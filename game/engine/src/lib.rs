@@ -415,8 +415,10 @@ mod test_integration;
 // `touch_input` is cross-platform: the menu's text fields call `is_touch_device()`
 // / `os_keyboard_prompt()` on every target (native gets cheap no-op stubs), so the
 // module must always compile. The on-screen overlay drawing + touch-event handling
-// is WASM-only (its callers are wasm-gated), hence dead_code is allowed on native
-// non-test builds where only the lightweight detection/keyboard API is reached.
+// run only where `touch_input::TOUCH_PLATFORM` is true (web + Android). A few
+// helpers are reached only by tests (`note_mouse`,
+// `BtnRect::overlaps`), so dead_code stays allowed on non-web, non-test builds —
+// Android included.
 #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 mod touch_input;
 
@@ -1222,8 +1224,11 @@ pub(crate) struct GameState {
     /// sites stay native-gated for now, so a browser joiner does not yet
     /// propagate its OWN edits to the server (v1 limitation L-web-edit).
     pub(crate) pending_block_changes: Vec<crate::protocol::BlockChange>,
-    /// Touch input for WASM (virtual joystick + action buttons).
-    #[cfg(target_arch = "wasm32")]
+    /// Touch input — virtual joystick + action buttons (web AND Android).
+    ///
+    /// Unconditional rather than `cfg`-gated: every call site branches on the
+    /// `touch_input::TOUCH_PLATFORM` const, so the field must exist on every
+    /// target for them to compile. On desktop nothing ever writes to it.
     pub(crate) touch: crate::touch_input::TouchInput,
     /// One-shot guard for the dedicated-server auto-join. When the Docker-served
     /// page sets `window.AXENSTAX_DEDICATED_WS`, the menu auto-joins that server
@@ -1756,7 +1761,6 @@ impl GameState {
             remote_swing: std::collections::HashMap::new(),
             remote_items: crate::remote_entities::RemoteItems::default(),
             pending_block_changes: Vec::new(),
-            #[cfg(target_arch = "wasm32")]
             touch: crate::touch_input::TouchInput::new(),
             #[cfg(target_arch = "wasm32")]
             dedicated_autojoin_done: false,
@@ -2140,8 +2144,7 @@ impl ApplicationHandler for App {
                         p.camera.aspect = screen.viewport.aspect();
                     }
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
+                if crate::touch_input::TOUCH_PLATFORM {
                     state.touch.set_screen_size(size.width as f32, size.height as f32);
                     // Keep the touch hotbar hit-band aligned with the drawn
                     // hotbar across DPR changes (e.g. moving a window between
@@ -2517,23 +2520,24 @@ impl ApplicationHandler for App {
                 state.update_and_render();
             }
 
-            WindowEvent::Touch(_touch) => {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let x = _touch.location.x as f32;
-                    let y = _touch.location.y as f32;
-                    let id = _touch.id;
-                    match _touch.phase {
-                        winit::event::TouchPhase::Started => {
-                            state.touch.on_touch_start(id, x, y);
-                        }
-                        winit::event::TouchPhase::Moved => {
-                            state.touch.on_touch_move(id, x, y);
-                        }
-                        winit::event::TouchPhase::Ended
-                        | winit::event::TouchPhase::Cancelled => {
-                            state.touch.on_touch_end(id);
-                        }
+            // winit delivers this on Android exactly as in the browser. The
+            // TOUCH_PLATFORM test is a match guard rather than a nested `if` to
+            // satisfy clippy::collapsible_match under check.sh's -D warnings;
+            // on desktop the event falls through to `_` as before.
+            WindowEvent::Touch(touch) if crate::touch_input::TOUCH_PLATFORM => {
+                let x = touch.location.x as f32;
+                let y = touch.location.y as f32;
+                let id = touch.id;
+                match touch.phase {
+                    winit::event::TouchPhase::Started => {
+                        state.touch.on_touch_start(id, x, y);
+                    }
+                    winit::event::TouchPhase::Moved => {
+                        state.touch.on_touch_move(id, x, y);
+                    }
+                    winit::event::TouchPhase::Ended
+                    | winit::event::TouchPhase::Cancelled => {
+                        state.touch.on_touch_end(id);
                     }
                 }
             }
@@ -2750,6 +2754,11 @@ pub fn android_main(app: android_activity::AndroidApp) {
             .with_tag("axenstax"),
     );
     log::info!("Axe'n'Stax {} starting on Android", env!("CARGO_PKG_VERSION"));
+
+    // The web build reads `navigator.maxTouchPoints`; on Android the answer is
+    // simply "yes". This drives `controls_visible()`, which shows the on-screen
+    // controls immediately rather than waiting for a first tap.
+    crate::touch_input::set_touch_device(true);
 
     // Every native state path hangs off `data_dir::data_root()`, and a few
     // older ones are still CWD-relative. An Android process starts at "/",

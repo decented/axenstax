@@ -43,8 +43,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::player_intent::PlayerIntent;
 
+/// Platforms whose primary input is a touchscreen: the web build (phones,
+/// tablets, touchscreen Chromebooks) and Android.
+///
+/// ONE const rather than a dozen copies of
+/// `#[cfg(any(target_arch = "wasm32", target_os = "android"))]` scattered across
+/// `lib.rs` and `game_loop.rs`. Touch needs every site to agree — event intake,
+/// resize, the tick and frame intent merges, zoom, look, pause/chat buttons,
+/// overlay draw, and per-frame edge clearing — and if one drifts you get a game
+/// that draws controls it never reads, reads touches it never draws, or replays
+/// every tap because the edges are never cleared.
+///
+/// A `bool` rather than a `cfg` because every touch code path COMPILES on every
+/// platform (`touch_input` is target-agnostic; only `os_keyboard_prompt` is
+/// cfg'd, and it has a native stub). `cfg!` const-folds, so desktop pays nothing
+/// for the dead branch.
+pub const TOUCH_PLATFORM: bool = cfg!(any(target_arch = "wasm32", target_os = "android"));
+
+/// True where [`os_keyboard_prompt`] can actually summon a soft keyboard (the
+/// web, via `window.prompt()`). On Android it is the native stub — no IME
+/// bridge exists yet — so text fields must stay egui `TextEdit`s there (usable
+/// with a hardware keyboard) rather than become prompt buttons that do nothing.
+pub const OS_KEYBOARD_PROMPT: bool = cfg!(target_arch = "wasm32");
+
 /// Global "this is a touch device" flag, set once at WASM startup from
-/// `navigator.maxTouchPoints`. Read from places that can't reach a `TouchInput`
+/// `navigator.maxTouchPoints` (and unconditionally by `android_main`). Read from places that can't reach a `TouchInput`
 /// instance — the menu's text fields, which swap egui text entry (no soft
 /// keyboard under winit+egui) for an OS-keyboard prompt on touch. Never changes
 /// after startup, so `Relaxed` is fine.

@@ -4662,8 +4662,7 @@ impl super::GameState {
             let dt = 1.0 / 20.0;
             #[allow(unused_mut)]
             let mut kbm = self.input.to_intent();
-            #[cfg(target_arch = "wasm32")]
-            {
+            if crate::touch_input::TOUCH_PLATFORM {
                 // Touch is its own P1 source on tablets — merge into KB+M
                 // so the routing logic only sees a single "P1 input".
                 let touch_intent = self.touch.to_intent();
@@ -7276,17 +7275,19 @@ impl super::GameState {
             // shares the gamepad/Esc toggle below; Chat has no `PlayerIntent`
             // field, so it pops the OS soft keyboard and routes the typed line
             // through the normal command dispatch via `ChatState.pending_submit`.
-            #[cfg(target_arch = "wasm32")]
-            {
+            // (Android has no OS prompt yet — `os_keyboard_prompt` returns None
+            // there, so Chat is drained and does nothing until an IME bridge.)
+            if crate::touch_input::TOUCH_PLATFORM {
                 if self.touch.take_pause_pressed() {
                     any_pause = true;
                 }
-                if self.touch.take_chat_pressed() && matches!(self.mode, GameMode::Playing) {
-                    if let Some(line) = crate::touch_input::os_keyboard_prompt("Chat / command", "") {
-                        let line = line.trim().to_string();
-                        if !line.is_empty() {
-                            self.chat.pending_submit = Some(line);
-                        }
+                if self.touch.take_chat_pressed()
+                    && matches!(self.mode, GameMode::Playing)
+                    && let Some(line) = crate::touch_input::os_keyboard_prompt("Chat / command", "")
+                {
+                    let line = line.trim().to_string();
+                    if !line.is_empty() {
+                        self.chat.pending_submit = Some(line);
                     }
                 }
             }
@@ -9538,8 +9539,7 @@ impl super::GameState {
             let dt = 1.0 / 60.0;
             #[allow(unused_mut)]
             let mut kbm = self.input.to_intent();
-            #[cfg(target_arch = "wasm32")]
-            {
+            if crate::touch_input::TOUCH_PLATFORM {
                 let touch_intent = self.touch.to_intent();
                 kbm.merge(&touch_intent);
                 // See the tick path: touch is "captured" (gameplay active) when a
@@ -9623,8 +9623,7 @@ impl super::GameState {
                 #[allow(unused_mut)]
                 let mut zoom = self.input.cursor_captured
                     && self.input.is_held(winit::keyboard::KeyCode::KeyC);
-                #[cfg(target_arch = "wasm32")]
-                {
+                if crate::touch_input::TOUCH_PLATFORM {
                     zoom |= self.touch.zoom_held;
                 }
                 self.players[0].camera.set_zoom(zoom);
@@ -9664,8 +9663,7 @@ impl super::GameState {
             // amount at any devicePixelRatio (the previous fixed scaling made
             // high-DPR tablets 2–3× too sensitive). Gated off while a modal owns
             // input so a mid-drag doesn't spin the camera behind an open panel.
-            #[cfg(target_arch = "wasm32")]
-            if pidx == 0 && !self.p0_ui_modal_open() {
+            if crate::touch_input::TOUCH_PLATFORM && pidx == 0 && !self.p0_ui_modal_open() {
                 let ppp = self.renderer.egui.ctx.pixels_per_point().max(1.0) as f64;
                 let (ldx, ldy) = self.touch.look_delta();
                 let lx = (ldx / ppp) as f32;
@@ -21073,12 +21071,11 @@ impl super::GameState {
                 .set_title(&format!("Axe'n'Stax | [{}]", block_name));
         }
 
-        // ── Touch controls overlay (WASM only). `controls_visible()` shows it
-        // immediately on a touch device (a Minecraft player expects to SEE the
-        // controls on load), and never on a desktop mouse/keyboard user until
-        // they actually tap — see `TouchInput::controls_visible`.
-        #[cfg(target_arch = "wasm32")]
-        if self.touch.controls_visible() {
+        // ── Touch controls overlay (web + Android). `controls_visible()` shows
+        // it immediately on a touch device (a Minecraft player expects to SEE
+        // the controls on load), and never on a desktop mouse/keyboard user
+        // until they actually tap — see `TouchInput::controls_visible`.
+        if crate::touch_input::TOUCH_PLATFORM && self.touch.controls_visible() {
             crate::touch_input::draw_touch_overlay(&self.renderer.egui.ctx, &self.touch);
         }
 
@@ -21147,8 +21144,9 @@ impl super::GameState {
         // keyboard's. They're consumed in the 60 Hz frame path, so clearing them
         // at the 20 Hz tick (where this used to live) replayed each tap 0–3×.
         // Continuous state (joystick position, held buttons) is untouched.
-        #[cfg(target_arch = "wasm32")]
-        self.touch.end_frame();
+        if crate::touch_input::TOUCH_PLATFORM {
+            self.touch.end_frame();
+        }
         self.window.request_redraw();
     }
 

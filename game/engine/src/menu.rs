@@ -3812,7 +3812,7 @@ fn menu_text_field(
     width: f32,
     font_size: f32,
 ) -> egui::Response {
-    if crate::touch_input::is_touch_device() {
+    if crate::touch_input::is_touch_device() && crate::touch_input::OS_KEYBOARD_PROMPT {
         let (text, color) = if buf.is_empty() {
             (placeholder.to_string(), egui::Color32::from_rgb(120, 120, 136))
         } else {
