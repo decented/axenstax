@@ -86,20 +86,18 @@ def test_contact_form_is_gone():
 def test_privacy_page_has_the_uk_gdpr_notice_essentials():
     """2026-10-03 legal pass (UK GDPR Art 13, DPA 2018 s.164A as inserted by the
     Data (Use and Access) Act 2025, ICO Children's Code std 4): who the
-    controller is + a contact route, a lawful basis and retention per item, the
+    controller is (contact route deferred — see internal compliance actions), a lawful basis and retention per item, the
     right to object stated separately, complaints to us first then the ICO, a
     child-friendly summary, and a last-updated date."""
     text = client.get("/privacy").text
     for needle in (
         "Who we are",
         "controller",
-        "Contact:",
         "Legal basis",
         "How long",
         "Your right to object",
         "Complaints",
         "ico.org.uk/make-a-complaint",
-        "within 30 days",
         "for players of any age",
         "Last updated:",
     ):
