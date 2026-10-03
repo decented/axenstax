@@ -449,7 +449,7 @@ use winit::event::{
     DeviceEvent, DeviceId, ElementState, KeyEvent, MouseScrollDelta, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::block::BlockRegistry;
@@ -2207,13 +2207,36 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        physical_key: PhysicalKey::Code(key),
+                        physical_key,
+                        ref logical_key,
                         state: key_state,
                         repeat,
                         ..
                     },
                 ..
             } => {
+                // Android's Back button carries NO physical key code — winit
+                // maps it to PhysicalKey::Unidentified and reports it only as
+                // the logical NamedKey::BrowserBack. Fold it onto Escape, whose
+                // arm below already implements the layered close Back should
+                // have: dialog → explorer → recipe book → inventory → villager →
+                // build choice → any open panel → pause, and quit only from the
+                // lobby root. Without this, Back tore the app down mid-world.
+                //
+                // The other half is in tools/packaging/android/AndroidManifest.xml:
+                // on Android 16+ with targetSdk 36, predictive back is on by
+                // default and KEYCODE_BACK is never dispatched (the system just
+                // finishes the Activity); `enableOnBackInvokedCallback="false"`
+                // opts back into the key-event path handled here.
+                //
+                // Desktop/web: an unidentified key fell through this arm before
+                // and returns here now — nothing follows the match, so same thing.
+                let key = match physical_key {
+                    PhysicalKey::Code(code) => code,
+                    _ if *logical_key == Key::Named(NamedKey::BrowserBack) => KeyCode::Escape,
+                    // Any other unidentified key is not ours to interpret.
+                    _ => return,
+                };
                 // Suppress all engine key handling while a DOM overlay (the
                 // voice-feedback modal) has focus. feedback.js handles F6,
                 // Space, and Escape itself while open.
