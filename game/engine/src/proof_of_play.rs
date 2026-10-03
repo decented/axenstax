@@ -332,6 +332,29 @@ pub fn passes_exposure_check(hash: &[u8; 32], multiplier: f32) -> bool {
 mod tests {
     use super::*;
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    // --- Golden vectors: the reward hash must stay byte-identical across
+    // hmac/sha2 upgrades (a silent change would re-roll every world's drops) ---
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_case_2() {
+        let mut mac = HmacSha256::new_from_slice(b"Jefe").unwrap();
+        mac.update(b"what do ya want for nothing?");
+        assert_eq!(
+            hex(&mac.finalize().into_bytes()),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn proof_hash_golden_vector() {
+        let h = proof_hash(&[0x42; 32], 0x0123_4567_89ab_cdef, 7, -12, 64, 300);
+        assert_eq!(hex(&h), "a86894aba0ca56a5ddcce77a140b35eff830c295a8200f41738026d4e221aba5");
+    }
+
     // --- Audit 2026-09-27: the secret is random per world, never seed-derived ---
 
     #[test]
