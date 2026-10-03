@@ -84,7 +84,8 @@ pub fn open_vault_envelope(content: &str, app_secret: &SecretKey, rail_pubkey: &
         return None;
     }
     let ct = B64.decode(env.ct.as_bytes()).ok()?;
-    let mut padded = cipher.decrypt(Nonce::from_slice(&iv), ct.as_slice()).ok()?;
+    let nonce = Nonce::try_from(iv.as_slice()).ok()?;
+    let mut padded = cipher.decrypt(&nonce, ct.as_slice()).ok()?;
     // The declared bucket must match what came out — a mismatch means the
     // envelope was relabelled.
     let body = if padded.len() == env.b { unpad(&padded).map(<[u8]>::to_vec) } else { None };

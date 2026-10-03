@@ -27,11 +27,11 @@ egui-winit = { version = "0.34", default-features = false, features = ["links"] 
 # Signet auth (Spec 1 Phase 1) — BIP-340 Schnorr verification of signed
 # kind-21236 join events. `sha2` moved to workspace-wide (was WASM-only) because
 # canonical_id runs on native too; `hex` is a tiny ubiquitous crate.
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 # HMAC-SHA256 for the Proof-of-Play hash (Spec 6 §2.2 / §2.2c). RustCrypto
 # canonical implementation; ~0 cost on top of `sha2` which we already pull in.
-hmac = "0.12"
+hmac = "0.13"
 # OS RNG — used by `signet::challenge::ChallengeTable` to mint per-client
 # nonces on the native server side. The WASM-only entry below adds the
 # `wasm_js` backend feature for the browser; the cross-platform line here
@@ -112,7 +112,7 @@ base64 = "0.22"
 # Signet contacts v2 vault envelope (WIRE.md §1): the projection body is
 # AES-256-GCM under a NIP-44-wrapped content key. NATIVE-ONLY — the contacts
 # sync never runs in the web build.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # UPnP IGD port mapping so a home router forwards the online-play UDP port
 # without anyone editing router settings (spec §4.1). Blocking API used on a
 # worker thread — the `aio_tokio` feature is deliberately OFF, so this pulls no
@@ -128,12 +128,6 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 js-sys = "0.3"
 qrcode = { version = "0.14", default-features = false }
-# Crypto crates for world persistence (Phase C) — sha2 is now workspace-wide
-# (see [dependencies]) because Signet auth also needs it. flate2 + tar moved to
-# [dependencies] (cross-platform, needed for .axeworld native support).
-# chacha20poly1305 also moved to [dependencies] (world chat Phase 4 needs it
-# on native too — see the comment there).
-hkdf = "0.12"
 web-sys = { version = "0.3", features = [
     "Window", "Document", "HtmlCanvasElement", "HtmlElement", "Element", "Node",
     "TouchEvent", "TouchList", "Touch",

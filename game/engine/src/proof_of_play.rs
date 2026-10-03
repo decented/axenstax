@@ -18,7 +18,7 @@
 //! This module owns Layer 1 (the hash) and Layer 2's gem-vein piece. The
 //! Bitcoin layer is post-alpha and lives in a future bitcoin subsystem.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::biome::Y_DP;
