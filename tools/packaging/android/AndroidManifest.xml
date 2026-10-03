@@ -40,7 +40,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- No Auto Backup: identity, runtime and burner keys live in app files and must not leave the device. -->
     <application
+        android:allowBackup="false"
         android:label="Axe'n'Stax"
         android:hasCode="false"
         android:enableOnBackInvokedCallback="false"

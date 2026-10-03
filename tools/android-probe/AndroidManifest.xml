@@ -17,7 +17,9 @@
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
 
+    <!-- No Auto Backup: identity, runtime and burner keys live in app files and must not leave the device. -->
     <application
+        android:allowBackup="false"
         android:label="AxeNStax GPU Probe"
         android:hasCode="false"
         android:extractNativeLibs="true">
