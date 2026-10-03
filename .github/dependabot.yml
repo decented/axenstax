@@ -12,3 +12,14 @@ updates:
     directory: "/game/engine"
     schedule:
       interval: "weekly"
+    groups:
+      # naga must move in lockstep with wgpu (same major), or the shader
+      # front-end and the renderer disagree on IR types.
+      wgpu:
+        patterns: ["wgpu*", "naga"]
+    ignore:
+      # secp256k1 is pinned to the 0.29 line that rust-nostr 0.44 depends on;
+      # bumping it alone puts two secp256k1 versions in the graph and breaks
+      # the types handed to nostr. Lift when nostr moves.
+      - dependency-name: "secp256k1"
+        versions: [">=0.30"]
