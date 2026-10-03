@@ -11,7 +11,14 @@ use super::GamepadState;
 
 /// Native (gilrs-backed) implementation of the gamepad backend.
 pub struct NativeBackend {
-    gilrs: Gilrs,
+    /// `None` when this platform/session has no gamepad support at all.
+    ///
+    /// Gamepads are an optional input device, so their absence must never be
+    /// fatal. gilrs COMPILES for Android but refuses at runtime ("Gilrs does
+    /// not support current platform"), and the old code panicked on that path —
+    /// which killed the game on launch for want of a joystick nobody had
+    /// plugged in. A sandboxed or udev-less desktop could hit the same thing.
+    gilrs: Option<Gilrs>,
     /// All known gamepads (connected and recently disconnected). The
     /// indices here match the slot indices the rest of the engine uses.
     states: Vec<GamepadState>,
@@ -24,22 +31,31 @@ pub struct NativeBackend {
 impl NativeBackend {
     pub fn new() -> Self {
         let gilrs = match Gilrs::new() {
-            Ok(g) => g,
+            Ok(g) => Some(g),
             Err(e) => {
                 log::warn!("Failed to init gamepad system: {e}");
-                // Partial failures still return a usable instance via GilrsBuilder.
-                gilrs::GilrsBuilder::new()
-                    .build()
-                    .unwrap_or_else(|e2| panic!("Gamepad system completely failed: {e2}"))
+                // A PARTIAL failure (some devices unreadable) still yields a
+                // usable instance here — that is what this fallback is for. A
+                // TOTAL failure (unsupported platform) does not, and must
+                // degrade to "no gamepads" rather than take the process down.
+                match gilrs::GilrsBuilder::new().build() {
+                    Ok(g) => Some(g),
+                    Err(e2) => {
+                        log::warn!("Gamepad support unavailable ({e2}) — continuing without it");
+                        None
+                    }
+                }
             }
         };
 
         let mut states = Vec::new();
         let mut ids = Vec::new();
-        for (id, gp) in gilrs.gamepads() {
-            log::info!("Gamepad detected: {} ({})", gp.name(), id);
-            states.push(GamepadState::new_connected());
-            ids.push(id);
+        if let Some(g) = gilrs.as_ref() {
+            for (id, gp) in g.gamepads() {
+                log::info!("Gamepad detected: {} ({})", gp.name(), id);
+                states.push(GamepadState::new_connected());
+                ids.push(id);
+            }
         }
 
         Self { gilrs, states, ids }
@@ -126,10 +142,18 @@ impl NativeBackend {
             gp.reset_frame_flags();
         }
 
-        while let Some(Event { id, event, .. }) = self.gilrs.next_event() {
+        // `and_then` on the Option makes a gamepad-less platform a no-op loop:
+        // frame flags above are still reset, and nothing else runs. We go back
+        // through `self.gilrs` on each use rather than holding a `&mut` across
+        // the loop body — the body needs `&mut self` for `find_or_create`.
+        while let Some(Event { id, event, .. }) = self.gilrs.as_mut().and_then(|g| g.next_event()) {
             match event {
                 EventType::Connected => {
-                    let name = self.gilrs.gamepad(id).name().to_string();
+                    let name = self
+                        .gilrs
+                        .as_ref()
+                        .map(|g| g.gamepad(id).name().to_string())
+                        .unwrap_or_default();
                     let idx = self.find_or_create(id);
                     self.states[idx].connected = true;
                     self.states[idx].disconnected_this_frame = false;
