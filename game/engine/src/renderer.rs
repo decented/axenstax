@@ -911,6 +911,10 @@ fn downscale_rgba(rgba: &[u8], width: u32, height: u32, target_w: u32, target_h:
 fn native_gpu_unsupported_and_exit(reason: &str) -> ! {
     log::error!("GPU not supported, exiting: {reason}");
     eprintln!("AxeNStax: this device's graphics hardware isn't supported.\n{reason}");
+    // BRIDGE: Android has no rfd backend (see Cargo.toml), so an APK on an
+    // unsupported GPU closes with the reason in logcat only. Replace with an
+    // on-screen message when the Android port gets a native dialog path.
+    #[cfg(not(target_os = "android"))]
     rfd::MessageDialog::new()
         .set_title("AxeNStax — graphics not supported")
         .set_description(reason)

@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
 /// What kind of OS dialog to open.
+// Android's BRIDGE stub (below) reads no payloads and builds no success results.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum FileDialogRequest {
     /// Show a "Save As" dialog; if the user confirms, write `bytes` to the
     /// chosen path on the worker thread.
@@ -50,6 +52,7 @@ pub enum FileDialogRequest {
 /// Named `FileDialogResult` (not `DialogResult`) because `menu.rs` already has
 /// a private `DialogResult` enum for its create/rename forms.
 #[derive(Debug)]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub enum FileDialogResult {
     /// World bytes were written successfully. Carries the path that was chosen.
     WorldSaved(PathBuf),
@@ -91,6 +94,32 @@ pub fn spawn_dialog(req: FileDialogRequest) -> Receiver<FileDialogResult> {
 
 // ── Worker ───────────────────────────────────────────────────────────────────
 
+/// BRIDGE: Android file dialogs — replace when the Android port reaches world
+/// Export/Import, skin upload, ghost files and profile import.
+///
+/// `rfd` has no Android backend at all (0.17 ships xdg-portal/win/mac only), so
+/// it is cut out of the Android dependency graph in Cargo.toml and this stub
+/// stands in. The real implementation is a Storage Access Framework round-trip
+/// — `ACTION_CREATE_DOCUMENT` / `ACTION_OPEN_DOCUMENT` fired through the
+/// Activity, with the chosen `content://` URI coming back via
+/// `onActivityResult` — which needs a JNI hop that does not exist yet.
+///
+/// Deliberately reports `Err` rather than `Cancelled`: callers treat `Cancelled`
+/// as "the user dismissed it" and show nothing, which would make the button look
+/// silently broken. A kid-readable line is the honest surface.
+#[cfg(target_os = "android")]
+fn run_dialog(req: FileDialogRequest) -> FileDialogResult {
+    let what = match req {
+        FileDialogRequest::SaveWorld { .. } | FileDialogRequest::OpenWorld => "Worlds",
+        FileDialogRequest::OpenSkin | FileDialogRequest::SaveSkin { .. } => "Skins",
+        FileDialogRequest::OpenGhost | FileDialogRequest::SaveGhost { .. } => "Ghost files",
+        FileDialogRequest::OpenProfile => "Profiles",
+    };
+    log::warn!("file dialog requested on Android, but there is no SAF bridge yet");
+    FileDialogResult::Err(format!("{what} can't be imported or exported on this device yet."))
+}
+
+#[cfg(not(target_os = "android"))]
 fn run_dialog(req: FileDialogRequest) -> FileDialogResult {
     match req {
         FileDialogRequest::SaveWorld { default_name, bytes } => {

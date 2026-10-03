@@ -117,11 +117,9 @@ qrcode = { version = "0.14", default-features = false }
 # by contact uses NIP-44 DIRECTLY to seal the rendezvous offer/answer runtime-key
 # to runtime-key — so declare it rather than inherit it. NATIVE-ONLY.
 nostr = { version = "=0.44.3", features = ["nip59", "nip44"] }
-# Native OS file dialogs (world Export/Import + skin upload). xdg-portal backend
-# drives the desktop's native file picker via xdg-desktop-portal (no GTK link →
-# AppImage-friendly). The portal backend is async; rfd's `pollster` feature
-# (auto-enabled) lets us use the blocking FileDialog API on a worker thread.
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# NOTE: `rfd` (native file dialogs) is NOT here: Android is also
+# `not(target_arch = "wasm32")` and rfd has no Android backend — see the
+# desktop-only section below.
 # Native Minecraft-skin import (spec §8.4): a blocking HTTP+TLS client used on a
 # worker thread to talk straight to Mojang (browsers go through /mc-skin). rustls
 # (no OpenSSL link → AppImage-friendly). NATIVE-ONLY — wasm uses the proxy fetch.
@@ -136,6 +134,45 @@ aes-gcm = "0.10"
 # worker thread — the `aio_tokio` feature is deliberately OFF, so this pulls no
 # async stack of its own. NATIVE-ONLY: there is no router to ask from a browser.
 igd-next = "0.17.1"
+
+# Desktop-only dependencies — native MINUS Android.
+#
+# Android satisfies `not(target_arch = "wasm32")`, so everything in the native
+# block above is also in the Android graph. Crates with no Android backend have
+# to be excluded explicitly here, or the cross-compile fails.
+#
+# Native OS file dialogs (world Export/Import + skin upload). xdg-portal backend
+# drives the desktop's native file picker via xdg-desktop-portal (no GTK link →
+# AppImage-friendly). The portal backend is async; rfd's `pollster` feature
+# (auto-enabled) lets us use the blocking FileDialog API on a worker thread.
+# rfd 0.17 implements its dialog traits for xdg-portal / Windows / macOS only;
+# on Android the picker is a Storage Access Framework intent, not a blocking
+# call. `native_file_dialog::run_dialog` has an Android stub (BRIDGE note there).
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+# Android-only dependencies (purely additive to the native block above).
+#
+# ── REQUIRED LINK FLAG FOR ANDROID ──────────────────────────────────────────
+#
+#     RUSTFLAGS="-Clink-arg=-lc++abi"
+#
+# The audio stack reaches C++ (rodio -> cpal -> oboe compiles its OpenSL ES /
+# AAudio glue), and cargo-ndk puts `-lc++_static` on the link line WITHOUT the
+# matching libc++abi, so the link dies on std::terminate, __cxa_guard_acquire
+# and __cxa_guard_release. libc++abi.a ships in the NDK sysroot. Its natural home
+# is game/engine/.cargo/config.toml, but that path is .gitignore'd (local build
+# paths), so tools/packaging/android/build-apk.sh sets it and it is recorded
+# HERE so it is never lost. Any other Android build must set it too.
+#
+# winit 0.30 pulls `android-activity` in transitively, and that crate refuses to
+# compile (`compile_error!`) until the app picks an activity backend.
+# `native-activity` keeps us on the pure-C NativeActivity path: no Java in the
+# APK and no libc++_shared.so to ship.
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+# logcat sink — `env_logger` writes to a stdout nothing reads inside an APK.
+android_logger = "0.14"
 
 # WASM-only dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

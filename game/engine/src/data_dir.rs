@@ -114,6 +114,24 @@ pub fn init() {
     let _ = ROOT.set(chosen);
 }
 
+/// Android startup: the app's private storage (`internal_data_path()`) IS the
+/// data root. Used instead of [`init`] by `android_main`.
+///
+/// [`init`] cannot work there: an Android app process has no `HOME`,
+/// `XDG_DATA_HOME` or `APPDATA`, so `resolve_with` returns `None` and the
+/// migration would run against `"."` — and the process starts with its cwd at
+/// `/`, which is not writable. There is also nothing to migrate: no pre-data-dir
+/// APK ever shipped. Private storage needs no permission and is removed on
+/// uninstall, which is the right lifetime for saves.
+#[cfg(target_os = "android")]
+pub fn init_at(root: PathBuf) {
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        log::warn!("could not create data dir {}: {e}", root.display());
+    }
+    log::info!("native data dir: {}", root.display());
+    let _ = ROOT.set(root);
+}
+
 /// The testable half of [`init`]: which dir this session uses.
 #[cfg(not(target_arch = "wasm32"))]
 fn choose_root(root: PathBuf, explicit: bool, cwd: Option<PathBuf>) -> PathBuf {

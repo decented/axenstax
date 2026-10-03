@@ -23,6 +23,11 @@
 // long-standing wide signatures in game_loop/renderer wiring, and egui/wgpu
 // generic soup. Everything else is fixed, and check.sh now runs -D warnings.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
+// Android only: clippy flags `missing_const_for_thread_local` on thread_locals
+// that ALREADY use `const { .. }` (save.rs, texture_registry.rs) — the macro
+// expands differently for that target and the lint misfires. Desktop clippy
+// (check.sh's -D warnings gate) is unaffected and still checks the rule.
+#![cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
 
 // Cross-platform modules
 mod audio;
@@ -1899,7 +1904,12 @@ impl ApplicationHandler for App {
         // resolution switch — multi-monitor safe). The 1280×720 above is the
         // windowed fallback size when the player toggles out with F11. WASM keeps
         // its canvas sizing path (browser owns fullscreen).
-        #[cfg(not(target_arch = "wasm32"))]
+        //
+        // Android is excluded: there are no monitors to enumerate and no window
+        // decorations to remove — the Activity already owns the whole screen and
+        // the requested inner size is ignored. Borderless(None) there is at best
+        // a no-op and at worst a panic in the monitor lookup.
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         let window_attrs =
             window_attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
 
@@ -2579,24 +2589,7 @@ pub fn run() {
     // First resolve the per-user data dir (and copy any legacy CWD state into
     // it) — BEFORE anything reads native state (audit 2026-09-27).
     data_dir::init();
-    let identity = signet::native_signer::init_identity();
-    match identity.npub() {
-        Some(npub) => log::info!("Signed in as {npub} (cached identity, offline)"),
-        None => log::info!("Playing as guest — sign-in is optional"),
-    }
-
-    // Native mailbox: start the background worker now — it retires the old
-    // device key/inbox files, flushes any queued report, and reads the public
-    // feedback status board off the frame thread. `profile_dir()` is the same
-    // data-dir `profile/` the Signet identity above uses (session_path() in
-    // signet/native_signer.rs) — consistent by design.
-    #[cfg(not(target_arch = "wasm32"))]
-    crate::native_mailbox::init(&crate::data_dir::profile_dir());
-
-    // Signet contacts sync: boot fetch + the 15-minute loop, on its own
-    // worker thread (never the frame thread).
-    #[cfg(not(target_arch = "wasm32"))]
-    crate::signet_contacts::init();
+    native_boot_services();
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -2686,9 +2679,102 @@ pub fn run() {
     update_check::start_once(crate::graphics_settings::GraphicsSettings::load().online_relays);
 
     let event_loop = EventLoop::new().unwrap();
+    drive_event_loop(event_loop);
+}
+
+/// Boot steps every native CLIENT entry point shares, run once the data root is
+/// fixed ([`run`] via `data_dir::init`, [`android_main`] via
+/// `data_dir::init_at`). One function so desktop and Android cannot drift.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_boot_services() {
+    let identity = signet::native_signer::init_identity();
+    match identity.npub() {
+        Some(npub) => log::info!("Signed in as {npub} (cached identity, offline)"),
+        None => log::info!("Playing as guest — sign-in is optional"),
+    }
+
+    // Native mailbox: start the background worker now — it retires the old
+    // device key/inbox files, flushes any queued report, and reads the public
+    // feedback status board off the frame thread. `profile_dir()` is the same
+    // data-dir `profile/` the Signet identity above uses (session_path() in
+    // signet/native_signer.rs) — consistent by design.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::native_mailbox::init(&crate::data_dir::profile_dir());
+
+    // Signet contacts sync: boot fetch + the 15-minute loop, on its own
+    // worker thread (never the frame thread).
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::signet_contacts::init();
+}
+
+/// Shared tail of every native entry point: set the control flow and hand the
+/// loop our [`App`]. Desktop and Android differ ONLY in how the `EventLoop` is
+/// constructed — Android must thread the `AndroidApp` through
+/// `with_android_app`.
+#[cfg(not(target_arch = "wasm32"))]
+fn drive_event_loop(event_loop: EventLoop<()>) {
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = App::new();
     event_loop.run_app(&mut app).unwrap();
+}
+
+/// Android entry point — the symbol `NativeActivity` looks for after
+/// `dlopen()`ing `libaxenstax_engine.so` (see `android.app.lib_name` in
+/// tools/packaging/android/AndroidManifest.xml).
+///
+/// What differs from [`run`]:
+///
+/// 1. **Logging** goes to logcat via `android_logger`; `env_logger` writes to a
+///    stdout nothing reads in an APK.
+/// 2. **The data root** is the app's private storage, set explicitly
+///    (`data_dir::init_at`) — an app process has no HOME/XDG to resolve from.
+/// 3. **No argument dispatch.** `--server`, `--admin-*` and `--screenshot` are
+///    desktop/CI affordances; an Activity is launched by intent, not argv.
+/// 4. **No update check and no updater.** The version check and the in-place
+///    AppImage updater are desktop affordances; an APK is updated by
+///    reinstalling (and, on a parent-managed tablet, by the guardian's grant).
+///    `self_update` is additionally gated on a running AppImage.
+/// 5. **The event loop is built from the `AndroidApp`**; `EventLoop::new()`
+///    cannot reach the activity.
+///
+/// `unsafe(no_mangle)`: edition 2024 classes symbol-affecting attributes as
+/// unsafe (we assert the exported name collides with nothing in the link).
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub fn android_main(app: android_activity::AndroidApp) {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("axenstax"),
+    );
+    log::info!("Axe'n'Stax {} starting on Android", env!("CARGO_PKG_VERSION"));
+
+    // Every native state path hangs off `data_dir::data_root()`, and a few
+    // older ones are still CWD-relative. An Android process starts at "/",
+    // which is not writable, so set BOTH to the app's private storage: the
+    // data root explicitly, and the cwd as a backstop for anything relative.
+    match app.internal_data_path() {
+        Some(dir) => {
+            data_dir::init_at(dir.clone());
+            match std::env::set_current_dir(&dir) {
+                Ok(()) => log::info!("working directory set to {dir:?}"),
+                Err(e) => log::error!("could not set working directory to {dir:?}: {e}"),
+            }
+        }
+        // Saves will fail, but the game should still boot far enough to be
+        // debuggable — a loud log beats a silent failure to launch.
+        None => log::error!("no internal_data_path — saves and settings will not persist"),
+    }
+
+    native_boot_services();
+
+    let event_loop = EventLoop::builder()
+        .with_android_app(app)
+        .build()
+        .expect("failed to build Android event loop");
+    drive_event_loop(event_loop);
 }
 
 

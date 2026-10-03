@@ -2,6 +2,12 @@
 target/
 build/
 build-w2/
+# build-android/ is build-apk.sh's default CARGO_TARGET_DIR — it keeps Android
+# objects out of the host/WASM caches so the two triples don't thrash each other.
+# build-host/ is the matching host/WASM target dir for worktree builds. Both run
+# to several GB, so they must never be stageable.
+build-android/
+build-host/
 dist/
 
 # Cargo config (local build paths)
