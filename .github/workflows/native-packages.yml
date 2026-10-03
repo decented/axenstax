@@ -18,6 +18,14 @@ on:
         description: "Build Linux only (AppImage + .deb) — skips Windows/macOS runners"
         type: boolean
         default: true
+      android:
+        description: "Also build the Android APK (ubuntu runner)"
+        type: boolean
+        # Off by default: without the release-key secrets the APK is debug-
+        # signed, and publish-installers.yml refuses to publish a run that
+        # carries a debug-signed APK (see its certificate check). Tick it when
+        # the signing secrets are in place, or for a test-only artifact.
+        default: false
 
 permissions:
   contents: read
@@ -179,5 +187,67 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: axenstax-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Android gets its own job because the pipeline shares nothing with
+  # cargo-packager: NativeActivity needs a cdylib (not a bin), built with
+  # cargo-ndk and packaged by aapt2 -> zip -> zipalign -> apksigner. No Gradle
+  # and no Java in the APK at all.
+  android:
+    name: android (APK)
+    if: inputs.android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: game/engine
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # Absent secrets is NOT a failure: a debug-signed APK is still worth having
+      # as a testable artifact. It simply cannot be published — the certificate
+      # check in publish-installers.yml rejects it — so warn loudly instead.
+      # The release key and its secrets are the deploy owner's; nothing here
+      # creates or handles a key beyond staging the one provided.
+      - name: Stage the release signing key (if configured)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KEYSTORE_B64:-}" ] && [ -n "${KEYSTORE_PASSWORD:-}" ]; then
+            umask 077
+            mkdir -p "$RUNNER_TEMP/signing"
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing/release.jks"
+            printf '%s' "$KEYSTORE_PASSWORD" > "$RUNNER_TEMP/signing/release.password"
+            echo "ANDROID_KEYSTORE=$RUNNER_TEMP/signing/release.jks" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASS_FILE=$RUNNER_TEMP/signing/release.password" >> "$GITHUB_ENV"
+            echo "release signing key staged"
+          else
+            echo "::warning::ANDROID_KEYSTORE_B64 / ANDROID_KEYSTORE_PASSWORD are not set — building a DEBUG-SIGNED APK. Installable for testing, but publish-installers.yml will refuse to publish it."
+          fi
+
+      - name: Build the APK (release)
+        run: PROFILE=release tools/packaging/android/build-apk.sh
+
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # The real versioned file, not the axenstax.apk convenience symlink.
+          cp tools/packaging/android/out/axenstax-engine_*.apk dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: axenstax-android
           path: dist/*
           if-no-files-found: error
