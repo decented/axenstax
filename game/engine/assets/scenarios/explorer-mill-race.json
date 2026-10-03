@@ -1,0 +1,67 @@
+{
+  "kind": "Challenge",
+  "display_name": "Mill Race — set a water wheel turning in the falls and light a lamp with it",
+  "kit": [
+    {
+      "name": "water_wheel",
+      "count": 2
+    },
+    {
+      "name": "cable",
+      "count": 16
+    },
+    {
+      "name": "electric_lamp",
+      "count": 2
+    },
+    {
+      "name": "bucket",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": 316
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "SourceTurned": {
+                "kind": "WaterWheel"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "PowerDevice",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      { "at": [4, 0, 0], "block": "stone" },
+      { "at": [4, 1, 0], "block": "stone" },
+      { "at": [4, 2, 0], "block": "stone" },
+      { "at": [4, 3, 0], "block": "stone" },
+      { "at": [4, 4, 0], "block": "water" }
+    ]
+  }
+}

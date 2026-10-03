@@ -1,0 +1,135 @@
+{
+  "kind": "Challenge",
+  "display_name": "Green Thumb \u2014 Wake a bare patch of soil into a row of golden wheat.",
+  "kit": [
+    {
+      "name": "wooden_hoe",
+      "count": 1
+    },
+    {
+      "name": "wheat_seeds",
+      "count": 8
+    },
+    {
+      "name": "bone_meal",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "HarvestCrop",
+      "count": 4
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "wheat_mature"
+      },
+      {
+        "at": [
+          4,
+          0,
+          0
+        ],
+        "block": "wheat_mature"
+      },
+      {
+        "at": [
+          5,
+          0,
+          0
+        ],
+        "block": "wheat_mature"
+      },
+      {
+        "at": [
+          6,
+          0,
+          0
+        ],
+        "block": "wheat_mature"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "water"
+      }
+    ]
+  }
+}

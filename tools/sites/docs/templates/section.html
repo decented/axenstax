@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ section.title }} — Axe'n'Stax{% endblock %}
+{% block page %}{{ section_slug }}{% endblock %}
+{% block content %}
+<div class="breadcrumb">
+    <a href="/">Home</a> &rsaquo; {{ section.title }}
+</div>
+
+<h1>{{ section.title }}</h1>
+<p class="section-subtitle">{{ section.subtitle }}</p>
+
+<div class="doc-list">
+    {% for doc in docs %}
+    <a href="/docs/{{ section_slug }}/{{ doc.path }}" class="doc-item {% if not doc.exists %}doc-missing{% endif %}">
+        <div class="doc-title">{{ doc.title }}</div>
+        <div class="doc-short">{{ doc.short }}</div>
+        {% if not doc.exists %}
+        <div class="doc-badge">Not yet written</div>
+        {% endif %}
+    </a>
+    {% endfor %}
+</div>
+{% endblock %}

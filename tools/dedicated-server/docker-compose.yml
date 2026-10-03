@@ -1,0 +1,83 @@
+# Axe'n'Stax dedicated server — run a published image (no build needed).
+#
+# This is the END-USER file: it PULLS prebuilt images from GHCR, so all you need
+# installed is Docker.
+#
+#   1. docker compose up -d
+#   2. Open  https://<this-box-ip>:8443   (accept the cert warning once), or
+#      Native → Join → ws://<this-box-ip>:6767
+#
+# Stop + keep the world:  docker compose down
+# Update to the latest:   docker compose pull && docker compose up -d
+# Wipe the world:         docker volume rm dedicated-server_axenstax-worlds
+#
+# Developers building from source: use docker-compose.build.yml (see README).
+
+services:
+  axenstax-server:
+    image: ghcr.io/decented/axenstax-server:latest
+    container_name: axenstax-server
+    ports:
+      - "8443:8443"   # web (HTTPS) + game socket (WSS /ws) — browsers (no-domain/LAN)
+      - "6767:6767"   # game socket (plain ws) — native clients (ws://box:6767)
+      # VPS with a real domain (AXENSTAX_DOMAIN below): expose 80+443 for ACME.
+      # - "80:80"
+      # - "443:443"
+    volumes:
+      - axenstax-worlds:/worlds
+    environment:
+      AXENSTAX_WORLD: "server-world"
+      AXENSTAX_GAMEMODE: "survival"      # survival | creative | adventure
+      AXENSTAX_MAX_PLAYERS: "8"
+      AXENSTAX_SERVER_NAME: "Axe'n'Stax Server"
+      AXENSTAX_WS_PORT: "6767"
+      AXENSTAX_WORLDS_DIR: "/worlds"
+      AXENSTAX_AUTOSAVE_SECS: "60"
+      # First-run setup wizard: on a fresh box the engine WAITS until the operator
+      # finishes the setup wizard in the console (/admin) before it creates a world,
+      # so the chosen "kind of place" (gallery / creative / survival / adventure)
+      # applies to the first world. Set to "1" to skip the gate and boot immediately
+      # on the defaults above (e.g. headless/CI). See README + the design doc.
+      # AXENSTAX_SKIP_WIZARD: "0"
+      # AXENSTAX_SEED: "12345"           # optional — fixed terrain for a new world
+      # --- VPS with a real domain (optional; see README) ---
+      # AXENSTAX_DOMAIN: "play.example.com"  # set → Caddy gets a real Let's Encrypt cert on :443
+      # --- Verified operator identity (optional; see README) ---
+      # AXENSTAX_REQUIRE_VERIFIED: "0"   # "1" → refuse to boot without a valid attestation
+      # AXENSTAX_PUBLIC_HOST: ""         # host:port advertised in the connect-string
+      # AXENSTAX_PAIR_RELAY: "wss://relay.damus.io"   # any public relay you trust
+      # AXENSTAX_DELEGATION_DAYS: "90"
+      # --- Access control (optional; see README) ---
+      # AXENSTAX_REQUIRE_SIGNIN: "0"     # "1" → only verified Signet identities may join
+      # AXENSTAX_WHITELIST: ""           # comma-separated npubs (implies sign-in)
+      # --- Creator Gallery / showcase kiosk (optional; Spec 2026-06-19 §8) ---
+      # Turn this box into a contained, unattended gallery/booth: a guest opening
+      # :8443 is locked to read-only Adventure, can click exhibits to collect them
+      # into a basket, and exits to one terminal screen (no escape to the lobby).
+      # Off by default — a normal server is unaffected. The served world's
+      # `<world>/exhibits/*.png|jpg` are fetched same-origin via the /exhibits route.
+      # AXENSTAX_SHOWCASE: "1"           # "1" → arm the kiosk loop
+      # AXENSTAX_EXIT_ACTION: "board"    # the exit screen kind (board/CTA)
+      # AXENSTAX_AUTO_LOOP_SECS: "0"     # >0 → reset to a fresh session after N seconds (booth)
+    restart: unless-stopped
+
+  # Operator Console (web sidecar). Caddy (in the server container) routes
+  # /admin → this service. It manages the same identity-dir policy files the
+  # engine reloads (shared volume); only the operator npub can sign in.
+  # Reach it at  https://<your-domain-or-box>/admin
+  axenstax-console:
+    image: ghcr.io/decented/axenstax-operator-console:latest
+    container_name: axenstax-console
+    volumes:
+      - axenstax-worlds:/worlds      # shared with the server — reads/writes <worlds>/.identity
+    environment:
+      AXENSTAX_WORLDS_DIR: "/worlds"
+      # Must match the server's AXENSTAX_WORLD so the Studio/Gallery panel writes
+      # exhibit images into the world the dedicated server actually serves.
+      AXENSTAX_WORLD: "server-world"
+      CONSOLE_BASE_PATH: "/admin"
+      PORT: "8101"
+    restart: unless-stopped
+
+volumes:
+  axenstax-worlds:

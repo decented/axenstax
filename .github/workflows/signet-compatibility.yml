@@ -1,0 +1,109 @@
+name: Signet Compatibility
+run-name: Signet compatibility ${{ inputs.signet_login_ref || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      signet_login_ref:
+        description: Signet Login ref or release tag requesting compatibility
+        required: false
+        type: string
+      signet_login_sha:
+        description: Signet Login commit SHA requesting compatibility
+        required: false
+        type: string
+      signet_login_candidate:
+        description: Build and vendor the Signet Login candidate bundle
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      signet_login_package_version:
+        description: Signet Login candidate package version
+        required: false
+        type: string
+      request_id:
+        description: Compatibility request id
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Check out Signet Login candidate
+        if: ${{ inputs.signet_login_candidate == 'true' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: forgesworn/signet-login
+          ref: ${{ inputs.signet_login_sha || inputs.signet_login_ref || 'main' }}
+          path: signet-login-candidate
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Build Signet Login candidate bundle
+        if: ${{ inputs.signet_login_candidate == 'true' }}
+        working-directory: signet-login-candidate
+        # 2026-09-28 audit fix: workflow_dispatch string inputs used to be spliced
+        # directly into this run: script (script-injection sink — an attacker who
+        # can trigger the dispatch controls signet_login_package_version). Pass
+        # through env instead, which the shell sees as an opaque value.
+        env:
+          EXPECTED_VERSION: ${{ inputs.signet_login_package_version }}
+        run: |
+          npm ci
+          npm run build
+          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          if [ -n "$EXPECTED_VERSION" ] && [ "$VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "Expected signet-login $EXPECTED_VERSION, built $VERSION"
+            exit 1
+          fi
+
+      - name: Vendor Signet Login candidate bundle
+        if: ${{ inputs.signet_login_candidate == 'true' }}
+        # 2026-09-27 audit fix: the game site no longer loads signet-login at all
+        # (the web taster is login-free) — only the console (real operator login)
+        # vendors it, and only from the pinned + sha256-verified
+        # tools/sites/vendor-signet-login.mjs path on ordinary deploys. This
+        # workflow still overwrites the console copy directly to test a candidate
+        # build against this repo's WASM build.
+        run: cp signet-login-candidate/dist/signet-login.iife.js tools/sites/console/static/vendor/signet-login.iife.js
+
+      - name: Rust toolchain (wasm32)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: game/engine
+
+      - name: Install trunk
+        # sha256-verified before extraction — see deploy.yml for the pin-bump note.
+        run: |
+          TRUNK_SHA256=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz -o trunk.tar.gz
+          echo "${TRUNK_SHA256}  trunk.tar.gz" | sha256sum -c -
+          tar -xzf trunk.tar.gz -C "$HOME/.cargo/bin" trunk
+          rm -f trunk.tar.gz
+          trunk --version
+
+      - name: Check Signet Login bundle drift
+        env:
+          SIGNET_LOGIN_EXPECTED_BUNDLE: ${{ inputs.signet_login_candidate == 'true' && 'signet-login-candidate/dist/signet-login.iife.js' || '' }}
+        run: node tools/sites/check-signet-login-bundle.mjs tools/sites/console/static/vendor/signet-login.iife.js
+
+      - name: Build WASM bundle
+        working-directory: game/engine
+        run: trunk build --release

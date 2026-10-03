@@ -1,0 +1,22 @@
+AxeNStax — Third-Party Notices
+===============================
+
+This file lists the open-source software bundled inside this AxeNStax
+native package, generated from the engine's dependency graph with
+`cargo-about` (see `tools/packaging/about.toml`). AxeNStax's own code is
+MIT-licensed (see LICENSE); the notices below cover everything else that's
+statically linked in.
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{this.name}}
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each this.used_by}}
+  - {{this.crate.name}} {{this.crate.version}}
+{{/each}}
+
+{{{this.text}}}
+
+{{/each}}

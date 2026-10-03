@@ -1,0 +1,210 @@
+/* Auth overlay — shown before WASM boot when a user needs to sign in. */
+
+#auth-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d1220;
+    font-family: Georgia, serif;
+    color: #d4a044;
+    padding: 1rem;
+    overflow-y: auto;
+}
+
+#auth-card {
+    background: #131a2e;
+    border: 1px solid #23304b;
+    border-radius: 10px;
+    padding: 2rem 2.25rem;
+    max-width: 420px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+#auth-card h1 {
+    font-size: 2rem;
+    margin: 0 0 0.5rem;
+    letter-spacing: 0.5px;
+}
+
+#auth-hint {
+    color: #9aa3b8;
+    font-size: 0.95rem;
+    margin: 0 0 1.25rem;
+}
+
+#qr-slot {
+    background: #fff;
+    padding: 0.5rem;
+    border-radius: 6px;
+    display: inline-block;
+    margin: 0 auto 1.25rem;
+    min-width: 180px;
+    min-height: 180px;
+}
+
+#qr-slot svg {
+    display: block;
+    width: 240px;
+    height: 240px;
+}
+
+#auth-divider {
+    color: #5b6075;
+    font-size: 0.85rem;
+    margin: 0 0 1rem;
+    letter-spacing: 1px;
+}
+
+#auth-same-device {
+    display: block;
+    width: 100%;
+    padding: 0.8rem 1rem;
+    background: #d4a044;
+    color: #0d1220;
+    border: none;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+#auth-same-device:hover:not(:disabled) {
+    background: #e6b656;
+}
+
+#auth-same-device:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+#auth-error {
+    display: none;
+    color: #f08080;
+    font-size: 0.9rem;
+    margin-top: 1rem;
+    word-break: break-word;
+}
+
+@media (max-width: 480px) {
+    #auth-card {
+        padding: 1.5rem 1.25rem;
+    }
+    #qr-slot svg {
+        width: 200px;
+        height: 200px;
+    }
+}
+
+/* === WebGPU "can't run yet" gate (ported from the retired entrance) ===
+ * Shown before boot by auth.js when the WebGPU probe fails. The card keeps the
+ * retired entrance's look; the old entrance.css :root vars don't exist here, so
+ * every value is the literal it resolved to in the entrance theme. A full-screen
+ * backdrop wraps the centered card so it reads as native to the game page. */
+
+#webgpu-gate {
+    position: fixed;
+    inset: 0;
+    z-index: 220;        /* above #loading (100) and the #errors bar (200) */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    overflow-y: auto;
+    background: #0d1220;
+}
+#webgpu-gate[hidden] { display: none; }
+
+.webgpu-block {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    background:
+        linear-gradient(180deg, rgba(224,112,112,.10), transparent 65%),
+        #131a2c;
+    border: 1px solid #6a2c2c;
+    border-radius: 12px;
+    padding: 1.4rem 1.6rem;
+    box-shadow: 0 18px 40px -16px rgba(0,0,0,.55);
+    position: relative;
+}
+.webgpu-block::before {
+    content: "⚠";
+    position: absolute;
+    top: 1.1rem;
+    left: 1.1rem;
+    font-size: 1.4rem;
+    color: #e07070;
+    line-height: 1;
+}
+.webgpu-block-title {
+    color: #e8ecf6;
+    font-size: 1.15rem;
+    margin: 0 0 0.45rem 2.2rem;
+    letter-spacing: .3px;
+}
+.webgpu-block-lede {
+    color: #9aa3b8;
+    margin: 0 0 0.9rem 2.2rem;
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+.webgpu-block-fix {
+    margin: 0 0 0.9rem 2.2rem;
+}
+.webgpu-steps {
+    margin: 0 0 0.6rem;
+    padding-left: 1.2rem;
+    color: #e8ecf6;
+    font-size: 0.92rem;
+    line-height: 1.6;
+}
+.webgpu-steps li { margin-bottom: 0.25rem; }
+.webgpu-steps code {
+    background: #0a0e1a;
+    border: 1px solid #2a3654;
+    color: #ffd486;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-family: ui-monospace, Menlo, monospace;
+}
+.webgpu-fallback {
+    color: #5b6075;
+    font-size: 0.86rem;
+    margin: 0.4rem 0 0;
+    line-height: 1.5;
+}
+.webgpu-retest {
+    display: inline-block;
+    margin-left: 2.2rem;
+    background: transparent;
+    border: 1px solid #d4a044;
+    color: #e7b85a;
+    border-radius: 6px;
+    padding: 0.45rem 1.1rem;
+    font-family: inherit;
+    font-size: 0.88rem;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+}
+.webgpu-retest:hover:not(:disabled) {
+    background: rgba(212,160,68,.12);
+    color: #ffd486;
+}
+.webgpu-retest:disabled { opacity: .55; cursor: progress; }
+
+@media (max-width: 580px) {
+    .webgpu-block { padding: 1.1rem 1.1rem 1.1rem 1.1rem; }
+    .webgpu-block::before { left: 0.9rem; top: 0.95rem; }
+    .webgpu-block-title,
+    .webgpu-block-lede,
+    .webgpu-block-fix,
+    .webgpu-retest { margin-left: 1.7rem; }
+}

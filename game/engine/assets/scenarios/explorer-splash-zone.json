@@ -1,0 +1,412 @@
+{
+  "kind": "Challenge",
+  "display_name": "Splash Zone \u2014 build the world's silliest water park",
+  "kit": [
+    {
+      "name": "water_bucket",
+      "count": 6
+    },
+    {
+      "name": "bucket",
+      "count": 4
+    },
+    {
+      "name": "glass",
+      "count": 32
+    },
+    {
+      "name": "stone",
+      "count": 32
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "UseBucket",
+      "count": 5
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          -2
+        ],
+        "block": "glass"
+      },
+      {
+        "at": [
+          4,
+          0,
+          2
+        ],
+        "block": "glass"
+      }
+    ]
+  }
+}

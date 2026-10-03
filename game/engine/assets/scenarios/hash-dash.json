@@ -1,0 +1,11 @@
+{
+  "kind": "HashDash",
+  "display_name": "Hash Dash",
+  "kit": [],
+  "objective": { "Timed": { "ticks": 3600 } },
+  "scoring": "Work",
+  "arena_seed": 1337,
+  "tuning": { "work_exponent": 1.2 },
+  "lock_creative": true,
+  "arena_mode": "Reuse"
+}

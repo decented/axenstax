@@ -1,0 +1,8 @@
+id = "berserker"
+category = "hostile"
+width = 0.7
+height = 2.05
+color = [0.55, 0.18, 0.16]
+health = 45
+speed = 6.0
+name = "Berserker"

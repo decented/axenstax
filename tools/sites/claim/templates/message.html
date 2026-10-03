@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — Axe'n'Stax{% endblock %}
+{% block content %}
+<div class="msg msg-{{ tone|default('info') }}">
+    <h1>{{ title }}</h1>
+    <p class="lead">{{ body }}</p>
+</div>
+<p><a class="btn" href="{{ support_url }}">Back to Axe'n'Stax →</a></p>
+{% endblock %}

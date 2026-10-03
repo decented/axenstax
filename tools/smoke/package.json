@@ -1,0 +1,13 @@
+{
+  "name": "axenstax-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node smoke.mjs",
+    "size": "node bundle-size.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

@@ -1,0 +1,66 @@
+# Axe'n'Stax dedicated server — public-domain (ACME) front.
+#
+# Used when AXENSTAX_DOMAIN is set (a VPS with a real DNS name pointed at it).
+# Caddy auto-provisions a Let's Encrypt certificate for the domain on :443
+# (the HTTP-01 challenge also needs :80 reachable). No self-signed warning —
+# players just open https://<domain> and the wss game socket reuses that trust.
+#
+# entrypoint.sh selects this file over the self-signed `Caddyfile` whenever
+# AXENSTAX_DOMAIN is non-empty.
+
+{
+	admin off
+
+	# Force HTTP/1.1 — same reason as the self-signed Caddyfile: Chromium opens the
+	# game WebSocket over HTTP/2 (RFC 8441) when the page is h2, and reverse_proxy
+	# can't bridge that to the engine's h1 WebSocket backend (→ 502, web client
+	# hangs on the loading screen). Reliability of the game socket beats the
+	# marginal h2 page-load gain for a single WASM bundle.
+	servers {
+		protocols h1
+	}
+}
+
+{$AXENSTAX_DOMAIN} {
+	# Operator Console (web sidecar) → the console service on the compose network.
+	# `handle_path` strips the /admin prefix; the console sets <base href> to /admin/
+	# so its links resolve. Only the operator npub can sign in (see tools/sites/console).
+	redir /admin /admin/
+	handle_path /admin/* {
+		reverse_proxy axenstax-console:8101
+	}
+
+	# Game socket → the engine's plain WebSocket on localhost. `reverse_proxy`
+	# transparently upgrades the WebSocket connection.
+	handle /ws {
+		reverse_proxy 127.0.0.1:6767
+	}
+
+	# Live showcase/kiosk config — written by the Operator Console; the dedicated
+	# page fetches it at boot to arm/disarm the kiosk without a rebuild.
+	handle /showcase.json {
+		root * /worlds/.identity
+		file_server
+	}
+
+	# Creator Gallery exhibit images (Spec 2026-06-19 §9) — same as the self-signed
+	# Caddyfile: serve `<world>/exhibits/*` from the served world's folder on the
+	# worlds volume so the web kiosk fetches them same-origin (`/exhibits/<ref>`).
+	# Must precede the catch-all below.
+	handle_path /exhibits/* {
+		root * /worlds/{$AXENSTAX_WORLD:server-world}/exhibits
+		# Artist-dropped files: never sniff them into HTML/script, never run
+		# anything they contain.
+		header X-Content-Type-Options nosniff
+		header Content-Security-Policy "default-src 'none'; img-src 'self'; sandbox"
+		file_server
+		encode zstd gzip
+	}
+
+	# Web client (guest-boot PWA) for everything else.
+	handle {
+		root * /srv/web
+		file_server
+		encode zstd gzip
+	}
+}

@@ -1,0 +1,63 @@
+{
+  "kind": "Challenge",
+  "display_name": "Campfire Cook \u2014 roast a meal and eat your fill",
+  "kit": [
+    {
+      "name": "campfire",
+      "count": 1
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    },
+    {
+      "name": "stick",
+      "count": 16
+    },
+    {
+      "name": "raw_beef",
+      "count": 3
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": "CookAtCampfire",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "EatFood",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "grass"
+      }
+    ]
+  }
+}

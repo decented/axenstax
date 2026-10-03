@@ -1,0 +1,68 @@
+{
+  "kind": "Challenge",
+  "display_name": "Saddle Up \u2014 Climb aboard a horse and feel the world move under you.",
+  "objective": {
+    "Action": {
+      "event": "RideEntity",
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          3
+        ],
+        "block": "gate"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "mob": "horse",
+        "count": 1
+      }
+    ]
+  }
+}

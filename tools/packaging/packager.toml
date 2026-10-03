@@ -1,0 +1,42 @@
+# Standalone cargo-packager config — turns the pre-built engine binary into
+# download-and-run installers (Win .msi/NSIS, macOS .dmg/.app, Linux AppImage/.deb).
+#
+# This is DELIBERATELY a standalone config, NOT game/engine/Cargo.toml — packaging is
+# bucket 2 (no engine-source touch). See docs/architecture/2026-06-06-native-build-
+# distribution-strategy.md (Track A) + tools/packaging/README.md.
+#
+# Usage (the build scripts wrap this):
+#   cargo packager -c tools/packaging/packager.toml -o <staging-with-binary> -f <formats>
+# When `-c` is used, `binaries` resolve from `--out-dir`, so the engine binary must be
+# staged there first (build-local.sh / the CI workflow do this). Relative `icons` resolve
+# from this file's directory.
+#
+# Keys are camelCase (cargo-packager `deny_unknown_fields`).
+
+# `name` MUST be set: with it unset, cargo-packager tries to auto-detect a package name by
+# chdir-ing to the config path to find a Cargo.toml — which fails (ENOTDIR) for a standalone
+# config file with no sibling manifest.
+name = "axenstax"
+productName = "AxeNStax"
+version = "0.2.27"                       # keep in step with game/engine/Cargo.toml
+identifier = "com.axenstax.engine"      # reverse-DNS; alphanumeric/-/. only
+# Copy rule: sovereignty-first, never "earn"/"Bitcoin" on a public surface
+# (UK FCA promotion perimeter + permanent word guards — see CLAUDE.md red lines).
+description = "Axe'n'Stax — the sovereign voxel sandbox: build, explore, and host your own worlds."
+authors = ["Decented"]
+
+# Resolved from --out-dir at package time (the staged release binary).
+binaries = [{ path = "axenstax-engine", main = true }]
+
+# Source icons (resized/converted per format by cargo-packager). PNG covers Linux/macOS;
+# the .ico is used for the Windows installer.
+icons = ["icons/icon-512.png", "icons/icon.ico"]
+
+# Third-party notices for everything statically linked into the binary.
+# Unlike `binaries` (which resolves from --out-dir), a bare `resources` entry
+# globs relative to THIS FILE's directory (cargo-packager chdirs here before
+# packaging — same reason `icons` above is relative, not --out-dir-relative).
+# The CI workflow and build-local.sh both generate this file straight into
+# tools/packaging/ (gitignored — it's a build artefact, not committed) with
+# `cargo about` before invoking cargo-packager. See tools/packaging/about.toml.
+resources = ["THIRD-PARTY-NOTICES.txt"]

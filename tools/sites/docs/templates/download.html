@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Native build — Axe'n'Stax{% endblock %}
+{% block content %}
+<div class="doc-container">
+    <h1>The native desktop build</h1>
+
+    <div style="background: #1a1f2e; border: 1px solid #2a3654; border-radius: 8px; padding: 16px 20px; margin: 24px 0;">
+        <p style="margin: 0 0 0.4rem; color: #d4a044; font-weight: 700;">The browser is the easy path.</p>
+        <p style="margin: 0; color: #c5c8d4;">Per <a href="/docs/tech/architecture/ADR-003-pwa-first-for-alpha.md">ADR-003</a> the browser build is a no-install, anonymous local "taster" — no sign-in, no accounts, just open it and play. <a href="{{ game_url }}">Open the game</a> in <strong>Chrome 121+</strong>, <strong>Edge 121+</strong>, or <strong>Brave</strong> with WebGPU enabled.</p>
+        <p style="margin: 0.6rem 0 0; color: #6f7488; font-size: 0.88rem;">The free <strong>desktop app</strong> is where the rest lives: optional sign-in, playing with friends (LAN, or over the internet with a friend's contact/invite — no dedicated server needed), split-screen, cloud Stash saves, world chat, and the Director camera. The Linux <strong>AppImage</strong> below is the main way to get it — every download's checksum is shown so you can verify it, and once installed it keeps itself up to date on its own (it checks both this site and a backup Nostr release feed, so it still finds updates if one is down). Windows and macOS aren't published as installers yet — build from source below, or open the browser version above in the meantime. The engine's source isn't a public repo yet (that's still coming); these build steps are for anyone who already has a checkout of the project.</p>
+    </div>
+
+    {% if installers %}
+    {% set sev_colour = {'clean': '#2ecc71', 'warn': '#d4a044', 'block': '#e06c5a'} %}
+    {% set os_name = {'linux': 'Linux', 'windows': 'Windows', 'macos': 'macOS'} %}
+    {% set ordered = (installers | selectattr('os', 'equalto', detected_os) | list) + (installers | rejectattr('os', 'equalto', detected_os) | list) %}
+    <h2>Download an installer</h2>
+    {% if detected_os %}
+    <p style="color:#c5c8d4;">Looks like you're on <strong>{{ os_name[detected_os] }}</strong> — the recommended download is highlighted. Every platform is listed; grab any of them.</p>
+    {% else %}
+    <p style="color:#c5c8d4;">Pick the installer for your platform. (Unsigned alpha builds — see "What the warnings mean" below.)</p>
+    {% endif %}
+
+    {% for inst in ordered %}
+    {% set recommended = inst.os == detected_os %}
+    <div style="background:{% if recommended %}#15241c{% else %}#161b28{% endif %}; border:{% if recommended %}2px solid #2ecc71{% else %}1px solid #2a3654{% endif %}; border-radius:8px; padding:16px 20px; margin:14px 0;">
+        <div style="display:flex; flex-wrap:wrap; align-items:baseline; gap:10px;">
+            <span style="font-weight:700; color:#e7e9f0;">{{ inst.os_label }} — {{ inst.format }}</span>
+            {% if recommended %}<span style="background:#2ecc71; color:#000; font-size:0.72rem; font-weight:700; padding:2px 8px; border-radius:10px;">RECOMMENDED FOR YOUR SYSTEM</span>{% endif %}
+        </div>
+        <p style="margin:0.5rem 0; color:{{ sev_colour[inst.severity] }}; font-size:0.9rem;">{{ inst.note }}</p>
+        <p style="margin:0.5rem 0;">
+            <a href="/download/installer/{{ inst.filename }}" style="display:inline-block; background:#2ecc71; color:#000; padding:10px 20px; border-radius:6px; text-decoration:none; font-weight:bold;">Download</a>
+            <span style="color:#9aa0b4; font-size:0.85rem; margin-left:8px;">{{ inst.filename }} · {{ inst.size }}</span>
+        </p>
+        <details style="margin-top:4px;">
+            <summary style="color:#6f7488; font-size:0.82rem; cursor:pointer;">Verify checksum (sha256)</summary>
+            <code style="display:block; word-break:break-all; color:#9aa0b4; font-size:0.8rem; margin-top:6px;">{{ inst.sha256 }}</code>
+        </details>
+    </div>
+    {% endfor %}
+
+    <div style="background:#161b28; border:1px solid #2a3654; border-radius:8px; padding:14px 20px; margin:18px 0; color:#c5c8d4; font-size:0.9rem;">
+        <p style="margin:0 0 0.4rem; font-weight:700; color:#d4a044;">What the warnings mean (these are unsigned alpha builds)</p>
+        <ul style="margin:0; padding-left:1.2rem;">
+            <li><strong>🐧 Linux — clean.</strong> No signing gate. <code>chmod +x</code> the AppImage and run, or <code>sudo apt install</code> the <code>.deb</code>.</li>
+            <li><strong>🪟 Windows — a warning, not a block.</strong> SmartScreen shows "Windows protected your PC" → click <strong>More info → Run anyway</strong>. It installs fine; the warning goes away once we code-sign.</li>
+            <li><strong>🍎 macOS — currently blocked.</strong> Until we notarise (Apple Developer account), Gatekeeper refuses a downloaded <code>.dmg</code>. macOS 15+ removed the easy Control-click bypass — you'd open System Settings → Privacy &amp; Security → "Open Anyway". For now, the <strong>build-from-source</strong> path below is the reliable route on a Mac.</li>
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if binary_available %}
+    <div style="background: #1a2a1a; border: 2px solid #2ecc71; border-radius: 8px; padding: 20px 24px; margin: 24px 0;">
+        <h2 style="color: #2ecc71; margin-top: 0;">Raw Linux x86-64 binary (advanced)</h2>
+        <p style="margin:0 0 0.6rem;">A bare convenience binary ({{ binary_size }}) — no installer wrapper. Prefer the AppImage above. Otherwise, build from source below.</p>
+        <p><a href="/download/axenstax-engine" style="display: inline-block; background: #2ecc71; color: #000; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold;">Download axenstax-engine</a></p>
+        <pre style="background: #111; padding: 12px; border-radius: 4px; overflow-x: auto;">chmod +x axenstax-engine
+./axenstax-engine</pre>
+    </div>
+    {% endif %}
+
+    <h2>Build it yourself</h2>
+    <p>The same Rust engine compiles to a native binary on all three desktop platforms. You'll need the
+    <strong>Rust toolchain</strong> (<a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a>)
+    and the engine source. Then, in every case:</p>
+    <pre style="background: #111; padding: 12px; border-radius: 4px; overflow-x: auto;">cd game/engine
+cargo build --release</pre>
+    <p>The binary lands at <code>target/release/axenstax-engine</code>
+    (<code>axenstax-engine.exe</code> on Windows). Per-platform setup:</p>
+
+    <h3>🐧 Linux</h3>
+    <p>Install the build + runtime libraries first:</p>
+    <pre style="background: #111; padding: 16px; border-radius: 4px; overflow-x: auto;">sudo apt update
+sudo apt install -y \
+    build-essential \
+    libudev-dev \
+    libvulkan1 \
+    mesa-vulkan-drivers \
+    vulkan-tools \
+    libwayland-client0 \
+    libxkbcommon0 \
+    libx11-6 libxi6 libxcursor1 libxrandr2</pre>
+    <p><code>libudev-dev</code> is required to build (gamepad support via gilrs); the Vulkan + X11/Wayland
+    packages are for running. NVIDIA cards also need the proprietary driver
+    (<code>sudo apt install nvidia-driver-550</code>, then reboot). Verify the GPU with
+    <code>vulkaninfo --summary</code>.</p>
+    <p>File dialogs (save/import) need <code>xdg-desktop-portal</code> running at runtime — standard on any
+    desktop Linux, nothing extra to install; there's no GTK fallback.</p>
+
+    <h3>🪟 Windows</h3>
+    <ol>
+        <li>Install <strong>Rust</strong> from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> — it will prompt for the
+        <strong>Visual Studio C++ Build Tools</strong> (the MSVC toolchain). Install those if you don't have them.</li>
+        <li>Open a new terminal (PowerShell) so the toolchain is on PATH.</li>
+        <li><code>cd game\engine</code> then <code>cargo build --release</code>.</li>
+        <li>Run <code>target\release\axenstax-engine.exe</code>.</li>
+    </ol>
+    <p>Rendering uses DirectX 12 (or Vulkan). No extra libraries needed beyond the MSVC build tools.</p>
+
+    <h3>🍎 macOS</h3>
+    <ol>
+        <li>Install the <strong>Xcode Command Line Tools</strong>: <code>xcode-select --install</code>.</li>
+        <li>Install <strong>Rust</strong> from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a>.</li>
+        <li><code>cd game/engine</code> then <code>cargo build --release</code>.</li>
+        <li>Run <code>./target/release/axenstax-engine</code>.</li>
+    </ol>
+    <p>Rendering uses Metal. Works on Apple Silicon and Intel Macs. No extra libraries needed.</p>
+
+    <h2>Controllers</h2>
+    <p>Xbox and PlayStation controllers work out of the box via USB or Bluetooth. For split-screen,
+    connect two controllers.</p>
+
+    <h2>Chromebook &amp; everything else</h2>
+    <p>Use the browser path — <a href="{{ game_url }}">the PWA</a> in Chrome 121+ is the supported way to
+    play on Chromebook, Mac, Windows, or Android. Crostini (Linux on Chromebook) <em>might</em> run a native
+    Linux build, but GPU passthrough is limited — the browser is faster and easier.</p>
+</div>
+{% endblock %}

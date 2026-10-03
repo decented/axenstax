@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Axe'n'Stax — Engine Specs & Architecture{% endblock %}
+{% block content %}
+<div class="hero">
+    <h1>Axe'n'Stax — Specs &amp; Architecture</h1>
+    <p class="tagline">The builder's reference: engine specs, architecture decisions, the roadmap, and self-hosting. The open-source side of Axe'n'Stax.</p>
+    <a href="{{ project_url }}" class="cta">The project</a>
+    <a href="{{ game_url }}" class="cta cta-secondary">Play</a>
+    <a href="/roadmap" class="cta cta-secondary">Build roadmap</a>
+</div>
+
+<h2>Documentation</h2>
+<div class="features">
+    {% for sec in sections %}
+    <a href="/docs/{{ sec.slug }}" class="feature-card section-link">
+        <h3>{{ sec.title }}</h3>
+        <p style="color: #9aa3b8; font-size: 0.9rem; margin-top: 0.4rem;">{{ sec.subtitle }}</p>
+    </a>
+    {% endfor %}
+</div>
+
+<p style="margin-top: 2rem; color: #5b6075; font-size: 0.85rem;">
+    This is the builder side (specs, ADRs, roadmap, self-host). If you're here to <em>play</em>:
+    the game runs in your browser, the guided <strong>journey</strong> for new players and the
+    dense <strong>wiki</strong> reference each live on their own sites. Internal working docs are
+    kept in the repository, not here.
+</p>
+{% endblock %}

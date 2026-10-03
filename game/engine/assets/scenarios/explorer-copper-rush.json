@@ -1,0 +1,79 @@
+{
+  "kind": "Challenge",
+  "display_name": "Copper Rush — dig copper out of the rock, smelt it, and draw your first cable",
+  "kit": [
+    {
+      "name": "stone_pickaxe",
+      "count": 1
+    },
+    {
+      "name": "furnace",
+      "count": 1
+    },
+    {
+      "name": "crafting_table",
+      "count": 1
+    },
+    {
+      "name": "coal",
+      "count": 8
+    },
+    {
+      "name": "rubber",
+      "count": 4
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "BreakBlock": {
+                "block": 70
+              }
+            },
+            "count": 3
+          }
+        },
+        {
+          "Action": {
+            "event": "SmeltItem",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      { "at": [3, 0, -1], "block": "copper_ore" },
+      { "at": [3, 0, 0], "block": "copper_ore" },
+      { "at": [3, 0, 1], "block": "copper_ore" },
+      { "at": [3, 1, -1], "block": "copper_ore" },
+      { "at": [3, 1, 0], "block": "copper_ore" },
+      { "at": [3, 1, 1], "block": "copper_ore" },
+      { "at": [4, 0, -1], "block": "stone" },
+      { "at": [4, 0, 0], "block": "stone" },
+      { "at": [4, 0, 1], "block": "stone" },
+      { "at": [4, 1, -1], "block": "stone" },
+      { "at": [4, 1, 0], "block": "stone" },
+      { "at": [4, 1, 1], "block": "stone" },
+      { "at": [3, -1, -1], "block": "cobblestone" },
+      { "at": [3, -1, 0], "block": "cobblestone" },
+      { "at": [3, -1, 1], "block": "cobblestone" },
+      { "at": [2, -1, -1], "block": "cobblestone" },
+      { "at": [2, -1, 0], "block": "cobblestone" },
+      { "at": [2, -1, 1], "block": "cobblestone" }
+    ]
+  }
+}

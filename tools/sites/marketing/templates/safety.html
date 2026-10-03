@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>For parents — Axe'n'Stax</title>
+    <meta name="description" content="A straight answer for grown-ups: an open-source sandbox where your child owns what they build. How sign-in and privacy work, and the honest answer on the optional, parent-controlled Bitcoin layer. The game works fully without any money involved.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="{{ game_url }}/">Play</a>
+            <a href="{{ learn_url }}">Learn</a>
+            <a href="{{ wiki_url }}">Wiki</a>
+            <a href="/roadmap">What's coming</a>
+            <a href="/safety">Parents</a>
+            <a href="/support">Support</a>
+            <a href="{{ docs_url }}/download">Download</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>For parents.</h1>
+        <p class="tagline">It's an open-source block sandbox where your child owns what they build — not a Bitcoin game with a child bolted on. Here are the straight answers to the questions that matter. No spin.</p>
+        <p class="hint">The short version: <strong>it's free — no ads, no loot boxes, no paywall</strong>, and it works completely without any money involved. Bitcoin is an optional layer <em>you</em> switch on — never the default, never required to play.</p>
+    </header>
+
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>What's the catch?</h3>
+            <p>There isn't a hidden one. <strong>No ads, no loot boxes, no paywall.</strong> It's open source, and you can even run the whole thing yourself on your own machine. We're backed by people who choose to support the project, not by selling your child's attention.</p>
+        </div>
+        <div class="feature-card">
+            <h3>What's the sign-in?</h3>
+            <p>In the browser there is <strong>no sign-in at all</strong> — no account, no cookies that identify anyone, and saves stay on the device. On the desktop app, players <em>can</em> sign in with Signet — a portable identity you own, with <strong>no passwords and no email harvesting</strong>. Signet lets a parent hold the account and run a child's persona under it. Nothing to leak, nothing we can sell.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Is my child exposed online?</h3>
+            <p>By default, <strong>no</strong>. Identities are private unless someone deliberately chooses to go public — there's no accidental public profile, and a child shows up as a handle they choose, not an account name we hold. Going public is always an explicit, opt-in choice.</p>
+            <p>There is <strong>no public list of worlds and no matchmaking with strangers</strong>. To play with someone else, one of you hosts a world at home and lets the other in. Today that's a home network — anyone on the same Wi-Fi can see that hosted world and, once signed in, join it, unless you set an allowlist. Reaching someone outside your network needs a direct invite to a person you already know. In-game text chat exists only inside those hosted worlds on the desktop app, between signed-in players; the browser version has no chat, no sign-in and no multiplayer.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Is the Bitcoin part gambling?</h3>
+            <p>Mining itself is based on <strong>work, not chance</strong>. Every pickaxe swing runs a real calculation (a hash); it's the opposite of a slot machine — there's no stake to lose, no bet, no "spin." The rarest finds (like a Satori) are chance-based items you keep and use in the game — never sellable, never a payout. Today it's there to <em>learn</em> how proof-of-work actually works, by doing it (and to keep mining honest) — not to win or lose anything.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Real Bitcoin, for a child?</h3>
+            <p>Not today. There's <strong>no money in the game</strong> — any real-money payout is <strong>deferred and switched off</strong>. If it ever comes, it will only be on Bitcoin-enabled servers <em>and</em> only when you, the guardian, switch it on — with controls per child and per server. Plenty of families will play with it off entirely, and the game loses nothing.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Who holds the money?</h3>
+            <p><strong>Nobody, today — there's no wallet yet.</strong> Bitcoin support isn't finished, so right now no real money changes hands on any world. When it ships, the design is non-custodial: derived from your child's own key, on your device. We never touch, hold, or move funds. That's a deliberate, hard line: the platform is not a money service.</p>
+        </div>
+    </section>
+
+    <section class="cta-block">
+        <h2>Still want to dig in?</h2>
+        <p>It's open source — you (or someone you trust) can read exactly how it works.</p>
+        <div class="cta-row">
+            <a href="{{ project_url }}" class="cta cta-large">How it's built &rarr;</a>
+            <a href="/support" class="cta cta-large">Support the project &rarr;</a>
+        </div>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ game_url }}/">Play</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            <a href="/roadmap">What's coming</a> ·
+            <a href="/support">Support</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ project_url }}">Project</a> ·
+            <a href="/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

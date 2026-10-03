@@ -1,0 +1,54 @@
+# Axe'n'Stax dedicated server — BUILD FROM SOURCE (developers / CI).
+#
+# This compiles the image locally instead of pulling it. It tags the images with
+# the SAME GHCR names the pull file (docker-compose.yml) uses, so once you've built
+# here, a plain `docker compose up -d` (the pull file) finds the local image and
+# runs it without pulling.
+#
+#   1. Build the artifacts on the host + the images:   ./build.sh
+#      (build.sh runs:  docker compose -f docker-compose.build.yml build)
+#   2. Start it:                                        docker compose up -d
+#
+# The publish CI workflow (.github/workflows/publish-server-image.yml) uses this
+# same file to build, then pushes the images to GHCR.
+
+services:
+  axenstax-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/decented/axenstax-server:latest
+    container_name: axenstax-server
+    ports:
+      - "8443:8443"   # web (HTTPS) + game socket (WSS /ws) — browsers (no-domain/LAN)
+      - "6767:6767"   # game socket (plain ws) — native clients (ws://box:6767)
+      # - "80:80"
+      # - "443:443"
+    volumes:
+      - axenstax-worlds:/worlds
+    environment:
+      AXENSTAX_WORLD: "server-world"
+      AXENSTAX_GAMEMODE: "survival"
+      AXENSTAX_MAX_PLAYERS: "8"
+      AXENSTAX_SERVER_NAME: "Axe'n'Stax Server"
+      AXENSTAX_WS_PORT: "6767"
+      AXENSTAX_WORLDS_DIR: "/worlds"
+      AXENSTAX_AUTOSAVE_SECS: "60"
+    restart: unless-stopped
+
+  axenstax-console:
+    build:
+      context: ../sites/console
+      dockerfile: Dockerfile
+    image: ghcr.io/decented/axenstax-operator-console:latest
+    container_name: axenstax-console
+    volumes:
+      - axenstax-worlds:/worlds
+    environment:
+      AXENSTAX_WORLDS_DIR: "/worlds"
+      CONSOLE_BASE_PATH: "/admin"
+      PORT: "8101"
+    restart: unless-stopped
+
+volumes:
+  axenstax-worlds:

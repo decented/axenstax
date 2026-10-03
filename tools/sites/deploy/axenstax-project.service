@@ -1,0 +1,18 @@
+[Unit]
+Description=Axe'n'Stax — project site (open-source home, FastAPI/uvicorn :8099)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/axenstax/tools/sites/project
+EnvironmentFile=/opt/axenstax/tools/sites/project/.env
+ExecStart=/opt/axenstax/tools/sites/project/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

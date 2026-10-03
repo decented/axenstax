@@ -1,0 +1,240 @@
+{
+  "kind": "Challenge",
+  "display_name": "Kaboomtown \u2014 blow the whole tower sky-high",
+  "kit": [
+    {
+      "name": "blasting_keg",
+      "count": 16
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    },
+    {
+      "name": "stone",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "Detonate",
+      "count": 3
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          3,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          4,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          -1
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "kind": "Challenge",
+  "display_name": "Catch the Wind — raise a windmill above the storm-blown hilltop and light a lamp with it",
+  "kit": [
+    {
+      "name": "windmill",
+      "count": 2
+    },
+    {
+      "name": "cable",
+      "count": 16
+    },
+    {
+      "name": "electric_lamp",
+      "count": 2
+    },
+    {
+      "name": "stone",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": 318
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "SourceTurned": {
+                "kind": "Windmill"
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "PowerDevice",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "weather_lock": "storm",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      { "at": [5, 0, 0], "block": "stone" },
+      { "at": [5, 1, 0], "block": "stone" },
+      { "at": [5, 2, 0], "block": "stone" },
+      { "at": [5, 3, 0], "block": "stone" },
+      { "at": [4, 4, -1], "block": "stone" },
+      { "at": [4, 4, 0], "block": "stone" },
+      { "at": [4, 4, 1], "block": "stone" },
+      { "at": [5, 4, -1], "block": "stone" },
+      { "at": [5, 4, 0], "block": "stone" },
+      { "at": [5, 4, 1], "block": "stone" },
+      { "at": [6, 4, -1], "block": "stone" },
+      { "at": [6, 4, 0], "block": "stone" },
+      { "at": [6, 4, 1], "block": "stone" }
+    ]
+  }
+}

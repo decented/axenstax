@@ -1,0 +1,8 @@
+id = "brigand"
+category = "hostile"
+width = 0.6
+height = 1.9
+color = [0.32, 0.22, 0.12]
+health = 16
+speed = 4.5
+name = "Brigand"

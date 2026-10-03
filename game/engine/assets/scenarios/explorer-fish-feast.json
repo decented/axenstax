@@ -1,0 +1,169 @@
+{
+  "kind": "Challenge",
+  "display_name": "Catch & Cook \u2014 Reel a fish from the pond, sizzle it on the campfire, and eat a meal you made from scratch.",
+  "kit": [
+    {
+      "name": "fishing_rod",
+      "count": 1
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    },
+    {
+      "name": "stick",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": "CatchFish",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "CookAtCampfire",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "EatFood",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          2,
+          0,
+          2
+        ],
+        "block": "campfire"
+      },
+      {
+        "at": [
+          3,
+          -2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -2,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -2,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -2,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "water"
+      }
+    ]
+  }
+}

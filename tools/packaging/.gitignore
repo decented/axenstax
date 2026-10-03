@@ -1,0 +1,4 @@
+staging/
+*.AppImage
+*.deb
+out/

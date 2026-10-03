@@ -1,0 +1,6 @@
+# Require the owner's review on anything that touches CI, deploy, or release
+# machinery — see docs/audits/2026-09-28-pre-public-audit.md §4 SHOULD.
+
+/.github/            @decented
+/tools/sites/deploy/ @decented
+/tools/release/      @decented

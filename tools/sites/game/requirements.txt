@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+jinja2
+httpx
+python-dotenv
+markdown
+pymdown-extensions
+python-multipart
+secp256k1
+nostr-sdk

@@ -1,0 +1,14 @@
+[
+  {
+    "name": "vivid",
+    "resolution": 16,
+    "files": [
+      "blocks/stone",
+      "blocks/dirt",
+      "blocks/sand",
+      "blocks/grass_top",
+      "blocks/grass_side",
+      "blocks/water"
+    ]
+  }
+]

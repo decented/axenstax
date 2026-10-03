@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+
+<form action="/settings" method="post" class="settings-form">
+    <label for="api_provider">API Provider</label>
+    <select name="api_provider" id="api_provider">
+        <option value="groq" {{ 'selected' if settings.api_provider == 'groq' else '' }}>Groq (free, recommended)</option>
+        <option value="openai" {{ 'selected' if settings.api_provider == 'openai' else '' }}>OpenAI</option>
+    </select>
+
+    <label for="api_key">API Key</label>
+    <input type="password" name="api_key" id="api_key" value="{{ settings.api_key }}"
+           placeholder="Enter your API key...">
+    <p class="hint">If left empty, the server will use the GROQ_API_KEY environment variable.</p>
+
+    <button type="submit">Save</button>
+</form>
+{% endblock %}

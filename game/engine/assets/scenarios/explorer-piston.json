@@ -1,0 +1,138 @@
+{
+  "kind": "Challenge",
+  "display_name": "Hidden Door \u2014 build a secret piston door that slides open at the flip of a lever",
+  "kit": [
+    {
+      "name": "sticky_piston",
+      "count": 2
+    },
+    {
+      "name": "piston",
+      "count": 2
+    },
+    {
+      "name": "lever",
+      "count": 2
+    },
+    {
+      "name": "cable",
+      "count": 16
+    },
+    {
+      "name": "stone",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 2
+          }
+        },
+        {
+          "Action": {
+            "event": "UsePiston",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          1,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          0,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          1,
+          0
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

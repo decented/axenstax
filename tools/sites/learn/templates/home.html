@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Learn Axe'n'Stax — your first adventure{% endblock %}
+{% block content %}
+<div class="hero">
+    <h1>New here? Let's get you started.</h1>
+    <p class="tagline">No manuals, no homework. We'll walk you into the world one friendly step at a time — mine your first block, build your first shelter, find your feet.</p>
+    {% for sec in sections %}
+    <a href="/docs/{{ sec.slug }}" class="cta">Start the journey &rarr;</a>
+    {% endfor %}
+    <a href="{{ game_url }}" class="cta cta-secondary">Play now</a>
+</div>
+
+{% for sec in sections %}
+<h2>{{ sec.title }}</h2>
+<p style="color: #9aa3b8; margin-top: -0.4rem;">{{ sec.subtitle }}</p>
+<div class="features">
+    <a href="/docs/{{ sec.slug }}" class="feature-card section-link">
+        <h3>Walk through it &rarr;</h3>
+        <p style="color: #9aa3b8; font-size: 0.9rem; margin-top: 0.4rem;">Every step, in order, from your very first block.</p>
+    </a>
+</div>
+{% endfor %}
+
+<p style="margin-top: 2rem; color: #5b6075; font-size: 0.85rem;">
+    Already know your way around and just need to look something up? That's what the
+    <strong>wiki</strong> is for. This site is for your first hours in the world.
+</p>
+{% endblock %}

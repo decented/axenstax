@@ -1,0 +1,292 @@
+{
+  "kind": "Challenge",
+  "display_name": "The Floor Is Lava! \u2014 build islands across a bubbling lava sea",
+  "kit": [
+    {
+      "name": "oak_planks",
+      "count": 128
+    },
+    {
+      "name": "stone",
+      "count": 64
+    },
+    {
+      "name": "glass",
+      "count": 32
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "PlaceBlock": {
+          "block": null
+        }
+      },
+      "count": 20
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          0
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          1
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          2
+        ],
+        "block": "lava"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          8,
+          0,
+          0
+        ],
+        "block": "amethyst"
+      }
+    ]
+  }
+}

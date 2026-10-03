@@ -1,0 +1,183 @@
+{
+  "kind": "Challenge",
+  "display_name": "Master Angler \u2014 Cast off a little stone dock and reel in a catch from the pond.",
+  "kit": [
+    {
+      "name": "fishing_rod",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "CatchFish",
+      "count": 2
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          3,
+          -2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -2,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -2,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -2,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -2,
+          2
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -2,
+          2
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -2,
+          2
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          2
+        ],
+        "block": "water"
+      }
+    ]
+  }
+}

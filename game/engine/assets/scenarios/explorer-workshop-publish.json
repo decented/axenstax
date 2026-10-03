@@ -1,0 +1,92 @@
+{
+  "kind": "Challenge",
+  "display_name": "Open Your Workshop \u2014 design a reskin and publish it for the whole world to use",
+  "kit": [
+    {
+      "name": "blueprint_paper",
+      "count": 4
+    },
+    {
+      "name": "plan",
+      "count": 1
+    },
+    {
+      "name": "drafting_stamp",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "WorkshopPublish",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "crafting_table"
+      },
+      {
+        "at": [
+          4,
+          0,
+          0
+        ],
+        "block": "item_frame"
+      }
+    ]
+  }
+}

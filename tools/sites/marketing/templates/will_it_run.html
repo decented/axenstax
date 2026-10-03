@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Will Axe'n'Stax run on this device? — Axe'n'Stax</title>
+    <meta name="description" content="Quick browser/GPU compatibility check for Axe'n'Stax. No sign-in needed.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="data:,">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="{{ docs_url }}" target="_blank" rel="noopener">Specs</a>
+            <a href="{{ docs_url }}/download">Download</a>
+        </div>
+    </nav>
+
+    <main class="will-it-run">
+        <header class="will-head">
+            <h1>Will Axe'n'Stax run on this device?</h1>
+            <p class="will-lede">No sign-in, no install. Just a quick check that your browser can talk to your GPU through WebGPU — that's all the engine needs.</p>
+        </header>
+
+        <section id="status" class="verdict verdict-loading">
+            <h2>Checking…</h2>
+            <p>Asking your browser for a WebGPU adapter.</p>
+        </section>
+
+        <section id="fix" class="will-fix"></section>
+
+        <div class="will-actions">
+            <a id="go-cta" href="{{ game_url }}/" class="cta cta-large" style="display: none;">Try the alpha →</a>
+            <button id="retest" type="button" class="cta cta-secondary">Re-test</button>
+            <a href="/" class="will-back">← Back to home</a>
+        </div>
+
+        <section class="will-faq">
+            <h3>What this is checking</h3>
+            <p>The engine renders through <strong>WebGPU</strong>, the new browser graphics API. WebGPU is on by default in <strong>Chrome 121+</strong> and <strong>Edge 121+</strong>. <strong>Brave</strong> ships it but keeps it behind a flag. <strong>Firefox</strong> and <strong>Safari</strong> are still stabilising — we'll add them when they're broadly ready.</p>
+            <p>This page only asks your browser whether a GPU adapter is available. It doesn't load the engine, doesn't sign you in, and doesn't keep any data.</p>
+        </section>
+    </main>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ game_url }}/">Game</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            {% if source_url %}<a href="{{ source_url }}" target="_blank" rel="noopener">Source</a>{% else %}<span style="opacity:0.6;">Source (soon)</span>{% endif %} ·
+            <a href="/privacy">Privacy</a>
+        </p>
+    </footer>
+
+    <script src="/static/webgpu-probe.js"></script>
+</body>
+</html>

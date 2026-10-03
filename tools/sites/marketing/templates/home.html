@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Axe'n'Stax — A sandbox you actually own</title>
+    <meta name="description" content="An open-source block-building sandbox, built from scratch — where you own your world, hold your own identity, and run your own rules. Self-hostable, free to play in your browser. Your world, your rules, yours to keep.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="#features">Features</a>
+            <a href="/experiences">Experiences</a>
+            <a href="/roadmap">What's coming</a>
+            <a href="/safety">Parents</a>
+            <a href="{{ learn_url }}">Learn</a>
+            <a href="/support">Support</a>
+            <a href="{{ docs_url }}/download">Download</a>
+            <a href="{{ game_url }}/" class="nav-cta">Play &rarr;</a>
+        </div>
+    </nav>
+
+    <header class="hero-home">
+        <div class="hero-copy">
+            <p class="hero-eyebrow">Open-source · open alpha</p>
+            <h1>Your world.<br>Your rules.<br><span class="accent">Yours to keep.</span></h1>
+            <p class="tagline">An open-source block-building sandbox, built from scratch — where you own your world, hold your own identity, and run things your way. Play free, host it yourself, and take everything you make with you.</p>
+            <div class="trust-row">
+                <span class="chip">Open source</span>
+                <span class="chip">No passwords</span>
+                <span class="chip">Free to play</span>
+                <span class="chip">Self-hostable</span>
+            </div>
+            <!-- The two play-paths live in .play-doors below (spans the full hero width). -->
+            <p class="hint">Open alpha · no account needed in the browser · two ways to play below ↓</p>
+        </div>
+
+        <div class="hero-art" aria-hidden="true">
+            <div class="glow"></div>
+            <!-- Isometric voxel cluster. Outer <g> positions (SVG transform attr);
+                 inner <g class="voxel"> does the float (CSS transform) so the two
+                 never fight. Lead cubes are emerald (freedom); the gold ₿ cube is
+                 the optional, parent-controlled Bitcoin bonus (never the hook). -->
+            <svg viewBox="0 0 460 430" xmlns="http://www.w3.org/2000/svg" role="img">
+                <g stroke="#1c2a45" stroke-width="1.2" opacity="0.5" fill="none">
+                    <path d="M230 305 L420 398 M230 305 L40 398 M170 330 L300 392 M290 330 L160 392"/>
+                </g>
+                <!-- dark depth cube (back) -->
+                <g transform="translate(190 250) scale(0.72)"><g class="voxel v4">
+                    <polygon points="0,0 60,30 0,60 -60,30" fill="#27374f"/>
+                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#1a2840"/>
+                    <polygon points="0,60 60,30 60,90 0,120" fill="#121d31"/>
+                </g></g>
+                <!-- small green cube (left) -->
+                <g transform="translate(118 150) scale(0.55)"><g class="voxel v3">
+                    <polygon points="0,0 60,30 0,60 -60,30" fill="#6ee7b7"/>
+                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#2fb985"/>
+                    <polygon points="0,60 60,30 60,90 0,120" fill="#178f68"/>
+                </g></g>
+                <!-- main green cube (centre) -->
+                <g transform="translate(238 138)"><g class="voxel">
+                    <polygon points="0,0 60,30 0,60 -60,30" fill="#5fe6ad"/>
+                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#28b07e"/>
+                    <polygon points="0,60 60,30 60,90 0,120" fill="#15875f"/>
+                    <polygon points="-26,28 2,42 -6,46 -34,32" fill="#ffffff" opacity="0.16"/>
+                </g></g>
+                <!-- gold "bonus" cube (floating, upper right) -->
+                <g transform="translate(350 66) scale(0.62)"><g class="voxel v2">
+                    <polygon points="0,0 60,30 0,60 -60,30" fill="#ffd486"/>
+                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#eeb14a"/>
+                    <polygon points="0,60 60,30 60,90 0,120" fill="#c98a2a"/>
+                    <text x="-3" y="92" font-size="40" font-weight="800" text-anchor="middle" fill="#7a4e10" opacity="0.7" font-family="ui-monospace, monospace">&#8383;</text>
+                </g></g>
+                <!-- tiny green cube (lower right) -->
+                <g transform="translate(348 252) scale(0.42)"><g class="voxel v3">
+                    <polygon points="0,0 60,30 0,60 -60,30" fill="#6ee7b7"/>
+                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#2fb985"/>
+                    <polygon points="0,60 60,30 60,90 0,120" fill="#178f68"/>
+                </g></g>
+            </svg>
+        </div>
+
+        <div class="play-doors">
+            <!-- Door 1 — web / instant -->
+            <div class="door">
+                <div class="door-head">
+                    <span class="door-ico" aria-hidden="true">🌐</span>
+                    <div class="door-headings">
+                        <span class="door-title">Play now</span>
+                        <span class="door-sub">right in your browser — nothing to install</span>
+                    </div>
+                </div>
+                <ul class="door-benes">
+                    <li>Click and you're in — no download, no setup</li>
+                    <li>Works on any PC with Chrome, Edge or Brave</li>
+                    <li>Always the latest version</li>
+                </ul>
+                <a class="cta cta-large door-cta" href="{{ game_url }}/">Play in your browser &rarr;</a>
+                <p class="door-fine">Firefox &amp; Safari aren't supported yet · <a href="/will-it-run">Will it run on this device?</a></p>
+            </div>
+
+            <!-- Door 2 — native / desktop app (OS-aware, set by os-paths.js) -->
+            <div class="door" id="door-native" data-game="{{ game_url }}/" data-download="{{ docs_url }}/download">
+                <div class="door-head">
+                    <span class="door-ico" aria-hidden="true">💻</span>
+                    <div class="door-headings">
+                        <span class="door-title">Get the desktop app</span>
+                        <span class="door-sub">smoother, runs cooler — uses your whole machine</span>
+                    </div>
+                </div>
+                <ul class="door-benes">
+                    <li>Faster &amp; cooler — all your cores + the GPU, no browser tax</li>
+                    <li>Host a game at home — friends on your network just join, and a friend in another house can join by invite (new in the alpha, no server to rent)</li>
+                    <li>Runs like a real game, not a tab</li>
+                </ul>
+                <a class="cta cta-large door-cta" id="native-cta" href="{{ docs_url }}/download">⬇ Download for Linux</a>
+                <p class="door-fine door-fallback" id="native-fallback" hidden></p>
+            </div>
+        </div>
+        <p class="doors-secondary">Or <a href="/experiences">see the experiences &rarr;</a></p>
+    </header>
+
+    <section class="section-head reveal">
+        <p class="kicker">Built to be yours</p>
+        <h2 id="features">Freedom, by design</h2>
+        <p>Every part of Axe'n'Stax is built so it stays under your control — your world, your identity, your rules. The freedom is the point; everything else is a bonus of owning what you make.</p>
+    </section>
+
+    <section class="features-grid">
+        <div class="feature-card reveal">
+            <span class="feat-ico">🌍</span>
+            <h3>Worlds that are truly yours</h3>
+            <p>Your worlds live on your own device. Export a world (or everything at once) and carry it anywhere, browser to desktop. Nobody can lock you out of what you built.</p>
+        </div>
+        <div class="feature-card reveal">
+            <span class="feat-ico">🔑</span>
+            <h3>Identity you hold</h3>
+            <p>In the browser there's no account at all. On the desktop app, sign in with Signet if you want to — one persona for every world and server, and your address for friends to find you. No passwords, no email harvesting: you hold the keys, we never do.</p>
+        </div>
+        <div class="feature-card reveal">
+            <span class="feat-ico">🔓</span>
+            <h3>Open source, self-hostable</h3>
+            <p>Run a single binary on your laptop or a Docker container on your own hardware — same engine, same world format. The whole thing is yours to run, and nobody can switch it off.</p>
+        </div>
+        <div class="feature-card reveal">
+            <span class="feat-ico">⚖️</span>
+            <h3>Your server, your rules</h3>
+            <p>Run a world your way. Set the economy, set the moderation, decide what's allowed — no terms handed down from above, no licence boxing in what you can build or how you run it.</p>
+        </div>
+        <div class="feature-card reveal">
+            <span class="feat-ico">🚀</span>
+            <h3>Custom engine, no ceilings</h3>
+            <p>Built from scratch in Rust on wgpu. WebGPU in the browser, native on desktop. Designed to scale from a solo world up to large multiplayer servers.</p>
+        </div>
+        <div class="feature-card reveal">
+            <span class="feat-ico">🎨</span>
+            <h3>Make it your own</h3>
+            <p>Open the Workshop to <em>reskin and reshape</em> any block or mob — blow one up into a giant editable cage, paint it, carve it, mirror it with symmetry, then pin your design across every copy in the world.</p>
+        </div>
+        <div class="feature-card is-gold reveal">
+            <span class="feat-ico">⚡</span>
+            <h3>Real proof-of-work, built in</h3>
+            <p>Every pickaxe swing runs real SHA-256 — the same maths that secures Bitcoin — so you can <em>see</em> how proof-of-work actually works, and it keeps mining honest (no X-ray cheats). A future, <strong>parent-controlled</strong> Bitcoin layer is an optional bonus some servers may switch on — off by default, never required to play, never the point.</p>
+        </div>
+        <div class="feature-card reveal">
+            <span class="feat-ico">🧒</span>
+            <h3>Designed by an 11-year-old</h3>
+            <p>Axolittle is our gameplay consultant — Minecraft Java veteran, mob expert, and the one who decides if a mechanic feels right.</p>
+        </div>
+    </section>
+
+    <!-- Experiences — the scenario layer -->
+    <section class="section-head reveal">
+        <p class="kicker">More ways to play</p>
+        <h2>Experiences</h2>
+        <p>Beyond the open sandbox, an <strong>experience</strong> drops a goal or a challenge on top of the world — play it, and your own world is never touched. Designing and sharing your own is an idea we're exploring.</p>
+    </section>
+    <section class="exp-band">
+        <div class="exp-grid">
+            <div class="exp-card reveal">
+                <span class="tag">⛏️ Timed sprint</span>
+                <h3>Hash Dash</h3>
+                <p>A three-minute mining sprint. Crosshair on the hardest rock you can find, never stop swinging — most work when the buzzer goes wins.</p>
+            </div>
+            <div class="exp-card reveal">
+                <span class="tag">🟧 Survival climb</span>
+                <h3>Satori Rush</h3>
+                <p>Start with nothing and race to the bottom of the world for your first Satori — the single rarest block in the game. Lower time, better run.</p>
+            </div>
+        </div>
+        <div class="exp-cta">
+            <a href="/experiences" class="cta cta-secondary">Explore experiences &rarr;</a>
+        </div>
+    </section>
+
+    <!-- Momentum stat band -->
+    <section class="stat-band reveal">
+        <div class="stat-band-inner">
+            <div class="stat"><span class="num">1,996</span><span class="lbl">commits</span></div>
+            <div class="stat"><span class="num">198k+</span><span class="lbl">lines of Rust</span></div>
+            <div class="stat"><span class="num">3,722</span><span class="lbl">tests, all green</span></div>
+        </div>
+        <p class="stat-foot">Built from the ground up in about four months — not a mod, not a fork. <a href="{{ project_url }}/built">See what's already shipped &rarr;</a></p>
+    </section>
+
+    <section id="alpha" class="cta-block">
+        <h2>Want in?</h2>
+        <p>Sign in with Signet and you're in. No waitlist, no approval — owning a Signet identity is the only friction.</p>
+        <div class="cta-row">
+            <a href="{{ game_url }}/" class="cta cta-large">Play in your browser &rarr;</a>
+        </div>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ game_url }}/">Play</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            <a href="/experiences">Experiences</a> ·
+            <a href="/roadmap">What's coming</a> ·
+            <a href="/safety">Parents</a> ·
+            <a href="/support">Support</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            <a href="{{ project_url }}">Project</a> ·
+            {% if source_url %}<a href="{{ source_url }}" target="_blank" rel="noopener">Source</a>{% else %}<span style="opacity:0.6;">Source (soon)</span>{% endif %} ·
+            <a href="/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+    <script src="/static/os-paths.js" defer></script>
+</body>
+</html>

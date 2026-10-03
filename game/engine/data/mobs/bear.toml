@@ -1,0 +1,8 @@
+id = "bear"
+category = "hostile"
+width = 1.4
+height = 1.4
+color = [0.42, 0.27, 0.16]
+health = 30
+speed = 4.0
+name = "Bear"

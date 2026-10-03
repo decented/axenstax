@@ -1,0 +1,92 @@
+{
+  "kind": "Challenge",
+  "display_name": "Rail Rider \u2014 lay a track, drop a cart on it, and ride your own railway",
+  "kit": [
+    {
+      "name": "rail",
+      "count": 32
+    },
+    {
+      "name": "cart",
+      "count": 2
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 3
+          }
+        },
+        {
+          "Action": {
+            "event": "RideEntity",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      }
+    ]
+  }
+}

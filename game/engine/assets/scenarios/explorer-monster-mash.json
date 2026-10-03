@@ -1,0 +1,286 @@
+{
+  "kind": "Challenge",
+  "display_name": "Monster Mash \u2014 bonk the whole monster mosh pit",
+  "kit": [
+    {
+      "name": "iron_sword",
+      "count": 1
+    },
+    {
+      "name": "bow",
+      "count": 1
+    },
+    {
+      "name": "arrow",
+      "count": 32
+    },
+    {
+      "name": "bread",
+      "count": 12
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "KillMob",
+      "count": 6
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          -1,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          0,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          0,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          0,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          0,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          0,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          1,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          1,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          1,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          1,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          1,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          0,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          0,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          0,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          -1,
+          1,
+          2
+        ],
+        "block": "cobblestone"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          6,
+          0,
+          0
+        ],
+        "mob": "brigand",
+        "count": 6
+      }
+    ]
+  }
+}

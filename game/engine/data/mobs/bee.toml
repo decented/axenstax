@@ -1,0 +1,8 @@
+id = "bee"
+category = "passive"
+width = 0.4
+height = 0.35
+color = [0.95, 0.78, 0.20]
+health = 10
+speed = 3.2
+name = "Bee"

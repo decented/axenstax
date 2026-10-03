@@ -1,0 +1,15 @@
+{
+  "name": "axenstax-feedback-reader",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "LOCAL trusted dev tool — subscribes to the AxeNStax relay, decrypts NIP-17 feedback DMs with the AxeNStax secret key into a local-only ledger, and publishes the anonymous status board (no replies). Holds the secret → never served publicly, never committed ledger. Gift-wrap helper: lib/nip59.cjs.",
+  "scripts": {
+    "test": "node --test",
+    "read": "node read.mjs",
+    "status": "node status.mjs"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.23.3"
+  }
+}

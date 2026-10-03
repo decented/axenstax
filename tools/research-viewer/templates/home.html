@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<h1>Research Viewer</h1>
+
+<div class="input-section">
+    <form action="/submit" method="post" class="url-form">
+        <input type="text" name="url" placeholder="Paste YouTube URL here..." required>
+        <button type="submit">Submit</button>
+    </form>
+
+    <form action="/search" method="post" class="url-form search-form">
+        <input type="text" name="query" placeholder="Search YouTube (e.g. &quot;best minecraft ideas&quot;)..." required>
+        <button type="submit">Search 10</button>
+    </form>
+</div>
+
+{% if videos %}
+<h2>Videos</h2>
+<div class="video-list">
+    {% for v in videos %}
+    <div class="video-item status-{{ v.status | replace(' ', '-') }}">
+        <div class="video-info">
+            <a href="/video/{{ v.id }}">{{ v.title or 'Loading...' }}</a>
+            <span class="video-meta">{{ v.created[:10] }}{% if v.channel %} &middot; {{ v.channel }}{% endif %}</span>
+        </div>
+        <span class="status-badge">{{ v.status }}</span>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="empty-state">No videos yet. Paste a YouTube URL above to get started.</p>
+{% endif %}
+
+{% if videos %}
+<script>
+// Auto-refresh if any videos are still processing
+const statuses = {{ videos | map(attribute='status') | list | tojson }};
+if (statuses.some(s => s !== 'done' && s !== 'error')) {
+    setTimeout(() => location.reload(), 5000);
+}
+</script>
+{% endif %}
+{% endblock %}

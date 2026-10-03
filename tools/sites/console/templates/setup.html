@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <base href="{{ base_href }}" />
+  <title>Set up your server — Axe'n'Stax</title>
+  <link rel="stylesheet" href="static/console.css" />
+  <link rel="stylesheet" href="static/wizard.css" />
+</head>
+<body class="wiz">
+  <main class="wiz-card">
+    <!-- progress dots -->
+    <div class="wiz-progress" id="wiz-progress" aria-hidden="true"></div>
+
+    <!-- 1. welcome -->
+    <section class="wiz-step" data-step="welcome">
+      <div class="wiz-emoji">🪓</div>
+      <h1>Let's set up your server</h1>
+      <p class="wiz-lead">A few quick questions and your world is ready. You can change
+        any of this later in the console.</p>
+      <button class="btn big" data-next>Start</button>
+    </section>
+
+    <!-- 2. kind of place -->
+    <section class="wiz-step" data-step="type" hidden>
+      <h1>What kind of place is this?</h1>
+      <p class="wiz-lead">Pick the one that fits best.</p>
+      <div class="choices" id="type-choices">
+        <button class="choice" data-value="gallery">
+          <span class="choice-emoji">🏛️</span>
+          <span class="choice-title">Gallery</span>
+          <span class="choice-blurb">You build it and hang your art. Visitors look, but can't change anything.</span>
+        </button>
+        <button class="choice" data-value="creative">
+          <span class="choice-emoji">🏗️</span>
+          <span class="choice-title">Creative world</span>
+          <span class="choice-blurb">Everyone builds with unlimited blocks.</span>
+        </button>
+        <button class="choice" data-value="survival">
+          <span class="choice-emoji">⛏️</span>
+          <span class="choice-title">Survival world</span>
+          <span class="choice-blurb">Gather, craft, and survive together.</span>
+        </button>
+        <button class="choice" data-value="adventure">
+          <span class="choice-emoji">🧭</span>
+          <span class="choice-title">Adventure</span>
+          <span class="choice-blurb">Explore and play, but don't change the world.</span>
+        </button>
+      </div>
+      <div class="wiz-nav">
+        <button class="btn ghost" data-back>Back</button>
+      </div>
+    </section>
+
+    <!-- 3. name -->
+    <section class="wiz-step" data-step="name" hidden>
+      <h1>Give it a name</h1>
+      <p class="wiz-lead">This is what players see.</p>
+      <label class="wiz-field">Server name
+        <input id="f-name" maxlength="60" autocomplete="off" placeholder="Axe'n'Stax Server" />
+      </label>
+      <label class="wiz-field">Short description <span class="opt">(optional)</span>
+        <input id="f-about" maxlength="200" autocomplete="off" placeholder="e.g. Our family build server" />
+      </label>
+      <div class="wiz-nav">
+        <button class="btn ghost" data-back>Back</button>
+        <button class="btn" data-next>Next</button>
+      </div>
+    </section>
+
+    <!-- 4. access -->
+    <section class="wiz-step" data-step="access" hidden>
+      <h1>Who can come in?</h1>
+      <div class="choices" id="access-choices">
+        <button class="choice" data-value="open">
+          <span class="choice-emoji">🌍</span>
+          <span class="choice-title">Anyone</span>
+          <span class="choice-blurb">Open to everyone with the link.</span>
+        </button>
+        <button class="choice" data-value="signin">
+          <span class="choice-emoji">🔑</span>
+          <span class="choice-title">Signed-in players</span>
+          <span class="choice-blurb">Players must sign in with a Nostr key.</span>
+        </button>
+        <button class="choice" data-value="friends">
+          <span class="choice-emoji">👋</span>
+          <span class="choice-title">Just my friends</span>
+          <span class="choice-blurb">Only people you add to the list.</span>
+        </button>
+      </div>
+      <label class="wiz-field" id="friends-field" hidden>Friends' npubs <span class="opt">(one per line — you can add more later)</span>
+        <textarea id="f-friends" rows="3" placeholder="npub1…&#10;npub1…"></textarea>
+      </label>
+      <div class="wiz-nav">
+        <button class="btn ghost" data-back>Back</button>
+        <button class="btn" data-next>Next</button>
+      </div>
+    </section>
+
+    <!-- 5. finishing touches -->
+    <section class="wiz-step" data-step="finish" hidden>
+      <h1>Finishing touches</h1>
+      <label class="toggle big-toggle">
+        <input type="checkbox" id="f-announce" />
+        <span>
+          <strong>Show in players' server lists</strong>
+          <small>People can find your server without a link.</small>
+        </span>
+      </label>
+      <label class="toggle big-toggle">
+        <input type="checkbox" id="f-history" />
+        <span>
+          <strong>Keep a visit history</strong>
+          <small>Remember who visited (npub + times) for a week. Off keeps nothing.</small>
+        </span>
+      </label>
+      <div class="wiz-nav">
+        <button class="btn ghost" data-back>Back</button>
+        <button class="btn" data-next>Next</button>
+      </div>
+    </section>
+
+    <!-- 6. review -->
+    <section class="wiz-step" data-step="review" hidden>
+      <h1>Ready?</h1>
+      <dl class="review" id="review"></dl>
+      <p class="warn-box" id="fresh-warn" hidden>
+        ⚠️ Changing the kind of place starts a <strong>brand-new world</strong>. Your
+        current world is saved as a backup (nothing is deleted).
+      </p>
+      <div class="wiz-nav">
+        <button class="btn ghost" data-back>Back</button>
+        <button class="btn big" id="create">Create my server!</button>
+      </div>
+    </section>
+
+    <!-- 7. done -->
+    <section class="wiz-step" data-step="done" hidden>
+      <div class="wiz-emoji">✅</div>
+      <h1 id="done-title">All set!</h1>
+      <p class="wiz-lead" id="done-msg">Your server is starting up…</p>
+      <p class="status" id="done-status"></p>
+    </section>
+
+    <!-- deliberately small + low-key: skipping is possible but discouraged -->
+    <p class="wiz-skip"><a href="#" id="skip">Skip setup for now</a></p>
+  </main>
+
+  <script id="wiz-defaults" type="application/json">{{ form | tojson }}</script>
+  <script src="static/wizard.js"></script>
+</body>
+</html>

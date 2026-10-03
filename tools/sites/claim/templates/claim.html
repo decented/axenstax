@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Claim your shirt — Axe'n'Stax{% endblock %}
+{% block content %}
+{% set f = form|default({}) %}
+<h1>Claim your shirt 👕</h1>
+<p class="lead">Thanks for supporting the project! Pop your code in, pick a size, and
+tell us where to send it. We print and post it for you — nothing else to pay.</p>
+
+{% if errors %}
+<div class="errors">
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<form method="post" action="/claim" autocomplete="on">
+    <label>Your code
+        <input name="code" value="{{ code }}" required autocapitalize="characters"
+               spellcheck="false" placeholder="e.g. ABCD2345">
+    </label>
+
+    <label>Item &amp; size
+        <select name="sync_variant_id" required>
+            <option value="" disabled {% if not f.sync_variant_id %}selected{% endif %}>Choose…</option>
+            {% for v in variants %}
+            <option value="{{ v.sync_variant_id }}" {% if f.sync_variant_id == v.sync_variant_id|string %}selected{% endif %}>{{ v.label }}</option>
+            {% endfor %}
+        </select>
+    </label>
+
+    <h2>Where to send it</h2>
+    <label>Full name
+        <input name="name" value="{{ f.name|default('') }}" required autocomplete="name">
+    </label>
+    <label>Address
+        <input name="address1" value="{{ f.address1|default('') }}" required autocomplete="address-line1">
+    </label>
+    <label>Address line 2 <span class="opt">(optional)</span>
+        <input name="address2" value="{{ f.address2|default('') }}" autocomplete="address-line2">
+    </label>
+    <div class="row">
+        <label>Town / City
+            <input name="city" value="{{ f.city|default('') }}" required autocomplete="address-level2">
+        </label>
+        <label>Postcode / ZIP
+            <input name="zip" value="{{ f.zip|default('') }}" required autocomplete="postal-code">
+        </label>
+    </div>
+    <div class="row">
+        <label>Country <span class="opt">(2-letter code, e.g. GB, DE, CZ, US)</span>
+            <input name="country_code" value="{{ f.country_code|default('') }}" required
+                   maxlength="2" pattern="[A-Za-z]{2}" autocapitalize="characters" autocomplete="country">
+        </label>
+        <label>State / Province <span class="opt">(US/CA/AU)</span>
+            <input name="state_code" value="{{ f.state_code|default('') }}" autocomplete="address-level1">
+        </label>
+    </div>
+    <label>Email <span class="opt">(for shipping updates only)</span>
+        <input name="email" type="email" value="{{ f.email|default('') }}" required autocomplete="email">
+    </label>
+    <label>Phone <span class="opt">(optional — some couriers ask for it)</span>
+        <input name="phone" value="{{ f.phone|default('') }}" autocomplete="tel">
+    </label>
+
+    <button type="submit">Send my shirt →</button>
+    <p class="fineprint">Your address goes straight to the print &amp; postage service to ship your
+    order. We don't store it. One code, one shirt.</p>
+</form>
+{% endblock %}

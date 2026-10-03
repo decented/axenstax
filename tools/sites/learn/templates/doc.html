@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} — Axe'n'Stax{% endblock %}
+{% block page %}{{ section_slug }}/{{ doc.path }}{% endblock %}
+{% block content %}
+<div class="breadcrumb">
+    <a href="/">Home</a> &rsaquo; <a href="/docs/{{ section_slug }}">{{ section.title }}</a> &rsaquo; {{ doc.title }}
+</div>
+
+<div class="doc-layout">
+    {% if toc %}
+    <aside class="doc-toc">
+        <h3>Contents</h3>
+        {{ toc | safe }}
+    </aside>
+    {% endif %}
+    <article class="doc-content">
+        {{ content | safe }}
+    </article>
+</div>
+{% endblock %}

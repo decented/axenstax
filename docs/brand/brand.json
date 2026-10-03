@@ -1,0 +1,58 @@
+{
+  "name": "Axe'n'Stax",
+  "slug": "axenstax",
+  "tagline": "Virtual world, real work.",
+  "tone": {
+    "personality": ["curious", "honest", "playful", "empowering", "awed"],
+    "voice": {
+      "do": [
+        "Talk like a smart friend, not a teacher",
+        "Be honest about the odds",
+        "Make the impossible sound exciting",
+        "Use 'you' and 'your' — it's their world",
+        "Let the kid feel like a real miner"
+      ],
+      "dont": [
+        "Lecture or explain down",
+        "Hype earnings or rewards",
+        "Make it sound discouraging",
+        "Use 'users' or 'players'",
+        "Pretend this is a simulation"
+      ]
+    },
+    "examples": {
+      "greeting": "Grab your axe. The whole Bitcoin network is out there. Let's see what you're up against.",
+      "success": "That's yours. You made it. Nobody else has that.",
+      "error": "Nothing this time. But you just did exactly what every miner on Earth does — real proof of work. The network noticed.",
+      "encouragement": "You've hashed more times than most adults ever will. Keep swinging.",
+      "cta": "Your world is waiting. Pick up where you left off."
+    }
+  },
+  "domain": {
+    "primary": "axenstax.com",
+    "alternates": ["axenstax.org"],
+    "defensive": []
+  },
+  "handles": {
+    "github": { "name": "axenstax", "available": true },
+    "npm": { "name": "axenstax", "available": true }
+  },
+  "project": {
+    "description": "Open-source voxel platform where every swing of your axe is a real hash on the Bitcoin network. You will never find a block — and that's the lesson.",
+    "lead": "Blocks (age 12)",
+    "umbrella": "Decented",
+    "colourTheme": {
+      "primary": "#22c55e",
+      "dark": "#14532d"
+    }
+  },
+  "meta": {
+    "generatedAt": "2026-03-22T00:00:00Z",
+    "generatedBy": "brand-forge v1",
+    "scoringRubric": "holodeck-derived-v1",
+    "previousName": "Genesis Blocks",
+    "nameScore": 66,
+    "domainScore": 71,
+    "domainsRegistered": "2026-03-22"
+  }
+}

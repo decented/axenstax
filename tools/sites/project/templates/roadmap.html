@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Engineering roadmap — Axe'n'Stax</title>
+    <meta name="description" content="Where Axe'n'Stax stands: what has shipped, what is waiting on live tests and people, the design calls that come next, later horizons, and the red lines the project will not cross.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="/#what">What it is</a>
+            <a href="/built">Built</a>
+            <a href="/roadmap">Roadmap</a>
+            <a href="{{ docs_url }}">Specs</a>
+            <a href="{{ marketing_url }}">Play</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>Engineering<br>roadmap.</h1>
+        <p class="tagline">Where the project stands, what is waiting on people and real devices, and what comes later. As of 2 October 2026: native release <strong>v0.2.27</strong>, network protocol <strong>v64</strong>. The full roadmap lives on the <a href="{{ docs_url }}/roadmap" style="color:#d4a044;">docs site</a>; this is the short version.</p>
+    </header>
+
+    <!-- WHERE WE ARE -->
+    <section style="max-width:1000px;margin:0 auto;padding:2.5rem 2rem 0;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">Where we are</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:680px;margin:0.4rem auto 0;">An open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The build queue is empty: everything that was ready to build has been built. What is left is work that needs a person or a real device, and a short list of design decisions.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Web: a taster</h3>
+            <p>The browser game at play.axenstax.com is an anonymous, local-only sandbox. No login, no multiplayer, no cloud save. Worlds live in your browser and can be exported to the desktop app.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Native: the full game</h3>
+            <p>The Linux AppImage has Signet sign-in, LAN play, online play by contact, the dedicated server and the feedback mailbox. Windows and macOS installers are not published yet; both build from source.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Parked</h3>
+            <p>Android is proven on hardware but nothing is published. Gamepad support is built and working, but is not a launch priority.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Posture</h3>
+            <p>Self-hosted, sovereign, player-owned. Worlds, saves and identity belong to the player. AxeNStax ships software, not a service.</p>
+        </div>
+    </section>
+
+    <!-- SHIPPED -->
+    <section style="max-width:1000px;margin:0 auto;padding:1.5rem 2rem 0;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">Shipped</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:620px;margin:0.4rem auto 0;">Implemented and in the current build. <a href="/built" style="color:#d4a044;">The long version is on Built</a>.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Engine and rendering</h3>
+            <p>A custom Rust engine on wgpu, native and WebAssembly from one codebase. Greedy meshing, day and night, weather, water and lava flow, lighting, particles, resolution-agnostic texture packs with hot-swap, and a single regression gate that covers lint, tests, the web build and a bundle-size limit.</p>
+        </div>
+        <div class="feature-card">
+            <h3>World and gameplay</h3>
+            <p>Survival and creative, crafting and smelting, farming and fishing, armour, hunger, biomes, caves, ravines, villages and a full ore set. Electricity with wires, batteries, lamps, a windmill and a water wheel. Timed Trials, slash commands and an optional guided companion.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Creatures</h3>
+            <p>A broad mob roster, tameable pets and steeds, bees, animal genetics and breeding, and a racing animal. Mob AI, spawning and physics run server-side, with changes sent to joiners.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Building and creative tools</h3>
+            <p>Stairs, slabs, doors, panes and signs; schematics with a build guide; the Workshop and Rig Studio for reskinning blocks and mobs; a skin editor with Minecraft import and export; exhibits and a kiosk mode; rails and cables; an opt-in third-person view; and a one-file export that carries your web worlds into the desktop app.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Multiplayer and identity</h3>
+            <p>LAN co-op, split-screen and a headless dedicated server with an Operator Console. Online play by contact: join a friend's home-hosted world by their Signet persona or an invite. Relays carry connection setup only, then the connection is direct and strangers get silence. World chat is native-only. Signet QR sign-in and contacts sync are in. An operator can publish their own server through an opt-in Nostr announce; nothing is ever announced automatically.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Sites and distribution</h3>
+            <p>Six public sites. A Linux AppImage with an in-place updater, a cross-platform packaging pipeline, and player documentation: wiki, learn journey, tutorials and operator guides.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Privacy by construction</h3>
+            <p>The web build has no login, cookies, analytics or feedback channel, and the site apps do not log IP addresses. Native feedback is per-report burner key, end-to-end encrypted, with no replies. Saves are crash-safe. Proof of Play is an educational proof-of-work primitive, never an earning mechanic.</p>
+        </div>
+    </section>
+
+    <!-- NOW -->
+    <section style="max-width:1000px;margin:0 auto;padding:1.5rem 2rem 0;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">Now: waiting on people and devices</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:620px;margin:0.4rem auto 0;">Each of these needs a second machine, a real device or a decision that is not the code's to make.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Live tests</h3>
+            <p>Two-machine LAN play with a real remote signer, and online play by contact across two real homes. Contacts sync and QR sign-in on a phone. Death drops and late-joiner backfill with a second player, the unverified Trials, an electricity switch test across two machines, and first launch of the data migration and updater on real hardware.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Fun test</h3>
+            <p>Play-testing with volunteer children who are not family. Family play has been a bug hunt, not evidence that the game is fun, so fun is still unvalidated.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Before the source goes public</h3>
+            <p>Sign-off of the draft privacy page and the Children's Code posture, a fresh public repository, and README and credits polish. Sign-in, pairing and feedback already default to decentralised public relays, with one relay list players can edit before they connect; the phone tests are pending.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Release</h3>
+            <p>Native v0.2.27 is cut once the repository is public. Until then the published installer is older than the source.</p>
+        </div>
+    </section>
+
+    <!-- NEXT -->
+    <section style="max-width:1000px;margin:0 auto;padding:1.5rem 2rem 0;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">Next: design calls</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:620px;margin:0.4rem auto 0;">Only the items that block building further on top of the current foundations.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Late-joiner chunk streaming</h3>
+            <p>Entities already backfill at join. World edits and chunks for a late joiner need a call between edit-log replay and chunk push; multiplayer chunk compression rides on the same decision. Anti-X-ray chunk obfuscation is built and tested but not yet in the live send path; it lands with this.</p>
+        </div>
+        <div class="feature-card">
+            <h3>One simulation, not two</h3>
+            <p>Single-player still runs its own mob and falling-block simulation beside the server's. The fix is to route single-player through a local server, which needs a playtest with the client-side sim removed. The same change settles the host's own position trust.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Server-authoritative saving</h3>
+            <p>The save path and the client use two overlapping player structures that will drift. They unify when saving becomes server-authoritative.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Identity and chat boundaries</h3>
+            <p>The signed identity is authoritative and the typed join name is a display fallback only; what remains is live two-machine verification. The chat ceiling can only be lowered locally; raising it waits on a real capability boundary.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Two owner decisions</h3>
+            <p>The final merge policy when an imported world's name clashes with an existing one (today both are kept), and how sub-block detail for high-resolution statues and faces should work.</p>
+        </div>
+    </section>
+
+    <!-- LATER -->
+    <section style="max-width:1000px;margin:0 auto;padding:1.5rem 2rem 0;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">Later</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:620px;margin:0.4rem auto 0;">Horizons. None of these is scheduled and none is built unless it says so.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Deeper systems</h3>
+            <p>An eight-tier farming economy. Player-driven economies on the settled non-custodial model (the engine holds a score, never a balance). Rail logistics phases 2 to 4. Electricity phases 3 and 4. A wireless-signalling element, designed but not built.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Worlds and creators</h3>
+            <p>Multi-world places with a hub and portals on one self-hosted address. Creator gallery phases 3 and 4. Cinematic camera and replay, partly built and not yet verified end to end. The Genesis founding-myth storyline.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Play and access</h3>
+            <p>Voice and proximity audio (not built). Guardian-facing controls: the operator allowlist exists, a guardian surface does not. A companion screen, networked spectator tiers, and non-custodial, bring-your-own-key cloud save on native.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Platforms and tooling</h3>
+            <p>Windows and macOS installers and an Android release. Small-box hardware targets and GPU-tier auto-detect. Self-hosting tooling such as backups and per-world configuration. Texture-pack distribution and WASM plugins for sandboxed server-side mods.</p>
+        </div>
+        <div class="feature-card">
+            <h3>A Bitcoin-enabled server layer</h3>
+            <p>Design only, and nothing is switched on. It would have to follow the rules below: off by default, parent-controlled, set per server, and driven by a deterministic work-meter.</p>
+        </div>
+    </section>
+
+    <!-- RED LINES -->
+    <section style="max-width:1000px;margin:0 auto;padding:1.5rem 2rem 0;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">Out of scope: red lines</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:620px;margin:0.4rem auto 0;">The project does not and will not do these. They keep AxeNStax a software vendor, never the operator of a service.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>No directory, no game servers</h3>
+            <p>No public directory of player-run servers, worlds or groups. Discovery is LAN-local, direct-address, or an operator's own opt-in announce. No game servers, and no relays carrying a group's game traffic, presence or chat. Multiplayer runs directly between players.</p>
+        </div>
+        <div class="feature-card">
+            <h3>No central child data</h3>
+            <p>No central collection of children's data and no collection of age as raw data. The web taster stays anonymous and local; feedback is burner-key and end-to-end encrypted.</p>
+        </div>
+        <div class="feature-card">
+            <h3>A building game</h3>
+            <p>Not positioned or marketed as a social network, social media or a chat platform. Playing with friends means building together.</p>
+        </div>
+        <div class="feature-card">
+            <h3>No chance-based payouts</h3>
+            <p>Proof of Play is educational proof-of-work. Any real-money layer is off by default, parent-controlled and per server, with a deterministic work-meter and never a probabilistic threshold. And no how-to for turning safety off: sensitive features sit behind a real capability boundary, not a disclaimer.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Retired</h3>
+            <p>The original plan for a paid hosting fleet, matchmaking, platform services and celebrity-scale events is retired. It would make AxeNStax the operator of the service, which these lines exist to prevent.</p>
+        </div>
+    </section>
+
+    <section class="cta-block">
+        <h2>Contributing</h2>
+        {% if source_url %}
+        <p>The source is public on GitHub. Specs and ADRs are the place to understand how it all fits together before you dive in.</p>
+        {% else %}
+        <p>The source repository is private for now and <strong>opening soon</strong>. When it does, the public GitHub and a contributor on-ramp switch on here. Until then, the specs are the place to understand how it all fits together.</p>
+        {% endif %}
+        <div class="cta-row">
+            <a href="{{ docs_url }}/roadmap" class="cta cta-large">Full roadmap &rarr;</a>
+            <a href="{{ docs_url }}" class="cta cta-large">Specs &amp; ADRs &rarr;</a>
+            <a href="/built" class="cta cta-large">What's already built &rarr;</a>
+            {% if source_url %}
+            <a href="{{ source_url }}" class="cta cta-large" target="_blank" rel="noopener">Source on GitHub &rarr;</a>
+            {% endif %}
+        </div>
+        <p class="hint" style="margin-top:1.2rem;">Curious what all this means for <em>players</em> rather than builders? That story lives over on <a href="{{ marketing_url }}/roadmap" style="color:#9aa3b8;text-decoration:underline;">the product roadmap &rarr;</a></p>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ marketing_url }}">Play</a> ·
+            <a href="/">Project</a> ·
+            <a href="/built">Built</a> ·
+            <a href="/roadmap">Roadmap</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            {% if source_url %}<a href="{{ source_url }}" target="_blank" rel="noopener">Source</a>{% else %}<span style="opacity:0.55;">Source (soon)</span>{% endif %} ·
+            <a href="{{ marketing_url }}/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

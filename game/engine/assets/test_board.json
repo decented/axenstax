@@ -1,0 +1,125 @@
+{
+  "_comment": "Community Test Board registry — features awaiting playtest. `ref` is a stable searchable token that also appears in the linked test sheet, so searching the wiki/docs for it finds the sheet. Ordering is computed at load (test_board::rank_items): features gating the most downstream work first, then by `priority`. Maintained by the build team; append a row when a feature ships and needs testing, remove it once green.",
+  "items": [
+    {
+      "ref": "TB-07-worldedit",
+      "title": "WorldEdit region tools (/we)",
+      "summary": "Pos1/pos2 select, set/replace/walls, copy + paste, stack. Big builds in seconds.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-07-worldedit",
+      "priority": 80,
+      "blocks": ["building-family-#30", "parkour-build-testing"]
+    },
+    {
+      "ref": "TB-10-schematic-import",
+      "title": "Schematic import (/import)",
+      "summary": "Load a Sponge .schem into a blueprint and place it. Community builds come in.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-10-schematic-import",
+      "priority": 75,
+      "blocks": ["community-builds", "building-family-#30"]
+    },
+    {
+      "ref": "TB-09-build-guide",
+      "title": "Blueprint build guide (/buildguide)",
+      "summary": "Ghost-cell overlay shows each block to place; cells flip as you build it correctly.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-09-build-guide",
+      "priority": 70,
+      "blocks": ["building-family-#30"]
+    },
+    {
+      "ref": "TB-06-minimap-waypoints",
+      "title": "Minimap, map screen & waypoints",
+      "summary": "Corner minimap, M full-screen map, place/remove waypoints, death markers.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-06-minimap-waypoints",
+      "priority": 65,
+      "blocks": ["navigation-features"]
+    },
+    {
+      "ref": "TB-15-tiered-storage",
+      "title": "Tiered chests + auto-collect",
+      "summary": "Copper/Iron/Diamond/Satori chests with bigger grids; Diamond+ pull nearby drops.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-15-tiered-storage",
+      "priority": 50,
+      "blocks": []
+    },
+    {
+      "ref": "TB-08-spawn-overlay",
+      "title": "Spawn-proofing overlay (F7)",
+      "summary": "Toggle markers on blocks dark enough for mobs to spawn. Light it up, markers clear.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-08-spawn-overlay",
+      "priority": 45,
+      "blocks": []
+    },
+    {
+      "ref": "TB-23-combat-sweep",
+      "title": "Combat sweep attack",
+      "summary": "A swing hits the crosshair mob full + every other mob in the arc for reduced damage.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-23-combat-sweep",
+      "priority": 40,
+      "blocks": []
+    },
+    {
+      "ref": "TB-24-narration",
+      "title": "Accessibility narration (TTS)",
+      "summary": "Opt-in spoken hotbar selection via the browser voice. Toggle in the menu.",
+      "sheet": "docs/test-sheets/2026-06-17-community-features-mega-test.md#tb-24-narration",
+      "priority": 35,
+      "blocks": []
+    },
+    {
+      "ref": "TB-48-electricity",
+      "title": "Electricity — power & logic (Phase 1)",
+      "summary": "Wire a circuit: lever/button/plate/crank/generator/battery -> cable -> a lamp that lights. Logic gates, powered rail. /give or craft the parts.",
+      "sheet": "docs/test-sheets/2026-06-17-electricity-phase1.md#tb-48-electricity",
+      "priority": 78,
+      "blocks": ["electricity-phase-3", "powered-rail-tuning"]
+    },
+    {
+      "ref": "TB-48-light-beams",
+      "title": "Electricity — light beams & motion (Phase 2)",
+      "summary": "Beam Sensor triplines: walk through the red beam to trigger it. Mirrors route it (180 deg + 90 deg turns); Motion Sensor trips on proximity.",
+      "sheet": "docs/test-sheets/2026-06-17-electricity-phase1.md#tb-48-light-beams",
+      "priority": 62,
+      "blocks": ["parkour-gates"]
+    },
+    {
+      "ref": "TB-49-challenges",
+      "title": "Feature-coverage challenges",
+      "summary": "In-game challenges that send you to try a feature. /scenario list to find them, /scenario <name> to start (onboarding, tame-wolf, vendor-sale...). HUD tracks progress.",
+      "sheet": "docs/test-sheets/2026-06-18-feature-coverage-challenges.md#tb-49-challenges",
+      "priority": 58,
+      "blocks": ["playtest-coverage"]
+    },
+    {
+      "ref": "TB-50-lan-multiplayer",
+      "title": "Native LAN multiplayer (host + join)",
+      "summary": "Two desktop machines on one network: one hosts a world, the other auto-discovers it (or joins by ip:port). Play together — moves + block edits sync. Native-only; browsers can't host. Backs the homepage 'host a LAN game' promise.",
+      "sheet": "docs/test-sheets/2026-06-18-native-lan-multiplayer.md#tb-50-lan-multiplayer",
+      "priority": 60,
+      "blocks": ["multiplayer-stability"]
+    },
+    {
+      "ref": "TB-51-worldgen-floor",
+      "title": "Solid ground — no void holes",
+      "summary": "Make a new Normal world. Walk ~50 blocks each way and dig straight down. The floor should be continuous to bedrock — no bottomless grid gaps, and you never fall through.",
+      "sheet": "docs/test-sheets/2026-06-23-test-lab-and-fixes.md#tb-51-worldgen-floor",
+      "priority": 92,
+      "blocks": ["alpha-playability"]
+    },
+    {
+      "ref": "TB-52-satoshi-welcome",
+      "title": "Meet Satoshi (new-world welcome)",
+      "summary": "In a new Normal world, Satoshi waits in a small wooden hut near spawn. Right-click him: he greets you, offers food (Survival), then gifts a starter-hut plan.",
+      "sheet": "docs/test-sheets/2026-06-23-test-lab-and-fixes.md#tb-52-satoshi-welcome",
+      "priority": 74,
+      "blocks": ["onboarding"]
+    },
+    {
+      "ref": "TB-53-build-along",
+      "title": "Build along a schematic",
+      "summary": "Lay the starter plan. Short on materials -> a build-guide + shopping list. With the materials -> choose 'build automatically' or 'guide me'. Guided glows the lowest unbuilt layer and walks upward as you place blocks.",
+      "sheet": "docs/test-sheets/2026-06-23-test-lab-and-fixes.md#tb-53-build-along",
+      "priority": 71,
+      "blocks": ["building-family-#30"]
+    }
+  ]
+}

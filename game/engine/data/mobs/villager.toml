@@ -1,0 +1,8 @@
+id = "villager"
+category = "passive"
+width = 0.6
+height = 1.85
+color = [0.45, 0.30, 0.18]
+health = 20
+speed = 0.5
+name = "Villager"

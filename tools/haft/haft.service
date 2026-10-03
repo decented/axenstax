@@ -1,0 +1,113 @@
+# User-level systemd unit for Haft McHafty — the owner's KithMoot agent in
+# the AxeNStax world's room. Install with tools/haft/install.sh (copies this
+# file verbatim to ~/.config/systemd/user/haft.service — nothing in this
+# file needs per-machine substitution; the machine-specific bits all live in
+# the EnvironmentFile it points at). Full walkthrough: tools/haft/README.md.
+#
+# Modelled on forgesworn/kithmoot's deploy/keeper@.service (read that
+# file's header before changing this one; it is the house style for what
+# these comments are for), with two deliberate departures:
+#
+#   - USER unit, not a system unit. This runs on the owner's own laptop as
+#     the owner's own user, not on a box that's up around the clock. It is
+#     installed to ~/.config/systemd/user/, `WantedBy=default.target`, and
+#     it sleeps when the laptop does — which is correct for "the owner's
+#     agent", not a bug to work around with a keepalive.
+#
+#   - Haft is a ROOM MEMBER (`kithmoot-agent join`), not a keeper
+#     (`kithmoot-agent create`). It holds no room key and cannot admit
+#     anyone; it answers in chat under an ownership proof. The keeper that
+#     holds this room open is a separate process (see
+#     docs/foundations/2026-09-05-world-chat.md §4, `WorldRoom`/
+#     `KithMootKeeper`) and is not this unit's job.
+#
+# WHAT THIS PROCESS IS: an AxeNStax character, standing in for the owner in
+# the family's chat room when the owner isn't at the keyboard. It holds
+# Haft's own Nostr key (~/.kithmoot/haft.key) and an ownership proof signed
+# by the owner's key, so anyone in the room can see whose agent it is
+# (docs/foundations/2026-09-05-world-chat.md §4.3 — an unowned agent in a
+# room with a child is an anonymous stranger with a language model attached,
+# and the whole point of the tier system is that there are no anonymous
+# strangers). It talks to Anthropic's API to answer, and to the room's
+# relays over TCP. It does not hold the room's traffic secret and cannot
+# remove anyone or close the room.
+#
+# INSTALL: tools/haft/install.sh (idempotent, no sudo — this is a user
+# unit). It verifies ~/.kithmoot/haft.key already exists, writes
+# ~/.config/axenstax/haft.env from haft.env.example if that file is not
+# already there, installs this unit, and runs `systemctl --user
+# daemon-reload`. It does NOT start the service — see tools/haft/README.md
+# for what has to be true first (a room link, an ownership proof) and the
+# exact commands left for the owner to run.
+#
+# CONFIG: everything, including where the kithmoot checkout lives on this
+# machine (KITHMOOT_DIR), is in the EnvironmentFile,
+# `~/.config/axenstax/haft.env` (see haft.env.example for every line and why
+# it's there). Edit it and `systemctl --user restart haft` to change
+# anything — this unit's own command line never changes.
+#
+# No WorkingDirectory is set: bin/kithmoot-agent.mjs imports its library via
+# a path relative to its own file location, not the process's cwd, and
+# every path this unit passes in (identity, persona, memory, owner proof)
+# is already absolute via the EnvironmentFile. Nothing here depends on
+# where the process starts.
+
+[Unit]
+Description=Haft McHafty — the owner's KithMoot agent in the AxeNStax world room
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h = this user's home directory (a systemd specifier, resolved by
+# systemd itself — not a personal path baked into this file).
+EnvironmentFile=%h/.config/axenstax/haft.env
+# kithmoot-agent only runs from dist/ (bin/kithmoot-agent.mjs imports
+# ../dist/src/node/cli.js) — already built upstream, nothing built by this
+# unit or by install.sh.
+#
+# ${KITHMOOT_DIR} is systemd's own command-line variable substitution
+# (systemd.service(5) "Basic environment variable substitution"), filled in
+# from the EnvironmentFile above at start time — NOT shell expansion, and
+# not something this unit file hardcodes, so the same file works whichever
+# directory the checkout lives in on this machine.
+#
+# The link is deliberately not on this command line either: `join` reads
+# its link positional from KITHMOOT_LINK in the environment when none is
+# given (kithmoot's src/node/cli.ts: `positionals[1] ?? env('LINK')`), so
+# the EnvironmentFile is the one and only place both paths live. If
+# KITHMOOT_LINK is empty, `join` fails immediately with "join needs a link"
+# and systemd restarts it per Restart=always below — which just spins until
+# the link is filled in, so check `journalctl --user -u haft` if Haft seems
+# to be doing nothing.
+#
+# --respond mentions (not --respond always) so Haft speaks when addressed,
+# not on every line in the room — the default upstream, made explicit here
+# because this is the one flag this unit does pass.
+ExecStart=/usr/bin/node ${KITHMOOT_DIR}/bin/kithmoot-agent.mjs join --respond mentions
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Hardening, carried over from the upstream keeper unit where it still
+# applies to an unprivileged user service:
+#
+#   - NOT MemoryDenyWriteExecute: V8 needs to flip code pages between
+#     writable and executable, exactly as the upstream keeper unit notes.
+#     Setting it here would not sandbox Haft harder, it would just crash
+#     Node.
+#   - No ProtectSystem=strict / ProtectHome / PrivateDevices / the
+#     kernel-tunable and control-group protections from the system unit:
+#     those are meaningless (or rejected outright) in a --user manager,
+#     which does not run as PID 1 and has no system-wide filesystem
+#     namespace to protect. A user unit is already confined to what the
+#     owner's own account can touch.
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=default.target

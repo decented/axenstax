@@ -1,0 +1,15 @@
+{
+  "kind": "Challenge",
+  "display_name": "Scavenger — three minutes to grab as many DIFFERENT things as you can",
+  "objective": {
+    "Timed": {
+      "ticks": 3600
+    }
+  },
+  "scoring": "InventoryVariety",
+  "arena_seed": 180,
+  "game_mode": "survival",
+  "world_type": "normal",
+  "time_lock": "day",
+  "mobs_enabled": false
+}

@@ -1,0 +1,12 @@
+{
+  "name": "axenstax-release",
+  "private": true,
+  "type": "module",
+  "description": "Publish AxeNStax AppImage releases as kind-30063 Nostr events on Blossom mirrors.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.25.0"
+  }
+}

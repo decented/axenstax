@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <base href="{{ base_href }}" />
+  <title>Operator Console — {{ summary.server_name or "Axe'n'Stax" }}</title>
+  <link rel="stylesheet" href="static/console.css" />
+  <link rel="stylesheet" href="static/wizard.css" />
+</head>
+<body>
+  <header class="bar">
+    <div>
+      <strong>Operator Console</strong>
+      <span class="muted">· {{ summary.server_name or "Axe'n'Stax server" }}</span>
+    </div>
+    <div class="bar-right">
+      {% if you_role %}<span class="rolebadge role-{{ you_role }}">{{ you_role }}</span>{% endif %}
+      <span class="muted mono" title="{{ you_npub }}">{{ you_npub[:12] }}…</span>
+      <button id="logout" class="btn ghost">Log out</button>
+    </div>
+  </header>
+
+  {% if can_setup and not setup_complete %}
+  <div class="setup-banner">
+    <span class="grow">⚙️ <strong>Server setup isn't finished.</strong> Run the quick setup wizard to choose what kind of place this is.</span>
+    <a class="btn" href="setup">Finish setup</a>
+  </div>
+  {% endif %}
+
+  <main class="grid">
+    <!-- Use-case guide: what kind of place this is + who can do what -->
+    {% if setup_complete %}
+    <section class="panel guide guide-{{ server_type }}" id="usecase-guide">
+      {% if is_gallery %}
+        <h2>🏛️ Your Gallery</h2>
+        {% if visitors_open %}
+          <p class="guide-state open">👁 <strong>Open to visitors — your gallery is live.</strong></p>
+          <p class="muted">Anyone who opens your link can walk around and look, but
+            <strong>can't change anything</strong>.</p>
+          <div class="share">
+            <span class="muted">Share this link:</span>
+            <code class="mono" id="share-link">…</code>
+            <button class="btn-copy" type="button" id="copy-share">Copy</button>
+          </div>
+          {% if 'showcase' in caps %}
+          <p class="guide-action">Want to make a change?
+            <button class="btn ghost" id="gallery-build">◀ Back to build mode</button>
+            <span class="muted">then reload your game tab.</span></p>
+          {% endif %}
+        {% else %}
+          <p class="guide-state build">🔨 <strong>Build mode — you're working on it.</strong></p>
+          <p class="muted">Walk in and build your gallery: place blocks and hang your art.
+            Don't share the link yet — right now anyone who opens it could change things too.</p>
+          {% if 'showcase' in caps %}
+          <p class="guide-action"><button class="btn" id="gallery-open">Open to visitors ▶</button>
+            <span class="muted">Tip: after switching, reload your own game tab.</span></p>
+          {% endif %}
+        {% endif %}
+        <p class="guide-foot">🖼️ <strong>Your art:</strong> add pictures in the
+          <a href="#studio-panel">Gallery panel below</a> — upload an image, then paste its
+          place-command into the game chat (<span class="mono">T</span>) to hang it on a wall.</p>
+        <p class="guide-foot muted">Only people who open the <em>web link</em> are kept to look-only.
+          To be extra sure nobody can edit, set <em>Who can join</em> (Access, below) to your friends.</p>
+      {% elif server_type == 'creative' %}
+        <h2>🏗️ Creative world</h2>
+        <p class="muted">Everyone who joins can build with unlimited blocks. No limits, nothing to
+          lose — great for building together.</p>
+      {% elif server_type == 'adventure' %}
+        <h2>🧭 Adventure world</h2>
+        <p class="muted">Players can explore and play, but <strong>can't change the world</strong>.
+          Good for a map or experience you've made for others to walk through.</p>
+      {% else %}
+        <h2>⛏️ Survival world</h2>
+        <p class="muted">Players gather, craft, and survive together. Mobs and damage are on.</p>
+      {% endif %}
+      {% if can_setup %}
+      <p class="guide-foot muted">Not what you wanted?
+        <a href="setup">Re-run the setup wizard</a> to change the kind of place, the name, or who can join.</p>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <!-- Identity (read-only; all operators) -->
+    <section class="panel">
+      <h2>Identity</h2>
+      <dl>
+        <dt>Operator</dt><dd class="mono">{{ summary.operator_npub }}</dd>
+        <dt>Runtime key</dt><dd class="mono">{{ summary.runtime_npub }}</dd>
+        <dt>Delegation</dt>
+        <dd>
+          {% if summary.delegation_days_left is not none %}
+            {{ summary.delegation_days_left }} day(s) left
+          {% else %}—{% endif %}
+        </dd>
+      </dl>
+      {% if can_setup %}
+      <h3>Setup</h3>
+      <p class="muted">Re-run the guided setup to change what kind of place this is, the
+        name, or who can join.</p>
+      <a class="btn ghost" href="setup">Re-run setup wizard</a>
+      {% endif %}
+    </section>
+
+    <!-- Team / roles (owner: all; admin: moderators only) -->
+    {% if 'manage_owners' in caps or 'manage_admins' in caps or 'manage_moderators' in caps %}
+    <section class="panel" id="team-panel">
+      <h2>Team</h2>
+      <p class="muted">Who can use this console, and what they can do.</p>
+
+      {% if 'manage_owners' in caps %}
+      <h3>Owners <span class="muted">(full control)</span></h3>
+      <ul class="npubs">
+        {% if primary_owner_npub %}
+          <li><span class="mono">{{ primary_owner_npub }}</span> <span class="tag">primary</span></li>
+        {% endif %}
+        {% for n in team.owner %}
+          <li><span class="mono">{{ n }}</span><button class="x" data-team-remove="owner" data-npub="{{ n }}">remove</button></li>
+        {% endfor %}
+      </ul>
+      <form class="addrow" data-team-add="owner">
+        <input name="npub" placeholder="npub1… (new owner)" autocomplete="off" />
+        <button class="btn">Add owner</button>
+      </form>
+      {% endif %}
+
+      {% if 'manage_admins' in caps %}
+      <h3>Admins <span class="muted">(everything except managing admins/owners)</span></h3>
+      <ul class="npubs">
+        {% for n in team.admin %}
+          <li><span class="mono">{{ n }}</span><button class="x" data-team-remove="admin" data-npub="{{ n }}">remove</button></li>
+        {% else %}
+          <li class="muted">none</li>
+        {% endfor %}
+      </ul>
+      <form class="addrow" data-team-add="admin">
+        <input name="npub" placeholder="npub1… (new admin)" autocomplete="off" />
+        <button class="btn">Add admin</button>
+      </form>
+      {% endif %}
+
+      {% if 'manage_moderators' in caps %}
+      <h3>Moderators <span class="muted">(allowlist / blocklist / kick only)</span></h3>
+      <ul class="npubs">
+        {% for n in team.moderator %}
+          <li><span class="mono">{{ n }}</span><button class="x" data-team-remove="moderator" data-npub="{{ n }}">remove</button></li>
+        {% else %}
+          <li class="muted">none</li>
+        {% endfor %}
+      </ul>
+      <form class="addrow" data-team-add="moderator">
+        <input name="npub" placeholder="npub1… (new moderator)" autocomplete="off" />
+        <button class="btn">Add moderator</button>
+      </form>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <!-- World / Showcase mode (admin+). Hidden for galleries — the guide above owns
+         the build/open switch, so we don't show a second, confusingly-worded one. -->
+    {% if 'showcase' in caps and world_status and not is_gallery %}
+    <section class="panel" id="world-panel">
+      <h2>World</h2>
+      <dl>
+        <dt>World</dt><dd class="mono">{{ world_status.world }}</dd>
+        <dt>Game mode</dt><dd>{{ world_status.game_mode }}</dd>
+      </dl>
+      <h3>Showcase / kiosk mode</h3>
+      <p class="muted">Turn this server into a contained gallery/booth: a guest is locked to
+        read-only Adventure, collects exhibits, and exits to one terminal screen. Applies on
+        the visitor's next page load (live — no restart).</p>
+      <form id="showcase-form" class="stack">
+        <label class="toggle">
+          <input type="checkbox" name="enabled" {% if world_status.showcase.enabled %}checked{% endif %} />
+          Kiosk mode (showcase)
+        </label>
+        <label>Exit action
+          <select name="exit_action">
+            <option value="board" {% if world_status.showcase.exit_action != 'cta' %}selected{% endif %}>Board — saved pieces + thanks</option>
+          </select>
+        </label>
+        <label>Auto-loop (seconds; 0 = dead-end booth)
+          <input name="auto_loop_secs" type="number" min="0" value="{{ world_status.showcase.auto_loop_secs }}" />
+        </label>
+        <button class="btn">Save showcase</button>
+      </form>
+    </section>
+    {% endif %}
+
+    <!-- Gallery / Studio: exhibit images + placed exhibits (admin+) -->
+    {% if 'studio' in caps %}
+    <section class="panel{% if is_gallery %} feature{% endif %}" id="studio-panel">
+      <h2>Gallery <span class="muted">· {{ studio_world }}/exhibits</span></h2>
+      <p class="muted">Upload your art here. Then, to hang each piece on a wall in the
+        world, copy its <strong>Place command</strong> and paste it into the in-game
+        chat (press <span class="mono">T</span>) — or hand it to whoever is helping you
+        build. Pictures always hang at their <strong>true shape</strong> (never
+        stretched); the numbers in the command just set how big it is, in blocks.
+        New to this? Read the <a href="https://wiki.axenstax.com/docs/player-guide/player-guide/art-galleries.md" target="_blank" rel="noopener">artist's gallery guide</a>.</p>
+      <form class="addrow" id="studio-upload" enctype="multipart/form-data">
+        <input type="file" name="file" accept="image/png,image/jpeg,image/gif,image/webp" />
+        <button class="btn">Upload</button>
+      </form>
+      <ul class="gallery">
+        {% for im in studio_images %}
+          <li>
+            <img class="thumb" src="/exhibits/{{ im.name }}" alt="{{ im.name }}" loading="lazy" />
+            <span class="mono">{{ im.name }}</span>
+            <span class="muted">{{ (im.size / 1024) | round(1) }} KB{% if im.width %} · {{ im.width }}×{{ im.height }} px{% endif %}</span>
+            {% if im.place_command %}
+            <span class="place-cmd">
+              <code class="mono">{{ im.place_command }}</code>
+              <button class="btn-copy" type="button" data-copy="{{ im.place_command }}">Copy place command</button>
+            </span>
+            {% endif %}
+            <button class="x" data-studio-delete="{{ im.name }}">delete</button>
+          </li>
+        {% else %}
+          <li class="muted">no images yet — upload art to build the gallery</li>
+        {% endfor %}
+      </ul>
+
+      <h3>Placed exhibits <span class="muted">(in the served world)</span></h3>
+      <ul class="exhibits">
+        {% for e in studio_exhibits %}
+          <li>
+            <span class="tag">{{ e.presentation }}</span>
+            <span class="mono">{{ e.image_ref }}</span>
+            <span class="muted">{{ e.width }}×{{ e.height }} @({{ e.x }}, {{ e.y }}, {{ e.z }})</span>
+            {% if e.label %}— "{{ e.label }}"{% endif %}
+          </li>
+        {% else %}
+          <li class="muted">none placed yet — author them in-world with <span class="mono">/exhibit</span> (native), then they appear here</li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <!-- Cloud: Stash / Beacon (Phase 3/4 — owner-involved) -->
+    {% if 'studio' in caps %}
+    <section class="panel" id="cloud-panel">
+      <h2>Cloud <span class="muted">· Stash / Beacon</span></h2>
+      <p class="muted">Publish gallery art to <strong>Beacon</strong> (public distribution) or
+        pull/push your private <strong>Stash</strong>, and adopt Beacon pieces into the gallery.</p>
+      <p class="notice">⏳ <strong>Needs your Nostr signer.</strong> Stash/Beacon must sign +
+        encrypt on your behalf over live relays — the same signer step the operator pairing
+        needs, which mySignet can't yet do (tracked upstream, not yet fixed).
+        The UI + wiring are staged; the live round-trip is an owner step, so this is shown
+        rather than wired to a control that can't work yet.</p>
+    </section>
+    {% endif %}
+
+    <!-- Access policy -->
+    {% if 'access' in caps %}
+    <section class="panel">
+      <h2>Access</h2>
+      {% if 'require_signin' in caps %}
+      <label class="toggle">
+        <input type="checkbox" id="require-signin" {% if require_signin %}checked{% endif %} />
+        Require sign-in (verified Signet identity)
+      </label>
+      {% endif %}
+
+      <h3>Allowlist <span class="muted">(only these npubs may join; blank = open)</span></h3>
+      <form class="addrow" data-add="allow">
+        <input name="npub" placeholder="npub1…" autocomplete="off" />
+        <button class="btn">Add</button>
+      </form>
+      <ul class="npubs">
+        {% for n in allowlist %}
+          <li><span class="mono">{{ n }}</span><button class="x" data-remove="allow" data-npub="{{ n }}">remove</button></li>
+        {% else %}
+          <li class="muted">empty — anyone may join</li>
+        {% endfor %}
+      </ul>
+
+      <h3>Blocklist <span class="muted">(refused even if allowlisted)</span></h3>
+      <form class="addrow" data-add="block">
+        <input name="npub" placeholder="npub1…" autocomplete="off" />
+        <button class="btn">Block</button>
+      </form>
+      <ul class="npubs">
+        {% for n in blocklist %}
+          <li><span class="mono">{{ n }}</span><button class="x" data-remove="block" data-npub="{{ n }}">remove</button></li>
+        {% else %}
+          <li class="muted">empty</li>
+        {% endfor %}
+      </ul>
+
+      <h3>Kick a player</h3>
+      <form class="addrow" id="kick-form">
+        <input name="npub" placeholder="npub1…" autocomplete="off" />
+        <button class="btn warn">Kick</button>
+      </form>
+    </section>
+    {% endif %}
+
+    <!-- Server settings -->
+    {% if 'settings' in caps %}
+    <section class="panel">
+      <h2>Server</h2>
+      <form id="settings-form" class="stack">
+        <label>Name <input name="server_name" value="{{ settings.server_name or '' }}" /></label>
+        <label>About <input name="about" value="{{ settings.about }}" /></label>
+        <label>Region <input name="region" value="{{ settings.region }}" /></label>
+        <label>Max players <input name="max_players" type="number" min="1" value="{{ settings.max_players or '' }}" /></label>
+        <label class="toggle">
+          <input type="checkbox" name="announce" {% if settings.announce %}checked{% endif %} />
+          Announce this server (publish a Server Card)
+        </label>
+        <button class="btn">Save server settings</button>
+      </form>
+    </section>
+    {% endif %}
+
+    <!-- Privacy -->
+    {% if 'privacy' in caps %}
+    <section class="panel">
+      <h2>Privacy</h2>
+      <p class="muted">Default is <strong>no tracking</strong>. Identity is <em>verified</em>;
+        the privacy posture is <em>declared</em> — see the docs.</p>
+      <form id="privacy-form" class="stack">
+        <label>Tracking
+          <select name="privacy_level">
+            <option value="none" {% if settings.privacy_level != 'sessions' %}selected{% endif %}>None — keep nothing</option>
+            <option value="sessions" {% if settings.privacy_level == 'sessions' %}selected{% endif %}>Sessions — keep join history</option>
+          </select>
+        </label>
+        <label>Retention (days) <input name="privacy_retention_days" type="number" min="0" value="{{ settings.privacy_retention_days }}" /></label>
+        <button class="btn">Save privacy</button>
+      </form>
+
+      <h3>Session history <span class="muted">(operator-private — npub + times only)</span></h3>
+      <p>Total: {{ telemetry.total_sessions }} · Unique today: {{ telemetry.unique_today }} · Peak today: {{ telemetry.peak_today }}</p>
+      <table class="sessions">
+        <thead><tr><th>npub</th><th>connected</th><th>left</th><th></th></tr></thead>
+        <tbody>
+          {% for s in telemetry.recent %}
+            <tr>
+              <td class="mono">{{ s.npub }}</td>
+              <td>{{ s.connect_unix }}</td>
+              <td>{{ s.disconnect_unix if s.disconnect_unix is not none else "online" }}</td>
+              <td><button class="x" data-forget data-npub="{{ s.npub }}">forget</button></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">no sessions recorded</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <button id="purge" class="btn warn">Purge all history</button>
+    </section>
+    {% endif %}
+  </main>
+
+  <script src="static/console.js"></script>
+</body>
+</html>

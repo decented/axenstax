@@ -1,0 +1,155 @@
+name: Deploy
+
+# Auto-deploy the seven sites (.com: marketing/game/learn/wiki/claim — .org:
+# project/docs) to the routing Hetzner box on every push to main. Works for ANY
+# pusher — CI uses the stored deploy key (secret HETZNER_SSH_KEY), not a personal one.
+#
+# SELF-PROVISIONING: remote-update.sh stands the whole layout up from scratch and
+# keeps it in sync — venvs, prod .env (rendered from templates, secrets preserved),
+# systemd units, and the Caddy vhost (installed + reloaded when changed). A fresh
+# site, a changed *.service, or a changed axenstax.Caddyfile are all applied
+# automatically; no manual SSH step. See tools/sites/deploy/README.md.
+#
+# DEPLOY_HOST: repo VARIABLE (Settings → Secrets and variables → Actions →
+# Variables), not a secret — the prod box's origin IP isn't sensitive (grey-cloud
+# DNS already exposes it), but hardcoding it in a public workflow file was still
+# flagged (2026-09-28 audit). Must be created before this workflow can deploy.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'game/engine/**'
+      - 'tools/sites/**'
+      - 'docs/**'
+      - '.github/workflows/deploy.yml'
+
+permissions:
+  contents: read
+
+# Only ever ship the latest tip of main; cancel an in-flight deploy on a newer push.
+concurrency:
+  group: deploy-axenstax
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Gate this job (which holds the deploy SSH key) behind a GitHub Environment —
+    # lets the owner add required reviewers / restrict which branches can deploy
+    # from the repo's Settings → Environments once the repo is public, with no
+    # workflow change needed here.
+    environment: production
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Rust toolchain (wasm32)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: game/engine
+
+      - name: Install trunk
+        # sha256-verified before extraction (2026-09-28 audit fix) — this used to
+        # pipe the download straight into tar unverified in the same job that
+        # later holds the deploy key. Pin bumps: re-fetch the matching
+        # .sha256 asset from the trunk release and update this constant.
+        run: |
+          TRUNK_SHA256=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz -o trunk.tar.gz
+          echo "${TRUNK_SHA256}  trunk.tar.gz" | sha256sum -c -
+          tar -xzf trunk.tar.gz -C "$HOME/.cargo/bin" trunk
+          rm -f trunk.tar.gz
+          trunk --version
+
+      # Vendor a PINNED, sha256-verified "Sign in with Signet" SDK build into the
+      # console site's vendor dir (2026-09-27 audit fix — was unpinned "latest",
+      # and also shipped onto the game site, which doesn't load signet-login at
+      # all any more; see tools/sites/vendor-signet-login.mjs). Non-fatal: falls
+      # back to the committed bundle if npm is unreachable or the sha256 doesn't
+      # match the pin. The hard drift check lives in signet-compatibility.yml.
+      - name: Vendor the pinned Signet Login bundle (console only)
+        run: node tools/sites/vendor-signet-login.mjs
+
+      - name: Build WASM bundle
+        working-directory: game/engine
+        run: trunk build --release
+
+      - name: Configure SSH
+        env:
+          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$HETZNER_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          bash tools/sites/deploy/ci-ssh-keyscan.sh "$DEPLOY_HOST"
+
+      - name: Sync sites + WASM bundle to the box
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          SSH="ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+          $SSH "deploy@$DEPLOY_HOST" 'mkdir -p /opt/axenstax/tools/sites /opt/axenstax/docs /opt/axenstax/game/engine/dist'
+          # Sites — never ship .env / certs / data / .venv (secrets + per-host state).
+          rsync -az --delete \
+            --exclude '.venv' --exclude '.env' --exclude 'certs' --exclude 'data' --exclude '__pycache__' \
+            -e "$SSH" tools/sites/ "deploy@$DEPLOY_HOST:/opt/axenstax/tools/sites/"
+          # Content for learn / wiki / docs — those apps read markdown from
+          # PROJECT_ROOT/docs/ on the box. Each doc route is GATED to that site's
+          # SECTIONS list (no arbitrary docs/ file is web-served, and docs/ is not
+          # static-mounted), so shipping the whole tree is safe — only listed paths
+          # are reachable. Without this, every article 404s ("Document file not found").
+          rsync -az --delete -e "$SSH" \
+            docs/ "deploy@$DEPLOY_HOST:/opt/axenstax/docs/"
+          # WASM bundle (rebuilt above).
+          rsync -az --delete -e "$SSH" \
+            game/engine/dist/ "deploy@$DEPLOY_HOST:/opt/axenstax/game/engine/dist/"
+
+      - name: Refresh venvs + restart services
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          ssh -i "$HOME/.ssh/deploy_key" -o StrictHostKeyChecking=yes "deploy@$DEPLOY_HOST" \
+            'bash /opt/axenstax/tools/sites/deploy/remote-update.sh'
+
+      - name: Remove deploy key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Smoke test (public URLs)
+        # New host map: .com = product, .org = project. remote-update.sh has just
+        # provisioned every site + reloaded Caddy, so these should all serve 200.
+        # Each URL is retried — on the very first cutover Caddy is still issuing
+        # Let's Encrypt certs (HTTP-01), so a brand-new host can need a few seconds
+        # before the TLS handshake succeeds. DNS must already resolve (grey-cloud).
+        run: |
+          fail=0
+          for u in \
+            https://axenstax.com/ \
+            https://play.axenstax.com/ \
+            https://play.axenstax.com/game \
+            https://learn.axenstax.com/ \
+            https://wiki.axenstax.com/ \
+            https://claim.axenstax.com/ \
+            https://axenstax.org/ \
+            https://docs.axenstax.org/ \
+            https://docs.axenstax.org/download/latest.json; do
+            code=000
+            for attempt in $(seq 1 10); do
+              # || true: a TLS-not-ready error during first cert issuance makes curl
+              # exit non-zero (it still prints http_code 000); without this the step's
+              # bash -e would abort here and the retry below would never run.
+              code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" || true)
+              [ "$code" = "200" ] && break
+              sleep 8
+            done
+            echo "$u -> $code"
+            [ "$code" = "200" ] || fail=1
+          done
+          exit $fail

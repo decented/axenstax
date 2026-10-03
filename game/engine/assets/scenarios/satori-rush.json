@@ -1,0 +1,11 @@
+{
+  "kind": "SatoriRush",
+  "display_name": "Satori Rush",
+  "kit": [],
+  "objective": "FirstSatori",
+  "scoring": "None",
+  "arena_seed": 21000000,
+  "tuning": { "work_exponent": 1.0 },
+  "lock_creative": true,
+  "arena_mode": "Resume"
+}

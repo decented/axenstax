@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Support Axe'n'Stax — value for value</title>
+    <meta name="description" content="Axe'n'Stax is free — no ads, no paywall, no loot boxes. We run on value-for-value: give back what it was worth to you, in time, talent, or treasure.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="data:,">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="{{ game_url }}/">Play</a>
+            <a href="{{ learn_url }}">Learn</a>
+            <a href="{{ wiki_url }}">Wiki</a>
+            <a href="/experiences">Experiences</a>
+            <a href="/roadmap">What's coming</a>
+            <a href="/safety">Parents</a>
+            <a href="/support">Support</a>
+            <a href="{{ docs_url }}/download">Download</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>Support the project</h1>
+        <p class="tagline">Axe'n'Stax is free — no ads, no paywall, no loot boxes. Instead we run on <strong>value for value</strong>: if the game gave you something, give a little back — in <strong>time, talent, or treasure</strong>.</p>
+        <p class="hint">Value-for-value is a model coined by <strong>Adam Curry</strong> (Podcasting 2.0): make the thing freely, and trust people to return what it was worth to them. Here's how, for us:</p>
+    </header>
+
+    <!-- TIME + TALENT — the best support, and it's free -->
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>⏳ Time</h3>
+            <p>Show up and play, and bring a friend, sibling or parent in. Just being here — playing, testing, talking — is worth more than you'd think, and it's the single best thing you can do.</p>
+        </div>
+        <div class="feature-card">
+            <h3>🎨 Talent</h3>
+            <p><strong>Reskin</strong> blocks and mobs in the Workshop. <strong>Build, test and play mods.</strong> Make something and share it. Your creativity is fuel for the whole project — and you might just build the thing everyone ends up using.</p>
+        </div>
+    </section>
+
+    <!-- TREASURE — back it directly, in Bitcoin, with the value reframe -->
+    <section class="cta-block">
+        <h2>₿ Treasure — for grown-ups</h2>
+        <p>Want to back it with money? Do it directly, in Bitcoin — no middleman. (Kids: this bit's for the grown-ups in your life.)</p>
+        <p style="max-width:640px;margin:1rem auto;color:var(--ink,#e7e9f0);">
+            Quick gut-check first: think about what already gets spent on stuff that <em>vanishes</em> —
+            a Marketplace skin pack, a loot box, a fizzy drink gone in a minute. You probably paid
+            more than this for the game you're comparing it to. A fraction of that, put <em>here</em>,
+            backs something <strong>open, real, and yours</strong> — not money you'll forget by next week.
+            So if it was worth it to you:
+        </p>
+    </section>
+
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>⚡ Chip in over Lightning</h3>
+            <p>Send any amount, straight to the project. Every sat helps keep the lights on.</p>
+            {% if lightning_tip %}
+            {% if tip_qr %}<p><img src="{{ tip_qr }}" alt="Lightning tip QR code" width="170" height="170" style="background:#fff;border-radius:10px;padding:6px;"></p>{% endif %}
+            <p><a class="cta" href="lightning:{{ lightning_tip }}">Open in your wallet ⚡</a></p>
+            <p style="font-size:0.8rem;word-break:break-all;"><code>{{ lightning_tip }}</code></p>
+            {% else %}
+            <p class="hint">Lightning tipping is switching on shortly — check back soon.</p>
+            {% endif %}
+        </div>
+        <div class="feature-card">
+            <h3>👕 Grab a tee</h3>
+            <p>Wear the project. Print-on-demand, so buying one chips in and you get something for it.</p>
+            {% if shop_url %}
+            <p><a class="cta" href="{{ shop_url }}">Visit the shop &rarr;</a></p>
+            {% else %}
+            <p class="hint">An online shop — paying in Bitcoin or card — is coming soon.</p>
+            {% endif %}
+        </div>
+    </section>
+
+    <!-- PATRON — the move-the-needle treasure -->
+    <section class="cta-block" style="border:1px solid var(--accent, #f7931a);">
+        <h2>🏛 Become a patron</h2>
+        <p>For centuries, ambitious work was made possible by <em>patrons</em> — people who backed the work itself, not a product. We're bringing that back, done the way it should be now: <strong>directly, peer-to-peer, in Bitcoin. No Patreon, no platform taking a cut or owning the relationship.</strong></p>
+        <p>A patron makes real things possible — and we make sure everyone knows it: named with our thanks, a standing place in the world as it grows, and a genuine say in where it goes. This is the "move the needle" lane, not a tip.</p>
+        {% if patron_contact %}
+        <a href="{{ patron_contact }}" class="cta cta-large">Become a patron &rarr;</a>
+        {% else %}
+        <p class="hint">The patron path is taking shape — more here soon.</p>
+        {% endif %}
+    </section>
+
+    <footer class="marketing-footer">
+        <p class="hint" style="margin-bottom:0.6rem;">Want to dig into the engine itself? It's open source — <a href="{{ docs_url }}">the specs</a> and <a href="{{ project_url }}">the project</a> are over here{% if source_url %}, with <a href="{{ source_url }}" target="_blank" rel="noopener">the source</a>{% else %} (source opening soon){% endif %}.</p>
+        <p>
+            <a href="{{ game_url }}/">Play</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            <a href="{{ project_url }}">Project</a> ·
+            <a href="/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# B0 / S0 EVAL SPIKE — throwaway de-risking harness for the native-build goal.
+#
+# Purpose (docs/goals/native-build-solo.md, Phase S0): prove, with `cargo test`
+# and a dual-target build, that the native Nostr/Blossom crates the cloud-save
+# story depends on:
+#   1. compile together at pinned versions;
+#   2. sit behind the `cfg(not(target_arch = "wasm32"))` dependency-table idiom so
+#      a `wasm32-unknown-unknown` build never even compiles them (the WASM bundle
+#      stays clean — the whole point of the gating);
+#   3. sign a Nostr event with a locally-generated key (nostr-sdk);
+#   4. round-trip an encrypted blob to a public Blossom server (nostr-blossom).
+#
+# This crate is DELIBERATELY standalone (NOT in the engine workspace, NOT touching
+# game/engine/Cargo.toml — that's bucket 3). It is not part of `./check.sh`.
+# Versions are PINNED so the spike is a stable reference for the later S3/S4 crates.
+[package]
+name = "native-build-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Nothing cross-platform here on purpose: the spike must demonstrate that the
+# native crates live ONLY under the not(wasm32) table, so wasm32 builds without
+# them. A cross-platform dep that itself failed on wasm32 would muddy the proof.
+[dependencies]
+
+# === Native-only — the exact idiom the engine uses (see game/engine/Cargo.toml).
+# A `cargo build --target wasm32-unknown-unknown` does not compile any of these.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# rust-nostr family, pinned in lockstep at 0.44.x (all share the `nostr` 0.44 core).
+nostr = "=0.44.3"
+nostr-sdk = "=0.44.1"
+nostr-connect = "=0.44.1"      # NIP-46 bunker client (Signet pairing harness)
+nostr-blossom = "=0.44.0"      # Blossom BUD-01/02 client, shares nostr 0.44 types
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+base64 = "0.22"                # mirrors @forgesworn/stash's base64-before-NIP-44 blob layer

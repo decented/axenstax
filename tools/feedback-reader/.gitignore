@@ -1,0 +1,7 @@
+node_modules/
+# The ledger holds persona npubs + raw kid text (possible PII) — LOCAL ONLY,
+# never committed. See docs/foundations/2026-06-07-lobby-mailbox-feedback.md.
+feedback-ledger.jsonl
+*.ledger.jsonl
+feedback-status-board.json
+feedback-status-board.json.tmp

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Privacy — Axe'n'Stax</title>
+    <meta name="description" content="What Axe'n'Stax collects today, where it goes, and how long it's kept — in plain English.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="{{ game_url }}/">Play</a>
+            <a href="{{ learn_url }}">Learn</a>
+            <a href="{{ wiki_url }}">Wiki</a>
+            <a href="/safety">Parents</a>
+            <a href="/support">Support</a>
+        </div>
+    </nav>
+
+    <div style="max-width:900px;margin:1.2rem auto 0;padding:0.8rem 1.2rem;border:1px solid #d4a044;border-radius:10px;background:rgba(212,160,68,0.12);text-align:center;">
+        <strong>DRAFT — pending owner sign-off.</strong> This page describes exactly what the code does today. It has not yet had a legal review, and nothing here is a legal or compliance certification.
+    </div>
+
+    <header class="hero hero-marketing">
+        <h1>Privacy.</h1>
+        <p class="tagline">The short version: we collect as little as we can get away with, and this page lists every place that isn't zero. No trackers, no ad networks, no selling your data — to anyone, ever.</p>
+    </header>
+
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Feedback in the desktop app</h3>
+            <p>The desktop app's bug and idea reports (<code>/bug</code>, <code>/idea</code>) are an alpha-tester feature, <strong>off by default</strong> and only available once a tester switches them on in Settings. When on, they are end-to-end encrypted to us and sent from a one-time key with no account or identity attached. A report contains your free-text message, your position in the world, and the world's name. We never reply to or message players. Report status is published as an anonymous list of scrambled ticket numbers that only the sender's own game can recognise.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Feedback in the browser</h3>
+            <p>The browser version has <strong>no feedback channel</strong>: no <code>/bug</code>, no <code>/idea</code>, no message box. Nothing you type or do in the game is sent to us.</p>
+        </div>
+        <div class="feature-card">
+            <h3>IP addresses</h3>
+            <p>Our applications &mdash; this site, the game, the docs, wiki, learn and project sites &mdash; do <strong>not log IP addresses</strong>; their access logging is switched off. An address is used in one place only: a small in-memory counter that rate-limits abuse (skin lookups). It is never written to a log or to disk, and it is gone when the application restarts.</p>
+            <p>The web server in front of these sites keeps <strong>no access logs</strong>. If a request fails partway through, it can write a short error line to its system log. Any address in that line is shortened first (the last part is cut off, so it is never your full IP address), and the system log deletes entries after 3 days. Older log entries that held full addresses were deleted on 3 October 2026.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Importing a Minecraft skin</h3>
+            <p>If you type a Minecraft username to bring in a skin (<code>/mc-skin</code>), that username is passed on to Mojang's own public skin-lookup service so we can fetch it. We don't log or write it to disk ourselves — it's held in a short in-memory cache (a few minutes, to avoid hammering Mojang on repeat lookups) and then discarded.</p>
+        </div>
+        <div class="feature-card">
+            <h3>The web game</h3>
+            <p>The browser version of Axe'n'Stax sets <strong>no cookies</strong> and needs <strong>no sign-in or account</strong>. It's a local, anonymous sandbox — your save stays on your device. If the page hits an error, it may send us a short technical error message (it carries no account and no identity) so we can fix the bug.</p>
+        </div>
+        <div class="feature-card">
+            <h3>The native (desktop) app</h3>
+            <p>The desktop app talks to public Nostr relays for Signet sign-in, and — if you play online with someone in your contacts — to set up a direct connection between your two computers. The game itself (your world, your play) is never routed through us; relays only carry the setup handshake.</p>
+        </div>
+        <div class="feature-card">
+            <h3>What we don't do</h3>
+            <p>No analytics, no ad trackers, no third-party marketing pixels. We never ask for a birth date — age, where it matters at all, comes from a yes/no signal your sign-in provider gives us, not a date we store. We don't sell or share what little we hold.</p>
+        </div>
+    </section>
+
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ game_url }}/">Play</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            <a href="{{ project_url }}">Project</a> ·
+            <a href="/support">Support</a> ·
+            <a href="/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

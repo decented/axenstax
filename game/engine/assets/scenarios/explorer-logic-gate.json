@@ -1,0 +1,138 @@
+{
+  "kind": "Challenge",
+  "display_name": "Sensor Vault \u2014 use a motion sensor and a logic gate to trip a lamp automatically",
+  "kit": [
+    {
+      "name": "motion_sensor",
+      "count": 1
+    },
+    {
+      "name": "logic_gate",
+      "count": 2
+    },
+    {
+      "name": "cable",
+      "count": 32
+    },
+    {
+      "name": "electric_lamp",
+      "count": 2
+    },
+    {
+      "name": "lever",
+      "count": 2
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 3
+          }
+        },
+        {
+          "Action": {
+            "event": "PowerDevice",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "night",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          0
+        ],
+        "block": "electric_lamp"
+      }
+    ]
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "kind": "Challenge",
+  "display_name": "Best Friend \u2014 Win over a wild wolf with bones until it sits at your side, loyal for life.",
+  "kit": [
+    {
+      "name": "bone",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "TameMob",
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -1
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "oak_log"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "mob": "wolf",
+        "count": 1
+      }
+    ]
+  }
+}

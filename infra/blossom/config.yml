@@ -1,0 +1,49 @@
+# blossom-server config (ghcr.io/hzrd149/blossom-server).
+#
+# ⚠️ UNVERIFIED SCHEMA. These keys are written to the best-known schema for
+# the pinned image but have NOT been validated against a running container
+# (the build host has no Docker). BEFORE relying on this, run:
+#     docker run --rm ghcr.io/hzrd149/blossom-server:<pinned> cat config.example.yml
+# and reconcile every key below. Upstream renames keys between versions.
+#
+# Auth model (IMPORTANT): blossom-server authorises an upload by verifying the
+# kind-24242 event signature + `t=upload` + a future `expiration`. By default
+# it does NOT restrict to an operator allow-list — any valid Nostr signature is
+# accepted. To restrict uploads to *only* our app server key you must set
+# `upload.requirePubkeyInList: true` AND list our key under top-level `owners:`.
+# If those keys are wrong for this image, uploads are open to any signer — which
+# is why the server is bound to loopback only (see docker-compose.yml) and the
+# game site is the sole client.
+
+databasePath: /app/data/sqlite.db
+
+dashboard:
+  enabled: false
+
+storage:
+  backend: local
+  local:
+    dir: /app/data/blobs
+  rules:
+    # Never auto-expire world blobs. (VERIFY: rule shape + that "" = no expiry.)
+    - type: "*"
+      expiration: ""
+
+upload:
+  enabled: true
+  # Require a valid kind-24242 auth event on upload.
+  requireAuth: true
+  # Restrict uploads to the pubkeys in `owners:` below. If this key name is
+  # wrong for the pinned image, uploads fall back to "any valid signature".
+  requirePubkeyInList: true
+
+list:
+  # We never call BUD-02 list; downloads are public GET by hash.
+  requireAuth: false
+
+# The app server key (hex) that the game site signs uploads with — its secret
+# lives in tools/sites/game/.env as NOSTR_SERVER_KEY. Fill the pubkey in before
+# first run (see README "Generating the server key"); start.sh refuses to launch
+# while the placeholder is present.
+owners:
+  - "REPLACE_WITH_BLOSSOM_APP_PUBKEY_HEX"

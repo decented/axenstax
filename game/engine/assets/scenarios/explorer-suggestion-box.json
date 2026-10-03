@@ -1,0 +1,14 @@
+{
+  "kind": "Challenge",
+  "display_name": "Suggestion Box — tell the makers one idea you would like in the game",
+  "objective": {
+    "Action": {
+      "event": "SendFeedback",
+      "count": 1
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false
+}

@@ -1,0 +1,175 @@
+# Build (and optionally publish) the Axe'n'Stax dedicated-server + operator-console
+# Docker images to GHCR.
+#
+# Low-hanging-fruit design: this REUSES the proven host-build path (build.sh) and
+# the existing Dockerfiles — it does NOT introduce a from-scratch multi-stage build.
+# The runner host-compiles the engine + web bundle, build.sh tags both images with
+# their GHCR names via docker-compose.build.yml, we smoke-test, then push.
+#
+# Cost note: a cold run compiles the whole Rust + WASM graph (~tens of minutes).
+# Actions minutes are unlimited on a public repo, so this isn't a billing
+# concern any more, but it's still real wall-clock time and noise — that's
+# why this NEVER runs on a normal push, only on manual dispatch (dry-run by
+# default) or a `server-v*` release tag. Run it deliberately.
+#
+# Architecture: amd64 only (the runner's arch). Multi-arch (arm64 for NAS) via
+# `docker buildx` is a deliberate later step — see
+# docs/superpowers/specs/2026-06-18-dedicated-server-image-publish-design.md.
+#
+# ONE-TIME PREREQUISITE for publishing: the GHCR packages must be linked to this
+# repo so the Actions GITHUB_TOKEN can write them. A package first created by a
+# *local* `docker push` has repository=null and is NOT writable by CI — you'll
+# get `denied: permission_denied: write_package` at the push step. Fix once per
+# package: <package> → settings → "Manage Actions access" → Add Repository →
+# decented/axenstax → role Write (or delete the package so the first CI push
+# recreates it auto-linked). The Pre-flight step below detects this and fails
+# fast — before the long build — with the exact fix URL.
+
+name: Publish server image
+
+on:
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push to GHCR (false = dry-run: build + smoke-test only, no publish)"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'server-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-server-image
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    # packages: write scoped to this job only (2026-09-28 audit fix) — it's the
+    # only job in this workflow and the only one that ever needs GHCR push.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Fail in seconds (not after the ~16-min build) if the Actions GITHUB_TOKEN
+      # can't actually PUSH to GHCR — the known cause of
+      # `denied: permission_denied: write_package`. We ask GHCR's token endpoint
+      # for a pull,push-scoped token and inspect which actions it GRANTED; this
+      # pushes nothing and is authoritative (it reflects real push permission,
+      # which the package's `.repository` field and the "Manage Actions access"
+      # list do NOT reliably — a package first created by a *local* docker push
+      # stays unwritable by CI even with the repo added at role Write). An ABSENT
+      # package is fine — the first Actions push creates it linked with write, so
+      # we pass it (this is the deliberate fix path: delete the stuck package, let
+      # CI recreate it). Fail-safe: HARD-fails only when the package EXISTS and
+      # push is positively absent; any uncertainty just warns and lets the push
+      # step be the gate, so it can never falsely block a legitimate publish.
+      - name: Pre-flight — Actions token can PUSH to GHCR
+        if: ${{ inputs.push == true || startsWith(github.ref, 'refs/tags/server-v') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner="${{ github.repository_owner }}"
+          repo="${{ github.repository }}"
+          basic="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+          fail=0
+          for pkg in axenstax-server axenstax-operator-console; do
+            # An absent package will be created (linked, writable) by the first
+            # push — so don't block on it.
+            if ! gh api "/users/$owner/packages/container/$pkg" >/dev/null 2>/tmp/ghc_e; then
+              if grep -qiE 'not found|HTTP 404' /tmp/ghc_e; then
+                echo "Package '$pkg' absent — the first Actions push creates it linked to $repo with write. OK."
+                continue
+              fi
+              # Couldn't read it for another reason — fall through to the push probe.
+            fi
+            jwt=$(curl -fsSL -u "$basic" \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:$owner/$pkg:pull,push" \
+              2>/dev/null | sed -nE 's/.*"token":"([^"]+)".*/\1/p')
+            if [ -z "$jwt" ]; then
+              echo "::warning::Could not obtain a GHCR token for '$pkg' to probe push scope — proceeding; the push step will surface any real problem."
+              continue
+            fi
+            # Decode the JWT payload (2nd segment, base64url) and read granted actions.
+            p=$(printf '%s' "$jwt" | cut -d. -f2 | tr '_-' '/+')
+            case $(( ${#p} % 4 )) in 2) p="$p==";; 3) p="$p=";; esac
+            claims=$(printf '%s' "$p" | base64 -d 2>/dev/null || true)
+            if [ -z "$claims" ]; then
+              echo "::warning::Could not decode the GHCR token for '$pkg' to probe push scope — proceeding; the push step will surface any real problem."
+            elif printf '%s' "$claims" | grep -q '"push"'; then
+              echo "Package '$pkg': token granted push — OK."
+            else
+              echo "::error::The Actions token was NOT granted push to the EXISTING package '$owner/$pkg'. With the repo already added at role Write and still no push, delete the package (its Settings → Danger Zone → Delete) so the next Actions push recreates it linked, then re-run."
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: Install Rust (stable + wasm target)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: game/engine
+
+      - name: Install trunk + engine build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev pkg-config
+          TRUNK_SHA256=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz -o trunk.tar.gz
+          echo "${TRUNK_SHA256}  trunk.tar.gz" | sha256sum -c -
+          sudo tar -xzf trunk.tar.gz -C /usr/local/bin trunk
+          rm -f trunk.tar.gz
+          trunk --version
+
+      - name: Build images from source (build.sh → docker-compose.build.yml)
+        working-directory: tools/dedicated-server
+        run: ./build.sh
+
+      - name: Smoke-test the built stack
+        working-directory: tools/dedicated-server
+        run: |
+          docker compose up -d
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsSk https://localhost:8443/ >/dev/null 2>&1; then ok="web"; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then echo "::error::web root never served on :8443"; docker compose logs; docker compose down; exit 1; fi
+          # Console reachable through Caddy's /admin route (returns its login page).
+          if ! curl -fsSk https://localhost:8443/admin/ >/dev/null 2>&1; then
+            echo "::error::/admin (console) not reachable through Caddy"; docker compose logs; docker compose down; exit 1
+          fi
+          echo "Smoke OK: web root + /admin both served."
+          docker compose down
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push == true || startsWith(github.ref, 'refs/tags/server-v') }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push images to GHCR
+        if: ${{ inputs.push == true || startsWith(github.ref, 'refs/tags/server-v') }}
+        working-directory: tools/dedicated-server
+        run: |
+          if ! docker compose -f docker-compose.build.yml push; then
+            echo "::error::Push to GHCR failed. If the log shows 'denied: permission_denied: write_package', the package is not linked to this repo — see the Pre-flight step's fix link, apply it once, then re-run."
+            exit 1
+          fi
+          echo "Pushed ghcr.io/${{ github.repository_owner }}/axenstax-server:latest"
+          echo "Pushed ghcr.io/${{ github.repository_owner }}/axenstax-operator-console:latest"
+          echo "::notice::Make the GHCR packages PUBLIC (one-time) for alphas to pull without a token."

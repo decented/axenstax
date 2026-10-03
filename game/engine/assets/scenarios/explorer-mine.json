@@ -1,0 +1,123 @@
+{
+  "kind": "Challenge",
+  "display_name": "Quarry Run \u2014 break twenty blocks and feel a mine take shape",
+  "kit": [
+    {
+      "name": "stone_pickaxe",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "BreakBlock": {
+          "block": null
+        }
+      },
+      "count": 20
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          2,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

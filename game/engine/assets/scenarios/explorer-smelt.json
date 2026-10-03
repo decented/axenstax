@@ -1,0 +1,93 @@
+{
+  "kind": "Challenge",
+  "display_name": "The Forge \u2014 light a furnace and smelt raw iron into a shining ingot",
+  "kit": [
+    {
+      "name": "furnace",
+      "count": 1
+    },
+    {
+      "name": "coal",
+      "count": 4
+    },
+    {
+      "name": "raw_iron",
+      "count": 4
+    },
+    {
+      "name": "crafting_table",
+      "count": 1
+    },
+    {
+      "name": "stick",
+      "count": 4
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "SmeltItem",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+id = "marauder"
+category = "hostile"
+width = 0.62
+height = 1.95
+color = [0.42, 0.42, 0.46]
+health = 28
+speed = 5.0
+name = "Marauder"

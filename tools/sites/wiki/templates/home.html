@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Axe'n'Stax Wiki — the player reference{% endblock %}
+{% block content %}
+<div class="hero">
+    <h1>The Axe'n'Stax Wiki</h1>
+    <p class="tagline">Look anything up — controls, blocks, mobs, crafting, villages, sats. The complete reference for how the game works.</p>
+    <a href="{{ game_url }}" class="cta">Play</a>
+</div>
+
+{% for sec in sections %}
+<h2>{{ sec.title }}</h2>
+<p style="color: #9aa3b8; margin-top: -0.4rem;">{{ sec.subtitle }}</p>
+<div class="features">
+    <a href="/docs/{{ sec.slug }}" class="feature-card section-link">
+        <h3>Browse the {{ sec.title }} &rarr;</h3>
+        <p style="color: #9aa3b8; font-size: 0.9rem; margin-top: 0.4rem;">Every page, top to bottom.</p>
+    </a>
+</div>
+{% endfor %}
+
+<p style="margin-top: 2rem; color: #5b6075; font-size: 0.85rem;">
+    New to Axe'n'Stax? The wiki is a reference — for a friendly, step-by-step start,
+    head to the <strong>guided journey</strong> for new players. This site is for when
+    you already know what you're looking for.
+</p>
+{% endblock %}

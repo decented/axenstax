@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="referrer" content="no-referrer">
+    <meta name="axenstax-relay" content="wss://relay.trotters.cc">
+    <!-- gamestr leaderboard (NIP-133 kind-33334 score publish) is DELIBERATELY
+         NOT loaded on this page (2026-09-27 audit fix) — the web taster never
+         publishes a score anywhere; see the note by static/gamestr.js below. -->
+    <!-- Cloud save is permanently off on the web taster (2026-09-27 audit fix —
+         see BLOSSOM_PUBLIC_URL / _cloud_save_enabled() in app.py). app.py's `/`
+         route re-substitutes these on every serve, always to "disabled"/"" —
+         there is no server config that can turn this back on. -->
+    <meta name="cloud-save" content="disabled">
+    <meta name="blossom-url" content="">
+    <!-- Injected by app.py at serve time: the marketing home the lobby "Exit"
+         leaves to (play.axenstax.com/ is now the game, so / is not "home"). -->
+    <meta name="marketing-url" content="">
+    <title>Axe'n'Stax</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1220; }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none;
+        }
+        #loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(130% 100% at 50% 28%, #1a2746 0%, #0d1220 68%);
+            color: #d4a044;
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            z-index: 100;
+        }
+        #loading.hidden { display: none; }
+        #loading #status { color: #7f8aa0; font-size: 0.95rem; margin-top: 0.9rem; }
+
+        /* Voxel hero — 2 cubes over 3, gently floating. */
+        #ls-hero {
+            display: flex; flex-direction: column; gap: 5px; margin-bottom: 22px;
+            filter: drop-shadow(0 10px 12px rgba(0,0,0,.5));
+            animation: ls-float 3.2s ease-in-out infinite;
+        }
+        #ls-hero .ls-row { display: flex; gap: 5px; justify-content: center; }
+        .vox {
+            width: 34px; height: 34px; border-radius: 5px;
+            box-shadow: inset -6px -6px 0 rgba(0,0,0,.30), inset 6px 6px 0 rgba(255,255,255,.18);
+        }
+        .v-green { background: #6fae5a; }
+        .v-orange { background: #e8862e; }
+        .v-brown { background: #8a7158; }
+        .v-gold { background: #f0c674; }
+        @keyframes ls-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+
+        #ls-word { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; color: #f3e6cf; }
+        #ls-tag { font-size: .72rem; font-weight: 700; letter-spacing: .36em; color: #d4a044; margin-top: 10px; }
+
+        /* Progress bar — eased indeterminate fill (real download progress TBD). */
+        #ls-bar {
+            width: 300px; max-width: 70vw; height: 7px; border-radius: 99px;
+            background: rgba(255,255,255,.08); overflow: hidden; margin-top: 22px;
+        }
+        #ls-bar > i {
+            display: block; height: 100%; border-radius: 99px;
+            background: linear-gradient(90deg, #d4a044, #f0c674);
+            animation: ls-fill 2.6s ease-in-out infinite;
+        }
+        @keyframes ls-fill { 0% { width: 8%; } 70% { width: 82%; } 100% { width: 8%; } }
+
+        /* Rotating tip / what's-new card (populated by loading-screen.js). */
+        #ls-card {
+            width: 520px; max-width: 82vw; margin-top: 26px; padding: 16px 20px;
+            background: #141b2e; border: 1px solid #283356; border-radius: 12px;
+            text-align: left; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+            opacity: 1; transition: opacity .3s ease;
+        }
+        #ls-card[hidden] { display: none; }
+        #ls-card.swap { opacity: 0; }
+        #ls-card .k { font-size: .7rem; font-weight: 700; letter-spacing: .18em; }
+        #ls-card .k.tip { color: #7fb3ff; }
+        #ls-card .k.new { color: #6fae5a; }
+        #ls-card .t { color: #eef2fb; font-size: 1rem; font-weight: 700; margin-top: 6px; }
+        #ls-card .b { color: #b0bacd; font-size: .86rem; line-height: 1.45; margin-top: 4px; }
+
+        #errors {
+            position: fixed; bottom: 0; left: 0; right: 0;
+            background: rgba(200, 0, 0, 0.9); color: white;
+            padding: 12px; font-family: monospace; font-size: 11px;
+            display: none; max-height: 80vh; overflow: auto;
+            z-index: 200; user-select: text; word-break: break-all;
+        }
+
+        /* Fullscreen toggle — floating corner button. */
+        #fs-toggle {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 180;
+            width: 36px;
+            height: 36px;
+            padding: 0;
+            border: 1px solid #23304b;
+            border-radius: 6px;
+            background: rgba(13, 18, 32, 0.55);
+            color: #d4a044;
+            font-family: system-ui, sans-serif;
+            font-size: 18px;
+            line-height: 36px;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.15s;
+        }
+        #fs-toggle:hover { background: rgba(13, 18, 32, 0.9); }
+        #fs-toggle:focus { outline: 2px solid #d4a044; outline-offset: 2px; }
+    </style>
+    <link rel="stylesheet" href="/static/auth-ui.css">
+    <!-- PWA (Spec 32 Phase B): installable manifest + service-worker registration.
+         The SW gives offline launch; auth.js boots from the cached session marker
+         when offline. (Branded icons land with branding/logo-favicons.) -->
+    <meta name="theme-color" content="#14241a">
+    <link rel="icon" href="/static/icons/favicon.ico" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+    <link rel="apple-touch-icon" href="/static/icons/favicon-180.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <script src="/static/sw-register.js"></script>
+    <!-- Strict-CSP-friendly: all scripts external, no inline blocks except
+         Trunk's auto-injected wasm-bindgen loader (its hash is computed at
+         serve time and added to the CSP `script-src` list). Load order
+         matters for auth.js — it assumes window.AxeBech32 is already on
+         window. (2026-09-27 audit: signet-login is no longer loaded here —
+         see the note by static/bech32.js below.) -->
+    <script src="/static/error-surface.js"></script>
+    <!-- Branded bundle-loading screen: rotates Tip / What's-New cards while the
+         WASM downloads. Reads the trunk-copied loading_tips.json (the SAME card
+         list the engine bakes in via include_str!). -->
+    <link data-trunk rel="copy-file" href="assets/loading_tips.json" />
+    <script src="/static/loading-screen.js"></script>
+    <script src="/static/fullscreen.js"></script>
+    <!-- noble-curves: schnorr.verify is used by persona-handle.js to verify
+         kind-31000 events. signet-login bundles its own copy of @noble/curves
+         inside the IIFE but doesn't re-expose it, so we keep this standalone
+         loader for the parts of the site that depend on `window.AxeNoble`. -->
+    <script src="/static/noble-curves.js"></script>
+    <!-- signet-login (window.Signet) is DELIBERATELY NOT loaded on this page
+         (2026-09-27 audit fix). The web build is an anonymous, login-free
+         local sandbox — auth.js hasn't made an /auth round-trip since the
+         2026-06-27 rewrite, and the vendored bundle only served a legacy
+         Signet session that could be silently revived (leaderboard publish,
+         Blossom bunker pairing) on a surface that must stay identity-free.
+         The console site still vendors + loads its own copy for its real
+         operator login (tools/sites/console/static/vendor/). Any page code
+         here that reads window.Signet (cloud.js, gamestr.js — not loaded
+         either, see below) already degrades to null/no-signer, same as it
+         does today when no legacy session exists. -->
+    <script src="/static/bech32.js"></script>
+    <script src="/static/npub-decode.js"></script>
+    <!-- Server Card (Spec A): npub→address relay-read bridge for join-by-npub. -->
+    <script src="/static/relay-query.js"></script>
+    <script src="/static/persona-handle.js"></script>
+    <script src="/static/world_store.js"></script>
+    <!-- nostr-tools/nip46 remote-signer bundle (window.AxeNostrNip46.{BunkerSigner, parseBunkerInput}).
+         DORMANT — no live consumer since the Charter strip (2026-05-27). Deliberately
+         retained for multiplayer-identity signing (Spec 1 Phase 4, via the engine signing
+         bridge docs/foundations/2026-05-14-engine-signing-bridge.md), gated on upstream
+         Signet `sign_event`. Full rationale + removal/regenerate recipe:
+         tools/sites/game/static/vendor/REGENERATE.md. -->
+    <script src="/static/vendor/nostr-tools-nip46.iife.js"></script>
+    <!-- WebGPU pre-flight helper (window.AxeWebGpu): page-agnostic probe +
+         friendly browser-specific "can't run yet" copy. Must load BEFORE auth.js,
+         which owns the gate + boot and reveals #webgpu-gate on failure. Inert on
+         its own (no .cta-enter here → its entrance auto-init stays off). -->
+    <!-- defer: both live in <head> but touch <body> elements (#loading, #errors,
+         #webgpu-gate/#webgpu-block). defer runs them after the DOM is parsed, in
+         order (webgpu-check before auth), so getElementById resolves and the
+         friendly "can't run" block can actually render. -->
+    <script defer src="/static/webgpu-check.js"></script>
+    <script defer src="/static/auth.js"></script>
+    <!-- Cloud save (serverless): @forgesworn/stash SDK (window.AxeStash) + a
+         nostr relay client (window.AxeRelay) + AxeNStax consumer (window.AxeCloud).
+         Browser signs Blossom auth + manifest events with the signer auth.js
+         retained; no AxeNStax server in the save path. -->
+    <script src="/static/vendor/stash.iife.js"></script>
+    <script src="/static/vendor/relay.iife.js"></script>
+    <!-- Public content distribution: @forgesworn/beacon SDK (window.AxeBeacon).
+         Consumed by a future beacon.js glue (Workshop sharing). -->
+    <script src="/static/vendor/beacon.iife.js"></script>
+    <!-- The browser build has NO feedback channel (no lobby mailbox, no /bug or
+         /idea) — removed 2026-10-01. Native keeps its own mailbox. -->
+    <script src="/static/cloud.js"></script>
+    <!-- Texture packs (P4d): fetches /static/packs/index.json + each pack's
+         <key>.png so the WASM engine can swap packs on the web. Same-origin
+         static fetch, no signer/relay dependency. Provides
+         window.axenstax_{list_texture_packs,fetch_pack_file}, called by the
+         engine's texture_packs_web.rs. -->
+    <script src="/static/texturepacks.js"></script>
+    <!-- Public content share/fetch (Workshop sharing): Beacon glue over
+         window.AxeBeacon (capped Blossom + injected signer). Provides
+         window.axenstax_openstash_* — the engine's wasm bridge (open_stash.rs)
+         calls these. Must be on THIS page (where the wasm engine runs), not just
+         the lobby. Depends on the Signet signer (auth.js) + window.AxeNoble
+         (noble-curves.js, for Schnorr-verified reads), both loaded above. -->
+    <script src="/static/beacon.js"></script>
+    <!-- gamestr.js (opt-in Hash Dash leaderboard publish, NIP-133 kind 33334) is
+         DELIBERATELY NOT loaded (2026-09-27 audit fix — finding: "web-taster
+         leaderboard overlay revives legacy Signet sessions and publishes a named
+         score to third-party relays"). The web taster never publishes anything
+         off-device; gamestr.rs's `js_gamestr_offer` extern call degrades to a
+         caught "not a function" error and logs a warning, same as any other
+         missing wasm-bindgen JS hook. The file itself is kept (its pure
+         buildScoreEvent/publishScore functions are still unit-tested by
+         tools/feedback-tests/gamestr.test.mjs) — it's just not wired to this page. -->
+</head>
+<body>
+    <div id="loading">
+        <div id="ls-hero" aria-hidden="true">
+            <div class="ls-row">
+                <span class="vox v-green"></span><span class="vox v-orange"></span>
+            </div>
+            <div class="ls-row">
+                <span class="vox v-brown"></span><span class="vox v-brown"></span><span class="vox v-gold"></span>
+            </div>
+        </div>
+        <div id="ls-word">AXE'N'STAX</div>
+        <div id="ls-tag">PROOF&nbsp;OF&nbsp;PLAY</div>
+        <div id="ls-bar"><i></i></div>
+        <p id="status">Loading…</p>
+        <div id="ls-card" hidden>
+            <div class="k"></div>
+            <div class="t"></div>
+            <div class="b"></div>
+        </div>
+    </div>
+    <div id="errors"></div>
+    <!-- Friendly WebGPU "can't run yet" gate (ported from the retired entrance).
+         Hidden by default; auth.js reveals it (and hides #loading) when the
+         WebGPU probe fails, then fills in browser-specific guidance + Re-test. -->
+    <div id="webgpu-gate" hidden>
+        <aside id="webgpu-block" class="webgpu-block">
+            <h3 class="webgpu-block-title">This browser can't run Axe'n'Stax yet</h3>
+            <p class="webgpu-block-lede" id="webgpu-block-lede">Checking your browser…</p>
+            <div class="webgpu-block-fix" id="webgpu-block-fix"></div>
+            <button id="webgpu-retest" type="button" class="webgpu-retest">Re-test</button>
+        </aside>
+    </div>
+    <!-- Trunk replaces this with the hashed glue/wasm loader.
+         #[wasm_bindgen(start)] in the engine registers window.__axenstax_set_pubkey
+         and window.__axenstax_start for auth.js to call once auth resolves. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+</body>
+</html>

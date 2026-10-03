@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} — Axe'n'Stax{% endblock %}
+{% block page %}{{ section_slug }}/{{ doc.path }}{% endblock %}
+{% block content %}
+<div class="breadcrumb">
+    <a href="/">Home</a> &rsaquo; <a href="/docs/{{ section_slug }}">{{ section.title }}</a> &rsaquo; {{ doc.title }}
+</div>
+
+{% if doc.path == "spec/06-bitcoin-integration.md" %}
+<div style="max-width:900px;margin:1rem auto;padding:0.8rem 1.2rem;border:1px solid #d4a044;border-radius:10px;background:rgba(212,160,68,0.12);">
+    <strong>Design spec, not a live feature.</strong> Nothing on this page is switched on today —
+    no real sats move on any world. This describes the intended design for a future,
+    server-operator-controlled, opt-in Bitcoin layer; see <a href="{{ marketing_url }}/safety">the parents' page</a> for what's actually true right now.
+</div>
+{% endif %}
+
+<div class="doc-layout">
+    {% if toc %}
+    <aside class="doc-toc">
+        <h3>Contents</h3>
+        {{ toc | safe }}
+    </aside>
+    {% endif %}
+    <article class="doc-content">
+        {{ content | safe }}
+    </article>
+</div>
+{% endblock %}

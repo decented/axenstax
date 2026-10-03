@@ -1,0 +1,20 @@
+{
+  "kind": "Challenge",
+  "display_name": "Fresh Coat — paint your own skin in the Workshop and wear it out",
+  "kit": [
+    {
+      "name": "bellows",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "SaveSkin",
+      "count": 1
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "workshop",
+  "time_lock": "day",
+  "mobs_enabled": false
+}

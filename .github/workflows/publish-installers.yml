@@ -1,0 +1,124 @@
+name: Publish native installers to /download
+
+# OWNER-GATED outward push — manual dispatch ONLY. Pulls the per-OS installers
+# from a `native-packages` run and rsyncs them into the box's INSTALLERS_DIR
+# (/opt/axenstax/build/installers) so docs.axenstax.org/download lists + serves
+# them. The docs FastAPI app reads that directory per-request, so no service
+# restart is needed.
+#
+# These are UNSIGNED alpha builds: Windows SmartScreen warns ("More info → Run
+# anyway"), macOS Gatekeeper BLOCKS the .dmg until it's notarised, Linux is
+# clean (chmod +x / apt install). The /download page documents each case.
+#
+# Reuses the deploy SSH path (HETZNER_SSH_KEY → deploy@$DEPLOY_HOST), exactly
+# like deploy.yml — the SSH runs on the GitHub runner, never locally.
+# DEPLOY_HOST: repo VARIABLE (Settings → Secrets and variables → Actions →
+# Variables) — see deploy.yml's header note. Must be created before this
+# workflow can publish.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "native-packages run id whose installer artifacts to publish"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read   # needed to download artifacts from another workflow run
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Owner-gated outward push; a GitHub Environment lets the owner add required
+    # reviewers / branch restrictions from repo Settings with no workflow change.
+    environment: installers
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Validate run_id
+        # 2026-09-28 audit fix: this input used to be interpolated straight into a
+        # `run:` step (script injection) and accepted ANY run's artifacts — which
+        # become the in-place AppImage update every Linux player pulls. Pass
+        # through env (never direct interpolation), require it to be purely
+        # numeric, and confirm it names a SUCCESSFUL native-packages.yml run on
+        # this repo's main branch, not a PR run or an unrelated workflow.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::run_id must be numeric, got '$RUN_ID'"; exit 1; }
+          run_json=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID")
+          path=$(echo "$run_json" | jq -r '.path')
+          branch=$(echo "$run_json" | jq -r '.head_branch')
+          event=$(echo "$run_json" | jq -r '.event')
+          status=$(echo "$run_json" | jq -r '.status')
+          conclusion=$(echo "$run_json" | jq -r '.conclusion')
+          repo=$(echo "$run_json" | jq -r '.repository.full_name')
+          echo "run $RUN_ID: path=$path branch=$branch event=$event status=$status conclusion=$conclusion repo=$repo"
+          [ "$repo" = "${{ github.repository }}" ] || { echo "::error::run $RUN_ID belongs to a different repository ($repo)"; exit 1; }
+          [ "$path" = ".github/workflows/native-packages.yml" ] || { echo "::error::run $RUN_ID is not a native-packages.yml run (path=$path)"; exit 1; }
+          [ "$branch" = "main" ] || { echo "::error::run $RUN_ID is not on main (branch=$branch)"; exit 1; }
+          [ "$event" != "pull_request" ] || { echo "::error::run $RUN_ID was triggered by a pull_request event"; exit 1; }
+          [ "$status" = "completed" ] && [ "$conclusion" = "success" ] || { echo "::error::run $RUN_ID did not complete successfully (status=$status conclusion=$conclusion)"; exit 1; }
+
+      - name: Download installer artifacts from the native-packages run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p staging installers
+          for art in axenstax-ubuntu-latest axenstax-windows-latest axenstax-macos-latest; do
+            if gh run download "$RUN_ID" -R "${{ github.repository }}" -n "$art" -D "staging/$art"; then
+              echo "downloaded $art"
+            else
+              echo "::warning::artifact $art not found on run $RUN_ID — skipping"
+            fi
+          done
+          # Flatten to just the real installer files — the /download route keys
+          # on these suffixes (see tools/sites/docs/app.py _INSTALLER_META).
+          # *.zsync rides along: it is the AppImage auto-update delta map, served
+          # next to the -latest- AppImage (both flow through as *.appimage/*.zsync).
+          find staging -type f \
+            \( -iname '*.appimage' -o -iname '*.deb' -o -iname '*.exe' \
+               -o -iname '*.msi' -o -iname '*.dmg' -o -iname '*.zsync' \) \
+            -print -exec cp -f {} installers/ \;
+          echo "=== installers staged for publish ==="
+          ls -lh installers
+          # Guard: never rsync --delete an EMPTY set (that would wipe the box dir).
+          [ -n "$(ls -A installers)" ] || { echo "::error::no installer files found on run $RUN_ID"; exit 1; }
+
+      - name: Configure SSH (deploy key)
+        env:
+          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$HETZNER_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          bash tools/sites/deploy/ci-ssh-keyscan.sh "$DEPLOY_HOST"
+
+      - name: Rsync installers to the box (/opt/axenstax/build/installers)
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          SSH="ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+          $SSH "deploy@$DEPLOY_HOST" 'mkdir -p /opt/axenstax/build/installers'
+          # NO --delete: 2026-09-27 audit fix. A routine linux_only run (the
+          # default — see native-packages.yml) only downloads a linux artifact
+          # above, so a `--delete` here would wipe the box's existing Windows/
+          # macOS installers on every ordinary release, silently breaking their
+          # /download rows until someone pays for a full-matrix run. rsync
+          # without --delete only adds/updates — it merges this run's files
+          # into whatever's already on the box rather than replacing the set.
+          rsync -az -e "$SSH" installers/ "deploy@$DEPLOY_HOST:/opt/axenstax/build/installers/"
+          echo "=== now live on the box ==="
+          $SSH "deploy@$DEPLOY_HOST" 'ls -lh /opt/axenstax/build/installers'
+
+      - name: Remove deploy key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Built from the ground up — Axe'n'Stax</title>
+    <meta name="description" content="Axe'n'Stax is a custom voxel engine written from zero in Rust — plus a from-scratch identity, payments, and save stack underneath it. 2,100+ commits, 230k+ lines, 4,300+ tests in about six months. Not a mod, not a fork.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="/#what">What it is</a>
+            <a href="/built">Built</a>
+            <a href="/roadmap">Roadmap</a>
+            <a href="{{ docs_url }}">Specs</a>
+            <a href="{{ marketing_url }}">Play</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>Built from<br>the ground up.</h1>
+        <p class="tagline">Axe'n'Stax is not a Minecraft mod and not a fork of an existing voxel engine. It's a custom engine written from zero in Rust — plus a from-scratch identity, payments, and save stack underneath it. We build <em>on</em> open standards, the way every company builds on Linux and HTTP. The implementations are ours.</p>
+    </header>
+
+    <!-- THE NUMBERS — the proof, at a glance -->
+    <section style="max-width:1000px;margin:0 auto;padding:1rem 2rem 2rem;">
+        <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:1.2rem;text-align:center;">
+            <div style="flex:1;min-width:150px;background:#13192b;border:1px solid #23304b;border-radius:10px;padding:1.4rem 1rem;">
+                <div style="font-size:2.4rem;color:#d4a044;font-weight:bold;line-height:1;">2,100+</div>
+                <div style="color:#9aa3b8;font-size:0.9rem;margin-top:0.4rem;">commits in about six months</div>
+            </div>
+            <div style="flex:1;min-width:150px;background:#13192b;border:1px solid #23304b;border-radius:10px;padding:1.4rem 1rem;">
+                <div style="font-size:2.4rem;color:#d4a044;font-weight:bold;line-height:1;">230k+</div>
+                <div style="color:#9aa3b8;font-size:0.9rem;margin-top:0.4rem;">lines of Rust (the engine)</div>
+            </div>
+            <div style="flex:1;min-width:150px;background:#13192b;border:1px solid #23304b;border-radius:10px;padding:1.4rem 1rem;">
+                <div style="font-size:2.4rem;color:#d4a044;font-weight:bold;line-height:1;">4,300+</div>
+                <div style="color:#9aa3b8;font-size:0.9rem;margin-top:0.4rem;">automated tests, green</div>
+            </div>
+            <div style="flex:1;min-width:150px;background:#13192b;border:1px solid #23304b;border-radius:10px;padding:1.4rem 1rem;">
+                <div style="font-size:2.4rem;color:#d4a044;font-weight:bold;line-height:1;">8 + 175</div>
+                <div style="color:#9aa3b8;font-size:0.9rem;margin-top:0.4rem;">engine specs + design docs (and 4 ADRs)</div>
+            </div>
+        </div>
+        <p class="hint" style="text-align:center;color:#5b6075;font-size:0.85rem;margin-top:1rem;">Figures are from the game repository alone — the identity/payments/save stack below lives in its own separate repos.</p>
+    </section>
+
+    <!-- NOT A MOD, NOT A FORK -->
+    <section class="cta-block" style="text-align:left;">
+        <div style="max-width:760px;margin:0 auto;">
+            <h2 style="text-align:center;">Two things were built, not one</h2>
+            <p style="margin-bottom:1rem;">Most "blockchain games" are a skin on someone else's engine. Axe'n'Stax is the opposite. There's a <strong>custom voxel engine</strong> — world format, renderer, networking, physics, the lot — and beneath it a <strong>custom stack of identity, payments, save and distribution primitives</strong>, each written from scratch. The game sits on infrastructure we also wrote.</p>
+            <p style="color:#9aa3b8;">Saying Axe'n'Stax "used open source" is like saying a car company "used roads." Everyone builds on open standards. What matters is what you built <em>on top</em> — and here, that's nearly all of it.</p>
+        </div>
+    </section>
+
+    <!-- WHAT'S ALREADY IN THE GAME -->
+    <section style="max-width:1000px;margin:0 auto;padding:3rem 2rem 1rem;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;">What's already in the game</h2>
+        <p style="text-align:center;color:#9aa3b8;max-width:620px;margin:0.4rem auto 0;">Every item here is implemented and test-covered — shipping today, not on a wish-list.</p>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Core engine</h3>
+            <p>Custom voxel world format, a wgpu renderer (greedy meshing, frustum culling, a 5-tier graphics preset from Potato to Ultra), a 20&nbsp;TPS authoritative tick loop, LAN multiplayer, up to 4-player split-screen on the desktop app, and an in-game command/chat system. Weather (rain, storms) is synced so everyone in a world sees the same sky. A cross-platform packaging pipeline produces native Windows, macOS and Linux builds, and the native app checks for its own updates — over a normal feed and over Nostr — and installs them in place.</p>
+        </div>
+        <div class="feature-card">
+            <h3>A full game</h3>
+            <p>Mining, tools, crafting and smelting; farming (tilling, ~10 crops, processing workstations); combat and armour; ~30 mob types with real AI; villages with professions, quests and reputation; cooking; build schematics; cosmetics; and an in-game Workshop that <em>reskins and reshapes</em> blocks and mobs. A guided build-along mode walks a saved Plan step by step, flagging what you're still missing. A "take it with you" export packages a whole web-taster profile into one file you can carry into the desktop app.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Play with others</h3>
+            <p>World chat lets players talk over the game connection itself, tiered by how well the game knows the two of you. Play by contact lets a friend join your home-hosted world directly by your Signet persona or a one-time invite link — Nostr relays carry only the initial handshake, never game traffic, and there's no AxeNStax-run server browser in the middle.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Creator tools</h3>
+            <p>An in-game skin painter — colour wheel, dye palette, hex input, pixel grid — for repainting your look without leaving the game. A Water Wheel turns a flowing stream into power for machines. Both sit alongside the Workshop's block/mob reskinning and reshaping.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Experiences &amp; sharing</h3>
+            <p>Two arcade Experiences ship in-game — <strong>Hash Dash</strong>, a 3-minute mining sprint, and <strong>Satori Rush</strong>, a race to the rarest block — built for BTC&nbsp;Prague.</p>
+        </div>
+        <div class="feature-card">
+            <h3>A player economy</h3>
+            <p>Vendor Blocks (player-run shops), auctions, a bazaar, bounties and commissions — the first player-to-player trade paths, with Builder NPCs and tradeable build plans layered on top.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Proof of Play</h3>
+            <p>A real SHA-256 hash on every pickaxe strike, surfaced to the player as an educational proof-of-work primitive. It deterministically drives rare drops today; a parent-controlled Lightning payout path for Bitcoin-enabled servers is designed, not yet switched on — and it would never be an age wall.</p>
+        </div>
+    </section>
+
+    <!-- THE STACK UNDERNEATH -->
+    <section class="cta-block" style="text-align:left;">
+        <div style="max-width:760px;margin:0 auto;">
+            <h2 style="text-align:center;">The stack we built underneath</h2>
+            <p style="text-align:center;color:#9aa3b8;margin-bottom:1.6rem;">This is the part people miss. These are our own primitives — written from scratch, in their own repositories, reusable across games. Not dependencies pulled off a shelf.</p>
+        </div>
+    </section>
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>Signet</h3>
+            <p>Decentralised identity — sign in with a Nostr persona, no passwords. Signet supports parent-held child personas.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Stash &amp; Locket</h3>
+            <p>Encrypted, ciphertext-only save primitives. Your world is yours, end-to-end — we can't read it. Bring-your-own-key cloud save on the desktop app is a later horizon, not live.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Beacon</h3>
+            <p>Public content distribution — share skins, scenarios and builds across the network.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Payments &amp; crypto</h3>
+            <p>Lightning rails (toll-booth / 402) plus real cryptography written in-house — ring signatures, Shamir secret sharing, range proofs, key-tree derivation. Designed as reusable rails; not yet wired into Axe'n'Stax for real-money payouts.</p>
+        </div>
+    </section>
+
+    <!-- THE HONEST LINE -->
+    <section style="max-width:760px;margin:0 auto;padding:2.5rem 2rem;">
+        <h2 style="text-align:center;color:#d4a044;letter-spacing:1px;font-size:1.5rem;">What we build <em>on</em></h2>
+        <p style="color:#9aa3b8;text-align:center;">We didn't reinvent these, and we don't claim to: <strong style="color:#c5c8d4;">Rust, wgpu, egui</strong> for the engine and rendering, and the open money-and-identity rails — <strong style="color:#c5c8d4;">Nostr and the Lightning Network</strong>. Everything that sits on them, we wrote. Being precise about that line is the point — it's where the credibility is.</p>
+    </section>
+
+    <section class="cta-block">
+        <h2>The pitch is momentum</h2>
+        <p>This is the velocity that's already proven — a working engine and a working stack, in about four months. Funding doesn't buy a wish-list; it compounds what's already moving.</p>
+        <div class="cta-row">
+            <a href="/roadmap" class="cta cta-large">Where it's going &rarr;</a>
+            <a href="{{ docs_url }}" class="cta cta-large">Read the specs &rarr;</a>
+        </div>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ marketing_url }}">Play</a> ·
+            <a href="/">Project</a> ·
+            <a href="/built">Built</a> ·
+            <a href="/roadmap">Roadmap</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            {% if source_url %}<a href="{{ source_url }}" target="_blank" rel="noopener">Source</a>{% else %}<span style="opacity:0.55;">Source (soon)</span>{% endif %} ·
+            <a href="{{ marketing_url }}/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

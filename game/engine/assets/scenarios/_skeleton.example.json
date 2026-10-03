@@ -1,0 +1,23 @@
+{
+  "kind": "Challenge",
+  "display_name": "Skeleton Trial — replace this whole string with your trial's one-line premise",
+  "kit": [
+    {
+      "name": "stone",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "PlaceBlock": {
+          "block": null
+        }
+      },
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false
+}

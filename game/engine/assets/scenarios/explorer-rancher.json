@@ -1,0 +1,95 @@
+{
+  "kind": "Challenge",
+  "display_name": "Two of Every Kind \u2014 Feed the cows their favourite wheat until love blooms and a calf appears.",
+  "kit": [
+    {
+      "name": "wheat",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "BreedAnimals": {
+          "offspring": null
+        }
+      },
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -1
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "hay_bale"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "hay_bale"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "mob": "cow",
+        "count": 1
+      },
+      {
+        "at": [
+          5,
+          0,
+          1
+        ],
+        "mob": "cow",
+        "count": 1
+      }
+    ]
+  }
+}

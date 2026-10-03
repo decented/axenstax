@@ -1,0 +1,18 @@
+[Unit]
+Description=Axe'n'Stax — game site (PWA runtime, FastAPI/uvicorn :8094)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/axenstax/tools/sites/game
+EnvironmentFile=/opt/axenstax/tools/sites/game/.env
+ExecStart=/opt/axenstax/tools/sites/game/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

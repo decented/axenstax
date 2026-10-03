@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Experiences — Axe'n'Stax</title>
+    <meta name="description" content="Experiences are curated ways to play Axe'n'Stax — a goal or challenge dropped on top of the sandbox. Play the official ones, Hash Dash and Satori Rush, and soon build and share your own.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="{{ game_url }}/">Play</a>
+            <a href="{{ learn_url }}">Learn</a>
+            <a href="{{ wiki_url }}">Wiki</a>
+            <a href="/experiences">Experiences</a>
+            <a href="/roadmap">What's coming</a>
+            <a href="/support">Support</a>
+            <a href="{{ docs_url }}/download">Download</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>Experiences.</h1>
+        <p class="tagline">The open sandbox is only half of it. An <strong>experience</strong> drops a goal, a challenge, or a whole new way to play on top of the world — you jump in, play it, and your own world is never touched.</p>
+        <div class="cta-row">
+            <a href="{{ game_url }}/" class="cta cta-large">Play &rarr;</a>
+        </div>
+    </header>
+
+    <!-- WHAT AN EXPERIENCE IS -->
+    <section style="max-width:760px;margin:0 auto;padding:1rem 2rem 0;">
+        <p style="color:#c5c8d4;">Think of experiences as different <em>games inside the game</em>. Some are quick races against the clock; some are long, careful climbs. You start one from the in-game chat (open it with <strong>T</strong> or <strong>/</strong>), and when it ends you're back in your own world, exactly as you left it.</p>
+        <p style="color:#9aa3b8;">Today there are two official experiences — and they're only the beginning of what an experience can be: timed challenges, puzzle builds, survival gauntlets, co-op missions, adventure maps. Whatever someone can dream up.</p>
+    </section>
+
+    <!-- THE OFFICIAL TWO -->
+    <section class="features-grid">
+        <div class="feature-card">
+            <h3>⛏️ Hash Dash</h3>
+            <p>A <strong>three-minute mining sprint</strong>. You're handed a stone pickaxe — now break the hardest rock you can find. Every block scores "work", and the hardest rock scores the most, so it's pure focus: crosshair on stone, never stop swinging. Most work when the buzzer goes wins. Runs on your world without changing it.</p>
+        </div>
+        <div class="feature-card">
+            <h3>🟧 Satori Rush</h3>
+            <p>Start with <strong>nothing</strong> and race to the bottom of the world for your first <strong>Satori</strong> — the single rarest block in the game. It's a full survival climb: wood, stone, iron, diamond, then deep into fresh deepslate. The clock counts up, a lower time is a better run, and your first Satori rings the Genesis Block fanfare.</p>
+        </div>
+    </section>
+
+    <section style="max-width:760px;margin:0 auto;padding:0.5rem 2rem 1rem;text-align:center;">
+        <p class="hint" style="color:#9aa3b8;">Start one in-game with <code>/scenario hash-dash</code> or <code>/scenario satori-rush</code>. Step-by-step guides live in the <a href="{{ learn_url }}" style="color:#d4a044;">Learn journey</a>; the full rules are in the <a href="{{ wiki_url }}" style="color:#d4a044;">Wiki</a>.</p>
+    </section>
+
+    <!-- COMING: CREATE & SHARE -->
+    <section class="cta-block" style="border:1px solid var(--accent,#d4a044);">
+        <h2>Soon: make your own</h2>
+        <p>Experiences won't just be ours. Soon you'll be able to <strong>design your own</strong> — set the goal, the rules, the world — and <strong>share them</strong> so anyone can play. Your challenge, running on someone else's screen, on the other side of the world — the same way you'll share a skin or a build.</p>
+        <a href="/roadmap" class="cta cta-large">See what's coming &rarr;</a>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ game_url }}/">Play</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            <a href="/experiences">Experiences</a> ·
+            <a href="/roadmap">What's coming</a> ·
+            <a href="/safety">Parents</a> ·
+            <a href="/support">Support</a> ·
+            <a href="{{ docs_url }}/download">Download</a> ·
+            <a href="{{ project_url }}">Project</a> ·
+            <a href="/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

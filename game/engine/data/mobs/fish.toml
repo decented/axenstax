@@ -1,0 +1,8 @@
+id = "fish"
+category = "passive"
+width = 0.4
+height = 0.3
+color = [0.62, 0.70, 0.74]
+health = 3
+speed = 1.8
+name = "Fish"

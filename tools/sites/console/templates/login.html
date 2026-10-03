@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <base href="{{ base_href }}" />
+  <meta name="axenstax-relay" content="wss://relay.damus.io" />
+  <title>Operator Console — Axe'n'Stax</title>
+  <link rel="stylesheet" href="static/console.css" />
+</head>
+<body class="login">
+  <main class="card">
+    <h1>Operator&nbsp;Console</h1>
+    <p class="sub">Axe'n'Stax dedicated server</p>
+    {% if unprovisioned %}
+      <p class="muted">
+        This server has <strong>no operator identity</strong> yet. Pair it first on the
+        server box:
+      </p>
+      <pre class="cmd">axenstax-engine --pair-server</pre>
+      <p class="muted">Once paired, the operator signs in here with that key.</p>
+    {% else %}
+      <p class="muted">Sign in with the operator key for this server:</p>
+      <p class="npub" title="the only key that can manage this server">{{ operator_npub }}</p>
+      <button id="signin" class="btn">Sign in with Signet</button>
+      <p id="status" class="status" role="status"></p>
+    {% endif %}
+  </main>
+  <script src="static/noble-curves.js"></script>
+  <script src="static/bech32.js"></script>
+  <script src="static/npub-decode.js"></script>
+  <script src="static/vendor/signet-login.iife.js"></script>
+  <script src="static/console-login.js"></script>
+</body>
+</html>

@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="referrer" content="no-referrer">
+    <!-- Dedicated-server page: NO cloud save / NO Signet sign-in. A self-hosted
+         server boots the web client as a guest and joins straight away. These
+         defaults keep the engine from attempting any cloud/relay calls, and the
+         engine's JS-bridge wrappers tolerate the absent /static glue (see
+         wasm_save::bridge_present) so the lobby's world-list fetch can't crash. -->
+    <meta name="cloud-save" content="disabled">
+    <meta name="blossom-url" content="">
+    <title>Axe'n'Stax — Server</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1220; }
+        canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+
+        /* Branded loading screen — mirrors the main site's #loading (voxel hero +
+           wordmark + tagline + eased progress bar). Self-contained: the dedicated
+           page ships no /static assets, so the styles are inline here. */
+        #loading {
+            position: fixed; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; text-align: center; padding: 20px;
+            background: radial-gradient(130% 100% at 50% 28%, #1a2746 0%, #0d1220 68%);
+            color: #d4a044; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            z-index: 100;
+        }
+        #loading.hidden { display: none; }
+        #ls-hero {
+            display: flex; flex-direction: column; gap: 5px; margin-bottom: 22px;
+            filter: drop-shadow(0 10px 12px rgba(0,0,0,.5));
+            animation: ls-float 3.2s ease-in-out infinite;
+        }
+        #ls-hero .ls-row { display: flex; gap: 5px; justify-content: center; }
+        .vox {
+            width: 34px; height: 34px; border-radius: 5px;
+            box-shadow: inset -6px -6px 0 rgba(0,0,0,.30), inset 6px 6px 0 rgba(255,255,255,.18);
+        }
+        .v-green { background: #6fae5a; }
+        .v-orange { background: #e8862e; }
+        .v-brown { background: #8a7158; }
+        .v-gold { background: #f0c674; }
+        @keyframes ls-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+        #ls-word { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; color: #f3e6cf; }
+        #ls-tag { font-size: .72rem; font-weight: 700; letter-spacing: .36em; color: #d4a044; margin-top: 10px; }
+        #ls-bar {
+            width: 300px; max-width: 70vw; height: 7px; border-radius: 99px;
+            background: rgba(255,255,255,.08); overflow: hidden; margin-top: 22px;
+        }
+        #ls-bar > i {
+            display: block; height: 100%; border-radius: 99px;
+            background: linear-gradient(90deg, #d4a044, #f0c674);
+            animation: ls-fill 2.6s ease-in-out infinite;
+        }
+        @keyframes ls-fill { 0% { width: 8%; } 70% { width: 82%; } 100% { width: 8%; } }
+        #status { color: #7f8aa0; font-size: 0.95rem; margin-top: 18px; }
+
+        /* WebGPU-unavailable guidance (shown only if the pre-flight probe fails) —
+           the engine renderer hard-requires WebGPU, so without this a browser that
+           gates it (e.g. Brave) would hit a cryptic engine panic instead. */
+        #webgpu-block {
+            position: fixed; inset: 0; z-index: 150; display: none;
+            flex-direction: column; align-items: center; justify-content: center;
+            background: #0d1220; color: #eef2fb; font-family: system-ui, sans-serif;
+            padding: 24px; text-align: center; overflow: auto;
+        }
+        #webgpu-block.show { display: flex; }
+        #webgpu-block h2 { color: #d4a044; font-size: 1.35rem; margin-bottom: 12px; max-width: 640px; }
+        #webgpu-block .fix { max-width: 640px; text-align: left; line-height: 1.55; color: #b0bacd; font-size: .95rem; }
+        #webgpu-block ol, #webgpu-block ul { margin: 8px 0 8px 22px; }
+        #webgpu-block li { margin: 6px 0; }
+        #webgpu-block code { background: #141b2e; border: 1px solid #283356; border-radius: 6px; padding: .1rem .4rem; color: #6dd57a; }
+        #webgpu-block button { margin-top: 18px; padding: .5rem 1.3rem; font-size: 1rem; cursor: pointer;
+            border: 1px solid #2c6a36; border-radius: 8px; background: #14241a; color: #6dd57a; }
+        .copybtn { margin-left: .4rem; padding: .05rem .55rem; font-size: .8rem; border: 1px solid #2c6a36;
+            border-radius: 6px; background: #14241a; color: #6dd57a; cursor: pointer; }
+
+        #errors {
+            position: fixed; bottom: 0; left: 0; right: 0;
+            background: rgba(200,0,0,0.9); color: #fff; padding: 12px;
+            font-family: monospace; font-size: 11px; display: none;
+            max-height: 80vh; overflow: auto; z-index: 200; word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div id="ls-hero" aria-hidden="true">
+            <div class="ls-row">
+                <span class="vox v-green"></span><span class="vox v-orange"></span>
+            </div>
+            <div class="ls-row">
+                <span class="vox v-brown"></span><span class="vox v-brown"></span><span class="vox v-gold"></span>
+            </div>
+        </div>
+        <div id="ls-word">AXE'N'STAX</div>
+        <div id="ls-tag">PROOF&nbsp;OF&nbsp;PLAY</div>
+        <div id="ls-bar"><i></i></div>
+        <p id="status">Connecting to server…</p>
+    </div>
+
+    <div id="webgpu-block">
+        <h2 id="webgpu-head">This browser can't reach WebGPU yet.</h2>
+        <div class="fix" id="webgpu-fix"></div>
+        <button id="webgpu-retest" type="button">Re-test</button>
+    </div>
+
+    <div id="errors"></div>
+
+    <!-- Surface uncaught errors on-page (no /static dependency). -->
+    <script>
+        (function () {
+            // Benign rejections to swallow. The engine auto-joins on load (no click),
+            // so its requestPointerLock() rejects with "A user gesture is required to
+            // request Pointer Lock" — that's expected browser policy (the lock is
+            // granted on the player's first click) and must NOT show as a red error.
+            function benign(msg) {
+                return /pointer lock|user gesture/i.test(String(msg || ''));
+            }
+            function show(msg) {
+                if (benign(msg)) return;
+                var e = document.getElementById('errors');
+                if (!e) return;
+                e.style.display = 'block';
+                e.textContent += msg + '\n';
+            }
+            window.addEventListener('error', function (ev) {
+                show('Error: ' + (ev.message || ev.error || ev));
+            });
+            window.addEventListener('unhandledrejection', function (ev) {
+                show('Promise rejection: ' + (ev.reason && ev.reason.message || ev.reason));
+            });
+        })();
+    </script>
+
+    <!-- Tell the engine where the game socket is. A relative "/ws" is resolved
+         against this page's origin (wss://host/ws), so the WebSocket reuses the
+         very cert the page was loaded with — no second prompt, no mixed content. -->
+    <script>window.AXENSTAX_DEDICATED_WS = "/ws";</script>
+    <!-- Showcase / kiosk-containment (Spec 2026-06-19 §8 Phase 2). Default OFF.
+         Live-configurable from the Operator Console (World/Showcase panel), which
+         writes /showcase.json (served by Caddy from the identity dir). Fetched at
+         page load + applied to these globals; the engine doesn't read them until
+         its first menu frame (well after the WASM bundle finishes loading), so the
+         values are in place by then. `__axenstax_showcase_ready` lets the boot
+         await it to be certain. No file → defaults (off). -->
+    <script>
+      window.AXENSTAX_SHOWCASE = window.AXENSTAX_SHOWCASE || "";
+      window.AXENSTAX_EXIT_ACTION = window.AXENSTAX_EXIT_ACTION || "board";
+      window.AXENSTAX_AUTO_LOOP_SECS = window.AXENSTAX_AUTO_LOOP_SECS || "0";
+      window.__axenstax_showcase_ready = fetch('/showcase.json', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (c) {
+          if (c && typeof c === 'object') {
+            if (c.enabled) window.AXENSTAX_SHOWCASE = "1";
+            if (c.exit_action) window.AXENSTAX_EXIT_ACTION = String(c.exit_action);
+            if (c.auto_loop_secs != null) window.AXENSTAX_AUTO_LOOP_SECS = String(c.auto_loop_secs);
+          }
+        })
+        .catch(function () { /* no /showcase.json → kiosk off */ });
+    </script>
+    <!-- Creator Gallery exhibit images (Spec 2026-06-19 §9). The full PWA serves
+         this from /static/world_store.js, but the dedicated page ships no /static
+         JS, so the engine's `axenstax_load_exhibit_art` bridge would be absent and
+         (guarded by `bridge_present`) it would skip every exhibit image. Provide
+         the bridge inline: fetch the image same-origin from the Caddy /exhibits/*
+         route (served from the world's exhibits folder). Sanitised ref; rejects a
+         bad ref / HTTP error so the engine skips that one exhibit and keeps going.
+         The `world` arg is ignored — the dedicated server serves a single world. -->
+    <script>
+      window.axenstax_load_exhibit_art = async function (world, imageRef) {
+        var safe = String(imageRef).replace(/[^a-z0-9_.-]/gi, '');
+        if (!safe || safe.indexOf('..') !== -1) throw new Error('bad exhibit ref');
+        var resp = await fetch('/exhibits/' + safe, { cache: 'force-cache' });
+        if (!resp.ok) throw new Error('exhibit ' + safe + ' HTTP ' + resp.status);
+        var buf = await resp.arrayBuffer();
+        return new Uint8Array(buf);
+      };
+    </script>
+
+    <!-- WebGPU pre-flight + guest boot.
+         The engine renderer hard-requires WebGPU; if it's missing the engine
+         panics with a cryptic "Failed to find a suitable GPU adapter". So probe
+         first: on success mint a throwaway guest key and start the engine (it then
+         auto-joins AXENSTAX_DEDICATED_WS on the first menu frame); on failure show
+         browser-specific guidance (Brave gates WebGPU behind a flag) instead of
+         the crash. The probe requests an adapter the engine re-requests for itself,
+         so it's a safe, cheap pre-check. -->
+    <script>
+        (function () {
+            var loadingEl = document.getElementById('loading');
+            var block = document.getElementById('webgpu-block');
+            var head = document.getElementById('webgpu-head');
+            var fix = document.getElementById('webgpu-fix');
+            var retest = document.getElementById('webgpu-retest');
+            var booted = false;
+
+            function hideLoading() { if (loadingEl) loadingEl.classList.add('hidden'); }
+
+            function isBrave() {
+                try {
+                    if (navigator.brave && typeof navigator.brave.isBrave === 'function') {
+                        return navigator.brave.isBrave();
+                    }
+                } catch (_e) { /* fall through */ }
+                return Promise.resolve(false);
+            }
+
+            // Same floor as tools/sites/game/static/webgpu-check.js
+            // (REQUIRED_TEXTURE_ARRAY_LAYERS) — see that file's comment and the
+            // Rust drift-guard test (texture_gen::texture_count_stays_under_webgpu_check_floor)
+            // for why 512. Keep both in sync if the block atlas grows.
+            var REQUIRED_TEXTURE_ARRAY_LAYERS = 512;
+            var lastReasonLowLayers = false;
+
+            function probe() {
+                if (!navigator.gpu) return Promise.resolve(false);
+                return navigator.gpu.requestAdapter()
+                    .then(function (a) {
+                        if (!a) return false;
+                        // An adapter existing isn't enough — it must also be able to
+                        // hold the block-texture atlas (texture_gen::texture_count()),
+                        // or Renderer::new hard-panics allocating it (some software
+                        // fallback / integrated GPUs only expose the WebGPU spec
+                        // default of 256 layers).
+                        var layers = a.limits && a.limits.maxTextureArrayLayers;
+                        if (typeof layers === 'number' && layers < REQUIRED_TEXTURE_ARRAY_LAYERS) {
+                            lastReasonLowLayers = true;
+                            return false;
+                        }
+                        lastReasonLowLayers = false;
+                        return true;
+                    })
+                    .catch(function () { return false; });
+            }
+
+            function copyChip(text) {
+                return '<code>' + text + '</code> <button class="copybtn" type="button" data-copy="'
+                    + text + '">Copy</button>';
+            }
+
+            function renderGuidance() {
+                return isBrave().then(function (brave) {
+                    var linux = /Linux/i.test(navigator.userAgent);
+                    var html;
+                    if (lastReasonLowLayers) {
+                        head.textContent = "Your graphics device doesn't support enough texture layers to run Axe'n'Stax.";
+                        html = '<ol>'
+                            + '<li>This usually means your browser fell back to a software renderer (e.g. SwiftShader) instead of your real graphics card.</li>'
+                            + '<li>Update your GPU drivers (NVIDIA / AMD / Intel) to the latest version and restart your browser fully.</li>'
+                            + (linux ? '<li>On Linux, install Vulkan tooling: ' + copyChip('sudo apt install mesa-vulkan-drivers vulkan-tools') + ' and run <code>vulkaninfo --summary</code>.</li>' : '')
+                            + '</ol><p>Then hit <strong>Re-test</strong>. If it still fails, this hardware may not be able to run Axe’n’Stax in a browser.</p>';
+                    } else if (brave) {
+                        head.textContent = 'Brave needs WebGPU switched on to run the game.';
+                        html = '<ol>';
+                        if (linux) {
+                            html += '<li>Open a new tab and go to ' + copyChip('brave://flags/#enable-vulkan')
+                                + ' — set it to <strong>Enabled</strong>. (This lets Brave use your graphics card on Linux.)</li>';
+                        }
+                        html += '<li>Open a new tab and go to ' + copyChip('brave://flags/#enable-unsafe-webgpu')
+                            + ' — set it to <strong>Enabled</strong>.</li>';
+                        html += '<li>Fully restart Brave (close <em>every</em> window), reopen, and come back here.</li>';
+                        html += '</ol><p>Then hit <strong>Re-test</strong>.</p>';
+                    } else {
+                        head.textContent = "This browser can't reach WebGPU yet.";
+                        html = '<p>Axe’n’Stax runs on <strong>Chrome</strong>, <strong>Edge</strong>, or '
+                            + '<strong>Brave</strong> (desktop, or Android with WebGPU enabled).</p><ul>'
+                            + '<li>Update your browser to the latest version, restart it fully, then hit <strong>Re-test</strong>.</li>'
+                            + (linux ? '<li>On Linux, install Vulkan tooling: ' + copyChip('sudo apt install mesa-vulkan-drivers vulkan-tools') + '</li>' : '')
+                            + '</ul>';
+                    }
+                    fix.innerHTML = html;
+                    fix.querySelectorAll('.copybtn').forEach(function (b) {
+                        b.addEventListener('click', function () {
+                            var t = b.getAttribute('data-copy') || '';
+                            if (navigator.clipboard && navigator.clipboard.writeText) {
+                                navigator.clipboard.writeText(t).then(function () {
+                                    var orig = b.textContent; b.textContent = 'Copied ✓';
+                                    setTimeout(function () { b.textContent = orig; }, 1500);
+                                });
+                            }
+                        });
+                    });
+                });
+            }
+
+            function boot() {
+                if (booted) return;
+                booted = true;
+                var bytes = crypto.getRandomValues(new Uint8Array(32));
+                var hex = Array.from(bytes).map(function (b) {
+                    return b.toString(16).padStart(2, '0');
+                }).join('');
+                (function start() {
+                    if (window.__axenstax_set_pubkey && window.__axenstax_start) {
+                        // Ensure the live showcase config (/showcase.json) has been
+                        // applied to the globals before the engine reads them.
+                        Promise.resolve(window.__axenstax_showcase_ready).then(function () {
+                            window.__axenstax_set_pubkey(hex);
+                            window.__axenstax_start();
+                            hideLoading();
+                        });
+                    } else {
+                        setTimeout(start, 30);
+                    }
+                })();
+            }
+
+            function gate() {
+                probe().then(function (ok) {
+                    if (ok) { boot(); return; }
+                    hideLoading();
+                    renderGuidance().then(function () { block.classList.add('show'); });
+                });
+            }
+
+            retest.addEventListener('click', function () {
+                retest.disabled = true;
+                var orig = retest.textContent;
+                retest.textContent = 'Testing…';
+                probe().then(function (ok) {
+                    if (ok) {
+                        block.classList.remove('show');
+                        if (loadingEl) loadingEl.classList.remove('hidden');
+                        boot();
+                    } else {
+                        retest.disabled = false;
+                        retest.textContent = orig;
+                    }
+                });
+            });
+
+            // Trunk fires this once the wasm has loaded + registered the boot hooks.
+            window.addEventListener('TrunkApplicationStarted', gate);
+        })();
+    </script>
+</body>
+</html>

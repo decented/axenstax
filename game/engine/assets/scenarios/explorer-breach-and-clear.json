@@ -1,0 +1,130 @@
+{
+  "kind": "Challenge",
+  "display_name": "Bring the Wall Down \u2014 a raider hides behind a stone wall \u2014 blow it open and finish the job",
+  "kit": [
+    {
+      "name": "blasting_keg",
+      "count": 2
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    },
+    {
+      "name": "iron_sword",
+      "count": 1
+    },
+    {
+      "name": "bread",
+      "count": 3
+    }
+  ],
+  "objective": {
+    "Checklist": {
+      "items": [
+        {
+          "Action": {
+            "event": "Detonate",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "KillMob",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          1,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          1,
+          1
+        ],
+        "block": "stone"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          5,
+          0,
+          0
+        ],
+        "mob": "brigand",
+        "count": 1
+      }
+    ]
+  }
+}

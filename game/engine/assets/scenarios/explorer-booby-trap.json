@@ -1,0 +1,122 @@
+{
+  "kind": "Challenge",
+  "display_name": "Booby Trap \u2014 rig a pressure plate to a blasting keg so a trespasser sets off the boom",
+  "kit": [
+    {
+      "name": "blasting_keg",
+      "count": 2
+    },
+    {
+      "name": "pressure_plate",
+      "count": 2
+    },
+    {
+      "name": "cable",
+      "count": 16
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    },
+    {
+      "name": "stone",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 2
+          }
+        },
+        {
+          "Action": {
+            "event": "Detonate",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          1,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          1,
+          -1
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

@@ -1,0 +1,437 @@
+{
+  "kind": "Challenge",
+  "display_name": "Roadrunner \u2014 saddle up a Nostrich and take her for a ride",
+  "objective": {
+    "Action": {
+      "event": "RideEntity",
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          7,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          8,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          9,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          10,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          11,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          12,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          -3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          -2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          -1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          2
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          13,
+          -1,
+          3
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          15,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          15,
+          0,
+          0
+        ],
+        "block": "amethyst"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "mob": "nostrich",
+        "count": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,1659 @@
+# Spec 01: Engine Architecture
+
+**Status**: Draft
+**Date**: 2026-03-03
+**Addendum**: `_audit-2026-04-18.md` — §4.1 tick order and input-processing
+phase boundaries diverge from current `GameServer::tick`; server-driven
+physics for remote players landed in Task 1d. Fold into this doc on the next
+spec-editing pass.
+**Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
+
+---
+
+## 1. System Overview
+
+Axe'n'Stax is a full-custom voxel sandbox engine written in Rust. A single codebase compiles to four distinct artifacts: a WASM+WebGPU web client, a native desktop client (Vulkan/Metal/DX12), a headless dedicated server, and an integrated single-binary (client+server in one process). The engine is server-authoritative. Worlds are independent shard instances, not a single mega-world. Bitcoin/Lightning integration is a feature flag, not an architectural dependency.
+
+### 1.1 High-Level Architecture
+
+```mermaid
+graph TB
+    subgraph ClientProcess["Client Process (WASM or Native)"]
+        Input["Input (winit / web events)"]
+        ClientNet["Network Client"]
+        Predict["Client Prediction"]
+        Renderer["Renderer (wgpu)"]
+        Audio["Audio (kira)"]
+        UI["UI (egui)"]
+        AssetMgr["Asset Manager"]
+    end
+
+    subgraph ServerProcess["Server Process (Native only)"]
+        ServerNet["Network Server"]
+        Sim["World Simulation (ECS)"]
+        WorldGen["World Generation"]
+        Persist["Persistence"]
+        PluginHost["Plugin Host (wasmtime)"]
+        Bitcoin["Bitcoin Bridge (optional)"]
+    end
+
+    subgraph SharedCrate["genesis_core (shared library)"]
+        ECS["ECS Runtime"]
+        VoxelCore["Voxel Types & Chunk Format"]
+        Protocol["Network Protocol Codec"]
+        Registry["Block/Item Registry"]
+        Physics["Physics & Collision"]
+        Config["Configuration"]
+    end
+
+    Input --> Predict
+    ClientNet <-->|UDP + WebTransport| ServerNet
+    Predict --> Renderer
+    AssetMgr --> Renderer
+    AssetMgr --> Audio
+
+    ServerNet --> Sim
+    Sim --> WorldGen
+    Sim --> Persist
+    Sim --> PluginHost
+    Sim --> Bitcoin
+
+    Predict -.-> ECS
+    Sim -.-> ECS
+    Predict -.-> VoxelCore
+    Sim -.-> VoxelCore
+    ClientNet -.-> Protocol
+    ServerNet -.-> Protocol
+```
+
+### 1.2 Integrated (Single-Binary) Mode
+
+In single-binary mode, the client and server run in the same OS process but in separate thread groups. They communicate over an in-process channel that implements the same `Transport` trait as the network layer, avoiding serialization overhead for the local connection while maintaining identical code paths for simulation and prediction. A remote player connecting to this instance uses real networking; only the local player gets the in-process fast path.
+
+```mermaid
+graph LR
+    subgraph SingleBinary["Single Binary Process"]
+        subgraph ClientThreads["Client Threads"]
+            CL["Client Logic"]
+            RT["Render Thread"]
+        end
+        subgraph ServerThreads["Server Threads"]
+            SL["Server Simulation"]
+            WG["World Gen Workers"]
+        end
+        IPC["InProcessTransport\n(crossbeam channels)"]
+        NET["NetworkTransport\n(for remote players)"]
+        CL <--> IPC <--> SL
+        SL <--> NET
+    end
+    Remote["Remote Players"] <--> NET
+```
+
+---
+
+## 2. Module Boundaries
+
+#### Current Implementation (Prototype — Single Crate)
+
+The prototype is a single binary crate (`axenstax-engine`) with these modules:
+
+| Module | Purpose |
+|--------|---------|
+| `main.rs` | Game loop, state machine (Menu/Playing/Paused), chunk streaming |
+| `renderer.rs` | wgpu pipelines (chunk, water, entity, wire, crosshair), HUD, menu render |
+| `shader.wgsl` | Vertex/fragment shaders (textured + lit + fog) |
+| `overlay.wgsl` | Crosshair/wireframe/HUD shaders (2D + 3D colored) |
+| `mesh.rs` | Greedy chunk meshing, Vertex format |
+| `world.rs` | Chunk HashMap, terrain generation, tree placement |
+| `chunk.rs` | 16³ block storage, serialize/deserialize |
+| `block.rs` | Block registry (14 types), per-face textures |
+| `texture_gen.rs` | Procedural 16×16 textures (15 block + 18 mob = 34 layers) |
+| `biome.rs` | 5 biomes, noise-based terrain height + cave carving |
+| `physics.rs` | Player physics (Minecraft-style momentum, AABB collision) |
+| `camera.rs` | FPS camera (yaw/pitch, view/projection matrices) |
+| `input.rs` | Keyboard/mouse state, double-tap flight, hotbar selection |
+| `raycast.rs` | DDA ray casting for block targeting |
+| `inventory.rs` | 36-slot inventory (9 hotbar + 27 main) |
+| `audio.rs` | Procedural sound (footsteps, break, place) via rodio |
+| `water.rs` | BFS water spread/retract, source tracking |
+| `leaf_decay.rs` | BFS leaf support check, staggered decay |
+| `entity.rs` | hecs ECS components, entity physics, spawn helpers, player-entity collision |
+| `entity_model.rs` | Multi-cuboid mob models, per-face textures, walk animation |
+| `mob.rs` | MobType enum, MobDef (size, colour, health, speed) |
+| `mob_ai.rs` | AI state machine (Idle/Wander/Chase), direct-line movement |
+| `combat.rs` | Health, melee damage, knockback, death/respawn, hostile-mob contact damage |
+| `save.rs` | World save/load (bincode metadata + raw chunk bytes) |
+| `menu.rs` | Main menu (world list) + pause menu (resume/save/quit/delete) |
+| `font.rs` | 5×7 bitmap font, text-to-quad rendering |
+| `chat_ui.rs` | In-game chat overlay (egui) — output log + input field, focus + history |
+| `commands/` | Slash-command system (parser, registry, dispatcher, built-ins). Plugin-shaped — registry/parser/UI are game-agnostic. Spec: `docs/foundations/2026-05-07-engine-commands.md` |
+
+Dependencies: wgpu 25, winit 0.30, glam 0.29, hecs 0.10, serde 1, bincode 1, ahash 0.8, noise 0.9, rodio 0.20, image 0.25, bytemuck 1.
+
+The production architecture below describes the multi-crate workspace this will evolve into.
+
+The engine is organized as a Cargo workspace. Each module is a separate crate with explicit dependency direction. No circular dependencies. Dependency flows downward; higher-level crates depend on lower-level ones, never the reverse.
+
+### 2.1 Crate Dependency Graph
+
+```mermaid
+graph TD
+    genesis_client --> genesis_core
+    genesis_client --> genesis_renderer
+    genesis_client --> genesis_net
+    genesis_client --> genesis_audio
+    genesis_client --> genesis_ui
+
+    genesis_server --> genesis_core
+    genesis_server --> genesis_net
+    genesis_server --> genesis_worldgen
+    genesis_server --> genesis_persist
+    genesis_server --> genesis_plugins
+
+    genesis_integrated --> genesis_client
+    genesis_integrated --> genesis_server
+
+    genesis_renderer --> genesis_core
+    genesis_net --> genesis_core
+    genesis_audio --> genesis_core
+    genesis_ui --> genesis_core
+    genesis_worldgen --> genesis_core
+    genesis_persist --> genesis_core
+    genesis_plugins --> genesis_core
+
+    genesis_protocol --> genesis_core
+
+    genesis_net --> genesis_protocol
+```
+
+### 2.2 Crate Definitions
+
+#### `genesis_core`
+The foundational crate. No platform-specific code. No I/O. Pure logic and types.
+
+**Owns:**
+- ECS runtime (entity storage, component storage, system scheduler)
+- Block and item registry (type IDs, properties, state machine definitions)
+- Chunk data structures (`Chunk`, `ChunkSection`, `PalettedContainer`)
+- Coordinate types (`BlockPos`, `ChunkPos`, `WorldPos`) and conversions
+- Physics primitives (AABB, ray casting, collision detection against voxel geometry)
+- Game tick types (`Tick`, `TickDelta`, `TickSchedule`)
+- Shared constants (chunk size = 16x16x16 sections, world height, etc.)
+- `Registry<T>` — typed registry for blocks, items, biomes, recipes
+- `VoxelWorld` trait — abstract read/write interface to block data
+
+**Public API surface:**
+```rust
+// Illustrative, not exhaustive
+pub struct World { /* ECS world */ }
+pub struct Chunk { sections: [ChunkSection; WORLD_HEIGHT_SECTIONS] }
+pub struct PalettedContainer<T> { /* ... */ }
+pub struct BlockPos { x: i32, y: i32, z: i32 }
+pub struct ChunkPos { x: i32, z: i32 }
+pub trait VoxelAccess {
+    fn get_block(&self, pos: BlockPos) -> BlockId;
+    fn set_block(&mut self, pos: BlockPos, block: BlockId) -> BlockId;
+}
+pub struct Registry<T: RegistryEntry> { /* ... */ }
+pub type BlockId = u16; // 65535 block types, 0 = air
+pub type ItemId = u16;
+```
+
+#### `genesis_protocol`
+Wire protocol definitions. Codec only, no I/O.
+
+**Owns:**
+- Packet definitions (all client-to-server and server-to-client messages)
+- Serialization/deserialization using `rkyv` (zero-copy deserialization for hot paths) with `serde` fallback for debug tooling
+- Protocol versioning (version byte in handshake, backward-compatible field additions)
+- Delta compression types for chunk data and entity state
+- Bandwidth budget constants
+
+**Public API surface:**
+```rust
+pub enum ClientPacket {
+    Handshake { protocol_version: u32, player_name: String },
+    PlayerMove { pos: Vec3, yaw: f32, pitch: f32, tick: Tick },
+    BlockAction { pos: BlockPos, action: BlockActionKind },
+    ChatMessage { content: String },
+    // ...
+}
+pub enum ServerPacket {
+    HandshakeResponse { status: HandshakeStatus, server_tick: Tick },
+    ChunkData { pos: ChunkPos, data: CompressedChunkData },
+    EntitySpawn { entity_id: EntityId, kind: EntityKind, pos: Vec3 },
+    EntityUpdate { updates: Vec<EntityDelta> },
+    BlockChange { pos: BlockPos, new_block: BlockId },
+    // ...
+}
+pub trait PacketCodec {
+    fn encode(&self, buf: &mut BytesMut);
+    fn decode(buf: &mut BytesMut) -> Result<Self, DecodeError>;
+}
+```
+
+#### `genesis_net`
+Transport layer. Handles connection lifecycle, reliability, ordering, encryption.
+
+**Owns:**
+- UDP transport (native) using raw sockets with custom reliability layer
+- WebTransport (WASM) for browser clients
+- `Transport` trait — abstraction over UDP, WebTransport, and in-process channels
+- Connection state machine (connecting, authenticating, connected, disconnecting)
+- Packet fragmentation and reassembly (MTU-aware)
+- Reliability layer: unreliable (position updates), reliable-ordered (block changes, chat), reliable-unordered (chunk data)
+- Encryption: Noise protocol (snow crate) for native, TLS via WebTransport for web
+- Bandwidth throttling and congestion control
+- Packet batching (coalesce small packets into frames, flush per tick)
+
+**Does NOT own:** Packet content definitions (that is `genesis_protocol`), game logic.
+
+**Public API surface:**
+```rust
+pub trait Transport: Send + Sync {
+    fn send(&self, peer: PeerId, packet: &[u8], channel: Channel) -> Result<()>;
+    fn recv(&self) -> Option<(PeerId, Vec<u8>, Channel)>;
+    fn connected_peers(&self) -> &[PeerId];
+    fn disconnect(&self, peer: PeerId, reason: DisconnectReason);
+}
+pub enum Channel {
+    Unreliable,
+    ReliableOrdered,
+    ReliableUnordered,
+}
+pub struct UdpTransport { /* ... */ }
+pub struct WebTransport { /* ... */ }
+pub struct InProcessTransport { /* ... */ }
+```
+
+#### `genesis_renderer`
+All GPU work. Native and WASM, both through `wgpu`.
+
+**Owns:**
+- GPU device initialization and surface management
+- Chunk mesh generation (greedy meshing algorithm, runs on worker threads, produces vertex buffers)
+- Texture atlas construction (runtime-built from individual textures, resolution-agnostic)
+- Block face culling (only emit faces adjacent to transparent/air blocks)
+- Sky rendering (procedural sky dome, sun/moon, day-night cycle)
+- Entity rendering (billboard sprites or simple voxel models)
+- Particle system
+- Post-processing (fog, ambient occlusion — screen-space)
+- Debug overlays (wireframe chunks, physics AABBs, F3-style debug info)
+- Camera management (projection, view matrix, frustum)
+- Render graph (orders passes, manages transient resources)
+
+**Does NOT own:** Game state, input handling, window creation (that is `genesis_client` via `winit`).
+
+**Public API surface:**
+```rust
+pub struct Renderer { /* ... */ }
+impl Renderer {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, config: &RenderConfig) -> Self;
+    pub fn resize(&mut self, width: u32, height: u32);
+    pub fn update_chunk_mesh(&mut self, pos: ChunkPos, mesh: ChunkMesh);
+    pub fn remove_chunk_mesh(&mut self, pos: ChunkPos);
+    pub fn set_camera(&mut self, camera: &Camera);
+    pub fn set_time_of_day(&mut self, time: f32);
+    pub fn render(&mut self, frame: &wgpu::SurfaceTexture, world_state: &RenderSnapshot);
+}
+pub struct ChunkMesh {
+    pub opaque_vertices: Vec<PackedVertex>,
+    pub transparent_vertices: Vec<PackedVertex>,
+}
+/// 8 bytes per vertex: position (3x u8 local), normal (u8 packed), uv (2x u16), light (u8), ao (u8)
+pub struct PackedVertex { data: [u8; 8] }
+```
+
+#### `genesis_audio`
+Sound playback. Uses `kira` for native, Web Audio API via `wasm-bindgen` for WASM.
+
+**Owns:**
+- Spatial audio (3D positioned sounds attenuated by distance)
+- Ambient soundscapes (biome-based)
+- Block interaction sounds (place, break, step)
+- Music playback (background tracks, crossfading)
+- Sound registry (maps sound event IDs to audio assets)
+
+**Public API surface:**
+```rust
+pub struct AudioEngine { /* ... */ }
+impl AudioEngine {
+    pub fn play_spatial(&mut self, sound: SoundId, pos: Vec3, volume: f32);
+    pub fn play_ambient(&mut self, sound: SoundId, volume: f32);
+    pub fn set_listener(&mut self, pos: Vec3, forward: Vec3, up: Vec3);
+    pub fn update(&mut self, dt: f32);
+}
+```
+
+#### `genesis_ui`
+User interface. Uses `egui` for immediate-mode GUI, rendered through `egui-wgpu`.
+
+**Owns:**
+- HUD (hotbar, health, hunger, crosshair)
+- Inventory screens
+- Chat window
+- Settings menus
+- Server browser / world selector
+- Debug overlay (F3 screen)
+- Main menu, pause menu
+
+**Does NOT own:** Rendering pipeline (passes egui draw lists to the renderer).
+
+#### `genesis_worldgen`
+Procedural world generation. CPU-intensive, runs on worker threads.
+
+**Owns:**
+- Terrain generation (noise-based heightmap, 3D density for caves/overhangs)
+- Biome placement and blending
+- Structure generation (trees, villages, ores, caves, dungeons)
+- Decoration passes (flowers, grass, underwater plants)
+- Light propagation (initial sunlight + block light for newly generated chunks)
+- World seed management
+- Generator registry (pluggable generators, plugins can register custom generators)
+
+**Key crate dependencies:** `noise` (for coherent noise), `fastrand` (deterministic RNG from seed).
+
+**Public API surface:**
+```rust
+pub trait WorldGenerator: Send + Sync {
+    fn generate_chunk(&self, pos: ChunkPos, seed: u64) -> Chunk;
+    fn get_biome(&self, pos: BlockPos) -> BiomeId;
+}
+pub struct DefaultGenerator { /* ... */ }
+```
+
+#### `genesis_persist`
+World persistence and snapshots. Server-side only.
+
+**Owns:**
+- Chunk serialization (region file format, inspired by Minecraft's Anvil but custom)
+- Region files: each file covers 32x32 chunks, header + compressed chunk data
+- Player data persistence (inventory, position, stats)
+- World metadata (seed, spawn point, tick count, game rules)
+- Snapshot/backup lifecycle (periodic full snapshots to object storage)
+- Pluggable storage backends: local filesystem (default), S3-compatible object storage (production)
+
+**Public API surface:**
+```rust
+pub trait WorldStorage: Send + Sync {
+    fn load_chunk(&self, pos: ChunkPos) -> Result<Option<Chunk>>;
+    fn save_chunk(&self, pos: ChunkPos, chunk: &Chunk) -> Result<()>;
+    fn save_player(&self, id: PlayerId, data: &PlayerData) -> Result<()>;
+    fn load_player(&self, id: PlayerId) -> Result<Option<PlayerData>>;
+    fn flush(&self) -> Result<()>;
+}
+pub struct RegionFileStorage { /* local disk */ }
+pub struct S3Storage { /* S3-compatible */ }
+```
+
+#### `genesis_plugins`
+WASM-based plugin runtime. Server-side only (initially).
+
+**Owns:**
+- WASM module loading and instantiation (`wasmtime`)
+- Plugin API (host functions exposed to WASM guests)
+- Capability-based permission system
+- Plugin lifecycle (load, init, tick, shutdown)
+- Event dispatch to plugins
+- Resource limits (memory, CPU time per tick, fuel metering)
+
+**Detailed in Section 8.**
+
+#### `genesis_client`
+The client application. Glues input, networking, prediction, rendering, audio, and UI.
+
+**Owns:**
+- Window creation and event loop (`winit` for native, `web-sys` for WASM)
+- Input mapping (keyboard, mouse, gamepad -> game actions)
+- Client-side prediction (local player movement predicted, reconciled on server correction)
+- Entity interpolation (remote entities smoothly interpolated between server snapshots)
+- Chunk request scheduling (which chunks to request based on player position and view distance)
+- Client state machine (main menu, connecting, loading, playing, disconnected)
+
+#### `genesis_server`
+The dedicated server binary. No rendering, no audio, no window.
+
+**Owns:**
+- Server tick loop (fixed timestep)
+- Player connection management (accept, authenticate, session lifecycle)
+- World simulation orchestration (tick all systems)
+- Chunk streaming to clients (priority queue based on distance, frustum)
+- Anti-cheat validation (server-authoritative position checks, action rate limits)
+- Server commands (console, RCON-style)
+- Graceful shutdown (save all chunks, notify players, flush persistence)
+
+> **Spec 48 (Electricity) — added tick subsystems (2026-06-17):** "tick all systems" now
+> includes the **block-update scheduler** (`block_update.rs` — a deduped neighbour-notify
+> queue + absolute-tick scheduled updates, bounded per tick, the redstone-style update
+> primitive) and the **power tick** (`power.rs::power_tick`, ordered *after* entity physics
+> and *before* carts so powered-rail state is current when a cart rolls). Both run identically
+> on the single-player `GameState::tick` path. Design: `docs/foundations/2026-06-17-electricity-power-logic.md`.
+
+#### `genesis_integrated`
+Single binary that embeds both client and server.
+
+**Owns:**
+- Process bootstrap (start server threads, then client threads)
+- In-process transport wiring
+- Shared resource management (both client and server access world data, server is authoritative)
+- "Open to LAN" functionality (bind network transport for remote players)
+
+---
+
+## 3. Build Targets
+
+### 3.1 Target Matrix
+
+| Artifact | Cargo Target | Platform | Graphics | Networking | Use Case |
+|---|---|---|---|---|---|
+| `genesis-client` | `--bin genesis-client` | Native (x86_64, aarch64) | wgpu -> Vulkan/Metal/DX12 | UDP (raw sockets) | Desktop player |
+| `genesis-client-web` | `--bin genesis-client --target wasm32-unknown-unknown` | WASM | wgpu -> WebGPU | WebTransport | Browser player |
+| `genesis-server` | `--bin genesis-server` | Native (x86_64, aarch64) | None | UDP (raw sockets) | Dedicated headless server |
+| `genesis` | `--bin genesis` | Native (x86_64, aarch64) | wgpu -> Vulkan/Metal/DX12 | UDP + in-process | Personal single-binary |
+
+### 3.2 Conditional Compilation Strategy
+
+Feature flags and target-conditional code are used to produce all artifacts from one codebase. The guiding principle: **shared logic lives in `genesis_core`** with no platform-specific code. Platform differences are isolated behind traits.
+
+#### Cargo Feature Flags
+
+```toml
+# genesis_core/Cargo.toml — no platform features, always builds clean
+[features]
+default = []
+
+# genesis_net/Cargo.toml
+[features]
+default = ["native"]
+native = ["socket2"]           # Raw UDP sockets
+web = ["web-sys", "js-sys"]    # WebTransport via browser APIs
+in-process = ["crossbeam-channel"]  # For integrated binary
+
+# genesis_renderer/Cargo.toml
+[features]
+default = ["native"]
+native = ["wgpu/vulkan-portability", "wgpu/metal", "wgpu/dx12"]
+web = ["wgpu/webgpu"]
+
+# genesis_audio/Cargo.toml
+[features]
+default = ["native"]
+native = ["kira"]
+web = ["web-sys/AudioContext"]
+
+# genesis_client/Cargo.toml
+[features]
+default = ["native"]
+native = ["genesis_renderer/native", "genesis_net/native", "genesis_audio/native", "winit"]
+web = ["genesis_renderer/web", "genesis_net/web", "genesis_audio/web", "web-sys"]
+
+# genesis_server/Cargo.toml
+[features]
+default = []
+bitcoin = ["genesis_bitcoin"]  # Optional Bitcoin bridge
+```
+
+#### Platform Abstraction via Traits
+
+```rust
+// genesis_net/src/transport.rs
+pub trait Transport: Send + Sync {
+    fn send(&self, peer: PeerId, data: &[u8], channel: Channel) -> Result<()>;
+    fn recv(&self) -> Option<(PeerId, Vec<u8>, Channel)>;
+    // ...
+}
+
+// Compile-time selection:
+#[cfg(feature = "native")]
+mod udp_transport;   // implements Transport over raw UDP
+
+#[cfg(feature = "web")]
+mod web_transport;   // implements Transport over WebTransport API
+
+#[cfg(feature = "in-process")]
+mod local_transport; // implements Transport over crossbeam channels
+```
+
+#### WASM-Specific Considerations
+
+- **No threads in WASM** (until widespread `SharedArrayBuffer` support): chunk meshing and world gen requests are sent to the server; the client does not generate chunks.
+- **No filesystem in WASM**: all asset loading goes through HTTP fetch.
+- **Async runtime**: `wasm-bindgen-futures` replaces `tokio` for the web client. Server never targets WASM.
+- **Entry point**: `#[wasm_bindgen(start)]` replaces `fn main()` for the web build. A thin `web_main.rs` calls into the same `genesis_client::run()` function.
+
+### 3.3 Build Commands
+
+```bash
+# Native desktop client
+cargo build --release --bin genesis-client
+
+# WASM web client (requires wasm-pack or cargo build + wasm-bindgen CLI)
+wasm-pack build game/client --target web --features web --no-default-features
+
+# Headless dedicated server
+cargo build --release --bin genesis-server
+
+# Headless server with Bitcoin support
+cargo build --release --bin genesis-server --features bitcoin
+
+# Single integrated binary
+cargo build --release --bin genesis
+
+# Docker image for production server
+docker build -f infra/docker/Dockerfile.server -t genesis-server:latest .
+```
+
+---
+
+## 4. Tick Architecture
+
+### 4.1 Server Tick (Fixed Timestep)
+
+The server simulation runs at a fixed tick rate of **20 ticks per second** (50ms per tick). This matches industry convention for voxel games and provides a good balance between responsiveness and bandwidth.
+
+Every tick, the server executes the following pipeline in order:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Server Tick Pipeline (50ms budget)                              │
+│                                                                 │
+│ 1. Network Recv     — drain inbound packets from all clients    │
+│ 2. Input Processing — validate and apply player actions         │
+│ 3. World Simulation — run ECS systems:                          │
+│    a. Physics (gravity, movement, collision)                    │
+│    b. Block updates (redstone-like, fluids, growth)             │
+│    c. Entity AI (mob behavior trees)                            │
+│    d. Scheduled ticks (block tick queue)                        │
+│    e. Plugin tick callbacks                                     │
+│ 4. World Gen Check  — dispatch pending chunk gen to workers     │
+│ 5. State Snapshot   — capture delta for this tick               │
+│ 6. Network Send     — broadcast entity updates, block changes   │
+│ 7. Persistence      — async flush dirty chunks (non-blocking)   │
+│ 8. Metrics          — record tick duration, entity count, etc.  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Tick timing**: The server uses a fixed-timestep accumulator. If a tick completes early, it sleeps for the remainder. If a tick overruns, the next tick runs immediately. If the server falls behind by more than 5 ticks (250ms), it drops ticks and logs a warning — it never "catches up" by running physics at accelerated speed, as that would cause desyncs and exploits.
+
+```rust
+const TICK_RATE: u32 = 20;
+const TICK_DURATION: Duration = Duration::from_millis(1000 / TICK_RATE as u64); // 50ms
+
+pub fn server_loop(server: &mut Server) {
+    let mut last_tick = Instant::now();
+    let mut accumulator = Duration::ZERO;
+
+    loop {
+        let now = Instant::now();
+        accumulator += now - last_tick;
+        last_tick = now;
+
+        // Cap accumulator to prevent death spiral
+        if accumulator > TICK_DURATION * 5 {
+            tracing::warn!(
+                behind_ms = accumulator.as_millis(),
+                "Server falling behind, dropping ticks"
+            );
+            accumulator = TICK_DURATION;
+        }
+
+        while accumulator >= TICK_DURATION {
+            server.tick();
+            accumulator -= TICK_DURATION;
+        }
+
+        // Sleep for remaining time (if any)
+        let remaining = TICK_DURATION.saturating_sub(accumulator);
+        if remaining > Duration::from_millis(1) {
+            std::thread::sleep(remaining - Duration::from_millis(1));
+            // Spin-wait for the last millisecond for precision
+            while Instant::now() - last_tick < TICK_DURATION - accumulator {}
+        }
+    }
+}
+```
+
+### 4.2 Client Frame Loop
+
+The client render loop is **decoupled from the tick rate** and runs as fast as the display allows (vsync or uncapped). The client maintains its own simulation state that is a prediction ahead of the last confirmed server state.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Client Frame Loop (variable rate, e.g., 60-240 FPS)        │
+│                                                             │
+│ 1. Poll Input       — keyboard, mouse, gamepad              │
+│ 2. Network Recv     — process server packets                │
+│    a. Apply authoritative state corrections                 │
+│    b. Reconcile predicted state (replay unacked inputs)     │
+│ 3. Prediction       — advance local player by dt            │
+│ 4. Interpolation    — lerp remote entities between snapshots│
+│ 5. Chunk Meshing    — check mesh queue, upload to GPU       │
+│ 6. Render           — submit draw calls via wgpu            │
+│ 7. Audio Update     — update listener, play queued sounds   │
+│ 8. UI               — run egui frame, overlay HUD           │
+│ 9. Present          — swap buffers                          │
+│ 10. Network Send    — flush outbound input packets          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Interpolation**: Remote entities are rendered at a position interpolated between the two most recent server snapshots. This introduces one tick (50ms) of visual latency for remote entities but ensures smooth motion regardless of network jitter.
+
+**Prediction**: The local player's movement is predicted immediately on the client. Each input is stamped with a sequence number. When the server acknowledges inputs, the client replays any unacknowledged inputs on top of the server's authoritative state. If the predicted position diverges from the server's corrected position by less than a threshold (0.1 blocks), the client smoothly corrects; if greater, it snaps.
+
+### 4.3 Integrated Mode Tick Architecture
+
+In single-binary mode, the server tick loop runs on a dedicated thread. The client frame loop runs on the main thread (required by windowing APIs). They communicate through the `InProcessTransport`, which uses bounded `crossbeam` channels.
+
+```mermaid
+sequenceDiagram
+    participant Main as Main Thread (Client)
+    participant Server as Server Thread
+    participant Workers as Worker Pool
+
+    loop Every Frame
+        Main->>Main: Poll input
+        Main->>Server: Send input (InProcessTransport)
+        Server->>Server: Accumulate inputs
+    end
+
+    loop Every 50ms
+        Server->>Server: Run tick pipeline
+        Server->>Workers: Dispatch chunk gen
+        Workers-->>Server: Return generated chunks
+        Server->>Main: Send state snapshot (InProcessTransport)
+    end
+
+    loop Every Frame
+        Main->>Main: Reconcile prediction
+        Main->>Main: Render frame
+    end
+```
+
+The in-process transport avoids serialization. Packets are passed as `Arc<[u8]>` (already encoded) or, for the local player, as typed structs through a separate typed channel that bypasses encoding entirely. This is an optimization; the semantics are identical to the network path.
+
+---
+
+## 5. ECS (Entity Component System)
+
+### 5.1 Why ECS
+
+A voxel game has extreme entity diversity: millions of blocks (though blocks are not ECS entities — they are voxel data), thousands of dropped items, hundreds of mobs, dozens of players, plus projectiles, particles, vehicles, and redstone-like contraptions. ECS provides:
+
+- **Cache-friendly iteration**: components stored contiguously in memory by type, not by entity. Iterating all positions+velocities for physics hits L1 cache.
+- **Composition over inheritance**: a chicken and a Brigand share `Position`, `Velocity`, `Health` components but differ in `AiBehavior`. No class hierarchy.
+- **Parallelism**: systems that access disjoint component sets can run concurrently. Physics and AI can overlap if they don't write to the same components.
+- **Data-driven design**: plugins add new components and systems without modifying engine code.
+
+### 5.2 ECS Implementation Choice
+
+**Decision: Use `hecs` as the ECS foundation, with a custom system scheduler built on top.**
+
+Rationale:
+- `hecs` is a minimal, zero-dependency archetype ECS. It provides entity/component storage and query iteration — nothing more. No runtime, no scheduler, no opinions.
+- `bevy_ecs` is more feature-rich but pulls in Bevy's type registration, change detection, and scheduling systems. These are powerful but create coupling to Bevy's design decisions and add compile-time cost.
+- A custom ECS from scratch is unnecessary; the hard problems (archetype storage, query iteration, entity allocation) are solved well by `hecs`. We add our own system scheduler, resource management, and parallelism on top.
+- `hecs` compiles to WASM without issue.
+
+The custom scheduler on top of `hecs` provides:
+- Explicit system ordering (topological sort by declared dependencies)
+- Parallel execution of independent systems (`rayon`-based on native, sequential on WASM)
+- Resource injection (singleton data like `WorldTime`, `BlockRegistry` that systems can access)
+
+### 5.3 What Is and Is Not an ECS Entity
+
+**Blocks are NOT ECS entities.** At 16x16x16 sections stacked 24 sections high, a single chunk contains 98,304 blocks. A 32-chunk render distance means ~3.3 million blocks visible. ECS cannot handle this; blocks are stored in the chunk voxel array (Section 6).
+
+**Block entities ARE ECS entities.** A chest, furnace, sign, or command block has state beyond its block ID (inventory contents, smelting progress, text). These are sparse — maybe 1 in 1000 blocks — so ECS is appropriate.
+
+| Concept | ECS Entity? | Storage | Why |
+|---|---|---|---|
+| Block (dirt, stone, air) | No | `PalettedContainer` in `ChunkSection` | Billions of them; must be dense array |
+| Block entity (chest, furnace) | Yes | ECS with `BlockEntityPos` component | Sparse, stateful, needs systems |
+| Player | Yes | ECS | Has inventory, position, health, input |
+| Mob (Brigand, chicken) | Yes | ECS | AI, physics, health, drops |
+| Dropped item | Yes | ECS | Position, velocity, despawn timer |
+| Projectile (arrow) | Yes | ECS | Position, velocity, damage, lifetime |
+| Particle | No | Particle system (renderer-owned) | Visual only, no game state |
+| Vehicle / minecart | Yes | ECS | Physics, passengers, rail pathfinding |
+
+### 5.4 Core Components
+
+```rust
+// Spatial
+pub struct Position(pub DVec3);       // double precision for large worlds
+pub struct Velocity(pub Vec3);
+pub struct Orientation { pub yaw: f32, pub pitch: f32 }
+pub struct BoundingBox(pub Aabb);
+
+// Identity
+pub struct EntityKind(pub u16);       // brigand, chicken, arrow, etc.
+pub struct PlayerId(pub u64);
+pub struct DisplayName(pub String);
+
+// Gameplay
+pub struct Health { pub current: f32, pub max: f32 }
+pub struct Inventory { pub slots: Vec<ItemStack> }
+pub struct AiBehavior { pub tree: BehaviorTreeId }
+
+// Block entity
+pub struct BlockEntityPos(pub BlockPos);
+pub struct ChestContents { pub items: [Option<ItemStack>; 27] }
+pub struct FurnaceState { pub fuel: f32, pub progress: f32 }
+
+// Lifetime
+pub struct DespawnTimer { pub ticks_remaining: u32 }
+pub struct JustSpawned; // marker component, removed after first tick
+```
+
+### 5.5 Core Systems (execution order)
+
+```
+1. InputSystem          — apply player inputs to velocity/actions
+2. AiSystem             — mob decision making (reads world state, writes intents)
+3. PhysicsSystem        — integrate velocity, resolve collisions with voxel geometry
+4. BlockUpdateSystem    — process block tick queue (fluid flow, plant growth)
+5. RedstoneSystem       — signal propagation (if applicable)
+6. CombatSystem         — damage resolution, knockback
+7. ItemPickupSystem     — check player-item overlap, transfer to inventory
+8. DespawnSystem        — remove expired entities
+9. ChunkLoadSystem      — load/unload chunks based on player positions
+10. PluginTickSystem    — invoke plugin tick callbacks
+11. SnapshotSystem      — capture delta state for network broadcast
+```
+
+---
+
+## 6. Memory Model
+
+### 6.1 Chunk Data Structure
+
+A chunk covers a 16x16 column of the world, divided into 16x16x16 sections vertically. The world height is 384 blocks (-64 to +319), yielding 24 sections per chunk.
+
+Each section uses a **paletted container** — the same approach Minecraft uses, proven efficient for voxel data:
+
+```rust
+pub struct ChunkSection {
+    /// Block state storage. Never None for loaded sections (air sections store a single-entry palette).
+    pub blocks: PalettedContainer<BlockId>,
+    /// Biome storage. 4x4x4 resolution (64 entries per section).
+    pub biomes: PalettedContainer<BiomeId>,
+    /// Block light levels. Nibble array (4 bits per block = 2048 bytes).
+    pub block_light: NibbleArray,
+    /// Sky light levels. Nibble array.
+    pub sky_light: NibbleArray,
+    /// Number of non-air blocks. Used for fast empty-section checks.
+    pub non_air_count: u16,
+}
+
+pub struct PalettedContainer<T: Copy + Eq> {
+    /// Maps indices (0..N) to actual values.
+    palette: SmallVec<[T; 4]>,
+    /// Bit-packed array of palette indices. Bits-per-entry scales with palette size.
+    /// 1 entry for single-value sections (0 bits, no storage needed).
+    /// 4 bits per entry for palettes up to 16.
+    /// 8 bits per entry for palettes up to 256.
+    /// Direct mapping (no palette) above 256 unique values — use ceil(log2(TOTAL_BLOCK_TYPES)) bits.
+    data: BitPackedArray,
+}
+```
+
+**Memory per section:**
+- Single-value (all air, all stone): 0 bytes data + ~8 bytes palette = ~8 bytes
+- Typical surface section (5-10 unique blocks): 4 bits * 4096 = 2048 bytes + palette
+- Complex section (many block states): 8 bits * 4096 = 4096 bytes + palette
+- Light data: 2 * 2048 = 4096 bytes
+
+**Memory per chunk (24 sections):** Roughly 50-150 KB for a typical overworld chunk including light data. Subterranean all-stone sections compress to near zero.
+
+### 6.2 Chunk Pooling and Arena Allocation
+
+Chunks are frequently allocated (entering render distance) and deallocated (leaving render distance). Naive `Box<Chunk>` allocation would thrash the global allocator.
+
+**Strategy: chunk pool with arena-allocated sections.**
+
+```rust
+pub struct ChunkPool {
+    /// Pre-allocated chunk shells, recycled on unload.
+    free_chunks: Mutex<Vec<Box<Chunk>>>,
+    /// Section data arena. Allocates contiguous 4KB blocks for section data.
+    section_arena: Arena,
+    /// High-water mark. Pool grows but never shrinks during runtime.
+    capacity: AtomicUsize,
+}
+
+impl ChunkPool {
+    pub fn acquire(&self) -> Box<Chunk> {
+        self.free_chunks.lock().pop().unwrap_or_else(|| {
+            self.capacity.fetch_add(1, Ordering::Relaxed);
+            Box::new(Chunk::new_empty(&self.section_arena))
+        })
+    }
+
+    pub fn release(&self, mut chunk: Box<Chunk>) {
+        chunk.clear(); // Reset to empty, return section memory to arena
+        self.free_chunks.lock().push(chunk);
+    }
+}
+```
+
+The `Arena` is a bump allocator (`bumpalo` crate) that allocates section data in large contiguous regions. When a chunk is released, its section data is returned to the arena's free list. This avoids per-section heap allocation.
+
+### 6.3 World-Level Data Layout
+
+```rust
+pub struct WorldMap {
+    /// Loaded chunks indexed by ChunkPos.
+    /// Using a concurrent hashmap for lock-free reads from multiple threads.
+    chunks: DashMap<ChunkPos, Arc<RwLock<Chunk>>>,
+    /// Chunk pool for allocation recycling.
+    pool: ChunkPool,
+    /// Currently loading chunks (dispatched to worldgen or disk, not yet ready).
+    loading: DashSet<ChunkPos>,
+}
+```
+
+**Why `DashMap`**: The world map is read from the render thread (meshing), the network thread (chunk serialization), and the game thread (simulation). `DashMap` (from the `dashmap` crate) provides sharded concurrent reads without a global lock. Writes (chunk insert/remove) are infrequent relative to reads.
+
+**Why `Arc<RwLock<Chunk>>`**: A chunk may be read by the mesher while the game thread writes a block change. `RwLock` allows concurrent readers. `Arc` allows the render thread to hold a reference to a chunk across frames without blocking the game thread from unloading it.
+
+### 6.4 Zero-Copy Considerations
+
+- **Network receive**: `rkyv` zero-copy deserialization allows reading packet fields directly from the receive buffer without copying into intermediate structs. Used for high-frequency packets (entity updates, player position).
+- **Chunk serialization for network**: chunks are compressed with `lz4_flex` (fast compression, good ratio for voxel data). The compressed bytes are sent directly; no intermediate representation.
+- **Chunk serialization for disk**: same `lz4_flex` compression, written directly to the region file. `rkyv` for the chunk header; raw compressed bytes for section data.
+- **Mesh upload**: vertex data is written into a staging buffer mapped by `wgpu`, then copied to GPU-local memory. No intermediate `Vec` — the mesher writes directly into the mapped buffer when possible.
+
+### 6.5 Memory Budget (Target)
+
+| Component | Budget | Notes |
+|---|---|---|
+| Chunk data (16 view distance) | ~200 MB | ~1,089 chunks * ~150 KB avg |
+| Chunk data (32 view distance) | ~700 MB | ~4,225 chunks * ~150 KB avg |
+| Chunk meshes (GPU) | ~300 MB | Vertex buffers, index buffers |
+| Entity data (ECS) | ~50 MB | 10,000 entities with components |
+| Texture atlas (GPU) | ~16 MB | 256 textures at 16x16 RGBA = 1 MB; mipmaps ~1.3x |
+| Audio buffers | ~50 MB | Loaded sound effects + streaming music |
+| Network buffers | ~32 MB | Ring buffers per connection |
+| **Total (16 VD)** | **~650 MB** | Comfortable on 2GB+ systems |
+| **Total (32 VD)** | **~1.15 GB** | Needs 4GB+ systems |
+
+---
+
+## 7. Threading Model
+
+### 7.1 Thread Layout
+
+```mermaid
+graph TB
+    subgraph MainThread["Main Thread"]
+        WE["Window Event Loop (winit)"]
+        Input["Input Processing"]
+        ClientLogic["Client Logic + Prediction"]
+        EguiFrame["UI Frame (egui)"]
+        RenderSubmit["Render Submission (wgpu)"]
+    end
+
+    subgraph GameThread["Game Thread (server tick)"]
+        Tick["Server Tick Loop"]
+        ECS_Systems["ECS Systems"]
+        PluginTick["Plugin Tick"]
+    end
+
+    subgraph NetThread["Network Thread"]
+        Recv["Packet Receive"]
+        Send["Packet Send"]
+        Encrypt["Encrypt/Decrypt"]
+    end
+
+    subgraph WorkerPool["Worker Pool (rayon, N = num_cpus - 2)"]
+        Mesh1["Chunk Mesher"]
+        Mesh2["Chunk Mesher"]
+        WG1["World Gen"]
+        WG2["World Gen"]
+        Light["Light Propagation"]
+        Compress["Chunk Compression"]
+    end
+
+    subgraph AsyncRuntime["Async Runtime (tokio, 2 threads)"]
+        DiskIO["Disk I/O"]
+        HTTP["HTTP Client (asset download)"]
+        Metrics["Metrics Export"]
+    end
+
+    MainThread -->|"Input commands"| GameThread
+    GameThread -->|"State snapshots"| MainThread
+    NetThread -->|"Decoded packets"| GameThread
+    GameThread -->|"Outbound packets"| NetThread
+    GameThread -->|"Chunk gen requests"| WorkerPool
+    WorkerPool -->|"Generated chunks"| GameThread
+    MainThread -->|"Mesh requests"| WorkerPool
+    WorkerPool -->|"Completed meshes"| MainThread
+    GameThread -->|"Save/load"| AsyncRuntime
+```
+
+### 7.2 Thread Responsibilities
+
+| Thread | Affinity | Responsibility | Communication |
+|---|---|---|---|
+| **Main** | Pinned to OS main thread (required by windowing APIs on macOS) | Window events, input, client logic, render submission, UI | Channels to/from game thread |
+| **Game** | Dedicated thread | Server tick loop, ECS system execution, plugin dispatch | Channels to/from main, net, workers |
+| **Network** | Dedicated thread | Socket polling (`mio` for epoll/kqueue), packet encode/decode, encryption | Lock-free SPSC queues to/from game thread |
+| **Worker pool** | `rayon` thread pool, N = `num_cpus() - 2` (min 2) | Chunk meshing, world generation, light propagation, compression | Job queues (crossbeam unbounded channels) |
+| **Async I/O** | `tokio` runtime, 2 threads | Disk reads/writes, HTTP requests, metrics export | `tokio::sync::mpsc` channels |
+
+### 7.3 Communication Patterns
+
+**Game thread <-> Main thread**: Bounded `crossbeam` channels. The game thread sends `ServerToClientEvent` (entity updates, block changes, chat). The main thread sends `ClientToServerEvent` (player input, chunk mesh requests).
+
+**Game thread <-> Network thread**: Lock-free SPSC ring buffers (`rtrb` crate). One ring for inbound packets, one for outbound. The network thread is the producer for inbound and consumer for outbound. This avoids any mutex contention on the hot path.
+
+**Game thread -> Worker pool**: Unbounded `crossbeam` channel of `WorkerJob` enums. Workers pull jobs, execute, and push results to a results channel that the game thread drains each tick.
+
+```rust
+pub enum WorkerJob {
+    GenerateChunk { pos: ChunkPos, seed: u64 },
+    MeshChunk { pos: ChunkPos, chunk: Arc<Chunk>, neighbors: ChunkNeighbors },
+    PropagateLighting { pos: ChunkPos, chunk: Arc<RwLock<Chunk>> },
+    CompressChunk { pos: ChunkPos, data: Vec<u8> },
+}
+
+pub enum WorkerResult {
+    ChunkGenerated { pos: ChunkPos, chunk: Box<Chunk> },
+    ChunkMeshed { pos: ChunkPos, mesh: ChunkMesh },
+    LightingComplete { pos: ChunkPos },
+    ChunkCompressed { pos: ChunkPos, compressed: Vec<u8> },
+}
+```
+
+### 7.4 Headless Server Threading
+
+The headless dedicated server has no main thread rendering constraints. The game thread IS the main thread. The thread layout simplifies:
+
+```
+Main/Game Thread — tick loop, ECS, plugins
+Network Thread   — socket I/O
+Worker Pool      — world gen, compression, lighting (no meshing)
+Async I/O        — persistence, metrics
+```
+
+No render thread. No mesh workers. The worker pool is smaller and focused on generation and persistence.
+
+### 7.5 WASM Threading
+
+WASM currently runs single-threaded. The entire client frame loop runs on the browser's main thread via `requestAnimationFrame`. Chunk meshing, world gen, and other heavy work are NOT done on the WASM client — the server handles generation and streams chunk data; meshing is done incrementally (a few sections per frame) with a time budget per frame (2ms cap) to avoid jank.
+
+When browser support for `SharedArrayBuffer` + WASM threads matures, the meshing work can move to Web Workers. The architecture is ready for this: the `WorkerJob`/`WorkerResult` pattern maps directly to Web Worker message passing.
+
+---
+
+## 8. Plugin Architecture
+
+### 8.1 Runtime: WASM (wasmtime)
+
+Plugins are compiled to WASM and executed in a sandboxed `wasmtime` runtime on the server. This provides:
+
+- **Memory safety**: a plugin cannot corrupt engine memory.
+- **CPU safety**: `wasmtime` fuel metering limits CPU per tick per plugin.
+- **Determinism**: WASM execution is deterministic; same inputs = same outputs.
+- **Language agnostic**: plugins can be written in Rust, C, AssemblyScript, or anything that compiles to WASM.
+- **Hot-reloading**: swap a plugin WASM module without restarting the server.
+
+### 8.2 Capability-Based Security
+
+Plugins do not get blanket access to the engine. They declare capabilities in a manifest, and the server operator grants or denies them.
+
+```toml
+# plugin.toml — plugin manifest
+[plugin]
+name = "bitcoin-rewards"
+version = "1.0.0"
+authors = ["Genesis Team"]
+
+[capabilities]
+block_registry = true       # Can register new block types
+item_registry = true        # Can register new item types
+recipe_registry = true      # Can register crafting recipes
+entity_spawn = false        # Cannot spawn entities directly
+player_inventory = true     # Can read/modify player inventories
+network_http = true         # Can make outbound HTTP requests (to LNbits)
+world_read = true           # Can read block data
+world_write = false         # Cannot modify blocks directly
+filesystem = false          # No filesystem access
+```
+
+The engine enforces capabilities by only linking the corresponding host functions into the WASM instance. If `entity_spawn = false`, the `spawn_entity` host function is simply not present in the WASM import table — calling it is a link-time error, not a runtime check.
+
+### 8.3 Host API (Engine -> Plugin)
+
+The plugin API is defined using the WASM Component Model (`wit-bindgen`). This generates type-safe bindings for both the host (Rust) and guest (any language).
+
+```wit
+// genesis-plugin.wit — the interface plugins consume
+
+interface genesis-api {
+    // Block registry
+    register-block: func(id: string, properties: block-properties) -> result<block-id, error>
+    register-item: func(id: string, properties: item-properties) -> result<item-id, error>
+    register-recipe: func(recipe: recipe-definition) -> result<recipe-id, error>
+
+    // World access (if capability granted)
+    get-block: func(x: s32, y: s32, z: s32) -> block-id
+    set-block: func(x: s32, y: s32, z: s32, block: block-id) -> result<_, error>
+
+    // Player access (if capability granted)
+    get-player-inventory: func(player: player-id) -> list<item-stack>
+    set-player-inventory-slot: func(player: player-id, slot: u32, item: item-stack) -> result<_, error>
+    send-player-message: func(player: player-id, message: string)
+
+    // HTTP (if capability granted, subject to allowlist)
+    http-request: func(request: http-request) -> result<http-response, error>
+
+    // Logging (always available)
+    log: func(level: log-level, message: string)
+}
+```
+
+### 8.4 Event Hooks (Plugin -> Engine)
+
+Plugins export functions that the engine calls at specific points:
+
+```wit
+// genesis-plugin-exports.wit — what plugins export
+
+interface genesis-plugin {
+    // Lifecycle
+    on-init: func()
+    on-shutdown: func()
+    on-tick: func(tick: u64)
+
+    // Block events
+    on-block-place: func(player: player-id, pos: block-pos, block: block-id) -> block-event-result
+    on-block-break: func(player: player-id, pos: block-pos, block: block-id) -> block-event-result
+
+    // Player events
+    on-player-join: func(player: player-id)
+    on-player-leave: func(player: player-id)
+    on-player-chat: func(player: player-id, message: string) -> chat-event-result
+
+    // Item events
+    on-item-use: func(player: player-id, item: item-id, target: use-target) -> item-event-result
+}
+
+enum block-event-result { allow, deny, modify(block-id) }
+enum chat-event-result { allow, deny, modify(string) }
+enum item-event-result { allow, deny }
+```
+
+### 8.5 Resource Limits
+
+| Resource | Default Limit | Configurable |
+|---|---|---|
+| Memory per plugin | 64 MB | Yes |
+| Fuel per tick (CPU) | 100,000 units (~1ms on modern hardware) | Yes |
+| HTTP requests per tick | 1 | Yes |
+| HTTP request timeout | 5 seconds | Yes |
+| HTTP domain allowlist | empty (none allowed) | Yes |
+| Maximum plugins per server | 64 | Yes |
+| Total plugin tick budget | 10ms (20% of tick) | Yes |
+
+If a plugin exhausts its fuel, the tick callback is interrupted and a warning is logged. If it exceeds fuel 10 times in 60 seconds, it is disabled and the operator is notified.
+
+---
+
+## 9. Configuration System
+
+### 9.1 Configuration Layers
+
+Configuration is layered, with later layers overriding earlier ones:
+
+```
+1. Compiled defaults (in code)
+2. Config file (TOML)
+3. Environment variables (GENESIS_ prefix)
+4. Command-line arguments
+```
+
+All configuration is parsed at startup into strongly-typed Rust structs using `serde` + `toml`. Environment variables use `GENESIS_` prefix with double-underscore for nesting (e.g., `GENESIS_SERVER__TICK_RATE=20`).
+
+### 9.2 Server Configuration
+
+```toml
+# server.toml
+
+[server]
+name = "My Genesis Server"
+bind_address = "0.0.0.0:25400"
+max_players = 100
+tick_rate = 20                    # startup-only
+view_distance = 16                # runtime-changeable
+simulation_distance = 12          # runtime-changeable
+motd = "Welcome to Axe'n'Stax"
+
+[server.rcon]
+enabled = false
+password = ""                     # required if enabled
+bind_address = "127.0.0.1:25401"
+
+[world]
+name = "overworld"
+seed = 0                          # 0 = random, startup-only
+generator = "default"             # startup-only
+save_interval_seconds = 300       # runtime-changeable
+world_border_radius = 10000       # runtime-changeable
+
+[world.rules]
+pvp = true                        # runtime-changeable
+mob_spawning = true               # runtime-changeable
+daylight_cycle = true             # runtime-changeable
+tick_speed = 3                    # runtime-changeable (random block tick speed)
+
+[network]
+compression_threshold = 256       # bytes; packets larger than this are compressed
+max_packet_size = 2097152         # 2 MB
+timeout_seconds = 30
+rate_limit_packets_per_second = 500
+
+[persistence]
+backend = "region_file"           # "region_file" or "s3"
+path = "./worlds"                 # local path for region_file backend
+snapshot_interval_minutes = 60
+snapshot_keep_count = 24
+
+[persistence.s3]                  # only used if backend = "s3"
+endpoint = ""
+bucket = ""
+region = ""
+access_key_env = "AWS_ACCESS_KEY_ID"
+secret_key_env = "AWS_SECRET_ACCESS_KEY"
+
+[plugins]
+directory = "./plugins"
+enabled = ["core-gameplay"]       # startup-only (plugins load at boot)
+
+[bitcoin]
+enabled = false                   # startup-only
+lnbits_url = ""
+lnbits_api_key_env = "LNBITS_API_KEY"
+
+[logging]
+level = "info"                    # runtime-changeable
+format = "json"                   # "json" or "pretty"
+file = ""                         # empty = stdout only
+```
+
+### 9.3 Client Configuration
+
+```toml
+# client.toml
+
+[video]
+vsync = true
+render_distance = 16              # runtime-changeable
+fov = 70                          # runtime-changeable
+fullscreen = false                # runtime-changeable
+resolution = [1920, 1080]
+gui_scale = 2                     # runtime-changeable
+max_fps = 0                       # 0 = unlimited
+
+[audio]
+master_volume = 1.0               # runtime-changeable
+music_volume = 0.5                # runtime-changeable
+sfx_volume = 1.0                  # runtime-changeable
+
+[controls]
+mouse_sensitivity = 0.5           # runtime-changeable
+invert_y = false                  # runtime-changeable
+
+[controls.keybinds]
+forward = "W"
+backward = "S"
+left = "A"
+right = "D"
+jump = "Space"
+sneak = "LShift"
+sprint = "LControl"
+inventory = "E"
+chat = "T"
+command = "/"
+debug = "F3"
+
+[network]
+server_address = ""
+player_name = "Steve"
+```
+
+### 9.4 Runtime vs Startup-Only
+
+The distinction matters for operations:
+
+- **Startup-only**: changing requires server restart. These are values that fundamentally alter initialization (seed, tick rate, storage backend, plugin list, Bitcoin toggle).
+- **Runtime-changeable**: can be changed via RCON command, admin UI, or config reload signal (`SIGHUP`). The server watches for changes and hot-applies them. Examples: view distance, game rules, log level.
+
+Runtime-changeable settings use `Arc<ArcSwap<Config>>` (from the `arc-swap` crate) for lock-free reads on the game thread with occasional writes from the config reload path.
+
+---
+
+## 10. Error Handling and Logging
+
+### 10.1 Error Philosophy
+
+- **Server must not crash on player input.** All packet parsing, block interactions, and plugin calls are wrapped in error handling. A malformed packet disconnects one player, not the server.
+- **Server may crash on data corruption.** If chunk data fails integrity checks on load, the server logs the error and refuses to load that chunk (returning bedrock/void) rather than propagating corrupt data. Operator is alerted.
+- **Client prefers graceful degradation.** Missing texture? Use magenta checkerboard. Audio device lost? Continue without sound. GPU error? Log and attempt recovery; if unrecoverable, exit cleanly.
+
+### 10.2 Error Types
+
+```rust
+/// Top-level engine error. Uses `thiserror` for derive.
+#[derive(Debug, thiserror::Error)]
+pub enum GenesisError {
+    #[error("network error: {0}")]
+    Network(#[from] NetworkError),
+
+    #[error("world error: {0}")]
+    World(#[from] WorldError),
+
+    #[error("persistence error: {0}")]
+    Persistence(#[from] PersistenceError),
+
+    #[error("plugin error in '{plugin}': {message}")]
+    Plugin { plugin: String, message: String },
+
+    #[error("configuration error: {0}")]
+    Config(#[from] ConfigError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NetworkError {
+    #[error("connection timeout for peer {peer_id}")]
+    Timeout { peer_id: PeerId },
+
+    #[error("malformed packet from {peer_id}: {reason}")]
+    MalformedPacket { peer_id: PeerId, reason: String },
+
+    #[error("authentication failed for {peer_id}")]
+    AuthFailed { peer_id: PeerId },
+
+    #[error("transport error: {0}")]
+    Transport(#[source] std::io::Error),
+}
+```
+
+### 10.3 Structured Logging
+
+Uses `tracing` crate (not `log`) for structured, span-based logging. Every log line carries structured fields that are machine-parseable.
+
+```rust
+use tracing::{info, warn, error, instrument, span, Level};
+
+#[instrument(skip(world), fields(chunk = %pos))]
+fn load_chunk(world: &mut WorldMap, pos: ChunkPos) -> Result<(), WorldError> {
+    let _span = span!(Level::DEBUG, "chunk_load", %pos).entered();
+
+    match world.storage.load_chunk(pos) {
+        Ok(Some(chunk)) => {
+            info!(non_air = chunk.non_air_count(), "chunk loaded from disk");
+            world.insert_chunk(pos, chunk);
+            Ok(())
+        }
+        Ok(None) => {
+            info!("chunk not on disk, dispatching worldgen");
+            world.request_generation(pos);
+            Ok(())
+        }
+        Err(e) => {
+            error!(error = %e, "failed to load chunk, serving void");
+            Err(WorldError::LoadFailed { pos, source: e })
+        }
+    }
+}
+```
+
+### 10.4 Log Output
+
+| Environment | Output Format | Destination |
+|---|---|---|
+| Development | Pretty-printed, colored, with span context | stderr |
+| Production (Docker/K8s) | JSON (one object per line) | stdout (collected by fluentd/vector) |
+| Single-binary personal | Pretty-printed | stderr + optional file |
+
+Configuration:
+```rust
+// Uses tracing-subscriber with EnvFilter
+fn init_logging(config: &LogConfig) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&config.level));
+
+    match config.format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_target(true)
+                .with_span_events(FmtSpan::CLOSE)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .pretty()
+                .with_env_filter(filter)
+                .init();
+        }
+    }
+}
+```
+
+### 10.5 Metrics
+
+The server exports Prometheus-compatible metrics via an HTTP endpoint (`/metrics`). Key metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `genesis_tick_duration_seconds` | Histogram | Time taken per server tick |
+| `genesis_tick_overrun_total` | Counter | Number of ticks that exceeded budget |
+| `genesis_players_connected` | Gauge | Current connected player count |
+| `genesis_chunks_loaded` | Gauge | Currently loaded chunks |
+| `genesis_entities_count` | Gauge | Total ECS entities |
+| `genesis_network_bytes_sent_total` | Counter | Total bytes sent |
+| `genesis_network_bytes_recv_total` | Counter | Total bytes received |
+| `genesis_worldgen_queue_depth` | Gauge | Pending worldgen jobs |
+| `genesis_plugin_fuel_consumed` | Counter per plugin | WASM fuel consumed |
+| `genesis_memory_chunks_bytes` | Gauge | Memory used by chunk data |
+
+Uses the `metrics` crate with `metrics-exporter-prometheus` as the backend.
+
+### 10.6 Crash Reporting
+
+On panic, the server:
+1. Catches the panic via a custom panic hook (`std::panic::set_hook`).
+2. Logs the panic with full backtrace at `error` level.
+3. Attempts a graceful save of all loaded chunks (best-effort, 5-second timeout).
+4. Flushes log buffers.
+5. Exits with a non-zero status code.
+
+In Kubernetes, the pod restarts automatically. The crash log is captured by the cluster logging pipeline.
+
+---
+
+## 11. Asset Pipeline
+
+### 11.1 Asset Types
+
+| Asset Type | Format | Source | Hot-Reload (Dev) |
+|---|---|---|---|
+| Block textures | PNG, 16x16 (or any power-of-two) | Disk or network | Yes |
+| Entity textures | PNG | Disk or network | Yes |
+| Sound effects | OGG Vorbis | Disk or network | Yes |
+| Music | OGG Vorbis (streamed) | Disk or network | No (restart) |
+| Block models | Custom JSON format | Disk or network | Yes |
+| UI textures | PNG | Disk or network | Yes |
+| Shaders | WGSL (wgpu native shader language) | Embedded in binary | Dev: file watch |
+| Plugin WASM | .wasm | Disk | Server restart |
+| Locale strings | TOML | Disk | Yes |
+
+### 11.2 Asset Loading Pipeline
+
+```mermaid
+flowchart LR
+    subgraph Sources["Asset Sources (priority order)"]
+        Disk["Local Disk\n(resource packs)"]
+        Server["Server Download\n(on connect)"]
+        CDN["CDN\n(content-addressed)"]
+    end
+
+    subgraph Loading["Asset Loading"]
+        Discover["Discover & Enumerate"]
+        Hash["Content Hash\n(BLAKE3)"]
+        Cache["Local Cache Check\n(~/.genesis/cache/)"]
+        Load["Load Raw Bytes"]
+        Decode["Decode\n(PNG decode, OGG decode)"]
+    end
+
+    subgraph Processing["GPU Processing"]
+        Atlas["Atlas Builder\n(pack textures into atlas)"]
+        Upload["GPU Upload\n(wgpu texture/buffer)"]
+        MipMap["Generate Mipmaps"]
+    end
+
+    subgraph Runtime["Runtime"]
+        Registry["Asset Registry\n(name -> GPU handle)"]
+    end
+
+    Disk --> Discover
+    Server --> Discover
+    CDN --> Discover
+    Discover --> Hash
+    Hash --> Cache
+    Cache -->|Hit| Decode
+    Cache -->|Miss| Load --> Decode
+    Decode --> Atlas
+    Atlas --> Upload --> MipMap --> Registry
+```
+
+### 11.3 Content-Addressed Caching
+
+Every asset is identified by its BLAKE3 hash (32 bytes, fast to compute). The cache directory stores assets as `~/.genesis/cache/{hash_hex[0..2]}/{hash_hex}.blob`. This provides:
+
+- **Deduplication**: identical textures across resource packs are stored once.
+- **Integrity**: corrupted cache entries are detected by hash mismatch and re-downloaded.
+- **CDN-friendly**: the server sends a manifest of `(asset_name, blake3_hash, size)` on connect. The client checks its local cache, then downloads missing assets from the server or a CDN, addressed by hash.
+
+```rust
+pub struct AssetManifest {
+    pub entries: Vec<AssetEntry>,
+}
+
+pub struct AssetEntry {
+    pub path: String,           // e.g., "textures/blocks/stone.png"
+    pub hash: [u8; 32],         // BLAKE3 hash
+    pub size: u64,              // bytes
+}
+
+pub struct AssetCache {
+    root: PathBuf,              // ~/.genesis/cache/
+}
+
+impl AssetCache {
+    pub fn get(&self, hash: &[u8; 32]) -> Option<Vec<u8>> { /* ... */ }
+    pub fn put(&self, hash: &[u8; 32], data: &[u8]) -> Result<()> { /* ... */ }
+    pub fn has(&self, hash: &[u8; 32]) -> bool { /* ... */ }
+}
+```
+
+### 11.4 Texture Atlas Construction
+
+The renderer builds a texture atlas at runtime from individual texture files. This is required because:
+- Resource packs can change texture resolution (16x16, 32x32, 64x64).
+- Plugins can add new block textures.
+- The atlas must be rebuilt when resource packs change.
+
+**Atlas algorithm:**
+1. Collect all block face textures. Pad each to the atlas tile size (max texture resolution in the pack).
+2. Pack into a square power-of-two texture using a simple shelf-packing algorithm.
+3. Generate mipmaps (important: use per-tile mipmap generation to avoid bleeding between tiles at lower mip levels, or use texture array instead of atlas).
+4. Upload to GPU as a 2D texture array (one layer per texture) rather than a traditional atlas. This avoids UV bleeding entirely and simplifies shader logic.
+
+**Decision: Use a 2D texture array, not a packed atlas.** Each block texture is one layer in a `wgpu::TextureViewDimension::D2Array`. The vertex data stores a texture layer index (u16) instead of UV coordinates within an atlas. This eliminates mipmap bleeding, simplifies the shader, and makes adding new textures trivial (append a layer).
+
+```rust
+pub struct TextureArray {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub tile_size: u32,          // e.g., 16
+    pub layer_count: u32,        // number of unique textures
+    /// Maps texture name (e.g., "stone") to layer index
+    pub name_to_layer: HashMap<String, u32>,
+}
+```
+
+### 11.5 Hot-Reloading (Development)
+
+In development builds (`#[cfg(debug_assertions)]` or a `--dev` flag), the asset pipeline watches the resource pack directory using `notify` (file system watcher crate). When a file changes:
+
+1. The file is re-hashed and re-loaded.
+2. If it is a texture, the corresponding layer in the texture array is re-uploaded.
+3. If it is a block model, affected chunk meshes are invalidated and re-meshed.
+4. If it is a sound, the audio engine reloads the sound buffer.
+
+Changes take effect within one frame (textures) or a few frames (meshes). No restart required.
+
+### 11.6 Server-to-Client Asset Transfer
+
+When a client connects to a server, asset synchronization follows this protocol:
+
+1. Server sends `AssetManifest` containing all required assets with their BLAKE3 hashes.
+2. Client diffs against local cache.
+3. Client requests missing assets by hash.
+4. Server streams requested assets (or redirects to CDN URL if configured).
+5. Client verifies hashes on receipt.
+6. Once all assets are cached, client builds texture array and signals ready.
+
+This ensures clients always have the correct assets for the server's resource pack and plugin content, without trusting the client's local files for multiplayer.
+
+---
+
+## Appendix A: Key Crate Dependencies
+
+| Crate | Version Strategy | Purpose |
+|---|---|---|
+| `wgpu` | Latest stable | GPU abstraction (Vulkan/Metal/DX12/WebGPU) |
+| `winit` | Latest stable | Window creation, input events (native) |
+| `web-sys` | Latest stable | Browser API bindings (WASM) |
+| `tokio` | 1.x | Async runtime for I/O (server, native client) |
+| `hecs` | Latest stable | ECS entity/component storage |
+| `rayon` | 1.x | Parallel computation (worker pool) |
+| `crossbeam` | Latest stable | Lock-free channels, concurrent data structures |
+| `dashmap` | Latest stable | Concurrent hashmap for world chunk storage |
+| `rkyv` | 0.8.x | Zero-copy serialization for network protocol |
+| `lz4_flex` | Latest stable | Fast compression for chunks |
+| `wasmtime` | Latest stable | WASM plugin runtime |
+| `wit-bindgen` | Latest stable | WASM Component Model bindings |
+| `tracing` | 0.1.x | Structured logging |
+| `tracing-subscriber` | 0.3.x | Log output formatting |
+| `metrics` | Latest stable | Metrics collection |
+| `metrics-exporter-prometheus` | Latest stable | Prometheus metrics endpoint |
+| `egui` | Latest stable | Immediate-mode UI |
+| `egui-wgpu` | Latest stable | egui rendering via wgpu |
+| `kira` | Latest stable | Audio engine (native) |
+| `noise` | Latest stable | Coherent noise for worldgen |
+| `glam` | Latest stable | Math library (Vec3, Mat4, etc.) |
+| `thiserror` | Latest stable | Error type derivation |
+| `serde` | 1.x | Serialization framework |
+| `toml` | Latest stable | Config file parsing |
+| `blake3` | Latest stable | Content-addressed asset hashing |
+| `snow` | Latest stable | Noise protocol encryption |
+| `arc-swap` | Latest stable | Lock-free config swapping |
+| `bumpalo` | Latest stable | Arena allocator |
+| `rtrb` | Latest stable | Real-time ring buffer (network thread) |
+| `notify` | Latest stable | Filesystem watcher (dev hot-reload) |
+| `fastrand` | Latest stable | Fast deterministic RNG |
+
+## Appendix B: File and Directory Layout
+
+```
+game/
+  engine/
+    Cargo.toml                    # Workspace root
+    genesis_core/
+      src/
+        lib.rs
+        ecs/                      # ECS runtime
+        voxel/                    # Chunk, PalettedContainer, BlockPos
+        registry/                 # Block, item, biome registries
+        physics/                  # AABB, raycasting, collision
+    genesis_protocol/
+      src/
+        lib.rs
+        packets/                  # Client and server packet definitions
+        codec.rs                  # Encode/decode implementations
+    genesis_net/
+      src/
+        lib.rs
+        transport.rs              # Transport trait
+        udp.rs                    # Native UDP implementation
+        webtransport.rs           # WASM WebTransport implementation
+        local.rs                  # In-process transport
+        reliability.rs            # Reliability layer
+        encryption.rs             # Noise protocol
+    genesis_renderer/
+      src/
+        lib.rs
+        mesh.rs                   # Greedy meshing
+        atlas.rs                  # Texture array construction
+        pipeline.rs               # Render passes
+        camera.rs
+        sky.rs
+        particles.rs
+    genesis_audio/
+      src/
+        lib.rs
+    genesis_ui/
+      src/
+        lib.rs
+        hud.rs
+        inventory.rs
+        chat.rs
+        menus.rs
+    genesis_worldgen/
+      src/
+        lib.rs
+        terrain.rs
+        biomes.rs
+        structures.rs
+        lighting.rs
+    genesis_persist/
+      src/
+        lib.rs
+        region_file.rs
+        s3.rs
+        player_data.rs
+    genesis_plugins/
+      src/
+        lib.rs
+        runtime.rs                # wasmtime setup
+        api.rs                    # Host functions
+        capabilities.rs           # Permission system
+        fuel.rs                   # Resource metering
+    genesis_client/
+      src/
+        main.rs                   # Native entry point
+        web_main.rs               # WASM entry point
+        app.rs                    # Client state machine
+        prediction.rs             # Client-side prediction
+        interpolation.rs          # Entity interpolation
+        input.rs                  # Input mapping
+    genesis_server/
+      src/
+        main.rs                   # Headless server entry point
+        tick.rs                   # Tick loop
+        session.rs                # Player session management
+        anticheat.rs              # Server-side validation
+        commands.rs               # Console commands
+    genesis_integrated/
+      src/
+        main.rs                   # Single-binary entry point
+```
+
+## Appendix C: Architectural Invariants
+
+These are rules that must never be violated. If a change would violate one of these, the architecture must be revisited.
+
+1. **`genesis_core` has zero platform-specific code.** It must compile on every target without conditional compilation. No `#[cfg(target_arch)]`, no `#[cfg(feature)]`.
+
+2. **The server is authoritative.** The client never unilaterally modifies world state. Client prediction is speculative and always reconciled against the server.
+
+3. **Blocks are not ECS entities.** Voxel data lives in `PalettedContainer` arrays inside `ChunkSection`. The ECS is for sparse, stateful objects only.
+
+4. **Plugins cannot break the server.** A plugin crash, timeout, or fuel exhaustion disables that plugin. The server continues running.
+
+5. **No OpenGL fallback.** The renderer targets `wgpu` only. Systems without Vulkan 1.2, Metal 3, DX12, or WebGPU are not supported.
+
+6. **Network protocol is versioned.** The handshake includes a protocol version. Incompatible clients are rejected with a clear error, not silently desynced.
+
+7. **Configuration is typed.** No `HashMap<String, String>` config bags. Every config value has a Rust type, a default, and validation.
+
+8. **The integrated binary uses the same code paths as client+server.** The only difference is the transport layer (in-process vs network). No special-case logic for "am I the host?"
+
+9. **Chunk data is always compressed on the wire and on disk.** Uncompressed chunks exist only in memory during active simulation.
+
+10. **All crate dependencies must compile to WASM** (for crates used by the client). Server-only crates (persistence, plugins, Bitcoin) are exempt.

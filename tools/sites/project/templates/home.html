@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Axe'n'Stax — Open-Source Voxel Engine</title>
+    <meta name="description" content="Axe'n'Stax is a full-custom, open-source voxel engine in Rust — own the entire stack, self-host from a single binary or a Docker container, built from the ground up. The project, the specs, and how to run your own.">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/marketing.css">
+    <link rel="icon" href="/static/axenstax-icon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+</head>
+<body class="marketing">
+    <nav class="marketing-nav">
+        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <div class="nav-links">
+            <a href="#what">What it is</a>
+            <a href="/built">Built</a>
+            <a href="/roadmap">Roadmap</a>
+            <a href="{{ docs_url }}">Specs</a>
+            <a href="{{ marketing_url }}">Play</a>
+        </div>
+    </nav>
+
+    <header class="hero hero-marketing">
+        <h1>An open-source<br>voxel engine.<br>Built from scratch.</h1>
+        <p class="tagline">Axe'n'Stax is a full-custom voxel platform in Rust on wgpu — no inherited engine, no ceilings. Self-hostable from a single binary or a Docker container: you own the entire stack and set the rules that run on it. Bitcoin is an optional layer, never a requirement.</p>
+        <div class="cta-row">
+            <a href="{{ docs_url }}" class="cta cta-large">Read the specs &rarr;</a>
+            {% if source_url %}
+            <a href="{{ source_url }}" class="cta cta-large" target="_blank" rel="noopener">Source on GitHub &rarr;</a>
+            {% else %}
+            <span class="cta cta-large" style="opacity:0.55; cursor:default;">Source opening soon</span>
+            {% endif %}
+        </div>
+        <p class="hint">Want to just play instead? <a href="{{ marketing_url }}">Axe'n'Stax.com &rarr;</a></p>
+    </header>
+
+    <!-- Momentum band — the from-the-ground-up proof, links to /built -->
+    <section style="max-width:1000px;margin:0 auto;padding:0 2rem 1rem;">
+        <div style="background:#11172a;border:1px solid #23304b;border-radius:12px;padding:1.6rem 1.8rem;text-align:center;">
+            <p style="margin:0 0 0.8rem;color:#c5c8d4;">Not a mod, not a fork — a custom engine <em>and</em> a from-scratch identity, payments and save stack beneath it. In about six months:</p>
+            <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:0.6rem 1.2rem;margin-bottom:1rem;">
+                <strong style="color:#d4a044;">2,100+ commits</strong>
+                <span style="color:#5b6075;">·</span>
+                <strong style="color:#d4a044;">230k+ lines of Rust</strong>
+                <span style="color:#5b6075;">·</span>
+                <strong style="color:#d4a044;">4,300+ tests</strong>
+            </div>
+            <a href="/built" class="cta">See everything that's shipped &rarr;</a>
+        </div>
+    </section>
+
+    <section id="what" class="features-grid">
+        <div class="feature-card">
+            <h3>Full custom build</h3>
+            <p>No Luanti, no Veloren — own the entire stack. Rust compiles to WASM for the browser and native for desktop. One renderer (wgpu) across WebGPU, Vulkan, Metal, DX12.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Self-hostable</h3>
+            <p>Run a single binary on your laptop, or a Docker container today. You run it yourself; there is no AxeNStax-operated hosting. Same engine, same world format.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Your server, your rules</h3>
+            <p>Operators set their own economy and moderation — no licence dictating what you build or how you monetise. Proof-of-play surfaces a real SHA-256 hash on every strike, driving rare drops today; a parent-controlled Lightning payout path for servers that opt in is designed, not yet switched on. All optional — the engine runs perfectly without any of it.</p>
+        </div>
+        <div class="feature-card">
+            <h3>Specs as source of truth</h3>
+            <p>Eight deep specs — engine, world format, rendering, networking, gameplay, Bitcoin, platform, security — plus ADRs and a public roadmap. The engine is rebuilt from these.</p>
+        </div>
+    </section>
+
+    <section id="build" class="cta-block">
+        <h2>Build &amp; host</h2>
+        <p>The specs, ADRs, and roadmap live on the docs site. Self-hosting and the server binary live there too. The source is opening soon — until then, the specs are the place to start.</p>
+        <div class="cta-row">
+            <a href="{{ docs_url }}" class="cta cta-large">Specs &amp; ADRs &rarr;</a>
+            <a href="{{ docs_url }}/roadmap" class="cta cta-large">Roadmap &rarr;</a>
+        </div>
+    </section>
+
+    <footer class="marketing-footer">
+        <p>
+            <a href="{{ marketing_url }}">Play</a> ·
+            <a href="/built">Built</a> ·
+            <a href="/roadmap">Roadmap</a> ·
+            <a href="{{ docs_url }}">Specs</a> ·
+            <a href="{{ learn_url }}">Learn</a> ·
+            <a href="{{ wiki_url }}">Wiki</a> ·
+            {% if source_url %}<a href="{{ source_url }}" target="_blank" rel="noopener">Source</a>{% else %}<span style="opacity:0.55;">Source (soon)</span>{% endif %} ·
+            <a href="{{ marketing_url }}/privacy">Privacy</a>
+        </p>
+        <p class="hint">Built by Staxolottle &amp; Axolittle. Open source under the moonshot.</p>
+    </footer>
+</body>
+</html>

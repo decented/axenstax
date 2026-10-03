@@ -1,0 +1,132 @@
+{
+  "kind": "Challenge",
+  "display_name": "Power Plant \u2014 make your own electricity, no switch required",
+  "kit": [
+    {
+      "name": "hand_crank",
+      "count": 1
+    },
+    {
+      "name": "steam_generator",
+      "count": 1
+    },
+    {
+      "name": "battery",
+      "count": 1
+    },
+    {
+      "name": "cable",
+      "count": 32
+    },
+    {
+      "name": "electric_lamp",
+      "count": 2
+    },
+    {
+      "name": "lever",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 3
+          }
+        },
+        {
+          "Action": {
+            "event": "PowerDevice",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "night",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          0
+        ],
+        "block": "electric_lamp"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          1,
+          0
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

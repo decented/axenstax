@@ -1,0 +1,14 @@
+{
+  "name": "axenstax-feedback-tests",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Node test runner for the browser gamestr.js primitives (the lobby mailbox browser code was removed 2026-10-01). Run: npm install && npm test. Not shipped; not in check.sh (which gates the engine). The dev reader has its own tests under tools/feedback-reader/.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "jsdom": "^29.1.1",
+    "nostr-tools": "^2.23.3"
+  }
+}

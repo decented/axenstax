@@ -1,0 +1,131 @@
+{
+  "kind": "Challenge",
+  "display_name": "The Plumber \u2014 carry a pond across the room and fill a dry trough",
+  "kit": [
+    {
+      "name": "bucket",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": "UseBucket",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "UseBucket",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          0
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          2,
+          0,
+          1
+        ],
+        "block": "water"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          0,
+          1
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

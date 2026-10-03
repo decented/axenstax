@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} — Printable</title>
+    <style>
+        /* ─── Shared (screen + print) ───────────────────────────────────── */
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0; padding: 0;
+            font-family: Georgia, "Times New Roman", serif;
+            color: #111; background: #f7f5f0;
+            line-height: 1.45;
+        }
+        main.sheet {
+            max-width: 720px;
+            margin: 24px auto 48px;
+            padding: 32px 40px;
+            background: #fff;
+            border: 1px solid #ddd;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            font-size: 12pt;
+        }
+        main.sheet h1 {
+            font-size: 22pt; color: #14324e;
+            border-bottom: 2px solid #14324e;
+            padding-bottom: 6px; margin: 0 0 12px;
+        }
+        main.sheet h2 {
+            font-size: 16pt; color: #14324e;
+            margin-top: 22pt; margin-bottom: 8pt;
+            border-bottom: 1px solid #cbd;
+        }
+        main.sheet h3 {
+            font-size: 13pt; color: #333;
+            margin-top: 16pt; margin-bottom: 6pt;
+        }
+        main.sheet p { margin: 0 0 8pt; }
+        main.sheet code { font-family: "Courier New", monospace; font-size: 10.5pt; }
+        main.sheet strong { font-weight: bold; }
+        main.sheet ul, main.sheet ol { margin: 4pt 0 8pt; padding-left: 20pt; }
+        main.sheet li { margin: 3pt 0; }
+        main.sheet hr {
+            border: 0; border-top: 1px dashed #999;
+            margin: 12pt 0;
+        }
+
+        /* ─── Real task-list checkboxes (via pymdownx.tasklist) ─────────── */
+        /* Swap the default <input type=checkbox> for a big, square, inked
+           box that's comfortable to tick with a pen. */
+        main.sheet .task-list-item { list-style-type: none; margin-left: -20pt; }
+        main.sheet .task-list-item input[type="checkbox"] {
+            appearance: none; -webkit-appearance: none;
+            width: 14pt; height: 14pt;
+            border: 1.5pt solid #14324e;
+            border-radius: 2pt;
+            margin: 0 8pt 0 0;
+            vertical-align: -3pt;
+            background: #fff;
+        }
+        main.sheet .task-list-item input[type="checkbox"]:checked::after {
+            content: "✓";
+            display: block;
+            font-size: 13pt;
+            line-height: 12pt;
+            text-align: center;
+            color: #14324e;
+            font-family: "Georgia", serif;
+        }
+
+        /* ─── Writing space under every `> Your answer:` blockquote ─────── */
+        main.sheet blockquote {
+            border-left: 3pt solid #d4a044;
+            padding: 4pt 10pt;
+            margin: 6pt 0 10pt;
+            background: #fffceb;
+        }
+        /* The blockquote's first <p> is the "Your answer:" prompt. Everything
+           after it (usually nothing) shows as-is. Give the whole block enough
+           minimum height to write a sentence or two by hand. */
+        main.sheet blockquote { min-height: 3.6cm; }
+
+        /* ─── Print toolbar (hidden when printing) ──────────────────────── */
+        .toolbar {
+            max-width: 720px;
+            margin: 20px auto 0;
+            padding: 8px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: system-ui, sans-serif;
+            font-size: 0.9rem;
+            color: #555;
+        }
+        .toolbar a { color: #14324e; text-decoration: none; }
+        .toolbar a:hover { text-decoration: underline; }
+        .toolbar button {
+            background: #14324e; color: #fff; border: none;
+            padding: 6px 14px; border-radius: 4px;
+            cursor: pointer; font: inherit;
+        }
+        .toolbar button:hover { background: #1d4b76; }
+
+        /* ─── @media print overrides ────────────────────────────────────── */
+        @page {
+            size: A4;
+            margin: 15mm 18mm 18mm 18mm;
+        }
+        @media print {
+            body { background: #fff; }
+            .no-print { display: none !important; }
+            main.sheet {
+                max-width: none;
+                margin: 0; padding: 0;
+                border: none; box-shadow: none;
+                background: transparent;
+            }
+            /* Start every Part on a fresh page. */
+            main.sheet h2 { page-break-before: always; }
+            /* …but don't force a page break before the very first h2 — the
+               title + "What you're testing" + setup should share page 1. */
+            main.sheet h1 + p + h2,
+            main.sheet > h2:first-of-type,
+            main.sheet h1 ~ :not(h2):not(:last-child) + h2.first-run {
+                page-break-before: auto;
+            }
+            /* Keep each question block together on one page where possible. */
+            main.sheet h3, main.sheet h4 { page-break-after: avoid; }
+            main.sheet ul, main.sheet ol, main.sheet p, main.sheet blockquote {
+                page-break-inside: avoid;
+            }
+            /* Ensure blockquotes' reserved writing space prints too. */
+            main.sheet blockquote { min-height: 3.6cm; break-inside: avoid; }
+            /* Ink-saver: drop the cream background behind blockquotes so
+               cheap printers don't flood the page. Border stays. */
+            main.sheet blockquote { background: transparent; }
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar no-print">
+        <a href="/docs/internal">← back to internal docs</a>
+        <span>Printable test sheet — Ctrl+P or</span>
+        <button id="print-btn" type="button">Print this sheet</button>
+    </div>
+    <main class="sheet" id="sheet-root" data-stem="{{ stem }}">
+        {{ content|safe }}
+    </main>
+    <script src="/static/print-sheet.js"></script>
+</body>
+</html>

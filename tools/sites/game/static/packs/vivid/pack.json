@@ -1,0 +1,10 @@
+{
+  "name": "vivid",
+  "description": "Bundled sample pack \u2014 bright solids + animated water.",
+  "version": "1.0.0",
+  "texture_resolution": 16,
+  "authors": [
+    "AxeNStax"
+  ],
+  "license": "CC0-1.0"
+}

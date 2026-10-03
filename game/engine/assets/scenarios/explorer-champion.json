@@ -1,0 +1,166 @@
+{
+  "kind": "Challenge",
+  "display_name": "The Champion \u2014 stand alone against the valley's fiercest raider",
+  "kit": [
+    {
+      "name": "iron_sword",
+      "count": 1
+    },
+    {
+      "name": "bow",
+      "count": 1
+    },
+    {
+      "name": "arrow",
+      "count": 32
+    },
+    {
+      "name": "bread",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "KillMob",
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          7,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          7,
+          0,
+          0
+        ],
+        "mob": "berserker",
+        "count": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,144 @@
+{
+  "kind": "Challenge",
+  "display_name": "Skybox Studio \u2014 raise a little house with walls, a door, and a window",
+  "kit": [
+    {
+      "name": "oak_planks",
+      "count": 128
+    },
+    {
+      "name": "stone",
+      "count": 64
+    },
+    {
+      "name": "glass",
+      "count": 16
+    },
+    {
+      "name": "oak_door",
+      "count": 1
+    },
+    {
+      "name": "sign",
+      "count": 1
+    },
+    {
+      "name": "torch",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "PlaceBlock": {
+          "block": null
+        }
+      },
+      "count": 30
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          -2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "sandstone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          2
+        ],
+        "block": "sandstone"
+      }
+    ]
+  }
+}

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}{{ video.title }}{% endblock %}
+{% block content %}
+
+<a href="/" class="back-link">&larr; Back to list</a>
+
+<h1>{{ video.title }}</h1>
+<p class="video-meta-detail">
+    {{ video.created[:10] }}
+    {% if video.channel %} &middot; {{ video.channel }}{% endif %}
+    {% if video.duration %} &middot; {{ (video.duration / 60) | round(0) | int }} min{% endif %}
+    &middot; <span class="status-badge">{{ video.status }}</span>
+</p>
+
+<!-- Embedded Video -->
+<div class="video-embed">
+    <iframe src="https://www.youtube.com/embed/{{ video.youtube_id }}"
+            frameborder="0" allowfullscreen></iframe>
+</div>
+
+<!-- Transcript -->
+{% if video.transcript %}
+<details class="transcript-section">
+    <summary>Transcript (click to expand)</summary>
+    <div class="transcript-box">{{ video.transcript }}</div>
+</details>
+{% elif video.status not in ['done', 'error'] %}
+<p class="processing-note">Transcript is being processed...</p>
+{% endif %}
+
+<!-- Ideas -->
+{% if video.ideas %}
+<h2>Ideas ({{ video.ideas | length }})</h2>
+
+<form action="/video/{{ video.id }}/vote" method="post">
+
+{% set groq_ideas = video.ideas | selectattr('source', 'equalto', 'Groq') | list %}
+{% set openai_ideas = video.ideas | selectattr('source', 'equalto', 'OpenAI') | list %}
+{% set claude_ideas = video.ideas | selectattr('source', 'equalto', 'Claude') | list %}
+{% set manual_ideas = video.ideas | selectattr('source', 'equalto', 'Manual') | list %}
+{% set first_pass = groq_ideas + openai_ideas %}
+
+{% if first_pass %}
+<h3 class="source-header">[First Pass] — {{ first_pass[0].source }}</h3>
+{% for idea in first_pass %}
+<div class="idea-card vote-{{ idea.vote or 'none' }}">
+    <div class="idea-header">
+        <strong>{{ idea.title }}</strong>
+    </div>
+    <p class="idea-desc">{{ idea.description }}</p>
+    <p class="idea-app"><strong>Application:</strong> {{ idea.application }}</p>
+    <div class="idea-controls">
+        <div class="vote-buttons">
+            <label class="vote-label vote-yes">
+                <input type="radio" name="vote_{{ idea.id }}" value="yes"
+                       {{ 'checked' if idea.vote == 'yes' else '' }}> Yes
+            </label>
+            <label class="vote-label vote-maybe">
+                <input type="radio" name="vote_{{ idea.id }}" value="maybe"
+                       {{ 'checked' if idea.vote == 'maybe' else '' }}> Maybe
+            </label>
+            <label class="vote-label vote-no">
+                <input type="radio" name="vote_{{ idea.id }}" value="no"
+                       {{ 'checked' if idea.vote == 'no' else '' }}> No
+            </label>
+        </div>
+        <input type="text" name="comment_{{ idea.id }}" value="{{ idea.comment }}"
+               placeholder="Add a comment..." class="idea-comment">
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if claude_ideas %}
+<h3 class="source-header">[Second Pass] — Claude</h3>
+{% for idea in claude_ideas %}
+<div class="idea-card vote-{{ idea.vote or 'none' }}">
+    <div class="idea-header">
+        <strong>{{ idea.title }}</strong>
+    </div>
+    <p class="idea-desc">{{ idea.description }}</p>
+    <p class="idea-app"><strong>Application:</strong> {{ idea.application }}</p>
+    <div class="idea-controls">
+        <div class="vote-buttons">
+            <label class="vote-label vote-yes">
+                <input type="radio" name="vote_{{ idea.id }}" value="yes"
+                       {{ 'checked' if idea.vote == 'yes' else '' }}> Yes
+            </label>
+            <label class="vote-label vote-maybe">
+                <input type="radio" name="vote_{{ idea.id }}" value="maybe"
+                       {{ 'checked' if idea.vote == 'maybe' else '' }}> Maybe
+            </label>
+            <label class="vote-label vote-no">
+                <input type="radio" name="vote_{{ idea.id }}" value="no"
+                       {{ 'checked' if idea.vote == 'no' else '' }}> No
+            </label>
+        </div>
+        <input type="text" name="comment_{{ idea.id }}" value="{{ idea.comment }}"
+               placeholder="Add a comment..." class="idea-comment">
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if manual_ideas %}
+<h3 class="source-header">[Manual] — Pasted Analysis</h3>
+{% for idea in manual_ideas %}
+<div class="idea-card vote-{{ idea.vote or 'none' }}">
+    <div class="idea-header">
+        <strong>{{ idea.title }}</strong>
+    </div>
+    <p class="idea-desc">{{ idea.description }}</p>
+    <p class="idea-app"><strong>Application:</strong> {{ idea.application }}</p>
+    <div class="idea-controls">
+        <div class="vote-buttons">
+            <label class="vote-label vote-yes">
+                <input type="radio" name="vote_{{ idea.id }}" value="yes"
+                       {{ 'checked' if idea.vote == 'yes' else '' }}> Yes
+            </label>
+            <label class="vote-label vote-maybe">
+                <input type="radio" name="vote_{{ idea.id }}" value="maybe"
+                       {{ 'checked' if idea.vote == 'maybe' else '' }}> Maybe
+            </label>
+            <label class="vote-label vote-no">
+                <input type="radio" name="vote_{{ idea.id }}" value="no"
+                       {{ 'checked' if idea.vote == 'no' else '' }}> No
+            </label>
+        </div>
+        <input type="text" name="comment_{{ idea.id }}" value="{{ idea.comment }}"
+               placeholder="Add a comment..." class="idea-comment">
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<!-- Manual Claude Analysis -->
+<h3 class="source-header">Manual Analysis</h3>
+<p class="hint">Paste analysis from Claude or another source here.</p>
+<textarea name="manual_analysis" class="manual-analysis-box"
+          placeholder="Paste your Claude analysis here...">{{ video.manual_analysis or '' }}</textarea>
+
+<div class="save-bar">
+    <button type="submit" class="save-btn">Save All</button>
+</div>
+</form>
+
+{% elif video.status == 'done' %}
+<p class="empty-state">No relevant ideas were found in this video.</p>
+{% elif video.status == 'error' %}
+<p class="error-state">Error: {{ video.error or 'Unknown error' }}</p>
+{% else %}
+<p class="processing-note">Processing... ideas will appear here when ready.</p>
+{% endif %}
+
+{% if video.status not in ['done', 'error'] %}
+<script>
+setTimeout(() => location.reload(), 5000);
+</script>
+{% endif %}
+
+{% endblock %}

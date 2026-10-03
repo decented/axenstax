@@ -1,0 +1,183 @@
+name: Native packages (dry run — artifacts only, NO release)
+
+# Builds the native installers on Windows / macOS / Linux and uploads them as CI
+# artifacts. This is a DRY RUN by design: no tag, no GitHub Release, no publish —
+# the hard line from docs/goals/native-build-solo.md (outward publish is owner-gated).
+# Unsigned: the macOS .dmg + Windows installer carry the expected Gatekeeper /
+# SmartScreen warnings until A2 signing (Apple Developer + a Windows cert).
+#
+# Triggers: manual dispatch only. (The `native-build-solo` working branch this
+# used to also trigger on was merged and deleted long ago — that push trigger was
+# dead weight, removed 2026-09-28. The Linux AppImage build is also verifiable
+# locally — see tools/packaging/README.md.)
+
+on:
+  workflow_dispatch:
+    inputs:
+      linux_only:
+        description: "Build Linux only (AppImage + .deb) — skips Windows/macOS runners"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Pick the build matrix from the dispatch input. `matrix` isn't available in a
+  # job-level `if`, so a tiny setup job emits the matrix JSON instead — Linux-only
+  # by default, all three on a push or an explicit linux_only=false dispatch.
+  # Win/macOS aren't in the matrix at all when skipped, so no runner is allocated
+  # for them. (Historical note: this default was originally a private-repo cost
+  # guard — macOS runner minutes billed at 10× — which no longer applies once the
+  # repo is public and Actions minutes are unlimited on all three runner OSes; kept
+  # as the default anyway since a full three-OS matrix is still slower and noisier
+  # than most dispatches need.)
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          LINUX='{"os":"ubuntu-latest","formats":"-f appimage -f deb"}'
+          WIN='{"os":"windows-latest","formats":"-f nsis"}'
+          MAC='{"os":"macos-latest","formats":"-f dmg"}'
+          if [ "${{ inputs.linux_only }}" = "true" ]; then
+            echo 'matrix={"include":['"$LINUX"']}' >> "$GITHUB_OUTPUT"
+            echo "Linux-only matrix (AppImage + .deb)."
+          else
+            echo 'matrix={"include":['"$LINUX"','"$WIN"','"$MAC"']}' >> "$GITHUB_OUTPUT"
+            echo "Full matrix (Linux + Windows + macOS)."
+          fi
+
+  package:
+    needs: setup
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # cargo-packager's -f is a Vec with no value delimiter — each format needs its
+      # OWN -f flag (`-f appimage -f deb`); space-separating makes it read the 2nd as a
+      # subcommand ("unrecognized subcommand 'deb'").
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      # AppImage tooling has no FUSE on CI runners — run it in extract mode instead.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: game/engine
+
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        # libudev-dev: gilrs (gamepad). libasound2-dev: alsa-sys via rodio (audio) —
+        # NOT preinstalled on ubuntu-latest, so the engine release build fails without it.
+        # libfuse2: AppImage tooling.
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libasound2-dev libfuse2
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Build engine (release)
+        working-directory: game/engine
+        run: cargo build --release
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p tools/packaging/staging
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp game/engine/target/release/axenstax-engine.exe tools/packaging/staging/
+          else
+            cp game/engine/target/release/axenstax-engine tools/packaging/staging/
+          fi
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --version 0.9.2 --locked
+
+      - name: Generate THIRD-PARTY-NOTICES.txt
+        # Ships inside every package as a `resources` entry (tools/packaging/packager.toml).
+        # MUST land in tools/packaging/ itself, not the staging dir: cargo-packager
+        # chdirs into the config file's directory before resolving relative
+        # `resources` globs (same reason `icons` in packager.toml is relative to
+        # that directory, not --out-dir). See docs/audits/2026-09-28-pre-public-audit.md §3 A #6.
+        shell: bash
+        working-directory: game/engine
+        run: |
+          cargo about generate \
+            ../../tools/packaging/about.hbs \
+            -c ../../tools/packaging/about.toml \
+            -o ../../tools/packaging/THIRD-PARTY-NOTICES.txt
+
+      - name: Package (${{ matrix.formats }})
+        shell: bash
+        # Retry: the AppImage builder downloads the type2-runtime from GitHub releases,
+        # which intermittently 504s. Everything else is deterministic.
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::packaging attempt $attempt"
+            if cargo packager -c tools/packaging/packager.toml -o tools/packaging/staging ${{ matrix.formats }} --verbose; then
+              echo "::endgroup::"; exit 0
+            fi
+            echo "::endgroup::"; echo "attempt $attempt failed; retrying..."; sleep 10
+          done
+          echo "packaging failed after 3 attempts" >&2; exit 1
+
+      - name: AppImage auto-update — embed zsync update-info + emit .zsync (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same recipe as tools/packaging/build-local.sh (verified locally) +
+          # docs/superpowers/specs/2026-06-18-appimage-auto-update-design.md §4:
+          # re-stamp the freshly-built AppImage with the auto-update URL, which
+          # writes the .upd_info ELF section AND emits the .zsync delta map. We
+          # publish BOTH the versioned AppImage (user download) and the stable
+          # -latest- copy + its .zsync (the in-place upgrade channel).
+          STAGING=tools/packaging/staging
+          SRC=$(find "$STAGING" -maxdepth 3 -name '*_x86_64.AppImage' ! -name '*-latest-*' | head -1)
+          [ -n "$SRC" ] || { echo "::error::no source AppImage to re-stamp"; exit 1; }
+          UPD='zsync|https://docs.axenstax.org/download/axenstax-engine-latest-x86_64.AppImage.zsync'
+          # Pinned + sha256-verified (2026-09-27 audit fix): AppImageKit only ever
+          # publishes appimagetool under the "continuous" tag, which upstream
+          # moves on every build — an unpinned fetch here would run whatever
+          # content sits behind that tag at deploy time, unverified, to repack
+          # the AppImage every Linux player's in-place updater downloads. Pin to
+          # this specific asset's sha256 (last verified 2026-09-27) so a moved or
+          # compromised tag fails loudly instead of silently shipping.
+          APPIMAGETOOL_SHA256=b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2
+          curl -fsSL https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -o appimagetool
+          echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c -
+          chmod +x appimagetool
+          SRC_ABS=$(readlink -f "$SRC"); AT_ABS=$(readlink -f appimagetool)
+          ( cd "$STAGING"
+            rm -rf squashfs-root
+            "$SRC_ABS" --appimage-extract >/dev/null
+            ARCH=x86_64 "$AT_ABS" --appimage-extract-and-run -u "$UPD" squashfs-root axenstax-engine-latest-x86_64.AppImage
+            rm -rf squashfs-root )
+          GOT=$(readelf -p .upd_info "$STAGING/axenstax-engine-latest-x86_64.AppImage" 2>/dev/null | grep -o 'zsync|.*' | head -1 || true)
+          [ "$GOT" = "$UPD" ] && [ -f "$STAGING/axenstax-engine-latest-x86_64.AppImage.zsync" ] \
+            || { echo "::error::auto-update re-stamp failed (upd_info='$GOT')"; exit 1; }
+          echo "auto-update OK — .upd_info embedded + .zsync emitted"
+
+      - name: Collect installers (drop the raw binary)
+        shell: bash
+        run: |
+          rm -f tools/packaging/staging/axenstax-engine tools/packaging/staging/axenstax-engine.exe
+          mkdir -p dist
+          # *.zsync + the -latest- AppImage ride along for the auto-update channel.
+          find tools/packaging/staging -maxdepth 3 \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.zsync' \) \
+            -exec cp {} dist/ \;
+          ls -la dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: axenstax-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error

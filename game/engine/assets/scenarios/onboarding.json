@@ -1,0 +1,155 @@
+{
+  "kind": "Challenge",
+  "display_name": "First Light \u2014 wake up, dig in, and make your very first camp",
+  "kit": [
+    {
+      "name": "oak_planks",
+      "count": 12
+    },
+    {
+      "name": "stick",
+      "count": 8
+    },
+    {
+      "name": "raw_porkchop",
+      "count": 2
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "BreakBlock": {
+                "block": null
+              }
+            },
+            "count": 4
+          }
+        },
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 6
+          }
+        },
+        {
+          "Action": {
+            "event": "CookAtCampfire",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          2,
+          0,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "dirt"
+      },
+      {
+        "at": [
+          2,
+          1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          3,
+          1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "crafting_table"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          1
+        ],
+        "block": "campfire"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "oak_log"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -1
+        ],
+        "block": "oak_log"
+      }
+    ]
+  }
+}

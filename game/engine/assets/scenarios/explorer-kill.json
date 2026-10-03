@@ -1,0 +1,118 @@
+{
+  "kind": "Challenge",
+  "display_name": "Raiders at the Gate \u2014 brigands are storming the wall \u2014 hold the line",
+  "kit": [
+    {
+      "name": "stone_sword",
+      "count": 1
+    },
+    {
+      "name": "bread",
+      "count": 3
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "KillMob",
+      "count": 3
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          1,
+          -2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          2,
+          0,
+          0
+        ],
+        "block": "gate"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          5,
+          0,
+          0
+        ],
+        "mob": "brigand",
+        "count": 3
+      }
+    ]
+  }
+}

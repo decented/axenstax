@@ -1,0 +1,18 @@
+[Unit]
+Description=Axe'n'Stax — docs site (specs/ADRs/roadmap, FastAPI/uvicorn :8095)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/axenstax/tools/sites/docs
+EnvironmentFile=/opt/axenstax/tools/sites/docs/.env
+ExecStart=/opt/axenstax/tools/sites/docs/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

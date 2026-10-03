@@ -1,0 +1,26 @@
+[
+  {
+    "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "display_name": "Mum",
+    "tier": "kin",
+    "is_child": false
+  },
+  {
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "display_name": "Wee Yin",
+    "tier": "kin",
+    "is_child": true
+  },
+  {
+    "pubkey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "display_name": "Pal",
+    "tier": "kith",
+    "is_child": false
+  },
+  {
+    "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+    "display_name": null,
+    "tier": "ken",
+    "is_child": false
+  }
+]

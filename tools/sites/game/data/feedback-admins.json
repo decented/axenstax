@@ -1,0 +1,4 @@
+{
+  "_comment": "One lowercase 64-hex pubkey per entry in `admins`. Reload by restarting the website.",
+  "admins": []
+}

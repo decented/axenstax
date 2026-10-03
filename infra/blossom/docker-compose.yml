@@ -1,0 +1,17 @@
+services:
+  blossom:
+    # Pinned to a release tag (not the moving `:master`) so the config schema
+    # can't shift under a redeploy. Better still, pin a digest once verified:
+    #   docker pull ghcr.io/hzrd149/blossom-server:v2.0.0
+    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/hzrd149/blossom-server:v2.0.0
+    # and replace the tag with that @sha256:... — then re-verify config.yml.
+    image: ghcr.io/hzrd149/blossom-server:v2.0.0
+    container_name: axenstax-blossom
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"      # loopback only; the game site proxies to it
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - blossom-data:/app/data
+volumes:
+  blossom-data:

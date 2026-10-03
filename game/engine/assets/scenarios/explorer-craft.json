@@ -1,0 +1,98 @@
+{
+  "kind": "Challenge",
+  "display_name": "First Workbench \u2014 fell a tree, build a bench, and make your first tools",
+  "kit": [],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": {
+              "BreakBlock": {
+                "block": 7
+              }
+            },
+            "count": 3
+          }
+        },
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 2
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "oak_log"
+      },
+      {
+        "at": [
+          3,
+          1,
+          0
+        ],
+        "block": "oak_log"
+      },
+      {
+        "at": [
+          3,
+          2,
+          0
+        ],
+        "block": "oak_log"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "grass"
+      }
+    ]
+  }
+}

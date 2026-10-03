@@ -1,0 +1,32 @@
+{
+  "kind": "Challenge",
+  "display_name": "Bouncer — build a creature in Rig Studio and set it bouncing",
+  "kit": [
+    {
+      "name": "oak_planks",
+      "count": 16
+    },
+    {
+      "name": "stone",
+      "count": 16
+    },
+    {
+      "name": "oak_log",
+      "count": 16
+    },
+    {
+      "name": "glass",
+      "count": 16
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "SpawnRig",
+      "count": 1
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false
+}

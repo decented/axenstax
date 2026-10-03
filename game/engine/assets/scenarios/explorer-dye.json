@@ -1,0 +1,60 @@
+{
+  "kind": "Challenge",
+  "display_name": "Colour Lab \u2014 mix dyes and paint the world bright",
+  "kit": [
+    {
+      "name": "red_dye",
+      "count": 4
+    },
+    {
+      "name": "blue_dye",
+      "count": 4
+    },
+    {
+      "name": "yellow_dye",
+      "count": 4
+    },
+    {
+      "name": "white_dye",
+      "count": 4
+    },
+    {
+      "name": "papyrus_sheet",
+      "count": 16
+    },
+    {
+      "name": "crafting_table",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "CraftItem",
+      "count": 3
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "stone"
+      }
+    ]
+  }
+}

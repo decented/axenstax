@@ -1,0 +1,75 @@
+# Axe'n'Stax — production reverse-proxy vhosts.
+# Installed at /etc/caddy/conf.d/axenstax.Caddyfile (imported by the main Caddyfile).
+# Six loopback uvicorn services; Caddy auto-provisions Let's Encrypt per hostname
+# on reload. Apps set their own CSP / security headers and handle their own CORS —
+# do NOT add CORS headers here.
+#
+# Audience split: .com = the product (players), .org = the open-source project
+# (builders). See docs/architecture/2026-06-06-domain-and-site-architecture.md.
+#
+# Host -> loopback service map:
+#   axenstax.com        -> marketing  :8096   product front door (pitch, "Play")
+#   play.axenstax.com   -> game       :8094   the game (PWA runtime)
+#   learn.axenstax.com  -> learn      :8098   guided journey (onboarding)
+#   wiki.axenstax.com   -> wiki       :8097   player reference
+#   claim.axenstax.com  -> claim      :8100   merch fulfilment intake (code-gated)
+#   axenstax.org        -> project    :8099   open-source project home
+#   docs.axenstax.org   -> docs       :8095   specs / ADRs / roadmap / self-host
+#
+# NOTE: this is the INVERSE of the previous layout (old: .com = game,
+# .org = marketing, docs.axenstax.com = everything). The cutover is a deliberate
+# one-time step — see README.md.
+
+# --- Product (.com) — for players -----------------------------------
+
+axenstax.com {            # marketing front door
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8096
+}
+www.axenstax.com {
+	redir https://axenstax.com{uri} permanent
+}
+
+play.axenstax.com {       # the game (PWA runtime)
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8094
+}
+
+learn.axenstax.com {      # guided journey (onboarding)
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8098
+}
+
+wiki.axenstax.com {       # player reference
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8097
+}
+
+claim.axenstax.com {      # merch claim / fulfilment intake (code-gated)
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8100
+}
+
+# --- Open-source project (.org) — for builders ----------------------
+
+axenstax.org {            # project home
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8099
+}
+www.axenstax.org {
+	redir https://axenstax.org{uri} permanent
+}
+
+docs.axenstax.org {       # specs / ADRs / roadmap / self-host
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8095
+}
+
+# --- Redirects from the OLD layout (so existing links don't 404) ----
+# The docs site moved hosts (docs.axenstax.com -> docs.axenstax.org); 301 it.
+# The bare .com/.org swap can't be redirected (both still serve a real site) —
+# old game-at-.com visitors now land on marketing (which has a "Play" button),
+# old marketing-at-.org visitors land on the project home. Acceptable drift.
+docs.axenstax.com {
+	redir https://docs.axenstax.org{uri} permanent
+}

@@ -1,0 +1,108 @@
+{
+  "kind": "Challenge",
+  "display_name": "Forged in Fire \u2014 pour lava beside water and make obsidian",
+  "kit": [
+    {
+      "name": "lava_bucket",
+      "count": 1
+    },
+    {
+      "name": "water_bucket",
+      "count": 1
+    },
+    {
+      "name": "bucket",
+      "count": 2
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "BreakBlock": {
+          "block": 302
+        }
+      },
+      "count": 1
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          0
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          1
+        ],
+        "block": "cobblestone"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          2
+        ],
+        "block": "cobblestone"
+      }
+    ]
+  }
+}

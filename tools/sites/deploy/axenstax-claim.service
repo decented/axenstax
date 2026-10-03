@@ -1,0 +1,18 @@
+[Unit]
+Description=Axe'n'Stax — claim site (merch fulfilment intake, FastAPI/uvicorn :8100)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/axenstax/tools/sites/claim
+EnvironmentFile=/opt/axenstax/tools/sites/claim/.env
+ExecStart=/opt/axenstax/tools/sites/claim/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

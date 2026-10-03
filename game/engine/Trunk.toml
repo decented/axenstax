@@ -1,0 +1,14 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Game site lives at axenstax.app/* in production and localhost:8094/* locally.
+# The previous /play/ prefix was legacy from the unified single-site era — see
+# tools/sites/README.md for the 2026-04-30 split.
+public_url = "/"
+
+[serve]
+address = "0.0.0.0"
+# Trunk's dev-serve port. The production game site (run separately via
+# tools/sites/game/start.sh) binds 8094, and 8095 is now the docs site —
+# moving trunk to 8097 to avoid the collision.
+port = 8097

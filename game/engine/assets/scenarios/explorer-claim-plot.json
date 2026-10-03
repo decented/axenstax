@@ -1,0 +1,107 @@
+{
+  "kind": "Challenge",
+  "display_name": "Stake Your Claim \u2014 plant a marker and make a patch of the world yours",
+  "kit": [
+    {
+      "name": "plot_marker",
+      "count": 1
+    },
+    {
+      "name": "sign",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Sequence": {
+      "steps": [
+        {
+          "Action": {
+            "event": "ClaimPlot",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "PlaceBlock": {
+                "block": null
+              }
+            },
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          1
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          -1
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          5,
+          -1,
+          2
+        ],
+        "block": "fence_post"
+      }
+    ]
+  }
+}

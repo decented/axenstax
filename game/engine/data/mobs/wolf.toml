@@ -1,0 +1,8 @@
+id = "wolf"
+category = "passive"
+width = 0.7
+height = 0.85
+color = [0.65, 0.65, 0.60]
+health = 20
+speed = 1.1
+name = "Wolf"

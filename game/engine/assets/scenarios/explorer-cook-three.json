@@ -1,0 +1,55 @@
+{
+  "kind": "Challenge",
+  "display_name": "Camp Cook \u2014 roast three meals over a crackling campfire",
+  "kit": [
+    {
+      "name": "campfire",
+      "count": 1
+    },
+    {
+      "name": "flint_and_steel",
+      "count": 1
+    },
+    {
+      "name": "stick",
+      "count": 16
+    },
+    {
+      "name": "raw_beef",
+      "count": 3
+    },
+    {
+      "name": "raw_porkchop",
+      "count": 3
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "CookAtCampfire",
+      "count": 3
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "grass"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "grass"
+      }
+    ]
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "kind": "Challenge",
+  "display_name": "Mule Maker — Pair a horse with a donkey and feed them wheat until a sturdy mule foal is born.",
+  "kit": [
+    {
+      "name": "wheat",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": {
+        "BreedAnimals": {
+          "offspring": "Mule"
+        }
+      },
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          2,
+          -1,
+          -1
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          -1
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          2
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          -1
+        ],
+        "block": "hay_bale"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          2
+        ],
+        "block": "hay_bale"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "mob": "horse",
+        "count": 1
+      },
+      {
+        "at": [
+          5,
+          0,
+          1
+        ],
+        "mob": "donkey",
+        "count": 1
+      }
+    ]
+  }
+}

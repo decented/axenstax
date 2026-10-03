@@ -1,0 +1,280 @@
+# Old-save data integrity — backward-compatible `WorldSave` loading
+
+**Status: DECISION TAKEN → BUILDING 2026-06-03.** Foundation doc for **Goal 3,
+Task 1** (`docs/backlog/2026-06-03-tier4-goal-3-engine-hardening.md`), graduated from
+owner-inbox **"Engine hardening — found by the wallpaper audit"** item #1
+(`docs/backlog/owner-inbox.md` §"Old-save data loss on any `WorldSave` field-add").
+
+The backlog flagged the save-versioning **approach** as "partly a product decision —
+write a foundation doc presenting the options + a recommendation FIRST; if the choice is
+a genuine product fork (invest in a versioning scheme vs. document-the-limitation),
+surface it and STOP rather than guess." This doc is that artifact. **Conclusion up
+front: it is _not_ a genuine product fork** — the spec already mandates the outcome and
+the "document-the-limitation" option is factually broken — so the doc records the
+decision and proceeds. The reasoning is below for the owner to veto if they disagree.
+
+---
+
+## TL;DR
+
+`WorldSave` is a plain `#[derive(Serialize, Deserialize)]` bincode struct with **no
+version envelope** (`save.rs:41-163`, 33 fields, newest = `face_overlays` #33). bincode 1
+is **positional and non-self-describing**: appending a field (which has happened 25+
+times) lengthens the stream at the tail, so a save written by an **older** engine is
+**shorter** than a **newer** engine expects. On load the newer engine reads the old
+fields, hits **EOF** on the first appended field, the `bincode::deserialize::<WorldSave>`
+returns `Err`, and a catch-all `Err(_)` arm falls back to the 8-field `LegacyWorldSave`,
+whose `upgrade()` **hard-codes every block-entity Vec to empty**. Net result on that
+one-way upgrade load: **all** block-entities (chests + their items, furnaces, vendors,
+**tip-jar escrow holding real sats**, plots, villages, raids, bounties, auctions, latent
+prints, face-overlay wallpaper) + extended per-player fields are silently dropped. Player
+position / health / inventory / hotbar survive.
+
+**The `#[serde(default)]` on fields 8-33 does _nothing_ here** — serde only honours
+`default` when the format reports a field *absent by name*, which a self-describing
+format (JSON) can do but bincode cannot. On bincode it just hits EOF and errors. The
+in-tree comment at `protocol.rs:568` already states this: *"bincode v1 cannot honour that
+on missing trailing bytes — old saves … won't load; accepted pre-launch."*
+
+**Decision: FIX IT, minimally.** Replace the all-or-nothing decode with a **tolerant
+positional decoder** that reads `WorldSave` field-by-field and, on hitting EOF for any
+**trailing** field, fills the remainder with `Default`. This recovers maximal data from
+any append-only-older save, changes **nothing on the write side** (zero on-disk format
+change, zero detection ambiguity), and protects local **and** cloud saves in one place
+(they are the same code path). It is the "Option-tail the trailing fields" mechanism the
+inbox itself suggested, and it is the least-invasive option that closes the gap.
+
+---
+
+## Why this is not a genuine product fork
+
+The backlog framed the choice as **"invest in a versioning scheme vs. document the
+limitation + lean on Stash."** Three verified facts collapse that fork:
+
+1. **Spec §8.4 already mandates the outcome.** `docs/spec/02-world-format.md §8.4
+   Format Versioning`: *"The engine MUST be able to read any format version ≤ its
+   built-in version."* "Document the limitation" (let old saves lose data) **directly
+   contradicts the spec.** §8.4 even names `#[serde(default)]` as the intended mechanism
+   for minor field-adds — the code _tried_ to follow the spec (every appended field has
+   `#[serde(default)]`) but the mechanism is inert on bincode. The fix makes the code
+   deliver what the spec already promises; it is not a new product direction.
+
+2. **Cloud/Stash shares the identical bug — "lean on Stash" is self-defeating.**
+   Verified end-to-end (`save.rs:977` pack → `save.rs:994-1010` the cloud copy is literally
+   `compressed.clone()` of the local blob → `wasm_save.rs:144` `bincode::serialize(save)`;
+   restore: `cloud_restore_wasm` returns raw bytes → the same single `unpack_world`
+   (`wasm_save.rs:213-221`) with the same `Err(_) → LegacyWorldSave → upgrade()` fallback).
+   There is exactly **one** serializer and **one** deserializer for both local and cloud.
+   Stash stores the very same versionless bincode blob, so a cloud-only copy suffers the
+   identical silent loss the moment a newer engine adds a field and re-loads. Stash gives
+   byte-durability, **not** format-version safety. So option (iii) protects neither local
+   nor cloud.
+
+3. **Real value is at stake, now.** Tip-jar escrow holds **real sats**; the PWA alpha
+   (Chromium) is going live (5 Jun 2026, ahead of BTC Prague). Reachable whenever an
+   existing world is opened by a newer engine — i.e. every future build that adds a
+   `WorldSave` field, which is the established pattern.
+
+Given a spec mandate, a factually-broken alternative, and real money at risk, the
+"recommendation" is forced. Per the autonomy posture (merge-to-main pre-authorised on a
+green gate; push to the playtest boundary), I proceed with the fix and record it here
+rather than blocking. **Owner veto point:** if you actually want to ship known old-save
+data loss for alpha, say so and I'll revert Task 1 to a documented limitation — but note
+that abandons cloud saves too.
+
+---
+
+## The bug, precisely (verified against live code, 2026-06-03)
+
+- **Struct:** `WorldSave`, `save.rs:41-163`. Derive `#[derive(Serialize, Deserialize)]`,
+  no container attrs. Fields 1-7 (`seed`, `player_x/y/z`, `player_health`, `hotbar_slot`,
+  `inventory: Vec<SavedSlot>`) have no serde attr; fields 8-33 each carry
+  `#[serde(default)]`. Newest field `face_overlays: Vec<SavedFaceOverlay>` (#33, line 162).
+- **Write (one logical format, three call sites):** `bincode::serialize(&save)` —
+  `save.rs:812` (`save_world`), `save.rs:1758` (`autosave_world`), `wasm_save.rs:144`
+  (`pack_world`, tar+gzip-wrapped). Default bincode 1 config: little-endian, fixint, **no
+  magic / version / length framing** on the record. The only "version" is
+  `WorldMeta.version` in the separate `world_meta.json` — a save-counter, never read on
+  the deserialize path.
+- **Read (three sites, identical shape):** `load_world` `save.rs:1025-1034`, `load_autosave`
+  `save.rs:1812-1819`, WASM/cloud `unpack_world` `wasm_save.rs:213-221`. Each: try
+  `bincode::deserialize::<WorldSave>`; on **any** `Err` (the kind is discarded — EOF and
+  genuine corruption are not distinguished) decode as `LegacyWorldSave` then `.upgrade()`.
+- **Loss:** `LegacyWorldSave` (`save.rs:399-409`) is the original 8 fields; `upgrade()`
+  (`save.rs:421-492`) sets every later Vec to `Vec::new()` and the post-legacy per-player
+  fields to defaults. Note `LegacyWorldSave` is a strict **prefix of the _original_**
+  `WorldSave`. Pre-fix, feeding the legacy decoder a "modern-minus-newest-field" stream is
+  lossy in one of two ways, because bincode's top-level `deserialize` **tolerates trailing
+  bytes**: with an **empty / aligned** primary inventory the legacy decode succeeds and
+  returns **`Ok` lossily** — the 8 legacy fields read, the trailing block-entity bytes are
+  silently ignored, and `upgrade()` yields a world with `chests = Vec::new()` (a **silent**
+  data drop); with a **non-empty** modern inventory the per-element enum tags misalign, the
+  legacy decode **errors**, and `load_world` fails the load outright. Either way data
+  integrity is lost.
+
+---
+
+## Options considered
+
+| # | Option | Closes local? | Closes cloud? | On-disk change | Verdict |
+|---|--------|---------------|---------------|----------------|---------|
+| i | `u32` SaveVersion magic + branch the deserialiser | Only **future** saves; **existing** magic-less saves still EOF unless _also_ tolerant-decoded | same | yes (new writes get a header) | **Partial** — needs (ii) anyway for existing saves; magic-vs-legacy detection is ambiguous (see below) |
+| ii | **Tolerant positional decode** (Option-tail: default trailing fields on EOF) | **Yes — all existing + future append-only saves** | **Yes** (same code path) | **none** | **CHOSEN** |
+| iii | Document the limitation + lean on Stash | No | **No** (Stash shares the bug) | none | **Rejected** — contradicts spec §8.4; cloud not saved |
+
+### Why not the write-side version magic (option i), now
+
+A `u32` magic+version prepended to *new* writes does **not** help the saves already on
+disk (they have no magic). To recover those you need the tolerant decode regardless — so
+(i) is strictly *additional* work on top of (ii), not an alternative. Worse, detecting
+"is this a versioned save?" is **ambiguous**: an old magic-less save begins with
+`seed: u32`, so any 4-byte magic can collide with a real `seed` (1/2³²), a silent-
+corruption mode unacceptable for a "production-grade" save path. An explicit version
+envelope is the **right** move — but only **when a non-append change first happens**
+(field reorder / removal / retype), which is exactly when a migration is unavoidable and
+a version discriminator earns its keep. Until then it is "redesign beyond what closes the
+gap," which the backlog explicitly rules out (YAGNI). **Deferred, not rejected** — see
+spec note below.
+
+---
+
+## Chosen mechanism — tolerant positional decode
+
+A single free function in `save.rs`, called at all three read sites (replacing the
+`bincode::deserialize::<WorldSave>` first-try; the `LegacyWorldSave` fallback stays for
+genuinely pre-item-era saves):
+
+```rust
+/// Read a `WorldSave` from a bincode stream, tolerating a stream that ends early
+/// because it was written by an OLDER engine (fewer trailing fields). Required fields
+/// (1-7) must be present; every appended field (8-33, all `#[serde(default)]`) defaults
+/// to empty if the stream ends at its boundary. Any field whose bytes are present but
+/// don't decode — incl. a mid-field EOF from a misaligned legacy/corrupt stream —
+/// propagates so the caller can fall back to LegacyWorldSave.
+fn deserialize_world_save_tolerant(data: &[u8]) -> Result<WorldSave, bincode::Error> {
+    let mut cur = std::io::Cursor::new(data);
+    // read_tail::<T>() reads one field, returning T::default() ONLY if the cursor is
+    // already at a clean field boundary (older writer stopped here); if bytes remain it
+    // decodes and propagates any error (incl. a mid-field EOF = legacy/corrupt shape).
+    Ok(WorldSave {
+        seed:           bincode::deserialize_from(&mut cur)?,   // 1-7 required
+        player_x:       bincode::deserialize_from(&mut cur)?,
+        /* …player_y, player_z, player_health, hotbar_slot, inventory… */
+        players:        read_tail(&mut cur)?,                   // 8-33 default at clean EOF
+        /* …all appended fields… */
+        face_overlays:  read_tail(&mut cur)?,
+    })
+}
+```
+
+**Key properties**
+
+- **Recovers maximal data** from any append-only-older save: fields present are read;
+  the first missing trailing field and everything after default to empty. The chest,
+  plot, tip-jar escrow, etc. that the old engine *did* write are preserved.
+- **Self-maintaining at compile time.** The struct literal lists **all 33 fields**, so
+  adding field #34 to `WorldSave` without updating the decoder is a **compile error** —
+  the decoder can never silently drift out of sync (unlike the hand-maintained
+  `LegacyWorldSave::upgrade()`).
+- **Routes genuine legacy / corrupt streams to the fallback.** `read_tail` defaults a
+  field **only** when the cursor is already at a clean end-of-stream (the older writer
+  stopped at this exact boundary). If bytes **remain**, the field is present: it decodes
+  and propagates **any** error — including a **mid-field** `UnexpectedEof`. That
+  distinction is load-bearing: a genuine legacy multi-player save with an empty primary
+  inventory reads the strict prefix cleanly, then its misaligned legacy `players` bytes
+  run off the end mid-decode; propagating that EOF (rather than swallowing it) makes the
+  tolerant decode fail so the `LegacyWorldSave` fallback recovers the players. (This was a
+  real regression caught by the branch review — pinned by a dedicated test.)
+- **Zero write-side / on-disk change**, so no magic-collision risk and full
+  cross-version interop with saves already in the wild (local **and** cloud).
+
+**Touch points:** `deserialize_world_save_tolerant` + `read_tail` in `save.rs`; called at
+`save.rs:1025`, `save.rs:1812`, `wasm_save.rs:214`. (Task 2 factors the *restore/apply*
+step into `apply_world_save_state`; this task DRYs the *decode* step into
+`read_world_save`/`deserialize_world_save_tolerant`. After both, every site reads
+`let save = read_world_save(&data)?; apply_world_save_state(&mut world, &save);`.)
+
+---
+
+## Test plan — the regression that proves it
+
+The existing round-trip tests **never exercise the EOF→legacy path** (they all serialise
+and deserialise the *same-engine* `WorldSave`, so the first decode always succeeds). The
+new test must construct a genuinely-older byte stream:
+
+1. Build a **real** current-format `WorldSave` carrying a **chest** (a block-entity the
+   legacy path would drop), with an empty `face_overlays`. Using the real struct — not a
+   hand-replicated mirror — guarantees the canonical bincode field order/types.
+2. `bincode::serialize` it, then **drop the trailing 8-byte empty-`face_overlays` length**
+   to mint the on-disk shape of a pre-2026-06-03 save (self-verified: assert those 8 bytes
+   are zero first). Write to `save::world_dir(name)/world.dat`, call the real path-based
+   `save::load_world(name, &mut world)`.
+3. Assert the **chest survives** — `loaded.chests.len() == 1` and
+   `world.chest_at((2,70,3)).is_some()` — i.e. it was **not** routed to
+   `LegacyWorldSave::upgrade()` (which hard-codes `chests = Vec::new()`), and
+   `face_overlays` defaulted to empty without erroring.
+
+On **current** code (the empty-primary-inventory fixture) the legacy fallback succeeds
+**lossily**, so the test goes red via the `chests.len() == 1` assertion (it gets `0` — a
+**silent** chest drop), not via a panic. After the fix it **passes**. Classic red→green.
+
+A second regression test (added after the branch review) pins the inverse: a **genuine
+legacy multi-player save with an empty primary inventory** must fall back to
+`LegacyWorldSave` and keep its extra players — the tolerant decode must NOT swallow the
+misaligned-`players` EOF and silently drop them (see the `read_tail` clean-boundary rule
+above). A third locks the `load_autosave` wiring of the tolerant decode. All live in
+`test_integration/save_load.rs` (native-only, already registered).
+
+---
+
+## Spec updates (done as part of Task 1)
+
+- **`docs/spec/02-world-format.md §8.4 Format Versioning`** — correct the claim that
+  `#[serde(default)]` handles minor field-adds; it is **inert on the bincode prototype
+  format**. Document the tolerant-positional-decode as the alpha mechanism that delivers
+  §8.4's "MUST read older versions" mandate for append-only changes, and record that an
+  explicit `u32` version envelope (App-B-style magic) is the prescribed mechanism for the
+  first **non-append** change / the production region-file format.
+- **§"Current Implementation (Step 11 — Prototype)"** — note that old-save load is now
+  backward-compatible for appended fields.
+
+---
+
+## Out of scope (do not do)
+
+- No write-side magic / version header now (deferred to the first non-append change — see
+  option i).
+- No migration to the production rkyv region-file format (`§4.4`) — that is the
+  multiplayer-era rebuild, not this hardening pass.
+- No touching the shipped+audited wallpaper feature; no redesign of the save format
+  beyond the tolerant decode.
+
+---
+
+## Review follow-ups (2026-06-03)
+
+A multi-agent adversarial review of the shipped branch surfaced issues beyond the
+original three; all resolved on top of the merge:
+
+- **Torn-write silent loss (the real-sats one).** `world.dat` was a plain `fs::write`
+  with no atomicity and no CRC, and the tolerant decode can't tell a cleanly-shorter OLD
+  save from a *truncated NEW* one — so a crash mid-write could silently "load" with the
+  tail (incl. tip-jar escrow) defaulted away, and `load_autosave` then deletes the
+  autosave. **Fixed** by writing `world.dat` atomically (temp → `fsync` → rename;
+  `save::write_atomic`), so torn writes are impossible at the source. (Spec §8.2.)
+- **`raid_kills` written but never restored** on any load path — the per-(village, player)
+  raid-defender leaderboard reset on every reload (leaderboard display only, not sats).
+  **Fixed** with the inverse restore in `apply_world_save_state` (one line repairs all
+  three load paths) + a load-path test.
+- **Decoder test coverage** — `deserialize_world_save_tolerant`/`read_tail` were only hit
+  end-to-end through `load_world`. Added direct unit tests (full-save identity,
+  clean-boundary default, mid-field-EOF propagation) + a `load_autosave` recovery test,
+  and replaced a mis-named toothless trailing-bytes test with a real forward-compat one.
+- **Forward-compat downgrade** is now flagged as a `BRIDGE` on `read_world_save` (a newer
+  save's extra fields are dropped on re-save — fine until a downgrade path / 34th field
+  exists, at which point the version envelope below earns its keep).
+- **Write-side drift** is already compile-time-safe — every `WorldSave` builder uses an
+  exhaustive literal (no `..`) and the struct has no `Default`, so a new field cannot be
+  added without updating every builder *and* the tolerant decoder. A DRY save-side
+  collector was considered and deliberately **not** built (pure maintainability, not a
+  correctness fix — the refactor risk isn't justified on the real-sats path).

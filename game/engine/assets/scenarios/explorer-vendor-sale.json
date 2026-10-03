@@ -1,0 +1,47 @@
+{
+  "kind": "Challenge",
+  "display_name": "Market Day \u2014 swap your spare stone for a fresh-baked loaf",
+  "kit": [
+    {
+      "name": "stone",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "VendorSale",
+      "count": 1
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "oak_planks"
+      },
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "block": "vendor_block"
+      }
+    ]
+  }
+}

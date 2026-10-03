@@ -1,0 +1,154 @@
+{
+  "kind": "Challenge",
+  "display_name": "Funny Farm \u2014 round up the silliest little zoo",
+  "kit": [
+    {
+      "name": "bone",
+      "count": 8
+    },
+    {
+      "name": "wheat",
+      "count": 8
+    },
+    {
+      "name": "shears",
+      "count": 1
+    }
+  ],
+  "objective": {
+    "Checklist": {
+      "items": [
+        {
+          "Action": {
+            "event": "TameMob",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": {
+              "BreedAnimals": {
+                "offspring": null
+              }
+            },
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "RideEntity",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "ShearOrMilk",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          -2,
+          -1,
+          -3
+        ],
+        "block": "hay_bale"
+      },
+      {
+        "at": [
+          6,
+          -1,
+          3
+        ],
+        "block": "hay_bale"
+      },
+      {
+        "at": [
+          -2,
+          0,
+          -3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          0,
+          -3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          -2,
+          0,
+          3
+        ],
+        "block": "fence_post"
+      },
+      {
+        "at": [
+          6,
+          0,
+          3
+        ],
+        "block": "fence_post"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          3,
+          0,
+          0
+        ],
+        "mob": "wolf",
+        "count": 1
+      },
+      {
+        "at": [
+          4,
+          0,
+          2
+        ],
+        "mob": "cow",
+        "count": 1
+      },
+      {
+        "at": [
+          5,
+          0,
+          2
+        ],
+        "mob": "cow",
+        "count": 1
+      },
+      {
+        "at": [
+          3,
+          0,
+          -2
+        ],
+        "mob": "horse",
+        "count": 1
+      },
+      {
+        "at": [
+          5,
+          0,
+          -2
+        ],
+        "mob": "sheep",
+        "count": 1
+      }
+    ]
+  }
+}

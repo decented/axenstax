@@ -1,0 +1,8 @@
+id = "cat"
+category = "passive"
+width = 0.4
+height = 0.5
+color = [0.55, 0.50, 0.45]
+health = 8
+speed = 3.0
+name = "Cat"

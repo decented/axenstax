@@ -1,0 +1,8 @@
+id = "donkey"
+category = "passive"
+width = 1.2
+height = 1.5
+color = [0.55, 0.48, 0.42]
+health = 25
+speed = 3.4
+name = "Donkey"

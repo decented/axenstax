@@ -1,0 +1,73 @@
+# Rust build artifacts
+target/
+build/
+build-w2/
+dist/
+
+# Cargo config (local build paths)
+game/engine/.cargo/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local Claude Code session state
+.claude/
+
+# Environment
+.env
+.env.*
+!.env.example
+.venv/
+*.log
+__pycache__/
+.superpowers/
+
+# Three-site split — runtime files in each site's data dir.
+# whitelist.txt and feedback-admins.json are intentionally tracked;
+# *.log, *.key and .venv are caught globally above. This catches the
+# admin-queue request log which doesn't match those patterns.
+tools/sites/*/data/access-requests.jsonl
+# Deprecated unified site — removed from the tree 2026-09-04; local leftovers (.venv, certs, data) stay ignored.
+tools/website/
+# Owner-only competitive-analysis dashboard — local tool, never tracked.
+tools/feature-audit/
+# Generated per-build by `cargo about` (native-packages.yml / build-local.sh) —
+# must land here (not tools/packaging/staging/) for packager.toml's `resources`
+# to find it; never hand-edited or committed.
+/tools/packaging/THIRD-PARTY-NOTICES.txt
+
+
+# Sensitive files
+*.pem
+*.key
+*.p12
+*.pfx
+# Nostr secret keys — the canonical AxeNStax identity secret lives OUTSIDE the
+# repo (~/.config/axenstax/). These patterns are belt-and-suspenders so a
+# stray secret file dropped inside the repo can never be committed.
+*.nsec
+*.secret
+/.secrets/
+**/secrets/
+*-official.json
+credentials.json
+serviceAccountKey.json
+
+# Playwright MCP session dumps (console logs, page snapshots)
+.playwright-mcp/
+
+# Running the engine writes its per-install profile to `profile/` RELATIVE TO
+# THE WORKING DIRECTORY: the Signet session, the runtime key, the mailbox key
+# and the contacts mirror. All of it is private to one machine and some of it
+# is secret — it must never be committed. Both spellings are needed: a run from
+# the repo root, and a run from the crate directory.
+/profile/
+game/engine/profile/

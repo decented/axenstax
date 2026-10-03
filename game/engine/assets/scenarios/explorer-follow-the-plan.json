@@ -1,0 +1,28 @@
+{
+  "kind": "Challenge",
+  "display_name": "Follow the Plan — raise a little hut block by block, following the ghost guide",
+  "kit": [
+    {
+      "name": "hut_plan",
+      "count": 1
+    },
+    {
+      "name": "oak_planks",
+      "count": 32
+    },
+    {
+      "name": "glass",
+      "count": 8
+    }
+  ],
+  "objective": {
+    "Action": {
+      "event": "CompleteBuildGuide",
+      "count": 1
+    }
+  },
+  "game_mode": "creative",
+  "world_type": "flat",
+  "time_lock": "day",
+  "mobs_enabled": false
+}

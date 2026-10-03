@@ -1,0 +1,132 @@
+{
+  "kind": "Challenge",
+  "display_name": "Suit Up \u2014 forge four pieces of iron gear, then test them on the raiders",
+  "kit": [
+    {
+      "name": "furnace",
+      "count": 1
+    },
+    {
+      "name": "coal",
+      "count": 8
+    },
+    {
+      "name": "raw_iron",
+      "count": 8
+    },
+    {
+      "name": "crafting_table",
+      "count": 1
+    },
+    {
+      "name": "iron_ingot",
+      "count": 16
+    },
+    {
+      "name": "stick",
+      "count": 8
+    },
+    {
+      "name": "leather",
+      "count": 8
+    },
+    {
+      "name": "iron_sword",
+      "count": 1
+    },
+    {
+      "name": "bread",
+      "count": 3
+    }
+  ],
+  "objective": {
+    "Checklist": {
+      "items": [
+        {
+          "Action": {
+            "event": "SmeltItem",
+            "count": 1
+          }
+        },
+        {
+          "Action": {
+            "event": "CraftItem",
+            "count": 4
+          }
+        },
+        {
+          "Action": {
+            "event": "KillMob",
+            "count": 2
+          }
+        }
+      ]
+    }
+  },
+  "game_mode": "survival",
+  "time_lock": "day",
+  "mobs_enabled": false,
+  "arena": {
+    "blocks": [
+      {
+        "at": [
+          3,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          4,
+          -1,
+          0
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          3,
+          -1,
+          1
+        ],
+        "block": "stone"
+      },
+      {
+        "at": [
+          2,
+          -1,
+          0
+        ],
+        "block": "furnace"
+      },
+      {
+        "at": [
+          2,
+          0,
+          1
+        ],
+        "block": "crafting_table"
+      },
+      {
+        "at": [
+          2,
+          0,
+          -1
+        ],
+        "block": "cobblestone"
+      }
+    ],
+    "mobs": [
+      {
+        "at": [
+          8,
+          0,
+          0
+        ],
+        "mob": "brigand",
+        "count": 2
+      }
+    ]
+  }
+}

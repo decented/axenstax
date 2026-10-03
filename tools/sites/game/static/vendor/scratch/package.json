@@ -1,0 +1,12 @@
+{
+  "name": "axenstax-vendor-scratch",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Scratch dir for building vendored bundles (nostr-tools/nip46). Not shipped.",
+  "type": "module",
+  "dependencies": {
+    "@forgesworn/stash": "file:../../../../../../../forgesworn/stash",
+    "esbuild": "^0.21.5",
+    "nostr-tools": "^2.23.3"
+  }
+}

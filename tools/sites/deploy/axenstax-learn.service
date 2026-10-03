@@ -1,0 +1,18 @@
+[Unit]
+Description=Axe'n'Stax — learn site (guided journey, FastAPI/uvicorn :8098)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/axenstax/tools/sites/learn
+EnvironmentFile=/opt/axenstax/tools/sites/learn/.env
+ExecStart=/opt/axenstax/tools/sites/learn/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

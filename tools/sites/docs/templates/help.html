@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Help — Axe'n'Stax{% endblock %}
+{% block content %}
+<div class="doc-container">
+    <h1>Help &amp; Setup</h1>
+
+    <h2>Playing the game</h2>
+    <p>The easiest way to play is in your browser — no install. <a href="{{ game_url }}">Open the game</a> in
+    <strong>Chrome 121+</strong>, <strong>Edge 121+</strong>, or <strong>Brave</strong> with WebGPU enabled.
+    Firefox and Safari aren't supported yet.</p>
+
+    <h2>Native build (desktop)</h2>
+    <p>Want more than the browser taster — optional sign-in, playing with friends over the internet,
+    split-screen, cloud saves, world chat? Grab the free <strong>desktop app</strong>. Linux ships as a
+    ready-to-run AppImage that updates itself; Windows and macOS aren't published as installers yet, so
+    build from source instead. See the <a href="/download">download page</a> for both routes.</p>
+
+    <h2>Controllers</h2>
+    <p>Xbox and PlayStation controllers work via USB or Bluetooth. For split-screen, connect two
+    controllers — the second one triggers Player 2 automatically.</p>
+
+    <h2>Something not working?</h2>
+    <p>Not sure your device can run it? Try the <a href="{{ marketing_url }}/will-it-run">compatibility check</a>.
+    Alpha testers can report a bug or idea from the desktop app with <code>/bug</code> or <code>/idea</code> in game chat
+    — it goes straight to the team. It is off by default: open Settings (top of the world list, or the pause menu) and tap the version line 7 times to switch it on.
+    (The browser version has no feedback channel.)</p>
+</div>
+{% endblock %}

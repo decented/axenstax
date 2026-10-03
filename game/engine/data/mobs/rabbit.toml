@@ -1,0 +1,8 @@
+id = "rabbit"
+category = "passive"
+width = 0.4
+height = 0.5
+color = [0.78, 0.65, 0.50]
+health = 3
+speed = 2.8
+name = "Rabbit"

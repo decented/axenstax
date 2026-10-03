@@ -1,0 +1,593 @@
+{
+  "plan": {
+    "version": 1,
+    "name": "Cosy Cabin",
+    "author_npub": "",
+    "license": "CCBYSA",
+    "derivation_chain": [],
+    "is_master": true,
+    "width": 6,
+    "depth": 5,
+    "height": 4,
+    "cells": [
+      {
+        "rx": 0,
+        "ry": 0,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 0,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 0,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 0,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 0,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 0,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 0,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 0,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 0,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 0,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 0,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 0,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 0,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 0,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 0,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 0,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 0,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 0,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 0,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 0,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 0,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 0,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 0,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 0,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 0,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 0,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 0,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 0,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 0,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 0,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 1,
+        "rz": 0,
+        "block_id": 7
+      },
+      {
+        "rx": 0,
+        "ry": 1,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 1,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 1,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 1,
+        "rz": 4,
+        "block_id": 7
+      },
+      {
+        "rx": 1,
+        "ry": 1,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 1,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 1,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 1,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 1,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 1,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 1,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 1,
+        "rz": 0,
+        "block_id": 7
+      },
+      {
+        "rx": 5,
+        "ry": 1,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 1,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 1,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 1,
+        "rz": 4,
+        "block_id": 7
+      },
+      {
+        "rx": 0,
+        "ry": 2,
+        "rz": 0,
+        "block_id": 7
+      },
+      {
+        "rx": 0,
+        "ry": 2,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 2,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 2,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 2,
+        "rz": 4,
+        "block_id": 7
+      },
+      {
+        "rx": 1,
+        "ry": 2,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 2,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 2,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 2,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 2,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 2,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 2,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 2,
+        "rz": 0,
+        "block_id": 7
+      },
+      {
+        "rx": 5,
+        "ry": 2,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 2,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 2,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 2,
+        "rz": 4,
+        "block_id": 7
+      },
+      {
+        "rx": 0,
+        "ry": 3,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 3,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 3,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 3,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 0,
+        "ry": 3,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 3,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 3,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 3,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 3,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 3,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 3,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 3,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 3,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 3,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 2,
+        "ry": 3,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 3,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 3,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 3,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 3,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 3,
+        "ry": 3,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 3,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 3,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 3,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 3,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 4,
+        "ry": 3,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 3,
+        "rz": 0,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 3,
+        "rz": 1,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 3,
+        "rz": 2,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 3,
+        "rz": 3,
+        "block_id": 9
+      },
+      {
+        "rx": 5,
+        "ry": 3,
+        "rz": 4,
+        "block_id": 9
+      },
+      {
+        "rx": 1,
+        "ry": 1,
+        "rz": 3,
+        "block_id": 15
+      },
+      {
+        "rx": 3,
+        "ry": 2,
+        "rz": 2,
+        "block_id": 23
+      }
+    ],
+    "authored_in": "creative"
+  },
+  "category": "SmallHouse"
+}

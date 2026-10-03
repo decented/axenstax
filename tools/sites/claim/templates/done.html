@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Sorted! — Axe'n'Stax{% endblock %}
+{% block content %}
+<h1>🎉 Sorted — it's on its way</h1>
+<p class="lead">Thanks for backing Axe'n'Stax. Your shirt is booked in with the print &amp;
+postage service{% if order_id %} (order <strong>#{{ order_id }}</strong>){% endif %}.
+You'll get shipping updates by email.</p>
+{% if not auto_confirm %}
+<p class="note">We'll give every order a quick once-over before it's sent to print —
+nothing else needed from you.</p>
+{% endif %}
+<p><a class="btn" href="{{ support_url }}">Back to Axe'n'Stax →</a></p>
+{% endblock %}

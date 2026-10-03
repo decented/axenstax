@@ -1,0 +1,171 @@
+[package]
+name = "axenstax-engine"
+license = "MIT"
+version = "0.2.27"
+edition = "2024"
+
+[dependencies]
+# Cross-platform (native + WASM)
+wgpu = { version = "29", default-features = false, features = ["wgsl", "webgpu"] }
+winit = "0.30"
+glam = "0.29"
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+lz4_flex = "0.11"
+ahash = "0.8"
+image = "0.25"
+noise = "0.9"
+hecs = "0.10"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+web-time = "1"
+egui = "0.34"
+egui-wgpu = { version = "0.34", features = ["winit"] }
+egui-winit = { version = "0.34", default-features = false, features = ["links"] }
+# Signet auth (Spec 1 Phase 1) — BIP-340 Schnorr verification of signed
+# kind-21236 join events. `sha2` moved to workspace-wide (was WASM-only) because
+# canonical_id runs on native too; `hex` is a tiny ubiquitous crate.
+sha2 = "0.10"
+hex = "0.4"
+# HMAC-SHA256 for the Proof-of-Play hash (Spec 6 §2.2 / §2.2c). RustCrypto
+# canonical implementation; ~0 cost on top of `sha2` which we already pull in.
+hmac = "0.12"
+# OS RNG — used by `signet::challenge::ChallengeTable` to mint per-client
+# nonces on the native server side. The WASM-only entry below adds the
+# `wasm_js` backend feature for the browser; the cross-platform line here
+# brings the same crate to native builds.
+getrandom = "0.3"
+# Archive crates for .axeworld pack/unpack (world_archive.rs — cross-platform).
+# Previously WASM-only; moved here so native builds can also read/write .axeworld
+# files (web↔native interchange, play-modes feature).
+flate2 = "1"
+tar = "0.4"
+# XChaCha20-Poly1305 (world chat Phase 4 — Kenspeckle contacts export, see
+# `contacts.rs`). Pure-Rust RustCrypto crate, no OS-specific bits, so — unlike
+# the Charter/Signet-signature crypto in `charter.rs`/`signet::verify`, which
+# is genuinely native-only — the contacts parser is a pure, cross-platform
+# function and this belongs up here rather than under either target-specific
+# section. Previously WASM-only (world-save encryption, Phase C); moved here
+# so native builds get it too.
+chacha20poly1305 = "0.10"
+
+# Native-only dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native re-declares egui-winit WITH the clipboard backend (arboard) + platform
+# clipboards so Ctrl+V paste works in text fields (e.g. the Join Game address).
+# The base [dependencies] entry stays minimal (`links` only) for wasm32, where
+# arboard does not build; Cargo unions feature sets per target.
+egui-winit = { version = "0.34", default-features = false, features = ["links", "clipboard", "wayland", "x11"] }
+pollster = "0.4"
+env_logger = "0.11"
+rodio = { version = "0.20", default-features = false, features = ["vorbis"] }
+gilrs = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+quinn = "0.11"
+# WebSocket transport for the dedicated server (and a native client that joins
+# it). Plain `ws` only — TLS for the browser is terminated by the Caddy front in
+# the Docker image, so the engine never needs a TLS stack here. `futures-util`
+# gives us `StreamExt`/`SinkExt` to split the duplex socket into reader/writer
+# tasks. Native-only: browsers use `web_sys::WebSocket` (see ws_transport_web.rs).
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# SIGINT/SIGTERM handler so the dedicated server saves the world on graceful
+# shutdown (`docker stop` sends SIGTERM). Native-only, dependency-light.
+ctrlc = "3"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# BIP-340 Schnorr (server-side only — the engine WASM client doesn't verify;
+# it signs at a higher layer via the Signet browser handoff). libsecp256k1-based.
+secp256k1 = { version = "0.29", default-features = false, features = ["std", "alloc"] }
+# Native Signet sign-in (Bucket 3, login half) — a generic NIP-46 bunker signer
+# (pair / persist / restore + the `NostrSigner` contract). Vendored in-repo (see
+# `vendor/signet-nip46-client/VENDOR.md`) because the WASM deploy build resolves
+# the whole dep graph and has no access to the canonical Forgesworn remote. It
+# pulls the rust-nostr 0.44.x family (nostr 0.44.3 → secp256k1 0.29.1, matching
+# the line above — no version clash). NATIVE-ONLY: never compiled into the wasm32
+# graph (every reference is `#[cfg(not(target_arch = "wasm32"))]`-gated).
+signet-nip46-client = { path = "vendor/signet-nip46-client" }
+# QR rendering for the native sign-in screen (desktop shows a nostrconnect:// QR
+# the phone scans). Also a wasm dep below (the lobby QR sign-in); here it serves
+# the native menu's Signet sign-in dialog.
+qrcode = { version = "0.14", default-features = false }
+# Direct handle on the rust-nostr core (same 0.44.3 the signer wraps — already in
+# the tree transitively, so no new resolution). The native sign-in path builds +
+# signs the kind-21236 join auth event with `EventBuilder` / `Keys` / `Tag` and
+# the `NostrSigner` trait. NATIVE-ONLY (never in the wasm32 graph).
+# `nip44` is already pulled in transitively (nip59 = ["nip44"]), but online play
+# by contact uses NIP-44 DIRECTLY to seal the rendezvous offer/answer runtime-key
+# to runtime-key — so declare it rather than inherit it. NATIVE-ONLY.
+nostr = { version = "=0.44.3", features = ["nip59", "nip44"] }
+# Native OS file dialogs (world Export/Import + skin upload). xdg-portal backend
+# drives the desktop's native file picker via xdg-desktop-portal (no GTK link →
+# AppImage-friendly). The portal backend is async; rfd's `pollster` feature
+# (auto-enabled) lets us use the blocking FileDialog API on a worker thread.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# Native Minecraft-skin import (spec §8.4): a blocking HTTP+TLS client used on a
+# worker thread to talk straight to Mojang (browsers go through /mc-skin). rustls
+# (no OpenSSL link → AppImage-friendly). NATIVE-ONLY — wasm uses the proxy fetch.
+ureq = { version = "2", features = ["tls"] }
+base64 = "0.22"
+# Signet contacts v2 vault envelope (WIRE.md §1): the projection body is
+# AES-256-GCM under a NIP-44-wrapped content key. NATIVE-ONLY — the contacts
+# sync never runs in the web build.
+aes-gcm = "0.10"
+# UPnP IGD port mapping so a home router forwards the online-play UDP port
+# without anyone editing router settings (spec §4.1). Blocking API used on a
+# worker thread — the `aio_tokio` feature is deliberately OFF, so this pulls no
+# async stack of its own. NATIVE-ONLY: there is no router to ask from a browser.
+igd-next = "0.17.1"
+
+# WASM-only dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys = "0.3"
+qrcode = { version = "0.14", default-features = false }
+# Crypto crates for world persistence (Phase C) — sha2 is now workspace-wide
+# (see [dependencies]) because Signet auth also needs it. flate2 + tar moved to
+# [dependencies] (cross-platform, needed for .axeworld native support).
+# chacha20poly1305 also moved to [dependencies] (world chat Phase 4 needs it
+# on native too — see the comment there).
+hkdf = "0.12"
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "HtmlCanvasElement", "HtmlElement", "Element", "Node",
+    "TouchEvent", "TouchList", "Touch",
+    "CssStyleDeclaration",
+    "console",
+    # Per-device graphics settings persistence (Spec 39 — localStorage axenstax_gfx)
+    "Storage",
+    # Fetch API (auth + world upload/download)
+    "Headers", "Request", "RequestInit", "RequestMode", "Response",
+    # Binary data (world blob upload)
+    "Blob", "BlobPropertyBag",
+    # IndexedDB (beforeunload emergency cache)
+    "IdbFactory", "IdbDatabase", "IdbObjectStore", "IdbObjectStoreParameters",
+    "IdbRequest", "IdbTransaction", "IdbTransactionMode", "IdbOpenDbRequest",
+    # Gamepad API (web-backed GamepadSystem — quad split-screen on WASM)
+    "Gamepad", "GamepadButton", "GamepadMappingType", "Navigator",
+    # WebSocket transport — the browser's pipe to the dedicated server.
+    "WebSocket", "MessageEvent", "BinaryType", "Event", "CloseEvent",
+    # Location — resolve a relative dedicated-server socket path against the
+    # page origin (wss://host/ws) for the auto-join.
+    "Location",
+    # #24 — Web Speech API for accessibility narration (TTS).
+    "SpeechSynthesis", "SpeechSynthesisUtterance",
+] }
+
+[profile.dev]
+debug = 1          # Line tables only — saves ~1GB disk
+opt-level = 1      # Slight optimization even in dev (faster game, smaller artifacts)
+
+[profile.release]
+lto = "thin"
+
+[dev-dependencies]
+# Static WGSL validation in tests (matches the wgpu / naga in tree).
+naga = { version = "29", features = ["wgsl-in"] }

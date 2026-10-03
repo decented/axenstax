@@ -1,0 +1,8 @@
+id = "shark"
+category = "hostile"
+width = 1.2
+height = 0.9
+color = [0.42, 0.48, 0.54]
+health = 30
+speed = 4.5
+name = "Shark"
