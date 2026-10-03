@@ -10,7 +10,7 @@ use glam::{Mat4, Vec3, Vec4};
 /// is on the positive side of all 6 planes. Spec 03 §5.2.
 ///
 /// Extracted from a view-projection matrix via the Gribb–Hartmann method. This
-/// engine renders with `Mat4::perspective_rh` (wgpu/D3D clip volume: `0 ≤ z ≤ w`),
+/// engine renders with `glam::camera::rh::proj::directx::perspective` (wgpu/D3D clip volume: `0 ≤ z ≤ w`),
 /// so the near plane is `row2` (not `row3 + row2`, which is the OpenGL form).
 #[derive(Clone, Copy, Debug)]
 pub struct Frustum {
@@ -528,13 +528,13 @@ impl Camera {
         // moved by this — only where the frame is viewed from / toward.
         let origin = self.render_eye();
         let target = origin + self.orbit_forward();
-        Mat4::look_at_rh(origin, target, Vec3::Y)
+        glam::camera::rh::view::look_at_mat4(origin, target, Vec3::Y)
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
         // Phase 5 — third-person may widen/narrow FOV by profile + pitch curve;
         // first-person / Neutral → effective_fov_y() == fov_y (unchanged).
-        Mat4::perspective_rh(
+        glam::camera::rh::proj::directx::perspective(
             self.effective_fov_y().to_radians(),
             self.aspect,
             self.near,
@@ -719,12 +719,12 @@ mod tests {
     #[test]
     fn micro_lod_near_far_by_distance() {
         // Camera at (8,8,8) looking down -Z (rh perspective).
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             Vec3::new(8.0, 8.0, 8.0),
             Vec3::new(8.0, 8.0, -100.0),
             Vec3::Y,
         );
-        let proj = Mat4::perspective_rh(70f32.to_radians(), 1.6, 0.1, 500.0);
+        let proj = glam::camera::rh::proj::directx::perspective(70f32.to_radians(), 1.6, 0.1, 500.0);
         let vp = proj * view;
         // chunk (0,0,-1) centre ≈ (8,8,-8) → ~16 ahead; (0,0,-5) ≈ (8,8,-72) → ~80 ahead.
         assert!(micro_chunk_is_near(&vp, 0, 0, -1, 64.0), "16 ahead is near");

@@ -2954,8 +2954,8 @@ fn run_shot_workshop(args: &[String]) {
     // Camera: stand back from the two projects and look at the floor.
     let eye = glam::Vec3::new(-2.0, floor as f32 + 4.5, 7.0);
     let target = glam::Vec3::new(1.5, floor as f32 + 2.0, 0.0);
-    let proj = glam::Mat4::perspective_rh(70.0_f32.to_radians(), 1280.0 / 720.0, 0.1, 300.0);
-    let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(70.0_f32.to_radians(), 1280.0 / 720.0, 0.1, 300.0);
+    let view = glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
     let camera_uniform = CameraUniform {
         view_proj: (proj * view).to_cols_array_2d(),
         camera_pos: [eye.x, eye.y, eye.z, 0.0],
@@ -3032,8 +3032,8 @@ fn run_screenshot(args: &[String]) {
     let target = glam::Vec3::new(0.0, spawn_y - 2.0, -20.0);
     let aspect = 1280.0 / 720.0;
 
-    let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::Y);
-    let proj = glam::Mat4::perspective_rh(70.0_f32.to_radians(), aspect, 0.1, 300.0);
+    let view = glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(70.0_f32.to_radians(), aspect, 0.1, 300.0);
     let view_proj = proj * view;
 
     let camera_uniform = CameraUniform {
