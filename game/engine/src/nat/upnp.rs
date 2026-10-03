@@ -267,7 +267,7 @@ mod tests {
 
     /// OWNER BOUNDARY (needs a real IGD router) — not run in CI.
     /// Run manually on a home network:
-    /// `cargo test --bin axenstax-engine nat::upnp -- --ignored --nocapture`
+    /// `cargo test --lib nat::upnp -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn live_router_accepts_and_releases_a_mapping() {

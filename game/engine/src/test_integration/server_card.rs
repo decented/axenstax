@@ -3,7 +3,7 @@
 //! attestation + sign a Card with the runtime key (task 1), serialise both to the
 //! JSON a relay would deliver, then resolve via the cross-platform core (task 4).
 //! This guards the Card tag schema and the resolver parsing against drift.
-//! Native (`nostr`); reached by `cargo test --bin axenstax-engine`.
+//! Native (`nostr`); reached by `cargo test --lib`.
 
 use nostr::{JsonUtil, Keys, Timestamp, ToBech32};
 

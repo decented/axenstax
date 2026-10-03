@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     /// OWNER BOUNDARY (live relay) — needs network, not run in CI.
-    /// Run manually: `cargo test --bin axenstax-engine relay_client -- --ignored`
+    /// Run manually: `cargo test --lib relay_client -- --ignored`
     #[test]
     #[ignore]
     fn live_multi_relay_connects_and_subscribes() {

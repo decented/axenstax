@@ -10,7 +10,7 @@
 //! `max_texture_array_layers` holds the 506-layer block atlas — a real GPU
 //! (this dev box's Intel iGPU: 2048) or a capable software stack. CI's
 //! llvmpipe caps at 256, so harness tests are `#[ignore]` and run locally:
-//! `cargo test --bin axenstax-engine -- --ignored game_harness`.
+//! `cargo test --lib -- --ignored game_harness`.
 
 use crate::GameMode;
 

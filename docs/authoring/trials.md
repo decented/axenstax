@@ -466,16 +466,16 @@ spare stone to the vendor" is not.
 After authoring, run (from `game/engine/`):
 
 ```bash
-CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<your build dir> cargo test --bin axenstax-engine trials_lint
-CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<your build dir> cargo test --bin axenstax-engine scenario
-CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<your build dir> cargo test --bin axenstax-engine trials
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<your build dir> cargo test --lib trials_lint
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<your build dir> cargo test --lib scenario
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<your build dir> cargo test --lib trials
 ```
 
 **ALL of these must be green** before the trial is correct. Every failure
 message is written to tell you exactly what's wrong and where — read it, it
 names your trial's token, the field, and the fix. Don't hand-wave past a
 failure; each one maps to a real way the trial would ship broken or
-un-completable. Finish with a full `cargo test --bin axenstax-engine` (or
+un-completable. Finish with a full `cargo test --lib` (or
 `./check.sh`) before considering the trial done — the whole suite must stay
 green, not just the trial-specific tests.
 

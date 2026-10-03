@@ -1334,8 +1334,8 @@ mod tests {
         assert_eq!(bytes[0], OVERRIDE_SET_VERSION, "blob is version-prefixed");
     }
 
-    /// Regenerates assets/official_overrides.fixture.json (run: cargo test --bin
-    /// axenstax-engine generate_official_fixture -- --ignored --nocapture). One
+    /// Regenerates assets/official_overrides.fixture.json (run: cargo test --lib
+    /// generate_official_fixture -- --ignored --nocapture). One
     /// CORNFLOWER reskin, bytes = version-prefixed bincode as a u8 JSON array.
     #[test]
     #[ignore]

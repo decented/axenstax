@@ -136,10 +136,23 @@ section "cargo test ($PROFILE_LABEL)"
 # Redirecting to a log and tailing it afterwards removes that coupling — and
 # shows MORE output on failure, not less.
 test_log="$(mktemp)"
-if (cd game/engine && CARGO_INCREMENTAL=0 cargo test --bin axenstax-engine $PROFILE_FLAG --quiet) >"$test_log" 2>&1; then
+# `--lib`, not `--bin axenstax-engine`: the engine is a lib + thin bin shim so
+# Android can build a cdylib (a bin target cannot be dlopen'd by NativeActivity).
+# Every #[cfg(test)] module lives in the library, so `--bin` would silently run
+# ZERO tests and still pass.
+if (cd game/engine && CARGO_INCREMENTAL=0 cargo test --lib $PROFILE_FLAG --quiet) >"$test_log" 2>&1; then
     tail -5 "$test_log"
-    ok "all tests pass"
-    verified+=("cargo test")
+    # A zero-test "pass" is the failure mode the --bin/--lib switch exists to
+    # prevent, so count what actually ran. The suite is well into the hundreds;
+    # anything under 100 means the wrong target was tested.
+    passed_total="$(awk '/test result: ok\./ { for (i = 1; i <= NF; i++) if ($i == "passed;") s += $(i - 1) } END { print s + 0 }' "$test_log")"
+    if [ "${passed_total:-0}" -ge 100 ]; then
+        ok "all tests pass ($passed_total)"
+        verified+=("cargo test ($passed_total tests)")
+    else
+        fail "only ${passed_total:-0} tests ran — wrong cargo test target?"
+        failures=$((failures + 1))
+    fi
 else
     tail -40 "$test_log"
     fail "tests failed"

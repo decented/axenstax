@@ -4,6 +4,24 @@ license = "MIT"
 version = "0.2.27"
 edition = "2024"
 
+# The engine is a lib + a thin bin shim (was bin-only until 2026-10).
+#
+# Android REQUIRES a cdylib: NativeActivity `dlopen()`s libaxenstax_engine.so
+# and calls `android_main` in it. A `bin` target cannot be loaded that way, so
+# without this the engine cannot be packaged into an APK at all.
+#
+#   rlib   — what src/main.rs (desktop + dedicated server) links against.
+#   cdylib — what the APK ships in lib/<abi>/, and what Trunk builds for the
+#            web (index.html selects it with data-target-name="axenstax_engine";
+#            `#[wasm_bindgen(start)]` lives in the library).
+#
+# Tests moved with the code, so they are LIBRARY tests: `cargo test --lib`, not
+# `--bin axenstax-engine` (which would silently run zero tests and still pass).
+[lib]
+name = "axenstax_engine"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"
+
 [dependencies]
 # Cross-platform (native + WASM)
 wgpu = { version = "29", default-features = false, features = ["wgsl", "webgpu"] }

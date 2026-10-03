@@ -253,6 +253,18 @@
     <!-- Trunk replaces this with the hashed glue/wasm loader.
          #[wasm_bindgen(start)] in the engine registers window.__axenstax_set_pubkey
          and window.__axenstax_start for auth.js to call once auth resolves. -->
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <!-- Build the LIBRARY (cdylib `axenstax_engine`), never the bin.
+         The crate has both since Android needs a cdylib (see Cargo.toml [lib]),
+         so Trunk must be told which of the two artifacts to build:
+             axenstax_engine  — the cdylib (underscore)   <- this one
+             axenstax-engine  — the bin    (hyphen)
+         `data-bin` can only ever select a *bin*, and pointing it at the bin
+         produces a ~1.5 MB wasm with the whole engine missing: src/main.rs is a
+         shim whose wasm32 branch calls nothing, so the linker drops the rlib
+         and with it every wasm-bindgen intrinsic (wasm-bindgen then dies with
+         "failed to find intrinsics to enable `clone_ref` function").
+         `#[wasm_bindgen(start)]` lives in the library (src/web_main.rs), so the
+         library IS the web artifact. Use data-target-name, not data-bin. -->
+    <link data-trunk rel="rust" data-target-name="axenstax_engine" data-wasm-opt="z" />
 </body>
 </html>
