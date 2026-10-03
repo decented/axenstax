@@ -97,33 +97,46 @@ jobs:
       # one APK signed with the wrong key strands every player who installed it:
       # they must uninstall (losing their worlds) before they can ever update.
       # A debug-signed APK reaching the site is therefore unrecoverable, not
-      # merely untidy — so pin the expected certificate and refuse anything else.
+      # merely untidy — so pin the expected certificate and never publish
+      # anything else. The APK is optional, though: a wrong-key (or unverifiable)
+      # APK is DELETED from the publish set with a warning and the step carries
+      # on, so it can never block the desktop installers from shipping.
       # The digest is public (it ships inside every signed APK), so committing it
       # is safe and makes an accidental key swap impossible to miss.
       - name: Verify APK signing certificate
+        env:
+          RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           apks=(installers/*.apk)
           if [ ${#apks[@]} -eq 0 ]; then
-            echo "no APK in this publish set — skipping certificate check"; exit 0
+            echo "no APK in this publish set — skipping certificate check"
+          else
+            EXPECTED=d27f95670c4c69720dc4b679b82cc54b0ad62b0e34b68a917a1e72ae88a1c642
+            APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
+            for apk in "${apks[@]}"; do
+              echo "=== $apk ==="
+              got=""
+              if [ -n "$APKSIGNER" ]; then
+                "$APKSIGNER" verify --print-certs "$apk" || true
+                got=$("$APKSIGNER" verify --print-certs "$apk" 2>/dev/null \
+                      | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' || true)
+              else
+                echo "::warning::apksigner not found — cannot verify $apk"
+              fi
+              if [ "$got" = "$EXPECTED" ]; then
+                echo "signing certificate OK"
+              else
+                echo "::warning::$apk is not signed with the pinned release key (expected $EXPECTED, got ${got:-<none>}) — REMOVED from the publish set. A debug-signed or re-keyed APK can never be upgraded in place. The rest of the run still publishes."
+                rm -f -- "$apk"
+              fi
+            done
           fi
-          EXPECTED=d27f95670c4c69720dc4b679b82cc54b0ad62b0e34b68a917a1e72ae88a1c642
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          for apk in "${apks[@]}"; do
-            echo "=== $apk ==="
-            "$APKSIGNER" verify --print-certs "$apk"
-            got=$("$APKSIGNER" verify --print-certs "$apk" \
-                  | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
-            if [ "$got" != "$EXPECTED" ]; then
-              echo "::error::$apk is signed with the WRONG key."
-              echo "::error::  expected $EXPECTED"
-              echo "::error::  got      ${got:-<none>}"
-              echo "::error::Refusing to publish — a debug-signed or re-keyed APK can never be upgraded in place."
-              exit 1
-            fi
-            echo "signing certificate OK"
-          done
+          echo "=== final publish set ==="
+          ls -lh installers
+          # Guard: never rsync an EMPTY set (an APK-only run whose APK was just dropped).
+          [ -n "$(ls -A installers)" ] || { echo "::error::nothing left to publish from run $RUN_ID"; exit 1; }
 
       - name: Configure SSH (deploy key)
         env:

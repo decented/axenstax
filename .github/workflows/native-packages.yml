@@ -22,9 +22,10 @@ on:
         description: "Also build the Android APK (ubuntu runner)"
         type: boolean
         # Off by default: without the release-key secrets the APK is debug-
-        # signed, and publish-installers.yml refuses to publish a run that
-        # carries a debug-signed APK (see its certificate check). Tick it when
-        # the signing secrets are in place, or for a test-only artifact.
+        # signed, and publish-installers.yml drops a debug-signed APK from the
+        # publish set with a warning (see its certificate check) — the desktop
+        # installers still ship. Tick it when the signing secrets are in place,
+        # or for a test-only artifact.
         default: false
 
 permissions:
@@ -197,6 +198,11 @@ jobs:
   android:
     name: android (APK)
     if: inputs.android
+    # The APK is never required. If this job fails, the run must still conclude
+    # green so publish-installers.yml (which insists on conclusion=success) can
+    # publish the desktop installers; the missing axenstax-android artifact is
+    # then just skipped there.
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -232,7 +238,7 @@ jobs:
             echo "ANDROID_KEYSTORE_PASS_FILE=$RUNNER_TEMP/signing/release.password" >> "$GITHUB_ENV"
             echo "release signing key staged"
           else
-            echo "::warning::ANDROID_KEYSTORE_B64 / ANDROID_KEYSTORE_PASSWORD are not set — building a DEBUG-SIGNED APK. Installable for testing, but publish-installers.yml will refuse to publish it."
+            echo "::warning::ANDROID_KEYSTORE_B64 / ANDROID_KEYSTORE_PASSWORD are not set — building a DEBUG-SIGNED APK. Installable for testing, but publish-installers.yml will drop it from the publish set."
           fi
 
       - name: Build the APK (release)
