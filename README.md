@@ -11,6 +11,21 @@ earn real value from play — that's a capability the platform unlocks, not
 the headline, and never the reason to play. See `docs/vision/` for the
 full thinking behind that ordering.
 
+## Links
+
+| | |
+|---|---|
+| Home | [axenstax.com](https://axenstax.com) |
+| Play in your browser | [play.axenstax.com](https://play.axenstax.com) |
+| Download the desktop app | [docs.axenstax.org/download](https://docs.axenstax.org/download) |
+| Player guide | [wiki.axenstax.com](https://wiki.axenstax.com) |
+| Learn | [learn.axenstax.com](https://learn.axenstax.com) |
+| Specs and design docs | [docs.axenstax.org](https://docs.axenstax.org) |
+| Project | [axenstax.org](https://axenstax.org) |
+| Privacy | [axenstax.com/privacy](https://axenstax.com/privacy) |
+
+The code for every site above lives in `tools/sites/` (see "Building it yourself" below).
+
 ## Web taster vs. native
 
 There are two ways to play:
