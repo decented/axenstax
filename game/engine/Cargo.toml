@@ -112,7 +112,7 @@ base64 = "0.22"
 # Signet contacts v2 vault envelope (WIRE.md §1): the projection body is
 # AES-256-GCM under a NIP-44-wrapped content key. NATIVE-ONLY — the contacts
 # sync never runs in the web build.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # UPnP IGD port mapping so a home router forwards the online-play UDP port
 # without anyone editing router settings (spec §4.1). Blocking API used on a
 # worker thread — the `aio_tokio` feature is deliberately OFF, so this pulls no
