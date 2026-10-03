@@ -112,7 +112,7 @@ copy one working site venv into the others (e.g.
 0. Version parity — `game/engine/Cargo.toml` and `tools/packaging/packager.toml` must carry the same `version` (cargo-packager names artefacts from the latter, and `/download/latest.json` reads the version off those names). Then the docs-site unit tests (`tools/sites/docs/test_*.py`, via the site venv) — the `/download/latest.json` contract.
 1. `cargo clippy` on the engine, gated `-D warnings` (Phase 4b, 2026-07-06) — any warning or error fails the run.
 2. `cargo build` on the engine.
-3. `cargo test --bin axenstax-engine` — runs every `#[cfg(test)]` module in the bin (currently 226+ tests across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`).
+3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently 4800+ tests across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
 4. `trunk build` for the WASM bundle.
 5. Bundle-size gate — brotli-compressed total must stay under 5 MiB (PWA alpha spec).
 6. With `--smoke`: Playwright smoke test against a running website. Confirms `/`, `/game`, WASM asset, JS loader all serve correctly. Saves a screenshot to `tools/smoke/out/play-landing.png`.
@@ -125,8 +125,8 @@ First-time setup: `(cd tools/smoke && npm install && npx playwright install chro
 
 - **Pure-function unit tests**: `#[cfg(test)] mod tests` at the bottom of each source module (see `chunk.rs`, `spawning.rs`, `falling_blocks.rs`, `combat.rs`, `mob_ai.rs`, `save.rs`, `protocol.rs`, …). These assert real invariants on extracted free functions — not placeholders.
 - **Integration tests**: `src/test_integration/{handshake,mobs,blocks,physics,smoke}.rs`, all gated `#[cfg(test)]`. They drive `TestHost` (in `src/test_harness.rs`), a synchronous wrapper around `GameServer` with no transport thread — fast, deterministic.
-- **Adding a new integration test**: either extend `TestHost` in `src/test_harness.rs` with a new helper, or drop a file in `src/test_integration/` and register it in `src/test_integration/mod.rs`. Both are reached by `cargo test --bin axenstax-engine` (which `check.sh` runs).
-- The engine is a bin-only crate (no `src/lib.rs`), which is why these live inside the bin rather than under `tests/*.rs`. If a lib target is added later, they move out mechanically.
+- **Adding a new integration test**: either extend `TestHost` in `src/test_harness.rs` with a new helper, or drop a file in `src/test_integration/` and register it in `src/test_integration/mod.rs`. Both are reached by `cargo test --lib` (which `check.sh` runs).
+- The engine is a library (`src/lib.rs`, `rlib` + `cdylib` for Android) plus a thin bin shim (`src/main.rs`). The tests still live inside the crate rather than under `tests/*.rs`; they could move out mechanically now that a lib target exists.
 
 ### Authoring Trials (Explorer Challenges)
 
@@ -139,7 +139,7 @@ turns every silent-failure mode into a loud test failure — an objective listen
 for an unfired event, a `Sequence`/`Checklist` leaf that isn't an `Action`, an
 arena that doesn't provide the objective's species, an unrecognised (typo'd) JSON
 field, or a money/earning word on any text surface. After authoring, `cargo test
---bin axenstax-engine trials_lint` must be green; its failure messages name the
+--lib trials_lint` must be green; its failure messages name the
 exact fix. Designed so a weaker model can author a correct trial.
 
 ## Project Posture
