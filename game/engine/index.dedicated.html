@@ -336,5 +336,9 @@
             window.addEventListener('TrunkApplicationStarted', gate);
         })();
     </script>
+    <!-- Build the LIBRARY cdylib `axenstax_engine` (underscore), never the bin
+         `axenstax-engine` (hyphen): the crate is lib + bin, so Trunk must be told
+         which artifact. Same link as index.html — see the note there. -->
+    <link data-trunk rel="rust" data-target-name="axenstax_engine" data-wasm-opt="z" />
 </body>
 </html>
