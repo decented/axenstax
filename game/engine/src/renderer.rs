@@ -2849,7 +2849,7 @@ impl Renderer {
     /// stable on-screen size regardless of split-screen layout.
     pub fn update_viewmodel_camera(&self, player_index: usize, aspect: f32) {
         if let Some(gpu) = self.player_gpu.get(player_index) {
-            let proj = glam::Mat4::perspective_rh(
+            let proj = glam::camera::rh::proj::directx::perspective(
                 crate::viewmodel::VIEWMODEL_FOV_Y.to_radians(),
                 aspect.max(0.0001),
                 0.01,
@@ -5292,8 +5292,8 @@ fn skin_preview_eye(yaw: f32, pitch: f32, dist: f32) -> glam::Vec3 {
 /// avatar's chest with a perspective projection at the given aspect ratio.
 pub(crate) fn skin_preview_view_proj(yaw: f32, pitch: f32, dist: f32, aspect: f32) -> glam::Mat4 {
     let target = glam::Vec3::new(0.0, 0.95, 0.0);
-    let view = glam::Mat4::look_at_rh(skin_preview_eye(yaw, pitch, dist), target, glam::Vec3::Y);
-    let proj = glam::Mat4::perspective_rh(45f32.to_radians(), aspect.max(0.01), 0.05, 50.0);
+    let view = glam::camera::rh::view::look_at_mat4(skin_preview_eye(yaw, pitch, dist), target, glam::Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(45f32.to_radians(), aspect.max(0.01), 0.05, 50.0);
     proj * view
 }
 

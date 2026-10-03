@@ -143,7 +143,7 @@ mod tests {
         let mut padded = vec![0u8; 4096];
         padded[..4].copy_from_slice(&(body.len() as u32).to_be_bytes());
         padded[4..4 + body.len()].copy_from_slice(body.as_bytes());
-        let ct = Aes256Gcm::new_from_slice(&key).unwrap().encrypt(Nonce::from_slice(&iv), padded.as_slice()).unwrap();
+        let ct = Aes256Gcm::new_from_slice(&key).unwrap().encrypt(&Nonce::from(iv), padded.as_slice()).unwrap();
         let k = nostr::nips::nip44::encrypt(rail.secret_key(), app, B64.encode(key), nostr::nips::nip44::Version::V2).unwrap();
         json!({"v": 2, "k": k, "iv": B64.encode(iv), "ct": B64.encode(ct), "b": 4096}).to_string()
     }

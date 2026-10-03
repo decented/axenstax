@@ -15,7 +15,7 @@
 //!
 //! Spec: `docs/foundations/2026-05-23-tip-jar.md`.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
