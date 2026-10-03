@@ -6,9 +6,9 @@ name: Deploy
 #
 # SELF-PROVISIONING: remote-update.sh stands the whole layout up from scratch and
 # keeps it in sync — venvs, prod .env (rendered from templates, secrets preserved),
-# systemd units, and the Caddy vhost (installed + reloaded when changed). A fresh
-# site, a changed *.service, or a changed axenstax.Caddyfile are all applied
-# automatically; no manual SSH step. See tools/sites/deploy/README.md.
+# systemd units, and the Caddy vhost (installed ONLY on a box that has none — a live
+# vhost is host-owned and never overwritten). A fresh site or a changed *.service
+# is applied automatically; a changed axenstax.Caddyfile is installed by hand. See tools/sites/deploy/README.md.
 #
 # DEPLOY_HOST: repo VARIABLE (Settings → Secrets and variables → Actions →
 # Variables), not a secret — the prod box's origin IP isn't sensitive (grey-cloud

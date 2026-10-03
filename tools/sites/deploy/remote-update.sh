@@ -11,7 +11,8 @@
 #   3. systemd unit  — install/refresh from deploy/*.service if missing or changed
 #   4. restart       — enable + restart, report active/FAILED
 # Then once, after the per-site loop:
-#   5. Caddy vhost   — install/refresh axenstax.Caddyfile, validate, reload if changed
+#   5. Caddy vhost   — install axenstax.Caddyfile ONLY if the box has none; a
+#                      live vhost is host-owned and never overwritten
 #
 # The .env merge is why this can do the one-time .com/.org cutover (existing
 # sites' URLs refresh) without losing GROQ/NOSTR_SERVER_KEY/PRINTFUL_TOKEN.
@@ -99,30 +100,28 @@ for s in $SITES; do
   fi
 done
 
-# ---- 5: Caddy vhost — install/refresh + reload if changed -----------------
+# ---- 5: Caddy vhost — first-time install only --------------------------
+# Once a vhost exists on the box it is host-owned (the operator manages it: access log
+# off, IP masking, etc.), so a deploy never overwrites it. The repo copy is only
+# the seed for a fresh box. To roll out a repo change, the operator installs it by hand.
 CADDY_SRC="$DEPLOY_DIR/axenstax.Caddyfile"
 CADDY_DST="/etc/caddy/conf.d/axenstax.Caddyfile"
 if [ -f "$CADDY_SRC" ]; then
-  if sudo cmp -s "$CADDY_SRC" "$CADDY_DST"; then
-    echo "caddy: vhost unchanged"
-  else
-    echo "caddy: vhost changed — installing + validating"
-    sudo mkdir -p /etc/caddy/conf.d
-    backup=""
-    if [ -f "$CADDY_DST" ]; then
-      backup="$CADDY_DST.bak.$(date +%Y%m%d-%H%M%S)"
-      sudo cp -a "$CADDY_DST" "$backup"
+  if sudo test -f "$CADDY_DST"; then
+    if sudo cmp -s "$CADDY_SRC" "$CADDY_DST"; then
+      echo "caddy: vhost matches repo copy"
+    else
+      echo "caddy: live vhost differs from repo copy — host-owned, left untouched"
     fi
+  else
+    echo "caddy: no vhost on this box — installing repo copy + validating"
+    sudo mkdir -p /etc/caddy/conf.d
     sudo cp "$CADDY_SRC" "$CADDY_DST"
     if sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
       sudo systemctl reload caddy && echo "caddy: reloaded (certs auto-issue on first serve)"
     else
-      echo "caddy: validate FAILED — rolling back"
-      if [ -n "$backup" ]; then
-        sudo cp "$backup" "$CADDY_DST"
-      else
-        sudo rm -f "$CADDY_DST"   # we created it this run; remove so config stays valid
-      fi
+      echo "caddy: validate FAILED — removing the vhost this run installed"
+      sudo rm -f "$CADDY_DST"
       rc=1
     fi
   fi

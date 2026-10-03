@@ -37,7 +37,7 @@ units (`game`, `docs`, `marketing`) are **reused** — same ports — but get ne
 | `axenstax.Caddyfile` | `/etc/caddy/conf.d/` | reverse-proxy vhosts; imported by main Caddyfile; auto-TLS |
 | `env.{game,docs,marketing,wiki,learn,project,claim}.template` | rendered to each site's `.env` **on the box** by `render-env.py` | prod env; **no secrets** — host blanks preserved across deploys (claim needs `PRINTFUL_TOKEN`) |
 | `render-env.py` | run on the box by `remote-update.sh` | merges a template with the existing host `.env`: template wins for config, blanks never clobber host secrets, `NOSTR_SERVER_KEY` auto-generated |
-| `remote-update.sh` | run on the box by CI | **self-provisioning**: venv + `.env` + unit install/refresh + restart + Caddy reload. Idempotent; stands the layout up from scratch |
+| `remote-update.sh` | run on the box by CI | **self-provisioning**: venv + `.env` + unit install/refresh + restart + Caddy vhost install on a fresh box only (a live vhost is host-owned and never overwritten). Idempotent; stands the layout up from scratch |
 
 ## Access
 
