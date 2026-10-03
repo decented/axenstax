@@ -2,7 +2,7 @@
 {% block title %}Native build — Axe'n'Stax{% endblock %}
 {% block content %}
 <div class="doc-container">
-    <h1>The native desktop build</h1>
+    <h1>The native build</h1>
 
     <div style="background: #1a1f2e; border: 1px solid #2a3654; border-radius: 8px; padding: 16px 20px; margin: 24px 0;">
         <p style="margin: 0 0 0.4rem; color: #d4a044; font-weight: 700;">The browser is the easy path.</p>
@@ -12,7 +12,7 @@
 
     {% if installers %}
     {% set sev_colour = {'clean': '#2ecc71', 'warn': '#d4a044', 'block': '#e06c5a'} %}
-    {% set os_name = {'linux': 'Linux', 'windows': 'Windows', 'macos': 'macOS'} %}
+    {% set os_name = {'linux': 'Linux', 'windows': 'Windows', 'macos': 'macOS', 'android': 'Android'} %}
     {% set ordered = (installers | selectattr('os', 'equalto', detected_os) | list) + (installers | rejectattr('os', 'equalto', detected_os) | list) %}
     <h2>Download an installer</h2>
     {% if detected_os %}
@@ -46,7 +46,13 @@
             <li><strong>🐧 Linux — clean.</strong> No signing gate. <code>chmod +x</code> the AppImage and run, or <code>sudo apt install</code> the <code>.deb</code>.</li>
             <li><strong>🪟 Windows — a warning, not a block.</strong> SmartScreen shows "Windows protected your PC" → click <strong>More info → Run anyway</strong>. It installs fine; the warning goes away once we code-sign.</li>
             <li><strong>🍎 macOS — currently blocked.</strong> Until we notarise (Apple Developer account), Gatekeeper refuses a downloaded <code>.dmg</code>. macOS 15+ removed the easy Control-click bypass — you'd open System Settings → Privacy &amp; Security → "Open Anyway". For now, the <strong>build-from-source</strong> path below is the reliable route on a Mac.</li>
+            {% if installers | selectattr('os', 'equalto', 'android') | list %}
+            <li><strong>🤖 Android — two taps of friction.</strong> The APK is an early alpha we ship ourselves rather than through Google Play, so Android treats it as an unknown app. First your browser asks permission to install apps — allow it. Then <strong>Play Protect</strong> may warn that the app is unrecognised: tap <strong>More details → Install anyway</strong>. That's the standard sideload path, and the price of not being on Play.</li>
+            {% endif %}
         </ul>
+        {% if installers | selectattr('os', 'equalto', 'android') | list %}
+        <p style="margin:0.6rem 0 0; font-size:0.86rem; color:#9aa0b4;">On a <strong>parent-managed tablet</strong>, installing apps from outside the store may be switched off by the device's management settings. That's a deliberate safety setting: installing Axe'n'Stax needs the parent to allow it from whichever app manages the device.</p>
+        {% endif %}
     </div>
     {% endif %}
 
@@ -110,6 +116,17 @@ sudo apt install -y \
     <h2>Controllers</h2>
     <p>Xbox and PlayStation controllers work out of the box via USB or Bluetooth. For split-screen,
     connect two controllers.</p>
+
+    <h3>🤖 Android (early alpha)</h3>
+    <p>Android loads the engine as a library through <code>NativeActivity</code> rather than running a plain
+    binary, so it builds through its own script instead of bare <code>cargo build</code>. You'll need the
+    <strong>Android SDK + NDK</strong> and <code>cargo-ndk</code>; there is no Gradle and no Java in the APK.</p>
+    <pre style="background: #111; padding: 12px; border-radius: 4px; overflow-x: auto;">cargo install cargo-ndk
+rustup target add aarch64-linux-android
+cd tools/packaging/android
+PROFILE=release ./build-apk.sh</pre>
+    <p>The APK lands in <code>tools/packaging/android/out/</code>, signed with a throwaway local debug key.
+    Touch controls are drawn automatically; gamepads aren't supported on Android yet.</p>
 
     <h2>Chromebook &amp; everything else</h2>
     <p>Use the browser path — <a href="{{ game_url }}">the PWA</a> in Chrome 121+ is the supported way to

@@ -23,6 +23,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from platforms import INSTALLER_META as _INSTALLER_META
+from platforms import OS_LABELS as _OS_LABELS
+from platforms import detect_os as _detect_os
 from versioning import filter_newest_per_platform, latest_manifest
 
 load_dotenv()
@@ -42,17 +45,7 @@ INSTALLERS_DIR = Path(
     os.environ.get("AXENSTAX_INSTALLERS_DIR", str(PROJECT_ROOT / "build" / "installers"))
 )
 
-# extension -> (os key, human format, per-OS expectation, severity). Severity drives the
-# warning colour: clean (Linux), warn (Windows SmartScreen), block (macOS Gatekeeper).
-_INSTALLER_META = {
-    ".appimage": ("linux", "AppImage (portable)", "chmod +x and run — no signing gate.", "clean"),
-    ".deb": ("linux", ".deb (Debian/Ubuntu)", "Install with: sudo apt install ./<file>.", "clean"),
-    ".exe": ("windows", "Installer (.exe)", "Unsigned: SmartScreen → More info → Run anyway.", "warn"),
-    ".msi": ("windows", "Installer (.msi)", "Unsigned: SmartScreen → More info → Run anyway.", "warn"),
-    ".dmg": ("macos", "Disk image (.dmg)", "Unsigned & un-notarised — macOS blocks it until we notarise (see below).", "block"),
-}
-
-_OS_LABELS = {"linux": "🐧 Linux", "windows": "🪟 Windows", "macos": "🍎 macOS"}
+# Installer table + OS labels live in platforms.py (pure, unit-tested by check.sh).
 _INSTALLER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,150}$")
 
 # The published-version derivation lives in versioning.py (pure, no FastAPI) so
@@ -361,18 +354,6 @@ def _discover_installers() -> list[dict]:
             "sha256": _sha256_cached(f),
         })
     return filter_newest_per_platform(out)
-
-
-def _detect_os(user_agent: str) -> str | None:
-    """Best-effort desktop-OS detection from the User-Agent (mobiles → None)."""
-    ua = (user_agent or "").lower()
-    if "windows" in ua:
-        return "windows"
-    if ("macintosh" in ua or "mac os x" in ua) and "mobile" not in ua and "iphone" not in ua and "ipad" not in ua:
-        return "macos"
-    if "linux" in ua and "android" not in ua:
-        return "linux"
-    return None
 
 
 @app.get("/download", response_class=HTMLResponse)

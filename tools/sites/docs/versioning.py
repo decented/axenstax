@@ -135,8 +135,8 @@ def latest_manifest(installers: list[dict], download_url: str, installer_url_bas
     return {
         "version": latest,
         "linux_appimage": linux_appimage,
-        # Stays None until the Android APK ships and `.apk` joins
-        # `_INSTALLER_META` in app.py. The client tolerates null.
+        # None until an `.apk` (see INSTALLER_META in platforms.py) is in the
+        # installers dir. The client tolerates null.
         "android_apk": newest_with_suffix(".apk"),
         "download_url": download_url,
         "linux_appimage_sha256": linux_appimage_sha256,
