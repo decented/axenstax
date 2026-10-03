@@ -35,7 +35,7 @@ image = "0.25"
 noise = "0.9"
 hecs = "0.10"
 serde = { version = "1", features = ["derive"] }
-bincode = "1"
+bincode = "3"
 serde_json = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 web-time = "1"
