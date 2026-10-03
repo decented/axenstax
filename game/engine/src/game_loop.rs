@@ -21521,7 +21521,7 @@ impl super::GameState {
             toggle_inventory: intent.toggle_inventory,
             drop_item: intent.drop_item,
             hotbar_slot: wire_hotbar,
-            block_changes: self.pending_block_changes.drain(..).collect(),
+            block_changes: std::mem::take(&mut self.pending_block_changes),
         };
 
         // Serialize once, send to whichever transport is active
