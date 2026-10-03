@@ -101,7 +101,7 @@ secp256k1 = { version = "0.29", default-features = false, features = ["std", "al
 # (pair / persist / restore + the `NostrSigner` contract). Vendored in-repo (see
 # `vendor/signet-nip46-client/VENDOR.md`) because the WASM deploy build resolves
 # the whole dep graph and has no access to the canonical Forgesworn remote. It
-# pulls the rust-nostr 0.44.x family (nostr 0.44.3 → secp256k1 0.29.1, matching
+# pulls the rust-nostr 0.44.x family (nostr 0.44.8 → secp256k1 0.29.1, matching
 # the line above — no version clash). NATIVE-ONLY: never compiled into the wasm32
 # graph (every reference is `#[cfg(not(target_arch = "wasm32"))]`-gated).
 signet-nip46-client = { path = "vendor/signet-nip46-client" }
@@ -109,14 +109,14 @@ signet-nip46-client = { path = "vendor/signet-nip46-client" }
 # the phone scans). Also a wasm dep below (the lobby QR sign-in); here it serves
 # the native menu's Signet sign-in dialog.
 qrcode = { version = "0.14", default-features = false }
-# Direct handle on the rust-nostr core (same 0.44.3 the signer wraps — already in
+# Direct handle on the rust-nostr core (same 0.44.8 the signer wraps — already in
 # the tree transitively, so no new resolution). The native sign-in path builds +
 # signs the kind-21236 join auth event with `EventBuilder` / `Keys` / `Tag` and
 # the `NostrSigner` trait. NATIVE-ONLY (never in the wasm32 graph).
 # `nip44` is already pulled in transitively (nip59 = ["nip44"]), but online play
 # by contact uses NIP-44 DIRECTLY to seal the rendezvous offer/answer runtime-key
 # to runtime-key — so declare it rather than inherit it. NATIVE-ONLY.
-nostr = { version = "=0.44.3", features = ["nip59", "nip44"] }
+nostr = { version = "=0.44.8", features = ["nip59", "nip44"] }
 # NOTE: `rfd` (native file dialogs) is NOT here: Android is also
 # `not(target_arch = "wasm32")` and rfd has no Android backend — see the
 # desktop-only section below.

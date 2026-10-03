@@ -1082,8 +1082,8 @@ fn gen_fire() -> Vec<u8> {
 /// solid paint-colour layers so a dye paints as one flat colour.
 fn gen_solid_colour(r: u8, g: u8, b: u8) -> Vec<u8> {
     let mut px = vec![0u8; PIXELS];
-    for texel in px.chunks_exact_mut(4) {
-        texel.copy_from_slice(&[r, g, b, 255]);
+    for texel in px.as_chunks_mut::<4>().0 {
+        *texel = [r, g, b, 255];
     }
     px
 }
@@ -2534,7 +2534,7 @@ pub fn block_average_rgba(block_id: crate::block::BlockId) -> [u8; 4] {
         return [120, 120, 120, 255];
     };
     let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
-    for px in tex.chunks_exact(4) {
+    for px in tex.as_chunks::<4>().0 {
         if px[3] == 0 {
             continue;
         }

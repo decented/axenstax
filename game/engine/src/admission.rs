@@ -52,6 +52,9 @@ pub fn decide(policy: AdmissionPolicy, current: usize, max: usize) -> Admission 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn release_seat(current: &std::sync::atomic::AtomicUsize) {
     use std::sync::atomic::Ordering;
+    // `fetch_update` is deprecated (renamed `try_update`) from Rust 1.99, but
+    // `try_update` is not available on older stable toolchains still in use.
+    #[allow(deprecated)]
     let _ = current.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
 }
 

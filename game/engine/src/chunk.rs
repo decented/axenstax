@@ -193,13 +193,13 @@ impl Chunk {
             _ => return None,
         };
         let mut blocks = [AIR; CHUNK_VOLUME];
-        for (i, chunk) in data[..block_bytes].chunks_exact(2).enumerate() {
-            blocks[i] = u16::from_le_bytes([chunk[0], chunk[1]]);
+        for (i, chunk) in data[..block_bytes].as_chunks::<2>().0.iter().enumerate() {
+            blocks[i] = u16::from_le_bytes(*chunk);
         }
         let mut placed = [0u64; PLACED_WORDS];
         if has_mask {
-            for (i, word) in data[block_bytes..].chunks_exact(8).enumerate() {
-                placed[i] = u64::from_le_bytes(word.try_into().unwrap());
+            for (i, word) in data[block_bytes..].as_chunks::<8>().0.iter().enumerate() {
+                placed[i] = u64::from_le_bytes(*word);
             }
         }
         Some(Self {

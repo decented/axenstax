@@ -15,7 +15,7 @@ categories = ["cryptography", "authentication", "api-bindings"]
 [dependencies]
 # rust-nostr family, pinned in lockstep (see the AxeNStax S0 spike). NIP-46 bunker
 # client + the NostrSigner trait this crate re-exposes.
-nostr = "=0.44.3"
+nostr = "=0.44.8"
 nostr-connect = "=0.44.1"
 # Relay transport for our own client-initiated (`nostrconnect://`) handshake —
 # rust-nostr 0.44's NostrConnect only accepts a literal "ack" there, while current

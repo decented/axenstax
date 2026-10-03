@@ -2167,7 +2167,7 @@ impl HostedServer {
         let state_update = protocol::StateUpdatePacket {
             tick: self.server_tick,
             players: player_states,
-            block_changes: self.pending_block_changes.drain(..).collect(),
+            block_changes: std::mem::take(&mut self.pending_block_changes),
             world_time: self.server.world_time,
             last_acked_input: 0,
             entity_spawns,
