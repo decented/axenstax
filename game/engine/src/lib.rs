@@ -2003,6 +2003,22 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// Android destroys the native window (and therefore the wgpu surface)
+    /// every time the app is backgrounded. Desktop and web never do this, which
+    /// is why `resumed`'s `if self.state.is_some() { return }` guard is safe.
+    ///
+    /// Drop the surface here so nothing draws into a dead handle. It is rebuilt
+    /// lazily by `Renderer::ensure_surface` on the next render, NOT on
+    /// `resumed` — winit's Android backend was observed not to re-emit
+    /// `resumed` after a background/foreground cycle (Pixel 8, 2026-07).
+    #[cfg(target_os = "android")]
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        log::info!("Android: suspended — dropping the wgpu surface");
+        if let Some(state) = self.state.as_mut() {
+            state.renderer.surface = None;
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,

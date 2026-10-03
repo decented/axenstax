@@ -498,6 +498,16 @@ fn choose_surface_formats(
 
 pub struct Renderer {
     pub surface: Option<wgpu::Surface<'static>>,
+    /// Retained so the surface can be REBUILT, not just dropped.
+    ///
+    /// Android destroys the native window every time the activity is
+    /// backgrounded, then hands back a fresh one. Rebuilding a surface needs the
+    /// instance it came from, and nothing else here holds one, so without this a
+    /// dropped surface would be permanent and the app would sit on a blank
+    /// screen. Desktop and web never exercise this path, hence dead there, but it
+    /// stays compiled on every platform so it cannot rot behind a cfg.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    instance: wgpu::Instance,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     /// Format we render through (always sRGB so linear shader output is gamma-
@@ -1465,6 +1475,7 @@ impl Renderer {
 
         Self {
             surface: Some(surface),
+            instance,
             device,
             queue,
             format,
@@ -1581,6 +1592,61 @@ impl Renderer {
         } else {
             vec![]
         }
+    }
+
+    /// Rebuild the surface if Android threw it away, immediately before it is
+    /// needed.
+    ///
+    /// Doing this at RENDER time rather than on `resumed` is deliberate: on a
+    /// Pixel 8 (the 2026-07 spike), winit's Android backend fired `resumed()`
+    /// exactly once at startup and never again across background/foreground
+    /// cycles, so a rebuild-on-resume never ran and the app froze on its last
+    /// frame. Rebuilding here is self-healing and independent of lifecycle
+    /// event ordering — whoever needs a surface gets one.
+    ///
+    /// No-op on every other platform: only Android revokes a live window.
+    #[allow(unused_variables)]
+    fn ensure_surface(&mut self, window: &Arc<Window>) {
+        #[cfg(target_os = "android")]
+        if self.surface.is_none() {
+            log::info!("surface missing at render time — rebuilding");
+            self.recreate_surface(window.clone());
+        }
+    }
+
+    /// Rebuild the swapchain surface for a freshly-created native window.
+    ///
+    /// Reuses the cached `config_format` / `present_mode` / view formats rather
+    /// than re-querying capabilities: the adapter has not changed, only the
+    /// window, and re-deriving them risks picking a different format from the
+    /// one every pipeline was already built against. If the window is still
+    /// gone (winit gives a null handle between Suspended and Resumed) creation
+    /// fails, is logged, and the caller skips the frame and retries next time.
+    ///
+    /// Only reached from `ensure_surface`, whose body is Android-only; left
+    /// compiled on all platforms so a desktop build still type-checks it.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn recreate_surface(&mut self, window: Arc<Window>) {
+        let surface = match self.instance.create_surface(window) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("could not recreate surface (window not back yet?): {e}");
+                return;
+            }
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.config_format,
+            width: self.width,
+            height: self.height,
+            present_mode: self.present_mode,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: self.surface_view_formats(),
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&self.device, &config);
+        self.surface = Some(surface);
+        log::info!("surface recreated ({}x{})", self.width, self.height);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -2810,7 +2876,16 @@ impl Renderer {
         // Advance any animated textures (Spec 03 §3.4) for this frame before the
         // scene draws, using the game-tick clock set by `set_anim_clock`.
         self.advance_animated_textures();
-        let surface = self.surface.as_ref().expect("render() requires a surface");
+        self.ensure_surface(window);
+        // MUST NOT panic when the surface is missing. On Android the native
+        // window is destroyed while backgrounded, `App::suspended` drops the
+        // surface, and `ensure_surface` legitimately cannot rebuild until the
+        // window returns — an `.expect()` here killed the event-loop thread on
+        // a Pixel 8 and looked like a permanent hang. `Transient` is the
+        // existing "skip this frame, retry next" contract.
+        let Some(surface) = self.surface.as_ref() else {
+            return Err(SurfaceError::Transient);
+        };
         let output = acquire_surface_frame(surface)?;
         // Render through the sRGB format (a view alias of the non-sRGB canvas on
         // WebGPU; identical to the texture format on native) so linear shader
@@ -3645,6 +3720,7 @@ impl Renderer {
 
         Self {
             surface: None,
+            instance,
             device,
             queue,
             format,
@@ -4137,7 +4213,12 @@ impl Renderer {
     /// Upload menu vertices for this frame.
     /// Render just the menu screen (no world geometry, but egui renders).
     pub fn render_menu_only(&mut self, window: &std::sync::Arc<winit::window::Window>) -> Result<(), SurfaceError> {
-        let surface = self.surface.as_ref().expect("render requires surface");
+        self.ensure_surface(window);
+        // See `render()`: skipping the frame, never panicking, is what keeps the
+        // event loop alive while Android has taken the window away.
+        let Some(surface) = self.surface.as_ref() else {
+            return Err(SurfaceError::Transient);
+        };
         let output = acquire_surface_frame(surface)?;
         // sRGB render view alias — see `render()`.
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor {
