@@ -2470,6 +2470,37 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
 - Drag cursor item follows mouse
 - All rendered via egui with block textures as managed textures
 
+##### Touch platforms + Android (`touch_input.rs`, 2026-10-03)
+
+- **One gate.** `touch_input::TOUCH_PLATFORM` (`cfg!(any(wasm32, android))`) gates
+  every touch site: event intake (`WindowEvent::Touch`), resize/pixels-per-point,
+  the 20 Hz tick and 60 Hz frame intent merges, hold-to-zoom, touch look, the
+  pause/chat buttons, the overlay draw, and per-frame edge clearing. Never add a
+  bare `#[cfg(target_arch = "wasm32")]` touch gate: if one site drifts the game
+  draws controls it never reads, or replays every tap because edges are never
+  cleared. `GameState.touch` exists on every target for the same reason.
+- `android_main` calls `set_touch_device(true)`, so the on-screen controls show
+  immediately (the web sets it from `navigator.maxTouchPoints`).
+- **Text entry.** `OS_KEYBOARD_PROMPT` is web-only (`window.prompt()`). On
+  Android there is no IME bridge yet, so menu text fields stay egui `TextEdit`s
+  (usable with a hardware keyboard) and the touch Chat button does nothing.
+  BRIDGE until a soft-keyboard bridge lands.
+- **Back = Escape.** Android's Back arrives as `PhysicalKey::Unidentified` +
+  `NamedKey::BrowserBack`; `lib.rs` maps it to `KeyCode::Escape`, so it runs the
+  same layered close (menu dialog → explorer → recipe book → inventory →
+  villager → build choice → any open panel → pause; quit only from the lobby
+  root). The manifest's `android:enableOnBackInvokedCallback="false"` is
+  required: with targetSdk 36 on Android 16+, predictive back otherwise finishes
+  the Activity without ever dispatching KEYCODE_BACK.
+- **Widget + dialog sizing.** On Android only, egui uses thumb-sized targets
+  (interact height 44, wider non-floating scrollbars). `draw_dialog_frame`
+  switches to a compact card — height-capped, scrolling under a pinned title
+  with an always-visible bar, width-capped — on Android **or** any viewport
+  under 620 points tall (a landscape phone is ~411 points). Taller desktop and
+  browser windows render exactly as before. Dialogs that bypass
+  `draw_dialog_frame` (egui `Window`s such as Relays and Playing online) set
+  `.vscroll(true)` on Android so their buttons stay reachable.
+
 #### Day-Night Cycle + Mob Spawning (Step 13)
 
 World time: 0-23999 ticks, wraps. 0=sunrise, 6000=noon, 12000=sunset, 18000=midnight.

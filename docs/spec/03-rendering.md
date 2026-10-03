@@ -131,6 +131,27 @@ Full design + phase ladder: `docs/foundations/2026-06-09-third-person-camera.md`
 - **requestAnimationFrame.** On web the render loop is driven by `requestAnimationFrame` (capped at display refresh), not a spin loop.
 - **Canvas backing store must be in physical pixels (CSS px × `devicePixelRatio`).** On web, the wgpu surface is configured from `window.inner_size()`, winit's `scale_factor()` *is* the browser `devicePixelRatio`, and egui's `pixels_per_point` is that same DPR -- all three operate in *physical* pixels. The canvas backing store (`canvas.width`/`canvas.height` DOM attributes, set explicitly because CSS `width:100%` alone leaves them at winit's 1×1 default) must therefore be sized `CSS_px × devicePixelRatio`, **not** the raw CSS px from `window.innerWidth/innerHeight`. If the DPR multiply is skipped, the surface/viewport end up at `1/DPR` scale and the scene renders into the top-left `1/DPR²` corner of the canvas (a quarter at DPR=2). This is invisible on desktop (DPR=1, where logical == physical) and only manifests on high-DPR displays -- typically mobile. The multiply must be applied in *every* path that sizes the canvas: initial sizing, the JS `resize` listener, and any post-async-init resync. winit's own `WindowEvent::Resized(size)` already carries a `PhysicalSize`, so paths driven by it need no further scaling. (Regression found on mobile Chrome and fixed 2026-06-06; see the WASM arms of `main.rs` `resumed`/`window_event`.)
 
+### 1.7 Android Surface Lifecycle (2026-10-03)
+
+Android destroys the native window whenever the activity is backgrounded, so the
+wgpu surface built on it becomes invalid. Desktop and web never revoke a window.
+
+- `App::suspended` (Android only) sets `Renderer.surface = None`.
+- `Renderer` retains the `wgpu::Instance` it was built from, and
+  `Renderer::ensure_surface` rebuilds the surface **lazily at render time** at the
+  top of both frame-acquire paths (`render()` and `render_menu_only()`), reusing
+  the cached `config_format` / `present_mode` / view formats so every pipeline's
+  format stays valid. It is a no-op off Android.
+- Rebuild-on-`resumed` does **not** work: on a Pixel 8 winit's Android backend
+  fired `resumed()` once at startup and never again across background/foreground
+  cycles, and `App::resumed` returns early once `GameState` exists anyway.
+- A missing surface must **never panic**. Both render paths return
+  `SurfaceError::Transient` (skip the frame, retry next) instead of the old
+  `.expect("render requires surface")`, which killed the event-loop thread the
+  instant the app was backgrounded and looked like a permanent hang.
+- Any new frame-acquire path must call `ensure_surface` and handle `None` the
+  same way.
+
 ---
 
 ## 2. Chunk Meshing

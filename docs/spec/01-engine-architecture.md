@@ -95,11 +95,13 @@ graph LR
 
 #### Current Implementation (Prototype — Single Crate)
 
-The prototype is a single binary crate (`axenstax-engine`) with these modules:
+The prototype is a single crate (`axenstax-engine`) with these modules. Since
+2026-10-03 it is a **library plus a thin binary shim** (see §3.2 "Entry points"):
 
 | Module | Purpose |
 |--------|---------|
-| `main.rs` | Game loop, state machine (Menu/Playing/Paused), chunk streaming |
+| `lib.rs` | Crate root: game loop, state machine (Menu/Playing/Paused), chunk streaming; `pub fn run()` (desktop) and `android_main` (Android) |
+| `main.rs` | Desktop shim — calls `axenstax_engine::run()`; nothing else |
 | `renderer.rs` | wgpu pipelines (chunk, water, entity, wire, crosshair), HUD, menu render |
 | `shader.wgsl` | Vertex/fragment shaders (textured + lit + fog) |
 | `overlay.wgsl` | Crosshair/wireframe/HUD shaders (2D + 3D colored) |
@@ -520,6 +522,30 @@ mod local_transport; // implements Transport over crossbeam channels
 - **No filesystem in WASM**: all asset loading goes through HTTP fetch.
 - **Async runtime**: `wasm-bindgen-futures` replaces `tokio` for the web client. Server never targets WASM.
 - **Entry point**: `#[wasm_bindgen(start)]` replaces `fn main()` for the web build. A thin `web_main.rs` calls into the same `genesis_client::run()` function.
+
+#### Entry points (current implementation, 2026-10-03)
+
+The engine crate is `[lib] name = "axenstax_engine"`, `crate-type = ["rlib", "cdylib"]`,
+with all code under `src/lib.rs`. One source tree, three entry points:
+
+| Target | Entry | Built by |
+|---|---|---|
+| Desktop (Linux/Windows/macOS) | `src/main.rs` shim → `axenstax_engine::run()` | `cargo build` / cargo-packager |
+| Web (wasm32) | `#[wasm_bindgen(start)]` in `web_main.rs` (the cdylib) | Trunk, `index.html` uses `data-target-name="axenstax_engine"` — **never `data-bin`**, which builds the shim and yields an engine-less ~1.5 MB wasm |
+| Android (aarch64-linux-android) | `#[unsafe(no_mangle)] android_main(AndroidApp)` in `lib.rs`; `NativeActivity` dlopen()s `libaxenstax_engine.so` | `tools/packaging/android/build-apk.sh` (cargo-ndk → aapt2 → zipalign → apksigner, no Gradle) |
+
+`run()` and `android_main` share `native_boot_services()` and `drive_event_loop()`
+so desktop and Android cannot drift. Tests are library tests: `cargo test --lib`
+(`--bin` runs zero tests and still passes — `check.sh` guards against that).
+
+#### Android-Specific Considerations
+
+- **Data root.** There is no `$HOME`; `android_main` calls `data_dir::init_at(app.internal_data_path())` and also sets the CWD there (a backstop for older CWD-relative paths — an Android process starts at `/`, which is not writable).
+- **No updater.** `android_main` never starts the update check or the in-place updater; there is no APK self-update path. Updates come from the distribution channel (sideload / store).
+- **No file dialogs.** `rfd` has no Android backend and is excluded from the Android dependency graph; `native_file_dialog` is a BRIDGE stub returning a kid-readable error until a SAF/JNI bridge exists.
+- **No gamepads.** gilrs has no Android backend; `GamepadSystem` holds `Option<Gilrs>` and a missing backend degrades to "no gamepads" (this also removed a latent desktop panic).
+- **Link flag.** oboe (via cpal) compiles C++ and cargo-ndk omits libc++abi, so every Android build needs `RUSTFLAGS=-Clink-arg=-lc++abi` (set by `build-apk.sh`; `.cargo/config.toml` is gitignored).
+- **Touch, Back, surface loss** — see Spec 05 "Touch platforms + Android" and Spec 03 §1.7.
 
 ### 3.3 Build Commands
 
