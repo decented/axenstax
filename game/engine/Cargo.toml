@@ -49,7 +49,7 @@ tar = "0.4"
 # function and this belongs up here rather than under either target-specific
 # section. Previously WASM-only (world-save encryption, Phase C); moved here
 # so native builds get it too.
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 
 # Native-only dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
