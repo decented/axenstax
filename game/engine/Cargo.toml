@@ -24,7 +24,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Cross-platform (native + WASM)
-wgpu = { version = "29", default-features = false, features = ["wgsl", "webgpu"] }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "webgpu"] }
 winit = "0.30"
 glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
@@ -217,4 +217,4 @@ lto = "thin"
 
 [dev-dependencies]
 # Static WGSL validation in tests (matches the wgpu / naga in tree).
-naga = { version = "29", features = ["wgsl-in"] }
+naga = { version = "30", features = ["wgsl-in"] }
