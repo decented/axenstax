@@ -1069,6 +1069,8 @@ impl super::GameState {
         egui::Window::new("Playing online")
             .default_open(true)
             .resizable(false)
+            // Short landscape phone screens: scroll, don't clip (Android only).
+            .vscroll(cfg!(target_os = "android"))
             .open(&mut open)
             .interactable(!self.input.cursor_captured)
             .show(&self.renderer.egui.ctx, |ui| {

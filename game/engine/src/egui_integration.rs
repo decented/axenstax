@@ -39,6 +39,32 @@ impl EguiIntegration {
         style.visuals.widgets.active.bg_stroke =
             egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 210, 80));
         style.visuals.selection.bg_fill = egui::Color32::from_rgb(80, 120, 200);
+
+        // Android gets thumb-sized hit targets. egui's defaults are mouse-sized
+        // (an interact height of ~18 points); an egui point is effectively a dp
+        // here and Material's minimum touch target is 48dp, so stock widgets are
+        // under half what a thumb needs — on a 420dpi phone ~4mm of target for
+        // an 8mm finger, which reads as "the button didn't work".
+        //
+        // Android only, not every TOUCH_PLATFORM: the web build is one binary
+        // for desktop browsers AND tablets, and the live web taster's layout is
+        // not to change under its desktop users. Web tablets can opt in later
+        // off the runtime `touch_input::is_touch_device()`.
+        if cfg!(target_os = "android") {
+            style.spacing.interact_size.y = 44.0;
+            style.spacing.button_padding = egui::vec2(12.0, 10.0);
+            style.spacing.item_spacing.y = 8.0;
+            style.spacing.scroll.bar_width = 12.0;
+            style.spacing.scroll.handle_min_length = 32.0;
+            // egui 0.34 defaults scrollbars to FLOATING, where they appear only
+            // once you are already scrolling — useless as a discovery cue (and
+            // AlwaysVisible still drew nothing with floating on, verified on a
+            // Pixel 8). Non-floating reserves real width and paints the bar
+            // unconditionally: the 2026-05-21 playtest showed kids read a
+            // clipped view as "that's all there is" rather than "scroll me".
+            style.spacing.scroll.floating = false;
+        }
+
         ctx.set_global_style(style);
 
         let state = egui_winit::State::new(

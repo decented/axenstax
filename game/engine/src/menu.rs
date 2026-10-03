@@ -3851,8 +3851,29 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
             ui.painter().rect_filled(screen, 0.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 200));
         });
 
+    // A phone in landscape gives egui a SHORT viewport: a Pixel 8 is 2400x1080
+    // physical at scale factor 2.625, i.e. ~914x411 *points*. Desktop windows
+    // are 700-1000 points tall, so dialogs authored there (the create-world form
+    // is ~600) overflow past both edges with no way to reach the top field or
+    // the confirm button. `compact` switches every dialog routed through here
+    // to a height-capped, scrolling card. It is always on for Android and
+    // otherwise only when the viewport is too short for a desktop-sized dialog
+    // — exactly the case that was unreachable before — so a normal desktop or
+    // browser window renders byte-for-byte as it always has.
+    //
+    // content_rect(), not the deprecated screen_rect(): egui 0.34 split the
+    // two, and on a phone the CONTENT area excludes the notch / nav-bar insets.
+    let screen = ctx.content_rect();
+    let compact = cfg!(target_os = "android") || screen.height() < 620.0;
+    let short_screen = screen.height() < 620.0;
+    let max_dialog_h = (screen.height() - 48.0).max(200.0);
+    // The -40 nudge is a desktop nicety (optical centring above the midline);
+    // on a short screen it just pushes the card's bottom off the display.
+    let y_offset = if short_screen { 0.0 } else { -40.0 };
+    let margin = if short_screen { 16 } else { 28 };
+
     egui::Area::new(egui::Id::new("dialog_content"))
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, y_offset))
         .interactable(true)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -3860,10 +3881,17 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
                 .fill(egui::Color32::from_rgb(26, 29, 37))
                 .stroke(egui::Stroke::new(1.0_f32, border_color))
                 .corner_radius(egui::CornerRadius::same(10))
-                .inner_margin(egui::Margin::same(28))
+                .inner_margin(egui::Margin::same(margin))
                 .show(ui, |ui| {
                     ui.set_min_width(360.0);
+                    if compact {
+                        // Cap the width too: on a 914-point-wide landscape
+                        // phone an unconstrained card sprawls edge to edge.
+                        ui.set_max_width((screen.width() - 64.0).clamp(360.0, 620.0));
+                    }
 
+                    // Title stays PINNED outside the scroll area — a scrolled-
+                    // away title leaves you looking at an anonymous form.
                     ui.vertical_centered(|ui| {
                         ui.label(
                             egui::RichText::new(title)
@@ -3872,9 +3900,27 @@ fn draw_dialog_frame(ctx: &egui::Context, title: &str, title_color: egui::Color3
                                 .strong(),
                         );
                     });
-                    ui.add_space(20.0);
+                    ui.add_space(if short_screen { 10.0 } else { 20.0 });
 
-                    result = inner(ui);
+                    if compact {
+                        // `auto_shrink([false, true])`: keep the full width but
+                        // shrink vertically to the content, so a small dialog
+                        // stays a small card and only an over-tall one scrolls.
+                        // AlwaysVisible: the 2026-05-21 playtest found kids did
+                        // not notice a scroll affordance — an always-drawn bar
+                        // is the cheapest "there is more below" signal.
+                        egui::ScrollArea::vertical()
+                            .max_height(max_dialog_h)
+                            .auto_shrink([false, true])
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                            )
+                            .show(ui, |ui| {
+                                result = inner(ui);
+                            });
+                    } else {
+                        result = inner(ui);
+                    }
                 });
         });
 

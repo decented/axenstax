@@ -322,6 +322,10 @@ pub fn draw_window(
     egui::Window::new("Relays")
         .collapsible(false)
         .resizable(false)
+        // A landscape phone is ~411 points tall: let the list scroll inside
+        // the screen-constrained window rather than clip "Done" off the bottom.
+        // Android only, so desktop/web windows size exactly as before.
+        .vscroll(cfg!(target_os = "android"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
