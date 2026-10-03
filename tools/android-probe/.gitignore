@@ -1,0 +1,15 @@
+# Build artefacts — the signed APK, the staging tree, and cargo's target dir.
+out/
+target/
+
+# Debug signing key. Generated on the first `./build-apk.sh` run and NEVER
+# committed: a throwaway key is still a private key, and committing one trips
+# secret scanners for no benefit. The script regenerates it automatically if
+# it is absent, so nothing is lost by keeping it out of the tree.
+debug.keystore
+
+# Belt and braces: no signing key of any kind is ever committed.
+*.keystore
+*.jks
+*.p12
+*.password

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Axe'n'Stax Android APK manifest.
+
+  android:hasCode="false"   — there is no Java/Kotlin in this APK. The whole
+                              game is libaxenstax_engine.so, so the build needs
+                              no dx/d8 step and therefore no Gradle.
+  android.app.lib_name      — NativeActivity dlopen()s "libaxenstax_engine.so"
+                              from this value and calls `android_main`. MUST
+                              match [lib] name in game/engine/Cargo.toml.
+  Theme.NoTitleBar.Fullscreen
+                            — without it NativeActivity gets a title bar and
+                              status bar over the game.
+  configChanges             — swallow rotation/resize/keyboard changes instead
+                              of letting Android destroy and recreate the
+                              Activity, which would tear down the wgpu surface
+                              and the whole world with it.
+  INTERNET                  — multiplayer (QUIC/WebSocket), the Nostr relay for
+                              sign-in, and the feedback mailbox. Nothing else is
+                              requested: no storage permission is needed because
+                              saves live in internal_data_path(), and no
+                              location/camera/contacts are used at all.
+  enableOnBackInvokedCallback="false"
+                            — REQUIRED while we target SDK 36. Apps targeting 36
+                              on an Android 16+ device get predictive back by
+                              default, and then KEYCODE_BACK is no longer
+                              dispatched to the app at all: the system simply
+                              finishes the Activity, which quit the game
+                              mid-world. Opting out restores the key-event path
+                              that lib.rs folds onto Escape (layered close).
+                              The real migration is OnBackInvokedDispatcher, which
+                              needs JNI — there is no Java in this APK — so it
+                              waits until android-activity exposes it.
+                              See developer.android.com/about/versions/16/behavior-changes-16.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.axenstax.game">
+
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="Axe'n'Stax"
+        android:hasCode="false"
+        android:enableOnBackInvokedCallback="false"
+        android:extractNativeLibs="true">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:label="Axe'n'Stax"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|smallestScreenSize|uiMode">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="axenstax_engine" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

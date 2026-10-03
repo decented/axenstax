@@ -1,0 +1,27 @@
+[package]
+name = "axeprobe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately NOT a member of the engine workspace — this is a throwaway spike
+# artefact with a tiny dependency graph (wgpu + android-activity + log). Keeping
+# it separate means building the probe does NOT drag in the engine's ~600-crate
+# tree (tokio, quinn, nostr, secp256k1, …), which matters on a laptop that has
+# to build one job at a time.
+[workspace]
+
+[lib]
+# NativeActivity dlopen()s this by the name in AndroidManifest.xml's
+# `android.app.lib_name` meta-data, so it must be a cdylib called libaxeprobe.so.
+crate-type = ["cdylib"]
+
+[dependencies]
+log = "0.4"
+android_logger = "0.14"
+pollster = "0.4"
+# Match the engine's wgpu major so the answer we get is the answer the engine
+# would get. `vulkan` + `gles` are the two backends that exist on Android; the
+# engine's own native path asks for Backends::all(), so we probe both.
+wgpu = { version = "29", default-features = false, features = ["wgsl", "vulkan", "gles"] }
+android-activity = { version = "0.6", features = ["native-activity"] }

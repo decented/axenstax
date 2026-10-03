@@ -1,0 +1,14 @@
+# Build artefacts — the signed APK and the staging tree.
+out/
+
+# Debug signing key. Generated on first `./build-apk.sh` run and NEVER
+# committed: a throwaway key is still a private key. The script regenerates it
+# automatically when absent, so nothing is lost by keeping it out of the tree.
+# A real distribution key must live outside the repo entirely.
+debug.keystore
+
+# Belt and braces: no signing key of any kind is ever committed.
+*.keystore
+*.jks
+*.p12
+*.password

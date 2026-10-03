@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal NativeActivity manifest for the GPU probe.
+
+  android:hasCode="false"      — there is no Java/Kotlin in this APK at all; the
+                                 whole app is libaxeprobe.so. Lets us skip dx/d8
+                                 and therefore skip Gradle entirely.
+  android.app.lib_name         — NativeActivity dlopen()s "libaxeprobe.so" from
+                                 this value. Must match [lib] name in Cargo.toml.
+  extractNativeLibs="true"     — we add the .so to the APK with a plain `zip`
+                                 (deflated). Uncompressed-and-page-aligned libs
+                                 would need extra care; extracting on install is
+                                 fine for a throwaway spike.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.axenstax.probe">
+
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
+
+    <application
+        android:label="AxeNStax GPU Probe"
+        android:hasCode="false"
+        android:extractNativeLibs="true">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize|density">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="axeprobe" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
