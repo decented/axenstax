@@ -31,7 +31,7 @@ sha2 = "0.10"
 hex = "0.4"
 # HMAC-SHA256 for the Proof-of-Play hash (Spec 6 §2.2 / §2.2c). RustCrypto
 # canonical implementation; ~0 cost on top of `sha2` which we already pull in.
-hmac = "0.12"
+hmac = "0.13"
 # OS RNG — used by `signet::challenge::ChallengeTable` to mint per-client
 # nonces on the native server side. The WASM-only entry below adds the
 # `wasm_js` backend feature for the browser; the cross-platform line here
