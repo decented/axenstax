@@ -5,7 +5,8 @@
 #
 # (copper-line.svg and the UI icons are not synced: no page uses them yet.)
 # Out of scope on purpose: tools/sites/claim (deliberately isolated),
-# tools/sites/console, and the game site's PWA icons (static/icons/).
+# tools/sites/console. The game PWA icons (static/icons/), desktop and Android icons are
+# written straight to their consumer paths by render-rasters.mjs, not copied here.
 set -euo pipefail
 
 BRAND="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
