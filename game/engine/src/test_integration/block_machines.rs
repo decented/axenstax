@@ -208,3 +208,229 @@ fn server_leaf_decay_is_applied_and_broadcast() {
     assert_eq!(h.get_block(leaf.0, leaf.1, leaf.2), block::AIR, "the leaf decayed");
     assert!(queued(&h, leaf, block::AIR), "the decay rides pending_block_changes");
 }
+
+// ── A remote player's log break feeds the SERVER's leaf decay (T1-3 review B) ─
+//
+// Drives real joins through `HostedServer::tick` (the `joiner_authority`
+// helpers). A joiner's client runs no leaf decay of its own any more (it rolled
+// a second, independent set of saplings on top of the server's), so the server
+// must decay a remote break's canopy on EVERY host kind — the LAN host as well
+// as the dedicated server — and roll its saplings exactly once. A LAN host's
+// OWN break stays with the host client's decay: feeding it to the server too
+// would roll every sapling twice.
+
+use super::joiner_authority::{block_changes_seen, cell_beside, join_guest, send_edits, start_open_server};
+use crate::hosted_server::{HostedServer, RemoteTransport};
+
+/// Server ticks to cover the support checks plus the 27..=108-pass random
+/// decay delay (one pass per 4 ticks), with slack for 100 leaves.
+const LEAF_DECAY_TICKS: u32 = 4 * 200;
+
+/// A 0-local-player server — what `server_main` runs.
+fn start_dedicated_server(tag: &str) -> HostedServer {
+    HostedServer::start(
+        0,
+        format!("block-machines-dedicated-{tag}-{}", std::process::id()),
+        42,
+        0,
+        RemoteTransport::WebSocket { port: 0 },
+    )
+    .expect("dedicated server starts")
+}
+
+/// Build an isolated tree beside `slot`: one oak log and a 5×5×4 canopy of oak
+/// leaves (100 of them) above and beside it — every leaf inside
+/// `on_log_broken`'s radius-5 scan, none in the player's own column. The box
+/// around the canopy is cleared first, so once the log goes nothing (no
+/// worldgen trunk) can support a single leaf: every one must decay.
+/// Returns (log cell, leaf cells).
+fn build_lone_tree(
+    hs: &mut HostedServer,
+    slot: usize,
+) -> ((i32, i32, i32), Vec<(i32, i32, i32)>) {
+    let log = cell_beside(hs, slot, 2, 0, 0);
+    let world = &mut hs.server.world;
+    for x in log.0 - 1..=log.0 + 5 {
+        for z in log.2 - 3..=log.2 + 3 {
+            for y in log.1 + 1..=log.1 + 6 {
+                world.set_block(x, y, z, block::AIR);
+            }
+        }
+    }
+    let mut leaves = Vec::new();
+    for x in log.0..=log.0 + 4 {
+        for z in log.2 - 2..=log.2 + 2 {
+            for y in log.1 + 2..=log.1 + 5 {
+                world.set_block(x, y, z, block::OAK_LEAVES);
+                leaves.push((x, y, z));
+            }
+        }
+    }
+    world.set_block(log.0, log.1, log.2, block::OAK_LOG);
+    (log, leaves)
+}
+
+/// Every oak sapling the server holds: on the ground as item entities, plus
+/// (for a joiner) whatever its pickup pass already granted into that player's
+/// server-side inventory — the magnet vacuums drops near a server-simulated
+/// player, so the ground alone would undercount.
+fn oak_saplings_on_server(hs: &HostedServer, picker: Option<usize>) -> u32 {
+    let on_ground: u32 = hs
+        .server
+        .ecs
+        .query::<&crate::entity::ItemEntity>()
+        .iter()
+        .filter_map(|(_, ie)| match &ie.stack.item {
+            Item::Material(m) if *m == MaterialId::OakSapling => Some(u32::from(ie.stack.count)),
+            _ => None,
+        })
+        .sum();
+    let picked = picker.map_or(0, |slot| {
+        u32::from(hs.server.players[slot].inventory.count_material(MaterialId::OakSapling))
+    });
+    on_ground + picked
+}
+
+fn leaves_left(hs: &HostedServer, leaves: &[(i32, i32, i32)]) -> usize {
+    leaves
+        .iter()
+        .filter(|&&(x, y, z)| block::is_any_leaves(hs.server.world.get_block(x, y, z)))
+        .count()
+}
+
+/// A joiner breaks the log; the SERVER decays the whole canopy, tells the
+/// joiner about every leaf, and drops saplings — at most one per leaf.
+fn assert_a_joiners_log_break_decays_on_the_server(mut hs: HostedServer) {
+    let (client, slot) = join_guest(&mut hs, "Lumberjack");
+    // Let a joiner who spawned in the air land before building beside them.
+    for _ in 0..60 {
+        hs.tick();
+    }
+    let (log, leaves) = build_lone_tree(&mut hs, slot);
+    let _ = block_changes_seen(&client);
+    assert_eq!(oak_saplings_on_server(&hs, Some(slot)), 0, "no saplings before the break");
+
+    send_edits(&hs, &client, slot, 1, &[(log, block::AIR)]);
+    for _ in 0..LEAF_DECAY_TICKS {
+        hs.tick();
+    }
+
+    assert_eq!(
+        hs.server.world.get_block(log.0, log.1, log.2),
+        block::AIR,
+        "the joiner's log break was accepted"
+    );
+    assert_eq!(
+        leaves_left(&hs, &leaves),
+        0,
+        "the server decays a remote player's canopy — the joiner's client no longer does"
+    );
+    let seen = block_changes_seen(&client);
+    assert!(
+        leaves.iter().all(|&c| seen
+            .iter()
+            .any(|bc| (bc.x, bc.y, bc.z) == c && bc.new_block == block::AIR)),
+        "every decayed leaf reaches the joiner as a broadcast BlockChange"
+    );
+    let saplings = oak_saplings_on_server(&hs, Some(slot)) as usize;
+    assert!(
+        saplings >= 1,
+        "~1 in 20 decayed leaves drops a sapling; 100 leaves dropped none — the server \
+         decayed the canopy but never spawned its saplings"
+    );
+    assert!(
+        saplings <= leaves.len(),
+        "{saplings} saplings from {} leaves — a leaf rolled its sapling more than once",
+        leaves.len()
+    );
+}
+
+#[test]
+fn a_joiners_log_break_decays_its_canopy_on_a_lan_host() {
+    // The LAN host (1 local player, machines OFF) — before the review fix the
+    // feed was flag-gated, so a joiner's break here fed nobody's decay.
+    let hs = start_open_server("leaf-decay-joiner");
+    assert!(!hs.server.simulates_block_machines);
+    assert_a_joiners_log_break_decays_on_the_server(hs);
+}
+
+#[test]
+fn a_joiners_log_break_decays_its_canopy_on_a_dedicated_server() {
+    let hs = start_dedicated_server("leaf-decay-joiner");
+    assert!(hs.server.simulates_block_machines);
+    assert_a_joiners_log_break_decays_on_the_server(hs);
+}
+
+#[test]
+fn a_lan_hosts_own_log_break_leaves_decay_to_the_host_client() {
+    // The host's own (local, position-trusted) break: its CLIENT queues the
+    // canopy and rolls the saplings. The server must not decay it as well, or
+    // a second, independent sapling roll lands in the server's world.
+    let mut hs = start_open_server("leaf-decay-host-own");
+    let (log, leaves) = build_lone_tree(&mut hs, 0);
+
+    send_edits(&hs, &hs.local_transports[0], 0, 1, &[(log, block::AIR)]);
+    for _ in 0..LEAF_DECAY_TICKS {
+        hs.tick();
+    }
+
+    assert_eq!(
+        hs.server.world.get_block(log.0, log.1, log.2),
+        block::AIR,
+        "the host's own log break reached the server"
+    );
+    assert_eq!(
+        leaves_left(&hs, &leaves),
+        leaves.len(),
+        "the server leaves a host-local break's decay to the host client"
+    );
+    assert_eq!(
+        oak_saplings_on_server(&hs, None),
+        0,
+        "no server-side sapling roll for a host-local break (the host client rolls them)"
+    );
+}
+
+// ── A joiner client runs no growth or leaf decay of its own (review A + B) ──
+
+#[test]
+fn a_joiner_client_never_grows_crops_or_decays_leaves_itself() {
+    // Source lint, in the `electricity::no_client_block_change_push_guesses_its_metadata`
+    // tradition (`TestHost` has no client, so the gate can't be driven here).
+    // A joiner's own growth pushes were accepted by the server as edits on top
+    // of its own growth (two crop stages per cycle), and its own leaf decay
+    // rolled a second set of saplings: both must stay behind
+    // `remote_client.is_none()` in the client tick.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("game_loop.rs");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "joiner-sim lint: cannot read {} ({e}). If the client tick moved, update \
+             this lint's path — do not delete the lint.",
+            path.display()
+        )
+    });
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut sites = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if line.contains("crate::growth::tick_growth(") || line.contains(".on_log_broken(") {
+            sites += 1;
+            let from = i.saturating_sub(6);
+            assert!(
+                lines[from..=i].iter().any(|l| l.contains("remote_client.is_none()")),
+                "game_loop.rs:{}: growth / leaf decay runs on a joiner client — gate it \
+                 behind `self.remote_client.is_none()` (the server it joined owns both)",
+                i + 1
+            );
+        }
+    }
+    assert!(
+        sites >= 3,
+        "joiner-sim lint found only {sites} call sites (expected tick_growth + 2 \
+         on_log_broken) — if they moved, update the lint, don't delete it"
+    );
+}

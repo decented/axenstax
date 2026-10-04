@@ -882,9 +882,10 @@ impl GameServer {
             // discarded, so a server-side decay cleared the leaf in the
             // server's world while every joiner kept a floating one until a
             // full chunk resync, and its sapling drops vanished. The queue is
-            // fed by `on_log_broken` from the joiner-edit path in
-            // `hosted_server.rs` (dedicated servers only — a host's client
-            // owns its own decay), so on a LAN host this stays a no-op.
+            // fed by `on_log_broken` from the block-edit apply in
+            // `hosted_server.rs` for REMOTE players' log breaks only, on every
+            // host kind (a joiner's client runs no decay; a LAN host's client
+            // keeps owning decay of its own breaks). Not flag-gated.
             let leaf_dirty = self.leaf_decay.tick(&mut self.world);
             for &(x, y, z) in &leaf_dirty {
                 let nb = self.world.get_block(x, y, z);

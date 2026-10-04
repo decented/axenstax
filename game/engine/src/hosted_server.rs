@@ -1740,12 +1740,17 @@ impl HostedServer {
                                 self.server.world.release_plot((bc.x, bc.y, bc.z));
                             }
                             self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
-                            // T1-3 — a log broken on a dedicated server queues
-                            // its leaves for the server's leaf-decay pass (the
-                            // client break arms' `on_log_broken`, server side).
-                            // Flag-gated: on a LAN host the host client owns
-                            // decay of its own breaks.
-                            if self.server.simulates_block_machines
+                            // T1-3 — a log broken by a REMOTE player queues its
+                            // leaves for the server's leaf-decay pass (the
+                            // client break arms' `on_log_broken`, server side),
+                            // on EVERY host kind: a joiner's client runs no
+                            // decay of its own (that rolled a second set of
+                            // saplings), so the server is the only one who can.
+                            // Gated on `remote`, NOT `simulates_block_machines`:
+                            // a LAN host's own (local) breaks stay with the host
+                            // client's decay, so feeding them here too would
+                            // roll every sapling twice.
+                            if remote
                                 && crate::block::is_any_log_block(old_block)
                                 && !crate::block::is_any_log_block(bc.new_block)
                             {

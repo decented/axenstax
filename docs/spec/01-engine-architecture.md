@@ -684,15 +684,40 @@ Rules:
   (built with `game_loop::broadcast_change`, so the meta byte rides), which
   `HostedServer` drains into every `StateUpdatePacket` — the same road falling
   blocks, fluids and power take.
-- **Leaf-decay feed.** On a dedicated server a joiner's edit that removes a log
-  calls `leaf_decay.on_log_broken` (in `hosted_server.rs`'s block-edit apply);
-  flag-gated, because a host's client owns decay of its own breaks.
+- **Leaf-decay feed (T1-3 review B).** A **remote** player's edit that removes
+  a log calls `leaf_decay.on_log_broken` in `hosted_server.rs`'s block-edit
+  apply, on **every** host kind (LAN host and dedicated). It is gated on the
+  editing slot being `server_simulated`, **not** on `simulates_block_machines`.
+  The server decays the canopy, broadcasts each leaf as a `BlockChange` and
+  rolls the saplings once. Joiners see those saplings as ghost items and get
+  them through `InventoryGrant` on pickup. On a LAN host the host client does
+  not render server items, so only joiners can see or pick up these saplings.
+  A LAN host's **own** (local) break keeps the host client's `on_log_broken` →
+  decay → sapling roll, and the server does not decay it a second time. Server
+  decay results reaching the host client go through `apply_remote_block_change`,
+  which feeds no decay and rolls no drops.
+- **Joiner clients run no growth or leaf decay (T1-3 review A + B).** With
+  `remote_client` set, the client tick skips `growth::tick_growth` and both
+  break arms' `on_log_broken`. The world it joined already grows crops and
+  saplings, and decays leaves, then broadcasts the results. A joiner's own
+  growth pushes were accepted as edits on top of that (`validate_block_edit`
+  only checks reach, plot and owner), so crops near a joiner advanced two stages
+  per cycle. Its own leaf decay rolled a second, independent set of saplings.
+  Gating only the pushes would still grow phantom local trees on the joiner's
+  own sapling rolls, so the whole call is skipped. Source lint:
+  `test_integration/block_machines.rs::a_joiner_client_never_grows_crops_or_decays_leaves_itself`.
 - **Persistence.** No save-format change: furnaces, composters, hives,
   dispensers, chests and power devices (keg fuses) are already in `WorldSave`.
 - **Still host-client only:** campfires, drying racks, animated construction
   anchors, villager workstation claims. Server-side keg blasts damage mobs but
-  not players (the server applies no player damage yet). Known gap: on a LAN
-  host, a log broken by a *joiner* feeds nobody's leaf decay.
+  not players (the server applies no player damage yet). Server-shot dispenser
+  arrows do nothing: the server runs no projectile sim (`entity::tick_projectiles`)
+  and `diff_entities` doesn't broadcast projectiles, so the arrow is consumed
+  unseen. Known gap: the host client's own leaf decay goes only to its local
+  remesh and never into `pending_block_changes`, so when a LAN **host** breaks
+  a tree, joiners keep floating leaves until a chunk resync. (Joiners still run
+  their other machine sweeps locally. Those pushes converge because they carry
+  absolute state.)
 
 ### 4.2 Client Frame Loop
 

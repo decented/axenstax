@@ -4996,7 +4996,15 @@ impl super::GameState {
             // other 39 was pure waste (engine audit 2026-06-04, B).
             // `tick_growth` owns that gate + both scans; shared with the
             // dedicated server (block_machines.rs, T1-3).
-            {
+            // A JOINER (`remote_client` set) skips growth entirely (T1-3
+            // review A): the world it joined already grows crops + saplings
+            // (the dedicated server itself, or the LAN host's client) and
+            // broadcasts every stage. Its own pushes were accepted as edits
+            // on top, so crops near a joiner grew two stages per cycle; and
+            // merely dropping the pushes would still grow phantom local trees
+            // on the joiner's own sapling rolls that the server never has.
+            // Lint: test_integration/block_machines.rs.
+            if self.remote_client.is_none() {
                 let raining = self.tick_counter < self.weather_rain_until;
                 let growth = crate::growth::tick_growth(
                     &mut self.world,
@@ -10987,7 +10995,11 @@ impl super::GameState {
                                 self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                 self.audio.play_break();
 
-                                if block::is_any_log_block(blk) {
+                                // A joiner runs no leaf decay of its own: the
+                                // server decays a remote break's canopy, rolls
+                                // its saplings once and broadcasts both (T1-3
+                                // review B — local decay rolled a second set).
+                                if block::is_any_log_block(blk) && self.remote_client.is_none() {
                                     self.leaf_decay.on_log_broken(pos[0], pos[1], pos[2], &self.world);
                                 }
                                 if blk == block::WATER {
@@ -11459,7 +11471,9 @@ impl super::GameState {
                                     self.players[pidx].breaking_pos = None;
                                     self.players[pidx].break_progress = 0;
 
-                                    if block::is_any_log_block(blk) {
+                                    // Joiners: server-side decay only (T1-3
+                                    // review B, see the break arm above).
+                                    if block::is_any_log_block(blk) && self.remote_client.is_none() {
                                         self.leaf_decay.on_log_broken(pos[0], pos[1], pos[2], &self.world);
                                     }
                                     if blk == block::WATER {
