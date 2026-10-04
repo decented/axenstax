@@ -4481,6 +4481,9 @@ pub const PAUSE_TRY_AGAIN: i32 = 9;
 /// Trial pause menu: leave the trial back to the lobby without saving (trials
 /// are ephemeral — there is nothing to save).
 pub const PAUSE_LEAVE_TRIAL: i32 = 10;
+/// Reopen the controls card (`controls.rs`) over the world. Every pause menu
+/// (normal and Trial). Cross-platform; the card picks the touch or keyboard table.
+pub const PAUSE_OPEN_CONTROLS: i32 = 11;
 /// Player leave: value is 100 + player_index (100 = P1 leaves, 101 = P2 leaves)
 pub const PAUSE_PLAYER_LEAVE_BASE: i32 = 100;
 
@@ -4679,6 +4682,20 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                     if ui.add(leave_btn).clicked() {
                         clicked = PAUSE_LEAVE_TRIAL;
                     }
+                    ui.add_space(4.0);
+
+                    let controls_btn = egui::Button::new(
+                        egui::RichText::new("Controls")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(150, 190, 230)),
+                    )
+                    .min_size(egui::vec2(button_width, 42.0))
+                    .fill(PANEL_BG)
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 60, 80)));
+                    if ui.add(controls_btn).clicked() {
+                        clicked = PAUSE_OPEN_CONTROLS;
+                    }
                 } else {
                     // Stash toggle — flip whether this world also saves online.
                     // Native-only: web is a local sandbox with no Stash (the lobby
@@ -4733,6 +4750,24 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                             } else {
                                 clicked = i as i32;
                             }
+                        }
+                        ui.add_space(4.0);
+                    }
+
+                    // Controls — reopens the controls card (first-spawn card +
+                    // H help sheet share one table: `controls.rs`). Cross-platform.
+                    {
+                        let controls_btn = egui::Button::new(
+                            egui::RichText::new("Controls")
+                                .size(16.0)
+                                .color(egui::Color32::from_rgb(150, 190, 230)),
+                        )
+                        .min_size(egui::vec2(button_width, 42.0))
+                        .fill(PANEL_BG)
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 60, 80)));
+                        if ui.add(controls_btn).clicked() {
+                            clicked = PAUSE_OPEN_CONTROLS;
                         }
                         ui.add_space(4.0);
                     }
@@ -5488,7 +5523,7 @@ pub fn draw_settings_panel(
         FREELOOK_SENS_MIN, RENDER_DISTANCE_MAX, RENDER_DISTANCE_MIN, RENDER_SCALE_MAX,
         RENDER_SCALE_MIN, SENSITIVITY_MAX, SENSITIVITY_MIN, TP_DISTANCE_MAX, TP_DISTANCE_MIN,
         ZOOM_FOV_MAX, ZOOM_FOV_MIN, BRIGHTNESS_MAX, BRIGHTNESS_MIN, MINIMAP_ZOOM_MAX,
-        MINIMAP_ZOOM_MIN,
+        MINIMAP_ZOOM_MIN, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN,
     };
     // The relay manager (its only use of `state`) is native-only.
     #[cfg(target_arch = "wasm32")]
@@ -5757,6 +5792,36 @@ pub fn draw_settings_panel(
                 .checkbox(&mut gfx.narration_enabled, "Narrate hotbar (accessibility)")
                 .changed()
             {
+                changed = true;
+            }
+
+            // Sound — master volume + mute. Persisted per-device on both targets
+            // and applied live (`AudioEngine::set_master`). The slider is shown
+            // as a percentage; the audio engine squares it for a usable curve.
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Sound")
+                    .size(14.0)
+                    .color(TITLE_COLOR),
+            );
+            ui.add_space(4.0);
+            let mut volume_pct = gfx.master_volume * 100.0;
+            if ui
+                .add(
+                    egui::Slider::new(&mut volume_pct, 0.0..=100.0)
+                        .fixed_decimals(0)
+                        .suffix("%")
+                        .text("Volume"),
+                )
+                .changed()
+            {
+                gfx.master_volume = (volume_pct / 100.0)
+                    .clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
+                changed = true;
+            }
+            if ui.checkbox(&mut gfx.audio_muted, "Mute all sound").changed() {
                 changed = true;
             }
 

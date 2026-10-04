@@ -27,6 +27,11 @@ impl HeadlessGame {
     pub(crate) fn boot_into_world(world_name: &str) -> Self {
         let mut state = pollster::block_on(crate::GameState::new_headless(1280, 720));
         state.world_name = world_name.to_string();
+        // No first-spawn controls card in headless runs: it is a modal that
+        // freezes player 0 and frees the cursor, and the persisted
+        // `controls_card_seen` flag is whatever the dev machine's settings.json
+        // says. (In-memory only — never `save()`d.)
+        state.graphics.controls_card_seen = true;
         state.mode = GameMode::Loading(crate::loading_screen::LoadingState::new(
             world_name.to_string(),
         ));

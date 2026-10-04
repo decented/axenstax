@@ -31,6 +31,7 @@
 
 // Cross-platform modules
 mod audio;
+mod controls;
 mod biome;
 mod block;
 mod camera;
@@ -976,6 +977,11 @@ pub(crate) struct GameState {
     /// Wave 6 — challenge board open flag (feature-coverage Phase 6). `true`
     /// while the J-key board is visible; cursor released + gameplay gated.
     pub(crate) challenge_board_open: bool,
+    /// The controls card (`controls.rs`) — shown once on first spawn per device
+    /// (`graphics.controls_card_seen`) and reopened from the pause menu's
+    /// "Controls" button. A modal for player 0 like `challenge_board_open`
+    /// (frees the cursor, freezes movement, Esc / "Got it" closes it).
+    pub(crate) controls_card_open: bool,
     /// #19 Rig Studio open flag (Y key). Cursor released + gameplay gated while open.
     pub(crate) rig_studio_open: bool,
     /// Trials — the in-game objective / help pop-up is showing (H key). A
@@ -1567,7 +1573,12 @@ impl GameState {
         Self::set_status("Starting game...");
 
         let input = InputState::new();
-        let audio = crate::audio::AudioEngine::new();
+        let mut audio = crate::audio::AudioEngine::new();
+        // Persisted master volume + mute (per-device, native and web).
+        {
+            let saved = crate::graphics_settings::GraphicsSettings::load();
+            audio.set_master(saved.master_volume, saved.audio_muted);
+        }
 
         // Create a single PlayerSlot for player 0
         let spawn = glam::Vec3::new(0.5, 80.0, 0.5);
@@ -1655,6 +1666,7 @@ impl GameState {
             pop_exposure_map: ahash::AHashMap::new(),
             chat: chat_ui::ChatState::new(),
             challenge_board_open: false,
+            controls_card_open: false,
             show_objective: false,
             satoshi_brief: None,
             rig_studio_open: false,
@@ -2510,6 +2522,10 @@ impl ApplicationHandler for App {
                             } else if state.players[0].crafting_ui.open {
                                 // Crafting UI is open but click wasn't on an egui widget
                                 // (click outside = no action, egui handles slot clicks)
+                            } else if state.controls_card_open {
+                                // The controls card is up: a stray click outside it
+                                // must NOT re-capture the cursor (the card's "Got it"
+                                // button needs a free pointer). Enter / Esc also close it.
                             } else if state
                                 .scenario
                                 .as_ref()

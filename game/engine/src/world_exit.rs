@@ -378,6 +378,7 @@ impl crate::GameState {
         self.active_trial = None;
         self.trial_outcome = None;
         self.challenge_board_open = false;
+        self.controls_card_open = false;
         self.build_guide = None;
 
         if exit_dead_ends(to, crate::showcase::should_dead_end_exit(&self.showcase)) {
