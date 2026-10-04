@@ -48,33 +48,103 @@ pub enum SignInStatus {
     Failed { message: String },
 }
 
-/// Progress events sent from the worker thread to [`poll`].
+/// Progress events sent from the worker thread to [`poll`]. Each carries the
+/// generation of the attempt that produced it, so [`poll`] can drop a result
+/// from an attempt the player has since cancelled or replaced.
 enum SignInEvent {
-    Done(Result<String /* pubkey hex */, JoinAuthError>),
+    Done {
+        generation: u64,
+        result: Result<String /* pubkey hex */, JoinAuthError>,
+    },
 }
 
 struct Manager {
     status: SignInStatus,
     rx: Option<Receiver<SignInEvent>>,
+    /// Which attempt `status`/`rx` belong to. Bumped by EVERY state change that
+    /// abandons the current attempt — [`reset`] (Cancel, "Try again", relay
+    /// edit, sign-out), a new worker, a synchronous failure, the preview hook.
+    /// A worker captures the value it was started under and may only persist a
+    /// sign-in while it is still current (see [`commit_if_current`]).
+    generation: u64,
 }
 
 static MANAGER: Mutex<Manager> = Mutex::new(Manager {
     status: SignInStatus::Idle,
     rx: None,
+    generation: 0,
 });
+
+/// How often a worker blocked in the handshake re-checks whether it has been
+/// cancelled. Bounds how long a cancelled QR keeps listening on the relays.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The current sign-in status (clone — cheap, drives the dialog).
 pub fn status() -> SignInStatus {
     MANAGER.lock().map(|m| m.status.clone()).unwrap_or(SignInStatus::Idle)
 }
 
-/// Reset to idle (the dialog closed / cancelled). The worker thread, if any,
-/// keeps running until its handshake times out; its final send is dropped.
+/// Reset to idle (the dialog closed / cancelled / "Try again"). Bumps the
+/// generation, so a worker still in flight for the abandoned attempt stops
+/// listening within [`CANCEL_POLL`] and can no longer persist a sign-in.
 pub fn reset() {
     if let Ok(mut m) = MANAGER.lock() {
+        m.generation = m.generation.wrapping_add(1);
         m.status = SignInStatus::Idle;
         m.rx = None;
     }
+}
+
+/// True while `generation` is still the live attempt. A poisoned lock counts as
+/// stale (fail closed: never persist on doubt).
+fn is_current(generation: u64) -> bool {
+    MANAGER.lock().map(|m| m.generation == generation).unwrap_or(false)
+}
+
+/// Resolves once `generation` has been superseded (polled every
+/// [`CANCEL_POLL`]). Raced against the handshake so a cancelled attempt drops
+/// its relay subscription instead of waiting out the handshake timeout.
+async fn superseded(generation: u64) {
+    while is_current(generation) {
+        tokio::time::sleep(CANCEL_POLL).await;
+    }
+}
+
+/// Run `commit` (the disk write that makes the sign-in real) only if
+/// `generation` is still the live attempt, holding the manager lock across
+/// the check AND the commit. [`reset`] / a new attempt take the same lock to
+/// bump the generation, so the two are totally ordered: either the commit
+/// finishes first (the player approved on their phone before cancelling — the
+/// sign-in stands), or the bump comes first and nothing is persisted. Returns
+/// `None` when stale. `commit` must be synchronous: no `.await` may run while
+/// the guard is held.
+fn commit_if_current<F>(generation: u64, commit: F) -> Option<Result<(), String>>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let m = MANAGER.lock().ok()?;
+    if m.generation != generation {
+        return None;
+    }
+    let out = commit();
+    drop(m);
+    Some(out)
+}
+
+/// The worker's last step once the handshake has produced a pubkey: commit the
+/// sign-in if this attempt is still current, then report. A stale attempt
+/// persists nothing and reports nothing. Split out so the guard is testable
+/// without a live bunker.
+fn conclude<F>(generation: u64, tx: &Sender<SignInEvent>, pubkey_hex: String, commit: F)
+where
+    F: FnOnce(&str) -> Result<(), String>,
+{
+    let result = match commit_if_current(generation, || commit(&pubkey_hex)) {
+        None => return,
+        Some(Ok(())) => Ok(pubkey_hex),
+        Some(Err(e)) => Err(JoinAuthError::Other(e)),
+    };
+    let _ = tx.send(SignInEvent::Done { generation, result });
 }
 
 /// The relays the sign-in QR advertises: the first [`SIGNIN_URI_MAX_RELAYS`] of
@@ -132,16 +202,24 @@ pub fn poll() {
             events.push(ev);
         }
     }
+    let current = m.generation;
     for ev in events {
-        match ev {
-            SignInEvent::Done(Ok(pubkey_hex)) => {
+        let SignInEvent::Done { generation, result } = ev;
+        if generation != current {
+            // From an attempt that was cancelled or replaced — never let it
+            // flip the dialog (the worker's commit guard already kept it off
+            // disk).
+            continue;
+        }
+        match result {
+            Ok(pubkey_hex) => {
                 let npub = NativeIdentity::SignedIn { pubkey_hex }
                     .npub()
                     .unwrap_or_default();
                 m.status = SignInStatus::Success { npub };
                 m.rx = None;
             }
-            SignInEvent::Done(Err(e)) => {
+            Err(e) => {
                 m.status = SignInStatus::Failed { message: e.to_string() };
                 m.rx = None;
             }
@@ -154,6 +232,7 @@ pub fn poll() {
 /// or any network. Dev tooling only (`--shot-signin`).
 pub fn preview_awaiting_scan(uri: String) {
     if let Ok(mut m) = MANAGER.lock() {
+        m.generation = m.generation.wrapping_add(1);
         m.status = SignInStatus::AwaitingScan { uri };
         m.rx = None;
     }
@@ -161,21 +240,40 @@ pub fn preview_awaiting_scan(uri: String) {
 
 fn set_failed(e: JoinAuthError) {
     if let Ok(mut m) = MANAGER.lock() {
+        m.generation = m.generation.wrapping_add(1);
         m.status = SignInStatus::Failed { message: e.to_string() };
         m.rx = None;
     }
 }
 
+/// Start a new attempt: bump the generation (orphaning any older worker),
+/// show `initial`, and hand back the generation + the worker's sender.
+fn begin_attempt(initial: SignInStatus) -> Option<(u64, Sender<SignInEvent>)> {
+    let (tx, rx): (Sender<SignInEvent>, Receiver<SignInEvent>) = channel();
+    let mut m = MANAGER.lock().ok()?;
+    m.generation = m.generation.wrapping_add(1);
+    m.status = initial;
+    m.rx = Some(rx);
+    Some((m.generation, tx))
+}
+
 /// Move the constructed session onto a worker thread (own current-thread tokio
 /// runtime) and drive `connect → approve → persist` to completion, reporting
 /// through the channel.
+///
+/// Cancellation (T0-8): the worker is tied to the generation it started under.
+/// It races the handshake against [`superseded`] and bails within
+/// [`CANCEL_POLL`] of a reset, and its disk write goes through
+/// [`commit_if_current`], so a cancelled or replaced QR can never sign the
+/// player in. What remains: (a) if the commit wins the lock an instant before
+/// Cancel, the sign-in the player approved on their phone stands (the lobby
+/// reads identity from disk, so it shows as signed in; only the dialog's
+/// "Signed in" confirmation is skipped); (b) for up to one [`CANCEL_POLL`]
+/// after Cancel the old QR's relay subscription is still open, so a scan in
+/// that window can still raise an approval prompt on the phone — approving it
+/// persists nothing.
 fn spawn_worker(session: BunkerSession, initial: SignInStatus) {
-    let (tx, rx): (Sender<SignInEvent>, Receiver<SignInEvent>) = channel();
-    {
-        let Ok(mut m) = MANAGER.lock() else { return };
-        m.status = initial;
-        m.rx = Some(rx);
-    }
+    let Some((generation, tx)) = begin_attempt(initial) else { return };
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -183,7 +281,8 @@ fn spawn_worker(session: BunkerSession, initial: SignInStatus) {
         {
             Ok(rt) => rt,
             Err(e) => {
-                let _ = tx.send(SignInEvent::Done(Err(JoinAuthError::Other(e.to_string()))));
+                let result = Err(JoinAuthError::Other(e.to_string()));
+                let _ = tx.send(SignInEvent::Done { generation, result });
                 return;
             }
         };
@@ -199,29 +298,39 @@ fn spawn_worker(session: BunkerSession, initial: SignInStatus) {
             // "no QR, only paste" + "stuck on approve" reports).
 
             // Resolving the persona pubkey completes the relay handshake and
-            // triggers the phone approval prompt (the live step).
-            let pubkey = match session.user_public_key().await {
-                Ok(pk) => pk,
-                Err(e) => {
-                    let _ = tx.send(SignInEvent::Done(Err(native_signer::map_signer_error(&e))));
+            // triggers the phone approval prompt (the live step). Raced against
+            // cancellation; the session is shut down AFTER the select so the
+            // borrow held by the handshake future has ended.
+            let handshake = tokio::select! {
+                r = session.user_public_key() => Some(r),
+                () = superseded(generation) => None,
+            };
+            let pubkey = match handshake {
+                None => {
+                    session.shutdown().await;
+                    return;
+                }
+                Some(Ok(pk)) => pk,
+                Some(Err(e)) => {
+                    let result = Err(native_signer::map_signer_error(&e));
+                    let _ = tx.send(SignInEvent::Done { generation, result });
                     return;
                 }
             };
-            // Persist the session for silent reconnection on later launches.
+            // Build the session record for silent reconnection on later
+            // launches (no disk I/O here — the write is in the commit below).
             let persisted = match session.persist().await {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.send(SignInEvent::Done(Err(native_signer::map_signer_error(&e))));
+                    let result = Err(native_signer::map_signer_error(&e));
+                    let _ = tx.send(SignInEvent::Done { generation, result });
                     return;
                 }
             };
-            let pubkey_hex = pubkey.to_hex();
-            if let Err(e) = native_signer::complete_sign_in(&persisted, &pubkey_hex) {
-                let _ = tx.send(SignInEvent::Done(Err(JoinAuthError::Other(e))));
-                return;
-            }
+            conclude(generation, &tx, pubkey.to_hex(), |hex| {
+                native_signer::complete_sign_in(&persisted, hex).map(|_| ())
+            });
             session.shutdown().await;
-            let _ = tx.send(SignInEvent::Done(Ok(pubkey_hex)));
         });
     });
 }
@@ -236,13 +345,25 @@ pub fn sign_out() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Serialises the tests that drive the process-global [`MANAGER`] (cargo
+    /// runs a module's tests in parallel).
+    static MANAGER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn manager_lock() -> std::sync::MutexGuard<'static, ()> {
+        MANAGER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// x-only secp256k1 generator — a valid pubkey for the npub render.
+    const PK_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
     // Exercises the synchronous status transitions with NO network: bad/empty
     // input fails before any worker thread spawns, and reset/poll are inert at
-    // Idle. (The live handshake itself is the owner/device boundary.) Kept as a
-    // single test because it drives the process-global manager.
+    // Idle. (The live handshake itself is the owner/device boundary.)
     #[test]
     fn status_lifecycle_without_network() {
+        let _g = manager_lock();
         reset();
         assert_eq!(status(), SignInStatus::Idle);
 
@@ -263,6 +384,89 @@ mod tests {
         // poll() with no in-flight worker is a no-op.
         poll();
         assert_eq!(status(), SignInStatus::Idle);
+    }
+
+    /// T0-8 — Cancel / "Try again" after a QR is shown: the old worker's
+    /// handshake later completes, but it must persist nothing and report
+    /// nothing.
+    #[test]
+    fn stale_worker_after_reset_persists_nothing_and_is_discarded() {
+        let _g = manager_lock();
+        let (generation, tx) =
+            begin_attempt(SignInStatus::AwaitingScan { uri: "nostrconnect://x".into() }).unwrap();
+        assert!(is_current(generation));
+        reset(); // the player cancelled
+        assert!(!is_current(generation));
+
+        let persisted = AtomicBool::new(false);
+        conclude(generation, &tx, PK_HEX.to_string(), |_| {
+            persisted.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(!persisted.load(Ordering::SeqCst), "a cancelled attempt must not persist");
+        poll();
+        assert_eq!(status(), SignInStatus::Idle, "a cancelled attempt must not sign in");
+
+        // "Try again" started a NEW attempt; the old worker finishing late must
+        // neither persist nor flip the new attempt's dialog.
+        let (old_gen, _old_tx) = begin_attempt(SignInStatus::AwaitingApproval).unwrap();
+        let (new_gen, new_tx) =
+            begin_attempt(SignInStatus::AwaitingScan { uri: "nostrconnect://y".into() }).unwrap();
+        assert_ne!(old_gen, new_gen);
+        conclude(old_gen, &new_tx, PK_HEX.to_string(), |_| {
+            persisted.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(!persisted.load(Ordering::SeqCst));
+        // Consumer side: even a stale-tagged event that reaches the live
+        // channel is dropped.
+        let _ = new_tx.send(SignInEvent::Done { generation: old_gen, result: Ok(PK_HEX.into()) });
+        poll();
+        assert!(
+            matches!(status(), SignInStatus::AwaitingScan { .. }),
+            "stale result must not touch the current attempt: {:?}",
+            status()
+        );
+        reset();
+    }
+
+    /// The guard must not break the happy path: the current attempt commits
+    /// and the dialog shows success.
+    #[test]
+    fn current_attempt_still_commits_and_succeeds() {
+        let _g = manager_lock();
+        let (generation, tx) =
+            begin_attempt(SignInStatus::AwaitingScan { uri: "nostrconnect://z".into() }).unwrap();
+        let persisted = AtomicBool::new(false);
+        conclude(generation, &tx, PK_HEX.to_string(), |hex| {
+            assert_eq!(hex, PK_HEX);
+            persisted.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(persisted.load(Ordering::SeqCst));
+        poll();
+        assert!(matches!(status(), SignInStatus::Success { .. }), "{:?}", status());
+
+        // A failing commit on the current attempt surfaces as Failed.
+        let (generation, tx) = begin_attempt(SignInStatus::AwaitingApproval).unwrap();
+        conclude(generation, &tx, PK_HEX.to_string(), |_| Err("disk full".into()));
+        poll();
+        assert!(matches!(status(), SignInStatus::Failed { .. }), "{:?}", status());
+        reset();
+    }
+
+    /// The cancellation watcher resolves once the attempt is superseded.
+    #[test]
+    fn superseded_resolves_after_reset() {
+        let _g = manager_lock();
+        let (generation, _tx) = begin_attempt(SignInStatus::AwaitingApproval).unwrap();
+        reset();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), superseded(generation))
+                .await
+                .expect("superseded() must resolve for a reset attempt");
+        });
     }
 
     /// Every `relay=` value in a built URI, still percent-encoded.
