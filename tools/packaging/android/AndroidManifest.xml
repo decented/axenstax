@@ -15,6 +15,10 @@
                               of letting Android destroy and recreate the
                               Activity, which would tear down the wgpu surface
                               and the whole world with it.
+  android:icon              — Copperline launcher icon from res/ (adaptive on API 26+,
+                              legacy PNG on 24-25). Regenerate with
+                              `node brand/render-rasters.mjs`. res/ is compiled by
+                              build-apk.sh (aapt2 compile) — no Gradle needed.
   INTERNET                  — multiplayer (QUIC/WebSocket), the Nostr relay for
                               sign-in, and the feedback mailbox. Nothing else is
                               requested: no storage permission is needed because
@@ -44,6 +48,7 @@
     <application
         android:allowBackup="false"
         android:label="Axe'n'Stax"
+        android:icon="@mipmap/ic_launcher"
         android:hasCode="false"
         android:enableOnBackInvokedCallback="false"
         android:extractNativeLibs="true">

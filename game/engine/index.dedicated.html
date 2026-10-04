@@ -14,17 +14,17 @@
     <title>Axe'n'Stax — Server</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1220; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #0D1B1E; }
         canvas { width: 100%; height: 100%; display: block; touch-action: none; }
 
-        /* Branded loading screen — mirrors the main site's #loading (voxel hero +
+        /* Branded loading screen — mirrors the main site's #loading (Copperline mark +
            wordmark + tagline + eased progress bar). Self-contained: the dedicated
            page ships no /static assets, so the styles are inline here. */
         #loading {
             position: fixed; inset: 0; display: flex; flex-direction: column;
             align-items: center; justify-content: center; text-align: center; padding: 20px;
-            background: radial-gradient(130% 100% at 50% 28%, #1a2746 0%, #0d1220 68%);
-            color: #d4a044; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            background: radial-gradient(130% 100% at 50% 28%, #1F3F2E 0%, #0D1B1E 68%);
+            color: #D27B3E; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
             z-index: 100;
         }
         #loading.hidden { display: none; }
@@ -33,29 +33,21 @@
             filter: drop-shadow(0 10px 12px rgba(0,0,0,.5));
             animation: ls-float 3.2s ease-in-out infinite;
         }
-        #ls-hero .ls-row { display: flex; gap: 5px; justify-content: center; }
-        .vox {
-            width: 34px; height: 34px; border-radius: 5px;
-            box-shadow: inset -6px -6px 0 rgba(0,0,0,.30), inset 6px 6px 0 rgba(255,255,255,.18);
-        }
-        .v-green { background: #6fae5a; }
-        .v-orange { background: #e8862e; }
-        .v-brown { background: #8a7158; }
-        .v-gold { background: #f0c674; }
+        #ls-mark { width: 168px; height: auto; display: block; }
         @keyframes ls-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
-        #ls-word { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; color: #f3e6cf; }
-        #ls-tag { font-size: .72rem; font-weight: 700; letter-spacing: .36em; color: #d4a044; margin-top: 10px; }
+        #ls-word { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; color: #E6E0D1; }
+        #ls-tag { font-size: .72rem; font-weight: 700; letter-spacing: .36em; color: #D27B3E; margin-top: 10px; }
         #ls-bar {
             width: 300px; max-width: 70vw; height: 7px; border-radius: 99px;
             background: rgba(255,255,255,.08); overflow: hidden; margin-top: 22px;
         }
         #ls-bar > i {
             display: block; height: 100%; border-radius: 99px;
-            background: linear-gradient(90deg, #d4a044, #f0c674);
+            background: linear-gradient(90deg, #D27B3E, #F4C16F);
             animation: ls-fill 2.6s ease-in-out infinite;
         }
         @keyframes ls-fill { 0% { width: 8%; } 70% { width: 82%; } 100% { width: 8%; } }
-        #status { color: #7f8aa0; font-size: 0.95rem; margin-top: 18px; }
+        #status { color: rgba(230, 224, 209, .6); font-size: 0.95rem; margin-top: 18px; }
 
         /* WebGPU-unavailable guidance (shown only if the pre-flight probe fails) —
            the engine renderer hard-requires WebGPU, so without this a browser that
@@ -71,7 +63,7 @@
         #webgpu-block .fix { max-width: 640px; text-align: left; line-height: 1.55; color: #b0bacd; font-size: .95rem; }
         #webgpu-block ol, #webgpu-block ul { margin: 8px 0 8px 22px; }
         #webgpu-block li { margin: 6px 0; }
-        #webgpu-block code { background: #141b2e; border: 1px solid #283356; border-radius: 6px; padding: .1rem .4rem; color: #6dd57a; }
+        #webgpu-block code { background: rgba(230, 224, 209, .06); border: 1px solid rgba(230, 224, 209, .14); border-radius: 6px; padding: .1rem .4rem; color: #6dd57a; }
         #webgpu-block button { margin-top: 18px; padding: .5rem 1.3rem; font-size: 1rem; cursor: pointer;
             border: 1px solid #2c6a36; border-radius: 8px; background: #14241a; color: #6dd57a; }
         .copybtn { margin-left: .4rem; padding: .05rem .55rem; font-size: .8rem; border: 1px solid #2c6a36;
@@ -88,12 +80,7 @@
 <body>
     <div id="loading">
         <div id="ls-hero" aria-hidden="true">
-            <div class="ls-row">
-                <span class="vox v-green"></span><span class="vox v-orange"></span>
-            </div>
-            <div class="ls-row">
-                <span class="vox v-brown"></span><span class="vox v-brown"></span><span class="vox v-gold"></span>
-            </div>
+            <svg id="ls-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 440" role="img" aria-hidden="true" focusable="false"><polygon points="68,370 178,172 228,243 307,74 508,370" fill="#1F3F2E"/><polygon points="307,74 328,188 308,204 386,370 508,370" fill="#2E6B43"/><polygon points="178,172 131,257 157,245 174,260 180,234 212,258 228,243" fill="#E6E0D1"/><polygon points="307,74 247,203 279,185 307,207 309,174 352,211" fill="#E6E0D1"/><rect x="371" y="309" width="44" height="64" fill="#0D1B1E"/><path d="M365 375V303H421V375H409V317H377V375Z" fill="#7A6E59" /><rect x="388" y="329" width="10" height="23" fill="#F4C16F"/><path d="M294 215C373 246 241 255 220 278C184 304 341 308 339 350C338 374 300 398 278 414H182C236 390 304 372 287 352C270 331 158 335 160 297C162 260 340 250 294 215Z" fill="#D27B3E" /></svg>
         </div>
         <div id="ls-word">AXE'N'STAX</div>
         <div id="ls-tag">PROOF&nbsp;OF&nbsp;PLAY</div>

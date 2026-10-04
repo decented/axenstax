@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive launcher icon (API 26+). Background is the solid Deep Frontier colour;
+     the foreground is the Copperline mark inside the central 66/108 safe zone.
+     No <monochrome> layer: the project has no themed-icon slot yet (brand/svg/axenstax-mark-mono.svg
+     is the source if one is added). Regenerate PNGs with: node brand/render-rasters.mjs -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

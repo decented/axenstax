@@ -20,7 +20,7 @@
     <title>Axe'n'Stax</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1220; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #0D1B1E; }
         canvas {
             width: 100%;
             height: 100%;
@@ -34,33 +34,25 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            background: radial-gradient(130% 100% at 50% 28%, #1a2746 0%, #0d1220 68%);
-            color: #d4a044;
+            background: radial-gradient(130% 100% at 50% 28%, #1F3F2E 0%, #0D1B1E 68%);
+            color: #D27B3E;
             font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
             z-index: 100;
         }
         #loading.hidden { display: none; }
-        #loading #status { color: #7f8aa0; font-size: 0.95rem; margin-top: 0.9rem; }
+        #loading #status { color: rgba(230, 224, 209, .6); font-size: 0.95rem; margin-top: 0.9rem; }
 
-        /* Voxel hero — 2 cubes over 3, gently floating. */
+        /* Copperline mark (inline axenstax-mark-flat.svg), gently floating. */
         #ls-hero {
             display: flex; flex-direction: column; gap: 5px; margin-bottom: 22px;
             filter: drop-shadow(0 10px 12px rgba(0,0,0,.5));
             animation: ls-float 3.2s ease-in-out infinite;
         }
-        #ls-hero .ls-row { display: flex; gap: 5px; justify-content: center; }
-        .vox {
-            width: 34px; height: 34px; border-radius: 5px;
-            box-shadow: inset -6px -6px 0 rgba(0,0,0,.30), inset 6px 6px 0 rgba(255,255,255,.18);
-        }
-        .v-green { background: #6fae5a; }
-        .v-orange { background: #e8862e; }
-        .v-brown { background: #8a7158; }
-        .v-gold { background: #f0c674; }
+        #ls-mark { width: 168px; height: auto; display: block; }
         @keyframes ls-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
 
-        #ls-word { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; color: #f3e6cf; }
-        #ls-tag { font-size: .72rem; font-weight: 700; letter-spacing: .36em; color: #d4a044; margin-top: 10px; }
+        #ls-word { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; color: #E6E0D1; }
+        #ls-tag { font-size: .72rem; font-weight: 700; letter-spacing: .36em; color: #D27B3E; margin-top: 10px; }
 
         /* Progress bar — eased indeterminate fill (real download progress TBD). */
         #ls-bar {
@@ -69,7 +61,7 @@
         }
         #ls-bar > i {
             display: block; height: 100%; border-radius: 99px;
-            background: linear-gradient(90deg, #d4a044, #f0c674);
+            background: linear-gradient(90deg, #D27B3E, #F4C16F);
             animation: ls-fill 2.6s ease-in-out infinite;
         }
         @keyframes ls-fill { 0% { width: 8%; } 70% { width: 82%; } 100% { width: 8%; } }
@@ -77,17 +69,17 @@
         /* Rotating tip / what's-new card (populated by loading-screen.js). */
         #ls-card {
             width: 520px; max-width: 82vw; margin-top: 26px; padding: 16px 20px;
-            background: #141b2e; border: 1px solid #283356; border-radius: 12px;
+            background: rgba(230, 224, 209, .06); border: 1px solid rgba(230, 224, 209, .14); border-radius: 12px;
             text-align: left; box-shadow: 0 10px 30px rgba(0,0,0,.35);
             opacity: 1; transition: opacity .3s ease;
         }
         #ls-card[hidden] { display: none; }
         #ls-card.swap { opacity: 0; }
         #ls-card .k { font-size: .7rem; font-weight: 700; letter-spacing: .18em; }
-        #ls-card .k.tip { color: #7fb3ff; }
-        #ls-card .k.new { color: #6fae5a; }
-        #ls-card .t { color: #eef2fb; font-size: 1rem; font-weight: 700; margin-top: 6px; }
-        #ls-card .b { color: #b0bacd; font-size: .86rem; line-height: 1.45; margin-top: 4px; }
+        #ls-card .k.tip { color: #F4C16F; }
+        #ls-card .k.new { color: #D27B3E; }
+        #ls-card .t { color: #E6E0D1; font-size: 1rem; font-weight: 700; margin-top: 6px; }
+        #ls-card .b { color: rgba(230, 224, 209, .72); font-size: .86rem; line-height: 1.45; margin-top: 4px; }
 
         #errors {
             position: fixed; bottom: 0; left: 0; right: 0;
@@ -109,7 +101,7 @@
             border: 1px solid #23304b;
             border-radius: 6px;
             background: rgba(13, 18, 32, 0.55);
-            color: #d4a044;
+            color: #D27B3E;
             font-family: system-ui, sans-serif;
             font-size: 18px;
             line-height: 36px;
@@ -119,15 +111,16 @@
             transition: background 0.15s;
         }
         #fs-toggle:hover { background: rgba(13, 18, 32, 0.9); }
-        #fs-toggle:focus { outline: 2px solid #d4a044; outline-offset: 2px; }
+        #fs-toggle:focus { outline: 2px solid #D27B3E; outline-offset: 2px; }
     </style>
     <link rel="stylesheet" href="/static/auth-ui.css">
     <!-- PWA (Spec 32 Phase B): installable manifest + service-worker registration.
          The SW gives offline launch; auth.js boots from the cached session marker
-         when offline. (Branded icons land with branding/logo-favicons.) -->
-    <meta name="theme-color" content="#14241a">
-    <link rel="icon" href="/static/icons/favicon.ico" sizes="any">
+         when offline. (Icons: brand/render-rasters.mjs -> /static/icons/.) -->
+    <meta name="theme-color" content="#0D1B1E">
+    <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
     <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+    <link rel="icon" href="/static/icons/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" href="/static/icons/favicon-180.png">
     <link rel="manifest" href="/manifest.webmanifest">
     <script src="/static/sw-register.js"></script>
@@ -221,12 +214,7 @@
 <body>
     <div id="loading">
         <div id="ls-hero" aria-hidden="true">
-            <div class="ls-row">
-                <span class="vox v-green"></span><span class="vox v-orange"></span>
-            </div>
-            <div class="ls-row">
-                <span class="vox v-brown"></span><span class="vox v-brown"></span><span class="vox v-gold"></span>
-            </div>
+            <svg id="ls-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 440" role="img" aria-hidden="true" focusable="false"><polygon points="68,370 178,172 228,243 307,74 508,370" fill="#1F3F2E"/><polygon points="307,74 328,188 308,204 386,370 508,370" fill="#2E6B43"/><polygon points="178,172 131,257 157,245 174,260 180,234 212,258 228,243" fill="#E6E0D1"/><polygon points="307,74 247,203 279,185 307,207 309,174 352,211" fill="#E6E0D1"/><rect x="371" y="309" width="44" height="64" fill="#0D1B1E"/><path d="M365 375V303H421V375H409V317H377V375Z" fill="#7A6E59" /><rect x="388" y="329" width="10" height="23" fill="#F4C16F"/><path d="M294 215C373 246 241 255 220 278C184 304 341 308 339 350C338 374 300 398 278 414H182C236 390 304 372 287 352C270 331 158 335 160 297C162 260 340 250 294 215Z" fill="#D27B3E" /></svg>
         </div>
         <div id="ls-word">AXE'N'STAX</div>
         <div id="ls-tag">PROOF&nbsp;OF&nbsp;PLAY</div>
