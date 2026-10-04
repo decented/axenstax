@@ -60,10 +60,10 @@ await expectStatus("/game", "legacy /game → / (301)", [200, 301]);
 const wasmRes = await expectStatus(`/${wasmName}`, "wasm asset", [200]);
 await expectStatus(`/${jsName}`, "js loader", [200]);
 
-// Feedback admin gate (spec §Phase 1d). Anonymous hits should either
-// redirect to /game / / or get a 403 — never a 200 that leaks the board.
-await expectStatus("/feedback/board", "feedback board gate", [302, 303, 403]);
-await expectStatus("/api/feedback/board.json", "feedback board JSON gate", [401, 403]);
+// The feedback board must not exist on the web site at all (the voice
+// server and its board were removed 2026-06-23; web has no feedback channel).
+await expectStatus("/feedback/board", "no feedback board", [404]);
+await expectStatus("/api/feedback/board.json", "no feedback board JSON", [404]);
 
 if (rootRes && rootRes.status() === 200) {
   // "/" serves the game index now — validate it looks like the engine bundle.
