@@ -14,12 +14,12 @@
     {% for sec in sections %}
     <a href="/docs/{{ sec.slug }}" class="feature-card section-link">
         <h3>{{ sec.title }}</h3>
-        <p style="color: #9aa3b8; font-size: 0.9rem; margin-top: 0.4rem;">{{ sec.subtitle }}</p>
+        <p style="color: var(--stone-muted); font-size: 0.9rem; margin-top: 0.4rem;">{{ sec.subtitle }}</p>
     </a>
     {% endfor %}
 </div>
 
-<p style="margin-top: 2rem; color: #5b6075; font-size: 0.85rem;">
+<p style="margin-top: 2rem; color: var(--stone-dim); font-size: 0.85rem;">
     This is the builder side (specs, ADRs, roadmap, self-host). If you're here to <em>play</em>:
     the game runs in your browser, the guided <strong>journey</strong> for new players and the
     dense <strong>wiki</strong> reference each live on their own sites. Internal working docs are

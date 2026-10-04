@@ -6,14 +6,21 @@
     <meta name="referrer" content="no-referrer">
     <title>Axe'n'Stax — A sandbox you actually own</title>
     <meta name="description" content="An open-source block-building sandbox, built from scratch — where you own your world, hold your own identity, and run your own rules. Self-hostable, free to play in your browser. Your world, your rules, yours to keep.">
+    <meta property="og:image" content="https://axenstax.com/static/brand/og-1200x630.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://axenstax.com/static/brand/og-1200x630.png">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" href="/static/marketing.css">
-    <link rel="icon" href="/static/axenstax-icon.svg">
-    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+    <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon-180.png">
+    <meta name="theme-color" content="#0D1B1E">
 </head>
 <body class="marketing">
     <nav class="marketing-nav">
-        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <a href="/" class="nav-brand"><img class="brand-mark" src="/static/brand/axenstax-mark-flat.svg" alt="" width="68" height="50"><img class="brand-wordmark" src="/static/brand/axenstax-wordmark-dark.svg" alt="Axe'n'Stax" width="163" height="26"></a>
         <div class="nav-links">
             <a href="#features">Features</a>
             <a href="/experiences">Experiences</a>
@@ -41,49 +48,8 @@
             <p class="hint">Open alpha · no account needed in the browser · two ways to play below ↓</p>
         </div>
 
-        <div class="hero-art" aria-hidden="true">
-            <div class="glow"></div>
-            <!-- Isometric voxel cluster. Outer <g> positions (SVG transform attr);
-                 inner <g class="voxel"> does the float (CSS transform) so the two
-                 never fight. Lead cubes are emerald (freedom); the gold ₿ cube is
-                 the optional, parent-controlled Bitcoin bonus (never the hook). -->
-            <svg viewBox="0 0 460 430" xmlns="http://www.w3.org/2000/svg" role="img">
-                <g stroke="#1c2a45" stroke-width="1.2" opacity="0.5" fill="none">
-                    <path d="M230 305 L420 398 M230 305 L40 398 M170 330 L300 392 M290 330 L160 392"/>
-                </g>
-                <!-- dark depth cube (back) -->
-                <g transform="translate(190 250) scale(0.72)"><g class="voxel v4">
-                    <polygon points="0,0 60,30 0,60 -60,30" fill="#27374f"/>
-                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#1a2840"/>
-                    <polygon points="0,60 60,30 60,90 0,120" fill="#121d31"/>
-                </g></g>
-                <!-- small green cube (left) -->
-                <g transform="translate(118 150) scale(0.55)"><g class="voxel v3">
-                    <polygon points="0,0 60,30 0,60 -60,30" fill="#6ee7b7"/>
-                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#2fb985"/>
-                    <polygon points="0,60 60,30 60,90 0,120" fill="#178f68"/>
-                </g></g>
-                <!-- main green cube (centre) -->
-                <g transform="translate(238 138)"><g class="voxel">
-                    <polygon points="0,0 60,30 0,60 -60,30" fill="#5fe6ad"/>
-                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#28b07e"/>
-                    <polygon points="0,60 60,30 60,90 0,120" fill="#15875f"/>
-                    <polygon points="-26,28 2,42 -6,46 -34,32" fill="#ffffff" opacity="0.16"/>
-                </g></g>
-                <!-- gold "bonus" cube (floating, upper right) -->
-                <g transform="translate(350 66) scale(0.62)"><g class="voxel v2">
-                    <polygon points="0,0 60,30 0,60 -60,30" fill="#ffd486"/>
-                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#eeb14a"/>
-                    <polygon points="0,60 60,30 60,90 0,120" fill="#c98a2a"/>
-                    <text x="-3" y="92" font-size="40" font-weight="800" text-anchor="middle" fill="#7a4e10" opacity="0.7" font-family="ui-monospace, monospace">&#8383;</text>
-                </g></g>
-                <!-- tiny green cube (lower right) -->
-                <g transform="translate(348 252) scale(0.42)"><g class="voxel v3">
-                    <polygon points="0,0 60,30 0,60 -60,30" fill="#6ee7b7"/>
-                    <polygon points="-60,30 0,60 0,120 -60,90" fill="#2fb985"/>
-                    <polygon points="0,60 60,30 60,90 0,120" fill="#178f68"/>
-                </g></g>
-            </svg>
+        <div class="hero-art">
+            <img src="/static/brand/axenstax-stacked-dark.svg" alt="Axe'n'Stax: explore, create, power, belong" width="520" height="446" fetchpriority="high">
         </div>
 
         <div class="play-doors">

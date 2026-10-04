@@ -8,12 +8,14 @@
     <meta name="description" content="Experiences are curated ways to play Axe'n'Stax — a goal or challenge dropped on top of the sandbox. Play the official ones, Hash Dash and Satori Rush, and soon build and share your own.">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" href="/static/marketing.css">
-    <link rel="icon" href="/static/axenstax-icon.svg">
-    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+    <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon-180.png">
+    <meta name="theme-color" content="#0D1B1E">
 </head>
 <body class="marketing">
     <nav class="marketing-nav">
-        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <a href="/" class="nav-brand"><img class="brand-mark" src="/static/brand/axenstax-mark-flat.svg" alt="" width="68" height="50"><img class="brand-wordmark" src="/static/brand/axenstax-wordmark-dark.svg" alt="Axe'n'Stax" width="163" height="26"></a>
         <div class="nav-links">
             <a href="{{ game_url }}/">Play</a>
             <a href="{{ learn_url }}">Learn</a>
@@ -35,8 +37,8 @@
 
     <!-- WHAT AN EXPERIENCE IS -->
     <section style="max-width:760px;margin:0 auto;padding:1rem 2rem 0;">
-        <p style="color:#c5c8d4;">Think of experiences as different <em>games inside the game</em>. Some are quick races against the clock; some are long, careful climbs. You start one from the in-game chat (open it with <strong>T</strong> or <strong>/</strong>), and when it ends you're back in your own world, exactly as you left it.</p>
-        <p style="color:#9aa3b8;">Today there are two official experiences — and they're only the beginning of what an experience can be: timed challenges, puzzle builds, survival gauntlets, co-op missions, adventure maps. Whatever someone can dream up.</p>
+        <p style="color:var(--stone);">Think of experiences as different <em>games inside the game</em>. Some are quick races against the clock; some are long, careful climbs. You start one from the in-game chat (open it with <strong>T</strong> or <strong>/</strong>), and when it ends you're back in your own world, exactly as you left it.</p>
+        <p style="color:var(--stone-muted);">Today there are two official experiences — and they're only the beginning of what an experience can be: timed challenges, puzzle builds, survival gauntlets, co-op missions, adventure maps. Whatever someone can dream up.</p>
     </section>
 
     <!-- THE OFFICIAL TWO -->
@@ -52,11 +54,11 @@
     </section>
 
     <section style="max-width:760px;margin:0 auto;padding:0.5rem 2rem 1rem;text-align:center;">
-        <p class="hint" style="color:#9aa3b8;">Start one in-game with <code>/scenario hash-dash</code> or <code>/scenario satori-rush</code>. Step-by-step guides live in the <a href="{{ learn_url }}" style="color:#d4a044;">Learn journey</a>; the full rules are in the <a href="{{ wiki_url }}" style="color:#d4a044;">Wiki</a>.</p>
+        <p class="hint" style="color:var(--stone-muted);">Start one in-game with <code>/scenario hash-dash</code> or <code>/scenario satori-rush</code>. Step-by-step guides live in the <a href="{{ learn_url }}" style="color:var(--copper);">Learn journey</a>; the full rules are in the <a href="{{ wiki_url }}" style="color:var(--copper);">Wiki</a>.</p>
     </section>
 
     <!-- COMING: CREATE & SHARE -->
-    <section class="cta-block" style="border:1px solid var(--accent,#d4a044);">
+    <section class="cta-block" style="border:1px solid var(--accent,var(--copper));">
         <h2>Soon: make your own</h2>
         <p>Experiences won't just be ours. Soon you'll be able to <strong>design your own</strong> — set the goal, the rules, the world — and <strong>share them</strong> so anyone can play. Your challenge, running on someone else's screen, on the other side of the world — the same way you'll share a skin or a build.</p>
         <a href="/roadmap" class="cta cta-large">See what's coming &rarr;</a>

@@ -5,12 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Axe'n'Stax{% endblock %}</title>
     <link rel="stylesheet" href="/static/style.css">
-    <link rel="icon" href="/static/axenstax-icon.svg">
-    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+    <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon-180.png">
+    <meta name="theme-color" content="#0D1B1E">
 </head>
 <body>
     <nav>
-        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <a href="/" class="nav-brand"><img class="brand-mark" src="/static/brand/axenstax-mark-flat.svg" alt="" width="68" height="50"><img class="brand-wordmark" src="/static/brand/axenstax-wordmark-dark.svg" alt="Axe'n'Stax" width="163" height="26"></a>
         <div class="nav-links">
             <a href="/">Home</a>
             {% for sec in sections %}
