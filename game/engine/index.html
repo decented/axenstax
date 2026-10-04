@@ -4,16 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <meta name="referrer" content="no-referrer">
-    <meta name="axenstax-relay" content="wss://relay.trotters.cc">
-    <!-- gamestr leaderboard (NIP-133 kind-33334 score publish) is DELIBERATELY
-         NOT loaded on this page (2026-09-27 audit fix) — the web taster never
-         publishes a score anywhere; see the note by static/gamestr.js below. -->
-    <!-- Cloud save is permanently off on the web taster (2026-09-27 audit fix —
-         see BLOSSOM_PUBLIC_URL / _cloud_save_enabled() in app.py). app.py's `/`
-         route re-substitutes these on every serve, always to "disabled"/"" —
-         there is no server config that can turn this back on. -->
-    <meta name="cloud-save" content="disabled">
-    <meta name="blossom-url" content="">
+    <!-- OFFLINE TASTER (T0-4, 2026-10-05): this page talks to its own origin only
+         (CSP connect-src 'self'). No relay, no Blossom, no Stash, no Beacon, no
+         sign-in, no gamestr leaderboard. The strings that must never return
+         here are pinned by tools/smoke/forbidden-symbol.mjs. -->
     <!-- Injected by app.py at serve time: the marketing home the lobby "Exit"
          leaves to (play.axenstax.com/ is now the game, so / is not "home"). -->
     <meta name="marketing-url" content="">
@@ -137,35 +131,11 @@
     <link data-trunk rel="copy-file" href="assets/loading_tips.json" />
     <script src="/static/loading-screen.js"></script>
     <script src="/static/fullscreen.js"></script>
-    <!-- noble-curves: schnorr.verify is used by persona-handle.js to verify
-         kind-31000 events. signet-login bundles its own copy of @noble/curves
-         inside the IIFE but doesn't re-expose it, so we keep this standalone
-         loader for the parts of the site that depend on `window.AxeNoble`. -->
-    <script src="/static/noble-curves.js"></script>
-    <!-- signet-login (window.Signet) is DELIBERATELY NOT loaded on this page
-         (2026-09-27 audit fix). The web build is an anonymous, login-free
-         local sandbox — auth.js hasn't made an /auth round-trip since the
-         2026-06-27 rewrite, and the vendored bundle only served a legacy
-         Signet session that could be silently revived (leaderboard publish,
-         Blossom bunker pairing) on a surface that must stay identity-free.
-         The console site still vendors + loads its own copy for its real
-         operator login (tools/sites/console/static/vendor/). Any page code
-         here that reads window.Signet (cloud.js, gamestr.js — not loaded
-         either, see below) already degrades to null/no-signer, same as it
-         does today when no legacy session exists. -->
+    <!-- Pure, offline helpers: bech32 + npub decode (window.AxeBech32,
+         window.axenstax_npub_to_hex/_encode, called by the engine's npub.rs). -->
     <script src="/static/bech32.js"></script>
     <script src="/static/npub-decode.js"></script>
-    <!-- Server Card (Spec A): npub→address relay-read bridge for join-by-npub. -->
-    <script src="/static/relay-query.js"></script>
-    <script src="/static/persona-handle.js"></script>
     <script src="/static/world_store.js"></script>
-    <!-- nostr-tools/nip46 remote-signer bundle (window.AxeNostrNip46.{BunkerSigner, parseBunkerInput}).
-         DORMANT — no live consumer since the Charter strip (2026-05-27). Deliberately
-         retained for multiplayer-identity signing (Spec 1 Phase 4, via the engine signing
-         bridge docs/foundations/2026-05-14-engine-signing-bridge.md), gated on upstream
-         Signet `sign_event`. Full rationale + removal/regenerate recipe:
-         tools/sites/game/static/vendor/REGENERATE.md. -->
-    <script src="/static/vendor/nostr-tools-nip46.iife.js"></script>
     <!-- WebGPU pre-flight helper (window.AxeWebGpu): page-agnostic probe +
          friendly browser-specific "can't run yet" copy. Must load BEFORE auth.js,
          which owns the gate + boot and reveals #webgpu-gate on failure. Inert on
@@ -176,40 +146,16 @@
          friendly "can't run" block can actually render. -->
     <script defer src="/static/webgpu-check.js"></script>
     <script defer src="/static/auth.js"></script>
-    <!-- Cloud save (serverless): @forgesworn/stash SDK (window.AxeStash) + a
-         nostr relay client (window.AxeRelay) + AxeNStax consumer (window.AxeCloud).
-         Browser signs Blossom auth + manifest events with the signer auth.js
-         retained; no AxeNStax server in the save path. -->
-    <script src="/static/vendor/stash.iife.js"></script>
-    <script src="/static/vendor/relay.iife.js"></script>
-    <!-- Public content distribution: @forgesworn/beacon SDK (window.AxeBeacon).
-         Consumed by a future beacon.js glue (Workshop sharing). -->
-    <script src="/static/vendor/beacon.iife.js"></script>
-    <!-- The browser build has NO feedback channel (no lobby mailbox, no /bug or
-         /idea) — removed 2026-10-01. Native keeps its own mailbox. -->
+    <!-- Local-only engine bridge: skin/ghost export, localStorage skin + wardrobe,
+         the same-origin /mc-skin import, and INERT stubs for the cloud save /
+         open-stash externs the wasm still imports (wasm_save.rs, open_stash.rs).
+         No network beyond our own origin. -->
     <script src="/static/cloud.js"></script>
     <!-- Texture packs (P4d): fetches /static/packs/index.json + each pack's
          <key>.png so the WASM engine can swap packs on the web. Same-origin
-         static fetch, no signer/relay dependency. Provides
-         window.axenstax_{list_texture_packs,fetch_pack_file}, called by the
-         engine's texture_packs_web.rs. -->
+         static fetch. Provides window.axenstax_{list_texture_packs,fetch_pack_file},
+         called by the engine's texture_packs_web.rs. -->
     <script src="/static/texturepacks.js"></script>
-    <!-- Public content share/fetch (Workshop sharing): Beacon glue over
-         window.AxeBeacon (capped Blossom + injected signer). Provides
-         window.axenstax_openstash_* — the engine's wasm bridge (open_stash.rs)
-         calls these. Must be on THIS page (where the wasm engine runs), not just
-         the lobby. Depends on the Signet signer (auth.js) + window.AxeNoble
-         (noble-curves.js, for Schnorr-verified reads), both loaded above. -->
-    <script src="/static/beacon.js"></script>
-    <!-- gamestr.js (opt-in Hash Dash leaderboard publish, NIP-133 kind 33334) is
-         DELIBERATELY NOT loaded (2026-09-27 audit fix — finding: "web-taster
-         leaderboard overlay revives legacy Signet sessions and publishes a named
-         score to third-party relays"). The web taster never publishes anything
-         off-device; gamestr.rs's `js_gamestr_offer` extern call degrades to a
-         caught "not a function" error and logs a warning, same as any other
-         missing wasm-bindgen JS hook. The file itself is kept (its pure
-         buildScoreEvent/publishScore functions are still unit-tested by
-         tools/feedback-tests/gamestr.test.mjs) — it's just not wired to this page. -->
 </head>
 <body>
     <div id="loading">

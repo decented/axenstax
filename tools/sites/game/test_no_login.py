@@ -21,7 +21,9 @@ client = TestClient(appmod.app, raise_server_exceptions=True)
 
 def test_auth_verify_is_gone():
     r = client.post("/auth/verify", json={}, headers={"X-Requested-With": "fetch"})
-    assert r.status_code == 404
+    # 404 or 405: no route handles it (the static catch-all mount answers a POST
+    # with 405). Either way it is not a working endpoint.
+    assert r.status_code in (404, 405)
 
 
 @pytest.mark.parametrize("path", ["/auth/challenge", "/auth/whoami", "/auth/logout"])
@@ -32,7 +34,7 @@ def test_every_auth_route_is_gone(path):
 
 def test_api_feedback_voice_proxy_is_gone():
     r = client.post("/api/feedback")
-    assert r.status_code == 404
+    assert r.status_code in (404, 405)  # no route; catch-all static mount answers 405
 
 
 @pytest.mark.parametrize("path", ["/", "/game"])

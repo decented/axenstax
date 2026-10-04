@@ -25,7 +25,14 @@
 // evicts the old build's cache → `sw-register.js` reloads once to the fresh
 // build. That is the auto-update path (no manual hard-reload needed). In dev /
 // unstamped serving the placeholder stays literal — harmless, just a fixed name.
-const CACHE = 'axenstax-__BUILD_ID__';
+//
+// CACHE_REV is the manual bump: static JS under /static is cached cache-first, and
+// the build id only changes when the wasm does. Bump CACHE_REV whenever /static
+// changes without a wasm change, so activate() evicts the old cache and clients
+// stop serving deleted/stale JS. rev 2 (2026-10-05, T0-4): the Stash/relay/Beacon
+// bundles and trotters meta were removed from the page.
+const CACHE_REV = 2;
+const CACHE = 'axenstax-r' + CACHE_REV + '-__BUILD_ID__';
 
 self.addEventListener('install', (event) => {
     // Precache the navigation shell (fixed path — no hashed names) so a cold

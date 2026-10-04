@@ -6,7 +6,10 @@
 // WHY THIS EXISTS
 //
 //   The web build is the anonymous local taster: no login, no multiplayer, no
-//   Stash, no analytics. World chat would make it a service, and a service that
+//   Stash, no analytics, and (T0-4, 2026-10-05) OFFLINE: the page may talk only
+//   to its own origin (CSP `connect-src 'self'`, pinned in the game site's
+//   tests/test_offline_taster.py), so no relay / Blossom / Stash / Beacon code
+//   and no `relay.trotters.cc` may be on the page or in its runtime JS. World chat would make it a service, and a service that
 //   carries a child's words is the regulated thing this project is built not to
 //   be (CLAUDE.md, red line 3). Compile-time `cfg` is what keeps chat out; this
 //   gate is what proves the `cfg` is still doing its job after somebody
@@ -38,7 +41,7 @@
 //   KNOWS is in the bundle, and fails if that is missing — the same principle
 //   as check.sh's own header: a gate that skips itself is worse than no gate.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 const DIST = resolve(
@@ -87,7 +90,28 @@ const SITE_STATIC = resolve(
   "game",
   "static",
 );
-const FORBIDDEN_STATIC_FILES = ["mailbox.js", "nip59.js"];
+const FORBIDDEN_STATIC_FILES = [
+  "mailbox.js",
+  "nip59.js",
+  // T0-4 offline taster: the Stash/relay/Beacon/identity glue, all deleted.
+  "beacon.js",
+  "relay-query.js",
+  "persona-handle.js",
+  "noble-curves.js",
+  "_debug-monitor.js",
+];
+// Paths (relative to the game site's static dir) that must not exist, even in a
+// subdirectory — the vendored Stash / relay / Beacon / NIP-46 bundles.
+const FORBIDDEN_STATIC_PATHS = [
+  "vendor/stash.iife.js",
+  "vendor/relay.iife.js",
+  "vendor/beacon.iife.js",
+  "vendor/nostr-tools-nip46.iife.js",
+];
+// Unloaded legacy file kept only because tools/feedback-tests/gamestr.test.mjs
+// still unit-tests it. index.html does not load it, so it is exempt from the
+// offline markers below. Delete both together, then drop this entry.
+const OFFLINE_EXEMPT_STATIC = new Set(["gamestr.js"]);
 const FORBIDDEN_STATIC_MARKERS = [
   "AxeMailbox",
   "AxeNip59",
@@ -95,6 +119,40 @@ const FORBIDDEN_STATIC_MARKERS = [
   "__axenstax_mailbox_enqueue",
   "__axenstax_open_mailbox",
 ];
+
+// Offline-taster markers (T0-4). Checked in the page (trunk's dist/index.html AND
+// the game/engine/index.html source) and in the site's runtime static JS. NOT in
+// the .wasm: `relay.trotters.cc` legitimately survives there as the
+// FORBIDDEN_RELAY_HOST lint constant (world_room.rs), which exists to REFUSE it.
+const OFFLINE_MARKERS = [
+  ["relay.trotters.cc", "the web taster is offline — it must not name any AxeNStax relay (red line 2)"],
+  ["axenstax-relay", "the relay <meta> tag fed the removed Stash/Beacon relay clients"],
+  ["AxeStash", "the Stash cloud-save SDK was removed from the web build"],
+  ["AxeRelay", "the Nostr relay client bundle was removed from the web build"],
+  ["AxeBeacon", "the Beacon sharing SDK was removed from the web build"],
+  ["AxeCloud", "the web cloud-save client (cloud.js AxeCloud) was removed"],
+  ["AxeNostrNip46", "the NIP-46 bunker-signer bundle was removed — no web sign-in"],
+  ["AxeHandle", "the persona-handle relay lookup was removed — no web identity"],
+  ["AxeNoble", "noble-curves only served the removed Beacon/persona verification"],
+  ["__axenstax_get_signer", "no signer exists on web — nothing defines or may call it"],
+  ["stash.iife", "index.html must not load the Stash bundle"],
+  ["relay.iife", "index.html must not load the relay-client bundle"],
+  ["beacon.iife", "index.html must not load the Beacon bundle"],
+  ["nostr-tools-nip46", "index.html must not load the NIP-46 bundle"],
+  ["static/beacon.js", "index.html must not load the removed Beacon glue"],
+  ["static/relay-query.js", "index.html must not load the removed relay-query bridge"],
+  ["static/persona-handle.js", "index.html must not load the removed persona-handle lookup"],
+  ["static/noble-curves.js", "index.html must not load the removed noble-curves loader"],
+];
+// The game page SOURCE (trunk input). dist/index.html is scanned with the bundle.
+const PAGE_SOURCE = resolve(
+  new URL(".", import.meta.url).pathname,
+  "..",
+  "..",
+  "game",
+  "engine",
+  "index.html",
+);
 
 // Strings we know are in any real bundle. If none is found, the gate cannot see
 // into the payload and must fail rather than pass.
@@ -145,6 +203,23 @@ for (const { name, path } of files) {
       hits.push({ name, marker, why });
     }
   }
+  if (name.endsWith(".html")) {
+    for (const [marker, why] of OFFLINE_MARKERS) {
+      if (text.includes(marker.toLowerCase())) {
+        hits.push({ name, marker, why });
+      }
+    }
+  }
+}
+
+// --- Page source (what trunk builds the dist page from) ---------------------
+if (existsSync(PAGE_SOURCE)) {
+  const text = readFileSync(PAGE_SOURCE, "latin1").toLowerCase();
+  for (const [marker, why] of OFFLINE_MARKERS) {
+    if (text.includes(marker.toLowerCase())) {
+      hits.push({ name: "game/engine/index.html", marker, why });
+    }
+  }
 }
 
 // --- Second pass: the game site's static JS -------------------------------
@@ -161,6 +236,13 @@ for (const name of readdirSync(SITE_STATIC).sort()) {
   }
   if (!name.endsWith(".js")) continue;
   const text = readFileSync(path, "latin1");
+  if (!OFFLINE_EXEMPT_STATIC.has(name)) {
+    for (const [marker, why] of OFFLINE_MARKERS) {
+      if (text.includes(marker)) {
+        hits.push({ name: `sites/game/static/${name}`, marker, why });
+      }
+    }
+  }
   for (const marker of FORBIDDEN_STATIC_MARKERS) {
     if (text.includes(marker)) {
       hits.push({
@@ -172,9 +254,19 @@ for (const name of readdirSync(SITE_STATIC).sort()) {
   }
 }
 
+for (const rel of FORBIDDEN_STATIC_PATHS) {
+  if (existsSync(resolve(SITE_STATIC, rel))) {
+    hits.push({
+      name: `sites/game/static/${rel}`,
+      marker: rel,
+      why: "this retired Stash/relay/Beacon/identity bundle must not exist — the web taster is offline",
+    });
+  }
+}
+
 const mib = (totalBytes / 1024 / 1024).toFixed(2);
 console.log(
-  `Scanned ${files.length} bundle file(s), ${mib} MiB, for ${FORBIDDEN.length} forbidden markers.`,
+  `Scanned ${files.length} bundle file(s), ${mib} MiB, for ${FORBIDDEN.length} forbidden markers (+${OFFLINE_MARKERS.length} offline-taster markers on the page and its JS).`,
 );
 
 if (!canaryFound) {
@@ -188,7 +280,7 @@ if (!canaryFound) {
 }
 
 if (hits.length > 0) {
-  console.error("\nFAIL: native-only surface (chat / feedback) found in the web build:\n");
+  console.error("\nFAIL: native-only or networked surface (chat / feedback / relay / Stash) found in the web build:\n");
   for (const h of hits) {
     console.error(`  ${h.name}: "${h.marker}"`);
     console.error(`    ${h.why}`);
@@ -201,4 +293,4 @@ if (hits.length > 0) {
   process.exit(1);
 }
 
-console.log("OK: no native-only chat/feedback surface in the web build (canary seen).");
+console.log("OK: no native-only chat/feedback surface and no relay/Stash/Beacon code in the web build (canary seen).");

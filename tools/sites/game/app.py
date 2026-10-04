@@ -97,26 +97,12 @@ PORT = int(os.environ.get("PORT", "8094"))
 DOCS_URL = os.environ.get("DOCS_URL", "https://localhost:8095")
 MARKETING_URL = os.environ.get("MARKETING_URL", "https://localhost:8096")
 
-# --- Cloud (Blossom) — PERMANENTLY OFF on the web taster ---
-# 2026-09-27 audit: an env-driven `BLOSSOM_PUBLIC_URL` let production silently
-# turn cloud save back on (the value was set in the deploy template, contradicting
-# the "unset in production" comment that used to live here). The web build is an
-# anonymous, login-free local sandbox (CLAUDE.md red line 3 / the "no login,
-# no cookies, no cloud save" posture this site states at the top of app.py's
-# docstring) — cloud save, cosmetics/wardrobe Blossom sync, and the cloud-world-
-# list merge in `menu.rs::poll_cloud_worlds` must never activate on web, not just
-# "by default". So there is no env var any longer: `_cloud_save_enabled()` is a
-# hard `False`, and `BLOSSOM_PUBLIC_URL` no longer exists as a config knob here.
-# (World-push "Stash" cloud save itself was removed 2026-07-09 — see
-# docs/superpowers/specs/2026-07-09-give-aliases-and-dead-web-stash-code.md —
-# this closes the door on the read-only paths that spec deliberately left open.)
-BLOSSOM_PUBLIC_URL = ""
-
-
-def _cloud_save_enabled() -> bool:
-    """Always False on the web taster — cloud save is native-only. See the
-    BLOSSOM_PUBLIC_URL comment above."""
-    return False
+# --- No cloud, no relay, no third party — the taster is OFFLINE (T0-4) ---
+# The web build talks to its own origin only: CSP `connect-src 'self'`, no Blossom
+# / Stash / Nostr relay / Beacon code on the page (2026-10-05; before that cloud
+# save was already hard-off here from the 2026-09-27 audit). Cloud save, sharing
+# and multiplayer live in the native app. tools/smoke/forbidden-symbol.mjs and
+# tests/test_offline_taster.py pin this so it cannot silently regrow.
 
 
 app = FastAPI(title="Axe'n'Stax — Game")
@@ -125,22 +111,17 @@ app = FastAPI(title="Axe'n'Stax — Game")
 # /play/ overrides this baseline with a stricter CSP that pins inline-script
 # hashes (Trunk's loader).
 #
-# 2026-09-27 audit cleanup: the voice widget ("Games Master") was decommissioned
-# 2026-06-23 and its /api/feedback proxy below removed with this change — both
-# the VOICE_SERVER_ORIGIN CSP scaffolding and the connect-src Blossom fragment
-# (cloud save is permanently off on web, see BLOSSOM_PUBLIC_URL above) existed
-# only to support features that no longer run on this site, so they're gone
-# rather than left as inert env-driven config someone could accidentally re-arm.
-#
-# NIP-46 bunker sign-in (Signet) + the Nostr save-manifest connect to relays whose set is
-# chosen by the signer/bunker (e.g. nos.lol, relay.primal.net, relay.ditto.pub, trotters)
-# and can change — so allow any secure websocket rather than an ever-stale relay allow-list.
-# script-src stays locked to trusted scripts, so only the vendored SDKs can open these.
+# 2026-10-05 (T0-4): the web taster is fully offline — `connect-src 'self'`, so
+# the page can reach only its own origin (the /mc-skin proxy, /static, the WASM
+# bundle). The old `wss:` allowance existed for NIP-46 bunker sign-in and the
+# Nostr save manifest; both are gone from the web build. `/` serves the stricter
+# per-build CSP below (`_build_play_headers`), which also carries
+# 'wasm-unsafe-eval' so the WASM engine can instantiate.
 _BASELINE_CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
-    "connect-src 'self' wss:; "
+    "connect-src 'self'; "
     "img-src 'self' data:; "
     "font-src 'self' data:; "
     "media-src 'self'; "
@@ -481,7 +462,7 @@ def _build_play_headers() -> dict:
         "default-src 'self'; "
         f"script-src {script_src}; "
         "style-src 'self' 'unsafe-inline'; "
-        "connect-src 'self' wss:; "
+        "connect-src 'self'; "
         "img-src 'self' data:; "
         "font-src 'self' data:; "
         "media-src 'self'; "
@@ -521,22 +502,6 @@ async def entrance(request: Request):
         )
 
     index_html = (WASM_DIST / "index.html").read_text()
-    # Reflect the real server cloud-save capability + the public Blossom URL into
-    # the served page, so cloud.js's enabled() is honest and it knows where to
-    # PUT/GET blobs (the static dist defaults to disabled / no url).
-    flag = "enabled" if _cloud_save_enabled() else "disabled"
-    index_html = re.sub(
-        r'<meta name="cloud-save" content="[^"]*">',
-        f'<meta name="cloud-save" content="{flag}">',
-        index_html,
-        count=1,
-    )
-    index_html = re.sub(
-        r'<meta name="blossom-url" content="[^"]*">',
-        f'<meta name="blossom-url" content="{BLOSSOM_PUBLIC_URL}">',
-        index_html,
-        count=1,
-    )
     # The in-game lobby "Exit" leaves to the marketing home — the real "home" now
     # that / IS the game. Inject it so the engine needn't hardcode the host (dev
     # vs prod). auth.js reads <meta name="marketing-url">.
