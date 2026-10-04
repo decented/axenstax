@@ -215,7 +215,7 @@ No existing engine (Luanti, Veloren, etc.) can deliver this vision without becom
 - **Engine**: Full custom build — own the entire stack, no inherited ceilings
 - **Payments**: LNbits as integration hub, Lightning Network for micropayments
 - **Scaling**: Shard-based (many independent world instances), not single mega-world
-- **Orchestration**: Kubernetes + Agones for game server fleet management
+- **Orchestration**: ~~Kubernetes + Agones fleet~~ **RETIRED** — an AxeNStax-operated fleet for others' groups crosses red line 2. Worlds are self-hosted (single binary or the operator's own Docker).
 - **Textures**: 16x16 default, resolution-agnostic renderer
 - **Reward Mechanic**: **Proof of Play** — every pickaxe strike runs HMAC-SHA256 (even on grass) and the hash is surfaced to the player as an educational proof-of-work primitive. The same hash deterministically drives optional rare drops on plain stone and, on Bitcoin-enabled servers, sats payouts via a **deterministic work-meter** (effort accumulation — never a chance-based "probabilistic" threshold; a probabilistic real-Bitcoin payout sits inside the UK Gambling Act gaming perimeter, s.6, where free-to-play is not a defence, so it is **retired for real sats** — see `docs/research/2026-06-21-uk-online-safety-gambling-crypto-landscape.md`). Visible ore blocks (coal/iron/diamond — Wave 13) are Minecraft-style guaranteed drops with the correct tool. The player is **not** a Bitcoin miner; on Bitcoin-enabled servers the server operator translates proof-of-play effort into payouts. Anti-X-ray = (a) architectural defence at the reward layer (`server_secret` never leaves the server — this part is live) + (b) chunk-stream obfuscation that replaces buried ore with stone in the data sent to the client; exposed ore in cave walls stays visible. **(b) is built + unit-tested but not yet wired into the live chunk-stream send path** (`game/engine/src/anti_xray.rs`, `#![allow(dead_code)]`) — it lands with real remote-multiplayer chunk streaming. Don't describe (b) as active protection until that lands. Full design: `docs/foundations/2026-05-12-proof-of-play-clarification.md`.
 - **Wallet**: Noncustodial Lightning wallet built into PWA, derived from Nostr 12-word seed
@@ -275,14 +275,11 @@ docs/
 game/
   engine/          — Custom voxel engine (client + server)
   textures/        — Block textures (16x16 default pack)
-platform/
-  matchmaking/     — Session directory + player routing
-  orchestration/   — Agones fleet management, autoscaling
-  payments/        — LNbits integration, split payments, LNURL flows
+platform/          — RETIRED placeholders (matchmaking/session directory/Agones cross red lines 1+2; see platform/README.md)
 tools/
   research-viewer/ — Local web app for YouTube research (port 8888)
 infra/
-  k8s/             — Kubernetes manifests, Agones Fleet specs
+  k8s/             — RETIRED (see infra/k8s/README.md)
   docker/          — Dockerfiles for server images
 ```
 
@@ -297,13 +294,13 @@ infra/
 
 | # | Spec | Lines | Covers |
 |---|------|-------|--------|
-| 01 | Engine Architecture | 1,609 | 12-crate workspace, ECS (hecs), tick loop (20 TPS), threading, WASM plugins, asset pipeline |
+| 01 | Engine Architecture | 1,609 | (as-designed: 12-crate workspace — as-built is ONE crate, `game/engine`), ECS (hecs), tick loop (20 TPS), threading, WASM plugins, asset pipeline |
 | 02 | World Format | 1,411 | Block registry (u16), 16x16x16 chunks, palette compression, world gen pipeline, lighting, persistence |
 | 03 | Rendering | 1,231 | wgpu pipeline, greedy meshing, texture arrays, 3 GPU tiers, procedural sky, egui UI, resource packs |
 | 04 | Networking | 1,112 | UDP + WebRTC dual transport, custom protocol, client prediction, 3-tier spectator system, anti-DDoS |
 | 05 | Gameplay Systems | 1,312 | Movement, block interaction, inventory, crafting, combat, mobs, game modes, particles/audio |
 | 06 | Bitcoin Integration | 1,830 | Hash-on-mine, reward economics, LNbits API, revenue splits, creator kit, Signet age verification |
-| 07 | Platform Services | 1,952 | Auth, matchmaking, Agones fleets, world lifecycle, region simulation, portals, moderation, cost controls |
+| 07 | Platform Services | 1,952 | **RETIRED banner** — operated matchmaking/Agones/session directory cross red lines; remaining: world lifecycle, region simulation, portals, moderation, cost controls |
 | 08 | Security & Anti-Cheat | 1,614 | Threat model, server authority, anti-bot, payment security, plugin sandboxing, privacy, incident response |
 
 ## Tech Stack
@@ -317,9 +314,8 @@ infra/
 - **Liquidity**: Amboss (~0.5%/tx), mandatory ~1% Lightning fee baked into splits
 - **Infrastructure Billing**: BitLaunch (hourly, Bitcoin) — costs paid from transaction flow, not out of pocket
 - **Bitcoin Model**: Hybrid — game works without Bitcoin, Bitcoin-enabled servers are flagship
-- **Self-Hosting**: Single binary (personal) or Docker/K8s (production) — same engine
-- **Infrastructure**: Kubernetes, Agones, Docker
-- **Matchmaking**: Open Match or custom
+- **Self-Hosting**: Single binary (personal) or the operator's own Docker — same engine
+- **Infrastructure / Matchmaking**: ~~Kubernetes, Agones, Open Match~~ RETIRED (red lines 1+2) — discovery is LAN, opt-in self-published Nostr announce, or direct address
 - **World Storage**: Pluggable backends, cloud-native snapshots
 
 ## Spec Maintenance
@@ -372,7 +368,7 @@ Every piece of code must be either **concrete** (production-grade, spec-aligned,
 - **`ServerPlayer` vs `PlayerSlot` duplication** (BRIDGE in server.rs). Save path uses raw ServerPlayer fields rather than PlayerSlot; the two structs will drift. Trigger: when save becomes server-authoritative.
 - **`HostedServer` local-player position-trust path** (BRIDGE in hosted_server.rs). Local players are position-authoritative; remote players are server-simulated. Unified once single-player routes through HostedServer.
 - **`PlayerSlot.charter_comms` reads a local tightening-only policy file** (BRIDGE). Charter has no comms capability — verified 2026-09-05: `comms` is a reserved word in Charter's prose contract, not a shipped clause kind; the published SDK type is a single `kind: 'schedule'` literal. Since 2026-09-28 the file can only LOWER a player's ceiling below the safe default (`Approved`), never raise it — the old self-named `guardian_npub` signature proved nothing, so it is ignored. Raising waits for a real capability boundary. Trigger: the Charter comms clause shipping upstream, or a Signet guardian attestation. See `docs/foundations/2026-09-05-world-chat.md §3.3`.
-- **`JoinRequestPacket.player_name` is client-asserted** (BRIDGE in protocol.rs:45). The multiplayer-identity design (`docs/spec/04-networking.md §1.8`) replaces this with `auth_event: SignetAuthEvent` + `handle_credential: Option<SignetCredential>` — handle sourced from the signed kind-31000 `display-name` tag, never from the client string. Batch A bounded + sanitised the field as short-term hardening. **Phase 4 cutover IMPLEMENTED 2026-06-16** (protocol v49): the handshake reorders (authed client waits for `ChallengePacket` → signs `{nonce, origin}` off the main loop → sends `JoinRequest` with the signed `auth_event`); the server verifies any present auth_event (tamper/invalid → reject) and rejects an *absent* one on a sign-in-required host (`HostedServer.require_signin`, `true` for the QUIC LAN host, `false` for the dedicated WebSocket server until the web path is live-verified). `USE_SIGNET_AUTH` is **retired** — identity is policy-driven (`hosted_server::resolve_join_identity`), not flag-gated. `player_name` is now a **display fallback only**, never trusted; the verified npub is stored on `ServerPlayer.verified_pubkey` for economy-block ownership; collisions get a `-<npub-suffix>` readable label, and a client-side **inspect view** (`hud_ui::draw_player_inspect`, fed by `RemoteClient::roster` + the npub now on the `Joined` event) shows each present player's full, copyable npub. The signing bridge that BLOCKED this now exists both sides: native `game_loop::native_join_sign_driver` (restored bunker on a worker thread) and web `window.__axenstax_sign_auth_event` + `wasm_auth::js_sign_driver` (the page's retained signet-login signer already exposes `signEvent`, so no upstream Signet change was needed). **Remaining = owner live test only** (2-machine LAN with a real bunker pair, native↔native + native↔dedicated; browser+phone for the web path). See `docs/foundations/2026-04-20-engine-signet-auth.md` + `docs/goals/2026-06-16-phase4-signet-multiplayer-auth.md`. **Charter Phase 1 decoupled 2026-05-09** when Charter pivoted to rev. 7 mechanism A (relay-read only, no bunker calls in the hot path) — Spec 10 delivered on main. **The in-engine schedule-Charter gate was STRIPPED 2026-05-26** (the `charter::check` session-start gate, the deny overlay, `charter-*.js`, and the `/auth` Charter store are gone — superseded by the standalone `@forgesworn/charter` SDK shipped upstream 2026-05-25; preserved in git history). Note: the unrelated `charter_allows_sats` Bitcoin parental-gate on `PlayerSlot` is untouched and remains live. The signing-bridge gap still applies to Phase 4 only, plus future Charter mechanism B/C/D specs when they ship. See `docs/spec/08-security-anti-cheat.md §9.0.1` for threat model.
+- **`JoinRequestPacket.player_name` is client-asserted** (was BRIDGE in protocol.rs; **resolved by the Phase 4 cutover below** — the field is now a display fallback only). The multiplayer-identity design (`docs/spec/04-networking.md §1.8`) replaces this with `auth_event: SignetAuthEvent` + `handle_credential: Option<SignetCredential>` — handle sourced from the signed kind-31000 `display-name` tag, never from the client string. Batch A bounded + sanitised the field as short-term hardening. **Phase 4 cutover IMPLEMENTED 2026-06-16** (protocol v49): the handshake reorders (authed client waits for `ChallengePacket` → signs `{nonce, origin}` off the main loop → sends `JoinRequest` with the signed `auth_event`); the server verifies any present auth_event (tamper/invalid → reject) and rejects an *absent* one on a sign-in-required host (`HostedServer.require_signin`, `true` for the QUIC LAN host, `false` for the dedicated WebSocket server until the web path is live-verified). `USE_SIGNET_AUTH` is **retired** — identity is policy-driven (`hosted_server::resolve_join_identity`), not flag-gated. `player_name` is now a **display fallback only**, never trusted; the verified npub is stored on `ServerPlayer.verified_pubkey` for economy-block ownership; collisions get a `-<npub-suffix>` readable label, and a client-side **inspect view** (`hud_ui::draw_player_inspect`, fed by `RemoteClient::roster` + the npub now on the `Joined` event) shows each present player's full, copyable npub. The signing bridge exists on **native only**: `game_loop::native_join_sign_driver` (restored bunker on a worker thread). The web half was never finished — `wasm_auth::js_sign_driver` consumes `window.__axenstax_sign_auth_event`, but nothing defines it (audit 2026-10-04), and the web build is now an anonymous offline taster anyway, so there is no web sign-in path. **Remaining = owner live test only** (2-machine LAN with a real bunker pair, native↔native + native↔dedicated). See `docs/foundations/2026-04-20-engine-signet-auth.md` + `docs/goals/2026-06-16-phase4-signet-multiplayer-auth.md`. **Charter Phase 1 decoupled 2026-05-09** when Charter pivoted to rev. 7 mechanism A (relay-read only, no bunker calls in the hot path) — Spec 10 delivered on main. **The in-engine schedule-Charter gate was STRIPPED 2026-05-26** (the `charter::check` session-start gate, the deny overlay, `charter-*.js`, and the `/auth` Charter store are gone — superseded by the standalone `@forgesworn/charter` SDK shipped upstream 2026-05-25; preserved in git history). Note: the unrelated `charter_allows_sats` Bitcoin parental-gate on `PlayerSlot` is untouched and remains live. The signing-bridge gap still applies to Phase 4 only, plus future Charter mechanism B/C/D specs when they ship. See `docs/spec/08-security-anti-cheat.md §9.0.1` for threat model.
 
 ### Resolved technical debt:
 - ~~`main.rs` is too large~~ — decomposed into game_loop.rs, block_interact.rs, chunk_stream.rs, spawning.rs
