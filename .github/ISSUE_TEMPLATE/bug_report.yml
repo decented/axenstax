@@ -1,0 +1,39 @@
+name: Bug report
+description: Something in the engine, a site or the docs is broken.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Never post a child's personal details, photos, real names or location
+        This repository is public. Redact anything that identifies a child (or anyone), use fake test data, and crop screenshots. Security problems do not belong here: use the private reporting link on the issue chooser.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Game version (Settings screen) or commit.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where did it happen?
+      options: [Native (Linux), Native (Windows), Native (macOS), Android, Web taster, Dedicated server, A website, Docs]
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have not included a child's personal details, photos, real names or location.
+          required: true

@@ -1221,6 +1221,7 @@ stateDiagram-v2
 
 **Authenticating** (0-1 second):
 - Client sends `AuthRequest` containing a platform-issued JWT (from the session directory/matchmaker) or a server-local password for personal-tier.
+- **RETIRED (do not build):** the platform JWT / session-directory / matchmaker path is retired — AxeNStax operates no matchmaker, session directory or platform auth service (that would make it the operator of a regulated service). Worlds are self-hosted; discovery is LAN, opt-in self-published Nostr announce, or direct address; identity is a Signet-signed auth event verified by the host (see §1.8 / §1.9 and `docs/foundations/2026-04-20-engine-signet-auth.md`). Only the server-local-password case above is current design.
 - Server validates the token, checks ban lists, checks capacity.
 - Server responds with `AuthResponse` containing the session token and server configuration.
 - If the server is full, the response includes a `ServerFull` reason code.

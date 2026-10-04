@@ -1,5 +1,18 @@
 # 07 — Platform Services and Infrastructure
 
+> **RETIRED DESIGN — do not build from this document.** AxeNStax-operated
+> matchmaking, session directories, Agones game-server fleets, platform-issued
+> auth tokens and hosted world services described here are **retired**. Operating
+> them would make AxeNStax the operator of a regulated service (the public
+> directory and the servers/relays carrying a group's traffic are two of the
+> project's four red lines; see `CONTRIBUTING.md`). Worlds are **self-hosted**
+> (single binary or Docker); discovery is **LAN-local, opt-in self-published Nostr
+> announce, or direct address**; identity is a third-party Signet sign-in. Sections
+> below are kept as historical design context only. Parts that describe the
+> engine's local control surface, moderation tooling for self-hosting operators, or
+> cost controls an operator might run for themselves may still be useful, but
+> nothing here is a plan for an AxeNStax-run platform.
+
 **Status**: Draft
 **Last Updated**: 2026-03-03
 

@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an idea that fits the project's direction.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Never post a child's personal details, photos, real names or location
+        This repository is public. Redact anything that identifies a child (or anyone) and use fake examples.
+
+        Please read **"What we won't merge"** in [CONTRIBUTING.md](https://github.com/decented/axenstax/blob/main/CONTRIBUTING.md) first: ideas that need an AxeNStax-operated directory, server or relay, collect children's data centrally, or position the game as a social network will be declined.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What do you propose?
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have not included a child's personal details, photos, real names or location.
+          required: true
+        - label: This does not cross any of the red lines in CONTRIBUTING.md.
+          required: true
