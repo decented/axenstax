@@ -157,7 +157,7 @@ async fn fetch_release_events(url: &str, pinned_hex: &str) -> Result<Vec<Event>,
         "limit": 10,
     }])
     .to_string();
-    sink.send(Message::Text(req)).await.map_err(|e| format!("send: {e}"))?;
+    sink.send(Message::Text(req.into())).await.map_err(|e| format!("send: {e}"))?;
 
     let mut out = Vec::new();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(8), async {

@@ -79,7 +79,7 @@ pub async fn publish(url: &str, ev: &Event) -> Result<(), String> {
     let (ws, _) =
         tokio_tungstenite::connect_async(url).await.map_err(|e| format!("connect {url}: {e}"))?;
     let (mut sink, mut stream) = ws.split();
-    sink.send(Message::Text(event_frame(ev))).await.map_err(|e| format!("send: {e}"))?;
+    sink.send(Message::Text(event_frame(ev).into())).await.map_err(|e| format!("send: {e}"))?;
 
     let id_hex = ev.id.to_hex();
     let wait_for_ok = async {
@@ -122,7 +122,7 @@ async fn fetch_events_inner(url: &str, filter: &serde_json::Value) -> Result<Vec
         tokio_tungstenite::connect_async(url).await.map_err(|e| format!("connect {url}: {e}"))?;
     let (mut sink, mut stream) = ws.split();
     let sub_id = "mb";
-    sink.send(Message::Text(req_frame(sub_id, filter)))
+    sink.send(Message::Text(req_frame(sub_id, filter).into()))
         .await
         .map_err(|e| format!("send: {e}"))?;
 
@@ -144,7 +144,7 @@ async fn fetch_events_inner(url: &str, filter: &serde_json::Value) -> Result<Vec
         }
     })
     .await;
-    let _ = sink.send(Message::Text(json!(["CLOSE", sub_id]).to_string())).await;
+    let _ = sink.send(Message::Text((json!(["CLOSE", sub_id]).to_string()).into())).await;
     Ok(out)
 }
 

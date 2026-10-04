@@ -56,7 +56,7 @@ async fn fetch_events_inner(url: &str, filter: &Value) -> Result<Vec<Event>, Str
     let ws = connect(url).await?;
     let (mut sink, mut stream) = ws.split();
     let sub = "q";
-    sink.send(Message::Text(json!(["REQ", sub, filter]).to_string()))
+    sink.send(Message::Text((json!(["REQ", sub, filter]).to_string()).into()))
         .await
         .map_err(|e| format!("send: {e}"))?;
     let mut out = Vec::new();
@@ -71,7 +71,7 @@ async fn fetch_events_inner(url: &str, filter: &Value) -> Result<Vec<Event>, Str
         }
     })
     .await;
-    let _ = sink.send(Message::Text(json!(["CLOSE", sub]).to_string())).await;
+    let _ = sink.send(Message::Text((json!(["CLOSE", sub]).to_string()).into())).await;
     Ok(out)
 }
 
@@ -92,7 +92,7 @@ async fn poll_ack_inner(
     let ws = connect(url).await?;
     let (mut sink, mut stream) = ws.split();
     for (sub, f) in [("e", eph), ("s", stored)] {
-        sink.send(Message::Text(json!(["REQ", sub, f]).to_string()))
+        sink.send(Message::Text((json!(["REQ", sub, f]).to_string()).into()))
             .await
             .map_err(|e| format!("send: {e}"))?;
     }
@@ -126,7 +126,7 @@ async fn poll_ack_inner(
     })
     .await;
     for sub in ["e", "s"] {
-        let _ = sink.send(Message::Text(json!(["CLOSE", sub]).to_string())).await;
+        let _ = sink.send(Message::Text((json!(["CLOSE", sub]).to_string()).into())).await;
     }
     live.retain(|e| e.verify().is_ok());
     page.retain(|e| e.verify().is_ok());

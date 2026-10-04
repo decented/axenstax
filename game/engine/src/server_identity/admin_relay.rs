@@ -115,7 +115,7 @@ where
             Ok((ws, _)) => {
                 let (mut sink, mut stream) = ws.split();
                 let req = subscribe_req(sub_id, author_hex, Some(since));
-                if sink.send(Message::Text(req)).await.is_err() {
+                if sink.send(Message::Text(req.into())).await.is_err() {
                     log::warn!("admin relay: failed to send REQ to {relay_url}; retrying");
                 } else {
                     log::info!("admin relay: subscribed on {relay_url}");
@@ -147,7 +147,7 @@ pub async fn publish_event(relay_url: &str, event_json: &str) -> Result<(), Stri
         .await
         .map_err(|e| format!("connect {relay_url}: {e}"))?;
     let (mut sink, mut stream) = ws.split();
-    sink.send(Message::Text(frame))
+    sink.send(Message::Text(frame.into()))
         .await
         .map_err(|e| format!("send: {e}"))?;
     // Best-effort: read up to a few frames or ~5s for an OK acknowledgement.

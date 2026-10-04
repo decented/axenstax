@@ -38,7 +38,7 @@ pub async fn query_events(relay_url: &str, kinds: &[u16], author_hex: &str) -> V
     };
     let (mut sink, mut stream) = ws.split();
     let req = query_req("axe-resolve", kinds, author_hex);
-    if sink.send(Message::Text(req)).await.is_err() {
+    if sink.send(Message::Text(req.into())).await.is_err() {
         return out;
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), async {

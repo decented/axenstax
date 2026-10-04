@@ -468,7 +468,7 @@ async fn relay_worker(
                     log::info!("[rendezvous] connected {}", urls[i]);
                     if let Some((kind, p)) = standing.clone() {
                         let _ =
-                            ws.send(Message::Text(req_frame(SUB_ID, kind, &p, sub_since()))).await;
+                            ws.send(Message::Text(req_frame(SUB_ID, kind, &p, sub_since()).into())).await;
                     }
                     sockets[i] = Some(ws);
                     connected_at[i] = Some(std::time::Instant::now());
@@ -494,7 +494,7 @@ async fn relay_worker(
                     standing = Some((kind, p.clone()));
                     let frame = req_frame(SUB_ID, kind, &p, sub_since());
                     for ws in sockets.iter_mut().flatten() {
-                        let _ = ws.send(Message::Text(frame.clone())).await;
+                        let _ = ws.send(Message::Text(frame.clone().into())).await;
                     }
                 }
                 Cmd::Publish(ev) => {
@@ -521,7 +521,7 @@ async fn relay_worker(
                         continue;
                     }
                     let Some(ws) = socket.as_mut() else { continue };
-                    if ws.send(Message::Text(p.frame.clone())).await.is_ok() {
+                    if ws.send(Message::Text(p.frame.clone().into())).await.is_ok() {
                         p.sent[i] = true;
                     }
                 }
@@ -832,7 +832,7 @@ mod tests {
                             // Short lock scope: nothing is awaited holding it.
                             let push = {
                                 let mut g = s.lock().unwrap();
-                                g.seen.push(t);
+                                g.seen.push(t.to_string());
                                 match v[0].as_str() {
                                     Some("REQ") => std::mem::take(&mut g.to_push),
                                     _ => Vec::new(),
@@ -842,20 +842,20 @@ mod tests {
                                 Some("REQ") => {
                                     let sub = v[1].as_str().unwrap_or("").to_string();
                                     let _ = ws
-                                        .send(Message::Text(format!("[\"EOSE\",\"{sub}\"]")))
+                                        .send(Message::Text((format!("[\"EOSE\",\"{sub}\"]")).into()))
                                         .await;
                                     for raw in push {
                                         let _ = ws
-                                            .send(Message::Text(format!(
-                                                "[\"EVENT\",\"{sub}\",{raw}]"
-                                            )))
+                                            .send(Message::Text(
+                                                format!("[\"EVENT\",\"{sub}\",{raw}]").into(),
+                                            ))
                                             .await;
                                     }
                                 }
                                 Some("EVENT") => {
                                     let id = v[1]["id"].as_str().unwrap_or("").to_string();
                                     let _ = ws
-                                        .send(Message::Text(format!("[\"OK\",\"{id}\",true,\"\"]")))
+                                        .send(Message::Text((format!("[\"OK\",\"{id}\",true,\"\"]")).into()))
                                         .await;
                                 }
                                 _ => {}

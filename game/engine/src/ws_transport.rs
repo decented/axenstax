@@ -108,8 +108,8 @@ where
     // drops the transport (slot freed), flush and send a Close frame.
     tokio::spawn(async move {
         while let Some(data) = out_rx.recv().await {
-            // `.into()` works whether tungstenite's Binary holds Vec<u8> or Bytes.
-            if sink.send(Message::Binary(data)).await.is_err() {
+            // tungstenite 0.26: `Binary` holds `Bytes`; `Vec<u8>` converts losslessly.
+            if sink.send(Message::Binary(data.into())).await.is_err() {
                 return;
             }
         }
@@ -268,7 +268,7 @@ pub fn connect_ws(url: &str) -> Result<WebSocketClientTransport, String> {
                         },
                         out = out_rx.recv() => match out {
                             Some(data) => {
-                                if sink.send(Message::Binary(data)).await.is_err() {
+                                if sink.send(Message::Binary(data.into())).await.is_err() {
                                     break;
                                 }
                             }
