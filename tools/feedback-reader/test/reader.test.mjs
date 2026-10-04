@@ -19,6 +19,7 @@ const KID_SK = NT.generateSecretKey();
 const kid = signerFromSecretKey(KID_SK);
 const KID_NPUB = NT.nip19.npubEncode(kid.pubkey);
 
+const RECENT = Math.floor(Date.now() / 1000);
 function fakeRelay() {
   const published = [];
   return { published, async publish(ev) { published.push(ev); } };
@@ -72,7 +73,7 @@ test('ledger supports the new → triaged → resolved transition in place', asy
   const { path: lp, cleanup } = tmpLedger();
   try {
     const ledger = new Ledger(lp);
-    ledger.append({ id: 'r9', fromNpub: KID_NPUB, handle: 'Secret Pete', type: 'bug', body: 'x', ts: 1, status: 'new', verdict: null });
+    ledger.append({ id: 'r9', fromNpub: KID_NPUB, handle: 'Secret Pete', type: 'bug', body: 'x', ts: RECENT, status: 'new', verdict: null });
     // Triage is INTERNAL only — a verdict (bug/idea/discard), never a GitHub issue.
     ledger.update('r9', { status: 'triaged', verdict: 'bug' });
     assert.equal(ledger.get('r9').status, 'triaged');
@@ -206,12 +207,12 @@ test('reresolveHandles repairs old kind-0 rows but never clobbers an embedded ha
   try {
     const ledger = new Ledger(lp);
     // A pre-fix row: handle resolved the OLD way, NO handleSource field (as on disk).
-    ledger.append({ id: 'old', fromNpub: KID_NPUB, handle: 'HashDashTypedName', type: 'bug', body: 'a', ts: 1, status: 'new', verdict: null });
+    ledger.append({ id: 'old', fromNpub: KID_NPUB, handle: 'HashDashTypedName', type: 'bug', body: 'a', ts: RECENT, status: 'new', verdict: null });
     // A post-fix row whose handle the client embedded at send time — authoritative.
-    ledger.append({ id: 'emb', fromNpub: KID_NPUB, handle: 'SignedInName', handleSource: 'embedded', type: 'bug', body: 'b', ts: 2, status: 'new', verdict: null });
+    ledger.append({ id: 'emb', fromNpub: KID_NPUB, handle: 'SignedInName', handleSource: 'embedded', type: 'bug', body: 'b', ts: RECENT, status: 'new', verdict: null });
     // A row whose reporter has no persona credential on the relay — left as-is.
     const STRANGER = NT.nip19.npubEncode(NT.getPublicKey(NT.generateSecretKey()));
-    ledger.append({ id: 'none', fromNpub: STRANGER, handle: 'OldName', type: 'idea', body: 'c', ts: 3, status: 'new', verdict: null });
+    ledger.append({ id: 'none', fromNpub: STRANGER, handle: 'OldName', type: 'idea', body: 'c', ts: RECENT, status: 'new', verdict: null });
 
     // kind-31000 lookup: the kid has a real persona handle; the stranger has none.
     const resolveByNpub = async (npub) => (npub === KID_NPUB ? 'TrueSignedIn' : null);
