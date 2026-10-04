@@ -16,3 +16,11 @@ by that grant. They identify the official project. You may use them to refer
 to Axe'n'Stax, but not to brand a fork, a server or a product in a way that
 suggests it is the official project or endorsed by it. Forks should use their
 own name and artwork.
+
+## App icons
+
+`node brand/render-rasters.mjs` renders every raster, including the game PWA
+icons (`tools/sites/game/static/icons/`), the AppImage/Windows icons
+(`tools/packaging/icons/`) and the Android launcher resources
+(`tools/packaging/android/res/`). Engine-side branding still to do:
+`ENGINE-BRANDING-PLAN.md`.
