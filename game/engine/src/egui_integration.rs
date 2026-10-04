@@ -27,18 +27,22 @@ impl EguiIntegration {
         // Configure default style: dark theme with game-appropriate colours
         let mut style = egui::Style { visuals: egui::Visuals::dark(), ..Default::default() };
         style.visuals.window_corner_radius = egui::CornerRadius::same(4);
-        style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgba_unmultiplied(26, 29, 35, 220);
-        style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgba_unmultiplied(35, 38, 50, 255);
-        style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgba_unmultiplied(50, 55, 70, 255);
-        style.visuals.widgets.active.bg_fill = egui::Color32::from_rgba_unmultiplied(60, 65, 80, 255);
+        // Copperline (brand/BRAND-GUIDELINES.md): Deep Frontier panels, Deep Rock
+        // buttons. Menu text colours are contrast-checked (>= 4.5:1) against these.
+        style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgba_unmultiplied(18, 32, 36, 220);
+        style.visuals.widgets.inactive.bg_fill = crate::brand::DEEP_ROCK;
+        style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(52, 52, 50);
+        style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(64, 62, 58);
         // Keyboard/controller focus uses the "active" widget visuals (egui
         // 0.34 style(): has_focus → active) — give it a visible gold stroke
-        // so d-pad navigation reads on standard widgets. Matches the crafting
-        // UI's PAD_FOCUS_BORDER. Buttons that override .stroke() paint their
+        // so d-pad navigation reads on standard widgets (Lantern `#F4C16F`; the
+        // crafting UI's PAD_FOCUS_BORDER is a separate, later pass). Buttons that override .stroke() paint their
         // own ring via menu::focus_ring.
         style.visuals.widgets.active.bg_stroke =
-            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 210, 80));
-        style.visuals.selection.bg_fill = egui::Color32::from_rgb(80, 120, 200);
+            egui::Stroke::new(2.0_f32, crate::brand::LANTERN);
+        // Selection: Forest Green fill with Stone text (4.8:1).
+        style.visuals.selection.bg_fill = crate::brand::FOREST;
+        style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, crate::brand::STONE);
 
         // Android gets thumb-sized hit targets. egui's defaults are mouse-sized
         // (an interact height of ~18 points); an egui point is effectively a dp

@@ -14,6 +14,14 @@ use egui::{Color32, ColorImage, Context, Id, TextureHandle, TextureOptions};
 
 /// Deep Frontier `#0D1B1E` — primary dark / UI background.
 pub const DEEP_FRONTIER: Color32 = Color32::from_rgb(13, 27, 30);
+/// Deep Rock `#2B2B2B` — neutral dark (widget fills, outlines).
+pub const DEEP_ROCK: Color32 = Color32::from_rgb(43, 43, 43);
+/// Forest Green `#2E6B43` — primary green (selection fill).
+pub const FOREST: Color32 = Color32::from_rgb(46, 107, 67);
+/// Lantern `#F4C16F` — warm highlight (focus ring).
+pub const LANTERN: Color32 = Color32::from_rgb(244, 193, 111);
+/// Sky Blue `#3F7FBF` — informational / selected-card outline.
+pub const SKY: Color32 = Color32::from_rgb(63, 127, 191);
 /// Mountain Stone `#E6E0D1` — primary light text.
 pub const STONE: Color32 = Color32::from_rgb(230, 224, 209);
 /// Copper `#D27B3E` — primary warm accent (path, selected states, bars).

@@ -3,30 +3,35 @@
 //! Main menu: world cards with metadata, selection, action bar, dialogs
 //! for create/edit/delete/fork. Pause menu: simplified (no delete).
 
+use crate::brand;
 use crate::save::{self, WorldEntry, WorldMeta};
 
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
 
-const TITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(212, 160, 68);
-const SUBTITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
-const TEXT_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 220, 220);
-const DIM_TEXT: egui::Color32 = egui::Color32::from_rgb(100, 100, 100);
+// Copperline palette (brand/BRAND-GUIDELINES.md). Every text colour below is
+// >= 4.5:1 on BG_DARK, CARD_BG, PANEL_BG and the egui widget fills set in
+// egui_integration.rs (ratios in the commit that introduced them).
+const TITLE_COLOR: egui::Color32 = brand::COPPER;
+const SUBTITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(176, 174, 164);
+const TEXT_COLOR: egui::Color32 = brand::STONE;
+const DIM_TEXT: egui::Color32 = egui::Color32::from_rgb(158, 164, 162);
 /// Campaign G — the rival ghost's signature colour (matches its in-world
 /// orange wireframe so "orange = the friend" reads everywhere).
 const RIVAL_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 165, 60);
-const BG_DARK: egui::Color32 = egui::Color32::from_rgb(13, 18, 28);
-const CARD_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(24, 27, 36, 255);
-const CARD_SELECTED_BORDER: egui::Color32 = egui::Color32::from_rgb(74, 122, 212);
-const CARD_BORDER: egui::Color32 = egui::Color32::from_rgb(42, 45, 58);
-const PANEL_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(26, 29, 35, 245);
+const BG_DARK: egui::Color32 = brand::DEEP_FRONTIER;
+const CARD_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(21, 38, 42, 255);
+const CARD_SELECTED_BORDER: egui::Color32 = brand::SKY;
+const CARD_BORDER: egui::Color32 = egui::Color32::from_rgb(46, 64, 68);
+const PANEL_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(18, 32, 36, 245);
 const BADGE_SURVIVAL_BG: egui::Color32 = egui::Color32::from_rgb(45, 90, 30);
-const BADGE_SURVIVAL_TEXT: egui::Color32 = egui::Color32::from_rgb(143, 199, 106);
+const BADGE_SURVIVAL_TEXT: egui::Color32 = egui::Color32::from_rgb(166, 214, 128);
 const BADGE_CREATIVE_BG: egui::Color32 = egui::Color32::from_rgb(30, 58, 90);
 const BADGE_CREATIVE_TEXT: egui::Color32 = egui::Color32::from_rgb(106, 176, 199);
-const DELETE_RED: egui::Color32 = egui::Color32::from_rgb(220, 80, 80);
-const ACTION_BLUE: egui::Color32 = egui::Color32::from_rgb(120, 150, 220);
+const DELETE_RED: egui::Color32 = egui::Color32::from_rgb(236, 104, 104);
+/// Sky Blue lightened: pure `#3F7FBF` is only 4.2:1 on Deep Frontier (fails as text).
+const ACTION_BLUE: egui::Color32 = egui::Color32::from_rgb(122, 172, 226);
 
 // ---------------------------------------------------------------------------
 // Menu State
@@ -3556,7 +3561,7 @@ fn focus_ring(ui: &egui::Ui, resp: &egui::Response) {
         ui.painter().rect_stroke(
             resp.rect.expand(2.0),
             6.0,
-            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 210, 80)),
+            egui::Stroke::new(2.0_f32, brand::LANTERN),
             egui::StrokeKind::Outside,
         );
     }
