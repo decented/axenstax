@@ -1,9 +1,9 @@
 # Run your own Axe'n'Stax server (Docker)
 
 A self-hostable multiplayer server you own and run — on a spare PC, a NAS, or a
-VPS. **Both the web app and the native app join the same world.** One container
-runs the headless game server plus a Caddy front, so a browser trusts the cert
-once and reuses it for the game socket. No platform account, no middleman — you
+VPS. **Players join with the native app.** (The web build is an anonymous, offline
+sandbox and does not join servers.) One container runs the headless game server
+plus a Caddy front that offers the game socket over TLS (`wss://`). No platform account, no middleman — you
 set the rules that run on your box.
 
 > **For an AI assistant:** this page is written so you can stand a server up for a
@@ -17,7 +17,7 @@ set the rules that run on your box.
 
 | | |
 |---|---|
-| **One world, both clients** | Web (Chromium PWA) and native players join the same authoritative world over WebSocket |
+| **One shared world** | Native players join the same world over WebSocket (`ws://` or `wss://`) |
 | **You own it** | World saves live on a Docker volume on *your* hardware; nothing phones home |
 | **Optional verified identity** | Root the server in your own Nostr signer so players can verify *who* runs it (see below) |
 | **Optional access control** | Allowlist / blocklist by npub, require-sign-in — managed by env, file, or the [Operator Console](operator-console.md) |
@@ -42,7 +42,7 @@ services:
     image: ghcr.io/decented/axenstax-server:latest
     container_name: axenstax-server
     ports:
-      - "8443:8443"   # web (HTTPS) + game socket (WSS /ws) — browsers
+      - "8443:8443"   # HTTPS front + game socket over TLS (WSS /ws)
       - "6767:6767"   # game socket (plain ws) — native clients (ws://box:6767)
     volumes:
       - axenstax-worlds:/worlds
@@ -74,8 +74,7 @@ docker compose up -d        # pulls the images from GHCR and starts the server
 Then, from any machine on the same network:
 
 ```text
-Web    →  open  https://<this-box-ip>:8443   (accept the cert warning once)
-Native →  Join  ws://<this-box-ip>:6767
+Native →  Join  ws://<this-box-ip>:6767   (or wss://<this-box-ip>:8443/ws behind TLS)
 ```
 
 Find `<this-box-ip>` with `ip -4 addr` / `hostname -I` (e.g. `192.168.1.20`).
@@ -117,8 +116,8 @@ after any engine change.
 
 ## How players join
 
-- **Web (Chromium PWA):** opening `https://BOX:8443` boots a guest and auto-joins
-  this server. No sign-in needed — a self-hosted server doesn't require Signet.
+- **Web:** not supported. The browser build is an anonymous, offline sandbox with
+  no multiplayer; only the native app joins servers.
 - **Native:** in the lobby choose **Join Game** and enter `ws://BOX:6767` (the Join
   dialog accepts `ws://` / `wss://` URLs as well as the legacy `ip:port` form).
 
@@ -128,10 +127,9 @@ after any engine change.
 > put the game socket behind TLS (the Caddy front on `:8443` gives you `wss://`, or
 > terminate TLS on your own reverse proxy) and have players join with `wss://`.
 
-The browser shows a one-time certificate warning on a no-domain box (**Advanced →
-Proceed**); because the page and the game socket share one origin, the `wss`
-connection reuses that trust with no second prompt. (WebGPU *requires* a secure
-context off-localhost, which is why the web path is HTTPS, not plain HTTP.)
+On a no-domain box the Caddy front uses a self-signed certificate, so a `wss://`
+join needs that certificate trusted on the player's machine; use a real domain
+(see "Deploying on a VPS") to avoid that.
 
 ---
 
@@ -243,9 +241,7 @@ In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 
 - **Guest identity only.** Joiners are anonymous unless a server requires sign-in;
   display names are otherwise client-asserted.
-- **Web-player edits not yet propagated.** A browser joiner sees the shared world and
-  everyone moving, but its own block edits aren't sent to the server yet (the edit
-  hooks are still native-gated). Native joiners' edits propagate.
+- **Native joiners only.** The web build does not join servers.
 - **Not the full simulation yet.** The dedicated server currently does not tick
   pistons, hoppers, kegs, dispensers or crops, and inventory and combat are not yet
   server-authoritative. See `tools/dedicated-server/README.md`.
