@@ -1,7 +1,8 @@
 //! Splash screen — shows on launch as a brand moment.
 //!
-//! Displays "AXE'N'STAX" title, "Proof of Play" tagline, and a loading bar.
-//! Art assets (pickaxe, coin stack) to be added later — placeholders reserved.
+//! Draws a dark full-screen background, the "AXE'N'STAX" title over a soft
+//! glow, the "PROOF OF PLAY" tagline and a thin loading bar. Text and painted
+//! shapes only — no image assets.
 
 use web_time::{Duration, Instant};
 

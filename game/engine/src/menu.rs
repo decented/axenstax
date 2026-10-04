@@ -5322,6 +5322,14 @@ pub fn draw_skin_panel(
                             .size(10.0)
                             .color(DIM_TEXT),
                     );
+                    ui.add_space(4.0);
+                    // T0-5 — just-in-time notice: say where the name goes
+                    // before the player presses the button.
+                    ui.label(
+                        egui::RichText::new(crate::mc_import::LOOKUP_NOTICE)
+                            .size(11.0)
+                            .color(DIM_TEXT),
+                    );
                     ui.add_space(8.0);
                     let has_text = !state.mc_import_buf.trim().is_empty();
                     ui.horizontal(|ui| {

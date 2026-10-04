@@ -5,6 +5,17 @@
 //! Phase A delivers only `expand_legacy_skin` (needed by `cosmetics::decode_skin_any`).
 //! Phase B adds the parse helpers, HTTP worker, and full `McImportOutcome` types.
 
+/// Just-in-time notice shown in the import dialog BEFORE the lookup: the typed
+/// username leaves the device. Native fetches straight from Mojang; the web
+/// build has to go through our game site's `/mc-skin` proxy (no CORS on
+/// Mojang), so it says so.
+#[cfg(not(target_arch = "wasm32"))]
+pub const LOOKUP_NOTICE: &str =
+    "The username you type is sent to Mojang (the makers of Minecraft) to fetch the skin.";
+#[cfg(target_arch = "wasm32")]
+pub const LOOKUP_NOTICE: &str =
+    "The username you type is sent through the Axe'n'Stax game site to Mojang (the makers of Minecraft) to fetch the skin.";
+
 /// Copy a `w×h` rect from `src` at `(sx,sy)` to `dst` at `(dx,dy)`, mirrored
 /// horizontally (pixel column `c` of the source lands at column `w-1-c`).
 fn blit_mirror_x(
@@ -381,6 +392,12 @@ fn run_mc_import(query: McQuery) -> McImportOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lookup_notice_names_mojang_and_the_username() {
+        assert!(super::LOOKUP_NOTICE.contains("Mojang"));
+        assert!(super::LOOKUP_NOTICE.contains("username"));
+    }
+
     use super::*;
 
     fn set_px(buf: &mut [u8], stride: usize, x: usize, y: usize, rgba: [u8; 4]) {

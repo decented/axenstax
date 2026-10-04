@@ -15,8 +15,9 @@ pub const TAPS_REQUIRED: u32 = 7;
 pub const TAP_WINDOW_SECS: f64 = 3.0;
 /// The countdown hint starts from this tap.
 pub const HINT_FROM_TAP: u32 = 3;
-/// How long the "Tester feedback on" confirmation stays up.
-pub const CONFIRM_SECS: f64 = 6.0;
+/// How long the "Tester feedback on" confirmation stays up — long enough to
+/// read both lines of [`UNLOCKED_MESSAGE`].
+pub const CONFIRM_SECS: f64 = 10.0;
 
 /// The line shown in Settings; the thing being tapped.
 pub fn version_line() -> String {
@@ -26,8 +27,10 @@ pub fn version_line() -> String {
 /// The label of the checkbox that appears once tester feedback is on.
 pub const CHECKBOX_LABEL: &str = "Tester feedback (/bug, /idea, /mailbox)";
 
-/// Shown at the seventh tap.
-pub const UNLOCKED_MESSAGE: &str = "Tester feedback on \u{2014} /bug and /idea are now available";
+/// Shown at the seventh tap. The second line is the just-in-time privacy
+/// notice (T0-5): reports leave the device, so ask for no personal details.
+pub const UNLOCKED_MESSAGE: &str = "Tester feedback on \u{2014} /bug and /idea are now available.\n\
+     Please keep personal details out of reports: no names, addresses, photos or location.";
 
 /// Result of one tap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +179,7 @@ mod tests {
         }
         assert_eq!(c.message(0.7).as_deref(), Some(UNLOCKED_MESSAGE));
         assert!(UNLOCKED_MESSAGE.contains("/bug and /idea are now available"));
+        assert!(UNLOCKED_MESSAGE.contains("personal details"), "JIT privacy notice present");
         assert_eq!(c.message(0.6 + CONFIRM_SECS + 0.1), None);
     }
 
