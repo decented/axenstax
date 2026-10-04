@@ -23,6 +23,11 @@ updates:
       # the types handed to nostr. Lift when nostr moves.
       - dependency-name: "secp256k1"
         versions: [">=0.30"]
+      # tokio-tungstenite is kept on the tungstenite line rust-nostr's
+      # async-wsocket uses (0.26); a newer one puts two tungstenites in the
+      # graph. Lift when nostr moves.
+      - dependency-name: "tokio-tungstenite"
+        versions: [">=0.27"]
       # bincode encodes WorldSave, protocol packets and several stores. 2.x/3.x
       # change the API and the encoding, so a bump is a planned save/wire
       # migration (with legacy-save tests), never a routine update.
