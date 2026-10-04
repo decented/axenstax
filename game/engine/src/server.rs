@@ -1154,13 +1154,17 @@ impl GameServer {
     /// Same write discipline as the client save (`save::write_world_folder`):
     /// every file goes through tmp + rename, so a crash or full disk never
     /// leaves a torn file. Chunks are written FIRST (no per-file fsync, one
-    /// directory fsync at the end) and `world.dat` is the commit point. If any
-    /// chunk fails, `world.dat` is NOT written: the previous `world.dat` stays
-    /// with its own chunk data rather than new block-entity state landing over
-    /// old blocks. Every chunk is still attempted so each failure is logged
-    /// with its path. `exhibits.json` is a sidecar for the Operator Console,
-    /// written after the commit; its failure is logged but doesn't fail the
-    /// save.
+    /// directory fsync at the end), then `world.dat`. Every chunk is attempted
+    /// and each failure is logged with its path; any failure makes the save
+    /// return `Err`. `world.dat` is still written when SOME chunks failed: the
+    /// good chunks have already been renamed in, so skipping it would leave
+    /// players, inventories and block entities from the last save beside newer
+    /// chunks — and a chunk path that fails every time would freeze them for
+    /// good (item loss / duplication on restart). Only when EVERY chunk write
+    /// failed (likely a dead disk) is `world.dat` skipped, leaving the last
+    /// consistent pair untouched. `exhibits.json` is a sidecar for the
+    /// Operator Console, written after `world.dat`; its failure is logged but
+    /// doesn't fail the save.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_save(&self) -> Result<(), String> {
         let wname = self.world_name.clone();
@@ -1441,10 +1445,12 @@ impl GameServer {
         let encoded = bincode::serialize(&save).map_err(|e| format!("serialize world.dat: {e}"))?;
 
         // Spec 02 §7.5 — loaded + evicted chunks, written before the commit point.
+        let mut chunk_attempts = 0usize;
         let mut chunk_failures = 0usize;
         let mut first_failure: Option<String> = None;
         for ((cx, cy, cz), chunk) in self.world.persistable_chunks() {
             if chunk.is_empty() { continue; }
+            chunk_attempts += 1;
             let path = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
             if let Err(e) = crate::save::write_atomic_nosync(&path, &chunk.as_bytes()) {
                 log::error!("Server save: chunk write failed ({}): {e}", path.display());
@@ -1453,9 +1459,10 @@ impl GameServer {
             }
         }
         crate::save::sync_dir(&chunks_dir);
-        if let Some(first) = first_failure {
+        if chunk_failures > 0 && chunk_failures == chunk_attempts {
             return Err(format!(
-                "{chunk_failures} chunk write(s) failed, world.dat not updated; first: {first}"
+                "all {chunk_failures} chunk write(s) failed, world.dat not updated; first: {}",
+                first_failure.unwrap_or_default()
             ));
         }
 
@@ -1474,7 +1481,12 @@ impl GameServer {
             }
             Err(e) => log::warn!("exhibits.json sidecar serialise failed ({}): {e}", exhibits_path.display()),
         }
-        Ok(())
+        match first_failure {
+            Some(first) => Err(format!(
+                "{chunk_failures} of {chunk_attempts} chunk write(s) failed (world.dat written); first: {first}"
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1516,26 +1528,43 @@ mod tests {
     }
 
     /// T0-7 — a chunk write failure is reported (with the chunk's path), not
-    /// swallowed, and `world.dat` — the commit point — is not written over
-    /// chunks that failed.
+    /// swallowed. While other chunks still save, `world.dat` IS written so
+    /// player/block-entity state never falls behind chunks already renamed in;
+    /// only when every chunk fails is `world.dat` left alone.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn server_save_reports_chunk_failure_and_skips_commit() {
+    fn server_save_reports_chunk_failure_and_keeps_world_dat_in_step() {
         let name = "__test_server_atomic_save_chunk_failure__";
         let dir = crate::save::world_dir(name);
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut server = GameServer::new(1, name.to_string(), 42);
         server.world.set_block(3, 64, 5, crate::block::BEDROCK);
+        server.world.set_block(40, 64, 5, crate::block::BEDROCK); // chunk 2_4_0
         server.try_save().expect("first save succeeds");
-        std::fs::remove_file(dir.join("world.dat")).unwrap();
+        assert!(dir.join("chunks/2_4_0.chunk").is_file(), "second chunk written");
 
         // Inject a failure without permissions (works as root/CI): a directory
-        // where the chunk's tmp file must go makes its write fail.
+        // where a chunk's tmp file must go makes that write fail.
         std::fs::create_dir_all(dir.join("chunks/0_4_0.chunk.tmp")).unwrap();
+
+        // One of several chunks fails: Err names it, world.dat still written.
+        std::fs::remove_file(dir.join("world.dat")).unwrap();
         let err = server.try_save().expect_err("a failed chunk write must fail the save");
         assert!(err.contains("0_4_0.chunk"), "error names the chunk path: {err}");
-        assert!(!dir.join("world.dat").exists(), "world.dat must not be committed over a failed chunk");
+        assert!(dir.join("world.dat").is_file(), "world.dat must keep step with the chunks that saved");
+
+        // Every chunk fails: world.dat is left alone.
+        for e in std::fs::read_dir(dir.join("chunks")).unwrap().filter_map(|e| e.ok()) {
+            let file = e.file_name().to_string_lossy().into_owned();
+            if file.ends_with(".chunk") {
+                std::fs::create_dir_all(dir.join("chunks").join(format!("{file}.tmp"))).unwrap();
+            }
+        }
+        std::fs::remove_file(dir.join("world.dat")).unwrap();
+        let err = server.try_save().expect_err("all chunks failing must fail the save");
+        assert!(err.contains("not updated"), "{err}");
+        assert!(!dir.join("world.dat").exists(), "no world.dat when no chunk saved");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
