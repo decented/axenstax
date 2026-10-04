@@ -6509,7 +6509,13 @@ fn draw_signin_dialog(
     // on the player's own relays. Editing the relays resets this to Idle (the
     // caller does that), so the QR is rebuilt with the new list.
     if matches!(native_signin::status(), SignInStatus::Idle) {
-        native_signin::start_qr(relays);
+        // A sign-in can commit an instant before a "Try again" / relay-edit
+        // reset (native_signin's guard keeps it, by design). Don't then offer
+        // a fresh QR to a player who is already signed in — show that instead.
+        match crate::signet::native_signer::current_owner_pubkey() {
+            Some(pubkey_hex) => native_signin::show_signed_in(pubkey_hex),
+            None => native_signin::start_qr(relays),
+        }
     }
     let status = native_signin::status();
 

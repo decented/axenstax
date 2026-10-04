@@ -227,6 +227,20 @@ pub fn poll() {
     }
 }
 
+/// Show the dialog's "Signed in" state for an identity that is already on
+/// this device, without starting an attempt. Covers residual (a) of the
+/// [`spawn_worker`] guard: a sign-in that committed an instant before a
+/// "Try again" / relay-edit reset leaves the still-open dialog at `Idle`; the
+/// dialog calls this instead of offering a fresh QR to a signed-in player.
+pub fn show_signed_in(pubkey_hex: String) {
+    let npub = NativeIdentity::SignedIn { pubkey_hex }.npub().unwrap_or_default();
+    if let Ok(mut m) = MANAGER.lock() {
+        m.generation = m.generation.wrapping_add(1);
+        m.status = SignInStatus::Success { npub };
+        m.rx = None;
+    }
+}
+
 /// Inject an `AwaitingScan` status (with a sample URI) for a headless
 /// screenshot / UX preview of the QR dialog, WITHOUT starting a live handshake
 /// or any network. Dev tooling only (`--shot-signin`).
@@ -452,6 +466,18 @@ mod tests {
         conclude(generation, &tx, PK_HEX.to_string(), |_| Err("disk full".into()));
         poll();
         assert!(matches!(status(), SignInStatus::Failed { .. }), "{:?}", status());
+        reset();
+    }
+
+    /// Residual (a): an already-signed-in identity shows as Success and
+    /// orphans any in-flight attempt.
+    #[test]
+    fn show_signed_in_supersedes_the_attempt() {
+        let _g = manager_lock();
+        let (generation, _tx) = begin_attempt(SignInStatus::AwaitingApproval).unwrap();
+        show_signed_in(PK_HEX.to_string());
+        assert!(!is_current(generation));
+        assert!(matches!(status(), SignInStatus::Success { ref npub } if npub.starts_with("npub1")), "{:?}", status());
         reset();
     }
 
