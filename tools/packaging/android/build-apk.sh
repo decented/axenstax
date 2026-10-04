@@ -86,7 +86,7 @@ cp "$STAGE/lib_cargo/$ABI/libaxenstax_engine.so" "$STAGE/lib/$ABI/"
 rm -rf "$STAGE/lib_cargo"
 echo "    .so size: $(du -h "$STAGE/lib/$ABI/libaxenstax_engine.so" | cut -f1)"
 
-# ── 2. Link the resource-less APK ──────────────────────────────────────────
+# ── 2. Compile the launcher-icon resources and link the APK ───────────
 # versionCode/versionName are INJECTED here rather than hardcoded in the
 # manifest, so they can never drift from Cargo.toml.
 #
@@ -109,10 +109,14 @@ if [ "$V_MIN" -ge 1000 ] || [ "$V_PAT" -ge 1000 ]; then
 fi
 VERSION_CODE=$(( V_MAJ * 1000000 + V_MIN * 1000 + V_PAT ))
 
-echo ">>> [2/5] aapt2 link (versionCode=$VERSION_CODE versionName=$VERSION)"
+echo ">>> [2/5] aapt2 compile res/ + link (versionCode=$VERSION_CODE versionName=$VERSION)"
+# res/ holds only the launcher icon (mipmap-*) and its background colour. The APK
+# still has no Java/Gradle; aapt2 compiles the resources straight into the package.
+"$BUILD_TOOLS/aapt2" compile --dir "$HERE/res" -o "$OUT/res.zip"
 "$BUILD_TOOLS/aapt2" link \
     -I "$PLATFORM/android.jar" \
     --manifest "$HERE/AndroidManifest.xml" \
+    -R "$OUT/res.zip" \
     --version-code "$VERSION_CODE" \
     --version-name "$VERSION" \
     -o "$OUT/unaligned.apk" \
@@ -177,7 +181,7 @@ echo ">>> [5/5] apksigner ($SIGNED_WITH)"
     --ks-key-alias "$KEY_ALIAS" \
     --out "$APK" "$OUT/aligned.apk"
 
-rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$APK.idsig"
+rm -f "$OUT/unaligned.apk" "$OUT/aligned.apk" "$OUT/res.zip" "$APK.idsig"
 rm -rf "$STAGE"
 
 # Stable name for the documented adb workflow, so the recipe keeps working while
