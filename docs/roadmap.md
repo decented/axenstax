@@ -30,7 +30,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 ### World and gameplay
 - Survival and creative modes, difficulty selector, and a one-way World Integrity Ledger (pure survival / ever creative / cheats used).
 - Tool progression, smelting, crafting (2x2 and 3x3) with a recipe book, repair, armour, hunger and health, death drops and respawn.
-- World generation with biomes, caves, ravines, mineshafts, villages, brigand hideouts and a full ore set (including copper).
+- World generation with biomes, caves, ravines, mineshafts, villages, brigand hideouts and coal, iron, diamond, copper, magnesium and nitre ores (no tin, gold or amethyst source yet, so Bronze is unreachable in survival).
 - Farming, fishing, composting, weather, water-driven and wind-driven machines.
 - Electricity: wires, switches, batteries, lamps, windmill, water wheel.
 - Proof of Play: every pickaxe strike runs an HMAC-SHA256 hash that is shown to the player as an educational proof-of-work primitive. It also drives optional rare drops. It is not a payout mechanism.
@@ -49,14 +49,14 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 - The Workshop: reskin and reshape blocks and mobs in game (paint, carve, symmetry, per-block wardrobe) and a Rig Studio for animated assets.
 - Skin editor with Minecraft skin import and export, classic and slim arms, and painter tools.
 - Exhibits (images on walls and standing frames) and a kiosk mode.
-- Rails with auto-connecting bends and flat floor cables; Rail Freight phase 1.
+- Rails with auto-connecting bends, 45-degree ascending and descending ramps, and flat floor cables; Rail Freight phase 1, plus parts of phases 2 and 3: cart hull tiers (wood, iron, diamond), bulk vendors restocking from an adjacent depot chest, and a transit-only robbery record (`hostile_acts`).
 - Cameras: opt-in third-person view (F5).
 - Take-your-worlds-to-native: the web lobby exports one profile file, and the desktop app imports it (name clashes keep both).
 
 ### Multiplayer and identity
-- LAN co-op over QUIC, split-screen on one machine, and a headless dedicated server (Docker image and an Operator Console with allowlist, blocklist and require-sign-in).
+- LAN co-op over QUIC, split-screen on one machine, and a headless dedicated server (Docker image and an Operator Console with allowlist, blocklist and require-sign-in). Known limits: the dedicated server's `GameServer::tick` does not run pistons, hoppers, kegs, dispensers or crops (so farms and machines do not run there); a joiner's world edits are applied without a possession check; no `StateUpdate` size bound; and a late joiner gets no earlier world edits or chunks (see Next).
 - Online play by contact (native): join a friend's home-hosted world by their Signet persona npub or a bearer invite. Nostr relays carry connection setup only; the connection is then direct. Strangers get silence. Relays never carry game traffic.
-- Server authority over remote players; join handshake with Signet-signed identity and protocol framing (v64).
+- Server authority over remote players (movement, reach and block edits are validated; inventory is not server-authoritative); join handshake with Signet-signed identity and protocol framing (v64).
 - World chat (native), tiered by contact relationship, with a ceiling that can only be tightened.
 - Signet sign-in by QR (mySignet pairing) and Signet contacts sync: Kin, Kith and blocks feed the address book, and a block removes a player from a running host.
 - Optional, self-published Nostr announce for an operator's own server. Nothing is ever announced automatically.
@@ -82,7 +82,7 @@ Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, c
 Everything here needs a person, a second machine or a real device, or a decision that is not the code's to make.
 
 **Live tests (cannot be verified solo)**
-- Two-machine LAN play with a real remote signer: native to native, and native to dedicated server; browser plus phone for the web path.
+- Two-machine LAN play with a real remote signer: native to native, and native to dedicated server. (The web build has no sign-in, so there is no browser-plus-phone leg.)
 - Online play by contact across two real houses (UPnP/STUN punch, bearer invite, persona attestation).
 - Death drops, late-joiner backfill and tool pickup, walked over by a second player.
 - Signet contacts sync on a phone: pairing, Kin/Kith appearing, a block kicking a connected player, disconnect. This now also tests the relay change: pairing runs over the first of "Your relays" (a public relay by default), not the project's own relay.
@@ -109,7 +109,7 @@ Everything here needs a person, a second machine or a real device, or a decision
 Only items that block building further on top.
 
 - **Planned dependency migrations** (held back from Dependabot on purpose): bincode 1 → 3 (changes the save and wire encoding, so it needs a migration with legacy-save tests) and wgpu/naga 29 → 30 (renderer API change; needs a visual check on real GPUs, native and WebGPU).
-- **Late-joiner chunk streaming.** Entities already backfill at join; world edits and chunks for a late joiner need a call between edit-log replay and chunk push. Multiplayer chunk compression rides on the same decision.
+- **Late-joiner chunk streaming.** The server backfills entity spawns to a late joiner, but the client renders only dropped items from them (mob and cart spawns are ignored, `remote_entities.rs`); world edits and chunks for a late joiner need a call between edit-log replay and chunk push. Multiplayer chunk compression rides on the same decision.
 - **Route single-player through a local `HostedServer`.** Single-player still runs its own mob, spawning and falling-block simulation alongside the server's (the "dual sim"). Ending it needs a playtest that validates entity behaviour with the client-side sim removed. Kill attribution, bounties and vows stay client-side until then.
 - **`ServerPlayer` / `PlayerSlot` duplication.** The save path uses raw server-player fields while the client uses slots. They will drift; unify when saving becomes server-authoritative.
 - **Local-player position trust.** Remote players are server-simulated with a speed cap; the host's own local player is still position-trusted. Resolved by the single-player routing above.
@@ -127,7 +127,7 @@ Horizons, each one line. None is scheduled.
 
 - **Farming tiers** — an eight-tier farming economy beyond the first tiers shipped.
 - **Player-driven economies** — vendors, markets, auctions and bounties, extended on the settled non-custodial model (the engine holds a score, never a balance).
-- **Rail logistics phases 2–4** — elevation (45-degree ascending rails, wall-mounted cables), commercial freight, cart tiers and transit risk.
+- **Rail logistics, remaining** — robbery reputation and bounty (needs a victim identity), wall-mounted cables, and phase 4 (Aether security). 45-degree ramps, cart tiers, depot-fed commercial vendors and the transit robbery record are already built.
 - **Electricity phases 3–4** — quantitative energy economy, electric furnace and motor.
 - **Aether (wireless signalling) element** — design written, not built.
 - **Multi-world places, hub and portals** — one self-hosted address hosting several linked worlds, with a back-stack and per-world access rules.

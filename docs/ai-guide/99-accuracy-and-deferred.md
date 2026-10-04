@@ -4,7 +4,9 @@
 
 **This is the single most important page for honesty.** It tells the assistant exactly what is **in the current build** versus what is **deferred / not yet available**. When any "you can do X" claim is at stake, consult this page. **Never describe a deferred feature as available.** When a player asks for a deferred thing, say kindly it isn't in the game yet and offer what they *can* do.
 
-> Build health (2026-06-22): native + WASM compile clean, **3,276 tests pass, 0 fail.** The engine is healthy; the gaps below are mostly *playtest-boundary* (feel/device/art), not crashes.
+> **STALE-CHECK (2026-10-04 gap audit):** this page was last verified 2026-06-22. Re-checked since: the honey loop and the touch/gamepad gaps (below) have changed; there are now about 4,700 unit tests; the web build is an anonymous offline taster (no sign-in, no multiplayer, no cloud save). Everything else on this page is unverified since June.
+>
+> Build health (2026-06-22, historical): native + WASM compile clean, **3,276 tests pass, 0 fail.** The engine is healthy; the gaps below are mostly *playtest-boundary* (feel/device/art), not crashes.
 
 ---
 
@@ -26,14 +28,14 @@ These were confirmed by live code audit. Earlier "not wired" notes about them ar
 
 ## 🟡 PARTIAL — works in part, do **not** over-promise the missing half
 - **Planting saplings.** Trees generate in the world, and saplings exist as items, but **planting a sapling to grow a new tree is not wired into gameplay** (`can_plant_sapling_at` has no live call site — only tests). Don't tell a player to plant a sapling and wait for a tree; that won't work yet. (Wild trees, and chopping them for wood, do work.)
-- **Touch & gamepad controls.** Core play works on touch and gamepad, but **~7 actions are unbound** on each (rotate ghost/blueprint, toggle explorer, and the Workshop tools: eyedropper, symmetry, pin, gallery, mode-toggle). Keyboard players have all of them. On touch/gamepad, treat those specific actions as **not currently reachable** and don't instruct a player to use them there.
+- **Touch & gamepad controls.** Core play works on touch and gamepad, but **many actions are unbound** on each (as of 2026-10-04: rotate ghost/blueprint, Inventory Explorer, all the Workshop editing keys, and on touch also drop-item and shift-click; neither has Map, Challenge Board (J) or Satoshi (N)). Keyboard players have all of them. On touch/gamepad, treat those specific actions as **not currently reachable** and don't instruct a player to use them there.
 - **Tamed-pet persistence.** Wolves, nostriches, cats, parrots, foxes persist across save/load. **Horse/donkey/mule have no ownership** (they're wild fauna — riding state lives on the player, like a borrowed mount), so a "tamed horse" won't be waiting after reload the way a tamed pet is.
 
 ## ❌ DEFERRED — not in the game; never present as available
 - **Earning / spending real money (sats payouts).** **Deferred entirely.** Players cannot earn, hold, withdraw, or spend real money in the game today. The reward maths exists in code but **payouts are switched off**, and any future version is **parent-controlled and opt-in**. Never imply a player earns money. (See the compliance note below.)
 - **Vendor "Buy" mode** (a vendor buying items *from* the player for sats) is **disabled pre-alpha**. Vendors do **Sell** and **Barter** only. Don't tell a player they can sell goods to a vendor for money.
 - **Donkey/mule cargo & cross-breeding.** Horses, donkeys *and* mules **are all rideable** — right-click to mount, WASD to ride (the mount handler gates on `is_rideable`, which includes all three; donkeys/mules also spawn naturally). What's **not** wired: **pack/cargo carrying** (no chest inventory on a mount) and **donkey×horse → mule cross-breeding** (no breeding food/cross logic). Don't promise cargo mounts or breeding mules. *(Earlier notes that "donkey/mule riding is deferred" were wrong — riding works; only cargo/cross-breeding is deferred. Donkeys/mules may also lack idle wander AI, so a wild one can stand still until mounted.)*
-- **Bee honey & honeycomb.** Bees exist and a bee **sting** works, but the whole honey loop — hives filling *and* harvesting — is **not wired into gameplay** (`deposit_honey`/`resolve_right_click` have no live callers). Honey/honeycomb are **not obtainable**. Don't present beekeeping/honey as an activity.
+- **Bee honey & honeycomb.** ~~Not wired~~ **Now wired (checked 2026-10-04):** hives are filled by nearby working bees (`deposit_honey`, `game_loop.rs`) and a right-click on a hive harvests (`bee_hive::resolve_right_click`, e.g. a Honey Jar). Treat as built but unplaytested.
 - **Craftable Flour / Cake / Pancakes / Beetroot Soup** and similar — their workstations/recipes aren't built, so they're **gated out of quests**. Don't send a player to craft them.
 - **Food saturation depth** — the hunger bar shows level but not saturation; don't explain a saturation mechanic as if it's surfaced.
 - **Multiplayer fleet / dedicated public servers, plot-management UI, auction/tip-jar multiplayer split concerns** — alpha is effectively a single-player / LAN experience; don't promise hosted public multiplayer.

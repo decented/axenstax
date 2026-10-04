@@ -4,6 +4,8 @@
 **Date**: 2026-03-03
 **Depends on**: ADR-002 (Tech Stack), Platform Overview (Visual Strategy)
 
+> **AS-BUILT (audit 2026-10-04).** The following sections are **design targets, not shipped**: §4.3 smooth lighting, §4.4 ambient occlusion, §6 the procedural sky (as built, the sky is a solid clear colour interpolated by `camera::sky_color(brightness)`: no sky quad, sun/moon, stars or clouds), and §9 post-processing and bloom (no HDR `Rgba16Float` target). The `smooth_lighting` graphics setting is stored so presets round-trip, but **it is not wired into the shader and does nothing** (`graphics_settings.rs`, "not yet wired into the shader"). Light is per-face block/sky light (`shader.wgsl`).
+
 ---
 
 ## 0. Design Principles

@@ -318,8 +318,7 @@ detail in `docs/spec/03-rendering.md §"Block-break crack overlay"`.
 2. The player must be targeting an adjacent solid face (ray-cast from eye position).
 3. The placed block must not overlap any entity's bounding box (including the player). Exceptions: (a) the player can place blocks at their feet if they have room to be pushed up (e.g., pillar-jumping — placing a block below yourself while jumping); (b) **non-solid blocks (cable, track, torch, sapling…) are exempt entirely** — they have no collision, so they may share a player's cell. Fixed 2026-07-04 ("you cant put the cables on the ground"): the overlap guard used to reject *all* blocks in an occupied cell, which silently no-oped the natural lay-a-cable-at-your-feet gesture. Pure rule: `placement::placement_blocked_by_player` (unit-tested); solidity of the would-be block is peeked via `Inventory::hotbar_placeable_id` before the guard runs. The "step back a little" toast now fires only when a *solid* placement is actually blocked.
 4. The player must have the block in their active hotbar slot.
-5. Placement reach: **4.5 blocks** (from eye position, matching Minecraft survival reach).
-6. Creative mode reach: **5.0 blocks**.
+5. Placement reach: **5.0 blocks** from eye position (single value in code: `REACH_DISTANCE = 5.0`, in `lib.rs` and `server.rs`; the server gate adds a small tolerance margin, see §2.5). There is no separate survival (4.5) and creative (5.0) reach; both game modes use 5.0.
 
 **Placement direction**: Blocks that have directional variants (furnaces, stairs, pistons) orient based on the player's facing direction and the face they clicked. Logs orient based on the face clicked (place on top = vertical, place on side = horizontal).
 
@@ -579,7 +578,7 @@ The `Inventory` component lives on the player entity:
 struct Inventory {
     hotbar: [Option<ItemStack>; 9],
     main: [Option<ItemStack>; 27],
-    armour: [Option<ItemStack>; 4],          // DEFERRED — armour system not yet built
+    armour: [Option<ItemStack>; 4],          // BUILT elsewhere — as-built it lives on PlayerSlot.armour_slots (see below), not in Inventory
     offhand: Option<ItemStack>,              // DEFERRED — offhand mechanic not yet wired
     crafting_input: [Option<ItemStack>; 4],  // 2x2 — DEFERRED — handled via separate crafting-table UI today
     crafting_output: Option<ItemStack>,      // DEFERRED — see above
@@ -587,7 +586,7 @@ struct Inventory {
 }
 ```
 
-**Current ship state (as of Wave 25):** the engine implements the **hotbar + main = 36 slots** flat (`game/engine/src/inventory.rs:11`). The `armour`, `offhand`, and `crafting_*` fields above are spec'd for the destination shape but not yet wired — armour waits on the armour system (also referenced in §6.6); offhand and crafting-input/output land when their respective UI surfaces do. Save-format compatibility is preserved by keeping the slot count at 36 until those fields go live.
+**Current ship state (as of Wave 25):** the engine implements the **hotbar + main = 36 slots** flat (`game/engine/src/inventory.rs:11`). The `armour`, `offhand`, and `crafting_*` fields above are spec'd for the destination shape but not yet wired — armour is **built** but stored as `PlayerSlot.armour_slots: [Option<ArmourItem>; 4]` (equip UI in `craft_ui.rs`, HUD readout, damage reduction, saved), not inside `Inventory`; offhand is still unbuilt; offhand and crafting-input/output land when their respective UI surfaces do. Save-format compatibility is preserved by keeping the slot count at 36 until those fields go live.
 
 The inventory system is a dedicated ECS system that:
 - Processes `InventoryAction` events (move, swap, drop, pick up).
@@ -2193,7 +2192,7 @@ The four modes below are the **target**. What's wired in the engine today:
 - **No fall damage, no fire damage, no drowning**: The player takes no environmental damage.
 - **Mob AI**: Hostile mobs do not target creative players. The player can still attack mobs.
 - **Pick block (middle-click)**: Adds the targeted block to the hotbar, even if not currently in inventory.
-- **Reach**: Extended to 5.0 blocks (vs 4.5 in survival).
+- **Reach**: 5.0 blocks, the same as survival (the code has one `REACH_DISTANCE`).
 
 ### 8.3 Spectator Mode Details
 
@@ -2277,7 +2276,7 @@ Speeds: Cow 0.7 b/s, Brigand 1.1 b/s, Chicken 0.5 b/s. (Tuned down for better fe
 
 Scan interval: Hostile mobs check for player every 10 ticks (0.5s).
 
-Not yet implemented: A* pathfinding, flee behaviour, attack state, line-of-sight, group behaviour.
+Since built: a flee state (`AiState::Flee`, prey bolt when struck) and a chase state. Still not implemented: A* pathfinding (movement is direct-line with ground following, `mob_ai.rs`), line-of-sight and group behaviour.
 
 #### Textured Mob Models (Step 9)
 
@@ -2316,7 +2315,7 @@ Entity hide distance: Entities within 0.5 blocks of camera are not rendered (pre
 
 Left click priority: Entity attack first, fall through to block break if no entity hit.
 
-Not yet implemented: Weapons, armour, hunger, item drops on death, death screen, ranged combat.
+Since built: armour (`armour.rs`, `PlayerSlot.armour_slots`), hunger (`combat.rs`), item drops on death (`death_drops.rs`) and a death screen (`hud_ui::draw_death_screen`). Weapons exist as tools (e.g. `ToolType::Sword`).
 
 #### World Persistence (Step 11)
 
@@ -2331,7 +2330,7 @@ Simple prototype format (production region files are future):
 
 On load: restore player state, mark loaded columns, register water sources, generate missing columns within render distance, mesh everything, scatter mobs.
 
-Not yet implemented: Region files, zstd compression, autosave timer, CRC checksums, entity persistence.
+Since built: an autosave timer and entity / block-entity persistence (`WorldSave`, see Spec 02 as-built banner). Still not implemented: region files, zstd compression, CRC checksums.
 
 ##### World Metadata (`world_meta.json`)
 
@@ -2587,8 +2586,7 @@ Inventory rewritten to use `ItemStack`. Tools and blocks share the same inventor
 reads from `inventory.hotbar_attack_damage(slot)`. Tool durability via
 `inventory.use_hotbar_tool(slot)`.
 
-Save format: BRIDGE — only block items are persisted. Tools are lost on save/load.
-Will be fixed when Item gets serde derives.
+Save format: **resolved** — all item types (blocks, tools, materials, armour) are serialised with full data; legacy block-only saves auto-upgrade on load.
 
 ### 4.5 Slash Commands
 

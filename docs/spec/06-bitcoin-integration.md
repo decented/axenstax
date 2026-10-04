@@ -1967,6 +1967,8 @@ The point at which custody appears is precise — refundability, or a persistent
 
 > **Renamed (2026-05-12).** This section was previously titled "Signet Age Verification." Per §10.3, age is not the platform's gate — the guardian's parental flag is. Signet still verifies identity claims (subject + guardian + parental flag + age ladder), but "Age Verification" mis-named the section as if age were the controlling input. Renamed to "Signet Identity Verification" to reflect what's actually being verified.
 
+> **NOT BUILT (audit 2026-10-04).** The Signet token / claims path in §11.1-§11.5 (a server requesting a Signet token with guardian, parental-flag and age-ladder claims, and applying them to Bitcoin features) is a design only. The engine as built verifies a kind-21236 auth event and an optional kind-31000 `display-name` handle credential (`signet::verify_auth_event`, `signet::verify_credential`; Spec 04 §1.8), and admits online players by Signet **contacts** tier (Spec 04 §1.9). No token with guardian / parental-flag / age claims is requested, verified or consumed anywhere in `game/engine/src`.
+
 ### 11.1 Signet Token Verification on Connect
 
 When a player connects to a Bitcoin-enabled server, the server requests the player's Signet token to read identity claims — guardian relationship, parental flag, age ladder (used for server-policy gates), and revocation status:

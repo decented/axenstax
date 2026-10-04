@@ -1,6 +1,6 @@
 # Controls
 
-Every key and button in Axe'n'Stax. Keyboard + mouse is the primary control scheme; gamepad and touch are supported too.
+Every key and button in Axe'n'Stax. Keyboard + mouse is the primary control scheme. Gamepad and touch are supported for the core actions (move, look, break, place, hotbar, inventory, pause, camera), but they do not have every keyboard action (see the notes under each section).
 
 ## Movement
 
@@ -127,6 +127,8 @@ Both Xbox-style and PlayStation-style controllers work. Up to 4 controllers for 
 | **Start** | Pause |
 | **A double-tap** | Toggle flight (Creative) |
 
+**Not on the gamepad yet:** the Map, Challenge Board (J), Satoshi (N), chat, block-ghost rotate, Inventory Explorer and the Workshop editing keys. Use a keyboard for those.
+
 ## Touch (mobile / tablet web)
 
 A fixed on-screen layout, not gesture-based:
@@ -136,6 +138,8 @@ A fixed on-screen layout, not gesture-based:
 - **Bottom-centre** — the hotbar + an **Inventory** button.
 - **Top-left** — **Pause** and **Chat** buttons.
 - **Top-right** — **View** (cycles perspective, same as F5) and **Zoom** buttons.
+
+**Not on touch yet:** drop item, block-ghost rotate, Inventory Explorer, the Workshop editing keys, shift-click, Map, Challenge Board (J) and Satoshi (N).
 
 ## Tips
 

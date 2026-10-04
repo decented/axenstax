@@ -35,7 +35,7 @@ which is what the docs site `/download` route serves
 Use `cargo build` (not `run`) — `run` launches the engine, which is
 interactive; we just want the binary written.
 
-### 2. Start the three sites (host)
+### 2. Start the sites (host)
 
 The website was split into independent FastAPI apps on 2026-04-30 and has since
 grown to **six locally-served sites**, mirroring the production split
@@ -56,13 +56,13 @@ grown to **six locally-served sites**, mirroring the production split
 > also deploys (`claim.axenstax.com`) but is **deliberately isolated** — never link
 > to it. `deploy.yml`'s smoke-test block is the authoritative list of live hosts.
 
-Bring all three up at once:
+Bring them all up at once (six public sites, plus the isolated `claim` site):
 
 ```bash
 <repo>/tools/sites/start-all.sh
 ```
 
-Stop all three:
+Stop them all:
 
 ```bash
 <repo>/tools/sites/stop-all.sh
@@ -112,7 +112,7 @@ copy one working site venv into the others (e.g.
 0. Version parity — `game/engine/Cargo.toml` and `tools/packaging/packager.toml` must carry the same `version` (cargo-packager names artefacts from the latter, and `/download/latest.json` reads the version off those names). Then the docs-site unit tests (`tools/sites/docs/test_*.py`, via the site venv) — the `/download/latest.json` contract.
 1. `cargo clippy` on the engine, gated `-D warnings` (Phase 4b, 2026-07-06) — any warning or error fails the run.
 2. `cargo build` on the engine.
-3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently 4800+ tests across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
+3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 4,700 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
 4. `trunk build` for the WASM bundle.
 5. Bundle-size gate — brotli-compressed total must stay under 5 MiB (PWA alpha spec).
 6. With `--smoke`: Playwright smoke test against a running website. Confirms `/`, `/game`, WASM asset, JS loader all serve correctly. Saves a screenshot to `tools/smoke/out/play-landing.png`.
@@ -219,33 +219,25 @@ No existing engine (Luanti, Veloren, etc.) can deliver this vision without becom
 - **Textures**: 16x16 default, resolution-agnostic renderer
 - **Reward Mechanic**: **Proof of Play** — every pickaxe strike runs HMAC-SHA256 (even on grass) and the hash is surfaced to the player as an educational proof-of-work primitive. The same hash deterministically drives optional rare drops on plain stone and, on Bitcoin-enabled servers, sats payouts via a **deterministic work-meter** (effort accumulation — never a chance-based "probabilistic" threshold; a probabilistic real-Bitcoin payout sits inside the UK Gambling Act gaming perimeter, s.6, where free-to-play is not a defence, so it is **retired for real sats** — see `docs/research/2026-06-21-uk-online-safety-gambling-crypto-landscape.md`). Visible ore blocks (coal/iron/diamond — Wave 13) are Minecraft-style guaranteed drops with the correct tool. The player is **not** a Bitcoin miner; on Bitcoin-enabled servers the server operator translates proof-of-play effort into payouts. Anti-X-ray = (a) architectural defence at the reward layer (`server_secret` never leaves the server — this part is live) + (b) chunk-stream obfuscation that replaces buried ore with stone in the data sent to the client; exposed ore in cave walls stays visible. **(b) is built + unit-tested but not yet wired into the live chunk-stream send path** (`game/engine/src/anti_xray.rs`, `#![allow(dead_code)]`) — it lands with real remote-multiplayer chunk streaming. Don't describe (b) as active protection until that lands. Full design: `docs/foundations/2026-05-12-proof-of-play-clarification.md`.
 - **Wallet**: Noncustodial Lightning wallet built into PWA, derived from Nostr 12-word seed
-- **Identity**: Nostr address per player; parent accounts control nested child accounts
+- **Identity**: Nostr (Signet persona) address per player. Parent/guardian relationships belong to Signet, not to engine code: the engine has no parent or child account model, only the local `PlayerSlot.charter_allows_sats` flag and the tightening-only comms policy file (see known debt)
 - **Not a money transmitter**: Platform never touches funds — critical policy constraint
 - **Development**: AI-driven development from specification documents
 
 ## Key Patterns
 
-### Signet sign-in via `signet-login` SDK
+### Sign-in (as built)
 
-The lobby and `/game` drive sign-in through the `signet-login` SDK
-(`window.Signet.{login, handleRedirectCallback, restoreSession, logout}`,
-vendored IIFE bundle at `tools/sites/game/static/vendor/signet-login.iife.js`).
-The SDK owns the QR rendering, relay subscription, and same-device redirect
-round-trip; the server only mints a CSRF challenge and verifies the resulting
-kind-21236 auth event at `/auth/verify`. Cutover details + what's deferred
-until upstream catches up: `docs/integrations/signet/2026-05-20-signet-login-adoption.md`.
+The **web build is an anonymous, login-free offline taster**: `tools/sites/game/` has
+no `/auth/*` routes, sets no cookie, and `static/vendor/signet-login.iife.js` is
+gone (`tools/sites/game/test_no_login.py` pins this; web has no multiplayer, cloud
+save or feedback channel). The old `signet-login` SDK cutover docs under
+`docs/integrations/signet/` are historical.
 
-**Deferred** (signet-login@0.7.1 doesn't yet surface): `accept=persona` +
-`accept_reason=` filter/caption, `fromNP=true` natural-person fallback flag,
-`warnings=` parser-warning channel, `charter_*` URL-extension passthrough
-on the redirect path. Upstream asks live in
-`<workspace>/forgesworn/signet-plans/MESSAGE-FROM-AXENSTAX.md` §0 (2026-05-20).
-The cookie HMAC already covers `np_flag` so reintroducing `fromNP` is
-zero-format-change once the SDK exposes it.
-
-Previous spec (no longer the live code path, kept for historical reference):
-`docs/integrations/signet/2026-04-20-accept-hint-consumer-wire-up.md`.
-Tracked upstream, not yet fixed; consumer wire-up moved to the SDK.
+**Native** sign-in is a NIP-46 / `nostrconnect` pairing driven by
+`game/engine/src/native_signin.rs` (QR shown in the lobby; relays come from the
+player's own "Your relays" list). Join-time identity (kind-21236 auth event,
+kind-31000 handle credential) is covered under the Phase 4 entry in "Resolved
+technical debt" below and in Spec 04 §1.8 / Spec 08 §9.0.1.
 
 ### Online play by contact (native)
 
@@ -292,16 +284,18 @@ infra/
 
 ## Spec Documents (docs/spec/)
 
+Specs 01-04 carry "AS-BUILT" banners (audit 2026-10-04) where the as-designed text diverges from the shipped engine; read the banner first.
+
 | # | Spec | Lines | Covers |
 |---|------|-------|--------|
-| 01 | Engine Architecture | 1,609 | (as-designed: 12-crate workspace — as-built is ONE crate, `game/engine`), ECS (hecs), tick loop (20 TPS), threading, WASM plugins, asset pipeline |
-| 02 | World Format | 1,411 | Block registry (u16), 16x16x16 chunks, palette compression, world gen pipeline, lighting, persistence |
-| 03 | Rendering | 1,231 | wgpu pipeline, greedy meshing, texture arrays, 3 GPU tiers, procedural sky, egui UI, resource packs |
-| 04 | Networking | 1,112 | UDP + WebRTC dual transport, custom protocol, client prediction, 3-tier spectator system, anti-DDoS |
-| 05 | Gameplay Systems | 1,312 | Movement, block interaction, inventory, crafting, combat, mobs, game modes, particles/audio |
-| 06 | Bitcoin Integration | 1,830 | Hash-on-mine, reward economics, LNbits API, revenue splits, creator kit, Signet age verification |
-| 07 | Platform Services | 1,952 | **RETIRED banner** — operated matchmaking/Agones/session directory cross red lines; remaining: world lifecycle, region simulation, portals, moderation, cost controls |
-| 08 | Security & Anti-Cheat | 1,614 | Threat model, server authority, anti-bot, payment security, plugin sandboxing, privacy, incident response |
+| 01 | Engine Architecture | 1,687 | **As-designed** 12-crate workspace; **as-built is ONE crate, `game/engine`** (wgpu 29, glam 0.33; no wasmtime plugin host). ECS (hecs), tick loop (20 TPS), threading, asset pipeline. Has an as-built banner |
+| 02 | World Format | 2,007 | Block registry (u16), 16x16x16 chunks, palette compression, world gen pipeline, lighting, persistence |
+| 03 | Rendering | 2,344 | wgpu pipeline, greedy meshing, texture arrays, 3 GPU tiers, procedural sky, egui UI, resource packs |
+| 04 | Networking | 1,674 | UDP + WebRTC dual transport (design; as-built is QUIC + WebSocket, `u32` protocol version), custom protocol, client prediction, 3-tier spectator system, anti-DDoS |
+| 05 | Gameplay Systems | 3,872 | Movement, block interaction, inventory, crafting, combat, mobs, game modes, particles/audio |
+| 06 | Bitcoin Integration | 2,423 | Hash-on-mine, reward economics, LNbits API, revenue splits, creator kit, Signet age verification |
+| 07 | Platform Services | 1,965 | **RETIRED banner** — operated matchmaking/Agones/session directory cross red lines; remaining: world lifecycle, region simulation, portals, moderation, cost controls |
+| 08 | Security & Anti-Cheat | 1,736 | Threat model, server authority, anti-bot, payment security, plugin sandboxing, privacy, incident response |
 
 ## Tech Stack
 
@@ -368,10 +362,16 @@ Every piece of code must be either **concrete** (production-grade, spec-aligned,
 - **`ServerPlayer` vs `PlayerSlot` duplication** (BRIDGE in server.rs). Save path uses raw ServerPlayer fields rather than PlayerSlot; the two structs will drift. Trigger: when save becomes server-authoritative.
 - **`HostedServer` local-player position-trust path** (BRIDGE in hosted_server.rs). Local players are position-authoritative; remote players are server-simulated. Unified once single-player routes through HostedServer.
 - **`PlayerSlot.charter_comms` reads a local tightening-only policy file** (BRIDGE). Charter has no comms capability — verified 2026-09-05: `comms` is a reserved word in Charter's prose contract, not a shipped clause kind; the published SDK type is a single `kind: 'schedule'` literal. Since 2026-09-28 the file can only LOWER a player's ceiling below the safe default (`Approved`), never raise it — the old self-named `guardian_npub` signature proved nothing, so it is ignored. Raising waits for a real capability boundary. Trigger: the Charter comms clause shipping upstream, or a Signet guardian attestation. See `docs/foundations/2026-09-05-world-chat.md §3.3`.
-- **`JoinRequestPacket.player_name` is client-asserted** (was BRIDGE in protocol.rs; **resolved by the Phase 4 cutover below** — the field is now a display fallback only). The multiplayer-identity design (`docs/spec/04-networking.md §1.8`) replaces this with `auth_event: SignetAuthEvent` + `handle_credential: Option<SignetCredential>` — handle sourced from the signed kind-31000 `display-name` tag, never from the client string. Batch A bounded + sanitised the field as short-term hardening. **Phase 4 cutover IMPLEMENTED 2026-06-16** (protocol v49): the handshake reorders (authed client waits for `ChallengePacket` → signs `{nonce, origin}` off the main loop → sends `JoinRequest` with the signed `auth_event`); the server verifies any present auth_event (tamper/invalid → reject) and rejects an *absent* one on a sign-in-required host (`HostedServer.require_signin`, `true` for the QUIC LAN host, `false` for the dedicated WebSocket server until the web path is live-verified). `USE_SIGNET_AUTH` is **retired** — identity is policy-driven (`hosted_server::resolve_join_identity`), not flag-gated. `player_name` is now a **display fallback only**, never trusted; the verified npub is stored on `ServerPlayer.verified_pubkey` for economy-block ownership; collisions get a `-<npub-suffix>` readable label, and a client-side **inspect view** (`hud_ui::draw_player_inspect`, fed by `RemoteClient::roster` + the npub now on the `Joined` event) shows each present player's full, copyable npub. The signing bridge exists on **native only**: `game_loop::native_join_sign_driver` (restored bunker on a worker thread). The web half was never finished — `wasm_auth::js_sign_driver` consumes `window.__axenstax_sign_auth_event`, but nothing defines it (audit 2026-10-04), and the web build is now an anonymous offline taster anyway, so there is no web sign-in path. **Remaining = owner live test only** (2-machine LAN with a real bunker pair, native↔native + native↔dedicated). See `docs/foundations/2026-04-20-engine-signet-auth.md` + `docs/goals/2026-06-16-phase4-signet-multiplayer-auth.md`. **Charter Phase 1 decoupled 2026-05-09** when Charter pivoted to rev. 7 mechanism A (relay-read only, no bunker calls in the hot path) — Spec 10 delivered on main. **The in-engine schedule-Charter gate was STRIPPED 2026-05-26** (the `charter::check` session-start gate, the deny overlay, `charter-*.js`, and the `/auth` Charter store are gone — superseded by the standalone `@forgesworn/charter` SDK shipped upstream 2026-05-25; preserved in git history). Note: the unrelated `charter_allows_sats` Bitcoin parental-gate on `PlayerSlot` is untouched and remains live. The signing-bridge gap still applies to Phase 4 only, plus future Charter mechanism B/C/D specs when they ship. See `docs/spec/08-security-anti-cheat.md §9.0.1` for threat model.
+
+- **`GameServer::tick` is not the whole simulation.** It runs mobs, water, leaf decay and player physics, but not pistons, hoppers, kegs, dispensers or crops, and it discards the `Vec` that `leaf_decay.tick` returns (`server.rs:862`). Those systems run only in the client-side `GameState::tick`, so a dedicated server has no working farms or machines. Trigger: tick parity, or routing single-player through `HostedServer`.
+- **No possession check on joiner block placement** (BRIDGE, `hosted_server.rs:1892`). The server keeps no authoritative inventory for a remote player, so placing an item the joiner does not hold is not refused. Trigger: remote inventories become server-authoritative (with the `ServerPlayer`/`PlayerSlot` debt).
+- **`HostedServer::mirror_host_world_state` is O(block entities) per call** (`hosted_server.rs:1984`, called from `game_loop.rs:9475`): it walks every host block entity (and compares plots) rather than diffing, to keep the server's copy live for joiner breaks. BRIDGE, replaced when the server owns container and economy state.
+- **`World::set_block` auto-creates chunks** (`world.rs:1601`, via `chunk_for_block_write` `.or_insert_with(Chunk::new)`): a write to an unloaded cell conjures an empty chunk instead of failing. Callers cannot tell a missing chunk from a real write; audit callers before relying on it.
+- **Five economy owner enums carry `LocalPlayer(pidx)`** and must converge on `Npub` together: `VendorOwner` (`vendor.rs:122`), `TipJarOwner` (`tip_jar.rs:34`), `AuctionOwner` (`auction.rs:36`), `PlotOwner` (`plot.rs:29`) and `HubOwner` (`market_hub.rs:30`). (The audit counted four; the code has these five. `ScreenContent::LocalPlayer` in `screen.rs` is a different, legitimate use.)
 
 ### Resolved technical debt:
-- ~~`main.rs` is too large~~ — decomposed into game_loop.rs, block_interact.rs, chunk_stream.rs, spawning.rs
+- ~~`JoinRequestPacket.player_name` is client-asserted~~ (Phase 4 cutover, 2026-06-16, protocol v49). The multiplayer-identity design (`docs/spec/04-networking.md §1.8`) replaces this with `auth_event: SignetAuthEvent` + `handle_credential: Option<SignetCredential>` — handle sourced from the signed kind-31000 `display-name` tag, never from the client string. Batch A bounded + sanitised the field as short-term hardening. **Phase 4 cutover IMPLEMENTED 2026-06-16** (protocol v49): the handshake reorders (authed client waits for `ChallengePacket` → signs `{nonce, origin}` off the main loop → sends `JoinRequest` with the signed `auth_event`); the server verifies any present auth_event (tamper/invalid → reject) and rejects an *absent* one on a sign-in-required host (`HostedServer.require_signin`, `true` for the QUIC LAN host; for the dedicated server it defaults to **false (guest-open)** via `--require-signin`, `server_main.rs:232`). `USE_SIGNET_AUTH` is **retired** — identity is policy-driven (`hosted_server::resolve_join_identity`), not flag-gated. `player_name` is now a **display fallback only**, never trusted; the verified npub is stored on `ServerPlayer.verified_pubkey` for economy-block ownership; collisions get a `-<npub-suffix>` readable label, and a client-side **inspect view** (`hud_ui::draw_player_inspect`, fed by `RemoteClient::roster` + the npub now on the `Joined` event) shows each present player's full, copyable npub. The signing bridge exists on **native only**: `game_loop::native_join_sign_driver` (restored bunker on a worker thread). The web half was never finished — `wasm_auth::js_sign_driver` consumes `window.__axenstax_sign_auth_event`, but nothing defines it (audit 2026-10-04), and the web build is now an anonymous offline taster anyway, so there is no web sign-in path. **Remaining = owner live test only** (2-machine LAN with a real bunker pair, native↔native + native↔dedicated). See `docs/foundations/2026-04-20-engine-signet-auth.md` + `docs/goals/2026-06-16-phase4-signet-multiplayer-auth.md`. **Charter Phase 1 decoupled 2026-05-09** when Charter pivoted to rev. 7 mechanism A (relay-read only, no bunker calls in the hot path) — Spec 10 delivered on main. **The in-engine schedule-Charter gate was STRIPPED 2026-05-26** (the `charter::check` session-start gate, the deny overlay, `charter-*.js`, and the `/auth` Charter store are gone — superseded by the standalone `@forgesworn/charter` SDK shipped upstream 2026-05-25; preserved in git history). Note: the unrelated `charter_allows_sats` Bitcoin parental-gate on `PlayerSlot` is untouched and remains live. The signing-bridge gap still applies to Phase 4 only, plus future Charter mechanism B/C/D specs when they ship. See `docs/spec/08-security-anti-cheat.md §9.0.1` for threat model.
+- ~~`main.rs` is too large~~ — decomposed into game_loop.rs, block_interact.rs, chunk_stream.rs, spawning.rs. **Caveat (audit 2026-10-04): the weight just moved — `game_loop.rs` is now about 22,300 lines**, far past the ~500-line guideline; splitting it is open debt
 - ~~`held_tool` is a separate GameState field~~ — now in PlayerSlot.hotbar_slot
 - ~~Tool cycling via T key~~ — replaced by proper inventory/crafting system
 - ~~`static Mutex` for world name~~ — now a field in GameState and GameServer

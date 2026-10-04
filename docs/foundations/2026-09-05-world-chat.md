@@ -275,6 +275,8 @@ Stored on the player as `PlayerSlot.charter_comms: CommsLevel`, following the sh
 
 ### 3.4 Guardian copy
 
+> **Status (audit 2026-10-04): module built, NOT WIRED.** `guardian_copy.rs` (payload shaping, batching) exists and is unit-tested, but nothing in the game loop calls it, the persistent child-HUD indicator is not drawn, and the module carries a blanket `#![allow(dead_code)]` BRIDGE. No chat is copied to a guardian today. Do not describe guardian copy as a shipped feature.
+
 When the Charter value says a child's chat is copied to their guardian, the **child's own client**
 sends both directions of the child's conversation to the guardian's key as NIP-17, over the
 family's relays, in batches.
@@ -319,6 +321,8 @@ does.
 The parent is not in the game. They are on a phone. The room is how the game's chat reaches them.
 
 ### 4.1 The seam
+
+> **Status (audit 2026-10-04): seam and keeper built, NOT WIRED.** `world_room.rs` (the `WorldRoom` trait, relay lint, NDJSON codec) and `kithmoot_keeper.rs` (`KithMootKeeper`) exist and are tested, but nothing outside those two modules constructs or calls them (`world_room.rs` keeps a blanket `#![allow(dead_code)]`). No world room runs in the live game.
 
 ```rust
 trait WorldRoom {

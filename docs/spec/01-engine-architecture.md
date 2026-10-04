@@ -8,6 +8,8 @@ physics for remote players landed in Task 1d. Fold into this doc on the next
 spec-editing pass.
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
+> **AS-BUILT (audit 2026-10-04).** This document describes the *as-designed* destination. The shipped engine is **one crate**, `game/engine` (library `axenstax_engine` plus a thin binary shim), not the 12-crate workspace sketched below. Dependency versions are those in `game/engine/Cargo.toml` (wgpu 29, glam 0.33, winit 0.30, egui 0.34, quinn 0.11, rodio 0.20), not the versions named in the later sections. **There is no `wasmtime` plugin host in the build** (no WASM plugin runtime is a dependency); §8 is design only. The §2 "Current Implementation" module table is a historical snapshot (earliest prototype); the real module list is `game/engine/src/`.
+
 ---
 
 ## 1. System Overview
@@ -130,7 +132,7 @@ The prototype is a single crate (`axenstax-engine`) with these modules. Since
 | `chat_ui.rs` | In-game chat overlay (egui) — output log + input field, focus + history |
 | `commands/` | Slash-command system (parser, registry, dispatcher, built-ins). Plugin-shaped — registry/parser/UI are game-agnostic. Spec: `docs/foundations/2026-05-07-engine-commands.md` |
 
-Dependencies: wgpu 25, winit 0.30, glam 0.29, hecs 0.10, serde 1, bincode 1, ahash 0.8, noise 0.9, rodio 0.20, image 0.25, bytemuck 1.
+Dependencies (as of 2026-10-04, `game/engine/Cargo.toml`): wgpu 29, winit 0.30, glam 0.33, hecs 0.10, serde 1, bincode 1, ahash 0.8, noise 0.9, rodio 0.20, image 0.25, bytemuck 1, quinn 0.11, egui 0.34.
 
 The production architecture below describes the multi-crate workspace this will evolve into.
 

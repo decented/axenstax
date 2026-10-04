@@ -5,7 +5,7 @@
 **Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `64`** (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
-- **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4.
+- **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
 - **v8** (2026-05-13): Wave 25 adds new `BlockId`s (`PURE_DEEPSLATE` + 3 deepslate ore variants + `SATORI_BLOCK` = ids 25..=29). Older clients without these registered would render unknown ids as `AIR` (registry fallback), producing voids in deepslate-bearing chunks; the bump forces clean rejection of stale clients. (The 3→8 jump is intentional — bumping past 4..7 was used as a "this is a content-bearing world-format change, not just protocol shape" signal.)
 - **v9–v37** (2026-05-13…2026-05-23): a run of content/feature appends (block-registry waves, market hubs, auctions, server bazaar). All positional bincode appends. The authoritative per-version log is the `PROTOCOL_VERSION` history comment in `game/engine/src/protocol.rs`.
 - **v38** (2026-05-24): Player avatars + first-person viewmodel. `PlayerState`'s block-only `held_item: u16` is replaced by a tool-capable `held_kind: u8` + `held_id: u16` pair (an `ItemRef` via `item_kind::{EMPTY,BLOCK,TOOL,MATERIAL}`), and gains `anim_state: u8` (locomotion: 0 idle / 1 walk / 2 jump) + `flags: u8` (`player_flags`: SWINGING=1, CROUCHING=2, ON_GROUND=4) so remote players render as animated humanoid avatars. `InputPacket` also gains `held_kind`/`held_id` so the client reports its own (client-authoritative) held item. See §4.2a.
@@ -20,6 +20,8 @@
 - **v64** (2026-09-28): **QUIC game-packet framing (audit wave 1).** Every game packet, both ways, now rides ONE reliable, ordered QUIC bidirectional stream per connection, framed as `u32 LE length + payload` (max 16 MiB); the client opens it with a zero-length hello frame and the server accepts it within 10 s. QUIC datagrams are no longer used (they were MTU-capped and never retransmitted, so busy `StateUpdate`s and large `JoinAccept`s were silently lost). The server closes a QUIC client with more than `MAX_OUTBOUND_QUEUE_BYTES = 8 MiB` queued ("connection too slow"). No packet shape changed; the framing did, so v63 and v64 peers are incompatible. See "Game-packet framing" in the Phase 1 implementation notes.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
+
+> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 64), not a `u16`. **There is no §4.1 chunk-streaming path**: `ChunkDataPacket` is defined and the client can decode it, but the server never sends it; a joiner receives the world **seed** in `JoinAccept` and regenerates terrain locally, then receives block deltas in `StateUpdate`. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
 
 ---
 
@@ -241,6 +243,8 @@ Kind-31000 credentials carry an `expires` tag (Signet-app sets a one-year defaul
 Bans are keyed on **persona pubkey**, never on handle. A misbehaving player who renames themselves is still banned; a legitimate player who happens to pick a taken handle is not. The `ServerPlayer` record stores `pubkey` as primary key; `handle` is a presentational field derived from the current credential.
 
 #### 1.8.4 Current State — BRIDGE (Phase 4 to remove)
+
+> **SUPERSEDED (audit 2026-10-04).** Everything in this subsection describes the Phase 3 state. Phase 4 landed at protocol v49 (2026-06-16): `USE_SIGNET_AUTH` is retired, `player_name` is a display fallback only, and the verify path is policy-driven (`hosted_server::resolve_join_identity`). Kept for history; Spec 08 §9.0.1 is current.
 
 `JoinRequestPacket.player_name: String` is still **client-asserted** on the wire. Phase 3 of `docs/foundations/2026-04-20-engine-signet-auth.md` (delivered 2026-05-03) added the new fields *alongside* `player_name` and bumped `PROTOCOL_VERSION` 2 → 3, but the verify path is gated on a compile-time `signet::USE_SIGNET_AUTH` const that ships at `false`. Today the server still uses `player_name` (bounded 32 bytes and control-char-stripped per the Batch A protocol hardening); the new fields arrive as `None` from every existing client and are ignored.
 
@@ -1220,7 +1224,7 @@ stateDiagram-v2
 - If handshake does not complete within 5 seconds, abort.
 
 **Authenticating** (0-1 second):
-- Client sends `AuthRequest` containing a platform-issued JWT (from the session directory/matchmaker) or a server-local password for personal-tier.
+- Client sends `AuthRequest` containing a server-local password for personal-tier. *(A platform-issued JWT from a session directory/matchmaker was in the original design and is retired; see below.)*
 - **RETIRED (do not build):** the platform JWT / session-directory / matchmaker path is retired — AxeNStax operates no matchmaker, session directory or platform auth service (that would make it the operator of a regulated service). Worlds are self-hosted; discovery is LAN, opt-in self-published Nostr announce, or direct address; identity is a Signet-signed auth event verified by the host (see §1.8 / §1.9 and `docs/foundations/2026-04-20-engine-signet-auth.md`). Only the server-local-password case above is current design.
 - Server validates the token, checks ban lists, checks capacity.
 - Server responds with `AuthResponse` containing the session token and server configuration.
@@ -1286,7 +1290,7 @@ The engine client leaves a world through exactly one function, `GameState::leave
 
 ### 10.1 Version Number
 
-The protocol version is a single `u16` integer, starting at `1`. It is incremented whenever a breaking change is made to packet formats, header structure, or semantics.
+The protocol version is a single integer (as built a `u32`, `PROTOCOL_VERSION`; originally specified as `u16`), starting at `1`. It is incremented whenever a breaking change is made to packet formats, header structure, or semantics.
 
 ### 10.2 Version Negotiation
 
@@ -1568,7 +1572,7 @@ refused — the server keeps no authoritative remote inventory.
 The following items from the main spec are explicitly out of scope for Phase 1 LAN and will be addressed when the target scenario demands them:
 
 - **WebRTC transport** — required for browser/WASM multiplayer clients. Phase 1α PWA alpha is single-player only (see ADR-003), so WebRTC is deferred until browser multiplayer lands post-alpha.
-- **NAT traversal** — STUN, hole punching, and relay fallback (Section 1.7); LAN play does not need NAT traversal.
+- ~~**NAT traversal** — STUN, hole punching, and relay fallback (Section 1.7)~~ — **BUILT as online play by contact (§1.9; `nat/`, `rendezvous/`), without a platform relay.** LAN play does not need it.
 - **Spectator protocol** — the full three-tier spectator system (Section 8); not required for two-player LAN co-op.
 - **Anti-DDoS / connection cookies** — stateless challenge-response (Section 11.1); unnecessary on trusted LAN.
 - **Application-layer bandwidth adaptation** — the `LinkQuality` enum and per-client throttling (Section 6.5); QUIC congestion control handles this at the transport layer on LAN.

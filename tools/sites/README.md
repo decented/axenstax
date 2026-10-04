@@ -1,6 +1,6 @@
 # Axe'n'Stax — site layout
 
-Six small FastAPI apps, one per public hostname, split by **audience**:
+Seven small FastAPI apps (six public sites plus the isolated `claim/` intake), one per hostname, split by **audience**:
 **`.com` = the product** (for players), **`.org` = the open-source project**
 (for builders). Locally each app lives on its own port. The full rationale and
 the migration from the previous layout is in
@@ -12,7 +12,7 @@ cutover steps are in `deploy/README.md`.
 | Site | Dir | Port | Production host | Role |
 |------|-----|------|-----------------|------|
 | **Marketing** | `marketing/` | 8096 | `axenstax.com` | Product front door — the pitch, single "Play" CTA |
-| **Game** | `game/` | 8094 | `play.axenstax.com` | Signet auth, `/game`, WASM bundle, install-as-PWA, voice-feedback |
+| **Game** | `game/` | 8094 | `play.axenstax.com` | `/game`, WASM bundle, install-as-PWA. An anonymous, login-free offline taster: no Signet auth, no cookies, no feedback channel (the voice server was removed 2026-06-23) |
 | **Learn** | `learn/` | 8098 | `learn.axenstax.com` | Guided journey — light, warm onboarding (re-voice pending) |
 | **Wiki** | `wiki/` | 8097 | `wiki.axenstax.com` | Player reference — dense, lookup-driven |
 | **Claim** | `claim/` | 8100 | `claim.axenstax.com` | Merch fulfilment intake — code-gated, no payment (see `claim/README.md`) |
@@ -23,12 +23,12 @@ cutover steps are in `deploy/README.md`.
 
 ## Spin up
 
-All six:
+All seven (the six public sites plus `claim/`):
 ```bash
 ./start-all.sh
 ```
 
-Stop all six:
+Stop all seven:
 ```bash
 ./stop-all.sh
 ```
@@ -40,7 +40,7 @@ cd wiki && ./start.sh        # or marketing/, game/, learn/, project/, docs/
 
 Each `start.sh` kills a stale `python app.py` on its own port, refuses if
 something unrelated holds the port, and creates a `.venv` on first run.
-Logs land at `/tmp/axenstax-{marketing,game,learn,wiki,project,docs}.log`.
+Logs land at `/tmp/axenstax-{marketing,game,learn,wiki,project,docs,claim}.log`.
 
 ## Inter-site links
 
@@ -65,8 +65,9 @@ repo in the marketing and project templates (a blank value renders "Source (soon
 
 The split is by *audience* and *trust boundary*:
 
-- **Game** holds the session cookie, auth keys, Signet callbacks — strict CSP,
-  hashes pinned. Compromise = credential theft.
+- **Game** serves the WASM bundle and the PWA shell — strict CSP, hashes pinned.
+  It sets no session cookie and has no `/auth/*` routes (the web build is
+  login-free; `test_no_login.py` pins that). Native sign-in lives in the engine.
 - **Docs / wiki / learn / project** are read-only content — no cookies, no auth,
   no JS deps beyond markdown rendering. Compromise = vandalism.
 - **Marketing** is near-static promotion — tightest CSP, no scripts.

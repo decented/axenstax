@@ -556,6 +556,8 @@ if accounts_per_fingerprint > MAX_ACCOUNTS_PER_DEVICE:
 > actually hidden from a modified client; don't describe it as active
 > protection.
 
+> **Scope note (audit 2026-10-04).** The visible-ore half of this frame does not apply to the built multiplayer: a joiner is sent the world **seed** in `JoinAccept` (`protocol.rs`, `JoinAcceptPacket.seed`) and regenerates terrain locally, so it holds the whole natural world, buried ore included, and there is no server-to-client chunk stream to obfuscate (the server never sends `ChunkData`). Chunk-stream anti-X-ray therefore protects nothing until real chunk streaming exists. The reward-layer defence (§5.1) is unaffected: it is keyed on `server_secret`, not the seed.
+
 ### 5.1 Why Proof of Play Defeats Reward-Layer X-Ray
 
 The Proof-of-Play hash that drives Bitcoin payouts (Spec 6 §2.3, §2.4) and the hash-driven rare-drop tier on plain stone (Spec 6 §2.2b) are both computed at dig-time using:

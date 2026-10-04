@@ -4,7 +4,7 @@ This page is a preview of what's **shipped recently**, what's **partway there**,
 what's **still to come** — so if you're wondering "is X in the game?", check here first.
 
 The game is in **alpha**. Things change fast. This page reflects the state as of
-**2026-09-07**; the authoritative, up-to-the-minute list is `docs/foundations/README.md`.
+**2026-10-04** (re-checked against the code in the gap audit; entries from before that date were left as written); the authoritative, up-to-the-minute list is `docs/foundations/README.md`.
 
 ## Recently shipped (no longer "coming")
 
@@ -172,6 +172,15 @@ economy are what's left of Phase 3.
   batch of authored house plans to take over from the single hardcoded house shape.
 - **The wider player economies** — markets, services, combat, PvP, land, knowledge and
   spectator economies beyond farming.
+
+## Known gaps (checked 2026-10-04)
+
+- **Mill, Oven and Aging Rack** blocks exist but cannot be used yet (no interaction, no recipes).
+- **Tin and Amethyst** have no source in the world yet, so Bronze cannot be made in Survival.
+- **Multiplayer:** a player who joins late sees items dropped on the ground but not the mobs or
+  carts that were already there, and does not receive earlier world edits. A dedicated server
+  does not run pistons, hoppers, kegs, dispensers or crops.
+- **Touch and gamepad** do not have every keyboard action yet (see **[Controls](controls.md)**).
 
 ## Blocked (waiting on the owner or upstream)
 

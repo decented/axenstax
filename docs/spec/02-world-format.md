@@ -6,6 +6,8 @@
 function (`falling_blocks.rs`) gated at 5 Hz per player, radius 16 blocks.
 **Depends on**: ADR-001, ADR-002, Platform Overview
 
+> **AS-BUILT (audit 2026-10-04).** The shipped world format differs from the production design below: chunks are a **flat `u16` array** (`chunk.rs`, no palette compression), saved one file per non-empty chunk under `worlds/<folder>/chunks/` plus a bincode `world.dat` (`save.rs`). There are **no region files and no CRC-32C**. The built Y range is **0..95 (`MAX_CHUNK_Y = 5`, six 16-block sections; `World::set_block` ignores `y < 0`)**, not -64..383. `WorldSave` has **52 fields** (`save.rs`; append-only invariant). Treat §2, §3.1, §4 and the integrity paragraphs as design targets, not description.
+
 ---
 
 ## 0. Scope
@@ -1476,7 +1478,7 @@ The prototype uses a simple format, not the production region-file system descri
 - No compression, no region files, no autosave timer, no CRC, no entity persistence
 
 > **Update (2026-06-03):** the prototype has since grown a periodic autosave and full
-> block-entity persistence (the `WorldSave` struct now carries 33 fields — chests,
+> block-entity persistence (the `WorldSave` struct then carried 33 fields; as of 2026-10-04 it has 52 — chests,
 > furnaces, vendors, tip-jar escrow, plots, villages, raids, bounties, wallpaper
 > overlays, …). Old-save loading is now **backward-compatible for appended fields**
 > via the tolerant positional decode described in §8.4 — older saves no longer fall
