@@ -166,7 +166,7 @@ async def privacy(request: Request):
     """The one shared /privacy page for all six sites (2026-09-28 audit fix,
     go-live MUST #20) — every other site links here via MARKETING_URL rather
     than carrying its own copy. States exactly and only what the code does
-    today; DRAFT banner in the template until the owner signs off on content."""
+    today. Signed off by the owner 2026-10-04 (DRAFT banner removed)."""
     return templates.TemplateResponse(request=request, name="privacy.html", context=_base_context())
 
 

@@ -1,6 +1,6 @@
 """Regression test for the 2026-09-28 pre-public audit fix (go-live MUST #20):
 a /privacy page must exist, describe only what the code does today, and carry
-a visible DRAFT banner until the owner signs off on the content.
+no DRAFT banner now the owner has signed it off (2026-10-04).
 
 Run: cd tools/sites/marketing && .venv/bin/python -m pytest test_privacy.py -q
 """
@@ -22,10 +22,12 @@ def test_privacy_page_exists():
     assert r.status_code == 200
 
 
-def test_privacy_page_has_draft_banner():
+def test_privacy_page_is_signed_off():
     r = client.get("/privacy")
-    assert "DRAFT" in r.text
-    assert "pending owner sign-off" in r.text
+    assert "DRAFT" not in r.text
+    assert "pending owner sign-off" not in r.text
+    assert "decented" in r.text
+    assert "no longer than 6 months" in r.text
 
 
 def test_privacy_page_covers_every_data_flow_named_in_the_audit():
