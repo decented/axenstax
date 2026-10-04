@@ -1143,13 +1143,31 @@ impl GameServer {
     /// branch here.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save(&self) {
+        match self.try_save() {
+            Ok(()) => log::info!("Server saved world '{}'", self.world_name),
+            Err(e) => log::error!("Server save of world '{}' FAILED: {e}", self.world_name),
+        }
+    }
+
+    /// [`save`](Self::save), reporting failure instead of only logging it.
+    ///
+    /// Same write discipline as the client save (`save::write_world_folder`):
+    /// every file goes through tmp + rename, so a crash or full disk never
+    /// leaves a torn file. Chunks are written FIRST (no per-file fsync, one
+    /// directory fsync at the end) and `world.dat` is the commit point. If any
+    /// chunk fails, `world.dat` is NOT written: the previous `world.dat` stays
+    /// with its own chunk data rather than new block-entity state landing over
+    /// old blocks. Every chunk is still attempted so each failure is logged
+    /// with its path. `exhibits.json` is a sidecar for the Operator Console,
+    /// written after the commit; its failure is logged but doesn't fail the
+    /// save.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn try_save(&self) -> Result<(), String> {
         let wname = self.world_name.clone();
         let dir = crate::save::world_dir(&wname);
         let chunks_dir = dir.join("chunks");
-        if let Err(e) = std::fs::create_dir_all(&chunks_dir) {
-            log::error!("Save mkdir failed: {e}");
-            return;
-        }
+        std::fs::create_dir_all(&chunks_dir)
+            .map_err(|e| format!("mkdir {}: {e}", chunks_dir.display()))?;
 
         let player_saves: Vec<crate::save::PlayerSaveData> = self.players.iter().map(|sp| {
             crate::save::PlayerSaveData {
@@ -1420,35 +1438,43 @@ impl GameServer {
                 .collect(),
         };
 
-        let encoded = match bincode::serialize(&save) {
-            Ok(data) => data,
-            Err(e) => { log::error!("Save serialize failed: {e}"); return; }
-        };
-        if let Err(e) = std::fs::write(dir.join("world.dat"), &encoded) {
-            log::error!("Save write failed: {e}");
-            return;
+        let encoded = bincode::serialize(&save).map_err(|e| format!("serialize world.dat: {e}"))?;
+
+        // Spec 02 §7.5 — loaded + evicted chunks, written before the commit point.
+        let mut chunk_failures = 0usize;
+        let mut first_failure: Option<String> = None;
+        for ((cx, cy, cz), chunk) in self.world.persistable_chunks() {
+            if chunk.is_empty() { continue; }
+            let path = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
+            if let Err(e) = crate::save::write_atomic_nosync(&path, &chunk.as_bytes()) {
+                log::error!("Server save: chunk write failed ({}): {e}", path.display());
+                chunk_failures += 1;
+                first_failure.get_or_insert(e);
+            }
         }
+        crate::save::sync_dir(&chunks_dir);
+        if let Some(first) = first_failure {
+            return Err(format!(
+                "{chunk_failures} chunk write(s) failed, world.dat not updated; first: {first}"
+            ));
+        }
+
+        let world_dat = dir.join("world.dat");
+        crate::save::write_atomic(&world_dat, &encoded)?;
 
         // Creator-gallery (Spec 2026-06-19 §9) — write an `exhibits.json` sidecar
         // next to `world.dat` so the Operator Console (which can't decode the
         // bincode `world.dat`) can list the world's placed exhibits. Best-effort.
+        let exhibits_path = dir.join("exhibits.json");
         match serde_json::to_vec_pretty(&self.world.exhibits) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(dir.join("exhibits.json"), json) {
-                    log::warn!("exhibits.json sidecar write failed: {e}");
+                if let Err(e) = crate::save::write_atomic(&exhibits_path, &json) {
+                    log::warn!("exhibits.json sidecar write failed ({}): {e}", exhibits_path.display());
                 }
             }
-            Err(e) => log::warn!("exhibits.json sidecar serialise failed: {e}"),
+            Err(e) => log::warn!("exhibits.json sidecar serialise failed ({}): {e}", exhibits_path.display()),
         }
-
-        // Save chunks
-        // Spec 02 §7.5 — loaded + evicted chunks.
-        for ((cx, cy, cz), chunk) in self.world.persistable_chunks() {
-            if chunk.is_empty() { continue; }
-            let filename = format!("{cx}_{cy}_{cz}.chunk");
-            let _ = std::fs::write(chunks_dir.join(&filename), chunk.as_bytes());
-        }
-        log::info!("Server saved world '{wname}'");
+        Ok(())
     }
 }
 
@@ -1456,6 +1482,63 @@ impl GameServer {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// T0-7 — the dedicated-server save round-trips through tmp + rename and
+    /// leaves no `.tmp` behind.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn server_save_is_atomic_and_round_trips() {
+        let name = "__test_server_atomic_save_round_trip__";
+        let dir = crate::save::world_dir(name);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut server = GameServer::new(1, name.to_string(), 42);
+        server.world.set_block(3, 64, 5, crate::block::BEDROCK);
+        server.try_save().expect("save succeeds");
+
+        assert!(dir.join("world.dat").is_file());
+        assert!(dir.join("exhibits.json").is_file());
+        assert!(dir.join("chunks/0_4_0.chunk").is_file(), "the edited chunk was written");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .chain(std::fs::read_dir(dir.join("chunks")).unwrap())
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .map(|e| e.path())
+            .collect();
+        assert!(leftovers.is_empty(), "atomic writes leave no .tmp: {leftovers:?}");
+
+        let mut server2 = GameServer::new(1, name.to_string(), 42);
+        server2.initial_load();
+        assert_eq!(server2.world.get_block(3, 64, 5), crate::block::BEDROCK, "block survives save/load");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T0-7 — a chunk write failure is reported (with the chunk's path), not
+    /// swallowed, and `world.dat` — the commit point — is not written over
+    /// chunks that failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn server_save_reports_chunk_failure_and_skips_commit() {
+        let name = "__test_server_atomic_save_chunk_failure__";
+        let dir = crate::save::world_dir(name);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut server = GameServer::new(1, name.to_string(), 42);
+        server.world.set_block(3, 64, 5, crate::block::BEDROCK);
+        server.try_save().expect("first save succeeds");
+        std::fs::remove_file(dir.join("world.dat")).unwrap();
+
+        // Inject a failure without permissions (works as root/CI): a directory
+        // where the chunk's tmp file must go makes its write fail.
+        std::fs::create_dir_all(dir.join("chunks/0_4_0.chunk.tmp")).unwrap();
+        let err = server.try_save().expect_err("a failed chunk write must fail the save");
+        assert!(err.contains("0_4_0.chunk"), "error names the chunk path: {err}");
+        assert!(!dir.join("world.dat").exists(), "world.dat must not be committed over a failed chunk");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// #8 — `GameServer::new` must seed its `BiomeGenerator` from the seed it is
     /// given, NOT the old hardcoded 42. Without this the LAN-host server
