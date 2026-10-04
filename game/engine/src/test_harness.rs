@@ -532,20 +532,15 @@ impl TestHost {
         );
     }
 
-    /// Run `n` ticks of the furnace smelt sweep over every furnace in the world
-    /// (the production [`crate::furnace::tick_one`]). The sweep itself lives in
-    /// the client loop, which a headless `GameServer` does not run — see the
-    /// dual-sim note in CLAUDE.md — so the harness stands in for it, exactly as
-    /// it stands in for the client's camera elsewhere.
+    /// Run `n` passes of the furnace smelt sweep over every furnace in the
+    /// world (the production [`crate::furnace::tick_all`]). A `GameServer` only
+    /// ticks furnaces itself when `simulates_block_machines` is set (the
+    /// dedicated server, T1-3); `TestHost` leaves that flag off, so the
+    /// harness stands in for the host client's sweep here. Don't combine this
+    /// with the flag — that would smelt twice per pass.
     pub fn tick_furnaces(&mut self, n: u32) {
         for _ in 0..n {
-            let positions: Vec<(i32, i32, i32)> =
-                self.server.world.iter_furnaces().map(|(p, _)| p).collect();
-            for p in positions {
-                if let Some(data) = self.server.world.furnace_at_mut(p) {
-                    let _ = crate::furnace::tick_one(data);
-                }
-            }
+            let _ = crate::furnace::tick_all(&mut self.server.world);
         }
     }
 
@@ -709,8 +704,9 @@ impl TestHost {
 
     /// Run one pass of the piston sweep (production
     /// [`crate::piston::tick_pistons`]) and return the cells it changed. Like
-    /// the furnace sweep, this lives in the client loop rather than
-    /// `GameServer::tick`, so the harness stands in for it.
+    /// [`Self::tick_furnaces`], this stands in for the host client's sweep —
+    /// `GameServer::tick` only runs it with `simulates_block_machines` set (the
+    /// dedicated server, T1-3), which `TestHost` leaves off.
     pub fn tick_pistons(&mut self) -> Vec<(i32, i32, i32)> {
         crate::piston::tick_pistons(&mut self.server.world)
     }

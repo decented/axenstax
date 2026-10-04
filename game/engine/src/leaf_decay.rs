@@ -21,6 +21,24 @@ const DECAY_BUDGET: usize = 8;
 /// of distinct affected leaves; this backstops the pathological case.
 const MAX_QUEUE: usize = 8192;
 
+/// Spawn the sapling drops a [`LeafDecaySystem::tick`] rolled (drained with
+/// [`LeafDecaySystem::take_sapling_drops`]) as item entities. Shared by the
+/// client loop and `GameServer::tick` (T1-3, 2026-10-05) so a decayed leaf on a
+/// hosted or dedicated world drops the same sapling a single-player one does.
+pub fn spawn_sapling_drops(
+    ecs: &mut hecs::World,
+    drops: Vec<(i32, i32, i32, crate::item::MaterialId)>,
+) {
+    for (x, y, z, mat) in drops {
+        crate::entity::spawn_item(
+            ecs,
+            glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.2, z as f32 + 0.5),
+            crate::item::ItemStack::new_material(mat, 1),
+            (x ^ z) as u32,
+        );
+    }
+}
+
 pub struct LeafDecaySystem {
     /// Leaves pending a support check.
     check_queue: Vec<(i32, i32, i32)>,

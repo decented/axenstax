@@ -389,6 +389,13 @@ impl HostedServer {
         // of the chosen/persisted seed). The caller passes the same value the
         // client uses (load_world_meta(folder).seed).
         let mut server = crate::server::GameServer::new(num_local_players, name_clone.clone(), seed);
+        // T1-3 — the server ticks the block machines (pistons, furnaces,
+        // crops, hoppers, …; `block_machines.rs`) only when no local host
+        // client does. Invariant: 0 local players ⇔ no host client — every
+        // client host path (LAN Host Game, online host, the single-player
+        // parity path) starts with ≥ 1, and the dedicated server
+        // (`server_main`, the WebSocket dedicated path) starts with 0.
+        server.simulates_block_machines = num_local_players == 0;
         server.initial_load();
 
         // Pull difficulty from the world meta for JoinAccept and UI wiring.
@@ -1733,6 +1740,22 @@ impl HostedServer {
                                 self.server.world.release_plot((bc.x, bc.y, bc.z));
                             }
                             self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+                            // T1-3 — a log broken on a dedicated server queues
+                            // its leaves for the server's leaf-decay pass (the
+                            // client break arms' `on_log_broken`, server side).
+                            // Flag-gated: on a LAN host the host client owns
+                            // decay of its own breaks.
+                            if self.server.simulates_block_machines
+                                && crate::block::is_any_log_block(old_block)
+                                && !crate::block::is_any_log_block(bc.new_block)
+                            {
+                                self.server.leaf_decay.on_log_broken(
+                                    bc.x,
+                                    bc.y,
+                                    bc.z,
+                                    &self.server.world,
+                                );
+                            }
                             // Keep both fluid systems' source bookkeeping in step
                             // with the edit (placed water/lava becomes a source,
                             // dug fluid drops its source, an opened gap wakes a
@@ -1982,6 +2005,13 @@ impl HostedServer {
     /// container / economy state — replace when single-player routes through
     /// HostedServer (CLAUDE.md known debt) and the server owns these entities.
     pub fn mirror_host_world_state(&mut self, host: &crate::world::World) {
+        // T1-3 — the mirror exists because a host CLIENT owns the machines;
+        // a server that ticks them itself (the dedicated server) has no host
+        // client to mirror, and mirroring would overwrite its own sim.
+        debug_assert!(
+            !self.server.simulates_block_machines,
+            "mirror_host_world_state on a server that ticks its own block machines"
+        );
         use crate::world::BlockEntityData as E;
         let server = &mut self.server.world;
         for (&pos, data) in &host.block_entities {
@@ -4711,5 +4741,39 @@ mod tests {
         let (snapshot, notice) = operator_join_over("op-bound", Some([0x5a; 32]));
         assert!(snapshot, "a channel-bound operator join receives the OperatorSnapshot");
         assert!(!notice, "no notice on a direct connection");
+    }
+}
+
+/// T1-3 — which side ticks the block machines is decided at construction, by
+/// whether a host client exists. These pin the wiring of
+/// `GameServer::simulates_block_machines` in `start_inner`.
+#[cfg(test)]
+mod block_machine_flag_tests {
+    use super::*;
+
+    /// Unique per process so parallel test threads never share a world folder.
+    /// `WebSocket { port: 0 }` + 0 remote players spawns no accept thread and
+    /// binds no socket (the `start_room_test_server` pattern).
+    fn start(tag: &str, num_local: usize) -> HostedServer {
+        let world = format!("test-block-machines-{}-{tag}", std::process::id());
+        HostedServer::start(num_local, world, 42, 0, RemoteTransport::WebSocket { port: 0 })
+            .expect("hosted server starts")
+    }
+
+    #[test]
+    fn a_dedicated_server_ticks_its_own_block_machines() {
+        // 0 local players = the dedicated server (`server_main`): nobody else
+        // will smelt, push or grow anything, so the server must.
+        let hs = start("dedicated", 0);
+        assert!(hs.server.simulates_block_machines);
+    }
+
+    #[test]
+    fn a_lan_host_server_leaves_block_machines_to_its_host_client() {
+        // ≥ 1 local player = a host client exists and already ticks every
+        // machine (and mirrors its block-entities in). A second tick here would
+        // double every piston push.
+        let hs = start("lan-host", 1);
+        assert!(!hs.server.simulates_block_machines);
     }
 }

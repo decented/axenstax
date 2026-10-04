@@ -297,6 +297,92 @@ pub fn resolve_blast(
     BlastOutcome { destroyed, chained, spilled }
 }
 
+/// What [`detonate_keg_core`] did to the world, for the caller's presentation.
+pub struct KegBlast {
+    /// `(pos, old_block)` for every cell turned to AIR (relit already; the
+    /// caller remeshes and closes any UI open on a destroyed container).
+    pub destroyed: Vec<((i32, i32, i32), BlockId)>,
+    /// One AIR `BlockChange` per destroyed cell, ready to broadcast.
+    pub changes: Vec<crate::protocol::BlockChange>,
+}
+
+/// The world + ECS half of a Blasting Keg detonation (Spec 49; shared
+/// 2026-10-05, T1-3) — everything that is simulation rather than presentation:
+/// [`resolve_blast`], fluid bookkeeping for blasted sources, container spills
+/// as item entities, relight + power-network nudge per cleared cell, chained
+/// kegs woken, and mob damage. The ONE implementation: the client's
+/// `detonate_keg` and the dedicated server (`block_machines.rs`) both call it.
+///
+/// The caller owns the gate ([`detonation_permitted`]) and everything that
+/// needs per-player client state: player damage (armour lives on
+/// `PlayerSlot`), parrot dismount, particles, audio, remeshing.
+pub fn detonate_keg_core(
+    world: &mut World,
+    ecs: &mut hecs::World,
+    water: &mut crate::water::WaterSystem,
+    lava: &mut crate::lava::LavaSystem,
+    registry: &crate::block::BlockRegistry,
+    pos: (i32, i32, i32),
+) -> KegBlast {
+    let outcome = resolve_blast(world, pos, BLAST_RADIUS, KEG_BLAST_POWER);
+    // Audit 2026-09-27 — blasted fluid cells go through the same source
+    // bookkeeping as a pickaxe/bucket removal (no phantom sources; the
+    // crater's neighbours wake and flow in).
+    notify_fluids_of_blast(water, lava, world, &outcome.destroyed);
+    // Blasted containers spill their contents as item entities.
+    for (k, (p, stack)) in outcome.spilled.iter().cloned().enumerate() {
+        crate::entity::spawn_item(
+            ecs,
+            glam::Vec3::new(p.0 as f32 + 0.5, p.1 as f32 + 0.5, p.2 as f32 + 0.5),
+            stack,
+            (k as u32).wrapping_mul(7919) ^ 0xB1A5,
+        );
+    }
+    let mut changes = Vec::with_capacity(outcome.destroyed.len());
+    for &(p, old) in &outcome.destroyed {
+        crate::lighting::update_for_block_change(world, p, old, block::AIR, registry);
+        // Spec 48 §2.3 — a blast that clears power blocks must re-evaluate the
+        // network, same as a manual break. `resolve_blast` already removed each
+        // cell's block-entity (incl. a destroyed device's PowerDevice); this
+        // nudges the neighbours so cut cables settle.
+        world.notify_neighbours(p);
+        changes.push(crate::game_loop::broadcast_change(world, p.0, p.1, p.2, block::AIR));
+    }
+    // Wake the chain-ignited kegs' power devices so their (short) fuses tick.
+    for &p in &outcome.chained {
+        world.mark_dirty(p);
+    }
+    apply_mob_blast_damage(ecs, world, registry, pos);
+    KegBlast { destroyed: outcome.destroyed, changes }
+}
+
+/// Spec 49 — blast damage to every mob around `center`, with distance falloff
+/// + line-of-sight reduction (the Spec 05 §6.3 hook). Computes against
+/// immutable borrows first, then applies.
+pub fn apply_mob_blast_damage(
+    ecs: &mut hecs::World,
+    world: &World,
+    registry: &crate::block::BlockRegistry,
+    center: (i32, i32, i32),
+) {
+    let c = (center.0 as f32 + 0.5, center.1 as f32 + 0.5, center.2 as f32 + 0.5);
+    let mob_hits: Vec<(hecs::Entity, f32)> = ecs
+        .query::<(&crate::entity::Position, &crate::combat::Health)>()
+        .iter()
+        .filter_map(|(e, (p, _h))| {
+            let ep = (p.0.x, p.0.y, p.0.z);
+            let los = line_of_sight_factor(c, ep, |x, y, z| registry.is_solid(world.get_block(x, y, z)));
+            let d = blast_damage(c, ep, BLAST_RADIUS, KEG_BLAST_DAMAGE, los);
+            (d > 0.0).then_some((e, d))
+        })
+        .collect();
+    for (e, d) in mob_hits {
+        if let Ok(mut h) = ecs.get::<&mut crate::combat::Health>(e) {
+            h.take_damage(d);
+        }
+    }
+}
+
 /// Apply computed blast hits `(player_index, raw_damage)` to player slots.
 /// Returns the indices whose hit actually LANDED (armour-gated, i-frame-gated)
 /// so the caller can run the on-owner-damage follow-ups (parrot dismount).

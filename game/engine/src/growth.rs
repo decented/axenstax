@@ -462,9 +462,51 @@ pub fn advance_saplings(
     dirty
 }
 
+/// What one [`tick_growth`] pass changed.
+#[derive(Debug, Default)]
+pub struct GrowthTick {
+    /// Crops that advanced a stage (already applied to the world).
+    pub crop_changes: Vec<BlockChange>,
+    /// Every cell a growing sapling touched (the sapling cell + its new tree).
+    /// Raw cells, not `BlockChange`s: the caller reads the settled block (and
+    /// its meta) off the world when it broadcasts.
+    pub grown_cells: Vec<(i32, i32, i32)>,
+}
+
+/// The farming growth pass (Spec 16 crops + 2026-07-04 saplings), shared by the
+/// client loop and the dedicated server (T1-3, 2026-10-05) so neither forks the
+/// cadence or the scan. Hoists the [`crops_should_advance`] gate BEFORE the
+/// full-loaded-volume scans: `collect_crop_positions` / `collect_sapling_positions`
+/// are O(loaded chunks), but growth only fires on ~1 tick in 40 (engine audit
+/// 2026-06-04, B). Deterministic: crops advance on the tick cadence + light gate,
+/// saplings on a position+tick hash — no RNG state to share.
+pub fn tick_growth(world: &mut World, tick: u64, raining: bool, seed: u32) -> GrowthTick {
+    if !crops_should_advance(tick) {
+        return GrowthTick::default();
+    }
+    let crop_positions = collect_crop_positions(world);
+    let crop_changes = advance_crops(world, tick, raining, crop_positions);
+    let saplings = collect_sapling_positions(world);
+    let grown_cells = advance_saplings(world, tick, seed, saplings);
+    GrowthTick { crop_changes, grown_cells }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_growth_is_inert_off_cadence_and_grows_on_it() {
+        let mut world = World::new();
+        world.set_block(0, 70, 0, WHEAT_STAGE_0);
+        world.set_sky_light_at(0, 70, 0, 15);
+        let off = tick_growth(&mut world, CROP_GROWTH_TICKS_PER_STAGE - 1, false, 7);
+        assert!(off.crop_changes.is_empty() && off.grown_cells.is_empty());
+        assert_eq!(world.get_block(0, 70, 0), WHEAT_STAGE_0);
+        let on = tick_growth(&mut world, CROP_GROWTH_TICKS_PER_STAGE, false, 7);
+        assert_eq!(on.crop_changes.len(), 1, "the lit wheat advances on the base cadence");
+        assert_eq!(world.get_block(0, 70, 0), WHEAT_STAGE_1);
+    }
 
     #[test]
     fn sapling_grows_into_its_species_tree() {

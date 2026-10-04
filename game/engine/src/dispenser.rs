@@ -14,8 +14,10 @@
 //! - The inventory is an embedded 9-slot [`ChestData`], so the chest UI
 //!   helpers (withdraw/deposit/sort) and the hopper feed work unchanged.
 //! - `tick_dispensers` is pure decision-making: it pops items and returns
-//!   eject orders; the caller (game loop) spawns the arrow / item entities,
-//!   because entity spawning needs the ECS + audio it owns.
+//!   eject orders; [`realise_order`] then applies each one to the world + ECS
+//!   (pour, bonemeal, ignite, shoot, toss). Both are shared by the client loop
+//!   and the dedicated server (`block_machines.rs`, T1-3); the client plays the
+//!   returned effect's particles + audio.
 
 use serde::{Deserialize, Serialize};
 
@@ -179,6 +181,177 @@ pub fn tick_dispensers(world: &mut World) -> Vec<EjectOrder> {
         orders.push(EjectOrder { pos, facing, stack, kind });
     }
     orders
+}
+
+/// What realising one [`EjectOrder`] did — the world/ECS work is already done;
+/// this tells the caller which presentation (remesh, particles, audio) to play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EjectEffect {
+    /// An arrow projectile was shot.
+    Shot,
+    /// A liquid source was poured into `cell` (the empty Bucket went back).
+    Poured { cell: (i32, i32, i32) },
+    /// The crop in `cell` advanced; `seed` is the stage roll's seed (reused for
+    /// the green poof so it is deterministic too).
+    Bonemealed { cell: (i32, i32, i32), seed: u64 },
+    /// A fire was lit in `cell` (lighting already updated).
+    Ignited { cell: (i32, i32, i32) },
+    /// The item was tossed out as an item entity.
+    Tossed,
+    /// The use failed (blocked pour, nothing to bonemeal, igniter didn't
+    /// catch): the stack went back into the dispenser, or out as an item if it
+    /// was full. Nothing is ever destroyed.
+    Refused,
+}
+
+/// The result of [`realise_order`].
+#[derive(Clone, Debug)]
+pub struct EjectOutcome {
+    pub effect: EjectEffect,
+    /// Where the ejected thing leaves the block (the muzzle).
+    pub spawn: glam::Vec3,
+    /// The facing direction as a unit-ish vector.
+    pub dir: glam::Vec3,
+    /// Block changes to broadcast (built with the world's meta byte).
+    pub changes: Vec<crate::protocol::BlockChange>,
+}
+
+/// Put `stack` back into the dispenser at `pos`; if it vanished or is full,
+/// toss it out of the facing side instead. Items are never destroyed.
+pub fn return_or_toss(
+    world: &mut World,
+    ecs: &mut hecs::World,
+    pos: (i32, i32, i32),
+    spawn: glam::Vec3,
+    dir: glam::Vec3,
+    stack: ItemStack,
+) {
+    if !return_stack(world, pos, stack.clone()) {
+        crate::entity::spawn_thrown_item(
+            ecs,
+            spawn,
+            dir * TOSS_SPEED + glam::Vec3::new(0.0, TOSS_LIFT, 0.0),
+            stack,
+            u8::MAX,
+        );
+    }
+}
+
+/// Realise one eject order against the world + ECS (Campaign D, 2026-07-05;
+/// shared 2026-10-05, T1-3): shoot the arrow, pour the bucket, bonemeal the
+/// crop, light the fire or toss the item. This is the ONE implementation — the
+/// client loop and the dedicated server (`block_machines.rs`) both call it; the
+/// client then plays the returned [`EjectEffect`]'s particles/audio/remesh.
+pub fn realise_order(
+    ctx: &mut crate::block_machines::MachineCtx<'_>,
+    order: EjectOrder,
+) -> EjectOutcome {
+    let (dx, dy, dz) = order.facing.offset();
+    let spawn = glam::Vec3::new(
+        order.pos.0 as f32 + 0.5 + dx as f32 * 0.6,
+        order.pos.1 as f32 + 0.4 + dy as f32 * 0.6,
+        order.pos.2 as f32 + 0.5 + dz as f32 * 0.6,
+    );
+    let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
+    let (tx, ty, tz) = (order.pos.0 + dx, order.pos.1 + dy, order.pos.2 + dz);
+    let mut changes = Vec::new();
+    let effect = match order.kind {
+        EjectKind::Arrow => {
+            crate::entity::spawn_arrow(
+                ctx.ecs,
+                spawn,
+                dir * crate::entity::ARROW_INITIAL_SPEED,
+                crate::entity::ARROW_DAMAGE,
+                None,
+            );
+            EjectEffect::Shot
+        }
+        EjectKind::PlaceLiquid(liquid) => {
+            // Mirror the right-click empty path: AIR-only, the source is
+            // registered with its liquid sim, the empty Bucket is retained.
+            // Blocked → the bucket is not used.
+            if ctx.world.get_block(tx, ty, tz) == block::AIR {
+                ctx.world.set_block(tx, ty, tz, liquid);
+                if liquid == block::WATER {
+                    ctx.water.add_source(tx, ty, tz);
+                } else {
+                    ctx.lava.add_source(tx, ty, tz);
+                }
+                changes.push(crate::game_loop::broadcast_change(ctx.world, tx, ty, tz, liquid));
+                let empty = ItemStack::new_material(MaterialId::Bucket, 1);
+                return_or_toss(ctx.world, ctx.ecs, order.pos, spawn, dir, empty);
+                EjectEffect::Poured { cell: (tx, ty, tz) }
+            } else {
+                return_or_toss(ctx.world, ctx.ecs, order.pos, spawn, dir, order.stack);
+                EjectEffect::Refused
+            }
+        }
+        EjectKind::Bonemeal => {
+            // Same +1–2 stage rule as the right-click path. The 4-tick
+            // dispenser cadence keeps tick parity constant, so the seed gets a
+            // murmur avalanche (the water-wheel-wave lesson) instead of the
+            // hand path's raw xor.
+            let target_blk = ctx.world.get_block(tx, ty, tz);
+            let mut seed = ctx.tick ^ ((tx as u64) << 32) ^ ((ty as u64) << 16) ^ (tz as u64);
+            seed ^= seed >> 33;
+            seed = seed.wrapping_mul(0xff51_afd7_ed55_8ccd);
+            seed ^= seed >> 33;
+            if let Some(next) = crate::growth::bonemeal_advance(target_blk, seed) {
+                ctx.world.set_block(tx, ty, tz, next);
+                changes.push(crate::game_loop::broadcast_change(ctx.world, tx, ty, tz, next));
+                // Consumed on success (already taken from the slot).
+                EjectEffect::Bonemealed { cell: (tx, ty, tz), seed }
+            } else {
+                // Not a crop / already mature — no waste.
+                return_or_toss(ctx.world, ctx.ecs, order.pos, spawn, dir, order.stack);
+                EjectEffect::Refused
+            }
+        }
+        EjectKind::Ignite => {
+            // Through the same FireSystem seam as the hand path (target-is-AIR
+            // + flammable-neighbour rules enforced inside ignite).
+            let lit = ctx.fire.ignite(ctx.world, tx, ty, tz, ctx.tick);
+            if lit {
+                crate::lighting::update_for_block_change(
+                    ctx.world,
+                    (tx, ty, tz),
+                    block::AIR,
+                    block::FIRE,
+                    ctx.registry,
+                );
+                changes.push(crate::game_loop::broadcast_change(
+                    ctx.world,
+                    tx,
+                    ty,
+                    tz,
+                    block::FIRE,
+                ));
+            }
+            // The igniter goes back. Flint & steel pays the same durability
+            // cost as a hand ignition (and breaks at 0); the Magnesium
+            // Firestarter is reusable, matching hand use.
+            let mut back = order.stack;
+            if lit && let Item::Tool(t) = &mut back.item {
+                t.durability = t.durability.saturating_sub(1);
+            }
+            let broken = matches!(&back.item, Item::Tool(t) if t.is_broken());
+            if !broken {
+                return_or_toss(ctx.world, ctx.ecs, order.pos, spawn, dir, back);
+            }
+            if lit { EjectEffect::Ignited { cell: (tx, ty, tz) } } else { EjectEffect::Refused }
+        }
+        EjectKind::Toss => {
+            crate::entity::spawn_thrown_item(
+                ctx.ecs,
+                spawn,
+                dir * TOSS_SPEED + glam::Vec3::new(0.0, TOSS_LIFT, 0.0),
+                order.stack,
+                u8::MAX,
+            );
+            EjectEffect::Tossed
+        }
+    };
+    EjectOutcome { effect, spawn, dir, changes }
 }
 
 /// Remove the block-entity at `pos` and return its contents for spilling

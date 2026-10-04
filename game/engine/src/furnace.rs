@@ -652,6 +652,54 @@ pub fn cleanup_furnace(world: &mut crate::world::World, x: i32, y: i32, z: i32) 
     spill
 }
 
+/// What one [`tick_all`] sweep did, for the caller's side effects.
+#[derive(Debug, Default)]
+pub struct FurnaceSweep {
+    /// FURNACE ↔ FURNACE_LIT flips, already applied to the world and built with
+    /// the world's meta byte — queue them for broadcast as-is.
+    pub changes: Vec<crate::protocol::BlockChange>,
+    /// Furnaces that finished a smelt this tick (audio / smoke / the
+    /// Proof-of-Play trickle are the client's — they need `PlayerSlot`).
+    pub completed: Vec<(i32, i32, i32)>,
+}
+
+/// Advance every furnace in the world one smelt tick (Spec 20 Phase 4) and flip
+/// its block between FURNACE and FURNACE_LIT when the lit state changes. Shared
+/// by the client loop and the dedicated server (T1-3, 2026-10-05) — the ONE
+/// sweep, so a hosted furnace and a single-player furnace smelt identically.
+///
+/// The flip only fires when the world's block actually disagrees with the
+/// desired state AND is still a furnace (defence against a `/setblock` that
+/// swapped the block out from under the entity — trust the next tick to
+/// converge).
+pub fn tick_all(world: &mut crate::world::World) -> FurnaceSweep {
+    let mut sweep = FurnaceSweep::default();
+    let positions: Vec<(i32, i32, i32)> = world.iter_furnaces().map(|(p, _)| p).collect();
+    for pos in positions {
+        let current_block = world.get_block(pos.0, pos.1, pos.2);
+        let outcome = match world.furnace_at_mut(pos) {
+            Some(data) => tick_one(data),
+            None => continue,
+        };
+        if let Some(lit) = outcome.lit_changed {
+            let want_block = if lit { crate::block::FURNACE_LIT } else { crate::block::FURNACE };
+            if current_block != want_block
+                && (current_block == crate::block::FURNACE
+                    || current_block == crate::block::FURNACE_LIT)
+            {
+                world.set_block(pos.0, pos.1, pos.2, want_block);
+                sweep.changes.push(crate::game_loop::broadcast_change(
+                    world, pos.0, pos.1, pos.2, want_block,
+                ));
+            }
+        }
+        if outcome.recipe_completed.is_some() {
+            sweep.completed.push(pos);
+        }
+    }
+    sweep
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

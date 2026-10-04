@@ -371,63 +371,29 @@ impl super::GameState {
         ) {
             return;
         }
-        let outcome = crate::explosion::resolve_blast(
+        // The world + ECS half — blast, fluid bookkeeping, spills, relight,
+        // power nudge, chained kegs, mob damage — is shared with the dedicated
+        // server (`explosion::detonate_keg_core`, T1-3). This side keeps the
+        // per-player and presentation work.
+        let blast = crate::explosion::detonate_keg_core(
             &mut self.world,
-            pos,
-            crate::explosion::BLAST_RADIUS,
-            crate::explosion::KEG_BLAST_POWER,
-        );
-        // Audit 2026-09-27 — blasted fluid cells go through the same source
-        // bookkeeping as a pickaxe/bucket removal (no phantom sources; the
-        // crater's neighbours wake and flow in).
-        crate::explosion::notify_fluids_of_blast(
+            &mut self.ecs,
             &mut self.water,
             &mut self.lava,
-            &self.world,
-            &outcome.destroyed,
+            &self.registry,
+            pos,
         );
-        // Blasted containers spill their contents as item entities.
-        for (k, (p, stack)) in outcome.spilled.iter().cloned().enumerate() {
-            crate::entity::spawn_item(
-                &mut self.ecs,
-                glam::Vec3::new(p.0 as f32 + 0.5, p.1 as f32 + 0.5, p.2 as f32 + 0.5),
-                stack,
-                (k as u32).wrapping_mul(7919) ^ 0xB1A5,
-            );
-        }
         for p in self.players.iter_mut() {
-            if p.open_chest.is_some_and(|c| outcome.destroyed.iter().any(|&(d, _)| d == c)) {
+            if p.open_chest.is_some_and(|c| blast.destroyed.iter().any(|&(d, _)| d == c)) {
                 p.open_chest = None;
             }
         }
-        // Relight + re-mesh every cleared cell; broadcast the change.
-        for &(p, old) in &outcome.destroyed {
-            crate::lighting::update_for_block_change(
-                &mut self.world,
-                p,
-                old,
-                crate::block::AIR,
-                &self.registry,
-            );
-            // Spec 48 §2.3 — a blast that clears power blocks must re-evaluate
-            // the network, same as a manual break. `resolve_blast` already
-            // removed each cell's block-entity (incl. a destroyed device's
-            // PowerDevice); this nudges the neighbours so cut cables settle.
-            self.world.notify_neighbours(p);
+        // Re-mesh every cleared cell (already relit); broadcast the change.
+        for &(p, _) in &blast.destroyed {
             self.rebuild_chunks_for_lighting(p.0, p.1, p.2);
-            #[cfg(not(target_arch = "wasm32"))]
-            self.pending_block_changes.push(crate::game_loop::broadcast_change(
-                &self.world,
-                p.0,
-                p.1,
-                p.2,
-                crate::block::AIR,
-            ));
         }
-        // Wake the chain-ignited kegs' power devices so their (short) fuses tick.
-        for &p in &outcome.chained {
-            self.world.mark_dirty(p);
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pending_block_changes.extend(blast.changes);
         self.apply_blast_damage(pos);
         // Particles (2026-07-05): the debris + smoke pass this module's doc
         // deferred "until the engine grows a particle framework" — it has one.
@@ -440,8 +406,10 @@ impl super::GameState {
         self.audio.play_explosion();
     }
 
-    /// Spec 49 — apply blast damage to players + mobs around a detonation centre,
+    /// Spec 49 — apply blast damage to the players around a detonation centre,
     /// with distance falloff + line-of-sight reduction (the Spec 05 §6.3 hook).
+    /// Mobs are damaged inside `explosion::detonate_keg_core` (shared with the
+    /// dedicated server); players stay here because armour lives on `PlayerSlot`.
     /// Computes against immutable borrows first, then applies, to keep the borrow
     /// checker happy.
     fn apply_blast_damage(&mut self, center: (i32, i32, i32)) {
@@ -476,26 +444,6 @@ impl super::GameState {
         // follow-up (perched parrots dismount).
         for i in crate::explosion::apply_player_blast_damage(&mut self.players, &player_hits) {
             self.dismount_parrots_on_owner_damage(i);
-        }
-
-        // Mobs (ECS).
-        let mob_hits: Vec<(hecs::Entity, f32)> = self
-            .ecs
-            .query::<(&crate::entity::Position, &crate::combat::Health)>()
-            .iter()
-            .filter_map(|(e, (p, _h))| {
-                let ep = (p.0.x, p.0.y, p.0.z);
-                let los = crate::explosion::line_of_sight_factor(c, ep, |x, y, z| {
-                    self.registry.is_solid(self.world.get_block(x, y, z))
-                });
-                let d = crate::explosion::blast_damage(c, ep, radius, max_dmg, los);
-                (d > 0.0).then_some((e, d))
-            })
-            .collect();
-        for (e, d) in mob_hits {
-            if let Ok(mut h) = self.ecs.get::<&mut crate::combat::Health>(e) {
-                h.take_damage(d);
-            }
         }
     }
 

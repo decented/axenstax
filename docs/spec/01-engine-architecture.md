@@ -641,6 +641,59 @@ pub fn server_loop(server: &mut Server) {
 }
 ```
 
+### 4.1.1 As-built: who ticks the block machines (T1-3, 2026-10-05)
+
+`GameServer::tick` (`server.rs`) runs world time, weather, mob spawning, falling
+blocks, water / lava / fire, **leaf decay**, player physics, mob AI, entity
+physics, item pickup, power, carts and combat on every hosted and dedicated
+world. Leaf decay's result is *applied*: each decayed cell is queued as a
+`BlockChange` and its sapling drops spawn (it used to be computed and thrown
+away, so joiners kept floating leaves).
+
+The **block machines** — hives (honey), crops + saplings, dispensers / droppers,
+pistons, furnaces, composters, Blasting Keg fuses (+ detonation) and hoppers —
+are ticked by exactly ONE side per world, decided by
+`GameServer::simulates_block_machines`:
+
+| World | Who ticks the machines | `simulates_block_machines` |
+|---|---|---|
+| Single-player (client sim) | the client loop (`game_loop.rs`) | n/a (no `GameServer`) |
+| LAN / online **host** (≥ 1 local player) | the host's client loop; results reach joiners via the host's `pending_block_changes`, and `HostedServer::mirror_host_world_state` copies the host's machine block-entities into the server every tick | `false` |
+| **Dedicated server** (`HostedServer::start` with 0 local players — `server_main`, the WebSocket dedicated path) | `GameServer::tick` → `block_machines.rs` | `true` |
+
+Rules:
+
+- **Never double-tick.** `HostedServer::start_inner` sets the flag iff
+  `num_local_players == 0` (0 local players ⇔ no host client). The mirror
+  debug-asserts the flag is off — a server ticking its own machines has no host
+  client to mirror, and mirroring would overwrite its sim. `TestHost` leaves the
+  flag off (its `tick_furnaces` / `tick_pistons` stand in for the host client).
+- **One implementation, two callers.** Each machine's logic is a pure free
+  function both sides call: `bee_hive::accumulate_honey`, `growth::tick_growth`,
+  `dispenser::tick_dispensers` + `dispenser::realise_order` (via
+  `block_machines::MachineCtx`), `piston::tick_pistons`, `furnace::tick_all`,
+  `composter::tick_all`, `power::tick_keg_fuses` + `explosion::detonate_keg_core`,
+  `hopper::tick_hoppers`. The client adds only presentation (remesh, particles,
+  audio) and per-`PlayerSlot` work (player blast damage, the furnace
+  Proof-of-Play trickle).
+- **Cadence matches the client.** Everything except hoppers runs inside the
+  4-tick (5 Hz) falling-block block, in the client's order (hives → growth →
+  dispensers → pistons → furnaces → composters → kegs); hoppers gate on
+  `tick_counter % HOPPER_INTERVAL_TICKS` every tick, outside that block.
+- **Broadcast.** Server machine changes go into `GameServer::pending_block_changes`
+  (built with `game_loop::broadcast_change`, so the meta byte rides), which
+  `HostedServer` drains into every `StateUpdatePacket` — the same road falling
+  blocks, fluids and power take.
+- **Leaf-decay feed.** On a dedicated server a joiner's edit that removes a log
+  calls `leaf_decay.on_log_broken` (in `hosted_server.rs`'s block-edit apply);
+  flag-gated, because a host's client owns decay of its own breaks.
+- **Persistence.** No save-format change: furnaces, composters, hives,
+  dispensers, chests and power devices (keg fuses) are already in `WorldSave`.
+- **Still host-client only:** campfires, drying racks, animated construction
+  anchors, villager workstation claims. Server-side keg blasts damage mobs but
+  not players (the server applies no player damage yet). Known gap: on a LAN
+  host, a log broken by a *joiner* feeds nobody's leaf decay.
+
 ### 4.2 Client Frame Loop
 
 The client render loop is **decoupled from the tick rate** and runs as fast as the display allows (vsync or uncapped). The client maintains its own simulation state that is a prediction ahead of the last confirmed server state.

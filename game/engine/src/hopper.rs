@@ -6,8 +6,10 @@
 //! chest into another or chain hoppers into a sorter. The hopper holds nothing
 //! itself, so there's no block-entity and no save-format change.
 //!
-//! The slot helpers are pure + unit-tested; `game_loop` runs the scan on the
-//! interval cadence and applies the moves with sequential chest borrows.
+//! The slot helpers are pure + unit-tested; [`tick_hoppers`] runs the scan on
+//! the interval cadence and applies the moves with sequential chest borrows. It
+//! is called by the client loop (single-player / LAN host) and, on a dedicated
+//! server, by `GameServer::tick` (T1-3) — one implementation, two callers.
 
 use crate::chest::ChestData;
 use crate::item::{Item, ItemStack};
@@ -110,6 +112,36 @@ pub fn collect_hopper_transfers(world: &World) -> Vec<((i32, i32, i32), (i32, i3
         }
     }
     out
+}
+
+/// One hopper pass (P7; shared 2026-10-05, T1-3): on the
+/// [`HOPPER_INTERVAL_TICKS`] cadence, move ONE item from the container above
+/// each hopper into the container below it. Sequential borrows (read source,
+/// compute dest, then put + take) avoid aliasing the world. Gated on `tick`
+/// internally, so it is safe to call every tick.
+///
+/// The ONE implementation: the client loop and the dedicated server
+/// (`block_machines.rs`) both call this. Container contents are block-entity
+/// state, not blocks, so a transfer queues no `BlockChange`.
+pub fn tick_hoppers(world: &mut World, tick: u64) {
+    if !tick.is_multiple_of(HOPPER_INTERVAL_TICKS) {
+        return;
+    }
+    for (above, below) in collect_hopper_transfers(world) {
+        // Chest OR dispenser/dropper on either end (container_at).
+        let Some((src_idx, item)) = container_at(world, above).and_then(first_item) else {
+            continue;
+        };
+        let Some(dst_idx) = container_at(world, below).and_then(|c| dest_slot(c, &item)) else {
+            continue; // destination full for this item
+        };
+        if let Some(c) = container_at_mut(world, below) {
+            put_one(c, dst_idx, item);
+        }
+        if let Some(c) = container_at_mut(world, above) {
+            take_one(c, src_idx);
+        }
+    }
 }
 
 #[cfg(test)]
