@@ -29,7 +29,7 @@ winit = "0.30"
 glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 ahash = "0.8"
 image = "0.25"
 noise = "0.9"
@@ -67,7 +67,8 @@ tar = "0.4"
 # function and this belongs up here rather than under either target-specific
 # section. Previously WASM-only (world-save encryption, Phase C); moved here
 # so native builds get it too.
-chacha20poly1305 = "0.10"
+# default-features off: 0.11's `getrandom` default drags getrandom 0.4 into the wasm build (no wasm_js); we only decrypt.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 
 # Native-only dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

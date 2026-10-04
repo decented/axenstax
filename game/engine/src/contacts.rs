@@ -121,10 +121,11 @@ pub fn parse_kenspeckle_export(
         return Err(ContactsParseError::TooShort);
     }
     let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key));
-    let nonce = XNonce::from_slice(nonce_bytes);
+    let cipher = XChaCha20Poly1305::new(key.into());
+    // `nonce_bytes` is exactly NONCE_LEN (24) by the `split_at` above.
+    let nonce = XNonce::try_from(nonce_bytes).map_err(|_| ContactsParseError::TooShort)?;
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| ContactsParseError::Decrypt)?;
 
     let entries: Vec<KindredEntry> =
