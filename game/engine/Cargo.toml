@@ -88,7 +88,7 @@ quinn = "0.11"
 # the Docker image, so the engine never needs a TLS stack here. `futures-util`
 # gives us `StreamExt`/`SinkExt` to split the duplex socket into reader/writer
 # tasks. Native-only: browsers use `web_sys::WebSocket` (see ws_transport_web.rs).
-tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # SIGINT/SIGTERM handler so the dedicated server saves the world on graceful
 # shutdown (`docker stop` sends SIGTERM). Native-only, dependency-light.
