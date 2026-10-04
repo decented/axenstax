@@ -12,16 +12,16 @@
 
 {% for sec in sections %}
 <h2>{{ sec.title }}</h2>
-<p style="color: #9aa3b8; margin-top: -0.4rem;">{{ sec.subtitle }}</p>
+<p style="color: var(--stone-muted); margin-top: -0.4rem;">{{ sec.subtitle }}</p>
 <div class="features">
     <a href="/docs/{{ sec.slug }}" class="feature-card section-link">
         <h3>Walk through it &rarr;</h3>
-        <p style="color: #9aa3b8; font-size: 0.9rem; margin-top: 0.4rem;">Every step, in order, from your very first block.</p>
+        <p style="color: var(--stone-muted); font-size: 0.9rem; margin-top: 0.4rem;">Every step, in order, from your very first block.</p>
     </a>
 </div>
 {% endfor %}
 
-<p style="margin-top: 2rem; color: #5b6075; font-size: 0.85rem;">
+<p style="margin-top: 2rem; color: var(--stone-dim); font-size: 0.85rem;">
     Already know your way around and just need to look something up? That's what the
     <strong>wiki</strong> is for. This site is for your first hours in the world.
 </p>

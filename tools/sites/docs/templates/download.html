@@ -4,44 +4,44 @@
 <div class="doc-container">
     <h1>The native build</h1>
 
-    <div style="background: #1a1f2e; border: 1px solid #2a3654; border-radius: 8px; padding: 16px 20px; margin: 24px 0;">
-        <p style="margin: 0 0 0.4rem; color: #d4a044; font-weight: 700;">The browser is the easy path.</p>
-        <p style="margin: 0; color: #c5c8d4;">Per <a href="/docs/tech/architecture/ADR-003-pwa-first-for-alpha.md">ADR-003</a> the browser build is a no-install, anonymous local "taster" — no sign-in, no accounts, just open it and play. <a href="{{ game_url }}">Open the game</a> in <strong>Chrome 121+</strong>, <strong>Edge 121+</strong>, or <strong>Brave</strong> with WebGPU enabled.</p>
-        <p style="margin: 0.6rem 0 0; color: #6f7488; font-size: 0.88rem;">The free <strong>desktop app</strong> is where the rest lives: optional sign-in, playing with friends (LAN, or over the internet with a friend's contact/invite — no dedicated server needed), split-screen, world chat, and the Director camera. The Linux <strong>AppImage</strong> below is the main way to get it — every download's checksum is shown so you can verify it, and once installed it keeps itself up to date on its own (it checks both this site and a backup Nostr release feed, so it still finds updates if one is down). Windows and macOS aren't published as installers yet — build from source below, or open the browser version above in the meantime. The engine's source is public at <a href="https://github.com/decented/axenstax" target="_blank" rel="noopener">github.com/decented/axenstax</a>; these build steps assume you have a checkout of it.</p>
+    <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; margin: 24px 0;">
+        <p style="margin: 0 0 0.4rem; color: var(--copper); font-weight: 700;">The browser is the easy path.</p>
+        <p style="margin: 0; color: var(--stone);">Per <a href="/docs/tech/architecture/ADR-003-pwa-first-for-alpha.md">ADR-003</a> the browser build is a no-install, anonymous local "taster" — no sign-in, no accounts, just open it and play. <a href="{{ game_url }}">Open the game</a> in <strong>Chrome 121+</strong>, <strong>Edge 121+</strong>, or <strong>Brave</strong> with WebGPU enabled.</p>
+        <p style="margin: 0.6rem 0 0; color: var(--stone-dim); font-size: 0.88rem;">The free <strong>desktop app</strong> is where the rest lives: optional sign-in, playing with friends (LAN, or over the internet with a friend's contact/invite — no dedicated server needed), split-screen, world chat, and the Director camera. The Linux <strong>AppImage</strong> below is the main way to get it — every download's checksum is shown so you can verify it, and once installed it keeps itself up to date on its own (it checks both this site and a backup Nostr release feed, so it still finds updates if one is down). Windows and macOS aren't published as installers yet — build from source below, or open the browser version above in the meantime. The engine's source is public at <a href="https://github.com/decented/axenstax" target="_blank" rel="noopener">github.com/decented/axenstax</a>; these build steps assume you have a checkout of it.</p>
     </div>
 
     {% if installers %}
-    {% set sev_colour = {'clean': '#2ecc71', 'warn': '#d4a044', 'block': '#e06c5a'} %}
+    {% set sev_colour = {'clean': 'var(--forest-bright)', 'warn': 'var(--copper)', 'block': 'var(--danger)'} %}
     {% set os_name = {'linux': 'Linux', 'windows': 'Windows', 'macos': 'macOS', 'android': 'Android'} %}
     {% set ordered = (installers | selectattr('os', 'equalto', detected_os) | list) + (installers | rejectattr('os', 'equalto', detected_os) | list) %}
     <h2>Download an installer</h2>
     {% if detected_os %}
-    <p style="color:#c5c8d4;">Looks like you're on <strong>{{ os_name[detected_os] }}</strong> — the recommended download is highlighted. Every platform is listed; grab any of them.</p>
+    <p style="color:var(--stone);">Looks like you're on <strong>{{ os_name[detected_os] }}</strong> — the recommended download is highlighted. Every platform is listed; grab any of them.</p>
     {% else %}
-    <p style="color:#c5c8d4;">Pick the installer for your platform. (Unsigned alpha builds — see "What the warnings mean" below.)</p>
+    <p style="color:var(--stone);">Pick the installer for your platform. (Unsigned alpha builds — see "What the warnings mean" below.)</p>
     {% endif %}
 
     {% for inst in ordered %}
     {% set recommended = inst.os == detected_os %}
-    <div style="background:{% if recommended %}#15241c{% else %}#161b28{% endif %}; border:{% if recommended %}2px solid #2ecc71{% else %}1px solid #2a3654{% endif %}; border-radius:8px; padding:16px 20px; margin:14px 0;">
+    <div style="background:{% if recommended %}var(--pine){% else %}var(--surface){% endif %}; border:{% if recommended %}2px solid var(--forest){% else %}1px solid var(--line){% endif %}; border-radius:8px; padding:16px 20px; margin:14px 0;">
         <div style="display:flex; flex-wrap:wrap; align-items:baseline; gap:10px;">
-            <span style="font-weight:700; color:#e7e9f0;">{{ inst.os_label }} — {{ inst.format }}</span>
-            {% if recommended %}<span style="background:#2ecc71; color:#000; font-size:0.72rem; font-weight:700; padding:2px 8px; border-radius:10px;">RECOMMENDED FOR YOUR SYSTEM</span>{% endif %}
+            <span style="font-weight:700; color:var(--stone);">{{ inst.os_label }} — {{ inst.format }}</span>
+            {% if recommended %}<span style="background:var(--forest); color:var(--stone); font-size:0.72rem; font-weight:700; padding:2px 8px; border-radius:10px;">RECOMMENDED FOR YOUR SYSTEM</span>{% endif %}
         </div>
         <p style="margin:0.5rem 0; color:{{ sev_colour[inst.severity] }}; font-size:0.9rem;">{{ inst.note }}</p>
         <p style="margin:0.5rem 0;">
-            <a href="/download/installer/{{ inst.filename }}" style="display:inline-block; background:#2ecc71; color:#000; padding:10px 20px; border-radius:6px; text-decoration:none; font-weight:bold;">Download</a>
-            <span style="color:#9aa0b4; font-size:0.85rem; margin-left:8px;">{{ inst.filename }} · {{ inst.size }}</span>
+            <a href="/download/installer/{{ inst.filename }}" style="display:inline-block; background:var(--copper); color:var(--frontier); padding:10px 20px; border-radius:6px; font-family:var(--font-display); font-stretch:62.5%; font-size:1.2rem; letter-spacing:0.06em; text-transform:uppercase; text-decoration:none; font-weight:bold;">Download</a>
+            <span style="color:var(--stone-muted); font-size:0.85rem; margin-left:8px;">{{ inst.filename }} · {{ inst.size }}</span>
         </p>
         <details style="margin-top:4px;">
-            <summary style="color:#6f7488; font-size:0.82rem; cursor:pointer;">Verify checksum (sha256)</summary>
-            <code style="display:block; word-break:break-all; color:#9aa0b4; font-size:0.8rem; margin-top:6px;">{{ inst.sha256 }}</code>
+            <summary style="color:var(--stone-dim); font-size:0.82rem; cursor:pointer;">Verify checksum (sha256)</summary>
+            <code style="display:block; word-break:break-all; color:var(--stone-muted); font-size:0.8rem; margin-top:6px;">{{ inst.sha256 }}</code>
         </details>
     </div>
     {% endfor %}
 
-    <div style="background:#161b28; border:1px solid #2a3654; border-radius:8px; padding:14px 20px; margin:18px 0; color:#c5c8d4; font-size:0.9rem;">
-        <p style="margin:0 0 0.4rem; font-weight:700; color:#d4a044;">What the warnings mean (these are unsigned alpha builds)</p>
+    <div style="background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 20px; margin:18px 0; color:var(--stone); font-size:0.9rem;">
+        <p style="margin:0 0 0.4rem; font-weight:700; color:var(--copper);">What the warnings mean (these are unsigned alpha builds)</p>
         <ul style="margin:0; padding-left:1.2rem;">
             <li><strong>🐧 Linux — clean.</strong> No signing gate. <code>chmod +x</code> the AppImage and run, or <code>sudo apt install</code> the <code>.deb</code>.</li>
             <li><strong>🪟 Windows — a warning, not a block.</strong> SmartScreen shows "Windows protected your PC" → click <strong>More info → Run anyway</strong>. It installs fine; the warning goes away once we code-sign.</li>
@@ -51,17 +51,17 @@
             {% endif %}
         </ul>
         {% if installers | selectattr('os', 'equalto', 'android') | list %}
-        <p style="margin:0.6rem 0 0; font-size:0.86rem; color:#9aa0b4;">On a <strong>parent-managed tablet</strong>, installing apps from outside the store may be switched off by the device's management settings. That's a deliberate safety setting: installing Axe'n'Stax needs the parent to allow it from whichever app manages the device.</p>
+        <p style="margin:0.6rem 0 0; font-size:0.86rem; color:var(--stone-muted);">On a <strong>parent-managed tablet</strong>, installing apps from outside the store may be switched off by the device's management settings. That's a deliberate safety setting: installing Axe'n'Stax needs the parent to allow it from whichever app manages the device.</p>
         {% endif %}
     </div>
     {% endif %}
 
     {% if binary_available %}
-    <div style="background: #1a2a1a; border: 2px solid #2ecc71; border-radius: 8px; padding: 20px 24px; margin: 24px 0;">
-        <h2 style="color: #2ecc71; margin-top: 0;">Raw Linux x86-64 binary (advanced)</h2>
+    <div style="background: var(--pine); border: 2px solid var(--forest); border-radius: 8px; padding: 20px 24px; margin: 24px 0;">
+        <h2 style="color: var(--forest-bright); margin-top: 0;">Raw Linux x86-64 binary (advanced)</h2>
         <p style="margin:0 0 0.6rem;">A bare convenience binary ({{ binary_size }}) — no installer wrapper. Prefer the AppImage above. Otherwise, build from source below.</p>
-        <p><a href="/download/axenstax-engine" style="display: inline-block; background: #2ecc71; color: #000; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold;">Download axenstax-engine</a></p>
-        <pre style="background: #111; padding: 12px; border-radius: 4px; overflow-x: auto;">chmod +x axenstax-engine
+        <p><a href="/download/axenstax-engine" style="display: inline-block; background: var(--copper); color: var(--frontier); padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold;">Download axenstax-engine</a></p>
+        <pre style="background: var(--frontier); border: 1px solid var(--line); padding: 12px; border-radius: 4px; overflow-x: auto;">chmod +x axenstax-engine
 ./axenstax-engine</pre>
     </div>
     {% endif %}
@@ -70,14 +70,14 @@
     <p>The same Rust engine compiles to a native binary on all three desktop platforms. You'll need the
     <strong>Rust toolchain</strong> (<a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a>)
     and the engine source. Then, in every case:</p>
-    <pre style="background: #111; padding: 12px; border-radius: 4px; overflow-x: auto;">cd game/engine
+    <pre style="background: var(--frontier); border: 1px solid var(--line); padding: 12px; border-radius: 4px; overflow-x: auto;">cd game/engine
 cargo build --release</pre>
     <p>The binary lands at <code>target/release/axenstax-engine</code>
     (<code>axenstax-engine.exe</code> on Windows). Per-platform setup:</p>
 
     <h3>🐧 Linux</h3>
     <p>Install the build + runtime libraries first:</p>
-    <pre style="background: #111; padding: 16px; border-radius: 4px; overflow-x: auto;">sudo apt update
+    <pre style="background: var(--frontier); border: 1px solid var(--line); padding: 16px; border-radius: 4px; overflow-x: auto;">sudo apt update
 sudo apt install -y \
     build-essential \
     libudev-dev \
@@ -121,7 +121,7 @@ sudo apt install -y \
     <p>Android loads the engine as a library through <code>NativeActivity</code> rather than running a plain
     binary, so it builds through its own script instead of bare <code>cargo build</code>. You'll need the
     <strong>Android SDK + NDK</strong> and <code>cargo-ndk</code>; there is no Gradle and no Java in the APK.</p>
-    <pre style="background: #111; padding: 12px; border-radius: 4px; overflow-x: auto;">cargo install cargo-ndk
+    <pre style="background: var(--frontier); border: 1px solid var(--line); padding: 12px; border-radius: 4px; overflow-x: auto;">cargo install cargo-ndk
 rustup target add aarch64-linux-android
 cd tools/packaging/android
 PROFILE=release ./build-apk.sh</pre>

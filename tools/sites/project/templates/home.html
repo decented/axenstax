@@ -6,14 +6,21 @@
     <meta name="referrer" content="no-referrer">
     <title>Axe'n'Stax — Open-Source Voxel Engine</title>
     <meta name="description" content="Axe'n'Stax is a full-custom, open-source voxel engine in Rust — own the entire stack, self-host from a single binary or a Docker container, built from the ground up. The project, the specs, and how to run your own.">
+    <meta property="og:image" content="https://axenstax.org/static/brand/og-1200x630.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://axenstax.org/static/brand/og-1200x630.png">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" href="/static/marketing.css">
-    <link rel="icon" href="/static/axenstax-icon.svg">
-    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+    <link rel="icon" type="image/svg+xml" href="/static/brand/axenstax-favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/apple-touch-icon-180.png">
+    <meta name="theme-color" content="#0D1B1E">
 </head>
 <body class="marketing">
     <nav class="marketing-nav">
-        <a href="/" class="nav-brand">Axe'n'Stax</a>
+        <a href="/" class="nav-brand"><img class="brand-mark" src="/static/brand/axenstax-mark-flat.svg" alt="" width="68" height="50"><img class="brand-wordmark" src="/static/brand/axenstax-wordmark-dark.svg" alt="Axe'n'Stax" width="163" height="26"></a>
         <div class="nav-links">
             <a href="#what">What it is</a>
             <a href="/built">Built</a>
@@ -39,14 +46,14 @@
 
     <!-- Momentum band — the from-the-ground-up proof, links to /built -->
     <section style="max-width:1000px;margin:0 auto;padding:0 2rem 1rem;">
-        <div style="background:#11172a;border:1px solid #23304b;border-radius:12px;padding:1.6rem 1.8rem;text-align:center;">
-            <p style="margin:0 0 0.8rem;color:#c5c8d4;">Not a mod, not a fork — a custom engine <em>and</em> a from-scratch identity, payments and save stack beneath it. In about six months:</p>
+        <div style="background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1.6rem 1.8rem;text-align:center;">
+            <p style="margin:0 0 0.8rem;color:var(--stone);">Not a mod, not a fork — a custom engine <em>and</em> a from-scratch identity, payments and save stack beneath it. In about six months:</p>
             <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:0.6rem 1.2rem;margin-bottom:1rem;">
-                <strong style="color:#d4a044;">2,100+ commits</strong>
-                <span style="color:#5b6075;">·</span>
-                <strong style="color:#d4a044;">230k+ lines of Rust</strong>
-                <span style="color:#5b6075;">·</span>
-                <strong style="color:#d4a044;">4,300+ tests</strong>
+                <strong style="color:var(--copper);">2,100+ commits</strong>
+                <span style="color:var(--stone-dim);">·</span>
+                <strong style="color:var(--copper);">230k+ lines of Rust</strong>
+                <span style="color:var(--stone-dim);">·</span>
+                <strong style="color:var(--copper);">4,300+ tests</strong>
             </div>
             <a href="/built" class="cta">See everything that's shipped &rarr;</a>
         </div>
