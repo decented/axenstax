@@ -23,3 +23,14 @@ updates:
       # the types handed to nostr. Lift when nostr moves.
       - dependency-name: "secp256k1"
         versions: [">=0.30"]
+      # bincode encodes WorldSave, protocol packets and several stores. 2.x/3.x
+      # change the API and the encoding, so a bump is a planned save/wire
+      # migration (with legacy-save tests), never a routine update.
+      - dependency-name: "bincode"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # wgpu/naga majors change the renderer API and need a visual check on
+      # real GPUs (native + WebGPU). Do them as a planned migration.
+      - dependency-name: "wgpu*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "naga"
+        update-types: ["version-update:semver-major"]

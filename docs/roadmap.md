@@ -1,6 +1,6 @@
 # Axe'n'Stax Roadmap
 
-*As of 2026-10-02 — release v0.2.27, network protocol v64.*
+*As of 2026-10-04 — source v0.2.27, network protocol v64. The repository is public and the sites deploy from `main`.*
 This file is **the** roadmap: where the project is, what is waiting, and what comes later.
 For "what do we build next", see `docs/foundations/README.md` (the build queue); feature requests and ideas enter through the internal feature backlog.
 
@@ -8,12 +8,12 @@ For "what do we build next", see `docs/foundations/README.md` (the build queue);
 
 ## Where we are
 
-Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The build queue is empty: everything that was ready to build has been built. What remains is work only the owner can do (live tests with real devices and people, and the steps before the repository goes public), plus a short list of design decisions that block building further on top of the current foundations.
+Axe'n'Stax is an open-source, self-hostable voxel sandbox with its own engine, client and server, written in Rust. The build queue is empty: everything that was ready to build has been built. What remains is work only the owner can do (cutting the native release, and live tests with real devices and people), plus a short list of design decisions that block building further on top of the current foundations.
 
-- **Version:** v0.2.27 on the native build, network protocol v64.
+- **Version:** v0.2.27 in source, network protocol v64. The published desktop installer is still v0.2.18 until the release below is cut.
 - **Web (`play.axenstax.com`)** is an anonymous, local-only sandbox: a *taster*. No login, no multiplayer, no cloud save and no feedback channel on web. Worlds live in the browser and can be exported to the desktop app.
 - **Native (Linux AppImage)** is the full game: Signet sign-in, LAN play, online play by contact, the dedicated server, and the feedback mailbox. Windows and macOS are not published as installers yet (build from source).
-- **Android** is parked: the native port has been proven on hardware, but nothing is published.
+- **Android** is ported onto the current main (v0.2.27 APK builds in CI, `android` input off by default), but nothing is published: release signing is owner-side, and updates will come through zap.store, not an in-app updater.
 - **Gamepad support** is built and working, but is parked as a launch priority.
 - **Posture:** self-hosted, sovereign, player-owned. Worlds, saves and identity belong to the player; AxeNStax ships software, not a service. See the red lines at the end.
 
@@ -94,14 +94,13 @@ Everything here needs a person, a second machine or a real device, or a decision
 **Fun test**
 - Play-testing with voluntary children who are not family. Family play has been a bug-hunt, not evidence that the game is fun, so fun is unvalidated.
 
-**Before the repository goes public**
-- Sign-off of the draft privacy page and the Children's Code / ICO posture.
-- Create the fresh-snapshot public repository and apply its settings (fork-PR approval, read-only token, secret scanning, private vulnerability reporting, light branch protection).
-- Root README polish and the credits pass. The bundled art gallery was removed from the repository and now lives as an external world pack; its artist permissions only matter if that pack is ever distributed.
-- Done in code, pending the phone tests above: the project's own relay is no longer a default anywhere in the native app or its tools. Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list (public relays by default, editable from the sign-in screen and the lobby Settings before connecting); feedback goes to a fixed set of public inbox relays.
+**Public launch — done 2026-10-03/04**
+- The repository is public as a fresh single-commit snapshot (old history archived privately), with fork-PR approval, secret scanning and push protection, private vulnerability reporting and a protected `main`.
+- The privacy page is signed off by the owner (2026-10-04): controller published as *decented*, bug reports kept until dealt with and at most 6 months.
+- The project's own relay is no longer a default anywhere in the native app or its tools (pending the phone tests above). Sign-in, contacts pairing, server discovery and the updater use the player's one editable "Your relays" list; feedback goes to a fixed set of public inbox relays.
 
 **Release**
-- Native v0.2.27 (protocol v64) is cut once the repository is public. Until then the published installer is older than the source.
+- Native v0.2.27 (protocol v64): the owner cuts it with the owner-held signing keys. Until then `/download` serves v0.2.18, which still predates the relay and privacy changes. After publishing, republish the kind-30063 release event to the public relays.
 
 ---
 
@@ -109,6 +108,7 @@ Everything here needs a person, a second machine or a real device, or a decision
 
 Only items that block building further on top.
 
+- **Planned dependency migrations** (held back from Dependabot on purpose): bincode 1 → 3 (changes the save and wire encoding, so it needs a migration with legacy-save tests) and wgpu/naga 29 → 30 (renderer API change; needs a visual check on real GPUs, native and WebGPU).
 - **Late-joiner chunk streaming.** Entities already backfill at join; world edits and chunks for a late joiner need a call between edit-log replay and chunk push. Multiplayer chunk compression rides on the same decision.
 - **Route single-player through a local `HostedServer`.** Single-player still runs its own mob, spawning and falling-block simulation alongside the server's (the "dual sim"). Ending it needs a playtest that validates entity behaviour with the client-side sim removed. Kill attribution, bounties and vows stay client-side until then.
 - **`ServerPlayer` / `PlayerSlot` duplication.** The save path uses raw server-player fields while the client uses slots. They will drift; unify when saving becomes server-authoritative.
