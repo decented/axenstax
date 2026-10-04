@@ -602,6 +602,7 @@ impl GameServer {
                         if let Some(slot) = self.players.get_mut(i) {
                             slot.player.pos = Vec3::new(p_save.x, p_save.y, p_save.z);
                             slot.player.velocity = Vec3::ZERO;
+                            slot.player.reset_fall();
                             // Note: ServerPlayer has no camera — yaw/pitch are only
                             // restored in PlayerSlot (game_loop.rs) for the local client.
                             slot.combat.health = p_save.health;
@@ -620,6 +621,7 @@ impl GameServer {
                     for i in player_saves.len()..self.players.len() {
                         self.players[i].player.pos = p0_pos + Vec3::new(i as f32 * 2.0, 0.0, 0.0);
                         self.players[i].player.velocity = Vec3::ZERO;
+                        self.players[i].player.reset_fall();
                     }
 
                     // Mark loaded columns
@@ -721,6 +723,7 @@ impl GameServer {
             }
             p.player.pos.y = sy as f32 + 1.0;
             p.player.velocity = Vec3::ZERO;
+            p.player.reset_fall();
         }
     }
 
@@ -1146,21 +1149,13 @@ impl GameServer {
     /// the same shared driver the client runs for local players
     /// (`survival::tick_player_survival`). Its own pass, so a tick with no
     /// queued intent (a dropped packet) still advances breath.
-    ///
-    /// Also sets every player's starvation floor from the difficulty table —
-    /// BRIDGE: capped non-lethal (`POISON_HEALTH_FLOOR`) server-side, because a
-    /// remote player's server copy of hunger drains here but is never refilled
-    /// (eating is client-side; the ServerPlayer vs PlayerSlot duplication in
-    /// CLAUDE.md), so Hard's lethal starvation would kill the server copy of
-    /// every remote player ~10 min in. Replace when hunger becomes
-    /// server-authoritative.
-    ///
-    /// And respawns a dead server copy once its respawn timer runs out —
-    /// BRIDGE: health/hunger/breath only; the position stays intent-driven, so
-    /// the client's own respawn teleport isn't mirrored here (same dual-sim
-    /// debt). Without it a server copy killed by a fall stayed dead for good
-    /// and stopped picking items up.
     fn tick_player_survival(&mut self) {
+        // BRIDGE: starvation floored non-lethal (`POISON_HEALTH_FLOOR`) on the
+        // server copy — a remote player's server-side hunger drains here but is
+        // never refilled (eating is client-side; ServerPlayer vs PlayerSlot
+        // duplication, see CLAUDE.md), so Hard's lethal starvation would kill
+        // every remote player's server copy ~10 min in — replace when hunger
+        // becomes server-authoritative.
         let starvation_floor = self
             .difficulty
             .rules()
@@ -1178,6 +1173,11 @@ impl GameServer {
                 self.play_mode,
             );
             if sp.combat.dead {
+                // BRIDGE: respawn restores health/hunger/breath only; position
+                // stays intent-driven, so the client's own respawn teleport
+                // isn't mirrored (without it a server copy killed by a fall
+                // stayed dead and stopped picking items up) — replace when
+                // single-player routes through HostedServer (dual-sim debt).
                 // No server-side death handler consumes the one-shot.
                 sp.combat.just_died = false;
                 if sp.combat.respawn_timer == 0 {

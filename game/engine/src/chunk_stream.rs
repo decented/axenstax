@@ -299,6 +299,7 @@ impl super::GameState {
                 if let Some(slot) = self.players.get_mut(i) {
                     slot.player.pos = glam::Vec3::new(p_save.x, p_save.y, p_save.z);
                     slot.player.velocity = glam::Vec3::ZERO;
+                    slot.player.reset_fall();
                     slot.camera.yaw = p_save.yaw;
                     slot.camera.pitch = p_save.pitch;
                     slot.combat.health = p_save.health;
@@ -466,6 +467,7 @@ impl super::GameState {
             };
             self.players[0].player.pos = glam::Vec3::new(sx as f32 + 0.5, spawn_y as f32, sz as f32 + 0.5);
             self.players[0].player.velocity = glam::Vec3::ZERO;
+            self.players[0].player.reset_fall();
             log::info!("Fresh world spawn at ({sx}, {spawn_y}, {sz}).");
 
             // New creative world starts with an EMPTY hotbar (owner 2026-07-02).
@@ -551,6 +553,7 @@ impl super::GameState {
                 );
                 self.players[0].player.pos = new_pos;
                 self.players[0].player.velocity = glam::Vec3::ZERO;
+                self.players[0].player.reset_fall();
                 let np_cx = (new_pos.x.floor() as i32).div_euclid(cs);
                 let np_cz = (new_pos.z.floor() as i32).div_euclid(cs);
                 for dx in -2..=2 {

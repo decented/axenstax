@@ -114,6 +114,11 @@ pub struct PlayerCombat {
     pub attack_cooldown: u32,
     pub flash_timer: u32,
     pub invincible_timer: u32,
+    /// Damage of the hit that started the current invulnerability window
+    /// (post-armour). Minecraft rule: a hit arriving inside the window only
+    /// applies the amount by which it exceeds this. Meaningful only while
+    /// `invincible_timer > 0`.
+    pub last_hit_damage: f32,
     pub dead: bool,
     /// Ticks until respawn (after death screen).
     pub respawn_timer: u32,
@@ -180,6 +185,7 @@ impl PlayerCombat {
             attack_cooldown: 0,
             flash_timer: 0,
             invincible_timer: 0,
+            last_hit_damage: 0.0,
             dead: false,
             respawn_timer: 0,
             just_died: false,
@@ -290,13 +296,27 @@ impl PlayerCombat {
     /// armour-reduced sources go through
     /// `PlayerSlot::take_damage_with_armour_from`.
     pub fn take_damage_from(&mut self, amount: f32, cause: crate::survival::DamageCause) -> bool {
-        if self.invincible_timer > 0 || self.dead {
+        if self.dead {
             return false;
         }
+        let applied = if self.invincible_timer > 0 {
+            // Minecraft rule: inside the hit-invulnerability window only the
+            // amount exceeding the hit that started it applies (if larger);
+            // otherwise the hit is ignored. The window is NOT restarted.
+            if amount <= self.last_hit_damage {
+                return false;
+            }
+            let extra = amount - self.last_hit_damage;
+            self.last_hit_damage = amount;
+            extra
+        } else {
+            self.last_hit_damage = amount;
+            self.invincible_timer = INVINCIBILITY_TICKS;
+            amount
+        };
         self.last_damage = cause;
-        self.health = (self.health - amount).max(0.0);
+        self.health = (self.health - applied).max(0.0);
         self.flash_timer = PLAYER_HURT_FLASH_TICKS;
-        self.invincible_timer = INVINCIBILITY_TICKS;
         if self.health <= 0.0 {
             self.dead = true;
             self.respawn_timer = 40; // 2 seconds before auto-respawn
@@ -310,6 +330,7 @@ impl PlayerCombat {
         self.dead = false;
         self.flash_timer = 0;
         self.invincible_timer = 0;
+        self.last_hit_damage = 0.0;
         self.respawn_timer = 0;
         // Respawn restores hunger too (MC parity).
         self.hunger = self.max_hunger;
@@ -737,6 +758,52 @@ mod tests {
         // While invulnerable, a follow-up hit must be ignored.
         assert!(!h.take_damage(5.0));
         assert_eq!(h.current, 17.0);
+    }
+
+    // --- Player i-frames: Minecraft rule (W2 review) ---
+
+    #[test]
+    fn iframe_larger_hit_applies_only_the_excess() {
+        // 4 dmg mob hit, then a 10 dmg fall inside the window: only the 6
+        // beyond the first hit applies (total 10 lost).
+        let mut c = PlayerCombat::new();
+        assert!(c.take_damage_from(4.0, crate::survival::DamageCause::Generic));
+        assert!((c.health - 16.0).abs() < 1e-4);
+        assert!(c.take_damage_from(10.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 10.0).abs() < 1e-4, "6 extra applied, got {}", c.health);
+        assert_eq!(c.last_damage, crate::survival::DamageCause::Fall);
+        // The window was not restarted, and a third equal hit is ignored.
+        assert!(!c.take_damage_from(10.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn iframe_smaller_or_equal_hit_is_ignored() {
+        let mut c = PlayerCombat::new();
+        assert!(c.take_damage_from(4.0, crate::survival::DamageCause::Generic));
+        assert!(!c.take_damage_from(3.0, crate::survival::DamageCause::Drowning));
+        assert!(!c.take_damage_from(4.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 16.0).abs() < 1e-4, "nothing extra applied, got {}", c.health);
+        assert_eq!(c.last_damage, crate::survival::DamageCause::Generic);
+    }
+
+    #[test]
+    fn iframe_window_expiry_allows_a_fresh_full_hit() {
+        let mut c = PlayerCombat::new();
+        c.take_damage_from(4.0, crate::survival::DamageCause::Generic);
+        for _ in 0..INVINCIBILITY_TICKS {
+            c.tick();
+        }
+        assert!(c.take_damage_from(3.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 13.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn iframe_excess_hit_can_kill() {
+        let mut c = PlayerCombat::new();
+        c.take_damage_from(4.0, crate::survival::DamageCause::Generic);
+        assert!(c.take_damage_from(30.0, crate::survival::DamageCause::Fall));
+        assert!(c.dead && c.just_died);
     }
 
     #[test]
@@ -1533,7 +1600,7 @@ mod tests {
             Some(ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron)),
         ];
         let before = slot.combat.health;
-        slot.take_damage_with_armour(8.0);
+        slot.take_damage_with_armour_from(8.0, crate::survival::DamageCause::Generic);
         let dealt = before - slot.combat.health;
         let expected = 8.0 * 0.40;
         assert!((dealt - expected).abs() < 1e-3,
@@ -1552,7 +1619,7 @@ mod tests {
             Some(ArmourItem::new(ArmourSlot::Leggings, ArmourMaterial::Iron)),
             Some(ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron)),
         ];
-        slot.take_damage_with_armour(8.0);
+        slot.take_damage_with_armour_from(8.0, crate::survival::DamageCause::Generic);
         for s in slot.armour_slots.iter() {
             let piece = s.as_ref().expect("piece still equipped after one hit");
             assert_eq!(
@@ -1573,7 +1640,7 @@ mod tests {
         let mut slot = crate::player_slot::PlayerSlot::new(0, Vec3::ZERO, 1.0);
         slot.armour_slots[ArmourSlot::Helmet as usize] = Some(helmet);
         assert_eq!(slot.total_armour_points(), 1);
-        let landed = slot.take_damage_with_armour(2.0);
+        let landed = slot.take_damage_with_armour_from(2.0, crate::survival::DamageCause::Generic);
         assert!(landed);
         assert!(slot.armour_slots[ArmourSlot::Helmet as usize].is_none(),
             "broken helmet must auto-unequip");

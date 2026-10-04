@@ -1415,6 +1415,7 @@ impl super::GameState {
                     if let Some(slot) = self.players.get_mut(0) {
                         slot.player.pos = t;
                         slot.player.velocity = glam::Vec3::ZERO;
+                        slot.player.reset_fall();
                     }
                 }
                 self.map_screen.open = false;
@@ -2767,6 +2768,8 @@ impl super::GameState {
         self.players[0].player.pos =
             glam::Vec3::new(sx as f32 + 0.5, s_surf as f32 + 1.0, sz as f32 + 0.5);
         self.players[0].player.velocity = glam::Vec3::ZERO;
+        // W2 — a trial start is a teleport, not a fall.
+        self.players[0].player.reset_fall();
         // Plant the finish beacon ONLY if its column has actually generated. For
         // a far course (cross-country / marathon) the finish is well outside the
         // loaded area at launch: surface_y would return the sea-level fallback
@@ -7614,6 +7617,7 @@ impl super::GameState {
                                     if let Some(slot) = self.players.get_mut(i) {
                                         slot.player.pos = glam::Vec3::new(ps.x, ps.y, ps.z);
                                         slot.player.velocity = glam::Vec3::ZERO;
+                                        slot.player.reset_fall();
                                         slot.player.flying = false; // resume grounded (parity with native SAVE branch)
                                         slot.camera.yaw = ps.yaw;
                                         slot.camera.pitch = ps.pitch;
@@ -21931,6 +21935,7 @@ impl super::GameState {
             if self.world.is_solid(bx, by, bz, &self.registry) {
                 self.players[i].player.pos.y = (by + 1) as f32;
                 self.players[i].player.velocity = glam::Vec3::ZERO;
+                self.players[i].player.reset_fall();
                 self.players[i].player.on_ground = true;
                 return;
             }

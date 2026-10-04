@@ -46,6 +46,8 @@ impl Command for TpCommand {
         if let Some(slot) = ctx.players.get_mut(ctx.player_idx) {
             slot.player.pos = target;
             slot.player.velocity = Vec3::ZERO;
+            // W2 — a teleport is not a fall: drop any distance banked before it.
+            slot.player.reset_fall();
             ctx.success(format!(
                 "Teleported to ({:.1}, {:.1}, {:.1})",
                 target.x, target.y, target.z

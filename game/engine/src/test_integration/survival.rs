@@ -94,14 +94,24 @@ fn creative_remote_player_is_immune_to_falls() {
 }
 
 #[test]
-fn local_position_trusted_player_is_not_simulated_server_side() {
-    // Local players run their fall damage client-side (game_loop); the server
-    // never moves them, so it never lands them.
+fn local_position_trusted_player_is_not_survival_simulated_server_side() {
+    // Local players run their survival (fall damage, drowning) client-side
+    // (game_loop). The server pass must skip them: with the head in water for
+    // longer than the air supply (300 ticks + 20-tick grace, first hit on tick
+    // 320) the server copy's health must still be 20. Deleting the
+    // `server_simulated` guard makes this fail with health 18.
     let mut host = TestHost::start_with(TestConfig::default());
     stone_floor(&mut host);
-    host.teleport_player(0, Vec3::new(0.5, 15.0, 0.5));
+    for y in 5..=8 {
+        host.set_block(0, y, 0, WATER);
+    }
+    host.teleport_player(0, Vec3::new(0.5, 5.0, 0.5));
+    assert!(
+        !host.server.players[0].server_simulated,
+        "the host's own seat is position-trusted, not server-simulated"
+    );
 
-    host.tick(60);
+    host.tick(330);
 
     assert_eq!(host.server.players[0].combat.health, 20.0);
 }

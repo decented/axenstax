@@ -120,6 +120,7 @@ impl TestHost {
     pub fn teleport_player(&mut self, i: usize, pos: Vec3) {
         self.server.players[i].player.pos = pos;
         self.server.players[i].player.velocity = Vec3::ZERO;
+        self.server.players[i].player.reset_fall();
     }
 
     /// Position of player `i`.
