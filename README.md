@@ -5,11 +5,9 @@ custom server — nothing forked or ceiling-limited from an existing project.
 
 **Sovereignty first.** You own your world, your identity, and the server it
 runs on. Play solo, self-host with friends, or run a public server — the
-game is fully playable, and fully fun, with Bitcoin switched off. Because
-you own the server, you *can* run a peer-to-peer economy and let players
-earn real value from play — that's a capability the platform unlocks, not
-the headline, and never the reason to play. See `docs/vision/` for the
-full thinking behind that ordering.
+game is fully playable, and fully fun, with no money involved at all. The
+focus is building, exploring and owning what you make. See `docs/vision/`
+for the full thinking behind that ordering.
 
 ## Links
 
@@ -37,9 +35,8 @@ There are two ways to play:
   full platform.
 - **Native** — the full desktop build. Sign in with a self-sovereign
   [Signet](https://mysignet.app) identity, run or join a self-hosted
-  world, and (on a Bitcoin-enabled server you or someone else runs) take
-  part in that server's economy. Non-custodial: the platform never holds
-  your funds or your keys.
+  world, and keep your own keys. Nothing about the game requires money,
+  and the platform never holds your keys.
 
 Both come from the same engine and the same codebase — the web build is a
 restricted subset, not a separate product.
@@ -92,8 +89,9 @@ forge a release signature.
 ./check.sh --smoke     # + a Playwright smoke test against a running site
 ```
 
-`check.sh` is the single regression gate this project runs in CI and
-locally — green there is the bar for a change being done.
+`check.sh` is the single regression gate. Run it locally before you open a PR;
+it is not yet run automatically in CI, so green on your machine is the bar for a
+change being done.
 
 ## Licence
 
@@ -119,7 +117,8 @@ tooling), not a claim of affiliation.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), including what we won't merge, and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Security
 

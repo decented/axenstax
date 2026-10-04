@@ -161,7 +161,7 @@ If you load a save from before Spec 29 with raw meat sitting in a furnace input 
 
 ### Proof of Play trickle
 
-On Bitcoin-enabled servers, each completed smelt fires a **1-sat Proof-of-Play trickle** to the closest player within 16 blocks (provided their Charter sats flag is on). It's a passive background credit — no toast, just a number that builds up in the Treasury panel. Off-Bitcoin servers and Charter-disabled players see no sats; smelting still works exactly the same.
+Each completed smelt can add a small Proof-of-Play score to the closest player within 16 blocks. It's passive and quiet (no toast); it is an in-game score, not money, and smelting works exactly the same whether or not it shows.
 
 ### Breaking + spillage
 

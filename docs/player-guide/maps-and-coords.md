@@ -22,8 +22,7 @@ Press **F3** to toggle the debug overlay. It shows:
 
 - Current XYZ + facing direction
 - Frame timing + tick timing (perf samples)
-- Reserve richness (the Bitcoin Reserve gauge)
-- Mining-rate text — sats-per-hour estimate while mining
+- Proof of Play readout — the hash produced by your latest pickaxe strike
 - Biome at the player's current column
 
 F3 is local-only — it doesn't affect gameplay or other players, and

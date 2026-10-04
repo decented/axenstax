@@ -16,7 +16,7 @@ A **3-minute** (3600-tick) mining sprint. You begin with an **empty inventory** 
 completely bare-handed, same as Satori Rush — so the winning strategy is to
 speed-craft your way up the tool tree inside the timer. Every block you break adds **"work"** to your
 score, and **harder blocks are worth far more** (pure deepslate and stone are the
-big earners; leaves, sand and dirt are nearly worthless; bare-fist/instant breaks
+the highest scorers; leaves, sand and dirt are nearly worthless; bare-fist/instant breaks
 score nothing). Highest total work when the clock hits zero **wins**. Hash Dash is
 **transient** — it runs on your current world and does **not** overwrite your save.
 

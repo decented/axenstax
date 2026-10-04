@@ -30,7 +30,7 @@ The bell now sits in the world. Don't break it — the migration logic reads its
 
 ### The Houses tab
 
-Right-click an **already-placed** bell (rather than one in your hand) and you'll get a **Houses tab** — a list of the nearby architect-attributed houses in that village, one row per architect. Each row has a **Tip** button (sends sats to that architect's npub) plus a **Tip all** option to spread a payment across every listed architect at once.
+Right-click an **already-placed** bell (rather than one in your hand) and you'll get a **Houses tab** — a list of the nearby architect-attributed houses in that village, one row per architect. Each row has a **Tip** button (records an in-game tip for that architect's npub; no real money moves today) plus a **Tip all** option to spread a payment across every listed architect at once.
 
 ## Wandering Villagers
 
@@ -79,7 +79,7 @@ You can speed this up by:
 A few good reasons:
 
 1. **Your own village.** Place it next to your base, your mine, your farm. Quest-givers in walking distance forever.
-2. **A second source of sats + reputation.** If your starting village is hostile (or just far away), found a new one in friendlier territory.
+2. **A second source of quests + reputation.** If your starting village is hostile (or just far away), found a new one in friendlier territory.
 3. **Pure construction.** Building a village from scratch is its own gameplay loop — placing houses, putting in a well, lighting a campfire.
 
 ## Limits + caveats

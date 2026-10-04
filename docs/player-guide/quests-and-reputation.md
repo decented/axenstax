@@ -88,9 +88,9 @@ Each player has a reputation score with each village, from -100 to +100. The HUD
 | Tier | Range | Sats × | Other effects |
 |---|---|---|---|
 | **Hostile** | ≤ -50 | 0.00 | Villagers refuse. |
-| **Wary** | -49 to -10 | 0.75 | Reduced payouts. |
+| **Wary** | -49 to -10 | 0.75 | Reduced rewards. |
 | **Neutral** | -9 to 9 | 1.00 | Baseline. |
-| **Friendly** | 10 to 49 | 1.10 | +10 % payouts. |
+| **Friendly** | 10 to 49 | 1.10 | +10 % rewards. |
 | **Beloved** | ≥ 50 | 1.25 | +25 % + bonus quests (future). |
 
 ### Reputation × sats
@@ -132,5 +132,5 @@ Either way the **items + reputation always pay out**. Even a Barter-mode kid get
 - **The Carpenter's stick quest is the easiest first quest.** 16 sticks for 10 sats + 5 rep. You'll have sticks coming out of your ears anyway.
 - **Don't accept three Fetch quests for the same item from three villagers** — the quest consumes the items at Turn In, so the third villager will be left short. Stagger them.
 - **Building reputation pays compound interest.** Friendly → +10 %. Beloved → +25 %. A few extra quests to get there pays for itself.
-- **Don't kill villagers.** 25 rep takes a handful of quests to earn back, and you've wasted an NPC who would've paid you.
-- **Check the HUD tier colour** before quest-grinding a village. If you're Wary or below, your payouts are reduced.
+- **Don't kill villagers.** 25 rep takes a handful of quests to earn back, and you've wasted an NPC who would've given you quests.
+- **Check the HUD tier colour** before quest-grinding a village. If you're Wary or below, your rewards are reduced.

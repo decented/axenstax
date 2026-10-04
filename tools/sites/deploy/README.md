@@ -156,9 +156,9 @@ DNS → code → provision → units → Caddy → restart → smoke.
    ```
 
 After step 6 the new hosts get Let's Encrypt certs automatically (grey-cloud DNS
-must already resolve). `SOURCE_URL` stays blank until the source repo is public —
-blank renders "source opening soon" instead of a 404. Flip it on (in
-`marketing/.env` and `project/.env`) the day the repo opens; no code change.
+must already resolve). `SOURCE_URL` is set to the public repo in
+`env.marketing.template` and `env.project.template`; `render-env.py` treats a
+non-blank template value as authoritative, so it reaches production on the next deploy.
 
 ### Manual sync (instead of the workflow)
 

@@ -16,7 +16,7 @@ cutover steps are in `deploy/README.md`.
 | **Learn** | `learn/` | 8098 | `learn.axenstax.com` | Guided journey — light, warm onboarding (re-voice pending) |
 | **Wiki** | `wiki/` | 8097 | `wiki.axenstax.com` | Player reference — dense, lookup-driven |
 | **Claim** | `claim/` | 8100 | `claim.axenstax.com` | Merch fulfilment intake — code-gated, no payment (see `claim/README.md`) |
-| **Project** | `project/` | 8099 | `axenstax.org` | Open-source project home (source link held until repo is public) |
+| **Project** | `project/` | 8099 | `axenstax.org` | Open-source project home (links to the public source repo) |
 | **Docs** | `docs/` | 8095 | `docs.axenstax.org` | Engine specs, ADRs, roadmap, self-host download |
 
 `.com` group = marketing + game + learn + wiki + claim. `.org` group = project + docs.
@@ -55,11 +55,11 @@ the right host in production. `start-all.sh` exports all six locally:
 | `WIKI_URL` | `https://localhost:8097` | marketing, project |
 | `LEARN_URL` | `https://localhost:8098` | marketing, project |
 | `PROJECT_URL` | `https://localhost:8099` | marketing |
-| `SOURCE_URL` | *(blank — held)* | marketing, project — public GitHub link, switched on when the repo opens |
+| `SOURCE_URL` | *(blank locally)* | marketing, project — public GitHub link; set in the prod env templates |
 
 Production values live in each site's `.env` (built from
-`deploy/env.<site>.template` on the box). `SOURCE_URL` stays blank until the
-source repo is public; blank renders "source opening soon" instead of a 404.
+`deploy/env.<site>.template` on the box). `SOURCE_URL` is set to the public
+repo in the marketing and project templates (a blank value renders "Source (soon)").
 
 ## Why one app per host, not one app with subdomain routing
 

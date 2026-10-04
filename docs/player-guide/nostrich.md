@@ -30,7 +30,7 @@ The Nostrich is the Nostr mascot. Killing one (or eating Nostrich meat) triggers
 
 - **Blocks Vendor Block trades** — vendors refuse to deal with you ("The Nostriches will not aid your dealings.")
 - **Zeroes village reputation** — villagers turn hostile until the vow lifts
-- **Pauses sats payouts** — on Bitcoin-enabled servers, every payout (Proof-of-Play, quests, vendor sales, plaque tips) is suppressed. Mining still happens; settlement is held.
+- **Pauses the sats score** — quest, trade and tip scoring is held while the vow lasts. Mining still happens.
 
 When the vow triggers, you'll see: *"The Nostriches will remember this…"*
 
@@ -113,7 +113,7 @@ When you have an active Vow, a purple-feather badge appears in the **top-left** 
 ## Coming in v3
 
 - ~~**Walk-and-follow trail**~~ — **shipped 2026-07-11**; see Tamed behaviour above
-- **Tribute path** — donate sats on Bitcoin-enabled servers to purify the vow instantly
+- **Atonement path** — an in-game way to purify the vow early (design only; not built)
 - **Cross-world slayer tag** — your kill follows you across worlds via Nostr
 - **Royal Pavlova + Nostrich Custard recipes** — luxury T5 desserts
 

@@ -19,9 +19,9 @@ below.
 
 > **Not a gamer? Co-opt a young Minecrafter.** The building and the server bits are
 > second nature to most Minecraft-savvy kids. Find one, point them at this guide and
-> the **[Operator Guide](#stage-1--get-a-space-the-server-the-techy-bit)**, and tip
-> them some sats for an afternoon. You bring the art and the eye; they bring the
-> world-building hands. It's a great split.
+> the **[Operator Guide](#stage-1--get-a-space-the-server-the-techy-bit)**, and ask for
+> a hand for an afternoon (and keep a parent in the loop). You bring the art and the eye;
+> they bring the world-building hands. It's a great split.
 
 ---
 
@@ -79,7 +79,7 @@ This is the one step that isn't point-and-click. Two honest options:
    minutes — it's a copy-paste Docker setup. Hand them the
    **[Dedicated Server guide](https://docs.axenstax.org/docs/operators/dedicated-server.md)**
    and the **[Operator Console guide](https://docs.axenstax.org/docs/operators/operator-console.md)**.
-   (This is the natural "tip a young Minecrafter some sats" job.)
+   (This is the natural "ask a young Minecrafter for a hand" job.)
 2. **Do it yourself** by following those two guides — they're written for
    non-experts and it's mostly pasting commands.
 

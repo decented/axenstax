@@ -185,9 +185,10 @@ economy are what's left of Phase 3.
 - **Single-player → server unification** — single-player still runs a slightly different
   simulation path from multiplayer. Merging them is a high-risk refactor that wants Axolittle
   present for phase-by-phase regression.
-- **Real Bitcoin settlement** — the Proof-of-Play hash, Satori veins and Genesis Block are
-  live, and sats numbers show in trades, but the actual Lightning payout backend
-  (non-custodial) isn't wired yet.
+- **Real-money layer** — not built, and not promised. The Proof-of-Play hash, Satori veins and
+  Genesis Block are live as educational proof-of-work and in-game scoring; sats numbers in
+  trades are an internal score only. Any future layer would be off by default, per server and
+  parent-controlled.
 
 ## Want to track progress?
 
