@@ -85,6 +85,13 @@ Update later with `docker compose pull && docker compose up -d`.
 > account or token. They're rebuilt by the `publish-server-image.yml` workflow
 > (manual dispatch). You only need path **B** if you want to build from source.
 
+> **Protocol version warning.** The current game is **protocol v64**
+> (`PROTOCOL_VERSION` in `game/engine/src/protocol.rs`). The published `latest`
+> image was built **before v64**, so a current client will be refused with a
+> protocol-mismatch error when it joins it. Until the image is republished, build
+> from source (path **B**) so the server and clients match. The image you run is
+> built for one protocol version only; clients and server must be on the same one.
+
 ### B. Build from source *(developers)*
 
 Compiles the server on your machine — needs the build toolchain and the source tree.
@@ -114,6 +121,12 @@ after any engine change.
   this server. No sign-in needed — a self-hosted server doesn't require Signet.
 - **Native:** in the lobby choose **Join Game** and enter `ws://BOX:6767` (the Join
   dialog accepts `ws://` / `wss://` URLs as well as the legacy `ip:port` form).
+
+> **Plain `ws://` is unencrypted.** The quick-start `ws://BOX:6767` socket carries
+> everything in clear text, including the sign-in auth event a signed-in player
+> sends when joining. On a trusted home LAN that is a small risk; over the internet
+> put the game socket behind TLS (the Caddy front on `:8443` gives you `wss://`, or
+> terminate TLS on your own reverse proxy) and have players join with `wss://`.
 
 The browser shows a one-time certificate warning on a no-domain box (**Advanced →
 Proceed**); because the page and the game socket share one origin, the `wss`
@@ -233,7 +246,11 @@ In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 - **Web-player edits not yet propagated.** A browser joiner sees the shared world and
   everyone moving, but its own block edits aren't sent to the server yet (the edit
   hooks are still native-gated). Native joiners' edits propagate.
-- This is a single self-hostable world server, not the Spec 07 Agones fleet.
+- **Not the full simulation yet.** The dedicated server currently does not tick
+  pistons, hoppers, kegs, dispensers or crops, and inventory and combat are not yet
+  server-authoritative. See `tools/dedicated-server/README.md`.
+- This is a single self-hostable world server. AxeNStax runs no hosted fleet for
+  anyone (the old Spec 07 Agones design is retired).
 
 Design spec: `docs/superpowers/specs/2026-06-16-dedicated-docker-server-design.md`.
 Image-publish (one-command install) spec:

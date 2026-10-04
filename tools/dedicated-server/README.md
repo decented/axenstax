@@ -6,9 +6,12 @@ server speaks **WebSocket**, which both targets use.
 
 One container runs two things behind one HTTPS origin:
 
-- the **headless game server** (`axenstax-engine --server`) — the full
-  authoritative simulation (mobs, blocks, carts, economy, combat, persistence),
-  no GPU/display needed;
+- the **headless game server** (`axenstax-engine --server`) — a headless,
+  GPU-free world server that currently simulates mobs, carts and
+  persistence, among other things. It is **not yet the full authoritative simulation**: it does
+  **not currently tick pistons, hoppers, kegs, dispensers or crops**, and
+  inventory and combat are **not yet server-authoritative** (a fix for the block
+  ticks is in progress);
 - a **Caddy front** that serves the web client and reverse-proxies the game
   socket, so the self-signed cert is trusted once and reused for `wss`.
 
@@ -20,6 +23,15 @@ One container runs two things behind one HTTPS origin:
                        │                         /worlds (volume)│
                        └───────────────────────────────────────┘
 ```
+
+> **Security note.** The plain `ws://BOX:6767` quick-start socket is unencrypted:
+> the sign-in auth event a player sends when joining travels in clear text unless
+> you front the socket with TLS (the bundled Caddy `wss://` route on `:8443`, or
+> your own reverse proxy). Use `wss://` anywhere beyond a trusted LAN.
+
+> **Protocol version.** The published `latest` image predates protocol v64 (the
+> current `PROTOCOL_VERSION`). Build from source (`./build.sh`) until it is
+> republished.
 
 ## Quick start
 
