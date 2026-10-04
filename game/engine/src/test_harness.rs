@@ -71,6 +71,7 @@ impl TestHost {
             server.initial_load();
         }
         server.set_play_mode(config.play_mode);
+        server.difficulty = crate::survival::Difficulty::from_meta_str(&config.difficulty);
         Self {
             server,
             camera_modes: vec![crate::camera::CameraMode::FirstPerson; num_players],

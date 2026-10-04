@@ -117,6 +117,11 @@ pub struct RemoteClient {
     /// Play mode received in the JoinAccept packet. Consumed once by the game
     /// loop via `set_play_mode` so the `is_creative` cache stays in lock-step.
     pub pending_play_mode: Option<crate::play_mode::PlayMode>,
+    /// W2 — the host's difficulty string from `JoinAccept` (the field has
+    /// always been on the wire). Consumed once by the game loop into
+    /// `GameState.difficulty`, so a joiner's client-side mob/starvation sim
+    /// runs at the host's difficulty, not its own default.
+    pub pending_difficulty: Option<String>,
     /// The host's clock from `JoinAccept`, so the sky is right before the
     /// first StateUpdate (review W3 N5).
     pub pending_world_time: Option<u32>,
@@ -371,6 +376,7 @@ impl RemoteClient {
             chunk_queue: Vec::new(),
             spawn_pos: None,
             pending_play_mode: None,
+            pending_difficulty: None,
             pending_world_time: None,
             pending_exhibits: None,
             join: JoinFlow::Sent,
@@ -408,6 +414,7 @@ impl RemoteClient {
             chunk_queue: Vec::new(),
             spawn_pos: None,
             pending_play_mode: None,
+            pending_difficulty: None,
             pending_world_time: None,
             pending_exhibits: None,
             join: JoinFlow::AwaitingChallenge { base, driver: Some(driver) },
@@ -484,6 +491,7 @@ impl RemoteClient {
                                     Some((accept.spawn_x, accept.spawn_y, accept.spawn_z));
                                 // Queue play_mode for game loop to apply via set_play_mode.
                                 self.pending_play_mode = Some(accept.play_mode);
+                                self.pending_difficulty = Some(accept.difficulty.clone());
                                 self.pending_world_time = Some(accept.world_time);
                                 // Queue authored exhibits for the game loop to apply
                                 // into world.exhibits (Creator Gallery render path).

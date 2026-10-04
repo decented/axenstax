@@ -38,6 +38,8 @@ pub mod trials_lint;
 pub mod packaging_copy_lint;
 pub mod weather;
 pub mod chat;
+// W2 survival basics — server-side fall damage + drowning for remote players.
+pub mod survival;
 
 // Online play by contact — the rendezvous end to end over an in-memory relay.
 #[cfg(not(target_arch = "wasm32"))]

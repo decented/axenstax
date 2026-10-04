@@ -307,7 +307,7 @@ pub fn apply_player_blast_damage(
     let mut landed = Vec::new();
     for &(i, d) in hits {
         if let Some(slot) = players.get_mut(i)
-            && slot.take_damage_with_armour(d)
+            && slot.take_damage_with_armour_from(d, crate::survival::DamageCause::Explosion)
         {
             landed.push(i);
         }

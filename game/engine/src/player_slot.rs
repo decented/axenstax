@@ -308,6 +308,10 @@ pub struct PlayerSlot {
     /// #7 — WorldEdit region selection corners + clipboard. Transient (not
     /// persisted); single-player power-user editing.
     pub worldedit: crate::worldedit::WorldEditSession,
+    /// W2 — where this player's last death left a grave, for the death
+    /// screen's "Your items are in a grave at x, y, z" line. Cleared at each
+    /// death, set when a grave is placed. Transient.
+    pub last_grave: Option<[i32; 3]>,
 }
 
 impl PlayerSlot {
@@ -376,6 +380,7 @@ impl PlayerSlot {
             ride_speed: 0.0,
             ride_heading: glam::Vec2::ZERO,
             worldedit: crate::worldedit::WorldEditSession::default(),
+            last_grave: None,
         }
     }
 
@@ -421,6 +426,16 @@ impl PlayerSlot {
     /// `PlayerCombat::take_damage`'s contract — false if the player
     /// was invulnerable or dead).
     pub fn take_damage_with_armour(&mut self, raw_damage: f32) -> bool {
+        self.take_damage_with_armour_from(raw_damage, crate::survival::DamageCause::Generic)
+    }
+
+    /// [`take_damage_with_armour`](Self::take_damage_with_armour), recording
+    /// `cause` for the death screen (W2) when the hit lands.
+    pub fn take_damage_with_armour_from(
+        &mut self,
+        raw_damage: f32,
+        cause: crate::survival::DamageCause,
+    ) -> bool {
         // i-frames / dead → don't wear armour either. PlayerCombat is
         // the authority on whether the hit "happened" for the player;
         // this mirrors that gate so a swarm of hits during i-frames
@@ -430,7 +445,7 @@ impl PlayerSlot {
         }
         let total_points = self.total_armour_points();
         let reduced = crate::armour::damage_after_armour(raw_damage, total_points);
-        let landed = self.combat.take_damage(reduced);
+        let landed = self.combat.take_damage_from(reduced, cause);
         if landed {
             for slot in self.armour_slots.iter_mut() {
                 if let Some(piece) = slot.as_mut()

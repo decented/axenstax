@@ -473,6 +473,10 @@ pub struct GameServer {
     /// const). Defaults to the High preset; in hosted single-player the client
     /// keeps it in sync with the player's render-distance dial.
     pub render_distance: i32,
+    /// W2 — world difficulty (`WorldMeta.difficulty`), read on `initial_load`.
+    /// Server-side it sets the starvation floor of server-simulated players
+    /// (bridged non-lethal, see `tick_player_physics`).
+    pub difficulty: crate::survival::Difficulty,
 }
 
 impl GameServer {
@@ -515,6 +519,7 @@ impl GameServer {
             pending_block_changes: Vec::new(),
             pending_item_grants: Vec::new(),
             render_distance: crate::graphics_settings::DEFAULT_RENDER_DISTANCE,
+            difficulty: crate::survival::Difficulty::Normal,
         }
     }
 
@@ -552,6 +557,7 @@ impl GameServer {
         // Falls back to defaults for a brand-new world with no meta yet.
         let meta = crate::save::load_world_meta(&self.world_name);
         self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
+        self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
         self.world.is_workshop = meta.is_workshop;
         self.world.world_type = meta.world_type;
         self.world.ground = meta.ground;
@@ -1130,6 +1136,54 @@ impl GameServer {
                 log::warn!(
                     "speed cap: clamped {horizontal:.3}→{MAX_HORIZONTAL_PER_TICK:.3} b/tick"
                 );
+            }
+        }
+
+        self.tick_player_survival();
+    }
+
+    /// W2 — fall damage + drowning for server-simulated (remote) players, via
+    /// the same shared driver the client runs for local players
+    /// (`survival::tick_player_survival`). Its own pass, so a tick with no
+    /// queued intent (a dropped packet) still advances breath.
+    ///
+    /// Also sets every player's starvation floor from the difficulty table —
+    /// BRIDGE: capped non-lethal (`POISON_HEALTH_FLOOR`) server-side, because a
+    /// remote player's server copy of hunger drains here but is never refilled
+    /// (eating is client-side; the ServerPlayer vs PlayerSlot duplication in
+    /// CLAUDE.md), so Hard's lethal starvation would kill the server copy of
+    /// every remote player ~10 min in. Replace when hunger becomes
+    /// server-authoritative.
+    ///
+    /// And respawns a dead server copy once its respawn timer runs out —
+    /// BRIDGE: health/hunger/breath only; the position stays intent-driven, so
+    /// the client's own respawn teleport isn't mirrored here (same dual-sim
+    /// debt). Without it a server copy killed by a fall stayed dead for good
+    /// and stopped picking items up.
+    fn tick_player_survival(&mut self) {
+        let starvation_floor = self
+            .difficulty
+            .rules()
+            .starvation_floor
+            .max(crate::combat::POISON_HEALTH_FLOOR);
+        for sp in &mut self.players {
+            sp.combat.starvation_floor = starvation_floor;
+            if !sp.server_simulated || !sp.connected {
+                continue;
+            }
+            crate::survival::tick_player_survival(
+                &mut sp.player,
+                &mut sp.combat,
+                &self.world,
+                self.play_mode,
+            );
+            if sp.combat.dead {
+                // No server-side death handler consumes the one-shot.
+                sp.combat.just_died = false;
+                if sp.combat.respawn_timer == 0 {
+                    sp.combat.respawn();
+                    sp.player.reset_fall();
+                }
             }
         }
     }
