@@ -153,6 +153,19 @@ pub fn tick_one(state: &mut WorkstationState) -> WorkstationTick {
     }
 }
 
+/// Advance every composter in the world one tick (the furnace-sweep pattern).
+/// Fuel-free and with no lit variant, so it changes no block and queues no
+/// broadcast — output is collected by right-click. Shared by the client loop
+/// and the dedicated server (T1-3, 2026-10-05).
+pub fn tick_all(world: &mut crate::world::World) {
+    let positions: Vec<(i32, i32, i32)> = world.iter_composters().map(|(p, _)| p).collect();
+    for pos in positions {
+        if let Some(state) = world.composter_at_mut(pos) {
+            let _ = tick_one(state);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

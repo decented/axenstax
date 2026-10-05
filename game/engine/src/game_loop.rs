@@ -3519,29 +3519,6 @@ impl super::GameState {
         }
     }
 
-    /// Campaign D (2026-07-05) — put a stack back into the dispenser at `pos`
-    /// (a failed use, or the returned empty Bucket / igniter); if the
-    /// block-entity vanished or is full, toss it out of the facing side
-    /// instead. Items are never destroyed.
-    fn dispenser_return_or_toss(
-        &mut self,
-        pos: (i32, i32, i32),
-        spawn: glam::Vec3,
-        dir: glam::Vec3,
-        stack: crate::item::ItemStack,
-    ) {
-        if !crate::dispenser::return_stack(&mut self.world, pos, stack.clone()) {
-            crate::entity::spawn_thrown_item(
-                &mut self.ecs,
-                spawn,
-                dir * crate::dispenser::TOSS_SPEED
-                    + glam::Vec3::new(0.0, crate::dispenser::TOSS_LIFT, 0.0),
-                stack,
-                u8::MAX,
-            );
-        }
-    }
-
     /// Skin painter (2026-09-06) — refresh the two precision aids drawn over the
     /// blown-up avatar mannequin:
     ///
@@ -4972,29 +4949,8 @@ impl super::GameState {
 
             // Honey accumulation (2026-07-04) — every HONEY_ACCUM_INTERVAL
             // ticks, a hive with a bee working nearby gains one honey level.
-            if self.tick_counter.is_multiple_of(crate::bee_hive::HONEY_ACCUM_INTERVAL_TICKS) {
-                let bees: Vec<(f32, f32, f32)> = self
-                    .ecs
-                    .query::<(&crate::entity::Position, &crate::entity::MobKind)>()
-                    .iter()
-                    .filter(|(_, (_, k))| k.0 == crate::mob::MobType::Bee)
-                    .map(|(_, (p, _))| (p.0.x, p.0.y, p.0.z))
-                    .collect();
-                if !bees.is_empty() {
-                    let hive_positions: Vec<(i32, i32, i32)> =
-                        self.world.iter_hives().map(|(p, _)| p).collect();
-                    for hp in hive_positions {
-                        if crate::bee_hive::bee_within(
-                            hp,
-                            &bees,
-                            crate::bee_hive::BEE_WORK_RADIUS,
-                        )
-                            && let Some(h) = self.world.hive_at_mut(hp) {
-                                h.deposit_honey();
-                            }
-                    }
-                }
-            }
+            // Shared with the dedicated server (block_machines.rs, T1-3).
+            crate::bee_hive::accumulate_honey(&mut self.world, &self.ecs, self.tick_counter);
 
             // Fire (2026-07-04 gap-fill wave) — lava starts fires on exposed
             // wood, then every burning cell advances: rain douses, kegs light,
@@ -5021,35 +4977,42 @@ impl super::GameState {
                 dirty_chunks.insert(World::block_to_chunk(x, y, z));
             }
             // Saplings (2026-07-04) — decayed leaves sometimes drop one.
-            for (x, y, z, mat) in self.leaf_decay.take_sapling_drops() {
-                crate::entity::spawn_item(
-                    &mut self.ecs,
-                    glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.2, z as f32 + 0.5),
-                    crate::item::ItemStack::new_material(mat, 1),
-                    (x ^ z) as u32,
-                );
-            }
+            crate::leaf_decay::spawn_sapling_drops(
+                &mut self.ecs,
+                self.leaf_decay.take_sapling_drops(),
+            );
 
             // Crop growth (Spec 16 farming Phase 6). 20-tick batch (4 *
             // falling_tick_counter = every 4 ticks ≈ 5 Hz) is fine because
             // per-stage interval is 200 ticks = once every 40 batches.
-            // BRIDGE: single-player owns the tick because HostedServer
-            // routing is deferred; multiplayer-authoritative growth lands
-            // when HostedServer integration arrives. Pure free function.
+            // BRIDGE: single-player / the LAN host own the tick client-side
+            // because single-player still bypasses GameServer (CLAUDE.md
+            // known debt); the dedicated server already ticks the SAME fn
+            // (block_machines.rs, T1-3). Replace when single-player routes
+            // through a local HostedServer.
             // Hoist the growth-cadence gate BEFORE the full-world crop scan:
             // collect_crop_positions is an O(loaded-volume) sweep, but crops
             // only advance on the ~1-in-40 cadence ticks — scanning on the
             // other 39 was pure waste (engine audit 2026-06-04, B).
-            if crate::growth::crops_should_advance(self.tick_counter) {
-                let crop_positions = crate::growth::collect_crop_positions(&self.world);
+            // `tick_growth` owns that gate + both scans; shared with the
+            // dedicated server (block_machines.rs, T1-3).
+            // A JOINER (`remote_client` set) skips growth entirely (T1-3
+            // review A): the world it joined already grows crops + saplings
+            // (the dedicated server itself, or the LAN host's client) and
+            // broadcasts every stage. Its own pushes were accepted as edits
+            // on top, so crops near a joiner grew two stages per cycle; and
+            // merely dropping the pushes would still grow phantom local trees
+            // on the joiner's own sapling rolls that the server never has.
+            // Lint: test_integration/block_machines.rs.
+            if self.remote_client.is_none() {
                 let raining = self.tick_counter < self.weather_rain_until;
-                let crop_changes = crate::growth::advance_crops(
+                let growth = crate::growth::tick_growth(
                     &mut self.world,
                     self.tick_counter,
                     raining,
-                    crop_positions,
+                    self.biome_gen.seed,
                 );
-                for bc in &crop_changes {
+                for bc in &growth.crop_changes {
                     dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
                     #[cfg(not(target_arch = "wasm32"))]
                     self.pending_block_changes.push(bc.clone());
@@ -5057,14 +5020,7 @@ impl super::GameState {
                 // Saplings (2026-07-04) — same cadence: each planted sapling
                 // rolls a deterministic chance to grow into its real worldgen
                 // tree (tree_shapes::place_tree).
-                let saplings = crate::growth::collect_sapling_positions(&self.world);
-                let grown = crate::growth::advance_saplings(
-                    &mut self.world,
-                    self.tick_counter,
-                    self.biome_gen.seed,
-                    saplings,
-                );
-                for &(x, y, z) in &grown {
+                for &(x, y, z) in &growth.grown_cells {
                     dirty_chunks.insert(World::block_to_chunk(x, y, z));
                     // Particles (2026-07-05): fresh-green poof up the new
                     // trunk so the growth moment reads.
@@ -5093,138 +5049,60 @@ impl super::GameState {
             // Dispensers/Droppers (2026-07-04) — same grid, same cadence:
             // rising power edges eject items / shoot arrows out of the
             // facing side. tick_dispensers pops the item; we spawn it.
+            // The world + ECS half (pour, bonemeal, ignite, shoot, toss,
+            // return-or-toss) is `dispenser::realise_order`, shared with the
+            // dedicated server (block_machines.rs, T1-3); this loop plays the
+            // presentation for what it did.
             for order in crate::dispenser::tick_dispensers(&mut self.world) {
-                let (dx, dy, dz) = order.facing.offset();
-                let spawn = glam::Vec3::new(
-                    order.pos.0 as f32 + 0.5 + dx as f32 * 0.6,
-                    order.pos.1 as f32 + 0.4 + dy as f32 * 0.6,
-                    order.pos.2 as f32 + 0.5 + dz as f32 * 0.6,
-                );
-                let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
-                match order.kind {
-                    crate::dispenser::EjectKind::Arrow => {
-                        crate::entity::spawn_arrow(
-                            &mut self.ecs,
-                            spawn,
-                            dir * crate::entity::ARROW_INITIAL_SPEED,
-                            crate::entity::ARROW_DAMAGE,
-                            None,
+                let pos = order.pos;
+                let out = {
+                    let mut ctx = crate::block_machines::MachineCtx {
+                        world: &mut self.world,
+                        ecs: &mut self.ecs,
+                        water: &mut self.water,
+                        lava: &mut self.lava,
+                        fire: &mut self.fire,
+                        registry: &self.registry,
+                        tick: self.tick_counter,
+                    };
+                    crate::dispenser::realise_order(&mut ctx, order)
+                };
+                match out.effect {
+                    crate::dispenser::EjectEffect::Poured { cell } => {
+                        self.rebuild_chunk_at(cell.0, cell.1, cell.2);
+                        self.audio.play_place();
+                    }
+                    crate::dispenser::EjectEffect::Bonemealed { cell, seed } => {
+                        self.rebuild_chunk_at(cell.0, cell.1, cell.2);
+                        self.audio.play_place();
+                        // UX polish sweep Task 1 — mirror the hand-bonemeal
+                        // green poof so the dispenser's effect reads too.
+                        self.particles.poof_green(
+                            glam::Vec3::new(
+                                cell.0 as f32 + 0.5,
+                                cell.1 as f32 + 0.5,
+                                cell.2 as f32 + 0.5,
+                            ),
+                            4,
+                            seed,
                         );
                     }
-                    crate::dispenser::EjectKind::PlaceLiquid(liquid) => {
-                        // Campaign D — pour the bucket into the facing cell,
-                        // mirroring the right-click empty path (AIR-only rule,
-                        // source registered with the liquid sim, empty Bucket
-                        // retained). Blocked → the bucket is not used.
-                        let (tx, ty, tz) =
-                            (order.pos.0 + dx, order.pos.1 + dy, order.pos.2 + dz);
-                        if self.world.get_block(tx, ty, tz) == block::AIR {
-                            self.world.set_block(tx, ty, tz, liquid);
-                            if liquid == block::WATER {
-                                self.water.add_source(tx, ty, tz);
-                            } else {
-                                self.lava.add_source(tx, ty, tz);
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.pending_block_changes.push(broadcast_change(&self.world, tx, ty, tz, liquid));
-                            self.rebuild_chunk_at(tx, ty, tz);
-                            self.audio.play_place();
-                            let empty = crate::item::ItemStack::new_material(
-                                crate::item::MaterialId::Bucket, 1,
-                            );
-                            self.dispenser_return_or_toss(order.pos, spawn, dir, empty);
-                        } else {
-                            self.dispenser_return_or_toss(order.pos, spawn, dir, order.stack);
-                        }
+                    crate::dispenser::EjectEffect::Ignited { cell } => {
+                        self.rebuild_chunks_for_lighting(cell.0, cell.1, cell.2);
+                        self.audio.play_place();
                     }
-                    crate::dispenser::EjectKind::Bonemeal => {
-                        // Campaign D — bonemeal the facing cell with the same
-                        // +1–2 stage rule as the right-click path. The 4-tick
-                        // dispenser cadence keeps tick parity constant, so the
-                        // seed gets a murmur avalanche (the water-wheel-wave
-                        // lesson) instead of the hand path's raw xor.
-                        let (tx, ty, tz) =
-                            (order.pos.0 + dx, order.pos.1 + dy, order.pos.2 + dz);
-                        let target_blk = self.world.get_block(tx, ty, tz);
-                        let mut seed = self.tick_counter
-                            ^ ((tx as u64) << 32)
-                            ^ ((ty as u64) << 16)
-                            ^ (tz as u64);
-                        seed ^= seed >> 33;
-                        seed = seed.wrapping_mul(0xff51_afd7_ed55_8ccd);
-                        seed ^= seed >> 33;
-                        if let Some(next) = crate::growth::bonemeal_advance(target_blk, seed) {
-                            self.world.set_block(tx, ty, tz, next);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.pending_block_changes.push(broadcast_change(&self.world, tx, ty, tz, next));
-                            self.rebuild_chunk_at(tx, ty, tz);
-                            self.audio.play_place();
-                            // Consumed on success (already taken from the slot).
-                            // UX polish sweep Task 1 — mirror the hand-bonemeal
-                            // green poof so the dispenser's effect reads too.
-                            self.particles.poof_green(
-                                glam::Vec3::new(tx as f32 + 0.5, ty as f32 + 0.5, tz as f32 + 0.5),
-                                4,
-                                seed,
-                            );
-                        } else {
-                            // Not a crop / already mature — no waste.
-                            self.dispenser_return_or_toss(order.pos, spawn, dir, order.stack);
-                        }
-                    }
-                    crate::dispenser::EjectKind::Ignite => {
-                        // Campaign D — light the facing cell through the same
-                        // FireSystem seam as the hand path (target-is-AIR +
-                        // flammable-neighbour rules enforced inside ignite).
-                        let (tx, ty, tz) =
-                            (order.pos.0 + dx, order.pos.1 + dy, order.pos.2 + dz);
-                        let lit = self.fire.ignite(&mut self.world, tx, ty, tz, self.tick_counter);
-                        if lit {
-                            crate::lighting::update_for_block_change(
-                                &mut self.world,
-                                (tx, ty, tz),
-                                block::AIR,
-                                block::FIRE,
-                                &self.registry,
-                            );
-                            self.rebuild_chunks_for_lighting(tx, ty, tz);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.pending_block_changes.push(
-                                broadcast_change(&self.world, tx, ty, tz, block::FIRE),
-                            );
-                            self.audio.play_place();
-                        }
-                        // The igniter goes back. Flint & steel pays the same
-                        // durability cost as a hand ignition (and breaks at 0);
-                        // the Magnesium Firestarter is reusable, matching hand use.
-                        let mut back = order.stack;
-                        if lit
-                            && let crate::item::Item::Tool(t) = &mut back.item {
-                                t.durability = t.durability.saturating_sub(1);
-                            }
-                        let broken =
-                            matches!(&back.item, crate::item::Item::Tool(t) if t.is_broken());
-                        if !broken {
-                            self.dispenser_return_or_toss(order.pos, spawn, dir, back);
-                        }
-                    }
-                    crate::dispenser::EjectKind::Toss => {
-                        crate::entity::spawn_thrown_item(
-                            &mut self.ecs,
-                            spawn,
-                            dir * crate::dispenser::TOSS_SPEED
-                                + glam::Vec3::new(0.0, crate::dispenser::TOSS_LIFT, 0.0),
-                            order.stack,
-                            u8::MAX,
-                        );
-                    }
+                    crate::dispenser::EjectEffect::Shot
+                    | crate::dispenser::EjectEffect::Tossed
+                    | crate::dispenser::EjectEffect::Refused => {}
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                self.pending_block_changes.extend(out.changes);
                 // Particles (2026-07-05): muzzle puff out of the facing side.
                 self.particles.puff(
-                    spawn,
-                    dir,
+                    out.spawn,
+                    out.dir,
                     4,
-                    self.tick_counter ^ ((order.pos.0 as u64) << 16) ^ order.pos.2 as u64,
+                    self.tick_counter ^ ((pos.0 as u64) << 16) ^ pos.2 as u64,
                 );
                 self.audio.play_place();
             }
@@ -5353,101 +5231,82 @@ impl super::GameState {
             // its smelt by 1 tick when (input + fuel + output room).
             // Lit-state transitions flip the block-id between FURNACE
             // and FURNACE_LIT and emit BlockChange packets.
-            let furnace_positions: Vec<(i32, i32, i32)> = self.world
-                .iter_furnaces()
-                .map(|((x, y, z), _)| (x, y, z))
-                .collect();
-            for pos in furnace_positions {
-                let current_block = self.world.get_block(pos.0, pos.1, pos.2);
-                let outcome = match self.world.furnace_at_mut(pos) {
-                    Some(data) => crate::furnace::tick_one(data),
-                    None => continue,
-                };
-                if let Some(lit) = outcome.lit_changed {
-                    let want_block = if lit { block::FURNACE_LIT } else { block::FURNACE };
-                    // Only flip if the world's block-id actually
-                    // disagrees with the desired state (defence against
-                    // a /setblock that swapped the block out from under
-                    // the entity — fall back to whatever the world says
-                    // and trust the next tick to converge).
-                    if current_block != want_block
-                        && (current_block == block::FURNACE || current_block == block::FURNACE_LIT)
-                    {
-                        self.world.set_block(pos.0, pos.1, pos.2, want_block);
-                        dirty_chunks.insert(World::block_to_chunk(pos.0, pos.1, pos.2));
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.pending_block_changes.push(broadcast_change(&self.world, pos.0, pos.1, pos.2, want_block));
-                    }
-                }
+            // The sweep itself (tick + lit flip) is `furnace::tick_all`,
+            // shared with the dedicated server (block_machines.rs, T1-3).
+            let furnace_sweep = crate::furnace::tick_all(&mut self.world);
+            for bc in &furnace_sweep.changes {
+                dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            self.pending_block_changes.extend(furnace_sweep.changes);
+            for pos in furnace_sweep.completed {
                 // Audio cue on recipe completion. Tied into the
                 // campfire's existing play_place hook for consistency.
-                if outcome.recipe_completed.is_some() {
-                    self.audio.play_place();
+                self.audio.play_place();
 
-                    // Spec 20 Phase 10 — Proof-of-Play sats trickle.
-                    // Find the closest player within
-                    // `POP_TRICKLE_RADIUS_BLOCKS` and credit them
-                    // `PROOF_OF_PLAY_TRICKLE_SATS` through the unified
-                    // helper. Charter + server-policy + tax/drain
-                    // gating happens inside `apply_sats_payout`; off-
-                    // Bitcoin servers and guardian-disabled players
-                    // see no sats line. No payout if no player is in
-                    // range (presence-gated by design — keeps the
-                    // mechanic from being a background farm).
-                    let fx = pos.0 as f32 + 0.5;
-                    let fy = pos.1 as f32 + 0.5;
-                    let fz = pos.2 as f32 + 0.5;
-                    // UX polish sweep Task 1 — smoke puffing out of the
-                    // furnace top so a smelt-complete beat actually reads.
-                    self.particles.burst_smoke(
-                        glam::Vec3::new(fx, fy + 1.0, fz),
-                        4,
-                        self.tick_counter ^ ((pos.0 as u64) << 16) ^ pos.2 as u64,
-                    );
-                    let radius_sq = crate::furnace::POP_TRICKLE_RADIUS_BLOCKS
-                        * crate::furnace::POP_TRICKLE_RADIUS_BLOCKS;
-                    let mut best: Option<(usize, f32)> = None;
-                    for (pidx, slot) in self.players.iter().enumerate() {
-                        // Post-merge review #7 — dead players don't
-                        // earn the PoP trickle. A corpse lying in the
-                        // heat radius shouldn't credit sats.
-                        if slot.is_dead() {
-                            continue;
-                        }
-                        let dx = slot.player.pos.x - fx;
-                        let dy = slot.player.pos.y - fy;
-                        let dz = slot.player.pos.z - fz;
-                        let d2 = dx * dx + dy * dy + dz * dz;
-                        if d2 <= radius_sq && best.is_none_or(|(_, bd)| d2 < bd) {
-                            best = Some((pidx, d2));
-                        }
+                // Spec 20 Phase 10 — Proof-of-Play sats trickle.
+                // Find the closest player within
+                // `POP_TRICKLE_RADIUS_BLOCKS` and credit them
+                // `PROOF_OF_PLAY_TRICKLE_SATS` through the unified
+                // helper. Charter + server-policy + tax/drain
+                // gating happens inside `apply_sats_payout`; off-
+                // Bitcoin servers and guardian-disabled players
+                // see no sats line. No payout if no player is in
+                // range (presence-gated by design — keeps the
+                // mechanic from being a background farm).
+                let fx = pos.0 as f32 + 0.5;
+                let fy = pos.1 as f32 + 0.5;
+                let fz = pos.2 as f32 + 0.5;
+                // UX polish sweep Task 1 — smoke puffing out of the
+                // furnace top so a smelt-complete beat actually reads.
+                self.particles.burst_smoke(
+                    glam::Vec3::new(fx, fy + 1.0, fz),
+                    4,
+                    self.tick_counter ^ ((pos.0 as u64) << 16) ^ pos.2 as u64,
+                );
+                let radius_sq = crate::furnace::POP_TRICKLE_RADIUS_BLOCKS
+                    * crate::furnace::POP_TRICKLE_RADIUS_BLOCKS;
+                let mut best: Option<(usize, f32)> = None;
+                for (pidx, slot) in self.players.iter().enumerate() {
+                    // Post-merge review #7 — dead players don't
+                    // earn the PoP trickle. A corpse lying in the
+                    // heat radius shouldn't credit sats.
+                    if slot.is_dead() {
+                        continue;
                     }
-                    if let Some((pidx, _)) = best {
-                        // Spec 28d.nostrich — the Vow suppresses every
-                        // sats payout for the player. Hashes still emit
-                        // (Proof-of-Play stays educational); settlement
-                        // is paused until the vow lifts.
-                        let charter = self.players[pidx].charter_allows_sats
-                            && !crate::nostrich_vow::is_vow_active(
-                                self.players[pidx].nostrich_vow.as_ref(),
-                            );
-                        let payout = crate::economy::apply_sats_payout(
-                            crate::furnace::PROOF_OF_PLAY_TRICKLE_SATS,
-                            crate::economy::PayoutKind::ProofOfPlay,
-                            &self.sats_policy,
-                            charter,
+                    let dx = slot.player.pos.x - fx;
+                    let dy = slot.player.pos.y - fy;
+                    let dz = slot.player.pos.z - fz;
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    if d2 <= radius_sq && best.is_none_or(|(_, bd)| d2 < bd) {
+                        best = Some((pidx, d2));
+                    }
+                }
+                if let Some((pidx, _)) = best {
+                    // Spec 28d.nostrich — the Vow suppresses every
+                    // sats payout for the player. Hashes still emit
+                    // (Proof-of-Play stays educational); settlement
+                    // is paused until the vow lifts.
+                    let charter = self.players[pidx].charter_allows_sats
+                        && !crate::nostrich_vow::is_vow_active(
+                            self.players[pidx].nostrich_vow.as_ref(),
                         );
-                        if !payout.suppressed && payout.credited > 0 {
-                            // No toast — the trickle is a passive
-                            // background credit; spamming "+1 sat" on
-                            // every smelt would drown the HUD. The
-                            // Treasury panel (Spec 16 Phase 4) shows
-                            // cumulative PoP earnings.
-                            log::debug!(
-                                "PoP smelt trickle: pidx={pidx} furnace=({},{},{}) credited={}",
-                                pos.0, pos.1, pos.2, payout.credited,
-                            );
-                        }
+                    let payout = crate::economy::apply_sats_payout(
+                        crate::furnace::PROOF_OF_PLAY_TRICKLE_SATS,
+                        crate::economy::PayoutKind::ProofOfPlay,
+                        &self.sats_policy,
+                        charter,
+                    );
+                    if !payout.suppressed && payout.credited > 0 {
+                        // No toast — the trickle is a passive
+                        // background credit; spamming "+1 sat" on
+                        // every smelt would drown the HUD. The
+                        // Treasury panel (Spec 16 Phase 4) shows
+                        // cumulative PoP earnings.
+                        log::debug!(
+                            "PoP smelt trickle: pidx={pidx} furnace=({},{},{}) credited={}",
+                            pos.0, pos.1, pos.2, payout.credited,
+                        );
                     }
                 }
             }
@@ -5457,15 +5316,8 @@ impl super::GameState {
             // workstation state machine. Fuel-free and stateless on the block
             // (no lit variant), so this is a pure per-tick state advance — no
             // block flip, no audio for v1. Output is collected by right-click.
-            let composter_positions: Vec<(i32, i32, i32)> = self.world
-                .iter_composters()
-                .map(|(p, _)| p)
-                .collect();
-            for pos in composter_positions {
-                if let Some(state) = self.world.composter_at_mut(pos) {
-                    let _ = crate::composter::tick_one(state);
-                }
-            }
+            // Shared with the dedicated server (block_machines.rs, T1-3).
+            crate::composter::tick_all(&mut self.world);
 
             // Spec 49 (Explosives) — Blasting Keg fuse sweep. The pure
             // `tick_keg_fuses` counts every lit keg's fuse down and returns the
@@ -5594,28 +5446,8 @@ impl super::GameState {
         // P7 — hoppers: on the transfer cadence, move one item from the chest
         // above each hopper into the chest below it. Sequential chest borrows
         // (read source, compute dest, then put + take) avoid aliasing the world.
-        if self.tick_counter.is_multiple_of(crate::hopper::HOPPER_INTERVAL_TICKS) {
-            let transfers = crate::hopper::collect_hopper_transfers(&self.world);
-            for (above, below) in transfers {
-                // Chest OR dispenser/dropper on either end (container_at).
-                let Some((src_idx, item)) = crate::hopper::container_at(&self.world, above)
-                    .and_then(crate::hopper::first_item)
-                else {
-                    continue;
-                };
-                let Some(dst_idx) = crate::hopper::container_at(&self.world, below)
-                    .and_then(|c| crate::hopper::dest_slot(c, &item))
-                else {
-                    continue; // destination full for this item
-                };
-                if let Some(c) = crate::hopper::container_at_mut(&mut self.world, below) {
-                    crate::hopper::put_one(c, dst_idx, item);
-                }
-                if let Some(c) = crate::hopper::container_at_mut(&mut self.world, above) {
-                    crate::hopper::take_one(c, src_idx);
-                }
-            }
-        }
+        // Shared with the dedicated server (block_machines.rs, T1-3).
+        crate::hopper::tick_hoppers(&mut self.world, self.tick_counter);
 
         // P6 — fishing bite check: a cast line that's reached its wait time
         // hooks; the player then right-clicks to reel it in.
@@ -11163,7 +10995,11 @@ impl super::GameState {
                                 self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                 self.audio.play_break();
 
-                                if block::is_any_log_block(blk) {
+                                // A joiner runs no leaf decay of its own: the
+                                // server decays a remote break's canopy, rolls
+                                // its saplings once and broadcasts both (T1-3
+                                // review B — local decay rolled a second set).
+                                if block::is_any_log_block(blk) && self.remote_client.is_none() {
                                     self.leaf_decay.on_log_broken(pos[0], pos[1], pos[2], &self.world);
                                 }
                                 if blk == block::WATER {
@@ -11635,7 +11471,9 @@ impl super::GameState {
                                     self.players[pidx].breaking_pos = None;
                                     self.players[pidx].break_progress = 0;
 
-                                    if block::is_any_log_block(blk) {
+                                    // Joiners: server-side decay only (T1-3
+                                    // review B, see the break arm above).
+                                    if block::is_any_log_block(blk) && self.remote_client.is_none() {
                                         self.leaf_decay.on_log_broken(pos[0], pos[1], pos[2], &self.world);
                                     }
                                     if blk == block::WATER {

@@ -46,6 +46,36 @@ pub fn bee_within(hive: (i32, i32, i32), bees: &[(f32, f32, f32)], radius: f32) 
     })
 }
 
+/// Honey accumulation sweep (2026-07-04; shared 2026-10-05, T1-3) — every
+/// [`HONEY_ACCUM_INTERVAL_TICKS`], each hive with a bee working within
+/// [`BEE_WORK_RADIUS`] gains one honey level. Gated on `tick` internally, so
+/// callers run it on their block-machine cadence and it no-ops off-interval.
+///
+/// The ONE implementation: the client loop (single-player / LAN host) and the
+/// dedicated server (`block_machines.rs`) both call this — never a copy.
+pub fn accumulate_honey(world: &mut crate::world::World, ecs: &hecs::World, tick: u64) {
+    if !tick.is_multiple_of(HONEY_ACCUM_INTERVAL_TICKS) {
+        return;
+    }
+    let bees: Vec<(f32, f32, f32)> = ecs
+        .query::<(&crate::entity::Position, &crate::entity::MobKind)>()
+        .iter()
+        .filter(|(_, (_, k))| k.0 == crate::mob::MobType::Bee)
+        .map(|(_, (p, _))| (p.0.x, p.0.y, p.0.z))
+        .collect();
+    if bees.is_empty() {
+        return;
+    }
+    let hive_positions: Vec<(i32, i32, i32)> = world.iter_hives().map(|(p, _)| p).collect();
+    for hp in hive_positions {
+        if bee_within(hp, &bees, BEE_WORK_RADIUS)
+            && let Some(h) = world.hive_at_mut(hp)
+        {
+            h.deposit_honey();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveData {
     pub bees_inside: u8,

@@ -431,6 +431,20 @@ pub struct GameServer {
     pub fire: crate::fire::FireSystem,
     /// Cache of `WorldMeta.fire_spread_enabled` (loaded with the other meta).
     pub fire_spread_enabled: bool,
+    /// Cache of `WorldMeta.explosives_enabled` (loaded with the other meta) —
+    /// gates a server-side keg detonation exactly as the client's
+    /// `GameState::explosives_enabled` gates its own (Spec 49).
+    pub explosives_enabled: bool,
+    /// T1-3 (2026-10-05) — does THIS server tick the block machines (hives,
+    /// crops + saplings, dispensers, pistons, furnaces, composters, keg fuses,
+    /// hoppers — see `block_machines.rs`)? `true` only when no local host
+    /// client simulates them: set by `HostedServer::start_inner` iff it has 0
+    /// local players (the dedicated server). A LAN / online host's client
+    /// already ticks every machine and mirrors its block-entities in, so a
+    /// second server-side tick would double every piston push and fight the
+    /// mirror. Default `false` (also for `TestHost`, whose
+    /// `tick_furnaces` / `tick_pistons` stand-ins would otherwise double up).
+    pub simulates_block_machines: bool,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
@@ -504,6 +518,8 @@ impl GameServer {
             lava: LavaSystem::new(),
             fire: crate::fire::FireSystem::new(),
             fire_spread_enabled: true,
+            explosives_enabled: true,
+            simulates_block_machines: false,
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
             loaded_columns: ahash::AHashSet::new(),
@@ -560,6 +576,7 @@ impl GameServer {
         self.world.mobs_enabled = meta.mobs_enabled;
         self.world.keep_inventory = meta.keep_inventory;
         self.fire_spread_enabled = meta.fire_spread_enabled;
+        self.explosives_enabled = meta.explosives_enabled;
 
         // Check for saved world
         let wname = self.world_name.clone();
@@ -721,8 +738,10 @@ impl GameServer {
     /// Run one server simulation tick (20 TPS).
     ///
     /// Covers: world time, mob spawn/sun-burn (400-tick cycle), falling
-    /// blocks, water/leaf decay, mob AI, entity physics, combat timers,
-    /// entity health, dead entity cleanup.
+    /// blocks, water/lava/fire, leaf decay (applied + broadcast), mob AI,
+    /// entity physics, power, carts, combat timers, entity health, dead entity
+    /// cleanup — and, when [`Self::simulates_block_machines`] is set (dedicated
+    /// server only), the block machines in `block_machines.rs`.
     ///
     /// BRIDGE: HostedServer input still trusts the client's position
     /// (hosted_server.rs:345). Single-player bypasses GameServer entirely;
@@ -859,7 +878,35 @@ impl GameServer {
                 ));
             }
 
-            self.leaf_decay.tick(&mut self.world);
+            // Leaf decay — APPLY the result (T1-3): it used to be computed and
+            // discarded, so a server-side decay cleared the leaf in the
+            // server's world while every joiner kept a floating one until a
+            // full chunk resync, and its sapling drops vanished. The queue is
+            // fed by `on_log_broken` from the block-edit apply in
+            // `hosted_server.rs` for REMOTE players' log breaks only, on every
+            // host kind (a joiner's client runs no decay; a LAN host's client
+            // keeps owning decay of its own breaks). Not flag-gated.
+            let leaf_dirty = self.leaf_decay.tick(&mut self.world);
+            for &(x, y, z) in &leaf_dirty {
+                let nb = self.world.get_block(x, y, z);
+                self.pending_block_changes
+                    .push(crate::game_loop::broadcast_change(&self.world, x, y, z, nb));
+            }
+            crate::leaf_decay::spawn_sapling_drops(
+                &mut self.ecs,
+                self.leaf_decay.take_sapling_drops(),
+            );
+
+            // Block machines (T1-3) — only where no host client ticks them.
+            if self.simulates_block_machines {
+                self.tick_block_machines();
+            }
+        }
+
+        // Hoppers — own 8-tick cadence on the monotonic counter, outside the
+        // 4-tick block, mirroring the client loop. Same flag rule.
+        if self.simulates_block_machines {
+            self.tick_hoppers();
         }
 
         // Server-driven player physics for remote (server_simulated) players
