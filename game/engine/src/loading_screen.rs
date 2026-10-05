@@ -8,6 +8,7 @@
 //!
 //! Design: `docs/superpowers/specs/2026-06-17-loading-screen-overhaul-design.md`.
 
+use crate::brand;
 use serde::Deserialize;
 use web_time::Instant;
 
@@ -156,61 +157,16 @@ impl LoadingState {
 }
 
 // ---------------------------------------------------------------------------
-// egui rendering — the in-engine world-load screen (approved "Voxel World hero
-// + rotating card beneath" direction). Painter-driven; structure mirrors
-// `splash_ui::draw_splash` (bg Area behind a transparent CentralPanel).
+// egui rendering — the in-engine world-load screen: the Copperline mark
+// (`brand::show_mark`, same artwork as the HTML boot screen) + rotating card
+// beneath. Painter-driven; structure mirrors `splash_ui::draw_splash` (bg Area
+// behind a transparent CentralPanel).
 // ---------------------------------------------------------------------------
 
-const BG: egui::Color32 = egui::Color32::from_rgb(13, 18, 32);
-
-fn lighten(c: egui::Color32, f: f32) -> egui::Color32 {
-    let m = |v: u8| (v as f32 + (255.0 - v as f32) * f) as u8;
-    egui::Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
-}
-fn darken(c: egui::Color32, f: f32) -> egui::Color32 {
-    let m = |v: u8| (v as f32 * (1.0 - f)) as u8;
-    egui::Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
-}
-
-/// One shaded voxel cube at `top_left`.
-fn cube(painter: &egui::Painter, top_left: egui::Pos2, size: f32, base: egui::Color32) {
-    let r = egui::Rect::from_min_size(top_left, egui::vec2(size, size));
-    painter.rect_filled(r, 5.0, base);
-    // Top highlight + bottom shadow strips for a faux-3D voxel look.
-    painter.rect_filled(
-        egui::Rect::from_min_size(top_left, egui::vec2(size, size * 0.26)),
-        0.0,
-        lighten(base, 0.22),
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_size(top_left + egui::vec2(0.0, size * 0.74), egui::vec2(size, size * 0.26)),
-        0.0,
-        darken(base, 0.30),
-    );
-}
-
-/// The floating voxel diorama — 2 cubes over 3, centred on `center`.
-fn paint_voxel_hero(painter: &egui::Painter, center: egui::Pos2) {
-    const S: f32 = 30.0;
-    const G: f32 = 5.0;
-    let green = egui::Color32::from_rgb(111, 174, 90);
-    let orange = egui::Color32::from_rgb(232, 134, 46);
-    let brown = egui::Color32::from_rgb(138, 113, 88);
-    let gold = egui::Color32::from_rgb(240, 198, 116);
-    // Top row (2 cubes).
-    let top_w = 2.0 * S + G;
-    let top_x = center.x - top_w / 2.0;
-    let top_y = center.y - S - G / 2.0;
-    cube(painter, egui::pos2(top_x, top_y), S, green);
-    cube(painter, egui::pos2(top_x + S + G, top_y), S, orange);
-    // Bottom row (3 cubes).
-    let bot_w = 3.0 * S + 2.0 * G;
-    let bot_x = center.x - bot_w / 2.0;
-    let bot_y = center.y + G / 2.0;
-    cube(painter, egui::pos2(bot_x, bot_y), S, brown);
-    cube(painter, egui::pos2(bot_x + S + G, bot_y), S, brown);
-    cube(painter, egui::pos2(bot_x + 2.0 * (S + G), bot_y), S, gold);
-}
+/// Deep Frontier `#0D1B1E` — matches the HTML boot screen, so no colour flash.
+const BG: egui::Color32 = brand::DEEP_FRONTIER;
+/// Width of the mark, px.
+const MARK_WIDTH: f32 = 150.0;
 
 /// Draw the full-screen world-load screen. `progress` is `[0,1]`.
 pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: f32) {
@@ -235,19 +191,17 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
         .show(ctx, |ui| {
             let available = ui.available_size();
             ui.vertical_centered(|ui| {
-                ui.add_space((available.y / 2.0 - 165.0).max(20.0));
+                ui.add_space((available.y / 2.0 - 190.0).max(16.0));
 
-                // Voxel hero (floats with `bob`).
-                let hero_center =
-                    ui.cursor().left_top() + egui::vec2(available.x / 2.0, 22.0 + bob);
-                paint_voxel_hero(ui.painter(), hero_center);
-                ui.add_space(70.0);
+                // Copperline mark (floats with `bob`; the layout slot stays put).
+                brand::show_mark(ui, MARK_WIDTH, 255, bob);
+                ui.add_space(8.0);
 
                 // Wordmark + tagline.
                 ui.label(
                     egui::RichText::new("AXE'N'STAX")
                         .size(40.0)
-                        .color(egui::Color32::from_rgb(243, 230, 207))
+                        .color(brand::STONE)
                         .strong()
                         .extra_letter_spacing(3.0),
                 );
@@ -255,7 +209,7 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
                 ui.label(
                     egui::RichText::new("PROOF  OF  PLAY")
                         .size(12.0)
-                        .color(egui::Color32::from_rgb(212, 160, 68))
+                        .color(brand::COPPER)
                         .extra_letter_spacing(7.0),
                 );
                 ui.add_space(22.0);
@@ -277,7 +231,7 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
                     egui::vec2(bar_w * progress.clamp(0.0, 1.0), bar_h),
                 );
                 ui.painter()
-                    .rect_filled(fill_rect, 4.0, egui::Color32::from_rgb(240, 198, 116));
+                    .rect_filled(fill_rect, 4.0, brand::COPPER);
                 ui.add_space(28.0);
 
                 // Rotating content card.
@@ -295,8 +249,8 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             egui::Frame::new()
-                                .fill(egui::Color32::from_rgb(20, 27, 46))
-                                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(40, 51, 86)))
+                                .fill(egui::Color32::from_rgb(20, 37, 41)) // Deep Frontier, lifted
+                                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(58, 74, 76)))
                                 .corner_radius(egui::CornerRadius::same(12))
                                 .inner_margin(egui::Margin::symmetric(20, 16))
                                 .show(ui, |ui| {

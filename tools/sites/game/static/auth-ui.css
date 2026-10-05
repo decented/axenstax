@@ -9,7 +9,7 @@
     justify-content: center;
     background: #0d1220;
     font-family: Georgia, serif;
-    color: #d4a044;
+    color: #D27B3E;
     padding: 1rem;
     overflow-y: auto;
 }
@@ -64,7 +64,7 @@
     display: block;
     width: 100%;
     padding: 0.8rem 1rem;
-    background: #d4a044;
+    background: #D27B3E;
     color: #0d1220;
     border: none;
     border-radius: 6px;
@@ -76,7 +76,7 @@
 }
 
 #auth-same-device:hover:not(:disabled) {
-    background: #e6b656;
+    background: #F4C16F;
 }
 
 #auth-same-device:disabled {
@@ -169,7 +169,7 @@
 .webgpu-steps code {
     background: #0a0e1a;
     border: 1px solid #2a3654;
-    color: #ffd486;
+    color: #F4C16F;
     padding: 0.05rem 0.4rem;
     border-radius: 4px;
     font-size: 0.85em;
@@ -185,8 +185,8 @@
     display: inline-block;
     margin-left: 2.2rem;
     background: transparent;
-    border: 1px solid #d4a044;
-    color: #e7b85a;
+    border: 1px solid #D27B3E;
+    color: #F4C16F;
     border-radius: 6px;
     padding: 0.45rem 1.1rem;
     font-family: inherit;
@@ -195,8 +195,8 @@
     transition: background .15s ease, color .15s ease;
 }
 .webgpu-retest:hover:not(:disabled) {
-    background: rgba(212,160,68,.12);
-    color: #ffd486;
+    background: rgba(210,123,62,.12);
+    color: #F4C16F;
 }
 .webgpu-retest:disabled { opacity: .55; cursor: progress; }
 

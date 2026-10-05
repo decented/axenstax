@@ -4,6 +4,7 @@
 //! mirrors `loading_screen::draw_loading_screen` (bg Area + transparent
 //! CentralPanel + voxel-hero brand moment).
 
+use crate::brand;
 use crate::showcase::{Basket, ExitAction};
 
 /// The lines the exit screen shows for `action`, derived from the basket. Pure
@@ -34,7 +35,7 @@ pub fn summary_lines(action: ExitAction, basket: &Basket) -> Vec<String> {
 /// timer driven by the caller.)
 pub fn draw_exit_screen(ctx: &egui::Context, action: ExitAction, basket: &Basket) {
     ctx.request_repaint();
-    const BG: egui::Color32 = egui::Color32::from_rgb(13, 18, 32);
+    const BG: egui::Color32 = brand::DEEP_FRONTIER;
     egui::Area::new(egui::Id::new("showcase_exit_bg"))
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
@@ -53,7 +54,7 @@ pub fn draw_exit_screen(ctx: &egui::Context, action: ExitAction, basket: &Basket
                 ui.label(
                     egui::RichText::new("AXE'N'STAX")
                         .size(40.0)
-                        .color(egui::Color32::from_rgb(243, 230, 207))
+                        .color(brand::STONE)
                         .strong()
                         .extra_letter_spacing(3.0),
                 );
@@ -62,7 +63,7 @@ pub fn draw_exit_screen(ctx: &egui::Context, action: ExitAction, basket: &Basket
                     ui.label(
                         egui::RichText::new(line)
                             .size(16.0)
-                            .color(egui::Color32::from_rgb(238, 242, 251)),
+                            .color(brand::STONE),
                     );
                     ui.add_space(4.0);
                 }

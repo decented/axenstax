@@ -190,6 +190,7 @@ mod tester_gate;
 #[cfg(not(target_arch = "wasm32"))]
 mod signet_contacts;
 mod held_item_model;
+mod brand;
 mod splash_ui;
 mod loading_screen;
 mod exhibit;
@@ -1918,6 +1919,20 @@ impl ApplicationHandler for App {
         let window_attrs = Window::default_attributes()
             .with_title("Axe'n'Stax")
             .with_inner_size(PhysicalSize::new(1280, 720));
+
+        // Copperline window/taskbar icon (native desktop only — no web, no APK).
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        let window_attrs = window_attrs.with_window_icon(brand::window_icon());
+
+        // Wayland app id / X11 WM_CLASS = the packaged identifier
+        // (tools/packaging/packager.toml), so the compositor matches the
+        // installed `.desktop` entry and its icon. winit's X11 and Wayland
+        // `with_name` write the same field, so one trait import covers both.
+        #[cfg(target_os = "linux")]
+        let window_attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            window_attrs.with_name("com.axenstax.engine", "axenstax-engine")
+        };
 
         // Native launches in BORDERLESS FULLSCREEN on the current monitor (no
         // resolution switch — multi-monitor safe). The 1280×720 above is the

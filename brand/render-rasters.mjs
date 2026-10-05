@@ -23,6 +23,10 @@
 //                                                    central 66/108 safe circle (adaptive icon;
 //                                                    background colour is res/values/colors.xml)
 //
+// Rust engine (game/engine/assets/brand/, include_bytes! by src/brand.rs):
+//   mark.png          <- axenstax-mark-flat.svg, 336x246 transparent (splash + loading screens)
+//   app-icon-128.png  <- axenstax-app-icon-rounded.svg 128, transparent corners (native window icon)
+//
 // Uses Playwright from tools/smoke/node_modules (no rsvg/inkscape needed).
 import { createRequire } from 'node:module';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -138,6 +142,11 @@ try {
     { size: 48, buf: await rounded(48) }, { size: 64, buf: await rounded(64) },
     { size: 128, buf: await rounded(128) }, { size: 256, buf: await rounded(256) },
   ]));
+
+  // --- Rust engine (egui mark texture + native window icon) ---
+  const eng = 'game/engine/assets/brand/';
+  write(eng + 'mark.png', await render(336, 246, 'transparent', img('axenstax-mark-flat.svg', 336, 246)));
+  write(eng + 'app-icon-128.png', await rounded(128));
 
   // --- Android ---
   const dens = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
