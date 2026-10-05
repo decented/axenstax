@@ -206,7 +206,7 @@ disclaimed. Enabling others to self-host = fine; nudging them to strip safety = 
 
 ## Project Overview
 
-Open-source, massively scalable voxel sandbox platform — custom engine, custom client, custom server. Players mine blocks to earn real Bitcoin (Lightning Network), creators run monetised servers, and the whole stack is self-hostable.
+Open-source, massively scalable voxel sandbox platform — custom engine, custom client, custom server. Sovereignty-first: players own their identity, worlds and creations, and the whole stack is self-hostable. **Proof of Play** is an educational proof-of-work mechanic (every strike hashes); on operator-run Bitcoin-enabled servers it can optionally drive sats via a deterministic work-meter. Never describe or market it as "earn Bitcoin" (UK FCA financial-promotion risk; see red lines).
 
 No existing engine (Luanti, Veloren, etc.) can deliver this vision without becoming the ceiling. See `docs/architecture/ADR-001-full-custom-engine.md`.
 
