@@ -207,6 +207,10 @@ web-sys = { version = "0.3", features = [
     "Location",
     # #24 — Web Speech API for accessibility narration (TTS).
     "SpeechSynthesis", "SpeechSynthesisUtterance",
+    # Web Audio — the 7 procedural sounds (audio.rs). AudioContext starts
+    # suspended and is resumed on the first user gesture.
+    "AudioContext", "AudioContextState", "AudioBuffer", "AudioBufferSourceNode",
+    "AudioDestinationNode", "AudioNode", "AudioScheduledSourceNode", "GainNode", "AudioParam",
 ] }
 
 [profile.dev]

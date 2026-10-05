@@ -1465,6 +1465,8 @@ impl super::GameState {
             hs.server.render_distance = self.graphics.render_distance;
         }
         Self::sync_display_settings(&mut self.renderer, &self.graphics);
+        // Master volume + mute (audio.rs) — both targets, applied live.
+        self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
         // Mipmaps (Spec 39 A6) — opt-in; flipping the dial rebuilds the block
         // atlas + sampler in place (no restart, no re-mesh). Pass the Workshop's
         // appended override layers so a reskin survives the rebuild.
@@ -4742,7 +4744,7 @@ impl super::GameState {
         // Chat-open input gate: when the chat overlay (or the full-screen map) is
         // open, the local player stops moving and looking. Mouse/keyboard go to egui.
         let mut intents = intents;
-        if self.chat.open || self.map_screen.open || self.challenge_board_open || self.rig_studio_open {
+        if self.chat.open || self.map_screen.open || self.challenge_board_open || self.rig_studio_open || self.controls_card_open {
             // Single-player chat/map is local-only in v1, so just gate slot 0.
             if let Some(first) = intents.get_mut(0) {
                 *first = PlayerIntent::default();
@@ -4789,6 +4791,8 @@ impl super::GameState {
                 || (i == 0 && self.wardrobe_open)
                 // Wave 6 — challenge board (player 0) is a modal menu.
                 || (i == 0 && self.challenge_board_open)
+                // The controls card (player 0) is a modal panel.
+                || (i == 0 && self.controls_card_open)
                 // #19 — Rig Studio (player 0) is a modal authoring panel.
                 || (i == 0 && self.rig_studio_open)
                 // Trials — the "Well done!" Race completion panel (player 0).
@@ -6451,6 +6455,17 @@ impl super::GameState {
         Ok(())
     }
 
+    /// Close the controls card and remember — per device, on web and native —
+    /// that it has been seen, so first spawn never shows it again. The caller
+    /// re-captures the cursor (it differs by path: Esc chain vs "Got it").
+    pub(crate) fn dismiss_controls_card(&mut self) {
+        self.controls_card_open = false;
+        if !self.graphics.controls_card_seen {
+            self.graphics.controls_card_seen = true;
+            self.graphics.save();
+        }
+    }
+
     /// True when a UI surface owns player 0's input — chat, the full-screen map,
     /// or any of player 0's modal panels (crafting/inventory, chest, furnace,
     /// vendor, dialogue, inspect/capture/plaque, explorer, Workshop, Wardrobe).
@@ -6460,7 +6475,7 @@ impl super::GameState {
     /// cross-platform "bump" keys (e.g. the N Satoshi summon) so they don't fire
     /// through an open dialogue/menu.
     pub(crate) fn p0_ui_modal_open(&self) -> bool {
-        if self.chat.open || self.map_screen.open || self.challenge_board_open || self.rig_studio_open {
+        if self.chat.open || self.map_screen.open || self.challenge_board_open || self.rig_studio_open || self.controls_card_open {
             return true;
         }
         // Trials — the "Well done!" completion panel pauses gameplay input.
@@ -6515,6 +6530,12 @@ impl super::GameState {
     /// Returns `true` when something was closed, so the caller knows whether
     /// to re-capture the cursor.
     pub(crate) fn close_topmost_ui_panel(&mut self) -> bool {
+        // The controls card goes first so Esc dismisses it (and remembers it
+        // was seen) instead of opening the pause menu behind it.
+        if self.controls_card_open {
+            self.dismiss_controls_card();
+            return true;
+        }
         if self.chat.open {
             self.chat.open = false;
             return true;
@@ -7323,6 +7344,12 @@ impl super::GameState {
                 self.repair_void_columns_after_load();
                 self.reset_tick_timing();
                 self.mode = GameMode::Playing;
+                // First spawn on this device: show the controls card once. It is
+                // a modal (frees the cursor, freezes movement) until "Got it".
+                if !self.graphics.controls_card_seen {
+                    self.controls_card_open = true;
+                    self.release_cursor();
+                }
                 // The world is live from here on — the only point a close-save
                 // or a leave-save may write it. An arena is recognised by its
                 // pending first-tick launch (fresh) or its restored run (Resume).
@@ -7710,6 +7737,9 @@ impl super::GameState {
                 let plan = crate::menu::plan_lobby_settings(panel_action, relays_changed, qr_on_screen);
                 if plan.persist {
                     self.graphics.save();
+                    // Volume / mute are world-independent: apply them live in
+                    // the lobby too (the rest is pushed on world entry).
+                    self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
                     // The tester unlock lives here: re-gate /bug, /idea, /mailbox.
                     #[cfg(not(target_arch = "wasm32"))]
                     crate::native_mailbox::apply_gate(&mut self.cmd_registry, &self.graphics);
@@ -8992,6 +9022,14 @@ impl super::GameState {
                             log::error!("Failed to save difficulty: {e}");
                         }
                     }
+                }
+                crate::menu::PAUSE_OPEN_CONTROLS => {
+                    // Reopen the controls card over the world. It is a modal in
+                    // `Playing` (cursor stays free, movement frozen) and closes
+                    // with "Got it" / Esc, which re-captures the cursor.
+                    self.controls_card_open = true;
+                    self.mode = GameMode::Playing;
+                    self.reset_tick_timing();
                 }
                 crate::menu::PAUSE_OPEN_SETTINGS => {
                     // Open the Graphics settings panel; drawn in place of the
@@ -19807,23 +19845,15 @@ impl super::GameState {
                         };
                         (display, how_to, progress)
                     } else {
-                        // UX polish sweep Task 2 — free play had almost nothing
-                        // to teach here ("free to explore" + one key). Replaced
-                        // with a scannable controls cheat-sheet covering the
-                        // keys/gestures a kid is otherwise unlikely to discover
-                        // on their own. Every line verified against input.rs
-                        // (KeyT/Slash → chat in main.rs, F5, KeyJ, KeyN) and
-                        // companion.rs (Follow/Stay/Wander cycle) / breeding.rs
-                        // + tameable.rs (sneak-gated feed/cull).
+                        // Free play: the controls cheat-sheet, built from the SAME
+                        // table as the first-spawn card and the pause menu's
+                        // "Controls" button (`controls.rs` — every row cites a real
+                        // binding and is covered by a test). Platform-aware.
                         (
-                            "Free play — controls".to_string(),
-                            "\u{2022} T — open chat, type /help for commands\n\
-                             \u{2022} F5 — third-person camera\n\
-                             \u{2022} J — challenges (Trials)\n\
-                             \u{2022} N — call Satoshi over to lend a hand\n\
-                             \u{2022} Empty hand, right-click a tamed pet — Follow / Stay / Wander\n\
-                             \u{2022} Sneak — careful actions (breeding a mount, culling your own pet)"
-                                .to_string(),
+                            "Free play \u{2014} controls".to_string(),
+                            crate::controls::help_sheet_text(
+                                crate::controls::ControlsLayout::current(),
+                            ),
                             String::new(),
                         )
                     };
@@ -20142,6 +20172,18 @@ impl super::GameState {
             } else if result.close_requested {
                 self.challenge_board_open = false;
                 self.capture_cursor();
+            }
+        }
+
+        // Controls card (`controls.rs`): first spawn + the pause menu's "Controls"
+        // button. One table feeds this card and the H help sheet.
+        if self.controls_card_open {
+            let layout = crate::controls::ControlsLayout::current();
+            if crate::controls::show_controls_card(&self.renderer.egui.ctx, layout) {
+                self.dismiss_controls_card();
+                if !self.p0_ui_modal_open() {
+                    self.capture_cursor();
+                }
             }
         }
 

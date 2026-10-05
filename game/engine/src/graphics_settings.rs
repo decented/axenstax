@@ -140,6 +140,12 @@ pub const SENSITIVITY_MAX: f32 = 0.01;
 pub const BRIGHTNESS_MIN: f32 = 0.6;
 pub const BRIGHTNESS_MAX: f32 = 2.0;
 pub const DEFAULT_BRIGHTNESS: f32 = 1.0;
+/// Master volume slider range (`0.0` = silent, `1.0` = sounds as authored).
+/// The audio engine squares it (`audio::effective_gain`) so the lower half of
+/// the slider is usable.
+pub const MASTER_VOLUME_MIN: f32 = 0.0;
+pub const MASTER_VOLUME_MAX: f32 = 1.0;
+pub const DEFAULT_MASTER_VOLUME: f32 = 1.0;
 
 /// Minimap zoom = world blocks per map pixel. Lower = more zoomed in (fewer
 /// blocks per pixel). A personal preference like brightness — it never flips the
@@ -299,6 +305,18 @@ pub struct GraphicsSettings {
     /// settings.json loads with feedback off.
     #[serde(default)]
     pub tester_feedback: bool,
+    /// Master volume for every sound effect, `MASTER_VOLUME_MIN..=MASTER_VOLUME_MAX`.
+    /// Per-device (native `settings.json`, web localStorage) and applied on
+    /// BOTH targets via `AudioEngine::set_master`. Personal pref, excluded from
+    /// preset detection. Clamped on load.
+    pub master_volume: f32,
+    /// Mute switch — silences all sound without losing the volume setting.
+    pub audio_muted: bool,
+    /// Whether this device has already been shown the one-time controls card
+    /// (first spawn). Per-device like `has_seen_license_onboarding`, so it
+    /// survives a web reload. The pause menu's "Controls" button reopens the
+    /// card any time regardless. Off by default.
+    pub controls_card_seen: bool,
 }
 
 /// The shipped relay set for the rendezvous handshake: public third-party
@@ -451,6 +469,9 @@ impl GraphicsSettings {
             online_relays: default_online_relays(),
             online_port: DEFAULT_ONLINE_PORT,
             tester_feedback: false,
+            master_volume: DEFAULT_MASTER_VOLUME,
+            audio_muted: false,
+            controls_card_seen: false,
         }
     }
 
@@ -513,6 +534,8 @@ impl GraphicsSettings {
         self.brightness = self.brightness.clamp(BRIGHTNESS_MIN, BRIGHTNESS_MAX);
         // #6 — minimap zoom (blocks per pixel).
         self.minimap_zoom = self.minimap_zoom.clamp(MINIMAP_ZOOM_MIN, MINIMAP_ZOOM_MAX);
+        // Master volume — a hand-edited file can't amplify or go negative.
+        self.master_volume = self.master_volume.clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
         // An empty or all-rubbish relay list would make online play silently
         // impossible, so repair rather than accept it.
         self.online_relays = sanitise_relays(std::mem::take(&mut self.online_relays));
@@ -810,12 +833,47 @@ mod tests {
         s.tester_feedback = true;
         s.narration_enabled = !s.narration_enabled;
         let narration = s.narration_enabled;
+        s.master_volume = 0.3;
+        s.audio_muted = true;
+        s.controls_card_seen = true;
         s.apply_preset(GraphicsPreset::Potato);
         assert_eq!(s.preset(), GraphicsPreset::Potato);
         assert_eq!(s.online_relays, vec!["wss://relay.example.com".to_string()]);
         assert_eq!(s.online_port, 4242);
         assert!(s.tester_feedback);
         assert_eq!(s.narration_enabled, narration);
+        assert_eq!(s.master_volume, 0.3, "a preset click must not touch the volume");
+        assert!(s.audio_muted);
+        assert!(s.controls_card_seen);
+    }
+
+    #[test]
+    fn audio_and_controls_card_defaults_and_old_file_compat() {
+        let d = GraphicsSettings::default();
+        assert_eq!(d.master_volume, DEFAULT_MASTER_VOLUME);
+        assert!(!d.audio_muted);
+        assert!(!d.controls_card_seen, "a new device must see the controls card once");
+        // An old settings file (none of the three keys) loads with the defaults.
+        let old: GraphicsSettings = serde_json::from_str(r#"{ "render_distance": 8 }"#).unwrap();
+        assert_eq!(old.master_volume, DEFAULT_MASTER_VOLUME);
+        assert!(!old.audio_muted);
+        assert!(!old.controls_card_seen);
+        // Round-trip.
+        let s = GraphicsSettings { master_volume: 0.4, audio_muted: true, controls_card_seen: true, ..Default::default() };
+        let back: GraphicsSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.master_volume, 0.4);
+        assert!(back.audio_muted);
+        assert!(back.controls_card_seen);
+    }
+
+    #[test]
+    fn clamp_pins_master_volume_into_range() {
+        let mut s = GraphicsSettings { master_volume: 9.0, ..Default::default() };
+        s.clamp();
+        assert_eq!(s.master_volume, MASTER_VOLUME_MAX);
+        s.master_volume = -1.0;
+        s.clamp();
+        assert_eq!(s.master_volume, MASTER_VOLUME_MIN);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 [
   { "kind": "tip", "title": "Hold to mine", "body": "Press and hold on a block to keep mining — release when it breaks. Tougher blocks take longer." },
   { "kind": "tip", "title": "Proof of Play", "body": "Every strike runs a real hash. Watch it flash on each hit — that's the proof of your work." },
-  { "kind": "tip", "title": "Your hotbar", "body": "Pick what's in your hand with the number keys, the scroll wheel, or the gamepad bumpers." },
+  { "kind": "tip", "title": "Your hotbar", "body": "Pick what's in your hand with the number keys 1 to 9 or the scroll wheel (on a touchscreen, tap the slots along the bottom)." },
   { "kind": "tip", "title": "Crafting table", "body": "Place a crafting table and open it for the full grid — far more recipes than your pocket crafting." },
-  { "kind": "tip", "title": "Recipe book", "body": "Stuck on a recipe? Open the recipe book (mouse, or gamepad Y) and tap a card to auto-fill the grid." },
+  { "kind": "tip", "title": "Recipe book", "body": "Stuck on a recipe? Open the recipe book and tap a card to auto-fill the grid." },
   { "kind": "tip", "title": "Open your pack", "body": "Open your inventory to rearrange items, stack things up, and equip armour." },
   { "kind": "tip", "title": "See yourself", "body": "Press F5 to swing the camera out to third person and admire your build — or your outfit." },
   { "kind": "tip", "title": "Talk & command", "body": "Press T (or /) to open chat. Try /time, /gamemode, /give and /help to bend the rules." },
@@ -16,8 +16,10 @@
   { "kind": "tip", "title": "Build on paper", "body": "Capture a build with the Drafting Stamp to save it as a reusable blueprint you can stamp down again." },
   { "kind": "tip", "title": "Mind the night", "body": "Mobs spawn in the dark. Plant torches and wall yourself in before the sun goes down." },
   { "kind": "tip", "title": "Sneak safely", "body": "Sneak to step right up to a ledge without falling off — handy when building out over a drop." },
-  { "kind": "new", "title": "New — third-person camera", "body": "The F5 camera is fresh. Tell us how it feels: too close, too far, any wobble? Your notes shape it." },
-  { "kind": "new", "title": "New — recipe book", "body": "The auto-fill recipe book is brand new. Try it on a tricky recipe and let us know what's missing." },
-  { "kind": "new", "title": "New — rail logistics", "body": "Carts, depots and ride-along just landed. Run a line and tell us how the freight loop plays." },
-  { "kind": "new", "title": "New — gamepad menus", "body": "You can now drive the whole UI from a controller. Give it a full lap and report anything clunky." }
+  { "kind": "tip", "title": "Take to the air", "body": "In a Creative world, double-tap Space to fly. Space takes you up and Shift brings you back down." },
+  { "kind": "tip", "title": "Run, don't walk", "body": "Double-tap W (or hold Ctrl) to sprint across open ground. Let go of W and you stop." },
+  { "kind": "tip", "title": "Find any item", "body": "Press B to search every item in the game. In Creative, click one to put it in your hand." },
+  { "kind": "tip", "title": "Forgot a key?", "body": "Press H for a controls cheat-sheet, or open the pause menu with Esc and choose Controls." },
+  { "kind": "tip", "title": "Watch your landing", "body": "A fall of more than 3 blocks hurts: half a heart for every extra block. Land in water and it costs you nothing." },
+  { "kind": "tip", "title": "Hold your breath", "body": "You can stay underwater for about 15 seconds. Swim up for air before the bubbles run out." }
 ]

@@ -376,6 +376,34 @@ mod tests {
     }
 
     #[test]
+    fn loading_cards_never_ask_for_feedback_or_claim_gamepad() {
+        // The web build has NO feedback channel, and native /bug, /idea and
+        // /mailbox are off by default behind a hidden tester unlock — so a
+        // loading card must never tell a player to send feedback (the old
+        // "New — tell us how it feels" cards did). Gamepad support is parked:
+        // no card claims it.
+        let cards = parse_cards(CARDS_JSON).expect("bundled cards parse");
+        for c in &cards {
+            let text = format!("{} {}", c.title, c.body).to_lowercase();
+            for banned in [
+                "tell us", "let us know", "report", "feedback", "your notes",
+                "/bug", "/idea", "needs testing", "gamepad", "controller",
+            ] {
+                assert!(
+                    !text.contains(banned),
+                    "loading card '{}' contains '{banned}'",
+                    c.title
+                );
+            }
+            assert!(
+                c.kind == CardKind::Tip,
+                "card '{}': 'new' cards carry a 'needs testing' label that implies feedback",
+                c.title
+            );
+        }
+    }
+
+    #[test]
     fn shuffle_no_immediate_repeat() {
         for seed in 0u64..50 {
             let order = shuffle_no_repeat(8, seed, Some(3));

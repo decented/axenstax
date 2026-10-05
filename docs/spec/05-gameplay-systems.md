@@ -3269,7 +3269,76 @@ Particles are **client-side visual effects** with server-triggered events. The s
 
 **LOD (Level of Detail)**: Particles beyond **32 blocks** from the camera are simplified (reduced count, no physics simulation, simple fade-out). Particles beyond **64 blocks** are not rendered at all.
 
-### 11.3 Sound System Overview
+### 11.3 Sound System — as built (2026-10-05, audit wave W2)
+
+**Status: a small procedural sound-effect layer. There is no sound-asset pipeline, no music, no positional audio, no category mixer.** The earlier draft of this section described a full audio system (nine volume categories, 3D positional audio, an OGG asset pipeline, a trait with `play_music` / `set_listener`); none of that exists. What does exist is `game/engine/src/audio.rs`:
+
+**Seven synthesised sounds.** No audio files exist anywhere in the repo or the bundle. Each sound is a short recipe of sine-tone and white-noise layers with a linear decay envelope (`audio::layers`), rendered to mono 44.1 kHz PCM by the pure function `audio::render_mix` — the **same samples on every target**.
+
+| Sound | Recipe | Call |
+|---|---|---|
+| Block break | noise 0.08 s, vol 0.30 | `play_break` |
+| Block place | 600 Hz tone 0.06 s, vol 0.25 | `play_place` |
+| Footstep | noise 0.04 s, vol 0.15 | `play_footstep(sprinting)` (throttled: 0.45 s walking, 0.35 s sprinting) |
+| Explosion (Blasting Keg, Spec 49) | 70 Hz tone 0.45 s + noise 0.50 s | `play_explosion` |
+| Thunder | 52 Hz tone 1.1 s + noise 1.4 s | `play_thunder` |
+| Gem pickup (routine Satori) | 880 Hz tone 0.12 s | `play_gem_pickup` |
+| Genesis Block fanfare (first Satori in a world) | C5 → E5 → G5 → C6 arpeggio, 0.2 s notes 0.1 s apart | `play_genesis_block` |
+
+**Not built** (design targets, kept in §11.9): jump / landing / hurt / item-pickup / menu-click / door / chest / eating sounds, per-material variants, mob sounds, ambient and weather loops, music, positional audio, obstruction, per-category volume sliders. Note that fall damage and drowning (§1.5, §1.5.1) currently make **no** sound.
+
+### 11.4 Master volume and mute (built)
+
+One master volume (`0..=1`, default 1.0) and one mute switch, both in `GraphicsSettings` (`master_volume`, `audio_muted`) — per-device, persisted on both targets (native `settings.json`, web `localStorage` `axenstax_gfx`), clamped on load, untouched by graphics-preset clicks. The Settings panel ("Graphics", reachable from the lobby and the pause menu) has a **Sound** section: a percentage slider and a "Mute all sound" checkbox, applied live. The engine squares the slider (`audio::effective_gain`: 50% → 0.25 amplitude) so the lower half of the travel is usable; 100% leaves the sounds exactly as authored. The setting reaches the engine through `AudioEngine::set_master` on three paths: GameState start-up, `sync_graphics_to_engine` (world entry + the in-game panel) and the lobby panel.
+
+### 11.5 Cross-platform audio (built)
+
+The game calls one API (`AudioEngine::play_*`, `set_master`) with two backends selected by `cfg(target_arch = "wasm32")` inside `audio.rs`, so call sites do not fork:
+
+| Platform | Backend | Notes |
+|---|---|---|
+| Native (desktop, Android) | `rodio` over `cpal` | The rendered PCM is played with `play_raw`. If no output device exists the engine runs silent. The master gain is baked into the rendered samples. |
+| Web (WASM) | Web Audio API via `web-sys` | The rendered PCM is copied into an `AudioBuffer` (cached per sound), started through an `AudioBufferSourceNode`, routed through one master `GainNode` (volume + mute). **No assets are fetched and none are embedded** (no `include_bytes!`), so the bundle-size gate is unaffected beyond a few KiB of code. |
+
+**Autoplay unlock (web).** Browsers start an `AudioContext` suspended. `AudioEngine::new` registers capture-phase `pointerdown` / `keydown` / `touchend` / `click` listeners on `window` that call `resume()`. A sound requested while the context is not running is **dropped, never queued** (so nothing bursts out when the context wakes), and the request also tries `resume()`. Consequence: the first click or key press is silent; every sound after it plays.
+
+**Not built:** the `AudioEngine` trait with positions / pitch / music from the earlier draft; `PannerNode` positional audio; OGG assets and the transcode pipeline.
+
+### 11.6 Sound event timing
+
+Sounds are requested from the game loop in the same frame as the event (break completion, placement, Satori drop, keg detonation, lightning strike) and play immediately. Footsteps are throttled to every 0.45 s walking / 0.35 s sprinting. The full event wish-list is in §11.9.
+
+### 11.7 Music
+
+**Not built.** The design target is in §11.9.
+
+### 11.8 Discoverability polish — UX polish sweep (2026-07-07)
+
+On top of the particle categories in §11.1, twelve previously silent-or-weak
+action beats now carry concrete particle/toast feedback: baby-born on
+breeding success (green poof + "A baby &lt;mob&gt; was born!" toast — the
+only one of the twelve that was 100% silent before), bonemeal green sparkle
+(hand and dispenser paths), tame-success poofs (Cat/Parrot/Fox/Wolf/Nostrich),
+breeding love-mode feed puff, seed-plant poof, blueprint-capture burst, Recall
+Whistle puff per recalled pet, mob-kill smoke, furnace smelt-complete smoke,
+and milk/shear puffs. All additive, no new mechanics; audio cues for the same
+beats are deferred (there are only seven sounds, §11.3).
+
+The same sweep rewrote the free-play `H` help panel (previously near-empty)
+into a controls cheat-sheet (since rebuilt from the shared controls table —
+see §11.10), and added a session-only (not persisted to save)
+first-encounter hint system: the first successful tame of any species teaches
+the pet-command gesture in the same toast that confirms the tame (see §9.7),
+and a one-time hint fires on each of a player's first Recall Whistle, Reach
+Claw, and Cat Treat craft. The recipe book (§4.6) gained a one-line "what it
+does" `usage` field on 7 non-obvious cards: Reach Claw, Cat Treat, Recall
+Whistle, Salt Lick, Bone Meal, Lead, Shears.
+
+### 11.9 Design targets — NOT built
+
+Everything below is the original audio design, kept so a rebuild has a destination. **None of it is implemented** (see §11.3-11.5 for what is). The only parts that exist are: the Master slider (as `master_volume` + mute), the break / place / footstep / explosion sounds, and Web Audio + `rodio` as the two backends.
+
+#### Sound categories and volume sliders
 
 Sound design is critical for game feel. Every interaction must have audio feedback.
 
@@ -3287,7 +3356,7 @@ Sound design is critical for game feel. Every interaction must have audio feedba
 | Weather | Rain, thunder | Separate slider. |
 | UI | Button clicks, inventory sounds | Separate slider. |
 
-### 11.4 Positional Audio
+#### Positional audio
 
 All in-world sounds are **3D positional** (except music and UI):
 
@@ -3299,7 +3368,7 @@ All in-world sounds are **3D positional** (except music and UI):
 
 **Sound obstruction** (enhancement over Minecraft): If a direct line between the listener and the sound source passes through more than **3 solid blocks**, the sound is muffled (low-pass filter + 50% volume reduction). This makes caves sound like caves and rewards building enclosed spaces.
 
-### 11.5 Cross-Platform Audio
+#### Audio abstraction and format
 
 Axe'n'Stax targets both web (WASM + WebGPU) and native (desktop) from a single codebase (see ADR-002).
 
@@ -3326,7 +3395,7 @@ The `AudioEngine` trait is implemented separately for Web Audio API (via `wasm-b
 
 **Audio format**: All sound assets ship as **OGG Vorbis** (good compression, wide support, royalty-free). The asset pipeline can accept WAV inputs and transcode to OGG during build.
 
-### 11.6 Key Sound Events and Timing
+#### Key sound events
 
 Sound responsiveness is as important as visual responsiveness. These sounds must play **within 1 frame** of their trigger:
 
@@ -3346,7 +3415,7 @@ Sound responsiveness is as important as visual responsiveness. These sounds must
 | Explosion | Boom + debris | On detonation. **Implemented Spec 49** (`audio::play_explosion` — low boom + debris noise). |
 | Ambient cave | Random cave sounds (every 5-15 minutes) | Low volume, slightly eerie. Not too scary (Genesis is 12). |
 
-### 11.7 Music System
+#### Music system
 
 - **Background music** plays intermittently: a track plays, then silence for 5-15 minutes (randomised), then another track.
 - Music selection is **biome-aware**: different track pools for overworld, caves (below Y=50), and any future AxeNStax-native alternate dimensions when they ship.
@@ -3354,28 +3423,17 @@ Sound responsiveness is as important as visual responsiveness. These sounds must
 - Music pauses (not stops) when the game is paused (single-player) or the inventory is open.
 - Music volume defaults to **50%** of master volume. Many players play with music off, so this must be easily togglable.
 
-### 11.8 Discoverability polish — UX polish sweep (2026-07-07)
+### 11.10 Controls card and the H help sheet (built 2026-10-05, W2)
 
-On top of the particle categories in §11.1, twelve previously silent-or-weak
-action beats now carry concrete particle/toast feedback: baby-born on
-breeding success (green poof + "A baby &lt;mob&gt; was born!" toast — the
-only one of the twelve that was 100% silent before), bonemeal green sparkle
-(hand and dispenser paths), tame-success poofs (Cat/Parrot/Fox/Wolf/Nostrich),
-breeding love-mode feed puff, seed-plant poof, blueprint-capture burst, Recall
-Whistle puff per recalled pet, mob-kill smoke, furnace smelt-complete smoke,
-and milk/shear puffs. All additive, no new mechanics; audio cues for the same
-beats are deferred (native-only, pending an AppImage rebuild).
+`game/engine/src/controls.rs` is the **single source of truth** for what the keys do. Two tables (keyboard + mouse, touch) of rows `{keys, action, source, native_only}`; every row cites the real binding it documents (`input.rs`, `lib.rs` key handling, `touch_input.rs`) and unit tests press the documented keys on a real `InputState`. Three surfaces read it:
 
-The same sweep rewrote the free-play `H` help panel (previously near-empty)
-into a controls cheat-sheet (T / `/help`, F5 third-person camera, J Trials, N
-call Satoshi, empty-hand right-click a tamed pet for Follow/Stay/Wander,
-sneak for careful actions), and added a session-only (not persisted to save)
-first-encounter hint system: the first successful tame of any species teaches
-the pet-command gesture in the same toast that confirms the tame (see §9.7),
-and a one-time hint fires on each of a player's first Recall Whistle, Reach
-Claw, and Cat Treat craft. The recipe book (§4.6) gained a one-line "what it
-does" `usage` field on 7 non-obvious cards: Reach Claw, Cat Treat, Recall
-Whistle, Salt Lick, Bone Meal, Lead, Shears.
+- **First-spawn controls card** — shown once per device when the first world finishes loading (`GraphicsSettings::controls_card_seen`, persisted like `has_seen_license_onboarding`, so it survives a web reload). A player-0 modal (`GameState.controls_card_open`): frees the cursor, freezes movement, closes with "Got it", Enter or Esc, then re-captures the cursor.
+- **Pause menu "Controls" button** (normal and Trial pause menus) — reopens the same card any time.
+- **Free-play H help sheet** — built from the same tables (`controls::help_sheet_text`), replacing the hand-written cheat-sheet.
+
+**Platform:** the touch table is used when `touch_input::is_touch_device()` is true (set from `navigator.maxTouchPoints` on the web, unconditionally on Android); keyboard + mouse otherwise. `TOUCH_PLATFORM` is deliberately not used — it is true for every web build, including a desktop with a mouse. **Gamepad is parked: the card makes no gamepad claim.**
+
+**Loading tips** (`assets/loading_tips.json`, shared by the engine and the web loader) no longer contain "New — tell us how it feels" cards or gamepad mentions: the web build has no feedback channel and native `/bug` is off by default behind a hidden tester unlock, so no tip may ask for feedback (a unit test in `loading_screen.rs` enforces it).
 
 ---
 
