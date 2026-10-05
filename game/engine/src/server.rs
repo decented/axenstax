@@ -1225,7 +1225,10 @@ impl GameServer {
                 // isn't mirrored (without it a server copy killed by a fall
                 // stayed dead and stopped picking items up) — replace when
                 // single-player routes through HostedServer (dual-sim debt).
-                // No server-side death handler consumes the one-shot.
+                // No server-side death handler consumes the one-shot. The
+                // copy restores on `respawn_timer` because the server can't
+                // see the client's Respawn choice (the client itself waits on
+                // its death screen — no auto-respawn since 2026-10-06).
                 sp.combat.just_died = false;
                 if sp.combat.respawn_timer == 0 {
                     sp.combat.respawn();

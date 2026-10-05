@@ -120,8 +120,15 @@ pub struct PlayerCombat {
     /// `invincible_timer > 0`.
     pub last_hit_damage: f32,
     pub dead: bool,
-    /// Ticks until respawn (after death screen).
+    /// Ticks until a dead *server copy* of a remote player is restored
+    /// (`GameServer::tick_player_physics`, BRIDGE there). The local client never
+    /// auto-respawns: it waits for `respawn_requested` (W2 owner decision
+    /// 2026-10-06 — the death screen stays up until the player chooses Respawn).
     pub respawn_timer: u32,
+    /// Set by the death screen (Respawn button / Enter / pad A) via
+    /// [`PlayerCombat::request_respawn`]; the client's death loop respawns the
+    /// player on the next tick and `respawn()` clears it.
+    pub respawn_requested: bool,
     /// One-shot flag: set on the tick the player transitions to dead, cleared
     /// after the death-side handler (e.g. inventory drop) consumes it.
     pub just_died: bool,
@@ -188,6 +195,7 @@ impl PlayerCombat {
             last_hit_damage: 0.0,
             dead: false,
             respawn_timer: 0,
+            respawn_requested: false,
             just_died: false,
             poison_ticks: 0,
             hunger: 20,
@@ -319,7 +327,10 @@ impl PlayerCombat {
         self.flash_timer = PLAYER_HURT_FLASH_TICKS;
         if self.health <= 0.0 {
             self.dead = true;
-            self.respawn_timer = 40; // 2 seconds before auto-respawn
+            // Server-copy restore delay only (see field doc) — the client
+            // waits on the death screen for `request_respawn`.
+            self.respawn_timer = 40;
+            self.respawn_requested = false;
             self.just_died = true;
         }
         true
@@ -332,6 +343,7 @@ impl PlayerCombat {
         self.invincible_timer = 0;
         self.last_hit_damage = 0.0;
         self.respawn_timer = 0;
+        self.respawn_requested = false;
         // Respawn restores hunger too (MC parity).
         self.hunger = self.max_hunger;
         self.hunger_drain_ticks = 0;
@@ -339,6 +351,22 @@ impl PlayerCombat {
         self.starvation_ticks = 0;
         self.breath = crate::survival::Breath::FULL;
         // just_died stays false — only the death transition sets it.
+    }
+
+    /// The player chose Respawn on the death screen. No-op unless dead (a stale
+    /// press can't queue a respawn for a later death). Returns whether the
+    /// request was taken.
+    pub fn request_respawn(&mut self) -> bool {
+        if !self.dead {
+            return false;
+        }
+        self.respawn_requested = true;
+        true
+    }
+
+    /// Whether the client death loop should respawn this player now.
+    pub fn should_respawn(&self) -> bool {
+        self.dead && self.respawn_requested
     }
 
     /// Apply (or refresh) a poison effect for `ticks` duration. No-op when
@@ -851,6 +879,27 @@ mod tests {
         }
         assert!(!p.just_died);
         assert!(p.dead);
+    }
+
+    #[test]
+    fn death_screen_waits_for_respawn_request() {
+        // W2 owner decision 2026-10-06 — no auto-respawn: however long the
+        // player sits on the death screen, they stay dead until they choose.
+        let mut p = PlayerCombat::new();
+        assert!(!p.request_respawn(), "alive: a press must not queue a respawn");
+        assert!(!p.respawn_requested);
+        p.take_damage(25.0);
+        for _ in 0..2000 {
+            p.tick();
+        }
+        assert!(p.dead);
+        assert!(!p.should_respawn(), "time alone must never respawn the player");
+        assert!(p.request_respawn());
+        assert!(p.should_respawn());
+        p.respawn();
+        assert!(!p.dead);
+        assert!(!p.respawn_requested, "respawn() consumes the request");
+        assert!(!p.should_respawn());
     }
 
     #[test]

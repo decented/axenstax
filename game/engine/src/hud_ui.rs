@@ -2055,15 +2055,21 @@ fn draw_debug_overlay(
 
 /// Draw death screen overlay. W2: `cause` is the line from
 /// `survival::death_message` (what killed you); `grave` is
-/// `survival::grave_message` when this death left a grave.
+/// `survival::grave_message` when this death left a grave. There is no
+/// auto-respawn (W2 2026-10-06): returns true when the player chose Respawn —
+/// the button, or Enter when `accept_enter` (the keyboard seat only, so one
+/// key press can't respawn every split-screen seat). `hint` names the seat's
+/// own respawn input.
 pub fn draw_death_screen(
     ctx: &egui::Context,
     viewport: &ViewportRect,
     player_index: usize,
     cause: &str,
     grave: Option<&str>,
+    accept_enter: bool,
+    hint: &str,
 ) -> bool {
-    let mut respawn = false;
+    let mut respawn = accept_enter && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
     // Approximate size of the death panel to centre it within the viewport.
     let panel_w = 320.0_f32;
@@ -2109,6 +2115,12 @@ pub fn draw_death_screen(
                         ).clicked() {
                             respawn = true;
                         }
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(hint)
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(220, 200, 200)),
+                        );
                     });
                 });
         });

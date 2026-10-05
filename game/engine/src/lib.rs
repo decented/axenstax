@@ -2521,6 +2521,10 @@ impl ApplicationHandler for App {
                                 // overlay sits on top. A stray click must NOT
                                 // re-capture the cursor (which would re-lock the
                                 // pointer and make both unclickable again).
+                            } else if state.players[0].is_dead() {
+                                // W2 — death screen up (no auto-respawn): same
+                                // rule, a stray click must not re-lock the
+                                // pointer away from the Respawn button.
                             } else if !state.input.cursor_captured {
                                 state.capture_cursor();
                             } else if state.showcase.enabled

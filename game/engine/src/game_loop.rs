@@ -6184,6 +6184,14 @@ impl super::GameState {
             // we only ever MOVE items (to a grave, to keep-inventory, or, as a
             // last resort, scatter); never destroy or charge.
             if self.players[i].combat.just_died {
+                // W2 — no auto-respawn, so P1's death screen must be clickable:
+                // free the pointer. Native's `reconcile_native_cursor` would do
+                // it next frame anyway; on web this is the only release (it
+                // keeps click-to-capture, and `lib.rs` won't re-grab on a stray
+                // click while P1 is dead).
+                if i == 0 && self.input.cursor_captured {
+                    self.release_cursor();
+                }
                 // W2 — the death screen's grave line; set below if a grave
                 // is actually placed this death.
                 self.players[i].last_grave = None;
@@ -6248,10 +6256,12 @@ impl super::GameState {
                 self.players[i].combat.just_died = false;
             }
 
-            // Auto-respawn when the death timer hits zero. Spawn-point is
-            // PlayerSlot::spawn_pos (set at world load to wherever the player
-            // started); future bed-settable spawn lands later.
-            if self.players[i].combat.dead && self.players[i].combat.respawn_timer == 0 {
+            // Respawn once the player chose it on the death screen (button,
+            // Enter, or their pad's A) — never on a timer (W2 owner decision
+            // 2026-10-06). Spawn-point is PlayerSlot::spawn_pos (set at world
+            // load to wherever the player started); future bed-settable spawn
+            // lands later.
+            if self.players[i].combat.should_respawn() {
                 self.players[i].combat.respawn();
                 let spawn = self.players[i].spawn_pos;
                 self.players[i].player.pos = spawn;
@@ -16740,16 +16750,39 @@ impl super::GameState {
                     crate::survival::death_message(self.players[pidx].combat.last_damage);
                 let grave_line =
                     self.players[pidx].last_grave.map(crate::survival::grave_message);
+                // Per-seat respawn inputs (no auto-respawn — W2 2026-10-06):
+                // the button (mouse / touch tap) for anyone with a pointer;
+                // Enter for the keyboard seat (P1 only, never while chat owns
+                // the keyboard); A on the seat's own controller, since pads
+                // can't reach egui buttons in-game (`inject_gamepad_nav` only
+                // runs in menus). Edge-triggered, so an A held at the moment of
+                // death doesn't skip the screen.
+                let pad_a = crate::local_join::ui_pad_index(
+                    pidx,
+                    self.p1_gamepad,
+                    self.players.len(),
+                )
+                .and_then(|gi| self.gamepad.gamepads().get(gi))
+                .is_some_and(|g| g.connected && g.a_pressed);
+                let hint = if pidx == 0 && crate::touch_input::TOUCH_PLATFORM {
+                    "Tap Respawn"
+                } else if pidx == 0 {
+                    "Click Respawn or press Enter"
+                } else {
+                    "Press A to respawn"
+                };
                 let respawn_clicked = crate::hud_ui::draw_death_screen(
                     &self.renderer.egui.ctx,
                     &screen.viewport,
                     pidx,
                     &cause_line,
                     grave_line.as_deref(),
+                    pidx == 0 && !self.chat.open,
+                    hint,
                 );
-                if respawn_clicked {
-                    // Skip the auto-respawn timer — next tick respawns.
-                    self.players[pidx].combat.respawn_timer = 0;
+                if respawn_clicked || pad_a {
+                    // Next tick's death loop respawns the player.
+                    self.players[pidx].combat.request_respawn();
                 }
             } else if painter_open {
                 // Spec 40 — the 16×16 paint-grid panel. Painting mutates the
