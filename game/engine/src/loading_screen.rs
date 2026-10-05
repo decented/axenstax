@@ -159,8 +159,7 @@ impl LoadingState {
 // ---------------------------------------------------------------------------
 // egui rendering — the in-engine world-load screen: the Copperline mark
 // (`brand::show_mark`, same artwork as the HTML boot screen) + rotating card
-// beneath. Painter-driven; structure mirrors `splash_ui::draw_splash` (bg Area
-// behind a transparent CentralPanel).
+// beneath. Painter-driven; the CentralPanel frame paints the Deep Frontier backdrop.
 // ---------------------------------------------------------------------------
 
 /// Deep Frontier `#0D1B1E` — matches the HTML boot screen, so no colour flash.
@@ -174,20 +173,15 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
     let t = ctx.input(|i| i.time) as f32;
     let bob = (t * 1.8).sin() * 6.0;
 
-    // Dark backdrop, behind the content panel (default order, non-interactable).
-    egui::Area::new(egui::Id::new("loading_screen_bg"))
-        .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
-        .interactable(false)
-        .show(ctx, |ui| {
-            ui.painter().rect_filled(ui.max_rect(), 0.0, BG);
-        });
-
     // `.show(ctx, ..)` is deprecated in favour of `.show_inside(ui, ..)`, but this
     // is a genuine top-level panel (no enclosing Ui) — egui 0.34 has no
     // non-deprecated top-level entry point for CentralPanel.
     #[allow(deprecated)]
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+        // The panel itself paints the Deep Frontier backdrop. (A separate bg
+        // `Area` here sized to its empty content — a zero rect — so it painted
+        // nothing, and the renderer clear colour showed through instead.)
+        .frame(egui::Frame::new().fill(BG))
         .show(ctx, |ui| {
             let available = ui.available_size();
             ui.vertical_centered(|ui| {

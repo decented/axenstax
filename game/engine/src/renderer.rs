@@ -4137,7 +4137,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(menu_backdrop_color(self.format)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -4239,7 +4239,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(menu_backdrop_color(self.format)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -4266,6 +4266,27 @@ impl Renderer {
         output.present();
         Ok(())
     }
+}
+
+/// Menu / loading-screen clear colour: Copperline Deep Frontier `#0D1B1E`.
+///
+/// wgpu clear values are *linear*; on an sRGB render view the hardware encodes
+/// them on write, so the brand's sRGB bytes must be decoded first. (The old
+/// hand-written `0.05/0.07/0.12` encoded to the slate `#424c63` that showed
+/// through the transparent menu panel and the loading screen.)
+fn menu_backdrop_color(format: wgpu::TextureFormat) -> wgpu::Color {
+    let c = crate::brand::DEEP_FRONTIER;
+    let ch = |v: u8| -> f64 {
+        let s = f64::from(v) / 255.0;
+        if !format.is_srgb() {
+            s
+        } else if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    wgpu::Color { r: ch(c.r()), g: ch(c.g()), b: ch(c.b()), a: 1.0 }
 }
 
 /// Render all world passes (chunks, water, entities, wireframe, crosshair) for a single viewport.
@@ -6228,6 +6249,21 @@ mod shader_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_backdrop_encodes_to_deep_frontier() {
+        // sRGB view: the hardware re-encodes the linear clear value, so it must
+        // land back on the brand bytes (13, 27, 30), not the old slate #424c63.
+        let c = menu_backdrop_color(wgpu::TextureFormat::Bgra8UnormSrgb);
+        let enc = |l: f64| -> u8 {
+            let s = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+            (s * 255.0).round() as u8
+        };
+        assert_eq!((enc(c.r), enc(c.g), enc(c.b)), (13, 27, 30));
+        // Non-sRGB view: bytes are written as-is.
+        let c = menu_backdrop_color(wgpu::TextureFormat::Bgra8Unorm);
+        assert_eq!(((c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8), (13, 27, 30));
+    }
 
     #[test]
     fn thumb_cache_invalidates_on_key_change() {
