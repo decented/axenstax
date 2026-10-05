@@ -102,8 +102,9 @@ pub struct JoinRequestPacket {
     /// whenever present and rejects an absent one on a sign-in-required host.
     pub auth_event: Option<crate::signet::SignetAuthEventWire>,
     /// Optional kind-31000 handle credential (display-name binding). Same
-    /// pubkey as `auth_event`; verified separately. `None` is allowed —
-    /// a verified join with no credential falls back to `Player <short-pubkey>`.
+    /// pubkey as `auth_event`; verified separately. `None` is allowed — a
+    /// verified join with no credential is named from the host's contacts book,
+    /// then the typed `player_name`, then a short npub (never hex).
     pub handle_credential: Option<crate::signet::SignetCredentialWire>,
     /// Skin reference the joining client announces: a `u64` content hash
     /// (`CosmeticDescriptor::skin_key`). `0` = default skin. The host copies this

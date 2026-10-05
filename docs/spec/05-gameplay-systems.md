@@ -3793,7 +3793,7 @@ The handle is never typed into AxeNStax or sent by the client as an untrusted st
 
 **Consequences for gameplay systems:**
 
-- **Nameplates / chat author / leaderboard**: all render `ServerPlayer.handle`, which is credential-sourced. If no credential is attached, fall back to `"Player <short_pubkey>"` — never to a client-provided string.
+- **Nameplates / chat author / leaderboard**: all render `ServerPlayer.handle`, which is credential-sourced. If no credential is attached, the host's contacts book names a known npub first; failing that the typed join name is a display fallback only (generic `Player` ignored), and failing that a short npub (`npub1abcd…wxyz`) — never hex (Spec 04 §1.8.1 step 3, T2-8).
 - **Bans**: keyed on persona pubkey, not on handle. A banned player can't escape by renaming; a legitimate player can safely pick any handle.
 - **Personas are first-class for gaming**: the expected pattern is that players maintain a **gaming-specific persona** in Signet-app, separate from their natural-person identity. Their real name stays on-device; their gamer handle is what every game platform sees.
 - **Alpha**: website access-request and `/play/` gate both use the same persona pubkey + kind 31000 credential. Multiplayer will use the same artefacts once it lands.

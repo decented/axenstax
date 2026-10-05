@@ -161,8 +161,9 @@ pub fn verify_credential(
 }
 
 /// Extract the `display-name` tag value from a credential, if present.
-/// Returns `None` when the tag is missing — callers fall back to
-/// `"Player <short-pubkey>"`.
+/// Returns `None` when the tag is missing — the host's naming ladder
+/// (`hosted_server::verified_display_label`) then falls through to the typed
+/// name and finally a short npub.
 pub fn extract_display_name(cred: &SignetCredential) -> Option<&str> {
     for tag in &cred.tags {
         if tag.len() == 2 && tag[0] == "display-name" {
