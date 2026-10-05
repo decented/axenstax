@@ -89,6 +89,8 @@ mod entity;
 mod mob;
 mod mob_ai;
 mod combat;
+// W2 survival basics — fall damage, drowning, difficulty table, death cause.
+mod survival;
 mod death_drops;
 mod game_window;
 #[cfg(all(test, not(target_arch = "wasm32")))]

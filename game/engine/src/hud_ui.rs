@@ -815,6 +815,9 @@ const HUD_ICON: f32 = 20.0;
 struct HudStack {
     hearts_y: f32,
     hunger_y: f32,
+    /// W2 — breath bubbles, one row above hunger (drawn only underwater /
+    /// refilling, but the row is always reserved so nothing jumps).
+    bubbles_y: f32,
     name_y: f32,
 }
 
@@ -825,8 +828,94 @@ fn hud_stack(vp: ViewportPts, scale: f32) -> HudStack {
     let gap = 6.0 * scale;
     let hearts_y = hotbar_top - icon - gap;
     let hunger_y = hearts_y - icon - gap;
-    let name_y = hunger_y - 18.0 * scale - gap;
-    HudStack { hearts_y, hunger_y, name_y }
+    let bubbles_y = hunger_y - BUBBLE_ICON * scale - gap;
+    let name_y = bubbles_y - 18.0 * scale - gap;
+    HudStack { hearts_y, hunger_y, bubbles_y, name_y }
+}
+
+/// W2 — breath bubble size (a touch smaller than hearts/hunger).
+const BUBBLE_ICON: f32 = 16.0;
+const BUBBLE_FULL: egui::Color32 = egui::Color32::from_rgb(110, 190, 255);
+const BUBBLE_EMPTY: egui::Color32 = egui::Color32::from_rgba_premultiplied(25, 40, 60, 120);
+
+/// W2 — the 10-bubble breath bar (Spec 05 §1.5.1), one row above hunger.
+/// The caller draws it only while underwater or refilling
+/// (`survival::show_breath_bar`); `bubbles` is `survival::breath_bubbles`.
+pub fn draw_breath(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize, bubbles: u8) {
+    let n = crate::survival::BREATH_BUBBLES as usize;
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
+    let scale = hud_scale(vp.width);
+    let size = BUBBLE_ICON * scale;
+    let gap = 3.0 * scale;
+    let total_w = n as f32 * (size + gap) - gap;
+    let x = vp.x + vp.width / 2.0 - total_w / 2.0;
+    let y = hud_stack(vp, scale).bubbles_y;
+
+    egui::Area::new(egui::Id::new(("breath", player_index)))
+        .fixed_pos(egui::pos2(x, y))
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, 0.0);
+                for i in 0..n {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+                    let fill = if i < bubbles as usize { BUBBLE_FULL } else { BUBBLE_EMPTY };
+                    ui.painter().rect_filled(rect, size / 2.0, fill);
+                }
+            });
+        });
+}
+
+/// W2 — the hurt flash: a subtle red vignette at the viewport EDGES (never a
+/// full-screen flash). `alpha` is `PlayerCombat::hurt_vignette_alpha` (≤ 0.35,
+/// fading over ~0.4 s); zero draws nothing. A band of `EDGE` × the shorter
+/// side runs from `alpha` at the edge to transparent at its inner rim.
+pub fn draw_hurt_vignette(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize, alpha: f32) {
+    const EDGE: f32 = 0.18;
+    let alpha = alpha.clamp(0.0, crate::survival::HURT_VIGNETTE_MAX_ALPHA);
+    if alpha <= 0.0 {
+        return;
+    }
+    let vp = ViewportPts::from_physical(viewport, ctx.pixels_per_point());
+    let band = vp.width.min(vp.height) * EDGE;
+    if band <= 0.0 {
+        return;
+    }
+    let edge = egui::Color32::from_rgba_unmultiplied(200, 20, 20, (alpha * 255.0).round() as u8);
+    let clear = egui::Color32::TRANSPARENT;
+    let (x0, y0) = (vp.x, vp.y);
+    let (x1, y1) = (vp.x + vp.width, vp.y + vp.height);
+    let outer = [
+        egui::pos2(x0, y0),
+        egui::pos2(x1, y0),
+        egui::pos2(x1, y1),
+        egui::pos2(x0, y1),
+    ];
+    let inner = [
+        egui::pos2(x0 + band, y0 + band),
+        egui::pos2(x1 - band, y0 + band),
+        egui::pos2(x1 - band, y1 - band),
+        egui::pos2(x0 + band, y1 - band),
+    ];
+    let mut mesh = egui::epaint::Mesh::default();
+    for p in outer {
+        mesh.colored_vertex(p, edge);
+    }
+    for p in inner {
+        mesh.colored_vertex(p, clear);
+    }
+    // Four trapezoids (two triangles each) between the outer and inner rims.
+    for k in 0..4u32 {
+        let n = (k + 1) % 4;
+        mesh.add_triangle(k, n, 4 + k);
+        mesh.add_triangle(n, 4 + n, 4 + k);
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new(("hurt_vignette", player_index)),
+    ));
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Rolling-window performance samples surfaced in the F3 debug overlay.
@@ -1964,13 +2053,21 @@ fn draw_debug_overlay(
         });
 }
 
-/// Draw death screen overlay.
-pub fn draw_death_screen(ctx: &egui::Context, viewport: &ViewportRect, player_index: usize) -> bool {
+/// Draw death screen overlay. W2: `cause` is the line from
+/// `survival::death_message` (what killed you); `grave` is
+/// `survival::grave_message` when this death left a grave.
+pub fn draw_death_screen(
+    ctx: &egui::Context,
+    viewport: &ViewportRect,
+    player_index: usize,
+    cause: &str,
+    grave: Option<&str>,
+) -> bool {
     let mut respawn = false;
 
     // Approximate size of the death panel to centre it within the viewport.
-    let panel_w = 260.0_f32;
-    let panel_h = 160.0_f32;
+    let panel_w = 320.0_f32;
+    let panel_h = 220.0_f32;
     let death_x = viewport.x as f32 + viewport.width as f32 / 2.0 - panel_w / 2.0;
     let death_y = viewport.y as f32 + viewport.height as f32 / 2.0 - panel_h / 2.0;
 
@@ -1990,6 +2087,20 @@ pub fn draw_death_screen(ctx: &egui::Context, viewport: &ViewportRect, player_in
                                 .color(egui::Color32::from_rgb(255, 80, 80))
                                 .strong(),
                         );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(cause)
+                                .size(18.0)
+                                .color(egui::Color32::WHITE),
+                        );
+                        if let Some(grave) = grave {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(grave)
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(230, 210, 170)),
+                            );
+                        }
                         ui.add_space(16.0);
                         if ui.button(
                             egui::RichText::new("Respawn")

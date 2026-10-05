@@ -177,15 +177,42 @@ Collision uses **AABB (Axis-Aligned Bounding Box) vs voxel grid** intersection.
 
 ### 1.5 Fall Damage
 
+**Built 2026-10-05 (audit wave W2).** Rules: `survival::fall_damage` (pure, unit-tested); tracking: `physics::Player::track_fall`.
+
 | Parameter | Value |
 |---|---:|
 | Safe fall distance | 3 blocks |
-| Damage per block above safe | 1 HP (0.5 hearts) |
-| Lethal fall height | 23.5 blocks (at 20 HP) |
-| Water negation | Any depth >= 1 block negates all fall damage |
-| Hay bale / slime block | Reduces fall damage by 80% / 100% respectively |
+| Damage | `ceil(d − 3)` HP — 1 HP (half a heart) per block beyond 3, rounded up |
+| Boundaries | 3.0 → 0 HP · 3.1 → 1 · 4.0 → 1 · 4.1 → 2 · 10 → 7 |
+| Lethal fall height | > 22 blocks (at 20 HP): 22 → 19 HP, 23 → 20 HP |
+| Water negation | Landing in (or splashing into) water negates all fall damage, any depth |
+| Hay bale | −80%: `ceil((d − 3) · 0.2)` (Minecraft's formula) |
+| Slime block | −100% — **not built: no slime block exists in the registry yet**; add it to `survival::landing_multiplier` when it ships |
+| Creative / Spectator | Immune |
+| Difficulty | Applies on every difficulty, **Peaceful included** (Minecraft parity); never scaled by difficulty |
+| Armour | **Bypassed** — applied straight to `PlayerCombat` (§6.3) |
 
-Fall damage is calculated at the moment of landing, based on total vertical distance fallen since last ground contact. The server tracks fall distance authoritatively. The client predicts for animation purposes (screen shake, damage flash) but the server determines actual HP loss.
+**Tracking.** `Player::tick` records the foot height before its move and, after integration, accumulates any *downward* motion into `Player.fall_distance` while airborne. Flight, noclip, swimming (`in_water`) and ladders (`World::is_climbable`, so vines too when they ship) reset it. On the tick the body touches ground — or its foot cell becomes water — it emits a `physics::Landing { fall_distance, landing_block }` (`landing_block` is the cell a hair below the foot, or `WATER` for a splash-down) and resets. Only motion *inside* `tick` counts, so a teleport (`/tp`, respawn) is never a fall; respawn and mounting a cart call `Player::reset_fall` explicitly. Upward motion (a jump, knockback) never adds. A small epsilon (1e-3) is subtracted before `ceil` so the accumulated float sum of an exact 3-block drop stays free.
+
+**Who applies it (dual-sim, as built).** One shared driver, `survival::tick_player_survival(player, combat, world, mode)`, consumes the landing and applies the damage. **Local players** (single-player, split-screen, the host's own seat, and a joined client's own body): `game_loop.rs` per-player combat pass. **Server-simulated remote players**: `GameServer::tick_player_physics` → `tick_player_survival`. A remote player's own client and the host each compute it from their own copy of the physics — the client's copy drives that player's HUD and death, the host's copy is what other players see in `PlayerState.health`. (Single-player still bypasses `GameServer` — CLAUDE.md known debt.)
+
+**I-frames.** Fall damage goes through `PlayerCombat::take_damage_from`, so it respects the 10-tick invulnerability window after another hit: a landing within 0.5 s of a mob hit does no fall damage. Deliberate simplification (Minecraft lets the larger hit through); not a bug.
+
+### 1.5.1 Drowning
+
+**Built 2026-10-05 (W2).** Rules: `survival::tick_breath` (pure, unit-tested); state: `PlayerCombat.breath` (transient — never saved, full on respawn).
+
+| Parameter | Value |
+|---|---:|
+| Trigger | Head (eye cell) in water — `survival::head_in_water` |
+| Air supply | 300 ticks (15 s) |
+| Out of air | 2 HP every 20 ticks — first hit on tick 320 of a dive from full lungs, then 340, 360… |
+| Refill | 8 air per tick with the head out of water → full in 38 ticks (~1.9 s); surfacing clears the drowning counter |
+| Armour | Bypassed |
+| Creative / Spectator | Immune — lungs stay full |
+| HUD | 10 bubbles (`ceil(air · 10 / 300)`), one row above hunger, shown **only** while underwater or refilling (`survival::show_breath_bar`) |
+
+Same two call sites as fall damage (§1.5). Server-side the breath pass runs in its own loop over every connected server-simulated player, so a tick with no queued intent still advances breath.
 
 ### 1.6 Ladder and Vine Climbing
 
@@ -1239,7 +1266,7 @@ These actions are defined in the tool's registered `UseHandler` and are plugin-e
 | Max HP | 20 | Displayed as 10 hearts (2 HP per heart). **T7 planned**: dynamic 4-12 capacity — see §6.2 callout. |
 | Natural regeneration rate | 1 HP / 4 seconds | Only when hunger is >= 18 (9 full shanks). |
 | Rapid regeneration | 1 HP / 0.5 seconds | When hunger is exactly 20 (full). |
-| Starvation damage | 1 HP / 4 seconds | When hunger reaches 0. Kills down to 1 HP on Easy equivalent, kills completely on Hard equivalent. |
+| Starvation damage | 1 HP / 4 seconds | When hunger reaches 0. Floor per difficulty (§8.5 table, W2): Easy 10 HP, Normal 1 HP, Hard kills, Peaceful half a heart. |
 | Respawn HP | 20 | Full health on respawn. |
 
 ### 6.2 Hunger / Stamina
@@ -1565,7 +1592,7 @@ On death (Survival):
 1. **Graves (#47, implemented 2026-06-16)** — the inventory is **NOT scattered**. The 36 slots are snapshotted into a recoverable `GRAVE` block placed at a safe cell at the death spot (`grave::find_safe_grave_pos` searches the death cell, then upward, then outward — never the void, never a hazard, never destroying a build; on the rare no-safe-cell it falls back to the legacy scatter so nothing is lost). The grave's `GraveData.slots` is **index-aligned** to the inventory, so recovery returns each stack to its **original slot** (Corpse-mod parity). Right-click the grave to reclaim (best-effort into free slots if the original is taken); it's removed when emptied. Breaking the grave spills its contents. Persisted in `WorldSave.graves` (append-only, serde-default). The death position is also toasted so the player can walk back.
 2. **Keep-inventory** — `WorldMeta.keep_inventory` (runtime-mirrored on `World`, default `false`; **`true` for blank-canvas/parkour worlds**). When on, death leaves the inventory intact and creates no grave. Toggle live with `/keepinventory [on|off]` (`/ki`).
 3. **No penalty** — death is sats/score/proof-of-play **penalty-free** (it only ever MOVES items; verified — the death path touches no `economy`/`proof_of_play`). XP retention is moot (no XP system).
-4. The death screen shows "You died!" with respawn + return-to-title.
+4. The death screen shows "You Died!", **a cause line** from the last damage that landed (`PlayerCombat.last_damage`, a `survival::DamageCause`, wording in `survival::death_message`): "You fell from a high place", "You drowned", "Killed by a <mob display name>", "You starved", "You tried to swim in lava", "You burned to death", "You were blown up", fallback "You died" — plus **"Your items are in a grave at x, y, z"** when this death placed a grave (`PlayerSlot.last_grave`), then Respawn. (W2, 2026-10-05. The cause is computed by whichever sim owns that player's body — a joined client's own sim for its own death — so it needs no wire field.) Note the death screen still auto-respawns after 2 s (`respawn_timer = 40`), which leaves little time to read the lines — an open design question. A subtle red screen-edge vignette (alpha ≤ 0.35, fading over 0.4 s — `combat::PLAYER_HURT_FLASH_TICKS`, `hud_ui::draw_hurt_vignette`) marks every hit that lands; never a full-screen flash.
 5. Respawn location: the player's bed (if set and unobstructed) or the world spawn point.
 6. On respawn: **full health, full hunger**. Respawning hungry adds frustration without depth.
 
@@ -2229,11 +2256,16 @@ Every world carries an append-only integrity record in `world_meta.json`. These 
 
 **Fork inheritance**: When a world is forked, ALL integrity fields are copied from the parent. The fork's `forked_from` field points to the parent. A fork of a creative-touched world is also creative-touched — there is no clean-slate workaround.
 
-**Difficulty levels** (current phase — gameplay effects expand in Phase 3):
-- **Peaceful**: Hostile mobs do not attack the player
-- **Easy**: 50% mob damage (Phase 3)
-- **Normal**: 100% mob damage (default)
-- **Hard**: 150% mob damage (Phase 3)
+**Difficulty table** (built 2026-10-05, W2) — one data table, `survival::DIFFICULTY_TABLE`; nothing else branches on the difficulty string:
+
+| Difficulty | Hostiles attack? | Mob → player damage `d` (before armour) | Starvation floor |
+|---|---|---|---|
+| Peaceful | No | ×1 (neutral bites — bee, goat, shark — unchanged) | 0.5 HP (unchanged) |
+| Easy | Yes | `min(d / 2 + 1, d)` | 10 HP |
+| Normal (default) | Yes | ×1 | 1 HP |
+| Hard | Yes | ×1.5 | none — starvation kills |
+
+Applied to hostile melee (`combat::tick_mob_attacks`) and the neutral bee sting / goat charge / shark bite. Not applied to fall damage, drowning, lava, fire or explosions. A joined client adopts the host's difficulty from `JoinAccept.difficulty` (the field was always on the wire — no protocol change). Server-side, `GameServer.difficulty` (from `WorldMeta` on `initial_load`) sets the starvation floor of its copies of remote players — **bridged non-lethal** (`max(floor, 0.5)`), because a remote player's server copy of hunger drains but is never refilled (eating is client-side); see the BRIDGE note on `GameServer::tick_player_survival`.
 
 **Bitcoin integration** (Phase 5): The integrity ledger provides the data layer for reward eligibility decisions. Server operators will configure policies (e.g., "creative worlds earn zero Bitcoin", "hard mode gets 2x multiplier"). The engine records facts; the server applies rules; the protocol delivers rewards.
 

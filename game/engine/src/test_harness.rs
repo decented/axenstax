@@ -71,6 +71,7 @@ impl TestHost {
             server.initial_load();
         }
         server.set_play_mode(config.play_mode);
+        server.difficulty = crate::survival::Difficulty::from_meta_str(&config.difficulty);
         Self {
             server,
             camera_modes: vec![crate::camera::CameraMode::FirstPerson; num_players],
@@ -119,6 +120,7 @@ impl TestHost {
     pub fn teleport_player(&mut self, i: usize, pos: Vec3) {
         self.server.players[i].player.pos = pos;
         self.server.players[i].player.velocity = Vec3::ZERO;
+        self.server.players[i].player.reset_fall();
     }
 
     /// Position of player `i`.

@@ -40,8 +40,10 @@ const GRAVITY: f32 = 0.08; // blocks/tick² (applied each tick as downward accel
 // a 1-block floor and this cap was the only thing preventing it. Since 2026-09-06
 // integration is SUB-STEPPED ([`substep_count`] / [`Player::integrate_substepped`]),
 // which stops a fall of any speed, this is now purely a FEEL constant —
-// Minecraft-like terminal velocity, and what the fall-damage curve is tuned
-// against. Re-tune it freely; do not rely on it for collision safety.
+// Minecraft-like terminal velocity. Fall damage (Spec 05 §1.5,
+// `survival::fall_damage`) is computed from fall DISTANCE, not speed, so
+// re-tuning this cap does not change fall damage. Re-tune it freely; do not
+// rely on it for collision safety.
 const MAX_FALL_SPEED: f32 = 0.78;
 
 // 2026-09-06 — sub-stepped collision. Per-sub-step displacement ceiling
@@ -116,6 +118,17 @@ const STEP_HEIGHT: f32 = 0.5;
 /// at/along the axis you ride it 1:1. Tunable feel knob (see `apply_ramp_ride`).
 const RAMP_SIDE_TOLERANCE: f32 = 0.20;
 
+/// W2 — a landing event: produced by [`Player::tick`] on the tick the body
+/// comes down after a fall (onto a block, or splashing into water), consumed
+/// by `survival::tick_player_survival`, which turns it into fall damage.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Landing {
+    /// Total downward distance (blocks) since the fall began.
+    pub fall_distance: f32,
+    /// The block landed on (`WATER` for a splash-down — negates the damage).
+    pub landing_block: crate::block::BlockId,
+}
+
 pub struct Player {
     /// Foot position (bottom-centre of hitbox).
     pub pos: Vec3,
@@ -131,6 +144,13 @@ pub struct Player {
     /// physics stays decoupled from the armour data layer. Grounded sprint
     /// only (Spec 05 §1.1); flying/noclip speed is untouched by boots.
     pub sprint_boots_mult: f32,
+    /// W2 — downward distance (blocks) accumulated since the body last stood,
+    /// swam, climbed or flew (Spec 05 §1.5). Only motion INSIDE `tick` counts,
+    /// so a teleport (`/tp`, respawn) is never a fall. Transient, never saved.
+    pub fall_distance: f32,
+    /// W2 — the landing produced this tick, if any; taken by
+    /// `survival::tick_player_survival`.
+    pub pending_landing: Option<Landing>,
 }
 
 impl Player {
@@ -142,7 +162,16 @@ impl Player {
             flying: false,
             in_water: false,
             sprint_boots_mult: 1.0,
+            fall_distance: 0.0,
+            pending_landing: None,
         }
+    }
+
+    /// W2 — forget any fall in progress (respawn, mounting a cart, a
+    /// teleport that should not end in a landing).
+    pub fn reset_fall(&mut self) {
+        self.fall_distance = 0.0;
+        self.pending_landing = None;
     }
 
     pub fn eye_pos(&self) -> Vec3 {
@@ -177,6 +206,9 @@ impl Player {
             }
         }
 
+        // W2 — foot height before this tick's move, for fall tracking.
+        let pre_y = self.pos.y;
+
         // The movement paths below compute `self.velocity` ONLY — they never
         // write `self.pos`. Integration is done once, below, in collision-safe
         // sub-steps (see `integrate_substepped`).
@@ -194,6 +226,67 @@ impl Player {
         } else {
             self.integrate_substepped(world, registry);
         }
+
+        self.track_fall(pre_y, world, mode);
+    }
+
+    /// W2 — fall-distance bookkeeping (Spec 05 §1.5). Flight, noclip,
+    /// swimming and ladders reset the fall; downward motion while airborne
+    /// accumulates; touching ground (or splashing into water) emits a
+    /// [`Landing`] and resets. The damage itself is `survival::fall_damage`.
+    fn track_fall(&mut self, pre_y: f32, world: &World, mode: crate::play_mode::PlayMode) {
+        if self.flying || mode.noclip() || self.in_water {
+            self.fall_distance = 0.0;
+            return;
+        }
+        let fx = self.pos.x.floor() as i32;
+        let fy = self.pos.y.floor() as i32;
+        let fz = self.pos.z.floor() as i32;
+        // Unloaded column: the body is falling through terrain that doesn't
+        // exist yet (void column, far /tp or Race-trial start, a server copy
+        // outside the generated area). Count nothing, or the column generating
+        // mid-fall would land the body with tens of blocks of fall distance.
+        // Per column (not per chunk): sky chunks may legitimately be absent.
+        let (cx, cz) = (fx.div_euclid(16), fz.div_euclid(16));
+        if !(0..=crate::world::MAX_CHUNK_Y).any(|cy| world.has_chunk(cx, cy, cz)) {
+            self.fall_distance = 0.0;
+            return;
+        }
+        if world.is_climbable(fx, fy, fz) {
+            self.fall_distance = 0.0;
+            return;
+        }
+        let dy = pre_y - self.pos.y;
+        if dy > 0.0 {
+            self.fall_distance += dy;
+        }
+        if world.is_water(fx, fy, fz) {
+            self.emit_landing(crate::block::WATER);
+            return;
+        }
+        if self.on_ground {
+            // The block under the feet (a hair below the foot so a full block
+            // reads as the cell beneath, a bottom slab as itself).
+            let below = world.get_block(fx, (self.pos.y - 0.05).floor() as i32, fz);
+            self.emit_landing(below);
+        }
+    }
+
+    /// Record a landing (keeping the larger one if an unconsumed landing is
+    /// already pending) and reset the fall.
+    fn emit_landing(&mut self, landing_block: crate::block::BlockId) {
+        if self.fall_distance > 0.0 {
+            let keep_old = self
+                .pending_landing
+                .is_some_and(|old| old.fall_distance >= self.fall_distance);
+            if !keep_old {
+                self.pending_landing = Some(Landing {
+                    fall_distance: self.fall_distance,
+                    landing_block,
+                });
+            }
+        }
+        self.fall_distance = 0.0;
     }
 
     /// Apply this tick's `velocity` to `pos` in collision-safe sub-steps.
@@ -665,6 +758,9 @@ impl Player {
         if self.pos.y < -64.0 {
             self.pos.y = 65.0;
             self.velocity = Vec3::ZERO;
+            // W2 — the void rescue is not a fall: without this the 100+ blocks
+            // fallen into the void would "land" lethally at y = 65.
+            self.fall_distance = 0.0;
         }
     }
 
@@ -928,6 +1024,43 @@ mod tests {
             p.pos.y,
         );
         assert!(p.velocity.y < 0.0, "y velocity should be negative (falling)");
+    }
+
+    /// W2 review — falling through an unloaded column must not bank fall
+    /// distance: when the column then generates around the body, the landing
+    /// deals nothing.
+    #[test]
+    fn fall_through_unloaded_column_then_chunks_appear_deals_no_damage() {
+        let (mut world, registry, cam) = empty_setup();
+        let mut p = Player::new(Vec3::new(0.5, 100.0, 0.5));
+        let idle = PlayerIntent::default();
+        let mut ticks = 0;
+        while p.pos.y > 58.0 && ticks < 400 {
+            p.tick(&idle, &cam, &world, &registry, PlayMode::Survival);
+            ticks += 1;
+        }
+        assert!(p.pos.y <= 58.0, "the player should have fallen ~40 blocks");
+        assert_eq!(p.fall_distance, 0.0, "no fall distance banked in a void column");
+        assert!(p.pending_landing.is_none());
+        // The column generates under the body mid-fall.
+        let floor_y = p.pos.y.floor() as i32 - 1;
+        for x in -5..=5 {
+            for z in -5..=5 {
+                world.set_block(x, floor_y, z, block::STONE);
+            }
+        }
+        for _ in 0..30 {
+            p.tick(&idle, &cam, &world, &registry, PlayMode::Survival);
+        }
+        assert!(p.on_ground, "the player should have landed on the new floor");
+        let dmg = p.pending_landing.take().map_or(0, |l| {
+            crate::survival::fall_damage(
+                l.fall_distance,
+                l.landing_block,
+                crate::survival::FallFlags::default(),
+            )
+        });
+        assert_eq!(dmg, 0, "landing after the column appeared must deal 0");
     }
 
     #[test]

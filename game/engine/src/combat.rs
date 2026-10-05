@@ -41,6 +41,10 @@ const HOSTILE_MELEE_COOLDOWN: u32 = 20;
 const HOSTILE_MELEE_RANGE: f32 = 1.5;
 /// Damage flash duration in ticks.
 pub const DAMAGE_FLASH_TICKS: u32 = 6;
+/// W2 — the PLAYER's hurt flash (drives the red screen-edge vignette): 8 ticks
+/// = 0.4 s at 20 TPS. Separate from [`DAMAGE_FLASH_TICKS`], which the mob
+/// model tint reads.
+pub const PLAYER_HURT_FLASH_TICKS: u32 = 8;
 /// Invincibility frames after being hit (ticks).
 const INVINCIBILITY_TICKS: u32 = 10;
 
@@ -110,6 +114,11 @@ pub struct PlayerCombat {
     pub attack_cooldown: u32,
     pub flash_timer: u32,
     pub invincible_timer: u32,
+    /// Damage of the hit that started the current invulnerability window
+    /// (post-armour). Minecraft rule: a hit arriving inside the window only
+    /// applies the amount by which it exceeds this. Meaningful only while
+    /// `invincible_timer > 0`.
+    pub last_hit_damage: f32,
     pub dead: bool,
     /// Ticks until respawn (after death screen).
     pub respawn_timer: u32,
@@ -134,8 +143,16 @@ pub struct PlayerCombat {
     pub regen_ticks: u32,
     /// Tick counter for starvation damage. When `hunger == 0`, this
     /// counter climbs; at STARVATION_INTERVAL_TICKS, drain 1 HP (floored
-    /// at POISON_HEALTH_FLOOR — starvation alone can't kill).
+    /// at `starvation_floor`).
     pub starvation_ticks: u32,
+    /// W2 — starvation never takes health below this. Set from the difficulty
+    /// table (`survival::Difficulty::rules().starvation_floor`) by the caller
+    /// before each `tick`; defaults to Normal (1 HP). `0.0` = starvation kills.
+    pub starvation_floor: f32,
+    /// W2 — what last hurt this player (death-screen cause line).
+    pub last_damage: crate::survival::DamageCause,
+    /// W2 — air supply / drowning state. Transient; reset on respawn.
+    pub breath: crate::survival::Breath,
 }
 
 /// How long between hunger ticks (Wave 24). 600 ticks = 30 seconds at
@@ -168,6 +185,7 @@ impl PlayerCombat {
             attack_cooldown: 0,
             flash_timer: 0,
             invincible_timer: 0,
+            last_hit_damage: 0.0,
             dead: false,
             respawn_timer: 0,
             just_died: false,
@@ -177,6 +195,9 @@ impl PlayerCombat {
             hunger_drain_ticks: 0,
             regen_ticks: 0,
             starvation_ticks: 0,
+            starvation_floor: crate::survival::Difficulty::Normal.rules().starvation_floor,
+            last_damage: crate::survival::DamageCause::Generic,
+            breath: crate::survival::Breath::FULL,
         }
     }
 
@@ -245,15 +266,17 @@ impl PlayerCombat {
             self.regen_ticks = 0;
         }
 
-        // --- Starvation damage (Wave 24) ---
-        if !self.dead && self.hunger == 0 && self.health > POISON_HEALTH_FLOOR {
+        // --- Starvation damage (Wave 24; W2 difficulty floor) ---
+        // The floor comes from the difficulty table: Easy 10 HP, Normal 1 HP,
+        // Hard 0 (starvation kills), Peaceful the old half heart.
+        if !self.dead && self.hunger == 0 && self.health > self.starvation_floor {
             self.starvation_ticks = self.starvation_ticks.saturating_add(1);
             if self.starvation_ticks >= STARVATION_INTERVAL_TICKS {
                 self.starvation_ticks = 0;
-                // Floor at the same value as poison — starvation alone
-                // can't kill (matches MC easy/normal where it stops at
-                // 1 HP / half a heart).
-                self.health = (self.health - 1.0).max(POISON_HEALTH_FLOOR);
+                let amount = (self.health - self.starvation_floor).min(1.0);
+                if amount > 0.0 {
+                    self.take_damage_from(amount, crate::survival::DamageCause::Starvation);
+                }
             }
         } else {
             self.starvation_ticks = 0;
@@ -265,12 +288,35 @@ impl PlayerCombat {
     }
 
     pub fn take_damage(&mut self, amount: f32) -> bool {
-        if self.invincible_timer > 0 || self.dead {
+        self.take_damage_from(amount, crate::survival::DamageCause::Generic)
+    }
+
+    /// [`take_damage`](Self::take_damage), recording `cause` as the last
+    /// damage (the death-screen line) when the hit lands. No armour here —
+    /// armour-reduced sources go through
+    /// `PlayerSlot::take_damage_with_armour_from`.
+    pub fn take_damage_from(&mut self, amount: f32, cause: crate::survival::DamageCause) -> bool {
+        if self.dead {
             return false;
         }
-        self.health = (self.health - amount).max(0.0);
-        self.flash_timer = DAMAGE_FLASH_TICKS;
-        self.invincible_timer = INVINCIBILITY_TICKS;
+        let applied = if self.invincible_timer > 0 {
+            // Minecraft rule: inside the hit-invulnerability window only the
+            // amount exceeding the hit that started it applies (if larger);
+            // otherwise the hit is ignored. The window is NOT restarted.
+            if amount <= self.last_hit_damage {
+                return false;
+            }
+            let extra = amount - self.last_hit_damage;
+            self.last_hit_damage = amount;
+            extra
+        } else {
+            self.last_hit_damage = amount;
+            self.invincible_timer = INVINCIBILITY_TICKS;
+            amount
+        };
+        self.last_damage = cause;
+        self.health = (self.health - applied).max(0.0);
+        self.flash_timer = PLAYER_HURT_FLASH_TICKS;
         if self.health <= 0.0 {
             self.dead = true;
             self.respawn_timer = 40; // 2 seconds before auto-respawn
@@ -284,12 +330,14 @@ impl PlayerCombat {
         self.dead = false;
         self.flash_timer = 0;
         self.invincible_timer = 0;
+        self.last_hit_damage = 0.0;
         self.respawn_timer = 0;
         // Respawn restores hunger too (MC parity).
         self.hunger = self.max_hunger;
         self.hunger_drain_ticks = 0;
         self.regen_ticks = 0;
         self.starvation_ticks = 0;
+        self.breath = crate::survival::Breath::FULL;
         // just_died stays false — only the death transition sets it.
     }
 
@@ -318,11 +366,17 @@ impl PlayerCombat {
         self.health - before
     }
 
-    /// No caller yet — unlike `Health::is_flashing` (mob rendering, live),
-    /// a player damage-flash HUD overlay has not been wired up to read this.
-    #[allow(dead_code)]
+    /// W2 — drives the red hurt vignette (`hud_ui::draw_hurt_vignette`).
     pub fn is_flashing(&self) -> bool {
         self.flash_timer > 0
+    }
+
+    /// W2 — the hurt vignette's alpha this frame (0 when not flashing).
+    pub fn hurt_vignette_alpha(&self) -> f32 {
+        if !self.is_flashing() {
+            return 0.0;
+        }
+        crate::survival::hurt_vignette_alpha(self.flash_timer, PLAYER_HURT_FLASH_TICKS)
     }
 }
 
@@ -642,6 +696,7 @@ pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Op
 pub fn tick_mob_attacks(
     ecs: &hecs::World,
     slot: &mut crate::player_slot::PlayerSlot,
+    difficulty: crate::survival::Difficulty,
 ) -> Vec<hecs::Entity> {
     let mut landed: Vec<hecs::Entity> = Vec::new();
     if slot.combat.dead {
@@ -658,15 +713,15 @@ pub fn tick_mob_attacks(
         }
 
         // Per-mob contact damage. All hostile mobs use the baseline
-        // melee damage.
-        let damage = HOSTILE_MELEE_DAMAGE;
+        // melee damage, scaled by the difficulty table (W2) before armour.
+        let damage = crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, difficulty);
 
         let to_player = player_pos - pos.0;
         let horiz_dist = Vec3::new(to_player.x, 0.0, to_player.z).length();
         let vert_overlap = to_player.y >= 0.0 && to_player.y < 1.8; // Player height
 
         if horiz_dist < HOSTILE_MELEE_RANGE && vert_overlap
-            && slot.take_damage_with_armour(damage) {
+            && slot.take_damage_with_armour_from(damage, crate::survival::DamageCause::Mob(kind.0)) {
                 // Knockback player away from the attacker
                 let kb_dir = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
                 slot.player.velocity.x += kb_dir.x * KNOCKBACK_BASE;
@@ -703,6 +758,52 @@ mod tests {
         // While invulnerable, a follow-up hit must be ignored.
         assert!(!h.take_damage(5.0));
         assert_eq!(h.current, 17.0);
+    }
+
+    // --- Player i-frames: Minecraft rule (W2 review) ---
+
+    #[test]
+    fn iframe_larger_hit_applies_only_the_excess() {
+        // 4 dmg mob hit, then a 10 dmg fall inside the window: only the 6
+        // beyond the first hit applies (total 10 lost).
+        let mut c = PlayerCombat::new();
+        assert!(c.take_damage_from(4.0, crate::survival::DamageCause::Generic));
+        assert!((c.health - 16.0).abs() < 1e-4);
+        assert!(c.take_damage_from(10.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 10.0).abs() < 1e-4, "6 extra applied, got {}", c.health);
+        assert_eq!(c.last_damage, crate::survival::DamageCause::Fall);
+        // The window was not restarted, and a third equal hit is ignored.
+        assert!(!c.take_damage_from(10.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn iframe_smaller_or_equal_hit_is_ignored() {
+        let mut c = PlayerCombat::new();
+        assert!(c.take_damage_from(4.0, crate::survival::DamageCause::Generic));
+        assert!(!c.take_damage_from(3.0, crate::survival::DamageCause::Drowning));
+        assert!(!c.take_damage_from(4.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 16.0).abs() < 1e-4, "nothing extra applied, got {}", c.health);
+        assert_eq!(c.last_damage, crate::survival::DamageCause::Generic);
+    }
+
+    #[test]
+    fn iframe_window_expiry_allows_a_fresh_full_hit() {
+        let mut c = PlayerCombat::new();
+        c.take_damage_from(4.0, crate::survival::DamageCause::Generic);
+        for _ in 0..INVINCIBILITY_TICKS {
+            c.tick();
+        }
+        assert!(c.take_damage_from(3.0, crate::survival::DamageCause::Fall));
+        assert!((c.health - 13.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn iframe_excess_hit_can_kill() {
+        let mut c = PlayerCombat::new();
+        c.take_damage_from(4.0, crate::survival::DamageCause::Generic);
+        assert!(c.take_damage_from(30.0, crate::survival::DamageCause::Fall));
+        assert!(c.dead && c.just_died);
     }
 
     #[test]
@@ -1386,8 +1487,11 @@ mod tests {
         for _ in 0..(STARVATION_INTERVAL_TICKS * 50) {
             combat.tick();
         }
-        assert_eq!(combat.health, POISON_HEALTH_FLOOR,
-            "starvation must floor at POISON_HEALTH_FLOOR (cannot kill)");
+        // W2 — default floor is Normal's 1 HP (difficulty table); the
+        // per-difficulty floors are covered in `survival::tests`.
+        assert_eq!(combat.health, 1.0,
+            "starvation must floor at Normal's 1 HP by default (cannot kill)");
+        assert!(!combat.dead);
     }
 
     #[test]
@@ -1453,7 +1557,7 @@ mod tests {
         );
         slot.combat.dead = true;
         let start_health = slot.combat.health;
-        let landed = tick_mob_attacks(&ecs, &mut slot);
+        let landed = tick_mob_attacks(&ecs, &mut slot, crate::survival::Difficulty::Normal);
         assert_eq!(slot.combat.health, start_health, "dead players take no damage");
         assert_eq!(slot.player.velocity, Vec3::ZERO);
         assert!(landed.is_empty(), "no attackers reported against a dead player");
@@ -1473,11 +1577,11 @@ mod tests {
             0, Vec3::new(0.0, 64.0, 0.0), 1.0,
         );
         let start_health = slot.combat.health;
-        let landed = tick_mob_attacks(&ecs, &mut slot);
+        let landed = tick_mob_attacks(&ecs, &mut slot, crate::survival::Difficulty::Normal);
         assert!(slot.combat.health < start_health, "the near brigand's hit lands");
         assert_eq!(landed, vec![near], "only the mob that landed damage is reported");
         // Immediately again: i-frames block the hit → nothing reported.
-        let landed_again = tick_mob_attacks(&ecs, &mut slot);
+        let landed_again = tick_mob_attacks(&ecs, &mut slot, crate::survival::Difficulty::Normal);
         assert!(landed_again.is_empty(), "i-frame-blocked hits are not reported");
     }
 
@@ -1496,7 +1600,7 @@ mod tests {
             Some(ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron)),
         ];
         let before = slot.combat.health;
-        slot.take_damage_with_armour(8.0);
+        slot.take_damage_with_armour_from(8.0, crate::survival::DamageCause::Generic);
         let dealt = before - slot.combat.health;
         let expected = 8.0 * 0.40;
         assert!((dealt - expected).abs() < 1e-3,
@@ -1515,7 +1619,7 @@ mod tests {
             Some(ArmourItem::new(ArmourSlot::Leggings, ArmourMaterial::Iron)),
             Some(ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron)),
         ];
-        slot.take_damage_with_armour(8.0);
+        slot.take_damage_with_armour_from(8.0, crate::survival::DamageCause::Generic);
         for s in slot.armour_slots.iter() {
             let piece = s.as_ref().expect("piece still equipped after one hit");
             assert_eq!(
@@ -1536,7 +1640,7 @@ mod tests {
         let mut slot = crate::player_slot::PlayerSlot::new(0, Vec3::ZERO, 1.0);
         slot.armour_slots[ArmourSlot::Helmet as usize] = Some(helmet);
         assert_eq!(slot.total_armour_points(), 1);
-        let landed = slot.take_damage_with_armour(2.0);
+        let landed = slot.take_damage_with_armour_from(2.0, crate::survival::DamageCause::Generic);
         assert!(landed);
         assert!(slot.armour_slots[ArmourSlot::Helmet as usize].is_none(),
             "broken helmet must auto-unequip");

@@ -1415,6 +1415,7 @@ impl super::GameState {
                     if let Some(slot) = self.players.get_mut(0) {
                         slot.player.pos = t;
                         slot.player.velocity = glam::Vec3::ZERO;
+                        slot.player.reset_fall();
                     }
                 }
                 self.map_screen.open = false;
@@ -2767,6 +2768,8 @@ impl super::GameState {
         self.players[0].player.pos =
             glam::Vec3::new(sx as f32 + 0.5, s_surf as f32 + 1.0, sz as f32 + 0.5);
         self.players[0].player.velocity = glam::Vec3::ZERO;
+        // W2 — a trial start is a teleport, not a fall.
+        self.players[0].player.reset_fall();
         // Plant the finish beacon ONLY if its column has actually generated. For
         // a far course (cross-country / marathon) the finish is well outside the
         // loaded area at launch: surface_y would return the sea-level fallback
@@ -4846,6 +4849,9 @@ impl super::GameState {
             // dismount doesn't fling them with stale momentum.
             if slot.riding.is_some() {
                 slot.player.velocity = glam::Vec3::ZERO;
+                // W2 — a ride is not a fall: dismounting must not "land" a
+                // fall that started before mounting.
+                slot.player.reset_fall();
                 continue;
             }
             // Task 15 — Rubber Boots sprint bonus. Refresh from the equipped
@@ -5479,13 +5485,17 @@ impl super::GameState {
         // generic Idle/Wander states but yields to Flee/Chase/Investigate.
         // Rabbits hop; goats charge and gore a player who's too close.
         crate::species_ai::dispatch_rabbits(&mut self.ecs, &player_positions, self.tick_counter);
+        // W2 — neutral-mob bites scale with the difficulty table too.
+        let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
         let bee_stings =
             crate::species_ai::dispatch_bees(&mut self.ecs, &player_positions, self.tick_counter);
         for sting in bee_stings {
-            let landed = self
-                .players
-                .get_mut(sting.target_slot)
-                .is_some_and(|slot| slot.take_damage_with_armour(crate::species_ai::BEE_STING_DAMAGE));
+            let landed = self.players.get_mut(sting.target_slot).is_some_and(|slot| {
+                slot.take_damage_with_armour_from(
+                    crate::survival::scale_mob_damage(crate::species_ai::BEE_STING_DAMAGE, difficulty),
+                    crate::survival::DamageCause::Mob(crate::mob::MobType::Bee),
+                )
+            });
             if landed {
                 self.dismount_parrots_on_owner_damage(sting.target_slot);
             }
@@ -5497,7 +5507,10 @@ impl super::GameState {
         for imp in goat_impacts {
             let mut landed = false;
             if let Some(slot) = self.players.get_mut(imp.target_slot) {
-                landed = slot.take_damage_with_armour(crate::goat_ai::CHARGE_DAMAGE);
+                landed = slot.take_damage_with_armour_from(
+                    crate::survival::scale_mob_damage(crate::goat_ai::CHARGE_DAMAGE, difficulty),
+                    crate::survival::DamageCause::Mob(crate::mob::MobType::Goat),
+                );
                 let p = slot.player.pos;
                 let push = glam::Vec3::new(p.x - imp.goat_pos.x, 0.0, p.z - imp.goat_pos.z)
                     .normalize_or_zero();
@@ -5567,7 +5580,10 @@ impl super::GameState {
         for bite in shark_bites {
             let mut landed = false;
             if let Some(slot) = self.players.get_mut(bite.target_slot) {
-                landed = slot.take_damage_with_armour(crate::species_ai::SHARK_BITE_DAMAGE);
+                landed = slot.take_damage_with_armour_from(
+                    crate::survival::scale_mob_damage(crate::species_ai::SHARK_BITE_DAMAGE, difficulty),
+                    crate::survival::DamageCause::Mob(crate::mob::MobType::Shark),
+                );
                 let p = slot.player.pos;
                 let push = glam::Vec3::new(p.x - bite.shark_pos.x, 0.0, p.z - bite.shark_pos.z)
                     .normalize_or_zero();
@@ -5719,8 +5735,28 @@ impl super::GameState {
                 );
             }
 
+            // W2 — starvation floor from the difficulty table, set before
+            // the combat tick that applies it.
+            self.players[i].combat.starvation_floor =
+                crate::survival::Difficulty::from_meta_str(&self.difficulty)
+                    .rules()
+                    .starvation_floor;
+
             // Tick combat timers
             self.players[i].combat.tick();
+
+            // W2 — fall damage (from this tick's physics landing) + drowning.
+            // The same shared driver runs server-side for remote players
+            // (`GameServer::tick_player_physics`).
+            {
+                let slot = &mut self.players[i];
+                crate::survival::tick_player_survival(
+                    &mut slot.player,
+                    &mut slot.combat,
+                    &self.world,
+                    self.play_mode,
+                );
+            }
 
             // P10 — lava contact damage. A body in lava burns at ~4 dmg/sec.
             // Flying modes (Creative/Spectator) are immune; gated to every 10
@@ -5735,11 +5771,13 @@ impl super::GameState {
                 let feet = self.world.get_block(bx, p.y.floor() as i32, bz);
                 let head = self.world.get_block(bx, (p.y + 1.0).floor() as i32, bz);
                 let landed = if feet == crate::block::LAVA || head == crate::block::LAVA {
-                    self.players[i].take_damage_with_armour(2.0)
+                    self.players[i]
+                        .take_damage_with_armour_from(2.0, crate::survival::DamageCause::Lava)
                 } else if feet == crate::block::FIRE || head == crate::block::FIRE {
                     // Fire burns at half lava strength (1 HP / 0.5 s). No
                     // lingering "on fire" status yet — contact only.
-                    self.players[i].take_damage_with_armour(1.0)
+                    self.players[i]
+                        .take_damage_with_armour_from(1.0, crate::survival::DamageCause::Fire)
                 } else {
                     false
                 };
@@ -5755,11 +5793,14 @@ impl super::GameState {
         }
 
         // ── Part C: Per-player combat (mob attacks on each player) ────────────
-        if !self.is_creative && self.difficulty != "peaceful" {
+        // W2 — the difficulty table decides whether hostiles attack at all
+        // (Peaceful: no) and scales the hits that land.
+        let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
+        if !self.is_creative && difficulty.rules().hostiles_attack {
             for i in 0..self.players.len() {
                 let attackers = {
                     let p = &mut self.players[i];
-                    crate::combat::tick_mob_attacks(&self.ecs, p)
+                    crate::combat::tick_mob_attacks(&self.ecs, p, difficulty)
                 };
                 // Task 11 (design P6) — a landed mob melee hit dismounts any
                 // of this player's perched parrots (a shoulder-ride doesn't
@@ -6143,6 +6184,9 @@ impl super::GameState {
             // we only ever MOVE items (to a grave, to keep-inventory, or, as a
             // last resort, scatter); never destroy or charge.
             if self.players[i].combat.just_died {
+                // W2 — the death screen's grave line; set below if a grave
+                // is actually placed this death.
+                self.players[i].last_grave = None;
                 // #6 — drop a death marker where the player fell, regardless of
                 // keep-inventory, so the map shows the way back (rolling, capped).
                 let dp = self.players[i].player.pos;
@@ -6182,6 +6226,7 @@ impl super::GameState {
                             self.world.set_block(gx, gy, gz, crate::block::GRAVE);
                             let grave = crate::grave::GraveData::from_snapshot(snapshot, self.world_time);
                             self.world.insert_grave((gx, gy, gz), grave);
+                            self.players[i].last_grave = Some([gx, gy, gz]);
                             self.toast = Some((
                                 format!("Your grave is at {gx}, {gy}, {gz} — go and reclaim it"),
                                 Instant::now() + Duration::from_secs(6),
@@ -6211,6 +6256,8 @@ impl super::GameState {
                 let spawn = self.players[i].spawn_pos;
                 self.players[i].player.pos = spawn;
                 self.players[i].player.velocity = glam::Vec3::ZERO;
+                // W2 — a death mid-fall must not land at the spawn point.
+                self.players[i].player.reset_fall();
             }
         }
     }
@@ -7402,6 +7449,7 @@ impl super::GameState {
                                     if let Some(slot) = self.players.get_mut(i) {
                                         slot.player.pos = glam::Vec3::new(ps.x, ps.y, ps.z);
                                         slot.player.velocity = glam::Vec3::ZERO;
+                                        slot.player.reset_fall();
                                         slot.player.flying = false; // resume grounded (parity with native SAVE branch)
                                         slot.camera.yaw = ps.yaw;
                                         slot.camera.pitch = ps.pitch;
@@ -16687,10 +16735,17 @@ impl super::GameState {
                     crate::hud_ui::ScenarioEndAction::None => {}
                 }
             } else if is_dead {
+                // W2 — say what happened, and where the items went.
+                let cause_line =
+                    crate::survival::death_message(self.players[pidx].combat.last_damage);
+                let grave_line =
+                    self.players[pidx].last_grave.map(crate::survival::grave_message);
                 let respawn_clicked = crate::hud_ui::draw_death_screen(
                     &self.renderer.egui.ctx,
                     &screen.viewport,
                     pidx,
+                    &cause_line,
+                    grave_line.as_deref(),
                 );
                 if respawn_clicked {
                     // Skip the auto-respawn timer — next tick respawns.
@@ -19432,6 +19487,22 @@ impl super::GameState {
                     perf_samples,
                     debug_readout,
                 );
+                // W2 — breath bubbles (survival, only while underwater or
+                // refilling) + the red hurt vignette at the screen edge.
+                if !self.is_creative && crate::survival::show_breath_bar(&slot.combat.breath) {
+                    crate::hud_ui::draw_breath(
+                        &self.renderer.egui.ctx,
+                        &screen.viewport,
+                        pidx,
+                        crate::survival::breath_bubbles(slot.combat.breath.air),
+                    );
+                }
+                crate::hud_ui::draw_hurt_vignette(
+                    &self.renderer.egui.ctx,
+                    &screen.viewport,
+                    pidx,
+                    slot.combat.hurt_vignette_alpha(),
+                );
                 // P8 — rain overlay over this viewport while it's raining.
                 if self.tick_counter < self.weather_rain_until {
                     crate::hud_ui::draw_rain_overlay(
@@ -21013,6 +21084,7 @@ impl super::GameState {
             }
 
         let mut pending_mode = None;
+        let mut pending_difficulty: Option<String> = None;
         let mut pending_pack = None;
         let mut pending_snapshot_json = None;
         let mut pending_exhibits = None;
@@ -21034,6 +21106,7 @@ impl super::GameState {
             client_chunks = std::mem::take(&mut client.chunk_queue);
             client_state = client.latest_state.take();
             pending_mode = client.pending_play_mode.take();
+            pending_difficulty = client.pending_difficulty.take();
             pending_pack = client.pending_resource_pack.take();
             pending_snapshot_json = client.pending_operator_snapshot_json.take();
             pending_exhibits = client.pending_exhibits.take();
@@ -21076,6 +21149,11 @@ impl super::GameState {
         // cache in sync) — done after the client borrow ends so `self` is free.
         if let Some(mode) = pending_mode {
             self.set_play_mode(mode);
+        }
+        // W2 — a joiner plays at the HOST's difficulty (JoinAccept already
+        // carries it), so its own client-side mob/starvation sim matches.
+        if let Some(difficulty) = pending_difficulty {
+            self.difficulty = difficulty;
         }
         if let Some(t) = self.remote_client.as_mut().and_then(|c| c.pending_world_time.take()) {
             self.world_time = t;
@@ -21695,6 +21773,7 @@ impl super::GameState {
             if self.world.is_solid(bx, by, bz, &self.registry) {
                 self.players[i].player.pos.y = (by + 1) as f32;
                 self.players[i].player.velocity = glam::Vec3::ZERO;
+                self.players[i].player.reset_fall();
                 self.players[i].player.on_ground = true;
                 return;
             }

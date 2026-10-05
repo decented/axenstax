@@ -393,7 +393,7 @@ pub fn apply_player_blast_damage(
     let mut landed = Vec::new();
     for &(i, d) in hits {
         if let Some(slot) = players.get_mut(i)
-            && slot.take_damage_with_armour(d)
+            && slot.take_damage_with_armour_from(d, crate::survival::DamageCause::Explosion)
         {
             landed.push(i);
         }
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn blast_damage_routes_through_equipped_armour() {
-        // Keg damage used to bypass `take_damage_with_armour` — full iron
+        // Keg damage used to bypass `take_damage_with_armour_from` — full iron
         // must reduce a 10.0 blast hit to 4.0 landed (the Spec 28e 60%
         // reduction the melee path already applies), and wear each piece.
         use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};

@@ -308,6 +308,10 @@ pub struct PlayerSlot {
     /// #7 — WorldEdit region selection corners + clipboard. Transient (not
     /// persisted); single-player power-user editing.
     pub worldedit: crate::worldedit::WorldEditSession,
+    /// W2 — where this player's last death left a grave, for the death
+    /// screen's "Your items are in a grave at x, y, z" line. Cleared at each
+    /// death, set when a grave is placed. Transient.
+    pub last_grave: Option<[i32; 3]>,
 }
 
 impl PlayerSlot {
@@ -376,6 +380,7 @@ impl PlayerSlot {
             ride_speed: 0.0,
             ride_heading: glam::Vec2::ZERO,
             worldedit: crate::worldedit::WorldEditSession::default(),
+            last_grave: None,
         }
     }
 
@@ -398,7 +403,7 @@ impl PlayerSlot {
 
     /// Material of the currently-equipped Boots, if any (`None` = bare
     /// feet or a broken/unequipped piece — broken Boots are already
-    /// dropped to `None` by `take_damage_with_armour`).
+    /// dropped to `None` by `take_damage_with_armour_from`).
     pub fn equipped_boots_material(&self) -> Option<ArmourMaterial> {
         self.armour_slots[ArmourSlot::Boots as usize].map(|item| item.material)
     }
@@ -419,18 +424,23 @@ impl PlayerSlot {
     /// unequipped so they don't keep contributing nor linger as visual
     /// clutter. Returns whether the hit landed (mirrors
     /// `PlayerCombat::take_damage`'s contract — false if the player
-    /// was invulnerable or dead).
-    pub fn take_damage_with_armour(&mut self, raw_damage: f32) -> bool {
-        // i-frames / dead → don't wear armour either. PlayerCombat is
-        // the authority on whether the hit "happened" for the player;
-        // this mirrors that gate so a swarm of hits during i-frames
+    /// was invulnerable or dead). Records `cause` for the death screen (W2)
+    /// when the hit lands.
+    pub fn take_damage_with_armour_from(
+        &mut self,
+        raw_damage: f32,
+        cause: crate::survival::DamageCause,
+    ) -> bool {
+        // Dead → nothing to do. i-frames are PlayerCombat's call (MC rule: a
+        // larger hit inside the window still applies its excess); armour only
+        // wears when the hit actually lands, so a swarm of ignored hits
         // doesn't shred armour invisibly.
-        if self.combat.invincible_timer > 0 || self.combat.dead {
+        if self.combat.dead {
             return false;
         }
         let total_points = self.total_armour_points();
         let reduced = crate::armour::damage_after_armour(raw_damage, total_points);
-        let landed = self.combat.take_damage(reduced);
+        let landed = self.combat.take_damage_from(reduced, cause);
         if landed {
             for slot in self.armour_slots.iter_mut() {
                 if let Some(piece) = slot.as_mut()
@@ -575,7 +585,7 @@ mod tests {
             slot.armour_slots[s as usize] = Some(ArmourItem::new(s, ArmourMaterial::Iron));
         }
         let start = slot.combat.health;
-        slot.take_damage_with_armour(10.0);
+        slot.take_damage_with_armour_from(10.0, crate::survival::DamageCause::Generic);
         // 15 points → 60% reduction → 4 hp lands.
         assert!((slot.combat.health - (start - 4.0)).abs() < 1e-3);
     }
@@ -589,7 +599,7 @@ mod tests {
         ] {
             slot.armour_slots[s as usize] = Some(ArmourItem::new(s, ArmourMaterial::Iron));
         }
-        slot.take_damage_with_armour(5.0);
+        slot.take_damage_with_armour_from(5.0, crate::survival::DamageCause::Generic);
         for s in [
             ArmourSlot::Helmet, ArmourSlot::Chestplate,
             ArmourSlot::Leggings, ArmourSlot::Boots,
@@ -606,7 +616,7 @@ mod tests {
         slot.armour_slots[ArmourSlot::Helmet as usize] =
             Some(ArmourItem::new(ArmourSlot::Helmet, ArmourMaterial::Iron));
         let helmet_dur_before = slot.armour_slots[ArmourSlot::Helmet as usize].unwrap().durability;
-        let landed = slot.take_damage_with_armour(5.0);
+        let landed = slot.take_damage_with_armour_from(5.0, crate::survival::DamageCause::Generic);
         assert!(!landed);
         // No durability wear on a non-landed hit (parity with combat
         // i-frames so swarms can't shred armour invisibly).
