@@ -357,7 +357,7 @@ pub fn detonate_keg_core(
 }
 
 /// Spec 49 — blast damage to every mob around `center`, with distance falloff
-/// + line-of-sight reduction (the Spec 05 §6.3 hook). Computes against
+/// and line-of-sight reduction (the Spec 05 §6.3 hook). Computes against
 /// immutable borrows first, then applies.
 pub fn apply_mob_blast_damage(
     ecs: &mut hecs::World,
