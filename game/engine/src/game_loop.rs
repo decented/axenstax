@@ -8388,9 +8388,15 @@ impl super::GameState {
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::MenuAction::HostWorldOnline(folder_name) => {
                     log::info!("Hosting world online: {folder_name}");
-                    self.start_online_prep(crate::online_prep::OnlineIntent::Host {
-                        folder: folder_name,
-                    });
+                    // Refused before any port, router mapping or phone prompt
+                    // (Spec 02 §8.4); `start_online_host` checks again.
+                    if let Some(why) = crate::save::world_open_refusal(&folder_name) {
+                        self.online_toast(why, 8);
+                    } else {
+                        self.start_online_prep(crate::online_prep::OnlineIntent::Host {
+                            folder: folder_name,
+                        });
+                    }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::menu::MenuAction::JoinContact { persona_hex, display_name } => {

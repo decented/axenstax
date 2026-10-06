@@ -1794,8 +1794,9 @@ format version in a trailing footer — see the bincode note under Migration str
       nothing decoded.
     - **Refusal is total**: `save::world_open_refusal` (reads only the 12-byte
       footers of `world.dat` and `autosave/world.dat`) is checked before a world is
-      entered from every path — world card Play/Host, the Workshop / Trial / online
-      host catch-all in the lobby loop, `start_online_host`, and the dedicated
+      entered from every path — world card Play/Host, "Host online" (before any port
+      or router mapping), the Workshop / Trial / online host catch-all in the lobby
+      loop, `start_online_host`, and the dedicated
       server's boot (exit 1). The lobby card is labelled "(needs a newer version)"
       and the banner reads *"This world was saved by a newer version of Axe'n'Stax.
       Update the game to open it."* The web build shows the same banner when the
