@@ -82,6 +82,8 @@ pub fn host_world_mode() -> HostWorld {
 ///
 /// The streamer is its own flag, not an alias of `simulates_block_machines`: a
 /// host lending its world (D4) will tick machines but not stream.
+// Reached only from native hosting / the dedicated server.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn assign_column_loading(
     server: &mut crate::server::GameServer,
     num_local_players: usize,

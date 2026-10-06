@@ -764,6 +764,8 @@ pub(crate) fn client_stream_anchors(
 
 /// [`plan_stream_step_for`] with one `radius` for every anchor (the dedicated
 /// server's streamer).
+// Reached only from native hosting / the dedicated server.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn plan_stream_step(
     anchors: &[(i32, i32)],
     nearest_to: &[(i32, i32)],

@@ -152,6 +152,8 @@ impl ServerTransport for ClosedTransport {
 /// directly and never reads it, so sends go nowhere (nothing piles up in an
 /// unread channel) and nothing ever arrives. Unlike [`ClosedTransport`] it is
 /// not closed: the seat is live.
+// Reached only from native hosting / the dedicated server.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct NullServerTransport;
 
 impl ServerTransport for NullServerTransport {
