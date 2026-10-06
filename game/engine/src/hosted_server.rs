@@ -1171,11 +1171,6 @@ impl HostedServer {
         }
     }
 
-    /// Send `pkt` to every handshake-complete, connected client.
-    fn send_to_all_joined(&self, pkt: &[u8]) {
-        self.send_to_joined_except(usize::MAX, pkt);
-    }
-
     /// Send `pkt` to slot `i` alone — if it is a joined, live slot.
     fn send_to_joined_slot(&self, i: usize, pkt: &[u8]) {
         if self.handshake_done.get(i).copied().unwrap_or(false)
