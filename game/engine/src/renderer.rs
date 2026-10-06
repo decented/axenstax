@@ -376,6 +376,10 @@ pub struct PlayerGpuResources {
     /// cached by `update_camera`. Used to build the culling frustum in `render`
     /// (Spec 39 A1) — the GPU camera buffer can't be read back cheaply.
     pub last_view_proj: glam::Mat4,
+    /// CPU-side copy of the render eye this player's camera was last updated
+    /// with (`CameraUniform::camera_pos`, what the fog measures from), cached by
+    /// `update_camera` for the chunk draw-distance cull (`render_world_viewport`).
+    pub last_camera_pos: glam::Vec3,
 }
 
 /// Per-frame draw/culling counters, surfaced in the F3 overlay (Spec 39 A1).
@@ -616,6 +620,12 @@ pub struct Renderer {
     // frame from the live render distance (`set_micro_lod_dist`); `f32::MAX` =
     // LOD off (all shells), the safe default before it's set.
     micro_lod_dist: f32,
+    // Final review fix 3 — chunk columns farther than this from a viewport's camera
+    // (Chebyshev, horizontal) are not drawn: past the fog's end they are wholly
+    // fogged out, and a lending host streams a far joiner's whole sim block that no
+    // viewport of its own can see. Set from the live render distance
+    // (`set_chunk_draw_columns`); `i32::MAX` = no limit, the default before it's set.
+    chunk_draw_columns: i32,
     // Crosshair (kept as direct GPU overlay — too simple for egui)
     crosshair_pipeline: wgpu::RenderPipeline,
     crosshair_buffer: wgpu::Buffer,
@@ -1517,6 +1527,7 @@ impl Renderer {
             micro_meshes: ahash::AHashMap::new(),
             micro_billboard_meshes: ahash::AHashMap::new(),
             micro_lod_dist: f32::MAX,
+            chunk_draw_columns: i32::MAX,
             crosshair_pipeline,
             crosshair_buffer,
             crosshair_vertex_count: 12,
@@ -1567,6 +1578,7 @@ impl Renderer {
                 viewmodel_camera_buffer: vm_cam_buf,
                 viewmodel_camera_bind_group: vm_cam_bg,
                 last_view_proj: glam::Mat4::IDENTITY,
+                last_camera_pos: glam::Vec3::ZERO,
             }],
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
@@ -1707,6 +1719,13 @@ impl Renderer {
         self.micro_lod_dist = dist.max(0.0);
     }
 
+    /// Final review fix 3 — set how many columns from the camera chunks are still
+    /// drawn (`camera::chunk_draw_columns(render_distance)`; `i32::MAX` = all).
+    /// Every viewport culls by it beside its frustum test.
+    pub fn set_chunk_draw_columns(&mut self, columns: i32) {
+        self.chunk_draw_columns = columns.max(0);
+    }
+
     /// Set the render scale (Spec 39 Phase 5). 1.0 renders the world straight to
     /// the surface (no offscreen, no blit cost); < 1.0 renders the world to a
     /// smaller offscreen target then upscales it — the biggest weak-GPU lever.
@@ -1752,6 +1771,11 @@ impl Renderer {
             queue.write_buffer(&gpu.camera_buffer, 0, bytemuck::cast_slice(&[*uniform]));
             // Cache the CPU-side view-proj for this frame's frustum culling (A1).
             gpu.last_view_proj = glam::Mat4::from_cols_array_2d(&uniform.view_proj);
+            gpu.last_camera_pos = glam::Vec3::new(
+                uniform.camera_pos[0],
+                uniform.camera_pos[1],
+                uniform.camera_pos[2],
+            );
         }
     }
 
@@ -1814,6 +1838,7 @@ impl Renderer {
             viewmodel_camera_buffer,
             viewmodel_camera_bind_group,
             last_view_proj: glam::Mat4::IDENTITY,
+            last_camera_pos: glam::Vec3::ZERO,
         }
     }
 
@@ -3014,6 +3039,7 @@ impl Renderer {
                         &self.micro_meshes,
                         &self.micro_billboard_meshes,
                         self.micro_lod_dist,
+                        self.chunk_draw_columns,
                         &self.painting_pipeline,
                         &self.paintings,
                         &self.painting_textures,
@@ -3764,6 +3790,7 @@ impl Renderer {
             micro_meshes: ahash::AHashMap::new(),
             micro_billboard_meshes: ahash::AHashMap::new(),
             micro_lod_dist: f32::MAX,
+            chunk_draw_columns: i32::MAX,
             crosshair_pipeline,
             crosshair_buffer,
             crosshair_vertex_count: 12,
@@ -3814,6 +3841,7 @@ impl Renderer {
                 viewmodel_camera_buffer: vm_cam_buf,
                 viewmodel_camera_bind_group: vm_cam_bg,
                 last_view_proj: glam::Mat4::IDENTITY,
+                last_camera_pos: glam::Vec3::ZERO,
             }],
             last_draw_stats: DrawStats::default(),
             crosshair_cache: ahash::AHashMap::new(),
@@ -4332,6 +4360,7 @@ fn render_world_viewport(
     micro_meshes: &ahash::AHashMap<(i32, i32, i32), Vec<(crate::block::BlockId, GpuPlantInstances)>>,
     micro_billboard_meshes: &ahash::AHashMap<(i32, i32, i32), GpuPlantInstances>,
     micro_lod_dist: f32,
+    chunk_draw_columns: i32,
     painting_pipeline: &wgpu::RenderPipeline,
     paintings: &[PaintingQuad],
     painting_textures: &ahash::AHashMap<u64, PaintingTex>,
@@ -4347,6 +4376,19 @@ fn render_world_viewport(
     let chunk_aabb = |cx: i32, cy: i32, cz: i32| -> (glam::Vec3, glam::Vec3) {
         let min = glam::Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
         (min, min + glam::Vec3::splat(cs))
+    };
+
+    // A chunk is drawn only if it is within the draw range of this viewport's
+    // camera (final review fix 3: columns past the fog's end cost the GPU for
+    // nothing — a far joiner's streamed block on a lending host) AND in the
+    // frustum.
+    let eye = gpu.last_camera_pos;
+    let chunk_visible = |cx: i32, cy: i32, cz: i32| -> bool {
+        if !crate::camera::chunk_in_draw_range(eye, cx, cz, chunk_draw_columns) {
+            return false;
+        }
+        let (min, max) = chunk_aabb(cx, cy, cz);
+        frustum.contains_aabb(min, max)
     };
 
     let vx = viewport.x as f32;
@@ -4401,8 +4443,7 @@ fn render_world_viewport(
         pass.set_bind_group(1, texture_bind_group, &[]);
 
         for (&(cx, cy, cz), gpu_mesh) in chunk_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
             }
@@ -4449,8 +4490,7 @@ fn render_world_viewport(
         pass.set_index_buffer(plant_geo_ibuf.slice(..), wgpu::IndexFormat::Uint32);
 
         for (&(cx, cy, cz), plants) in plant_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
             }
@@ -4499,8 +4539,7 @@ fn render_world_viewport(
         // (counted once); the far loop below re-checks the frustum silently.
         pass.set_pipeline(micro_pipeline);
         for (&(cx, cy, cz), batches) in micro_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
             }
@@ -4528,8 +4567,7 @@ fn render_world_viewport(
         pass.set_vertex_buffer(0, plant_geo_vbuf.slice(..));
         pass.set_index_buffer(plant_geo_ibuf.slice(..), wgpu::IndexFormat::Uint32);
         for (&(cx, cy, cz), billboards) in micro_billboard_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 continue; // already counted in the near loop
             }
             if crate::camera::micro_chunk_is_near(&gpu.last_view_proj, cx, cy, cz, micro_lod_dist) {
@@ -4574,8 +4612,7 @@ fn render_world_viewport(
         pass.set_bind_group(0, &gpu.camera_bind_group, &[]);
         pass.set_bind_group(1, texture_bind_group, &[]);
         for (&(cx, cy, cz), decal) in decal_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
             }
@@ -4717,8 +4754,7 @@ fn render_world_viewport(
         pass.set_bind_group(0, &gpu.camera_bind_group, &[]);
         pass.set_bind_group(1, texture_bind_group, &[]);
         for (&(cx, cy, cz), gpu_mesh) in transparent_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
             }
@@ -4733,8 +4769,7 @@ fn render_world_viewport(
         pass.set_bind_group(1, texture_bind_group, &[]);
 
         for (&(cx, cy, cz), gpu_mesh) in water_meshes.iter() {
-            let (min, max) = chunk_aabb(cx, cy, cz);
-            if !frustum.contains_aabb(min, max) {
+            if !chunk_visible(cx, cy, cz) {
                 stats.culled += 1;
                 continue;
             }

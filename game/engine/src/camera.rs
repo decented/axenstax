@@ -684,6 +684,31 @@ pub fn micro_chunk_is_near(view_proj: &Mat4, cx: i32, cy: i32, cz: i32, lod_dist
     w <= lod_dist
 }
 
+/// Final review fix 3 — how many columns from the camera (Chebyshev, on column
+/// indices) the world's chunks are still drawn: the render distance plus one.
+/// The distance fog ends at the render distance (`graphics_settings::fog_distances`,
+/// `end = render_distance * 16`) and the streamer loads out to it, so a chunk
+/// past this is wholly fogged out and drawing it only costs the GPU — a lending
+/// host loads a far joiner's whole sim-distance block (up to ~440 columns of
+/// it) that no viewport of the host's can see. `i32::MAX` = no limit.
+pub fn chunk_draw_columns(render_distance: i32) -> i32 {
+    render_distance.max(0).saturating_add(1)
+}
+
+/// Final review fix 3 — is the chunk column `(cx, cz)` within `max_cols`
+/// columns of the camera at `eye`, horizontally? (A chunk's height never
+/// matters: a column is drawn whole or not at all.) Pure + tested; the
+/// renderer asks it of every chunk-keyed draw loop beside the frustum test.
+pub fn chunk_in_draw_range(eye: Vec3, cx: i32, cz: i32, max_cols: i32) -> bool {
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    let (ex, ez) = (
+        (eye.x.floor() as i32).div_euclid(cs),
+        (eye.z.floor() as i32).div_euclid(cs),
+    );
+    let max = max_cols.max(0) as u32;
+    cx.abs_diff(ex) <= max && cz.abs_diff(ez) <= max
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1343,5 +1368,46 @@ mod tests {
             cam.orbit_yaw_offset.abs() < 1e-3 && cam.orbit_pitch_offset.abs() < 1e-3,
             "fully returns behind the player"
         );
+    }
+
+    /// Final review fix 3 — chunk columns past the draw range are skipped: a
+    /// far joiner's streamed block is never drawn by the host's viewports.
+    #[test]
+    fn chunks_beyond_the_draw_range_are_not_drawn() {
+        let eye = Vec3::new(8.0, 70.0, 8.0); // column (0, 0)
+        let cols = chunk_draw_columns(4);
+        assert_eq!(cols, 5, "render distance + 1");
+        assert!(chunk_in_draw_range(eye, 0, 0, cols));
+        assert!(chunk_in_draw_range(eye, 5, 0, cols), "on the edge: drawn");
+        assert!(chunk_in_draw_range(eye, -5, 5, cols), "a corner is within a square");
+        assert!(!chunk_in_draw_range(eye, 6, 0, cols), "one past: culled");
+        assert!(!chunk_in_draw_range(eye, 0, -6, cols));
+        assert!(!chunk_in_draw_range(eye, 40, 40, cols), "a far joiner's columns");
+        // Negative coordinates: the camera's column rounds down, not toward zero.
+        let eye = Vec3::new(-0.5, 70.0, -16.5); // column (-1, -2)
+        assert!(chunk_in_draw_range(eye, 4, -2, cols));
+        assert!(!chunk_in_draw_range(eye, 5, -2, cols));
+        assert!(chunk_in_draw_range(eye, -6, -2, cols));
+        assert!(!chunk_in_draw_range(eye, -7, -2, cols));
+        assert!(chunk_in_draw_range(eye, -1, 3, cols));
+        assert!(!chunk_in_draw_range(eye, -1, 4, cols));
+        // No limit keeps everything (also at the extremes, without overflow).
+        assert!(chunk_in_draw_range(eye, 1_000_000, -1_000_000, i32::MAX));
+        assert!(chunk_in_draw_range(eye, -2_000_000_000, 2_000_000_000, i32::MAX));
+        // A limit of zero is the camera's own column.
+        assert!(chunk_in_draw_range(eye, -1, -2, 0));
+        assert!(!chunk_in_draw_range(eye, 0, -2, 0));
+        assert_eq!(chunk_draw_columns(i32::MAX), i32::MAX, "saturates");
+    }
+
+    /// The cull never takes anything the fog still shows: a chunk past the draw
+    /// range is at least (range columns) of blocks away, beyond the fog's end.
+    #[test]
+    fn the_draw_range_lies_beyond_the_fog() {
+        for rd in 2..=32 {
+            let (_, fog_end) = crate::graphics_settings::fog_distances(rd);
+            let range_blocks = chunk_draw_columns(rd) as f32 * crate::chunk::CHUNK_SIZE as f32;
+            assert!(range_blocks > fog_end, "rd {rd}: range {range_blocks} <= fog end {fog_end}");
+        }
     }
 }

@@ -1557,6 +1557,11 @@ impl super::GameState {
         // Tracks the live render distance so it scales with the player's setting.
         let lod = self.graphics.render_distance as f32 * crate::chunk::CHUNK_SIZE as f32 * 0.55;
         self.renderer.set_micro_lod_dist(lod);
+        // Chunk draw range (final review fix 3) — columns past the render distance
+        // + 1 are wholly fogged out; every viewport skips them, so a lending
+        // host's far-joiner columns cost the GPU nothing. Tracks the live setting.
+        self.renderer
+            .set_chunk_draw_columns(crate::camera::chunk_draw_columns(self.graphics.render_distance));
     }
 
     /// Apply the current `graphics` settings to live engine state (Spec 39) and
