@@ -98,7 +98,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # SIGINT/SIGTERM handler so the dedicated server saves the world on graceful
 # shutdown (`docker stop` sends SIGTERM). Native-only, dependency-light.
 ctrlc = "3"
-rcgen = "0.13"
+rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # BIP-340 Schnorr (server-side only — the engine WASM client doesn't verify;
 # it signs at a higher layer via the Signet browser handoff). libsecp256k1-based.
