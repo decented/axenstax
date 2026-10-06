@@ -85,6 +85,9 @@ pub enum PacketType {
     /// else: the server respawns the player only if IT holds them dead, at the
     /// spawn point IT holds, and answers with `PlayerEventType::Respawned`.
     /// Sent by a joiner only; a host's own players respawn in its client sim.
+    /// A client re-sends it every 20 ticks until answered (the server's
+    /// per-tick packet budget never drops it, but a request made inside the
+    /// first 20 ticks of a death is ignored — see `Respawned`).
     Respawn = 57,
 }
 
@@ -803,13 +806,16 @@ pub enum PlayerEventType {
     Left,
     /// MP-A3 (v67) — the server's own sim killed this player's body (a fall,
     /// drowning): it now holds them dead — no physics, no pickups, no edits, no
-    /// mob targeting — until they send `PacketType::Respawn`. Sent to every
-    /// joined client, the player included; their own client enters its death
+    /// mob targeting — until they send `PacketType::Respawn`. Sent to that
+    /// player ALONE (never broadcast); their own client enters its death
     /// screen. NOT sent for a death the joiner's input reported (its client
     /// already knows; an echo after a quick Respawn would kill it again).
     Died,
     /// MP-A3 (v67) — the server respawned this player at the spawn point it
-    /// holds for them. The player's own client moves there.
+    /// holds for them, after a `Respawn` it held them dead for at least
+    /// `server::MIN_DEAD_TICKS_BEFORE_RESPAWN` ticks to honour. Sent to that
+    /// player ALONE; their own client moves there (if the position is inside
+    /// the join-spawn range).
     Respawned { x: f32, y: f32, z: f32 },
 }
 

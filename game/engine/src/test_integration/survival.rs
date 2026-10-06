@@ -173,3 +173,19 @@ fn a_server_copy_killed_by_a_fall_stays_dead_until_respawn_is_requested() {
     assert_eq!(sp.player.pos, stood);
     assert_eq!(host.server.respawn_player(0), None, "a living player has nothing to respawn");
 }
+
+#[test]
+fn a_server_copy_must_have_been_dead_20_ticks_before_a_respawn_is_honoured() {
+    let mut host = TestHost::start_with(TestConfig::default());
+    stone_floor(&mut host);
+    remote_player_at(&mut host, Vec3::new(0.5, 5.0, 0.5));
+    assert!(host.server.players[0].combat.take_damage(1000.0));
+
+    // Dead on tick 1 of its death; the counter reads n after n ticks.
+    tick_with_idle_input(&mut host, 19);
+    assert_eq!(host.server.respawn_player(0), None, "19 ticks dead is too soon");
+    assert!(host.server.players[0].combat.dead, "and changes nothing");
+    tick_with_idle_input(&mut host, 1);
+    assert!(host.server.respawn_player(0).is_some(), "20 ticks dead is enough");
+    assert!(!host.server.players[0].combat.dead);
+}

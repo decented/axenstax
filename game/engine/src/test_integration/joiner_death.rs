@@ -343,3 +343,155 @@ fn a_joiner_who_disconnects_while_dead_is_dropped_not_revived() {
     let sp = &hs.server.players[slot];
     assert!(!sp.connected && sp.combat.dead, "and nothing revives the body");
 }
+
+fn send_disconnect(client: &ChannelClientTransport) {
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Disconnect, &()));
+}
+
+/// Kill the joiner by its own report and let the server hold it dead long
+/// enough (>= 20 ticks) for a Respawn to be honoured.
+fn die_and_wait(
+    hs: &mut HostedServer,
+    client: &ChannelClientTransport,
+    inbox: &mut Inbox,
+    at: Vec3,
+) {
+    send_input(client, 1, at, 0.0, 0.0, &[]);
+    tick_n(hs, client, inbox, 25);
+}
+
+// ── Control packets are never starved by the gameplay budget ────────────────
+
+#[test]
+fn a_respawn_behind_a_flood_of_packets_still_lands() {
+    // The server reads at most 10 packets a client sends per tick and drops the
+    // rest. Respawn is a control packet: dropped, the joiner would be dead on
+    // the server for good while walking about its own respawned body.
+    let mut hs = start_dedicated_server("respawn-flood");
+    let (client, slot) = join_guest(&mut hs, "Flooded");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    die_and_wait(&mut hs, &client, &mut inbox, at);
+    assert!(hs.server.players[slot].combat.dead);
+
+    for t in 0..12 {
+        send_input(&client, 100 + t, at, 0.0, 0.0, &[]);
+    }
+    send_respawn(&client); // the 13th packet this tick
+    tick_n(&mut hs, &client, &mut inbox, 1);
+
+    assert!(!hs.server.players[slot].combat.dead, "the Respawn past the budget was honoured");
+    assert_eq!(inbox.respawned(slot).len(), 1, "and the joiner was told");
+}
+
+#[test]
+fn a_disconnect_behind_a_flood_of_packets_still_frees_the_slot() {
+    let mut hs = start_dedicated_server("disconnect-flood");
+    let (client, slot) = join_guest(&mut hs, "Leaver");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    for t in 0..12 {
+        send_input(&client, 1 + t, at, 20.0, 0.0, &[]);
+    }
+    send_disconnect(&client);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(hs.slot_is_free(slot), "a Disconnect past the budget still releases the seat");
+}
+
+#[test]
+fn gameplay_packets_past_the_budget_are_still_dropped() {
+    // The exemption is for control packets only.
+    let mut hs = start_dedicated_server("budget-still-bites");
+    let (client, slot) = join_guest(&mut hs, "Spammer");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    let cell = (at.x.floor() as i32 + 1, at.y as i32, at.z.floor() as i32);
+    for t in 0..10 {
+        send_input(&client, 1 + t, at, 20.0, 0.0, &[]);
+    }
+    send_input(&client, 50, at, 20.0, 0.0, &[(cell, block::STONE)]); // the 11th
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert_eq!(
+        hs.server.world.get_block(cell.0, cell.1, cell.2),
+        block::AIR,
+        "an edit in the 11th packet of a tick is dropped"
+    );
+}
+
+// ── Death and respawn belong to their owner alone ───────────────────────────
+
+fn tick_two(
+    hs: &mut HostedServer,
+    a: (&ChannelClientTransport, &mut Inbox),
+    b: (&ChannelClientTransport, &mut Inbox),
+    n: u32,
+) {
+    for _ in 0..n {
+        hs.tick();
+        a.1.drain(a.0);
+        b.1.drain(b.0);
+    }
+}
+
+#[test]
+fn died_and_respawned_go_only_to_the_player_they_are_about() {
+    let mut hs = start_dedicated_server("owner-only");
+    let (ca, a) = join_guest(&mut hs, "Alpha");
+    let (cb, b) = join_guest(&mut hs, "Bravo");
+    assert_ne!(a, b);
+    let (mut ia, mut ib) = (Inbox::default(), Inbox::default());
+    stand_on_floor(&mut hs, a);
+
+    // A dies on the server (a fall, drowning…): its own sim didn't see it.
+    assert!(hs.server.players[a].combat.take_damage(1000.0));
+    tick_two(&mut hs, (&ca, &mut ia), (&cb, &mut ib), 25);
+    assert_eq!(ia.died(a), 1, "A is told it died");
+    assert!(
+        ib.events.iter().all(|(_, e)| !matches!(e, PlayerEventType::Died)),
+        "B is not sent A's death: {:?}",
+        ib.events
+    );
+
+    send_respawn(&ca);
+    tick_two(&mut hs, (&ca, &mut ia), (&cb, &mut ib), 1);
+    assert_eq!(ia.respawned(a).len(), 1, "A is told where it stands");
+    assert!(
+        ib.events.iter().all(|(_, e)| !matches!(e, PlayerEventType::Respawned { .. })),
+        "B is not sent A's respawn point: {:?}",
+        ib.events
+    );
+}
+
+// ── A Respawn is honoured only after 20 ticks dead ──────────────────────────
+
+#[test]
+fn a_respawn_right_after_reporting_zero_health_is_not_a_free_teleport_home() {
+    // A client can report health 0, then Respawn — a teleport home with full
+    // health. The server holds the body dead for 20 ticks first; the client's
+    // own resend (20 ticks later) covers an honest quick click.
+    let mut hs = start_dedicated_server("quick-respawn");
+    let (client, slot) = join_guest(&mut hs, "Hopper");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+
+    send_input(&client, 1, at, 0.0, 0.0, &[]);
+    send_respawn(&client);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(hs.server.players[slot].combat.dead, "reported death taken");
+    assert!(inbox.respawned(slot).is_empty(), "a Respawn in the same packet burst is ignored");
+
+    for _ in 0..16 {
+        send_respawn(&client);
+        tick_n(&mut hs, &client, &mut inbox, 1);
+    }
+    assert!(hs.server.players[slot].combat.dead, "still dead 17 ticks in");
+    assert!(inbox.respawned(slot).is_empty());
+    assert_eq!(hs.server.players[slot].player.pos, at, "and nowhere near home");
+
+    // The resend, once the body has been dead the minimum (17 ticks so far).
+    tick_n(&mut hs, &client, &mut inbox, 3);
+    send_respawn(&client);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(!hs.server.players[slot].combat.dead, "honoured after 20 ticks dead");
+    assert_eq!(inbox.respawned(slot).len(), 1);
+}

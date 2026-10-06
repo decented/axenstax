@@ -1176,6 +1176,15 @@ impl HostedServer {
         self.send_to_joined_except(usize::MAX, pkt);
     }
 
+    /// Send `pkt` to slot `i` alone — if it is a joined, live slot.
+    fn send_to_joined_slot(&self, i: usize, pkt: &[u8]) {
+        if self.handshake_done.get(i).copied().unwrap_or(false)
+            && !self.disconnected.get(i).copied().unwrap_or(true)
+        {
+            self.transports[i].send_to_client(pkt);
+        }
+    }
+
     /// Is slot `i` a server-simulated joiner the server holds dead (MP-A3)?
     fn joiner_is_dead(&self, i: usize) -> bool {
         self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.combat.dead)
@@ -1183,10 +1192,11 @@ impl HostedServer {
 
     /// MP-A3 — turn this tick's server-originated joiner deaths (the
     /// `just_died` one-shot: a fall or drowning in `GameServer::tick`) into
-    /// `PlayerEventType::Died`, sent to every joined client, the dead player
-    /// included. That is how a joiner whose server copy died — when its own sim
-    /// didn't see it — reaches its death screen, and with it the Respawn button
-    /// the server is waiting on. A death the joiner's input REPORTED sets no
+    /// `PlayerEventType::Died`, sent to the dead player alone (nobody else has
+    /// a use for it, and it names where someone is not safe). That is how a
+    /// joiner whose server copy died — when its own sim didn't see it — reaches
+    /// its death screen, and with it the Respawn button the server is waiting
+    /// on. A death the joiner's input REPORTED sets no
     /// one-shot (`GameServer::report_player_death`): its client already knows,
     /// and an echo arriving after a quick Respawn would kill it a second time.
     fn announce_joiner_deaths(&mut self) {
@@ -1203,7 +1213,31 @@ impl HostedServer {
                     event: protocol::PlayerEventType::Died,
                 },
             );
-            self.send_to_all_joined(&pkt);
+            self.send_to_joined_slot(i, &pkt);
+        }
+    }
+
+    /// MP-A3 — slot `i`'s `Respawn` request. Honoured only for a joined,
+    /// server-simulated player whose server copy has been dead long enough
+    /// (`GameServer::respawn_player`); anything else is ignored (a living
+    /// player's Respawn would be a free teleport). Answers `Respawned` to that
+    /// player alone.
+    fn handle_respawn(&mut self, i: usize) {
+        if !self.handshake_done[i] || self.disconnected[i] {
+            return;
+        }
+        if !self.server.players.get(i).is_some_and(|sp| sp.server_simulated) {
+            return;
+        }
+        if let Some(at) = self.server.respawn_player(i) {
+            let pkt = protocol::serialize_packet(
+                protocol::PacketType::PlayerEvent,
+                &protocol::PlayerEventPacket {
+                    player_index: i as u32,
+                    event: protocol::PlayerEventType::Respawned { x: at.x, y: at.y, z: at.z },
+                },
+            );
+            self.send_to_joined_slot(i, &pkt);
         }
     }
 
@@ -1443,14 +1477,26 @@ impl HostedServer {
             let mut edits_this_tick = 0usize;
             while let Some(packet) = self.transports[i].try_recv_from_client() {
                 packets_this_tick += 1;
-                if packets_this_tick > MAX_PACKETS_PER_TICK {
-                    while self.transports[i].try_recv_from_client().is_some() {}
-                    log::warn!("Player {i} exceeded packet budget — dropped excess");
-                    break;
+                let over_budget = packets_this_tick > MAX_PACKETS_PER_TICK;
+                if packets_this_tick == MAX_PACKETS_PER_TICK + 1 {
+                    log::warn!("Player {i} exceeded packet budget — dropping excess gameplay packets");
                 }
                 let Some((ptype, payload)) = protocol::deserialize_header(&packet) else {
                     continue;
                 };
+                // The budget bounds gameplay traffic, never control packets
+                // (MP-A3): a `Respawn` or `Disconnect` past the 10th packet of
+                // a tick is still read. Dropped, a joiner could be left dead on
+                // the server for good, or a leaver's seat held. Everything else
+                // past the budget is drained and discarded, as before.
+                if over_budget
+                    && !matches!(
+                        ptype,
+                        protocol::PacketType::Respawn | protocol::PacketType::Disconnect
+                    )
+                {
+                    continue;
+                }
                 match ptype {
                     protocol::PacketType::JoinRequest => {
                         if self.handshake_done[i] {
@@ -2039,29 +2085,7 @@ impl HostedServer {
                     }
                     protocol::PacketType::Respawn => {
                         // MP-A3 — the joiner chose Respawn on its death screen.
-                        // Honoured only for a joined, server-simulated player
-                        // the server holds dead; anything else is ignored (a
-                        // living player's Respawn would be a free teleport).
-                        if !self.handshake_done[i] || self.disconnected[i] {
-                            continue;
-                        }
-                        if !self.server.players.get(i).is_some_and(|sp| sp.server_simulated) {
-                            continue;
-                        }
-                        if let Some(at) = self.server.respawn_player(i) {
-                            let pkt = protocol::serialize_packet(
-                                protocol::PacketType::PlayerEvent,
-                                &protocol::PlayerEventPacket {
-                                    player_index: i as u32,
-                                    event: protocol::PlayerEventType::Respawned {
-                                        x: at.x,
-                                        y: at.y,
-                                        z: at.z,
-                                    },
-                                },
-                            );
-                            self.send_to_all_joined(&pkt);
-                        }
+                        self.handle_respawn(i);
                     }
                     // Native-only — the web build carries no chat surface at
                     // all (docs/foundations/2026-09-05-world-chat.md §6); on

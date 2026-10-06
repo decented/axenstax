@@ -139,7 +139,21 @@ pub struct ServerPlayer {
     /// bed / `/spawnpoint` spawns are client-side only, so the server's
     /// respawn point is still the join spawn.
     pub spawn_pos: Vec3,
+    /// How many consecutive server ticks this player's copy has been dead
+    /// (MP-A3); `0` while alive. [`GameServer::respawn_player`] honours a
+    /// `Respawn` only once this reaches [`MIN_DEAD_TICKS_BEFORE_RESPAWN`], so a
+    /// client that reports zero health and immediately asks to respawn does not
+    /// get a free teleport home with full health.
+    pub dead_ticks: u32,
 }
+
+/// Ticks a server-simulated player's copy must have been dead before a
+/// `Respawn` request is honoured (MP-A3). One second at 20 TPS — about the
+/// least a person needs to see "You died" and click. A quicker request is
+/// ignored, not queued: the client re-sends an unanswered `Respawn` every
+/// [`crate::remote_client::RESPAWN_RESEND_TICKS`] (= this), so an honest quick
+/// click lands on the resend.
+pub const MIN_DEAD_TICKS_BEFORE_RESPAWN: u32 = 20;
 
 /// Resolve the [`ItemRef`] a player is currently holding from the item in
 /// their active hotbar slot. Empty / out-of-range slots resolve to `Empty`.
@@ -278,6 +292,7 @@ impl ServerPlayer {
             chat_rate: crate::comms::RateLimiter::new(),
             client_worldgen_version: crate::world::worldgen_fingerprint(),
             spawn_pos: spawn,
+            dead_ticks: 0,
         }
     }
 
@@ -1293,11 +1308,21 @@ impl GameServer {
             .max(crate::combat::POISON_HEALTH_FLOOR);
         for sp in &mut self.players {
             sp.combat.starvation_floor = starvation_floor;
+            if !sp.server_simulated {
+                continue;
+            }
             // A dead copy stays dead (MP-A3): the 40-tick revive BRIDGE is
             // gone. It waits for the joiner's explicit Respawn
-            // (`Self::respawn_player`). The death's `just_died` one-shot is
-            // left for `HostedServer` to turn into a `PlayerEventType::Died`.
-            if !sp.server_simulated || !sp.connected || sp.combat.dead {
+            // (`Self::respawn_player`), no sooner than
+            // `MIN_DEAD_TICKS_BEFORE_RESPAWN` after dying. The death's
+            // `just_died` one-shot is left for `HostedServer` to turn into a
+            // `PlayerEventType::Died`.
+            if sp.combat.dead {
+                sp.dead_ticks = sp.dead_ticks.saturating_add(1);
+                continue;
+            }
+            sp.dead_ticks = 0;
+            if !sp.connected {
                 continue;
             }
             crate::survival::tick_player_survival(
@@ -1326,6 +1351,7 @@ impl GameServer {
         }
         sp.combat.die(crate::survival::DamageCause::Generic);
         sp.combat.just_died = false;
+        sp.dead_ticks = 0;
         sp.pending_intent = None;
         sp.intent_queue.clear();
         true
@@ -1336,15 +1362,19 @@ impl GameServer {
     /// spawn point's column ([`Self::standing_spot`]), at rest, no fall in
     /// progress and no stale moves queued. Returns where they now stand, or
     /// `None` (and changes nothing) for a living player — otherwise Respawn
-    /// would be a free teleport home.
+    /// would be a free teleport home — and for one dead for fewer than
+    /// [`MIN_DEAD_TICKS_BEFORE_RESPAWN`] ticks, which stops a client that
+    /// reports zero health and asks at once from teleporting home at full
+    /// health (its own resend covers an honest quick click).
     pub fn respawn_player(&mut self, idx: usize) -> Option<Vec3> {
         let spawn = self.standing_spot(self.players.get(idx)?.spawn_pos);
         let sp = &mut self.players[idx];
-        if !sp.combat.dead {
+        if !sp.combat.dead || sp.dead_ticks < MIN_DEAD_TICKS_BEFORE_RESPAWN {
             return None;
         }
         sp.combat.respawn();
         sp.combat.just_died = false;
+        sp.dead_ticks = 0;
         sp.player.pos = spawn;
         sp.player.velocity = Vec3::ZERO;
         sp.player.reset_fall();
