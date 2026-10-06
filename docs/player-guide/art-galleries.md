@@ -220,12 +220,11 @@ The smoothest workflow, especially with a helper:
 
 ---
 
-## Selling & tips (where this is heading)
+## Selling & tips
 
-The gallery is built to let a piece carry a **price and a link** so a future
-gift-shop can sell prints with the **money going straight to you** (no platform cut).
-That checkout isn't switched on yet. For now, put your **own sales or tip link in the
-label** (`/exhibit label <n> Prints: yourshop.com`) so visitors can find you.
+There is no checkout in the game: AxeNStax does not sell prints or handle any
+payment for you. To point visitors at your own shop or tip link, put it in the
+piece's **label** (`/exhibit label <n> Prints: yourshop.com`).
 
 ---
 

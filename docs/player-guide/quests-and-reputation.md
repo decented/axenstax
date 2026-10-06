@@ -95,7 +95,7 @@ Each player has a reputation score with each village, from -100 to +100. The HUD
 
 ### Reputation × sats
 
-The multiplier applies to the **sats reward** of every quest — but that's not the last step. After the reputation multiplier, the village takes a **20% treasury skim** off the top, so the number that actually lands in your wallet is lower than a naive tier × base calculation. A 12-sat base quest at:
+The multiplier applies to the **sats reward** of every quest — but that's not the last step. After the reputation multiplier, the village takes a **20% treasury skim** off the top, so the score you actually receive is lower than a naive tier × base calculation. A 12-sat base quest at:
 
 - **Wary** pays 8 sats.
 - **Neutral** pays 10.
