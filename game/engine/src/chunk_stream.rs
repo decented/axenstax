@@ -929,18 +929,6 @@ pub(crate) fn apply_remote_change_to_unloaded_column(
     unload_column_blocks(world, cx, cz);
 }
 
-/// Columns in `loaded` that are more than `unload_dist` chunks (Chebyshev,
-/// per axis) from EVERY player column.
-pub(crate) fn columns_to_unload(
-    loaded: &ahash::AHashSet<(i32, i32)>,
-    player_cols: &[(i32, i32)],
-    unload_dist: i32,
-) -> Vec<(i32, i32)> {
-    let anchors: Vec<StreamAnchor> =
-        player_cols.iter().map(|&col| StreamAnchor { col, radius: unload_dist }).collect();
-    columns_outside_anchors(loaded, &anchors, 0)
-}
-
 /// Columns in `loaded` that are more than their anchor's `radius + slack`
 /// (Chebyshev, per axis) from EVERY anchor — the ones a streamer unloads.
 pub(crate) fn columns_outside_anchors(
@@ -1092,7 +1080,7 @@ mod tests {
     use crate::block;
 
     /// Spec 02 §7.5 — drives the SAME world-side helpers `stream_chunks` calls
-    /// (`columns_to_unload` → `unload_column_blocks`, then `load_column_blocks`
+    /// (`columns_outside_anchors` → `unload_column_blocks`, then `load_column_blocks`
     /// on re-entry) for a player walking > rd+2 chunks away and back. Fails on
     /// the pre-fix wiring (drop on unload, regenerate on re-entry).
     #[test]
@@ -1118,8 +1106,8 @@ mod tests {
             }
         }
         // Walk > 200 blocks away: every column is out of range.
-        let far = [(20, 0)];
-        let gone = columns_to_unload(&loaded, &far, rd + 2);
+        let far = [StreamAnchor { col: (20, 0), radius: rd }];
+        let gone = columns_outside_anchors(&loaded, &far, UNLOAD_HYSTERESIS);
         assert!(gone.contains(&(1, 1)));
         for &(cx, cz) in &gone {
             loaded.remove(&(cx, cz));
@@ -1127,8 +1115,8 @@ mod tests {
         }
         assert!(!world.has_chunk(1, 2, 1), "unloaded column leaves `chunks`");
         // Walk back: the stream load branch re-enters the column.
-        let home = [(0, 0)];
-        assert!(columns_to_unload(&loaded, &home, rd + 2).is_empty());
+        let home = [StreamAnchor { col: (0, 0), radius: rd }];
+        assert!(columns_outside_anchors(&loaded, &home, UNLOAD_HYSTERESIS).is_empty());
         for cx in -rd..=rd {
             for cz in -rd..=rd {
                 if !loaded.contains(&(cx, cz)) {

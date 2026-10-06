@@ -1536,8 +1536,8 @@ border. On restore, `register_column_sources` and `register_column_fires`
 re-adopt the column's fluids and fires.
 
 **Testing.** The world side of streaming is split into renderer-free helpers in
-`chunk_stream.rs`: `columns_to_unload`, `unload_column_blocks` and
-`load_column_blocks`. `stream_chunks`, `step_load`, the spawn-pref path and the
+`chunk_stream.rs`: `columns_outside_anchors` (via the planner,
+`plan_stream_step_for`), `unload_column_blocks` and `load_column_blocks`. `stream_chunks`, `step_load`, the spawn-pref path and the
 void repair all call them, and unit tests cover them.
 
 **Remote changes for columns a client does not hold (2026-10-06).** A server
