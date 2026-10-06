@@ -187,7 +187,10 @@ fn protocol_version_is_the_pinned_value() {
     // v66 (2026-10-06): JoinRequest gains `ws_host`; a WebSocket join signs
     //   `axenstax-join:ws-host:<dialled host>` and a server with
     //   `--public-host` refuses any other host (T-JOIN-RELAY WS residual).
-    assert_eq!(protocol::PROTOCOL_VERSION, 66);
+    // v67 (2026-10-06, MP-A3): server-held death + server projectiles —
+    //   `PacketType::Respawn = 57` (C→S), `PlayerEventType::{Died, Respawned}`
+    //   (S→C) and `EntityKind::Projectile = 39`, all appended.
+    assert_eq!(protocol::PROTOCOL_VERSION, 67);
 }
 
 #[test]
