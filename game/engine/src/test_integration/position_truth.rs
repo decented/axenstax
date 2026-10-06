@@ -23,6 +23,7 @@ use crate::play_mode::PlayMode;
 use crate::player_intent::PlayerIntent;
 use crate::prediction::{OwnPrediction, Reconciled};
 use crate::protocol::{self, InputPacket};
+use crate::remote_client::{build_join_request_guest, ConnectionState, RemoteClient};
 use crate::transport::{ChannelClientTransport, ClientTransport};
 use crate::world::World;
 
@@ -105,10 +106,20 @@ struct Move {
     yaw: f32,
 }
 
+/// How a test joiner reaches the server.
+enum Link {
+    /// Raw packets on the channel, numbered by the test itself.
+    Raw(ChannelClientTransport),
+    /// The real connection: `RemoteClient` stamps each input's sequence
+    /// number, and the prediction records under the number it returns —
+    /// exactly `network_send_input`'s wiring (`OwnPrediction::send`).
+    Client(Box<RemoteClient>),
+}
+
 /// A joined client in miniature, wired the way `game_loop.rs` wires it:
 /// step the body → send the input → record it; fold in each StateUpdate.
 struct Joiner {
-    client: ChannelClientTransport,
+    link: Link,
     slot: usize,
     world: World,
     registry: BlockRegistry,
@@ -126,6 +137,8 @@ struct Joiner {
     max_error: f32,
     /// Acknowledged inputs compared.
     compared: usize,
+    /// The last input went out riding (see [`Joiner::ride_step`]).
+    riding: bool,
     outcomes: Vec<Reconciled>,
 }
 
@@ -134,13 +147,37 @@ impl Joiner {
     /// rest at `start`, in arenas built into both worlds.
     fn join(hs: &mut HostedServer, start: Vec3, latency: u64) -> Self {
         let (client, slot) = join_guest(hs, "Walker");
+        let joiner = Self::joined(hs, Link::Raw(client), slot, start, latency);
+        // Drop the join's own traffic.
+        while joiner.raw().try_recv_from_server().is_some() {}
+        joiner
+    }
+
+    /// Join `hs` through a real `RemoteClient` (see [`Link::Client`]).
+    fn join_via_remote_client(hs: &mut HostedServer, start: Vec3, latency: u64) -> Self {
+        let transport = hs.attach_test_remote();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(transport),
+            build_join_request_guest("Wire", 0),
+            None,
+        );
+        hs.tick();
+        rc.poll();
+        let ConnectionState::Connected { player_index, .. } = rc.state else {
+            panic!("the join did not complete");
+        };
+        rc.latest_state = None;
+        Self::joined(hs, Link::Client(Box::new(rc)), player_index as usize, start, latency)
+    }
+
+    fn joined(hs: &mut HostedServer, link: Link, slot: usize, start: Vec3, latency: u64) -> Self {
         build_arena(&mut hs.server.world);
         let mut world = World::new();
         build_arena(&mut world);
         hs.server.players[slot].player = Player::new(start);
         let body = Player::new(start);
-        let mut joiner = Self {
-            client,
+        Self {
+            link,
             slot,
             world,
             registry: BlockRegistry::new(),
@@ -153,11 +190,21 @@ impl Joiner {
             predicted: HashMap::new(),
             max_error: 0.0,
             compared: 0,
+            riding: false,
             outcomes: Vec::new(),
-        };
-        // Drop the join's own traffic.
-        while joiner.client.try_recv_from_server().is_some() {}
-        joiner
+        }
+    }
+
+    fn raw(&self) -> &ChannelClientTransport {
+        match &self.link {
+            Link::Raw(client) => client,
+            Link::Client(_) => panic!("this joiner talks through a RemoteClient"),
+        }
+    }
+
+    /// Updates folded in that confirmed the prediction outright.
+    fn agreed(&self) -> usize {
+        self.outcomes.iter().filter(|r| matches!(r, Reconciled::Agreed)).count()
     }
 
     fn server_pos(&self, hs: &HostedServer) -> Vec3 {
@@ -174,7 +221,13 @@ impl Joiner {
     fn predict_and_send(&mut self, m: Move) {
         self.seq += 1;
         let mut input = InputPacket {
-            tick: self.seq,
+            // Over a `RemoteClient` this is junk on purpose — far from the
+            // connection's own count, as `network_send_input`'s process-wide
+            // counter is after an earlier session: the client overwrites it.
+            tick: match self.link {
+                Link::Raw(_) => self.seq,
+                Link::Client(_) => self.seq + 500,
+            },
             yaw: m.yaw,
             health: 20.0,
             move_forward: m.forward,
@@ -191,28 +244,95 @@ impl Joiner {
         input.x = self.body.pos.x;
         input.y = self.body.pos.y;
         input.z = self.body.pos.z;
-        self.client
-            .send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
-        self.prediction.record(&input, &self.body);
-        self.predicted.insert(self.seq, self.body.pos);
+        let seq = match &mut self.link {
+            Link::Raw(client) => {
+                client.send_to_server(&protocol::serialize_packet(
+                    protocol::PacketType::ClientInput,
+                    &input,
+                ));
+                self.prediction.record(self.seq, &input, &self.body);
+                self.seq
+            }
+            Link::Client(rc) => self
+                .prediction
+                .send(
+                    rc,
+                    &input,
+                    &mut self.body,
+                    false,
+                    &self.world,
+                    &self.registry,
+                    PlayMode::Survival,
+                )
+                .expect("connected: the input went out"),
+        };
+        self.riding = false;
+        self.predicted.insert(seq, self.body.pos);
+    }
+
+    /// One tick riding a cart or mount this client simulates on its own
+    /// (`game_loop.rs`: no physics step; `apply_riding_follow` pins the body
+    /// to the seat at `seat`), steering with `m` — then one server tick.
+    fn ride_step(&mut self, hs: &mut HostedServer, m: Move, seat: Vec3) {
+        self.body.pos = seat;
+        self.body.velocity = Vec3::ZERO;
+        self.body.on_ground = false;
+        self.seq += 1;
+        let input = InputPacket {
+            tick: self.seq,
+            yaw: m.yaw,
+            health: 20.0,
+            move_forward: m.forward,
+            move_right: m.right,
+            jump: m.jump,
+            sprint: m.sprint,
+            sneak: m.sneak,
+            x: seat.x,
+            y: seat.y,
+            z: seat.z,
+            ..Default::default()
+        };
+        let Link::Client(rc) = &mut self.link else {
+            panic!("riding needs a RemoteClient link");
+        };
+        self.prediction
+            .send(rc, &input, &mut self.body, true, &self.world, &self.registry, PlayMode::Survival)
+            .expect("connected: the input went out");
+        self.riding = true;
+        self.server_tick(hs);
     }
 
     /// One server tick, then deliver whatever StateUpdates have "arrived".
     fn server_tick(&mut self, hs: &mut HostedServer) {
         hs.tick();
         self.ticks += 1;
-        while let Some(pkt) = self.client.try_recv_from_server() {
-            if let Some((protocol::PacketType::StateUpdate, payload)) = protocol::deserialize_header(&pkt)
-                && let Ok(state) = protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload)
-            {
-                self.in_flight.push_back((self.ticks, state));
+        match &mut self.link {
+            Link::Raw(client) => {
+                while let Some(pkt) = client.try_recv_from_server() {
+                    if let Some((protocol::PacketType::StateUpdate, payload)) =
+                        protocol::deserialize_header(&pkt)
+                        && let Ok(state) =
+                            protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload)
+                    {
+                        self.in_flight.push_back((self.ticks, state));
+                    }
+                }
+            }
+            Link::Client(rc) => {
+                rc.poll();
+                if let Some(state) = rc.latest_state.take() {
+                    self.in_flight.push_back((self.ticks, state));
+                }
             }
         }
         while self.in_flight.front().is_some_and(|(at, _)| at + self.latency <= self.ticks) {
             let (_, state) = self.in_flight.pop_front().unwrap();
             self.deliver(&state);
         }
-        self.prediction.decay();
+        // `OwnPrediction::send` decays the glide over a real client.
+        if matches!(self.link, Link::Raw(_)) {
+            self.prediction.decay();
+        }
     }
 
     /// `game_loop.rs::network_receive`'s own-body apply.
@@ -221,6 +341,10 @@ impl Joiner {
             return;
         };
         let server = Vec3::new(own.x, own.y, own.z);
+        if self.riding {
+            self.prediction.note_server_pos(server);
+            return;
+        }
         if let Some(predicted) = self.predicted.get(&state.last_acked_input) {
             self.max_error = self.max_error.max((server - *predicted).length());
             self.compared += 1;
@@ -331,6 +455,83 @@ fn agreement_holds_with_inputs_in_flight() {
 }
 
 #[test]
+fn the_real_client_records_each_input_under_the_number_it_went_out_with() {
+    // The whole client path: `RemoteClient::send_input` numbers each input on
+    // the wire (from 1, per connection) and `OwnPrediction::send` records it
+    // under THAT number — so the server's acknowledgements line up with the
+    // records. The test's own `tick` on each packet is junk the client
+    // overwrites. Zero corrections alone proves nothing (an ack matching no
+    // record is skipped, not corrected): the acks must also confirm records.
+    let mut hs = start_dedicated("wire");
+    let mut first = Joiner::join_via_remote_client(&mut hs, on_floor(0.5, 0.5), 2);
+    run_the_course(&mut hs, &mut first);
+    assert!(first.compared > 60, "acks matched recorded inputs: {}", first.compared);
+    assert!(first.agreed() > 60, "acks confirmed the prediction: {:?}", first.outcomes);
+    assert!(first.max_error < 1e-4, "prediction drifted from the server by {}", first.max_error);
+    assert_eq!(first.corrections(), 0, "{:?}", first.outcomes);
+
+    // Leave, and join again in the same process: a new connection counting
+    // from 1 again, the same prediction (`GameState` keeps one), and the
+    // caller's own counter still running on from the first session.
+    let (prediction, seq) = (std::mem::take(&mut first.prediction), first.seq);
+    if let Link::Client(rc) = &mut first.link {
+        rc.disconnect();
+    }
+    drop(first);
+    hs.tick();
+    hs.tick();
+    let mut second = Joiner::join_via_remote_client(&mut hs, on_floor(0.5, 0.5), 2);
+    second.prediction = prediction;
+    second.seq = seq;
+    run_the_course(&mut hs, &mut second);
+    assert!(second.compared > 60, "{}", second.compared);
+    assert!(second.agreed() > 60, "the second session's acks match too: {:?}", second.outcomes);
+    assert!(second.max_error < 1e-4, "drifted by {}", second.max_error);
+    assert_eq!(second.corrections(), 0, "{:?}", second.outcomes);
+}
+
+#[test]
+fn a_ride_leaves_the_server_body_where_it_began_and_getting_off_rejoins_it() {
+    // A ride is this client's own sim (BRIDGE until the server simulates
+    // rides). Its steering keys — forward, jump, sprint, sneak — must not walk
+    // the server's body away (or into a pit) meanwhile; on getting off the
+    // joiner is put straight back on the server's body, and from there the
+    // prediction agrees with the server again.
+    let mut hs = start_dedicated("ride");
+    let mut j = Joiner::join_via_remote_client(&mut hs, on_floor(-3.5, -9.5), 2);
+    j.run(&mut hs, Move::default(), 5);
+    j.run(&mut hs, Move { forward: 1.0, yaw: SOUTH, ..Default::default() }, 5);
+    j.run(&mut hs, Move::default(), 5);
+    let got_on = j.server_pos(&hs);
+    assert!((j.body.pos - got_on).length() < 1e-4);
+
+    let steer = Move { forward: 1.0, right: 0.5, jump: true, sprint: true, sneak: true, yaw: EAST };
+    for i in 1..=40 {
+        j.ride_step(&mut hs, steer, got_on + Vec3::new(0.25 * i as f32, 0.6, 0.0));
+    }
+    assert!(
+        (j.server_pos(&hs) - got_on).length() < 1e-4,
+        "the server's body stood still: {got_on} -> {}",
+        j.server_pos(&hs)
+    );
+    assert!((j.body.pos - got_on).length() > 5.0, "the ride carried the joiner: {}", j.body.pos);
+
+    // Off, and walk on.
+    let (before, agreed_before) = (j.outcomes.len(), j.agreed());
+    j.step(&mut hs, Move { forward: 1.0, yaw: EAST, ..Default::default() });
+    assert!((j.body.pos - got_on).length() < 1e-4, "back on the server's body: {}", j.body.pos);
+    j.run(&mut hs, Move { forward: 1.0, yaw: SOUTH, ..Default::default() }, 15);
+    j.run(&mut hs, Move::default(), 5);
+    let after = &j.outcomes[before..];
+    assert!(
+        !after.iter().any(|r| matches!(r, Reconciled::Smoothed { .. } | Reconciled::Snapped { .. })),
+        "getting off corrected nothing: {after:?}"
+    );
+    assert!(j.agreed() > agreed_before + 15, "{after:?}");
+    assert!((j.body.pos - j.server_pos(&hs)).length() < 1e-4);
+}
+
+#[test]
 fn a_server_teleport_snaps_the_joiner_to_the_server_body() {
     let mut hs = start_dedicated("teleport");
     let mut j = Joiner::join(&mut hs, on_floor(0.5, 0.5), 2);
@@ -409,6 +610,35 @@ fn bunched_inputs_are_each_simulated_with_their_own_heading() {
 }
 
 #[test]
+fn a_client_frame_hitch_catches_up_without_a_correction() {
+    // The joiner's frame stalls for half a second: the server ticks ten times
+    // with nothing from it, then the client runs its ten missed ticks in one
+    // frame and sends ten inputs at once. All ten are simulated, in order,
+    // so its prediction is never corrected.
+    let mut hs = start_dedicated("hitch");
+    let mut j = Joiner::join_via_remote_client(&mut hs, on_floor(3.5, -10.5), 1);
+    let south = Move { forward: 1.0, yaw: SOUTH, ..Default::default() };
+    j.run(&mut hs, Move::default(), 5);
+    j.run(&mut hs, south, 5);
+    for _ in 0..2 {
+        for _ in 0..10 {
+            j.server_tick(&mut hs);
+        }
+        // All ten reach the server before its next tick.
+        for _ in 0..10 {
+            j.predict_and_send(Move { sprint: true, ..south });
+        }
+        j.server_tick(&mut hs);
+        j.run(&mut hs, south, 6);
+        j.run(&mut hs, Move::default(), 6);
+    }
+    assert!(j.agreed() > 20, "{:?}", j.outcomes);
+    assert!(j.max_error < 1e-4, "the hitch cost the server steps: off by {}", j.max_error);
+    assert_eq!(j.corrections(), 0, "{:?}", j.outcomes);
+    assert!((j.body.pos - j.server_pos(&hs)).length() < 1e-4);
+}
+
+#[test]
 fn state_updates_acknowledge_the_last_input_the_server_applied() {
     let mut hs = start_dedicated("ack");
     let mut j = Joiner::join(&mut hs, on_floor(0.5, 0.5), 0);
@@ -419,12 +649,14 @@ fn state_updates_acknowledge_the_last_input_the_server_applied() {
     for _ in 0..3 {
         j.seq += 1;
         let input = InputPacket { tick: j.seq, health: 20.0, ..Default::default() };
-        j.client
+        j.raw()
             .send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
     }
+    // Nothing banked (`ServerPlayer::step_credit`): one step this tick.
+    hs.server.players[j.slot].step_credit = 0;
     hs.tick();
     let mut acks = Vec::new();
-    while let Some(pkt) = j.client.try_recv_from_server() {
+    while let Some(pkt) = j.raw().try_recv_from_server() {
         if let Some((protocol::PacketType::StateUpdate, payload)) = protocol::deserialize_header(&pkt)
             && let Ok(s) = protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload)
         {
@@ -551,6 +783,84 @@ fn the_world_spawn_loads_the_columns_it_searches() {
 }
 
 // ── The edge of the server's terrain ─────────────────────────────────────────
+
+#[test]
+fn on_a_lan_host_a_joiner_goes_on_past_the_terrain_the_server_started_with() {
+    // A LAN host's server loaded the area round where hosting began. Its
+    // joiners' bodies must not meet an invisible wall at that area's edge:
+    // the columns ahead of them load as they go.
+    let mut hs = HostedServer::start(
+        1,
+        format!("position-truth-lan-roam-{}", std::process::id()),
+        42,
+        0,
+        RemoteTransport::WebSocket { port: 0 },
+    )
+    .expect("host starts");
+    let (client, slot) = join_guest(&mut hs, "Rover");
+    let first_area = hs.server.loaded_columns.clone();
+    // Flying above the world's tallest terrain, so nothing but the edge of
+    // the server's terrain could stop it.
+    hs.server.play_mode = PlayMode::Creative;
+    let sp = &mut hs.server.players[slot];
+    sp.player.pos.y = 100.0;
+    sp.player.flying = true;
+    let start = sp.player.pos;
+    for seq in 1..=200 {
+        let input = InputPacket {
+            tick: seq,
+            yaw: EAST,
+            move_forward: 1.0,
+            sprint: true,
+            health: 20.0,
+            ..Default::default()
+        };
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        hs.tick();
+    }
+    let at = hs.server.players[slot].player.pos;
+    let col = ((at.x.floor() as i32).div_euclid(16), (at.z.floor() as i32).div_euclid(16));
+    assert!(at.x > start.x + 180.0, "flew on east: {start} -> {at}");
+    assert!(!first_area.contains(&col), "beyond the area hosting began with: {col:?}");
+    assert!(hs.server.loaded_columns.contains(&col), "its column loaded: {col:?}");
+}
+
+#[test]
+fn a_body_pushing_at_the_edge_in_mid_air_still_comes_down() {
+    // The edge stops a body sideways only. Reverting its height too left a
+    // joiner who jumped or fell against the edge hanging in mid-air for as
+    // long as it pushed. (A dedicated server: no refill.)
+    let mut hs = start_dedicated("edge-fall");
+    let (client, slot) = join_guest(&mut hs, "Faller");
+    let edge_cx = (0..64).find(|cx| !hs.server.loaded_columns.contains(&(*cx, 0))).unwrap();
+    let edge_x = edge_cx * 16;
+    let y = 84;
+    for x in edge_x - 4..edge_x {
+        for z in 7..=9 {
+            hs.server.world.set_block(x, y, z, block::STONE);
+            for above in y + 1..=y + 7 {
+                hs.server.world.set_block(x, above, z, block::AIR);
+            }
+        }
+    }
+    // Three blocks above the runway, right at the edge.
+    let start = Vec3::new(edge_x as f32 - 0.05, (y + 4) as f32, 8.5);
+    hs.server.players[slot].player = Player::new(start);
+    for seq in 1..=30 {
+        let input = InputPacket {
+            tick: seq,
+            yaw: EAST,
+            move_forward: 1.0,
+            health: 20.0,
+            ..Default::default()
+        };
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        hs.tick();
+    }
+    let at = hs.server.players[slot].player.pos;
+    assert!((at.y - (y + 1) as f32).abs() < 1e-3, "came down onto the runway: {at}");
+    assert!(at.x < edge_x as f32, "still held at the edge: {at}");
+}
 
 #[test]
 fn a_joiner_body_stops_at_the_edge_of_the_servers_terrain() {

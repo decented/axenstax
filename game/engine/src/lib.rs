@@ -1136,7 +1136,10 @@ pub(crate) struct GameState {
     /// increasing across the whole session so the server's replay filter
     /// (`hosted_server.rs` `input.tick <= sp.last_input_tick`) never drops our
     /// input. Must NOT be world_time (which is cyclic 0..23999 and would stall
-    /// input for ~20 min after each day-cycle wrap).
+    /// input for ~20 min after each day-cycle wrap). Only the host's own
+    /// loopback goes out with it: a joined `RemoteClient` stamps its own
+    /// per-connection sequence, and the prediction records under THAT
+    /// (`OwnPrediction::send`) — never under this.
     pub(crate) net_send_seq: u64,
     /// A joiner's prediction of its own body against the server's (Spec 04
     /// §5.3): the inputs sent and not yet applied by the server, and the

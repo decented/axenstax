@@ -1434,7 +1434,13 @@ impl super::GameState {
         }
         if let Some(id) = a.tp
             && self.is_creative {
-                if let Some(w) = self.world.waypoints.iter().find(|w| w.id == id) {
+                if !crate::world_exit::self_teleport_allowed(self.remote_client.is_some()) {
+                    // A joiner's body is the server's (Spec 04 §5.3.1).
+                    self.toast = Some((
+                        crate::world_exit::JOINED_TELEPORT_REFUSED.to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                } else if let Some(w) = self.world.waypoints.iter().find(|w| w.id == id) {
                     let t = glam::Vec3::new(
                         w.pos[0] as f32 + 0.5,
                         w.pos[1] as f32,
@@ -21588,18 +21594,24 @@ impl super::GameState {
                 .collect();
             if let Some(server_pos) = own_server_pos
                 && let Some(slot) = self.players.first_mut()
-                && slot.riding.is_none()
             {
-                let outcome = self.own_prediction.reconcile(
-                    acked,
-                    server_pos,
-                    &mut slot.player,
-                    &self.world,
-                    &self.registry,
-                    self.play_mode,
-                );
-                if let crate::prediction::Reconciled::Snapped { error } = outcome {
-                    log::debug!("Own position corrected by the server: snapped {error}");
+                if slot.riding.is_some() {
+                    // Our ride is our own sim (BRIDGE, see
+                    // `network_send_input`): nothing to reconcile, but
+                    // getting off goes back to where the server holds us.
+                    self.own_prediction.note_server_pos(server_pos);
+                } else {
+                    let outcome = self.own_prediction.reconcile(
+                        acked,
+                        server_pos,
+                        &mut slot.player,
+                        &self.world,
+                        &self.registry,
+                        self.play_mode,
+                    );
+                    if let crate::prediction::Reconciled::Snapped { error } = outcome {
+                        log::debug!("Own position corrected by the server: snapped {error}");
+                    }
                 }
             }
             // P9 weather sync — same source field as reserve above. The
@@ -21789,7 +21801,8 @@ impl super::GameState {
             .and_then(|s| (s < 9).then_some(s as u8));
 
         // Monotonic, strictly-increasing send sequence for the replay filter.
-        // (NOT world_time, which is cyclic 0..23999.)
+        // (NOT world_time, which is cyclic 0..23999.) Used as-is on the host's
+        // own loopback; a joined connection stamps its own (see below).
         self.net_send_seq += 1;
         let send_tick = self.net_send_seq;
 
@@ -21830,18 +21843,26 @@ impl super::GameState {
             }
 
         if let Some(ref mut client) = self.remote_client {
-            client.send_input(&input);
-            // Spec 04 §5.3 — keep what we predicted from this input until the
-            // server says it has applied it. A cart ride is this client's own
-            // sim (the server walks the body instead): nothing to reconcile
-            // against while mounted; the server's position wins on dismount.
-            let slot = &self.players[0];
-            if slot.riding.is_some() {
-                self.own_prediction.reset();
-            } else {
-                self.own_prediction.record(&input, &slot.player);
-            }
-            self.own_prediction.decay();
+            // Spec 04 §5.3.1 — send, and keep what we predicted from this
+            // input under the sequence number the connection stamped on it
+            // (the one the server acknowledges), until the server says it has
+            // applied it. Not `send_tick`: that counter spans every session
+            // in this process and the host's loopback, so it never matches.
+            // BRIDGE: a ride (cart or mount) is this client's own sim until
+            // the server simulates rides — it goes out with no movement, so
+            // the server's body stays where the ride began, and getting off
+            // puts us back on that body (`OwnPrediction::send`).
+            let slot = &mut self.players[0];
+            let riding = slot.riding.is_some();
+            self.own_prediction.send(
+                client,
+                &input,
+                &mut slot.player,
+                riding,
+                &self.world,
+                &self.registry,
+                self.play_mode,
+            );
         }
 
         // Cinematic replay (Phase 2c) — tee one frame per sim tick into the

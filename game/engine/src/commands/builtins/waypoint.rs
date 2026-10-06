@@ -95,6 +95,15 @@ impl Command for WaypointCommand {
                 }
             }
             Some("tp") | Some("goto") => {
+                // Below op is someone else's world
+                // (`world_exit::local_command_op_level`), where the body is
+                // the server's (Spec 04 §5.3.1): a jump here would only be
+                // put back.
+                if ctx.op_level < OpLevel::Op {
+                    let m = crate::world_exit::JOINED_TELEPORT_REFUSED.to_string();
+                    ctx.error(m.clone());
+                    return CommandResult::Error(m);
+                }
                 if !*ctx.is_creative {
                     let m = "Waypoint teleport is creative-only.".to_string();
                     ctx.error(m.clone());
@@ -142,6 +151,15 @@ mod tests {
     use crate::world::World;
 
     fn run(world: &mut World, creative: bool, args: &[&str]) -> (CommandResult, Vec<PlayerSlot>) {
+        run_at(world, creative, OpLevel::Op, args)
+    }
+
+    fn run_at(
+        world: &mut World,
+        creative: bool,
+        op_level: OpLevel,
+        args: &[&str],
+    ) -> (CommandResult, Vec<PlayerSlot>) {
         let cmd = WaypointCommand;
         let mut t = 0u32;
         let mut s = 4u32;
@@ -161,7 +179,7 @@ mod tests {
             world_name: "test",
             players: &mut players,
             player_idx: 0,
-            op_level: OpLevel::Op,
+            op_level,
             current_tick: 0,
             log: &mut log,
             registry: &reg,
@@ -225,6 +243,28 @@ mod tests {
         let (r, players) = run(&mut world, true, &["tp", "Far"]);
         assert_eq!(r, CommandResult::Success);
         assert_eq!(players[0].player.pos, Vec3::new(100.5, 80.0, -39.5));
+    }
+
+    #[test]
+    fn tp_is_refused_in_someone_elses_world_even_in_creative() {
+        // A joiner (`local_command_op_level(true)`): its body is the server's.
+        let mut world = World::new();
+        waypoint::add(
+            &mut world.waypoints,
+            "Far".into(),
+            [100, 80, -40],
+            waypoint::MANUAL_COLOUR,
+            waypoint::WaypointKind::Manual,
+        );
+        let joiner = crate::world_exit::local_command_op_level(true);
+        let (r, players) = run_at(&mut world, true, joiner, &["tp", "Far"]);
+        assert_eq!(
+            r,
+            CommandResult::Error(crate::world_exit::JOINED_TELEPORT_REFUSED.to_string())
+        );
+        assert_eq!(players[0].player.pos, Vec3::new(12.0, 70.0, -5.0), "not moved");
+        // Pinning a waypoint is still fine there.
+        assert_eq!(run_at(&mut world, false, joiner, &["add", "Camp"]).0, CommandResult::Success);
     }
 
     #[test]

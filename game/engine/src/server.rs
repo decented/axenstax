@@ -63,11 +63,18 @@ pub struct ServerPlayer {
     /// `GameServer::tick_player_physics` when present.
     pub pending_intent: Option<QueuedInput>,
     /// Inputs that arrived while one was already pending (network jitter
-    /// bunching two inputs into one tick). Consumed one per tick after
-    /// `pending_intent`, so no movement step is dropped — and a client
-    /// flooding inputs still only moves one step a tick. Bounded by
+    /// bunching two inputs into one tick, or a client frame hitch sending
+    /// several at once). Consumed after `pending_intent`, one a tick plus any
+    /// banked [`Self::step_credit`], so no movement step is dropped — and a
+    /// client flooding inputs still only moves one step a tick. Bounded by
     /// [`MAX_QUEUED_INTENTS`] (oldest dropped). See [`ServerPlayer::queue_input`].
     pub intent_queue: std::collections::VecDeque<QueuedInput>,
+    /// Steps this player may take this tick: one more each server tick, up to
+    /// [`MAX_STEP_CREDIT`], spent one per input simulated. A tick with no
+    /// input waiting (a hitch on the client's side or the network's) banks
+    /// its step, so the late inputs catch up when they arrive (at most
+    /// [`MAX_INTENTS_PER_TICK`] a tick) instead of standing in the queue.
+    pub step_credit: u32,
     /// Sequence number (`InputPacket.tick`) of the last input whose effect is
     /// in this player's server state: simulated by `tick_player_physics`,
     /// applied directly (position-trusted local slots), or deliberately
@@ -294,6 +301,7 @@ impl ServerPlayer {
             held_id: 0,
             pending_intent: None,
             intent_queue: std::collections::VecDeque::new(),
+            step_credit: 0,
             last_applied_input: 0,
             // Default: position-trusted. Caller flips to true for remote players.
             server_simulated: false,
@@ -353,9 +361,25 @@ impl ServerPlayer {
 }
 
 /// Most movement intents a server-simulated player may have waiting (a pending
-/// one plus this many queued). At 20 TPS that bounds the backlog to a few
-/// ticks of latency.
-pub const MAX_QUEUED_INTENTS: usize = 3;
+/// one plus this many queued): room for one client frame's catch-up (the game
+/// loop runs up to 10 ticks a frame after a hitch, each sending an input) with
+/// some to spare. Overflow drops the oldest.
+pub const MAX_QUEUED_INTENTS: usize = 12;
+
+/// Most queued inputs one server tick simulates for a player: the catch-up
+/// rate after a hitch, when banked [`ServerPlayer::step_credit`] allows it.
+pub const MAX_INTENTS_PER_TICK: usize = 4;
+
+/// Most steps a player can bank (see [`ServerPlayer::step_credit`]). Over any
+/// run of `n` server ticks a body takes at most `n + MAX_STEP_CREDIT` steps,
+/// each held to the per-step speed cap — so catching up never lets a client
+/// out-run the cap: one flooding inputs still moves one step a tick.
+pub const MAX_STEP_CREDIT: u32 = MAX_QUEUED_INTENTS as u32;
+
+/// Columns a LAN / online host's server may generate a tick round its joiners'
+/// bodies ([`GameServer::column_refill_per_tick`]). Each costs terrain
+/// generation and a light pass on the host's own frame, hence the bound.
+pub const HOST_COLUMN_REFILL_PER_TICK: usize = 2;
 
 /// One client input waiting for the server's physics tick: the movement
 /// intent plus what the server needs to simulate it exactly as the client's
@@ -387,8 +411,9 @@ impl QueuedInput {
 impl ServerPlayer {
     /// Take one client input. The first waits in `pending_intent`; more
     /// arriving before the next tick queue behind it (bounded, oldest
-    /// dropped). `GameServer::tick_player_physics` consumes exactly one per
-    /// tick. A dropped input's flight toggle is carried into the next one, so
+    /// dropped). `GameServer::tick_player_physics` consumes one per tick, more
+    /// only on banked credit (see [`Self::step_credit`]). A dropped input's
+    /// flight toggle is carried into the next one, so
     /// the server's flight state can't silently part from the client's (it
     /// is not on the wire for the client to learn back).
     pub fn queue_input(&mut self, mut input: QueuedInput) {
@@ -582,6 +607,12 @@ pub struct GameServer {
     /// mirror. Default `false` (also for `TestHost`, whose
     /// `tick_furnaces` / `tick_pistons` stand-ins would otherwise double up).
     pub simulates_block_machines: bool,
+    /// Most columns [`Self::refill_columns_round_simulated_players`] may
+    /// generate in one tick. [`HOST_COLUMN_REFILL_PER_TICK`] on a LAN / online
+    /// host (set by `HostedServer::start_inner`, which has local players);
+    /// `0` — off — otherwise, the dedicated server included (its own
+    /// streaming is a separate change, Phase B1).
+    pub column_refill_per_tick: usize,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
@@ -661,6 +692,7 @@ impl GameServer {
             fire_spread_enabled: true,
             explosives_enabled: true,
             simulates_block_machines: false,
+            column_refill_per_tick: 0,
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
             loaded_columns: ahash::AHashSet::new(),
@@ -1356,6 +1388,8 @@ impl GameServer {
         // is presumably why the fly-sprint figure was used.
         const MAX_HORIZONTAL_PER_TICK: f32 = 1.089 * 1.5;
 
+        self.refill_columns_round_simulated_players();
+
         for sp in &mut self.players {
             if !sp.server_simulated {
                 continue;
@@ -1367,58 +1401,129 @@ impl GameServer {
                 sp.intent_queue.clear();
                 continue;
             }
-            let Some(input) = sp.pending_intent.take().or_else(|| sp.intent_queue.pop_front())
-            else {
-                continue;
-            };
-            // Whatever the step below does, this input's effect is now in the
-            // server's state — acknowledge it (Spec 04 §5.3).
-            sp.last_applied_input = sp.last_applied_input.max(input.seq);
-            let pre = sp.player.pos;
-            // Server has no GPU camera; construct a throwaway one from the
-            // look this input was simulated with on the client. Aspect/FOV
-            // only matter for matrices we don't build.
-            let mut cam = crate::camera::Camera::new(sp.player.pos, 1.0);
-            cam.yaw = input.yaw;
-            cam.pitch = input.pitch;
-            let intent = input.intent;
+            // One step a tick, plus any banked on ticks that had nothing to
+            // step (the inputs were late): a hitch catches up instead of
+            // leaving its backlog standing as latency, and a flood still
+            // moves one step a tick.
+            sp.step_credit = (sp.step_credit + 1).min(MAX_STEP_CREDIT);
+            let mut steps = 0;
+            while steps < MAX_INTENTS_PER_TICK && sp.step_credit > 0 {
+                let Some(input) =
+                    sp.pending_intent.take().or_else(|| sp.intent_queue.pop_front())
+                else {
+                    break;
+                };
+                steps += 1;
+                sp.step_credit -= 1;
+                // Whatever the step below does, this input's effect is now in
+                // the server's state — acknowledge it (Spec 04 §5.3).
+                sp.last_applied_input = sp.last_applied_input.max(input.seq);
+                let pre = sp.player.pos;
+                // Server has no GPU camera; construct a throwaway one from the
+                // look this input was simulated with on the client.
+                // Aspect/FOV only matter for matrices we don't build.
+                let mut cam = crate::camera::Camera::new(sp.player.pos, 1.0);
+                cam.yaw = input.yaw;
+                cam.pitch = input.pitch;
+                let intent = input.intent;
 
-            // Task 15 — `sp.player.sprint_boots_mult` stays at its default
-            // (1.0, no bonus) here: `ServerPlayer` doesn't track armour at
-            // all (same pre-existing BRIDGE as reputation/pets/kill_counter
-            // above — armour lives on the client's `PlayerSlot`). A remote
-            // player's Rubber Boots bonus isn't applied server-side until
-            // that duplication collapses.
-            sp.player.tick(&intent, &cam, &self.world, &self.registry, self.play_mode);
+                // Task 15 — `sp.player.sprint_boots_mult` stays at its
+                // default (1.0, no bonus) here: `ServerPlayer` doesn't track
+                // armour at all (same pre-existing BRIDGE as
+                // reputation/pets/kill_counter above — armour lives on the
+                // client's `PlayerSlot`). A remote player's Rubber Boots bonus
+                // isn't applied server-side until that duplication collapses.
+                sp.player.tick(&intent, &cam, &self.world, &self.registry, self.play_mode);
 
-            // Speed cap (horizontal only — y is gravity/jump and legitimately
-            // exceeds this during a jump).
-            let dx = sp.player.pos.x - pre.x;
-            let dz = sp.player.pos.z - pre.z;
-            let horizontal = (dx * dx + dz * dz).sqrt();
-            if horizontal > MAX_HORIZONTAL_PER_TICK {
-                let scale = MAX_HORIZONTAL_PER_TICK / horizontal;
-                sp.player.pos.x = pre.x + dx * scale;
-                sp.player.pos.z = pre.z + dz * scale;
-                log::warn!(
-                    "speed cap: clamped {horizontal:.3}→{MAX_HORIZONTAL_PER_TICK:.3} b/tick"
-                );
-            }
+                // Speed cap, per step (horizontal only — y is gravity/jump
+                // and legitimately exceeds this during a jump).
+                let dx = sp.player.pos.x - pre.x;
+                let dz = sp.player.pos.z - pre.z;
+                let horizontal = (dx * dx + dz * dz).sqrt();
+                if horizontal > MAX_HORIZONTAL_PER_TICK {
+                    let scale = MAX_HORIZONTAL_PER_TICK / horizontal;
+                    sp.player.pos.x = pre.x + dx * scale;
+                    sp.player.pos.z = pre.z + dz * scale;
+                    log::warn!(
+                        "speed cap: clamped {horizontal:.3}→{MAX_HORIZONTAL_PER_TICK:.3} b/tick"
+                    );
+                }
 
-            // No terrain, no step. Beyond the columns this server has
-            // generated its world is empty air: a body stepping there would
-            // fall out of the world — and the joiner's client, which follows
-            // the server's position (Spec 04 §5.3), with it. The edge of the
-            // server's terrain stops the body like a wall instead.
-            // BRIDGE: replaced when the server streams terrain around every
-            // player (Phase B1) — then the edge is never reached.
-            if !column_loaded(&self.loaded_columns, sp.player.pos) {
-                sp.player.pos = pre;
-                sp.player.velocity = Vec3::ZERO;
+                // No terrain, no step. Beyond the columns this server has
+                // generated its world is empty air: a body stepping there
+                // would fall out of the world — and the joiner's client, which
+                // follows the server's position (Spec 04 §5.3), with it. The
+                // edge of the server's terrain stops the body like a wall
+                // instead — sideways only: its fall or jump carries on, so a
+                // body pushing at the edge in mid-air comes down rather than
+                // hanging there.
+                // BRIDGE: replaced when the server streams terrain around
+                // every player (Phase B1) — then the edge is never reached. A
+                // LAN / online host already refills ahead of its joiners
+                // (`refill_columns_round_simulated_players`).
+                if !column_loaded(&self.loaded_columns, sp.player.pos) {
+                    sp.player.pos.x = pre.x;
+                    sp.player.pos.z = pre.z;
+                    sp.player.velocity.x = 0.0;
+                    sp.player.velocity.z = 0.0;
+                }
             }
         }
 
         self.tick_player_survival();
+    }
+
+    /// Generate the unloaded columns round each server-simulated body in the
+    /// world — its own and the eight about it, nearest first across all
+    /// bodies — at most [`Self::column_refill_per_tick`] a tick. So a joiner
+    /// on a LAN / online host walks on into terrain the server never loaded
+    /// (its loaded area is where hosting began, and the 3×3 at each joiner's
+    /// spawn) instead of meeting an invisible wall. The 3×3 keeps at least a
+    /// column's width of lead ahead of a body: over 14 ticks at fly-sprint,
+    /// time enough at two columns a tick. Runs before the bodies step, so a
+    /// step is never resolved against air that terrain then fills.
+    /// BRIDGE: off (`0`) on a dedicated server until B1 streams terrain round
+    /// every player there; this then folds into that.
+    fn refill_columns_round_simulated_players(&mut self) {
+        let mut budget = self.column_refill_per_tick;
+        if budget == 0 {
+            return;
+        }
+        let cs = CHUNK_SIZE as i32;
+        let mut wanted: Vec<(f32, i32, i32)> = Vec::new();
+        for sp in &self.players {
+            if !sp.server_simulated || !sp.is_present_and_alive() {
+                continue;
+            }
+            let p = sp.player.pos;
+            if !p.is_finite() {
+                continue;
+            }
+            let cx = (p.x.floor() as i32).div_euclid(cs);
+            let cz = (p.z.floor() as i32).div_euclid(cs);
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let (x, z) = (cx + dx, cz + dz);
+                    if self.loaded_columns.contains(&(x, z)) {
+                        continue;
+                    }
+                    // Distance from the body to the column's nearest point.
+                    let nx = p.x.clamp((x * cs) as f32, ((x + 1) * cs) as f32);
+                    let nz = p.z.clamp((z * cs) as f32, ((z + 1) * cs) as f32);
+                    wanted.push(((nx - p.x).hypot(nz - p.z), x, z));
+                }
+            }
+        }
+        wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, x, z) in wanted {
+            if budget == 0 {
+                break;
+            }
+            if !self.loaded_columns.contains(&(x, z)) {
+                self.ensure_column_loaded(x, z);
+                budget -= 1;
+            }
+        }
     }
 
     /// W2 — fall damage + drowning for server-simulated (remote) players, via
@@ -2396,7 +2501,7 @@ mod tests {
     /// tighten the threshold.
     /// Audit 2026-09-27: `pending_intent` was overwritten per packet, so two
     /// inputs bunched into one tick lost a movement step. Now both are
-    /// simulated, one per tick — and a flood still moves one step a tick.
+    /// simulated — and a flood still moves one step a tick.
     #[test]
     fn bunched_intents_are_all_simulated_one_per_tick() {
         let mut sp = ServerPlayer::new(Vec3::ZERO);
@@ -2407,7 +2512,7 @@ mod tests {
         assert_eq!(sp.pending_intent.as_ref().map(|i| i.intent.move_forward), Some(1.0));
         assert_eq!(sp.intent_queue.len(), 1);
         // A flood is bounded: oldest queued intents drop, the pending one stays.
-        for _ in 0..10 {
+        for _ in 0..MAX_QUEUED_INTENTS + 5 {
             sp.queue_intent(b.clone());
         }
         assert_eq!(sp.intent_queue.len(), MAX_QUEUED_INTENTS);
@@ -2425,6 +2530,83 @@ mod tests {
             MAX_QUEUED_INTENTS - 1,
             "exactly one intent is consumed per tick"
         );
+    }
+
+    /// A client frame hitch: nothing arrives for a few ticks, then the late
+    /// inputs all at once. The ticks that had nothing to step bank their
+    /// steps, and the backlog catches up (at most `MAX_INTENTS_PER_TICK` a
+    /// tick) instead of overflowing the queue or standing in it as latency.
+    #[test]
+    fn a_hitch_catches_up_on_banked_steps_and_a_flood_still_steps_once_a_tick() {
+        let mut server = GameServer::new(1, "intent-credit-test".into(), 42);
+        server.players[0].server_simulated = true;
+        let queue = |server: &mut GameServer, seq: u64| {
+            server.players[0].queue_input(QueuedInput { seq, ..Default::default() });
+        };
+        for _ in 0..6 {
+            server.tick_player_physics();
+        }
+        assert_eq!(server.players[0].step_credit, 6, "six empty ticks banked six steps");
+        for seq in 1..=10 {
+            queue(&mut server, seq);
+        }
+        server.tick_player_physics();
+        assert_eq!(server.players[0].last_applied_input, 4, "four caught up this tick");
+        server.tick_player_physics();
+        assert_eq!(server.players[0].last_applied_input, 8, "and four more: 6 banked + 2 earned");
+        server.tick_player_physics();
+        assert_eq!(server.players[0].last_applied_input, 9, "the bank spent, one a tick");
+        server.tick_player_physics();
+        assert_eq!(server.players[0].last_applied_input, 10, "nothing lost");
+        assert_eq!(server.players[0].step_credit, 0);
+
+        // A flood (two inputs every tick) gains nothing: one step a tick.
+        let mut seq = 10;
+        for _ in 0..5 {
+            for _ in 0..2 {
+                seq += 1;
+                queue(&mut server, seq);
+            }
+            server.tick_player_physics();
+        }
+        assert_eq!(server.players[0].last_applied_input, 15, "five ticks, five steps");
+        assert_eq!(server.players[0].step_credit, 0);
+        assert!(MAX_QUEUED_INTENTS >= 10, "room for one frame's catch-up (10 ticks)");
+    }
+
+    /// A LAN / online host generates the columns round its joiners' bodies,
+    /// nearest first, at most `column_refill_per_tick` a tick in all.
+    #[test]
+    fn columns_round_simulated_bodies_load_nearest_first_two_a_tick() {
+        let mut server = GameServer::new(2, "column-refill-test".into(), 42);
+        let col = |p: Vec3| ((p.x.floor() as i32).div_euclid(16), (p.z.floor() as i32).div_euclid(16));
+        let at = [Vec3::new(1000.5, 120.0, 8.5), Vec3::new(-1000.5, 120.0, 8.5)];
+        for (sp, p) in server.players.iter_mut().zip(at) {
+            sp.server_simulated = true;
+            sp.player.pos = p;
+            sp.player.flying = true;
+        }
+        server.play_mode = crate::play_mode::PlayMode::Creative;
+        assert!(server.loaded_columns.is_empty());
+
+        // Off (a dedicated server's default): nothing.
+        server.tick_player_physics();
+        assert!(server.loaded_columns.is_empty(), "a budget of 0 loads nothing");
+
+        server.column_refill_per_tick = HOST_COLUMN_REFILL_PER_TICK;
+        server.tick_player_physics();
+        assert_eq!(server.loaded_columns.len(), 2, "two a tick, across all bodies");
+        assert!(
+            server.loaded_columns.contains(&col(at[0])) && server.loaded_columns.contains(&col(at[1])),
+            "each body's own column first: {:?}",
+            server.loaded_columns
+        );
+        for tick in 2..=9 {
+            server.tick_player_physics();
+            assert_eq!(server.loaded_columns.len(), 2 * tick);
+        }
+        server.tick_player_physics();
+        assert_eq!(server.loaded_columns.len(), 18, "both 3x3s, then nothing more");
     }
 
     #[test]

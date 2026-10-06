@@ -35,6 +35,7 @@ use crate::physics::Player;
 use crate::play_mode::PlayMode;
 use crate::player_intent::PlayerIntent;
 use crate::protocol::InputPacket;
+use crate::remote_client::RemoteClient;
 use crate::world::World;
 
 /// Most inputs kept awaiting acknowledgement: 6.4 s at 20 TPS. Older ones are
@@ -111,6 +112,17 @@ pub enum Reconciled {
     Snapped { error: Vec3 },
 }
 
+/// Clear the movement keys from an input — what a riding joiner sends (see
+/// [`OwnPrediction::send`]). Look, hand and edits are kept.
+pub fn hold_still(input: &mut InputPacket) {
+    input.move_forward = 0.0;
+    input.move_right = 0.0;
+    input.sprint = false;
+    input.sneak = false;
+    input.jump = false;
+    input.toggle_flight = false;
+}
+
 /// A joiner's prediction of its own body. Empty (and inert) when not joined.
 #[derive(Default)]
 pub struct OwnPrediction {
@@ -118,6 +130,10 @@ pub struct OwnPrediction {
     /// Added to the camera: where the player was last shown minus where the
     /// body now is. Decays to zero.
     visual_offset: Vec3,
+    /// The last input went out while riding (see [`Self::send`]).
+    riding: bool,
+    /// Where the server last said our body is.
+    server_pos: Option<Vec3>,
 }
 
 impl OwnPrediction {
@@ -125,11 +141,23 @@ impl OwnPrediction {
         Self::default()
     }
 
-    /// Forget every held input and any glide — a teleport the server did not
-    /// simulate (riding a cart), or a new session.
+    /// Forget everything — a new session.
     pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Forget every held input and any glide.
+    fn clear_history(&mut self) {
         self.sent.clear();
         self.visual_offset = Vec3::ZERO;
+    }
+
+    /// Note where the server holds our body, without reconciling: while
+    /// riding, there is nothing to reconcile, but getting off goes back here.
+    pub fn note_server_pos(&mut self, server_pos: Vec3) {
+        if server_pos.is_finite() {
+            self.server_pos = Some(server_pos);
+        }
     }
 
     /// Inputs sent and not yet acknowledged (plus the last acknowledged one,
@@ -139,13 +167,95 @@ impl OwnPrediction {
         self.sent.len()
     }
 
-    /// Record an input just sent, with the body its step produced.
-    pub fn record(&mut self, input: &InputPacket, body: &Player) {
+    /// Send this tick's input over `client` and hold what this client
+    /// predicted from it under the sequence number it went out with — the
+    /// number the server acknowledges ([`RemoteClient::send_input`] stamps
+    /// its own; `input.tick` is ignored). Returns that number; `None` when
+    /// nothing was sent.
+    ///
+    /// `riding`: the body is on a cart or mount, which this client
+    /// simulates on its own (BRIDGE: rides stay client-side until the server
+    /// simulates them — Spec 04 §5.3.1). Its steering keys must not walk the
+    /// server's body, so the input goes out with no movement ([`hold_still`])
+    /// and the server's body stands where the ride began; nothing is held.
+    /// On the first input after getting off (also sent still), the body is
+    /// put back on the server's at once ([`Self::take_server_body`]) — one
+    /// clean jump, after which prediction and server agree again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send(
+        &mut self,
+        client: &mut RemoteClient,
+        input: &InputPacket,
+        body: &mut Player,
+        riding: bool,
+        world: &World,
+        registry: &BlockRegistry,
+        mode: PlayMode,
+    ) -> Option<u64> {
+        let got_off = !riding && self.riding;
+        let still;
+        let input = if riding || got_off {
+            let mut i = input.clone();
+            hold_still(&mut i);
+            still = i;
+            &still
+        } else {
+            input
+        };
+        let seq = client.send_input(input);
+        if let Some(seq) = seq {
+            if riding {
+                self.riding = true;
+                self.clear_history();
+            } else {
+                if got_off {
+                    self.riding = false;
+                    self.take_server_body(body, world, registry, mode);
+                }
+                self.record(seq, input, body);
+            }
+        }
+        self.decay();
+        seq
+    }
+
+    /// The end of a ride: put `body` where the server holds it, at rest, and
+    /// forget everything in flight. The server's body stood still meanwhile
+    /// (the ride sent no movement), so one still step settles ours as its is —
+    /// grounded, nothing left of the ride's speed. No server position yet:
+    /// the body stays, and the first acknowledgement corrects it.
+    fn take_server_body(
+        &mut self,
+        body: &mut Player,
+        world: &World,
+        registry: &BlockRegistry,
+        mode: PlayMode,
+    ) {
+        self.clear_history();
+        let Some(pos) = self.server_pos else {
+            return;
+        };
+        body.pos = pos;
+        body.velocity = Vec3::ZERO;
+        body.on_ground = false;
+        let cam = crate::camera::Camera::new(pos, 1.0);
+        body.tick(&PlayerIntent::default(), &cam, world, registry, mode);
+        body.reset_fall();
+    }
+
+    /// Record input `seq` just sent, with the body its step produced. A
+    /// sequence number not after the newest held one starts a new history:
+    /// it belongs to a new connection (each counts from 1), and the old
+    /// records can't be acknowledged by it.
+    pub fn record(&mut self, seq: u64, input: &InputPacket, body: &Player) {
+        if self.sent.back().is_some_and(|last| last.seq >= seq) {
+            self.clear_history();
+        }
         if self.sent.len() >= HISTORY_CAP {
             self.sent.pop_front();
         }
         self.sent.push_back(Sent {
-            seq: input.tick,
+            seq,
             intent: PlayerIntent::from_input_packet(input),
             yaw: input.yaw,
             pitch: input.pitch,
@@ -167,7 +277,11 @@ impl OwnPrediction {
         registry: &BlockRegistry,
         mode: PlayMode,
     ) -> Reconciled {
-        if acked == 0 || !server_pos.is_finite() {
+        if !server_pos.is_finite() {
+            return Reconciled::Skipped;
+        }
+        self.server_pos = Some(server_pos);
+        if acked == 0 {
             return Reconciled::Skipped;
         }
         while self.sent.front().is_some_and(|s| s.seq < acked) {
@@ -254,7 +368,7 @@ mod tests {
             let pkt = input(seq, 1.0);
             let cam = crate::camera::Camera::new(body.pos, 1.0);
             body.tick(&PlayerIntent::from_input_packet(&pkt), &cam, world, reg, PlayMode::Survival);
-            pred.record(&pkt, body);
+            pred.record(seq, &pkt, body);
         }
     }
 
@@ -333,13 +447,31 @@ mod tests {
     }
 
     #[test]
+    fn a_new_connection_counting_from_one_again_starts_a_new_history() {
+        // A second join in the same process: its inputs count from 1 again.
+        // The first session's records must not shadow them.
+        let world = floor_world(8);
+        let reg = BlockRegistry::new();
+        let mut pred = OwnPrediction::new();
+        let mut body = grounded(Vec3::new(0.5, 64.0, 0.5));
+        walk(&mut pred, &mut body, &world, &reg, 1, 40);
+        let mut body = grounded(Vec3::new(-3.5, 64.0, 2.5));
+        walk(&mut pred, &mut body, &world, &reg, 1, 2);
+        let at_two = body.pos;
+        walk(&mut pred, &mut body, &world, &reg, 3, 2);
+        assert_eq!(pred.held(), 4, "only the new connection's inputs are held");
+        let r = pred.reconcile(2, at_two, &mut body, &world, &reg, PlayMode::Survival);
+        assert_eq!(r, Reconciled::Agreed);
+    }
+
+    #[test]
     fn the_history_is_bounded() {
         let world = floor_world(4);
         let reg = BlockRegistry::new();
         let mut pred = OwnPrediction::new();
         let body = grounded(Vec3::new(0.5, 64.0, 0.5));
         for seq in 1..=(HISTORY_CAP as u64 + 50) {
-            pred.record(&input(seq, 0.0), &body);
+            pred.record(seq, &input(seq, 0.0), &body);
         }
         assert_eq!(pred.held(), HISTORY_CAP);
         let mut b = grounded(Vec3::new(0.5, 64.0, 0.5));

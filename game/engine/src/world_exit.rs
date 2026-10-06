@@ -206,6 +206,19 @@ pub(crate) fn local_command_op_level(joined: bool) -> OpLevel {
     }
 }
 
+/// What a joiner is told when it tries to teleport itself (a waypoint jump
+/// from the map or `/waypoint tp`): in someone else's world the body is the
+/// server's (Spec 04 §5.3.1), and the server takes no teleport from a client
+/// yet, so a jump would only be put back.
+pub(crate) const JOINED_TELEPORT_REFUSED: &str =
+    "Teleporting isn't available when you've joined someone else's world yet.";
+
+/// May this machine's player teleport itself? Not in someone else's world
+/// (see [`JOINED_TELEPORT_REFUSED`]).
+pub(crate) fn self_teleport_allowed(joined: bool) -> bool {
+    !joined
+}
+
 /// Is the pause menu's "Switch to Creative" locked? During a creative-locked
 /// scenario, and always in someone else's world — the host owns the mode, and
 /// `/gamemode` is already refused there (review W3 S1).
@@ -524,6 +537,14 @@ mod tests {
         assert!(creative_switch_locked(false, true));
         assert!(creative_switch_locked(true, false));
         assert!(!creative_switch_locked(false, false));
+    }
+
+    #[test]
+    fn a_joiner_cannot_teleport_itself() {
+        // Its body is the server's (Spec 04 §5.3.1); in its own world, it can.
+        assert!(!self_teleport_allowed(true));
+        assert!(self_teleport_allowed(false));
+        assert!(JOINED_TELEPORT_REFUSED.contains("joined someone else's world"));
     }
 
     #[test]

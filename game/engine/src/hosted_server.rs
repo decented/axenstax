@@ -430,6 +430,11 @@ impl HostedServer {
         // parity path) starts with ≥ 1, and the dedicated server
         // (`server_main`, the WebSocket dedicated path) starts with 0.
         server.simulates_block_machines = num_local_players == 0;
+        // A LAN / online host generates terrain ahead of its joiners' bodies
+        // (Spec 04 §5.3.1); a dedicated server's streaming is Phase B1's.
+        if num_local_players > 0 {
+            server.column_refill_per_tick = crate::server::HOST_COLUMN_REFILL_PER_TICK;
+        }
         // A world on disk that fails to load is refused here — before the accept
         // thread starts or anything is saved — never replaced by a fresh world
         // (Spec 02 §8.4). The error names the file and why.

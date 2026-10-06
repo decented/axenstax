@@ -250,7 +250,12 @@ pub enum OwnLifeEvent {
 pub struct RemoteClient {
     transport: Box<dyn ClientTransport>,
     pub state: ConnectionState,
-    /// Tick counter for input packets.
+    /// The sequence number (`InputPacket.tick`) the NEXT input goes out with:
+    /// 1, 2, 3… per connection. The ONE input counter of a joined session —
+    /// the server acknowledges these numbers (`last_acked_input`), so the
+    /// client's prediction records under the number [`Self::send_input`]
+    /// returns, never a counter of its own (Spec 04 §5.3.1). Never 0: the
+    /// server reads 0 as "nothing received yet" and drops it.
     tick: u64,
     /// Latest state update from the server (consumed by game loop each frame).
     pub latest_state: Option<protocol::StateUpdatePacket>,
@@ -558,7 +563,7 @@ impl RemoteClient {
         Self {
             transport,
             state: ConnectionState::Connecting,
-            tick: 0,
+            tick: 1,
             latest_state: None,
             chunk_queue: Vec::new(),
             spawn_pos: None,
@@ -602,7 +607,7 @@ impl RemoteClient {
         Self {
             transport,
             state: ConnectionState::Connecting,
-            tick: 0,
+            tick: 1,
             latest_state: None,
             chunk_queue: Vec::new(),
             spawn_pos: None,
@@ -941,13 +946,19 @@ impl RemoteClient {
     }
 
     /// Send player input to the server. Call each tick (20 TPS).
-    pub fn send_input(&mut self, input: &protocol::InputPacket) {
+    ///
+    /// Returns the sequence number the input went out with (its `tick` is
+    /// overwritten with this connection's own counter, whatever the caller
+    /// put there) — the number the server will acknowledge it by. `None`
+    /// when nothing was sent (not connected).
+    pub fn send_input(&mut self, input: &protocol::InputPacket) -> Option<u64> {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
-            return;
+            return None;
         }
 
         let mut input = input.clone();
-        input.tick = self.tick;
+        let seq = self.tick;
+        input.tick = seq;
         self.tick += 1;
 
         // MP-A3 — an unanswered Respawn is asked again (see the field).
@@ -975,6 +986,7 @@ impl RemoteClient {
         }
         self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
+        Some(seq)
     }
 
     /// Ask the server to apply a right-click to the power device in `pos`
