@@ -1861,10 +1861,12 @@ format version in a trailing footer — see the bincode note under Migration str
     is opened instead and the damaged autosave folder is renamed to
     `autosave.corrupt-<ts>`, so neither the next autosave nor the leave-time
     `clear_autosave` can destroy it; a toast says which copy the player got (an
-    autosave recovery is announced too). An autosave the world opened FROM is kept
-    until a save lands (review 2026-10-06): it used to be deleted as soon as the
-    world opened, and with a damaged `world.dat` it is the only good copy. If that rename fails, or `world.dat` also
-    fails, the world is refused. The server never reads the autosave (it never
+    autosave recovery is announced too). If that rename fails, or `world.dat` also
+    fails, the world is refused. An autosave the world opened FROM is kept until a
+    save lands (review 2026-10-06): it used to be deleted as soon as the world
+    opened, and with a damaged `world.dat` it is the only good copy. "Quit without
+    saving" keeps it too, for the whole session until a save lands
+    (`world_exit::SessionSaves`, below). The server never reads the autosave (it never
     clears one, so preferring it would shadow every later server save); a folder
     holding only an autosave is refused there ("open the world in the game once to
     recover it").
@@ -1874,20 +1876,46 @@ format version in a trailing footer — see the bincode note under Migration str
     queues an all-air chunk's file for deletion (the mined-out case, engine audit
     2026-06-04 A) only for those. A file the session never read is unknown data and
     is left alone. The set survives a Workshop reset (same folder) and is forgotten
-    on a world change. The dedicated server applies the same rule
+    on a world change. The delete is further gated on the chunk being `persist`
+    (read from disk, or really edited): `World::set_block` creates an empty chunk
+    when a block is set to air where the streamer had dropped the column, and air
+    over air changes nothing, so that conjured chunk is never `persist` and never
+    deletes the real file under it (review 2026-10-06; before, the next save
+    left a hole after the restart). The dedicated server applies the same rule
     (`GameServer::try_save`, review 2026-10-06): it never deleted any, so a
     mined-out chunk came back after a restart.
   - **Every save checks before it touches anything**: `save_world` and
     `write_world_folder` run the newer/unreadable check AND the damaged-meta check
     (`meta_write_blocked`) first — before the stale-chunk deletes, chunk writes and
     `world.dat`.
-  - **A world's first save writes `world.dat` first** (`save::is_first_save`: no
-    `world.dat` and no `chunks/*.chunk` yet; `write_world_folder` and
-    `GameServer::try_save`). A first save cut short — the dedicated server killed
-    during its tick-0 save — leaves a world that opens, its unwritten chunks
-    regenerating from the seed, instead of chunks without a `world.dat`, refused at
-    every boot. Every later save still writes the chunks first and `world.dat` last
-    (its commit point).
+  - **A world's first save stages its chunks, commits with `world.dat`, then
+    publishes** (`save::write_first_save`; `save::is_first_save`: no `world.dat` and
+    no `chunks/*.chunk` yet; used by `write_world_folder`, so `save_world` and the
+    imports, and by `GameServer::try_save`). Every loader marks a column with ANY
+    saved chunk as loaded and never generates the rest of it, so a first save that
+    wrote its chunks one by one into `chunks/` and was cut short left permanent
+    holes — and writing `world.dat` first (the previous rule) still left holes. The
+    order now:
+    1. every non-empty chunk is written into `chunks.new/` (one left by an earlier
+       first save cut short is cleared first — it was never committed), then one
+       directory fsync;
+    2. `world.dat` is written atomically — the commit point;
+    3. `chunks.new/` is renamed to `chunks/` (`publish_staged_chunks`): an empty
+       `chunks/` is removed first, one holding anything else (a stray `.tmp`) is
+       kept aside whole as `chunks.corrupt-<ts>`, and it never publishes over a
+       saved chunk.
+
+    A chunk that can't be written fails the save before `world.dat`. Cut short
+    before step 2 there is no `world.dat` and no `chunks/*.chunk` — the world is
+    still new (`chunks.new/` does not count as saved), and the next save is a first
+    save again. Cut short after step 2, the next native load of `world.dat`
+    (`load_world`, after the decode) or the next save (`save_world`,
+    `write_world_folder`, `GameServer::try_save`) finishes step 3
+    (`finish_staged_first_save`), before anything is read or deleted; a
+    `chunks.new/` without a `world.dat` is left alone. Every later save still
+    writes its chunks into `chunks/` first and `world.dat` last (its commit point).
+    Tests cut a first save short at every chunk boundary and just before the
+    publish (`save::FIRST_SAVE_CUT`) and check that the folder is new or whole.
   - **A failed save is never silent (review 2026-10-06).** Pause → Save clears the
     crash-recovery autosave only once the save landed (it was cleared after a
     failed save too); any failed save shows *"Couldn't save: <reason>. Your last
@@ -1896,12 +1924,37 @@ format version in a trailing footer — see the bincode note under Migration str
     Save & Quit, Trial Leave, the end cards, the J-board arena hop, the skin-paint
     hop, the window close — the player stays in the world, still live and nothing
     torn down, with that toast, to retry or deliberately "Quit without saving".
+  - **A failed save never funnels the player into deleting the autosave** (second
+    review, 2026-10-06). `world_exit::SessionSaves` on `GameState` records what the
+    session's saves have left the crash-recovery autosave guarding: `save_failed`
+    (the last save failed, so the autosave may be the newest copy there is),
+    `opened_from_autosave` (set in `chunk_stream::begin_load`) and
+    `close_save_failed`. A save that lands resets it; every world entry and exit
+    does too. While `keeps_autosave()` (`save_failed || opened_from_autosave`) holds,
+    "Quit without saving" (`SaveChoice::Discard`) keeps the autosave, like a
+    window close or a dropped connection does (`should_clear_autosave(.., keep_autosave)`),
+    and the pause menu says so rather than promising a discard — the button reads
+    *"Quit — your autosave from <age> is kept"* with *"Anything since your autosave
+    from <age> will be lost."* under it (`save::autosave_age`). A failed
+    window-close save sets `close_save_failed`, appends *"Close the window again to
+    quit — your autosave from <age> is kept."* (or *"… to quit without saving."*
+    when none is kept) to the toast, and the NEXT close quits without saving
+    (`close_choice` returns `Abandon`), so a save that keeps failing never traps
+    the player in the world.
+  - **Every save of the live session supersedes the autosave once it lands**
+    (`save::save_world_superseding_autosave`, via `GameState::save_live_world`): the
+    pause-menu Save, Save & Quit and every other exit that saves, a resumable
+    scenario's start and the replay snapshot — the last two used to leave a stale
+    autosave behind, which the loader prefers and so would roll the fresh save back
+    after a crash. A failed save keeps the autosave.
   - **An import never writes into a taken name** (review 2026-10-06). `.axeworld`
     and `.axeprofile` imports name against EVERY entry under the worlds root, not
     the lobby list (which shows only folders with a `world.dat` and hides the
     Workshop), so they can't write into the native Workshop, a chunks-only or
     autosave-only folder, or over a stray file; `write_unpacked_world` also refuses
-    an existing folder outright.
+    an existing folder outright. An import that fails part-way removes the folder
+    it created (it is the import's own, checked above), so a half-written world is
+    never left for the lobby to list once `world.dat` is in it.
   - **Proof-of-Play secret**: a legacy meta without `pop_secret` gets one in the
     lobby (`apply_world_seed`), but on native it is persisted only once the world
     has opened (`persist_pop_secret_if_missing` in `begin_load`), so a refused world
@@ -1922,6 +1975,14 @@ format version in a trailing footer — see the bincode note under Migration str
     repack the record without the original (the web has no side file to keep it
     in). Import, backup download and replay stay lenient (the archive itself is
     untouched there).
+  - **Known, not fixed (open design call).** Only a world's FIRST save is
+    all-or-nothing. A LATER save cut short can still leave a partial NEW column —
+    world-generation chunks of a column first saved in that save, written one by one
+    into `chunks/` — the same hole class (the loaders never generate the rest of a
+    column that has any saved chunk). Closing it needs a manifest or a loader that
+    can tell a complete column from a partial one. And `World::set_block` still
+    auto-creates a chunk for an unloaded cell (known debt), so a non-air write into
+    a column the streamer had dropped can overwrite the real file.
   - The first **non-append** change to `WorldSave` itself (reorder / removal /
     retype), and the bincode 1 → 3 move, need a real migration keyed on this
     version.

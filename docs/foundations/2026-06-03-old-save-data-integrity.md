@@ -379,10 +379,57 @@ An independent review of the two changes above found these, all fixed (Spec 02 �
   the repair runs last, once the world has loaded.
 - **A first save cut short was refused forever.** Chunks were written before
   `world.dat` even on a world's first save, so a dedicated server killed during its
-  tick-0 save left chunks without a `world.dat`. A first save now writes `world.dat`
-  first; the refusal message says how to recover a folder already in that state.
+  tick-0 save left chunks without a `world.dat`. This pass wrote `world.dat` first;
+  the second review (below) found that still left holes, and replaced it with a
+  staged first save. The refusal message says how to recover a folder already in
+  the chunks-without-`world.dat` state.
 - **The dedicated server never deleted a mined-out chunk's file**, so mined-out chunks
   came back after a restart. It now applies the client's rule (read or written this
   session, now all-air).
 - **Opening from the autosave deleted it at once.** With a damaged `world.dat` that was
   the only good copy. It is now kept until a save lands.
+
+## Update 2026-10-06: second review of the follow-ups
+
+A second independent review of the follow-ups above found these, all fixed (Spec 02
+§8.4; the red run before the fix failed the six new disk tests):
+
+- **A failed save led the player to delete the autosave.** After a failed save, "Quit
+  without saving" (`SaveChoice::Discard`) cleared the crash-recovery autosave, which
+  could be the newest copy of the session there was; so did quitting a session that
+  opened from the autosave. `world_exit::SessionSaves` (`save_failed`,
+  `opened_from_autosave`, `close_save_failed`) now makes a discard keep the autosave
+  while either of the first two is set, and the pause menu says so — *"Quit — your
+  autosave from <age> is kept"* — instead of promising a discard. A failed
+  window-close save keeps the player in the world with a hint to close again, and
+  the second close quits without saving, keeping the autosave, so a save that keeps
+  failing never traps them. A save that lands resets it all.
+- **The "write `world.dat` first" rule still left holes.** Every loader treats a
+  column with any saved chunk as loaded and never generates the rest, so a first save
+  cut short after some of its chunks (written one by one, in hash-map order) left
+  permanent holes under a perfectly valid `world.dat`. A first save now stages its
+  chunks in `chunks.new/`, writes `world.dat` as the commit point, then renames
+  `chunks.new/` to `chunks/` (`save::write_first_save`). Cut short before the commit
+  the world is still new; cut short after it, the next load or save finishes the
+  publish (`finish_staged_first_save`). A stray `chunks/` already in the way is kept
+  aside as `chunks.corrupt-<ts>`, never deleted. Tests cut a first save short at every
+  chunk boundary and just before the publish, for the client, the server and an import.
+- **A failed import left its half-written folder behind**, which the lobby listed once
+  `world.dat` was in it: a world with chunks missing. An import that fails now removes
+  the folder it created.
+- **A conjured empty chunk deleted a real chunk file.** `World::set_block` creates an
+  empty chunk for a cell whose column the streamer had dropped; the next save read
+  that all-air chunk as "mined out" and deleted the file under it. Deletion now also
+  requires the chunk to be `persist` (read from disk or really edited), on the client
+  and the server.
+- **Scenario and replay saves left a stale autosave behind.** A resumable scenario's
+  start and the replay snapshot saved without dropping the autosave they superseded,
+  and the loader prefers an autosave, so a crash rolled the fresh save back. Every
+  save of the live session now goes through `save::save_world_superseding_autosave`.
+
+Known, not fixed here — needs a design call (a manifest, or a loader that can tell a
+complete column from a partial one): only a world's FIRST save is all-or-nothing. A
+LATER save cut short can still leave a partial NEW column (the world-generation chunks
+of a column first saved in that save), the same hole class. And `World::set_block`
+still auto-creating a chunk means a non-air write into a column the streamer had
+dropped can overwrite the real file (known debt in the project notes).
