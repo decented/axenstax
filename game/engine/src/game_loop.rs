@@ -21781,8 +21781,13 @@ impl super::GameState {
                             target_sats: state.reserve_target_sats,
                             current_sats: state.reserve_current_sats,
                         };
+                        // Final review fix 2 — the host's own seats are never
+                        // remote players: seat N is drawn from its live body by
+                        // the split-screen loop, so a roster entry for it would
+                        // draw it a second time, a tick behind.
+                        let local_seats = self.players.len();
                         self.remote_players = state.players.into_iter()
-                            .filter(|p| p.player_index != 0)
+                            .filter(|p| crate::pure_helpers::is_remote_player_index(p.player_index, local_seats))
                             // Discard players with non-finite positions (NaN/inf
                             // from malicious or buggy peers causes undefined
                             // behaviour in f32-to-i32 casts during rendering).

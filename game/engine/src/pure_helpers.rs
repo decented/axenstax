@@ -178,6 +178,19 @@ pub(crate) fn skin_layer_of(player_index: usize) -> u32 {
     (player_index as u32).min(crate::renderer::SKIN_LAYERS - 2)
 }
 
+/// Is the server's player slot `player_index` a REMOTE peer to the host client
+/// — rather than one of its own `local_seats`? Server slots `0..local_seats`
+/// are the host's own seats (slot 0 is the one that sends input; the others
+/// follow their seats through `HostedServer::sync_local_slots` so joiners see
+/// them); joiners come after. The host draws a remote peer from the broadcast
+/// roster, but every local seat is drawn by the split-screen loop from its own
+/// live body — so a seat that also came back through the roster is drawn twice
+/// in each other seat's viewport, one tick apart.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn is_remote_player_index(player_index: u32, local_seats: usize) -> bool {
+    player_index as usize >= local_seats
+}
+
 /// Should an on-sign-in Stash skin load, resolving late, be applied?
 ///
 /// The load is kicked off at world entry and lands asynchronously. If the
@@ -368,5 +381,19 @@ mod tests {
         assert!(!super::should_apply_loaded_skin(true));
         // Player hasn't touched their look → the restored skin should apply.
         assert!(super::should_apply_loaded_skin(false));
+    }
+
+    /// Final review fix 2 — a split-screen host's second seat is a LOCAL seat,
+    /// not a remote peer: only indices past the host client's seats are.
+    #[test]
+    fn local_seats_are_never_remote_players() {
+        // One seat: slot 0 is the host; a joiner is slot 1.
+        assert!(!super::is_remote_player_index(0, 1));
+        assert!(super::is_remote_player_index(1, 1));
+        // Two seats: slot 1 is the second seat, the first joiner is slot 2.
+        assert!(!super::is_remote_player_index(0, 2));
+        assert!(!super::is_remote_player_index(1, 2), "seat 1 is drawn by the split-screen loop");
+        assert!(super::is_remote_player_index(2, 2));
+        assert!(super::is_remote_player_index(7, 2));
     }
 }
