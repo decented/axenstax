@@ -674,6 +674,10 @@ impl super::GameState {
         folder: String,
         prep: crate::online_prep::OnlinePrep,
     ) -> Result<(), String> {
+        // Never publish an invite to a world this build refuses (Spec 02 §8.4).
+        if let Some(why) = crate::save::world_open_refusal(&folder) {
+            return Err(why);
+        }
         let settings = crate::graphics_settings::GraphicsSettings::load();
         let now = self.online_now();
         let identity = crate::runtime_identity::RuntimeIdentity::load()?
@@ -7704,7 +7708,15 @@ impl super::GameState {
                                 self.p1_gamepad = None;
                                 self.capture_cursor();
                             }
-                            Err(e) => log::error!("Failed to unpack local world: {e}"),
+                            Err(e) => {
+                                log::error!("Failed to unpack local world: {e}");
+                                // Saved by a newer build (Spec 02 §8.4): say why.
+                                if crate::save_format::is_newer_world_error(&e)
+                                    && let GameMode::Menu(ref mut ms) = self.mode
+                                {
+                                    ms.notice = Some(e);
+                                }
+                            }
                         }
                     }
                     Ok(None) => {
@@ -8542,6 +8554,22 @@ impl super::GameState {
                     }
                 }
                 crate::menu::MenuAction::None => {}
+            }
+
+            // A world saved by a newer build is never entered, whichever lobby path
+            // asked for it (Workshop, a Trial arena, an online host): stay here and
+            // say why (Spec 02 §8.4). A joined session reads no local save.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.remote_client.is_none()
+                && let Some(why) = load_world.as_deref().and_then(crate::save::world_open_refusal)
+            {
+                // Re-borrowed: `menu_state` must stay dead past the action match,
+                // whose arms call `&mut self` methods.
+                if let GameMode::Menu(ref mut ms) = self.mode {
+                    ms.notice = Some(why);
+                }
+                load_world = None;
+                self.hosted_server = None;
             }
 
             // Online play by contact — the invite link a press staged.

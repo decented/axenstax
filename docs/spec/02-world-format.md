@@ -1738,7 +1738,9 @@ The world format version is stored in three places:
 2. Each region file header (Section 4.2).
 3. Each snapshot manifest.
 
-**Version numbering**: Simple incrementing `u16`. Current version: 1.
+**Version numbering**: Simple incrementing `u16`. Current version: 1. (Design, for the
+production region format. The as-built prototype `world.dat` carries its own `u32`
+format version in a trailing footer — see the bincode note under Migration strategy.)
 
 **Compatibility rules**:
 - The engine MUST be able to read any format version <= its built-in version.
@@ -1761,10 +1763,50 @@ The world format version is stored in three places:
     changes — the only kind `WorldSave` has ever had. **Invariant: `WorldSave` fields
     may only be APPENDED, never reordered / removed / retyped.** The decoder's struct
     literal lists every field, so a new field that isn't added to it is a compile
-    error (it cannot silently drift). The first **non-append** change must introduce
-    an explicit `u32` version envelope (Appendix-B-style magic) + a real migration —
-    deferred until then (YAGNI). Full rationale + the cloud-save blast radius:
+    error (it cannot silently drift). Full rationale + the cloud-save blast radius:
     `docs/foundations/2026-06-03-old-save-data-integrity.md`.
+  - **Forward compatibility — the format-version footer (gap-audit T1-7, 2026-10-06).**
+    The tolerant decode alone let a build open a save from a *newer* build (unknown
+    trailing fields ignored) and then silently drop the newer fields on re-save — an
+    AppImage rollback lost data. Every `world.dat` is now written as
+    `bincode(WorldSave) || format_version: u32 LE || b"AXSAVEv1"`
+    (`save_format::encode_world_save`, the one encoder: native save, autosave, the
+    dedicated server's `GameServer::try_save`, and `world_archive::pack_world` for
+    web / cloud / `.axeworld` / `.axeprofile` / replay).
+    - **A footer, not a header**: builds from before the footer already ignore
+      unknown trailing bytes, so they keep opening new saves exactly as before (no
+      worse), while every build from now on can read the version. A header would
+      have made new saves unreadable to shipped builds, and a 4-byte header magic
+      collides with a legacy save's leading `seed: u32`; an 8-byte trailing magic
+      at the very end of a footer-less save is not a realistic collision.
+    - **`SAVE_FORMAT_VERSION`** = `WORLD_SAVE_FIELD_COUNT` (52 today) +
+      `SAVE_LAYOUT_REVISION` (0). Two tripwire tests stop drift: serde's field list
+      for `WorldSave` must equal `WORLD_SAVE_FIELD_COUNT` (so appending a field
+      without bumping the version fails), and the tolerant reader must consume every
+      byte of a current save (so a field listed in its struct literal without a read
+      fails). A wire change that is **not** an appended field (a field or enum variant
+      inside a nested saved type, a retype) is invisible to both tripwires and must
+      bump `SAVE_LAYOUT_REVISION` by hand.
+    - **Read** (`save::read_world_save`): no footer → the legacy path, unchanged.
+      Footer version ≤ ours → the footer is stripped *before* the tolerant decode
+      (left on, an older save's footer would be decoded as the field it lacks), then
+      decoded as before. Footer version > ours → `WorldSaveError::NewerVersion`,
+      nothing decoded.
+    - **Refusal is total**: `save::world_open_refusal` (reads only the 12-byte
+      footers of `world.dat` and `autosave/world.dat`) is checked before a world is
+      entered from every path — world card Play/Host, the Workshop / Trial / online
+      host catch-all in the lobby loop, `start_online_host`, and the dedicated
+      server's boot (exit 1). The lobby card is labelled "(needs a newer version)"
+      and the banner reads *"This world was saved by a newer version of Axe'n'Stax.
+      Update the game to open it."* The web build shows the same banner when the
+      IndexedDB / cloud blob fails to unpack for this reason. And every native writer
+      (`save_world`, `write_world_folder`, `autosave_world`, `GameServer::try_save`,
+      `save_world_meta`) refuses the folder first, before any chunk is written, so a
+      load that fell through to a freshly generated world can never save over it.
+      The damaged-meta recovery does not quarantine or rebuild a newer world's meta.
+  - The first **non-append** change to `WorldSave` itself (reorder / removal /
+    retype), and the bincode 1 → 3 move, need a real migration keyed on this
+    version.
 - Major changes (layout reorganization): New version number, migration code in
   `migration::v{N}_to_v{N+1}` module. Lazy per-chunk migration on load.
 - Full-world migration tool: `axenstax-migrate` CLI that reads an entire world and

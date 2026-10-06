@@ -712,6 +712,14 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
+    // A world saved by a newer engine is refused before anything loads or writes
+    // it (Spec 02 §8.4). Booting on would fail the load, generate a fresh world
+    // and save it at tick 0 (below) — over the real one.
+    if let Some(why) = crate::save::world_open_refusal(&cfg.world) {
+        log::error!("world '{}': {why}", cfg.world);
+        std::process::exit(1);
+    }
+
     // Bootstrap a fresh world's metadata so the chosen seed + game mode persist
     // and the world shows the right mode. Existing worlds are loaded as-is.
     if !crate::save::world_exists(&cfg.world) {

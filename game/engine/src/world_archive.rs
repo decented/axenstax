@@ -6,7 +6,7 @@
 //!
 //! Archive format (unchanged from the original WASM implementation):
 //!   world_meta.json  — serde_json: WorldMeta
-//!   world.dat        — bincode: WorldSave
+//!   world.dat        — bincode: WorldSave + format-version footer (`save_format`)
 //!   chunks/<cx>_<cy>_<cz>.chunk — raw binary: one non-empty chunk each
 //!
 //! The format is byte-identical to what the WASM client has always written, so
@@ -151,8 +151,8 @@ pub fn pack_world(
         ar.append_data(&mut header, "world_meta.json", &meta_json[..])
             .map_err(|e| format!("tar meta: {e}"))?;
 
-        let world_dat = bincode::serialize(save)
-            .map_err(|e| format!("serialise world: {e}"))?;
+        // bincode payload + format-version footer (Spec 02 §8.4).
+        let world_dat = crate::save_format::encode_world_save(save)?;
         let mut header = tar::Header::new_gnu();
         header.set_size(world_dat.len() as u64);
         header.set_mode(0o644);
@@ -653,5 +653,75 @@ mod tests {
         assert_eq!(meta2.time_lock, "day");
         assert!(!meta2.mobs_enabled);
         assert_eq!(fresh.get_block(3, 80, 0), block::SANDSTONE);
+    }
+
+    // ── world.dat format-version footer (gap-audit T1-7, Spec 02 §8.4) ──
+
+    /// The raw bytes of one archive member.
+    fn archive_member(blob: &[u8], name: &str) -> Vec<u8> {
+        let tar = crate::save::read_bounded(GzDecoder::new(blob), MAX_IMPORT_DECOMPRESSED_BYTES)
+            .unwrap();
+        let mut ar = tar::Archive::new(&tar[..]);
+        for entry in ar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().to_string_lossy() == name {
+                let mut out = Vec::new();
+                entry.read_to_end(&mut out).unwrap();
+                return out;
+            }
+        }
+        panic!("no {name} in archive");
+    }
+
+    /// A `.axeworld` holding `world_dat` verbatim (e.g. one from a newer build).
+    fn archive_with_world_dat(meta: &WorldMeta, world_dat: &[u8]) -> Vec<u8> {
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut ar = tar::Builder::new(&mut gz);
+            for (path, bytes) in [
+                ("world_meta.json", serde_json::to_vec(meta).unwrap()),
+                ("world.dat", world_dat.to_vec()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                ar.append_data(&mut header, path, &bytes[..]).unwrap();
+            }
+            ar.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn pack_world_writes_the_footer() {
+        let blob = pack_world(&WorldMeta::new("f"), &minimal_world_save(5), &World::new(), &[])
+            .unwrap();
+        let dat = archive_member(&blob, "world.dat");
+        assert_eq!(
+            crate::save_format::split_save_footer(&dat).1,
+            Some(crate::save_format::SAVE_FORMAT_VERSION)
+        );
+    }
+
+    /// Web, cloud, `.axeworld` and `.axeprofile` imports all unpack through here:
+    /// a world from a newer build is refused with the lobby message, and a
+    /// footer-less archive from an older build still opens.
+    #[test]
+    fn unpack_refuses_a_world_from_a_newer_build() {
+        let meta = WorldMeta::new("n");
+        let mut newer = bincode::serialize(&minimal_world_save(5)).unwrap();
+        newer.extend_from_slice(&crate::save_format::footer_bytes(
+            crate::save_format::SAVE_FORMAT_VERSION + 1,
+        ));
+        let blob = archive_with_world_dat(&meta, &newer);
+        let err = unpack_world(&blob, &mut World::new()).err().expect("refused");
+        assert!(crate::save_format::is_newer_world_error(&err), "{err}");
+        let err = unpack_world_for_import(&blob, &mut World::new()).err().expect("refused");
+        assert!(crate::save_format::is_newer_world_error(&err), "{err}");
+
+        let legacy = archive_with_world_dat(&meta, &bincode::serialize(&minimal_world_save(6)).unwrap());
+        let (_, save, _) = unpack_world(&legacy, &mut World::new()).expect("footer-less loads");
+        assert_eq!(save.seed, 6);
     }
 }

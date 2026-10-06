@@ -1026,6 +1026,14 @@ fn kick_off_profile_export() -> std::rc::Rc<std::cell::RefCell<Option<Result<Str
 /// toggle, kick a backup) and return any resulting `MenuAction` (Play/Host/Load),
 /// or `MenuAction::None`. Centralised so the responsive grid stays readable.
 fn handle_card_action(state: &mut MenuState, idx: usize, card_action: CardAction) -> MenuAction {
+    // A world saved by a newer version is never opened or hosted (Spec 02 §8.4):
+    // stay in the lobby and say why, before anything reads or writes it.
+    if matches!(card_action, CardAction::DoubleClick | CardAction::Play | CardAction::Host)
+        && let Some(why) = save::world_open_refusal(&state.worlds[idx].folder_name)
+    {
+        state.notice = Some(why);
+        return MenuAction::None;
+    }
     match card_action {
         CardAction::Select => {
             state.selected = Some(idx);

@@ -20,6 +20,7 @@ use crate::crafting::{Tool, ToolMaterial, ToolType};
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack, MaterialId};
 use crate::world::World;
+pub use crate::save_format::WorldSaveError;
 
 /// WASM: pubkey for per-user world namespacing. Set by `wasm_auth::set_pubkey`
 /// (called from auth.js) before the engine starts.
@@ -84,6 +85,12 @@ pub fn wasm_storage_key() -> String {
 }
 
 /// Saved world metadata + player state.
+///
+/// Positional bincode, APPEND-ONLY (Spec 02 §8.4). Appending a field: add it LAST
+/// here, read it last in `deserialize_world_save_tolerant_reporting`, and bump
+/// `save_format::WORLD_SAVE_FIELD_COUNT` (the tripwire tests fail until you do), so
+/// older builds refuse the new saves instead of truncating them. A wire change inside
+/// a nested saved type bumps `save_format::SAVE_LAYOUT_REVISION` instead.
 #[derive(Serialize, Deserialize)]
 pub struct WorldSave {
     pub seed: u32,
@@ -1537,6 +1544,7 @@ pub fn write_world_folder(
     world: &World,
 ) -> Result<(), String> {
     let dir = world_dir(name);
+    refuse_write_over_newer_save(&dir)?;
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
 
@@ -1547,8 +1555,8 @@ pub fn write_world_folder(
     // vault-key NIP-44-wrapped — "the disk file IS the Stash blob") between the
     // `serialize` and the `write_atomic` below with **no format change** to any
     // caller. Implement no AEAD now (the recommended end-state per the contract);
-    // until then `world.dat` stays plaintext bincode.
-    let encoded = bincode::serialize(save).map_err(|e| format!("serialize: {e}"))?;
+    // until then `world.dat` stays plaintext bincode (+ the format-version footer).
+    let encoded = crate::save_format::encode_world_save(save)?;
 
     // Spec 02 §7.5 — loaded + evicted chunks. Written FIRST (tmp + rename, one
     // directory fsync at the end — review S2), so `world.dat` below is the commit
@@ -1585,6 +1593,7 @@ pub fn save_world(
         return Err("save_world: no players to save".to_string());
     }
     let dir = world_dir(name);
+    refuse_write_over_newer_save(&dir)?;
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
 
@@ -2093,14 +2102,16 @@ impl TailReader {
 /// `WorldSave`'s declaration order (= the bincode wire order).
 #[cfg(test)]
 fn deserialize_world_save_tolerant(data: &[u8]) -> Result<WorldSave, bincode::Error> {
-    deserialize_world_save_tolerant_reporting(data).map(|(s, _)| s)
+    deserialize_world_save_tolerant_reporting(data).map(|(s, _, _)| s)
 }
 
 /// [`deserialize_world_save_tolerant`], also returning the tail field that failed
-/// (if any) so a loader can keep the damaged original (review S5).
+/// (if any) so a loader can keep the damaged original (review S5), and how many
+/// bytes the decode consumed (the reader-side field-count tripwire checks a current
+/// save is read to its last byte).
 fn deserialize_world_save_tolerant_reporting(
     data: &[u8],
-) -> Result<(WorldSave, Option<&'static str>), bincode::Error> {
+) -> Result<(WorldSave, Option<&'static str>, u64), bincode::Error> {
     let mut cur = std::io::Cursor::new(data);
     // Fields from `carts` on are decoded "stop at first failure": see `TailReader`.
     let mut tail = TailReader::default();
@@ -2189,38 +2200,97 @@ fn deserialize_world_save_tolerant_reporting(
         // read LAST.
         rig_clips: tail.field(&mut cur, "rig_clips"),
     };
-    Ok((save, tail.failed_at))
+    Ok((save, tail.failed_at, cur.position()))
 }
 
 /// Decode a `world.dat` byte stream into a `WorldSave`. Single source of truth for
-/// every load path (`load_world`, `load_autosave`, WASM/cloud `unpack_world`). Tries
-/// the tolerant decode first — recovering older appended-field saves WITHOUT loss —
-/// and only if its required prefix fails does it fall back to the genuinely-ancient
-/// 8-field `LegacyWorldSave` (block-only inventory, no block-entities), which upgrades
-/// lossily but is the right behaviour for a real pre-item save.
+/// every load path (`load_world`, `load_autosave`, the damaged-meta recovery, and
+/// `world_archive::unpack_world` for web / cloud / `.axeworld` / `.axeprofile`).
 ///
-/// BRIDGE (forward-compat): a save written by a *newer* engine (with extra appended
-/// fields this build doesn't know) decodes fine here — the unknown trailing bytes are
-/// ignored. But a subsequent re-save writes only this build's known fields, so the
-/// newer-only state is silently dropped on the round-trip. Harmless today (no downgrade
-/// path ships; `rig_clips` is the newest field today); when a real
-/// downgrade path exists, gate this with the explicit `u32` version envelope so a
-/// newer save is refused rather than truncated. See the foundation doc.
-pub fn read_world_save(data: &[u8]) -> Result<WorldSave, String> {
+/// Forward compatibility (gap-audit T1-7, `crate::save_format`): every save written
+/// since carries a footer `format_version: u32 LE || b"AXSAVEv1"`.
+/// - Footer with a version NEWER than [`crate::save_format::SAVE_FORMAT_VERSION`] →
+///   refused with [`WorldSaveError::NewerVersion`], nothing decoded. Decoding it
+///   would drop the newer fields on the next re-save (an AppImage rollback silently
+///   losing data); the lobby says "update the game" instead, and the writers refuse
+///   the folder (`refuse_write_over_newer_save`).
+/// - Footer with this version or older → stripped, then decoded as below.
+/// - No footer (every save from before it) → decoded as below, exactly as before.
+///
+/// The decode tries the tolerant reader first — recovering older appended-field
+/// saves WITHOUT loss — and only if its required prefix fails does it fall back to
+/// the genuinely-ancient 8-field `LegacyWorldSave` (block-only inventory, no
+/// block-entities), which upgrades lossily but is the right behaviour for a real
+/// pre-item save.
+pub fn read_world_save(data: &[u8]) -> Result<WorldSave, WorldSaveError> {
     read_world_save_reporting(data).map(|(s, _)| s)
 }
 
 /// [`read_world_save`], plus whether the tolerant tail stopped at a failed field
 /// (then part of the save was defaulted and the file must be kept aside).
-pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), String> {
-    match deserialize_world_save_tolerant_reporting(data) {
-        Ok((s, failed)) => Ok((s, failed.is_some())),
+pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), WorldSaveError> {
+    // The footer is stripped BEFORE the tolerant decode: left on, an older-version
+    // save's 12 footer bytes would be decoded as the first field it lacks.
+    let (payload, version) = crate::save_format::split_save_footer(data);
+    if let Err(e) = crate::save_format::check_version(version) {
+        log::warn!("world.dat: {e:?} — refused, not decoded");
+        return Err(e);
+    }
+    match deserialize_world_save_tolerant_reporting(payload) {
+        Ok((s, failed, _)) => Ok((s, failed.is_some())),
         Err(_) => {
-            let legacy: LegacyWorldSave = bincode::deserialize(data)
-                .map_err(|e| format!("deserialize (legacy fallback): {e}"))?;
+            let legacy: LegacyWorldSave = bincode::deserialize(payload).map_err(|e| {
+                WorldSaveError::Undecodable(format!("deserialize (legacy fallback): {e}"))
+            })?;
             log::info!("Loaded legacy save format — will upgrade on next save");
             Ok((legacy.upgrade(), false))
         }
+    }
+}
+
+/// The newer-version refusal for the world folder `dir`, if its `world.dat` — or
+/// its crash-recovery `autosave/world.dat` — was saved by a newer build (Spec 02
+/// §8.4). Reads only each file's 12-byte footer.
+#[cfg(not(target_arch = "wasm32"))]
+fn newer_save_in(dir: &std::path::Path) -> Option<WorldSaveError> {
+    [dir.join("world.dat"), dir.join("autosave").join("world.dat")]
+        .iter()
+        .find_map(|p| {
+            crate::save_format::check_version(crate::save_format::file_footer_version(p)).err()
+        })
+}
+
+/// The lobby message for a world this build must not open, if any. Checked before
+/// a world is entered from every lobby path (world card, Workshop, Trials, online
+/// host, dedicated server), so a refused world is never read in, never replaced by
+/// a freshly generated one, and never written.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn world_open_refusal(folder_name: &str) -> Option<String> {
+    newer_save_in(&world_dir(folder_name)).map(|e| e.to_string())
+}
+
+/// Web: the IndexedDB / cloud blob is checked as it is unpacked
+/// (`world_archive::unpack_world` → [`read_world_save`]).
+#[cfg(target_arch = "wasm32")]
+pub fn world_open_refusal(_folder_name: &str) -> Option<String> {
+    None
+}
+
+/// Refuse to write anything into the world folder `dir` while it holds a save
+/// from a newer build. Called FIRST by every native writer — `save_world`,
+/// `write_world_folder`, `autosave_world`, `GameServer::try_save`, and
+/// `save_world_meta` (via `meta_write_blocked`) — before any chunk, meta or
+/// `world.dat` is touched. Belt and braces behind [`world_open_refusal`]: a load
+/// that fails falls through to generating a fresh world, and without this its
+/// first save would land on top of the newer one.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn refuse_write_over_newer_save(dir: &std::path::Path) -> Result<(), String> {
+    match newer_save_in(dir) {
+        Some(e) => {
+            log::error!("refusing to write to {}: {e:?}", dir.display());
+            Err(format!("refusing to write: {e}"))
+        }
+        None => Ok(()),
     }
 }
 
@@ -3107,6 +3177,11 @@ pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
         Ok(data) => match serde_json::from_slice::<WorldMeta>(&data) {
             Ok(meta) => return Ok(meta),
             Err(e) => {
+                // A newer build may write meta this build can't parse: refuse the
+                // world rather than quarantine and rebuild it (Spec 02 §8.4).
+                if let Some(newer) = newer_save_in(&dir) {
+                    return Err(newer.to_string());
+                }
                 log::error!("world '{folder_name}': world_meta.json does not parse ({e})");
                 quarantine_corrupt(&meta_path)
                     .map_err(|qe| format!("world info damaged: {e}; {qe}"))?;
@@ -3117,6 +3192,9 @@ pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
             if !has_quarantined_sibling(&dir, "world_meta.json") {
                 // Legacy world with no meta file at all. Don't write to disk yet.
                 return Ok(WorldMeta::from_folder(folder_name, &dat_path));
+            }
+            if let Some(newer) = newer_save_in(&dir) {
+                return Err(newer.to_string());
             }
             log::error!(
                 "world '{folder_name}': world_meta.json missing and a damaged copy was \
@@ -3265,6 +3343,11 @@ pub fn load_world_meta(folder_name: &str) -> WorldMeta {
 /// Either way a write would put defaults over the world's real info.
 #[cfg(not(target_arch = "wasm32"))]
 fn meta_write_blocked(dir: &std::path::Path) -> Option<String> {
+    // A world saved by a newer build: its meta may carry fields this build would
+    // drop on re-write (Spec 02 §8.4).
+    if let Some(e) = newer_save_in(dir) {
+        return Some(e.to_string());
+    }
     let meta_path = dir.join("world_meta.json");
     match fs::read(&meta_path) {
         Ok(data) => serde_json::from_slice::<WorldMeta>(&data)
@@ -3336,16 +3419,26 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
             if folder_name == crate::workshop::WORKSHOP_FOLDER {
                 continue;
             }
+            // A world saved by a newer build (Spec 02 §8.4) keeps its card, labelled
+            // with why; opening it is refused with the same message.
             // A world whose info is damaged (see `try_load_world_meta`) still gets a
             // card, clearly labelled, so the player knows it exists; `load_world`
             // refuses to open it.
-            let meta = match try_load_world_meta(&folder_name) {
-                Ok(meta) => meta,
-                Err(e) => {
-                    let mut m = WorldMeta::from_folder(&folder_name, &dat_path);
-                    m.display_name = format!("{folder_name} (world info damaged)");
-                    m.description = e;
-                    m
+            let meta = if let Some(why) = world_open_refusal(&folder_name) {
+                let mut m = try_load_world_meta(&folder_name)
+                    .unwrap_or_else(|_| WorldMeta::from_folder(&folder_name, &dat_path));
+                m.display_name = format!("{} (needs a newer version)", m.display_name);
+                m.description = why;
+                m
+            } else {
+                match try_load_world_meta(&folder_name) {
+                    Ok(meta) => meta,
+                    Err(e) => {
+                        let mut m = WorldMeta::from_folder(&folder_name, &dat_path);
+                        m.display_name = format!("{folder_name} (world info damaged)");
+                        m.description = e;
+                        m
+                    }
                 }
             };
 
@@ -3535,6 +3628,7 @@ pub fn autosave_world(
     if players.is_empty() {
         return Err("autosave_world: no players to save".to_string());
     }
+    refuse_write_over_newer_save(&world_dir(name))?;
     let dir = world_dir(name).join("autosave");
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir autosave: {e}"))?;
@@ -3702,7 +3796,7 @@ pub fn autosave_world(
             .collect(),
     };
 
-    let encoded = bincode::serialize(&save).map_err(|e| format!("serialize: {e}"))?;
+    let encoded = crate::save_format::encode_world_save(&save)?;
 
     let mut saved = 0u32;
     let (to_write, to_delete) = partition_chunks_for_save(world);
@@ -6520,5 +6614,241 @@ mod tests {
         assert_eq!(fs::read(&p).unwrap(), b"bb");
         assert!(!dir.join("1_2_3.chunk.tmp").exists());
         sync_dir(&dir);
+    }
+
+    // ── world.dat format-version footer (gap-audit T1-7, Spec 02 §8.4) ──
+
+    use crate::save_format::{
+        file_footer_version, footer_bytes, NEWER_WORLD_MESSAGE, SAVE_FORMAT_VERSION,
+    };
+
+    /// A `world.dat` as a build one format version newer than this one writes it.
+    fn newer_world_dat(seed: u32) -> Vec<u8> {
+        let mut bytes = bincode::serialize(&minimal_world_save_for_tests(seed)).unwrap();
+        bytes.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION + 1));
+        bytes
+    }
+
+    /// Every file under `dir` with its bytes, so a test can prove nothing changed.
+    fn snapshot_tree(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(
+            root: &std::path::Path,
+            at: &std::path::Path,
+            out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        ) {
+            for e in fs::read_dir(at).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    let rel = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
+                    out.insert(rel, fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn test_slot() -> crate::player_slot::PlayerSlot {
+        crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.5, 64.0, 0.5), 1.0)
+    }
+
+    /// The assumption the footer design rests on: the decoder every build before
+    /// the footer runs (tolerant decode of the WHOLE stream) reads a footer-bearing
+    /// save exactly like the bare payload, ignoring the 12 trailing bytes. So
+    /// shipped builds keep opening new saves exactly as before.
+    #[test]
+    fn pre_footer_decoder_reads_a_footer_bearing_save_unchanged() {
+        let payload = worldsave_with_chest_bytes();
+        let mut with_footer = payload.clone();
+        with_footer.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION));
+
+        let (old_build, failed, _) = deserialize_world_save_tolerant_reporting(&with_footer)
+            .expect("a pre-footer build must still decode a footer-bearing save");
+        assert!(failed.is_none(), "the footer must not trip the tail reader");
+        let (plain, _, _) = deserialize_world_save_tolerant_reporting(&payload).unwrap();
+        assert_eq!(
+            bincode::serialize(&old_build).unwrap(),
+            bincode::serialize(&plain).unwrap(),
+            "footer bytes must not bleed into any field"
+        );
+        assert_eq!(old_build.chests.len(), 1);
+        // A build that also knew a field fewer stops even earlier, so ignores more.
+    }
+
+    #[test]
+    fn footer_bearing_and_footerless_saves_decode_identically() {
+        let save = minimal_world_save_for_tests(77);
+        let legacy = bincode::serialize(&save).unwrap();
+        let current = crate::save_format::encode_world_save(&save).unwrap();
+        let a = read_world_save(&legacy).expect("a footer-less legacy save still loads");
+        let b = read_world_save(&current).expect("a current save loads");
+        assert_eq!(bincode::serialize(&a).unwrap(), bincode::serialize(&b).unwrap());
+        assert_eq!(b.seed, 77);
+    }
+
+    /// The footer is stripped BEFORE the tolerant decode: an older-version save
+    /// (one appended field fewer) defaults that field instead of decoding the
+    /// footer bytes as it — which would fail the tail and flag the save damaged.
+    #[test]
+    fn older_version_footer_is_stripped_before_the_tail_decode() {
+        let mut bytes = bincode::serialize(&minimal_world_save_for_tests(9)).unwrap();
+        // `rig_clips` is the newest field and an empty Vec: its 8 length bytes end
+        // the payload. Drop them = a save written before `rig_clips` existed.
+        bytes.truncate(bytes.len() - 8);
+        bytes.extend_from_slice(&footer_bytes(SAVE_FORMAT_VERSION - 1));
+        let (back, partial) = read_world_save_reporting(&bytes).expect("older save loads");
+        assert!(!partial, "footer bytes were decoded as a field");
+        assert_eq!(back.seed, 9);
+        assert!(back.rig_clips.is_empty());
+    }
+
+    #[test]
+    fn newer_version_save_is_refused_with_a_typed_error() {
+        let err = read_world_save(&newer_world_dat(1)).err().expect("must refuse");
+        assert_eq!(
+            err,
+            crate::save_format::WorldSaveError::NewerVersion {
+                found: SAVE_FORMAT_VERSION + 1,
+                supported: SAVE_FORMAT_VERSION,
+            }
+        );
+        assert_eq!(err.to_string(), NEWER_WORLD_MESSAGE);
+    }
+
+    /// TRIPWIRE (the reader half of `save_format::world_save_field_count_tripwire`):
+    /// the tolerant reader must read every field of a current save. A field listed
+    /// in its struct literal as `Default::default()` without a read compiles fine
+    /// but leaves bytes unread here.
+    #[test]
+    fn tolerant_reader_reads_every_byte_of_a_current_save() {
+        let payload = bincode::serialize(&minimal_world_save_for_tests(4)).unwrap();
+        let (_, failed, consumed) = deserialize_world_save_tolerant_reporting(&payload).unwrap();
+        assert!(failed.is_none());
+        assert_eq!(
+            consumed,
+            payload.len() as u64,
+            "the tolerant reader skipped a WorldSave field (bytes left unread)"
+        );
+    }
+
+    #[test]
+    fn newer_world_is_refused_and_nothing_writes_to_it() {
+        let _g = WorldsRootGuard::new("newer_refused");
+        let dir = world_dir("w");
+        fs::create_dir_all(dir.join("chunks")).unwrap();
+        fs::write(dir.join("world.dat"), newer_world_dat(5)).unwrap();
+        let meta = WorldMeta::new("w");
+        fs::write(dir.join("world_meta.json"), serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+        fs::write(dir.join("chunks").join("0_4_0.chunk"), b"not a real chunk").unwrap();
+        let before = snapshot_tree(&dir);
+
+        // Opening: refused with the lobby message, before anything is read in.
+        assert_eq!(world_open_refusal("w").as_deref(), Some(NEWER_WORLD_MESSAGE));
+        let mut world = World::new();
+        assert_eq!(load_world("w", &mut world).err().as_deref(), Some(NEWER_WORLD_MESSAGE));
+        assert_eq!(world.persistable_chunks().count(), 0, "no chunk was read in");
+
+        // The lobby card says why rather than offering a world it can't open.
+        let entries = list_world_entries();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].meta.display_name.contains("needs a newer version"));
+        assert_eq!(entries[0].meta.description, NEWER_WORLD_MESSAGE);
+
+        // Every writer refuses: no autosave, no meta, no save, no server save.
+        let slot = test_slot();
+        assert!(save_world_meta("w", &meta).is_err(), "meta write");
+        assert!(
+            write_world_folder("w", &meta, &minimal_world_save_for_tests(1), &World::new())
+                .is_err(),
+            "world folder write"
+        );
+        assert!(
+            save_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).is_err(),
+            "save"
+        );
+        assert!(
+            autosave_world("w", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).is_err(),
+            "autosave"
+        );
+        assert!(
+            crate::server::GameServer::new(0, "w".to_string(), 1).try_save().is_err(),
+            "dedicated-server save"
+        );
+
+        assert_eq!(snapshot_tree(&dir), before, "the newer world's files must be untouched");
+    }
+
+    #[test]
+    fn newer_autosave_alone_refuses_the_world() {
+        let _g = WorldsRootGuard::new("newer_autosave");
+        let dir = world_dir("w");
+        fs::create_dir_all(dir.join("autosave")).unwrap();
+        fs::write(
+            dir.join("world.dat"),
+            crate::save_format::encode_world_save(&minimal_world_save_for_tests(5)).unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.join("autosave").join("world.dat"), newer_world_dat(5)).unwrap();
+        let before = snapshot_tree(&dir);
+
+        assert!(has_autosave("w"));
+        assert_eq!(world_open_refusal("w").as_deref(), Some(NEWER_WORLD_MESSAGE));
+        let mut world = World::new();
+        assert_eq!(load_autosave("w", &mut world).err().as_deref(), Some(NEWER_WORLD_MESSAGE));
+        assert!(save_world_meta("w", &WorldMeta::new("w")).is_err());
+        assert_eq!(snapshot_tree(&dir), before);
+    }
+
+    /// A newer build may write a `world_meta.json` this build cannot parse. The
+    /// damaged-meta recovery must not quarantine it or rebuild it from a
+    /// `world.dat` it cannot read.
+    #[test]
+    fn unparseable_meta_on_a_newer_world_is_not_quarantined() {
+        let _g = WorldsRootGuard::new("newer_meta");
+        let dir = world_dir("w");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("world.dat"), newer_world_dat(5)).unwrap();
+        fs::write(dir.join("world_meta.json"), br#"{"world_type": {"future": 1}"#).unwrap();
+        let before = snapshot_tree(&dir);
+
+        assert_eq!(try_load_world_meta("w").err().as_deref(), Some(NEWER_WORLD_MESSAGE));
+        assert_eq!(snapshot_tree(&dir), before, "no quarantine rename, no rebuilt meta");
+        let entries = list_world_entries();
+        assert!(entries[0].meta.display_name.contains("needs a newer version"));
+    }
+
+    #[test]
+    fn every_world_dat_writer_appends_the_current_footer() {
+        let _g = WorldsRootGuard::new("writers_footer");
+        let slot = test_slot();
+        let current = Some(SAVE_FORMAT_VERSION);
+
+        write_world_folder("a", &WorldMeta::new("a"), &minimal_world_save_for_tests(1), &World::new())
+            .unwrap();
+        assert_eq!(file_footer_version(&world_dir("a").join("world.dat")), current, "write_world_folder");
+
+        save_world("b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).unwrap();
+        assert_eq!(file_footer_version(&world_dir("b").join("world.dat")), current, "save_world");
+
+        autosave_world("c", &World::new(), std::slice::from_ref(&slot), 1, &[], &[]).unwrap();
+        assert_eq!(
+            file_footer_version(&world_dir("c").join("autosave").join("world.dat")),
+            current,
+            "autosave_world"
+        );
+
+        crate::server::GameServer::new(0, "d".to_string(), 1).try_save().unwrap();
+        assert_eq!(file_footer_version(&world_dir("d").join("world.dat")), current, "server save");
+
+        // And each loads back through the normal path.
+        for name in ["a", "b", "d"] {
+            let mut w = World::new();
+            load_world(name, &mut w).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        let mut w = World::new();
+        load_autosave("c", &mut w).unwrap();
     }
 }

@@ -243,7 +243,7 @@ above). A third locks the `load_autosave` wiring of the tolerant decode. All liv
 ## Out of scope (do not do)
 
 - No write-side magic / version header now (deferred to the first non-append change — see
-  option i).
+  option i). *Superseded 2026-10-06: a version FOOTER shipped — see below.*
 - No migration to the production rkyv region-file format (`§4.4`) — that is the
   multiplayer-era rebuild, not this hardening pass.
 - No touching the shipped+audited wallpaper feature; no redesign of the save format
@@ -270,11 +270,43 @@ original three; all resolved on top of the merge:
   end-to-end through `load_world`. Added direct unit tests (full-save identity,
   clean-boundary default, mid-field-EOF propagation) + a `load_autosave` recovery test,
   and replaced a mis-named toothless trailing-bytes test with a real forward-compat one.
-- **Forward-compat downgrade** is now flagged as a `BRIDGE` on `read_world_save` (a newer
-  save's extra fields are dropped on re-save — fine until a downgrade path / 34th field
-  exists, at which point the version envelope below earns its keep).
+- **Forward-compat downgrade** was flagged as a `BRIDGE` on `read_world_save` (a newer
+  save's extra fields are dropped on re-save). **Closed 2026-10-06 (gap-audit T1-7)** —
+  see "Update: the format-version footer" below.
 - **Write-side drift** is already compile-time-safe — every `WorldSave` builder uses an
   exhaustive literal (no `..`) and the struct has no `Default`, so a new field cannot be
   added without updating every builder *and* the tolerant decoder. A DRY save-side
   collector was considered and deliberately **not** built (pure maintainability, not a
   correctness fix — the refactor risk isn't justified on the real-sats path).
+
+---
+
+## Update 2026-10-06: the format-version footer (gap-audit T1-7)
+
+The forward-compat BRIDGE is replaced. Every `world.dat` is now
+`bincode(WorldSave) || format_version: u32 LE || b"AXSAVEv1"` (`save_format.rs`), and
+a build refuses — clearly, without writing — a save whose version is newer than its own
+`SAVE_FORMAT_VERSION` (52 = the `WorldSave` field count, plus a hand-bumped layout
+revision for nested-type changes).
+
+Why this does not reopen the "Why not option i" objections above:
+
+- **It is a footer, not a header.** Option i prepended a magic, which (a) would make
+  every new save unreadable to the builds already shipped and (b) collides with a
+  legacy save's leading `seed: u32`. A footer sits after the last field. The tolerant
+  decoder every shipped build runs ignores trailing bytes (verified by the test
+  `pre_footer_decoder_reads_a_footer_bearing_save_unchanged`), so shipped builds keep
+  opening new saves exactly as before, and the 8-byte magic sits at the very end of the
+  file, where a footer-less save has no realistic chance of matching it.
+- **The tolerant decode stays.** Footer-less saves (everything written before
+  2026-10-06) take the same path as before; a footer-bearing save has the footer
+  stripped first, then the same decode.
+
+What a refusal does: the lobby card is labelled "(needs a newer version)", Play / Host /
+Workshop / Trials / online host stay in the lobby with *"This world was saved by a newer
+version of Axe'n'Stax. Update the game to open it."*, the dedicated server exits at boot,
+and every native writer (save, autosave, server save, meta) refuses the folder before
+touching it. No quarantine rename, no rebuilt meta. Full description: Spec 02 §8.4.
+
+Still open: a real migration for the first non-append change to `WorldSave` and for the
+bincode 1 → 3 move, which will key on this version.

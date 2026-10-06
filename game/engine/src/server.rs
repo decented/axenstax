@@ -1298,6 +1298,9 @@ impl GameServer {
     pub(crate) fn try_save(&self) -> Result<(), String> {
         let wname = self.world_name.clone();
         let dir = crate::save::world_dir(&wname);
+        // A world saved by a newer build is never written (Spec 02 §8.4) — checked
+        // before the first chunk, since chunks are written before `world.dat`.
+        crate::save::refuse_write_over_newer_save(&dir)?;
         let chunks_dir = dir.join("chunks");
         std::fs::create_dir_all(&chunks_dir)
             .map_err(|e| format!("mkdir {}: {e}", chunks_dir.display()))?;
@@ -1571,7 +1574,7 @@ impl GameServer {
                 .collect(),
         };
 
-        let encoded = bincode::serialize(&save).map_err(|e| format!("serialize world.dat: {e}"))?;
+        let encoded = crate::save_format::encode_world_save(&save)?;
 
         // Spec 02 §7.5 — loaded + evicted chunks, written before the commit point.
         let mut chunk_attempts = 0usize;
