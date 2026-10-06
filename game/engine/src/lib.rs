@@ -2198,10 +2198,19 @@ impl ApplicationHandler for App {
                     // A close never throws away a crash-recovery autosave:
                     // it saves a live own world or arena, or leaves disk alone.
                     let choice = crate::world_exit::close_choice(in_world, state.live_world);
-                    if state.live_world.is_some() {
-                        state.leave_world(choice, crate::world_exit::ExitTo::Quit);
+                    // A close-save that FAILED keeps the window open in the
+                    // world with the toast saying why (review 2026-10-06): the
+                    // player can retry, or "Quit without saving". (Online
+                    // hosting was already retired above.)
+                    let stayed = state.live_world.is_some()
+                        && !state.leave_world(choice, crate::world_exit::ExitTo::Quit);
+                    if stayed {
+                        state.window.request_redraw();
+                    } else {
+                        event_loop.exit();
                     }
                 }
+                #[cfg(target_arch = "wasm32")]
                 event_loop.exit();
             }
 

@@ -10,8 +10,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::save::{
-    exhibit_image_path, list_world_entries, load_world, load_world_meta, sanitize_folder_name,
-    sanitize_image_ref, slugify_folder_name, write_world_folder, WorldMeta, WorldSave,
+    exhibit_image_path, load_world, load_world_meta, sanitize_folder_name, sanitize_image_ref,
+    slugify_folder_name, worlds_root, write_world_folder, WorldMeta, WorldSave,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::world::World;
@@ -76,6 +76,12 @@ fn write_unpacked_world(
     world: &World,
     images: &[ExhibitImage],
 ) -> Result<(), String> {
+    // Belt and braces behind the collision set: an import only ever creates a
+    // folder, never writes into one that is there.
+    let dir = crate::save::world_dir(final_name);
+    if dir.exists() {
+        return Err(format!("{} already exists; not importing over it", dir.display()));
+    }
     let mut meta2 = meta;
     if final_name != base_slug {
         meta2.display_name = final_name.to_string();
@@ -96,10 +102,27 @@ fn write_unpacked_world(
     Ok(())
 }
 
-/// Every world folder name currently on disk (the collision set).
+/// Every name already taken under `worlds_root()` — the collision set an import
+/// names against. EVERY entry counts, not just the lobby's world cards
+/// (`list_world_entries` lists only folders holding a `world.dat` and skips the
+/// Workshop): naming against that list let an import write over the native
+/// Workshop, a folder holding only chunks or a crash-recovery autosave, or a
+/// stray file (Spec 02 §8.4). `Err` when the folder can't be listed — then no
+/// name is known to be free and the import is refused.
 #[cfg(not(target_arch = "wasm32"))]
-fn existing_world_folders() -> Vec<String> {
-    list_world_entries().into_iter().map(|e| e.folder_name).collect()
+fn existing_world_folders() -> Result<Vec<String>, String> {
+    let root = worlds_root();
+    let entries = match std::fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{} can't be listed ({e})", root.display())),
+    };
+    entries
+        .map(|e| {
+            e.map(|e| e.file_name().to_string_lossy().into_owned())
+                .map_err(|e| format!("{} can't be listed ({e})", root.display()))
+        })
+        .collect()
 }
 
 /// Unpack a `.axeworld` byte blob into a new world folder.
@@ -120,7 +143,7 @@ pub fn import_world_native(bytes: &[u8]) -> Result<String, String> {
 
     // Derive a filesystem-safe folder name from the archive's display name.
     let base_slug = sanitize_folder_name(&meta.display_name);
-    let final_name = dedupe_world_name(&base_slug, &existing_world_folders());
+    let final_name = dedupe_world_name(&base_slug, &existing_world_folders()?);
 
     let display = meta.display_name.clone();
     write_unpacked_world(&final_name, &base_slug, meta, &save, &world, &images)?;
@@ -180,7 +203,7 @@ pub fn import_profile_world(bytes: &[u8], entry_name: &str) -> Result<(String, b
     let (meta, save, images) = unpack_world_for_import(bytes, &mut world)?;
 
     let base_slug = slugify_folder_name(entry_name);
-    let final_name = keep_both_name(&base_slug, &existing_world_folders());
+    let final_name = keep_both_name(&base_slug, &existing_world_folders()?);
     let renamed = final_name != base_slug;
 
     write_unpacked_world(&final_name, &base_slug, meta, &save, &world, &images)?;
@@ -508,6 +531,63 @@ mod tests {
                 let _ = std::fs::remove_dir(crate::data_dir::profile_dir()); // only if now empty
             }
         }
+    }
+
+    /// Review 2026-10-06 — an import names against EVERY entry under the worlds
+    /// root, not the lobby list (folders with a `world.dat`, minus the Workshop):
+    /// it must never write into the native Workshop, a folder holding only
+    /// chunks or only a crash-recovery autosave, or over a stray file.
+    #[test]
+    fn an_import_never_writes_into_a_name_the_lobby_does_not_list() {
+        let _g = crate::save::WorldsRootGuard::new("nwio_import_collisions");
+        let root = crate::save::worlds_root();
+        let mut world = World::new();
+        world.set_block(0, 0, 0, block::STONE);
+        let save = crate::save::minimal_world_save_for_tests(9);
+        write_world_folder("src", &crate::save::WorldMeta::new("src"), &save, &world).unwrap();
+        let bytes = export_world_native("src").expect("export");
+        write_world_folder(
+            crate::workshop::WORKSHOP_FOLDER,
+            &crate::save::WorldMeta::new("The Workshop"),
+            &save,
+            &world,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("chunks-only/chunks")).unwrap();
+        std::fs::write(root.join("chunks-only/chunks/0_0_0.chunk"), b"chunk").unwrap();
+        std::fs::create_dir_all(root.join("autosave-only/autosave")).unwrap();
+        std::fs::write(root.join("autosave-only/autosave/world.dat"), b"autosave").unwrap();
+        std::fs::write(root.join("stray"), b"a file").unwrap();
+        let workshop_dat = std::fs::read(world_dir(crate::workshop::WORKSHOP_FOLDER).join("world.dat")).unwrap();
+
+        for (entry, folder) in [
+            ("The Workshop", "the_workshop (web)"),
+            ("chunks-only", "chunks-only (web)"),
+            ("autosave-only", "autosave-only (web)"),
+            ("stray", "stray (web)"),
+        ] {
+            let (name, renamed) = import_profile_world(&bytes, entry).expect(entry);
+            assert_eq!(name, folder, "{entry}");
+            assert!(renamed, "{entry}");
+        }
+        // Every taken name is exactly as it was.
+        assert_eq!(
+            std::fs::read(world_dir(crate::workshop::WORKSHOP_FOLDER).join("world.dat")).unwrap(),
+            workshop_dat
+        );
+        for (dir, files) in [
+            ("chunks-only", vec!["chunks"]),
+            ("autosave-only", vec!["autosave"]),
+        ] {
+            let mut found: Vec<String> = std::fs::read_dir(root.join(dir))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            found.sort();
+            assert_eq!(found, files, "{dir} was written into");
+        }
+        assert_eq!(std::fs::read(root.join("stray")).unwrap(), b"a file");
     }
 
     #[test]

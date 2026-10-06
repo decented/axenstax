@@ -1521,7 +1521,9 @@ fn serialize_inventory(inventory: &Inventory) -> Vec<SavedSlot> {
 /// whose file the session never read — data it knows nothing about — leaves that
 /// file alone.
 #[cfg(not(target_arch = "wasm32"))]
-fn partition_chunks_for_save(world: &World) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
+pub(crate) fn partition_chunks_for_save(
+    world: &World,
+) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
     let mut write = Vec::new();
     let mut delete = Vec::new();
     // Spec 02 §7.5 — loaded + evicted chunks (an unloaded edit must still save).
@@ -1533,6 +1535,21 @@ fn partition_chunks_for_save(world: &World) -> (Vec<(i32, i32, i32)>, Vec<(i32, 
         }
     }
     (write, delete)
+}
+
+/// True when `dir` holds nothing of a saved world yet — no `world.dat` and no
+/// `chunks/*.chunk` — so the save about to run is the world's FIRST. A first save
+/// writes `world.dat` BEFORE any chunk (`write_world_folder`,
+/// `GameServer::try_save`): cut short (the dedicated server killed during its
+/// tick-0 save), it leaves a world that opens, its unwritten chunks regenerating
+/// from the seed — not chunks without a `world.dat`, which `world_open` refuses
+/// for good (Spec 02 §8.4). Every later save keeps `world.dat` as its commit
+/// point, written after the chunks. When the folder can't be checked this is
+/// `false`: the usual order.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn is_first_save(dir: &std::path::Path) -> bool {
+    matches!(dir.join("world.dat").try_exists(), Ok(false))
+        && matches!(crate::world_open::saved_chunk_file(dir), Ok(None))
 }
 
 /// Every check a save runs before it touches `dir`: not a newer build's world nor
@@ -1560,9 +1577,12 @@ fn refuse_world_write(dir: &std::path::Path) -> Result<(), String> {
 ///
 /// Specifically this function:
 ///   - Creates `worlds/<name>/chunks/` (mkdir -p).
+///   - Writes every non-empty chunk as `chunks/<cx>_<cy>_<cz>.chunk`.
 ///   - Atomically writes `worlds/<name>/world.dat` (bincode of `save`).
 ///   - Writes `worlds/<name>/world_meta.json` (via `save_world_meta`).
-///   - Writes every non-empty chunk as `chunks/<cx>_<cy>_<cz>.chunk`.
+///
+/// On a world's FIRST save (`is_first_save`) `world.dat` and the meta are
+/// written before the chunks, so a first save cut short still opens.
 ///
 /// It does NOT bump `meta.version` or update proof-of-play stats — callers that
 /// need those (i.e. the live-game `save_world`) do so themselves after the call.
@@ -1578,6 +1598,7 @@ pub fn write_world_folder(
 ) -> Result<(), String> {
     let dir = world_dir(name);
     refuse_world_write(&dir)?;
+    let first_save = is_first_save(&dir);
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
 
@@ -1591,10 +1612,18 @@ pub fn write_world_folder(
     // until then `world.dat` stays plaintext bincode (+ the format-version footer).
     let encoded = crate::save_format::encode_world_save(save)?;
 
-    // Spec 02 §7.5 — loaded + evicted chunks. Written FIRST (tmp + rename, one
-    // directory fsync at the end — review S2), so `world.dat` below is the commit
-    // point: a crash before it leaves the old world.dat with new-or-old chunks,
-    // never new block-entity state over old block data.
+    // A world's FIRST save writes world.dat and its meta before any chunk, so one
+    // cut short still opens (`is_first_save`); there is no older block data on
+    // disk for the new state to disagree with.
+    if first_save {
+        write_atomic(&dir.join("world.dat"), &encoded)?;
+        save_world_meta(name, meta)?;
+    }
+
+    // Spec 02 §7.5 — loaded + evicted chunks. Otherwise written FIRST (tmp +
+    // rename, one directory fsync at the end — review S2), so `world.dat` below is
+    // the commit point: a crash before it leaves the old world.dat with
+    // new-or-old chunks, never new block-entity state over old block data.
     for ((cx, cy, cz), chunk) in world.persistable_chunks() {
         if chunk.is_empty() {
             continue;
@@ -1607,8 +1636,10 @@ pub fn write_world_folder(
     }
     sync_dir(&chunks_dir);
 
-    write_atomic(&dir.join("world.dat"), &encoded)?;
-    save_world_meta(name, meta)?;
+    if !first_save {
+        write_atomic(&dir.join("world.dat"), &encoded)?;
+        save_world_meta(name, meta)?;
+    }
 
     Ok(())
 }
@@ -2393,8 +2424,10 @@ pub fn load_world(
     let dir = world_dir(name);
 
     // Refuse a world whose info is damaged beyond recovery rather than load it
-    // under default meta (seed 42, survival) — audit 2026-09-27.
-    try_load_world_meta(name)?;
+    // under default meta (seed 42, survival) — audit 2026-09-27. Read-only: a
+    // recoverable torn meta is repaired by `world_open::open_world` once the
+    // whole load has succeeded, never before (review 2026-10-06).
+    peek_world_meta(name)?;
 
     let dat_path = dir.join("world.dat");
     let data = fs::read(&dat_path).map_err(|e| format!("world.dat can't be read ({e})"))?;
@@ -3227,8 +3260,87 @@ pub struct WorldEntry {
     pub cloud_only: bool,
 }
 
+/// What [`read_world_meta`] found wrong with `world_meta.json`, when the world's
+/// info is still recoverable from `world.dat`.
+#[cfg(not(target_arch = "wasm32"))]
+enum MetaDamage {
+    /// The file is there but does not parse: why.
+    Torn(String),
+    /// Missing, and a damaged copy was quarantined earlier.
+    Quarantined,
+}
+
+/// Read a world's info with NO side effect (review 2026-10-06: reading never
+/// writes). `Ok((meta, None))` for a good file (or a legacy world with none);
+/// `Ok((rebuilt, Some(damage)))` when the file is torn or was quarantined but
+/// `world.dat` supplies the seed — the meta is rebuilt in memory only, with the
+/// PoP secret salvaged from the damaged bytes or `None` (never a freshly minted
+/// one, which would differ on every read); `Err` when the info is damaged
+/// beyond recovery. See [`try_load_world_meta`] for the rules.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_world_meta(folder_name: &str) -> Result<(WorldMeta, Option<MetaDamage>), String> {
+    let dir = world_dir(folder_name);
+    let meta_path = dir.join("world_meta.json");
+    let dat_path = dir.join("world.dat");
+
+    // Bytes, not read_to_string: a tear inside a multi-byte character must be
+    // recovered like any other parse failure, not refused (review S4).
+    let (damage, salvaged_secret) = match fs::read(&meta_path) {
+        Ok(data) => match serde_json::from_slice::<WorldMeta>(&data) {
+            Ok(meta) => return Ok((meta, None)),
+            Err(e) => {
+                // A newer build may write meta this build can't parse: refuse the
+                // world rather than quarantine and rebuild it (Spec 02 §8.4).
+                if let Some(newer) = save_refusal_in(&dir) {
+                    return Err(newer.to_string());
+                }
+                // The PoP secret lives ONLY in this file (never in world.dat, which
+                // travels in exports), so whatever of it is still readable in the
+                // damaged bytes is salvaged.
+                (MetaDamage::Torn(e.to_string()), salvage_pop_secret(&data))
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if !has_quarantined_sibling(&dir, "world_meta.json") {
+                // Legacy world with no meta file at all. Don't write to disk yet.
+                return Ok((WorldMeta::from_folder(folder_name, &dat_path), None));
+            }
+            if let Some(newer) = save_refusal_in(&dir) {
+                return Err(newer.to_string());
+            }
+            (MetaDamage::Quarantined, salvage_pop_secret_from_quarantine(&dir))
+        }
+        Err(e) => return Err(format!("world info damaged: world_meta.json can't be read ({e})")),
+    };
+
+    // Recovery: rebuild from world.dat's seed, never from the seed-42 default.
+    let save = fs::read(&dat_path)
+        .map_err(|e| format!("world info damaged: world_meta.json unreadable and world.dat unreadable ({e})"))
+        .and_then(|data| {
+            read_world_save(&data).map_err(|e| {
+                format!("world info damaged: world_meta.json unreadable and world.dat has no seed ({e})")
+            })
+        })?;
+    let mut meta = recovered_meta(folder_name, &dat_path, &save);
+    meta.pop_secret = salvaged_secret;
+    Ok((meta, Some(damage)))
+}
+
+/// A world's info, read-only: [`read_world_meta`] without the repair. A torn but
+/// recoverable meta comes back rebuilt in memory (seed from `world.dat`,
+/// conservative flags, the salvaged PoP secret or `None`); nothing is moved or
+/// written. For every reader that is not opening the world — the lobby list,
+/// display, the seed lookups — so reading a world never changes it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn peek_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
+    read_world_meta(folder_name).map(|(meta, _)| meta)
+}
+
 /// Load `world_meta.json` for a world, strictly (audit 2026-09-27, item
-/// "torn world_meta.json reloads with seed 42").
+/// "torn world_meta.json reloads with seed 42"), REPAIRING a recoverable one.
+/// Called once a world has opened (`world_open::open_world`, after the load
+/// succeeded) — every other reader uses the read-only [`peek_world_meta`], so a
+/// world that is then refused is never written (review 2026-10-06).
 ///
 /// - A readable, parseable file → `Ok(meta)`.
 /// - No file and no quarantined sibling → `Ok(defaults)`: a genuinely legacy
@@ -3247,92 +3359,39 @@ pub struct WorldEntry {
 ///   moved, so a refused world is left byte-for-byte as it was (Spec 02 §8.4).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
+    let (mut meta, damage) = read_world_meta(folder_name)?;
+    let Some(damage) = damage else {
+        return Ok(meta);
+    };
     let dir = world_dir(folder_name);
-    let meta_path = dir.join("world_meta.json");
-    let dat_path = dir.join("world.dat");
-
-    // Bytes, not read_to_string: a tear inside a multi-byte character must be
-    // recovered like any other parse failure, not refused (review S4).
-    enum Damage {
-        /// The file is there but does not parse: its bytes, and why.
-        Torn(Vec<u8>, String),
-        /// Missing, and a damaged copy was quarantined earlier.
-        Quarantined,
-    }
-    let damage = match fs::read(&meta_path) {
-        Ok(data) => match serde_json::from_slice::<WorldMeta>(&data) {
-            Ok(meta) => return Ok(meta),
-            Err(e) => {
-                // A newer build may write meta this build can't parse: refuse the
-                // world rather than quarantine and rebuild it (Spec 02 §8.4).
-                if let Some(newer) = save_refusal_in(&dir) {
-                    return Err(newer.to_string());
-                }
-                Damage::Torn(data, e.to_string())
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if !has_quarantined_sibling(&dir, "world_meta.json") {
-                // Legacy world with no meta file at all. Don't write to disk yet.
-                return Ok(WorldMeta::from_folder(folder_name, &dat_path));
-            }
-            if let Some(newer) = save_refusal_in(&dir) {
-                return Err(newer.to_string());
-            }
-            Damage::Quarantined
-        }
-        Err(e) => return Err(format!("world info damaged: world_meta.json can't be read ({e})")),
-    };
-
-    // Recovery: rebuild from world.dat's seed, never from the seed-42 default.
-    // world.dat is read FIRST, so an unrecoverable world is refused with nothing
-    // moved or written — the damaged meta stays exactly where it was (Spec 02 §8.4).
-    let save = fs::read(&dat_path)
-        .map_err(|e| format!("world info damaged: world_meta.json unreadable and world.dat unreadable ({e})"))
-        .and_then(|data| {
-            read_world_save(&data).map_err(|e| {
-                format!("world info damaged: world_meta.json unreadable and world.dat has no seed ({e})")
-            })
-        })?;
-    // The PoP secret lives ONLY in this file (never in world.dat, which travels
-    // in exports), so whatever of it is still readable in the damaged bytes is
-    // salvaged before they are moved aside.
-    let salvaged_secret = match damage {
-        Damage::Torn(data, e) => {
+    match damage {
+        MetaDamage::Torn(e) => {
             log::error!("world '{folder_name}': world_meta.json does not parse ({e})");
-            quarantine_corrupt(&meta_path)
+            quarantine_corrupt(&dir.join("world_meta.json"))
                 .map_err(|qe| format!("world info damaged: {e}; {qe}"))?;
-            salvage_pop_secret(&data)
         }
-        Damage::Quarantined => {
-            log::error!(
-                "world '{folder_name}': world_meta.json missing and a damaged copy was \
-                 quarantined earlier; rebuilding from world.dat"
-            );
-            salvage_pop_secret_from_quarantine(&dir)
-        }
-    };
-    let mut meta = recovered_meta(folder_name, &dat_path, &save);
+        MetaDamage::Quarantined => log::error!(
+            "world '{folder_name}': world_meta.json missing and a damaged copy was \
+             quarantined earlier; rebuilding from world.dat"
+        ),
+    }
     // Keep the world's own PoP secret when it survived the tear (drop placement
     // stays put); only a truly unrecoverable one is replaced, and never by
     // None/zero — the rebuilt meta is written with a real secret.
-    meta.pop_secret = Some(match salvaged_secret {
-        Some(s) => s,
-        None => {
-            log::error!(
-                "world '{folder_name}': the Proof-of-Play secret was not recoverable; \
-                 a fresh one is generated (Satori drop placement moves)"
-            );
-            crate::proof_of_play::gen_world_secret()
-        }
-    });
+    if meta.pop_secret.is_none() {
+        log::error!(
+            "world '{folder_name}': the Proof-of-Play secret was not recoverable; \
+             a fresh one is generated (Satori drop placement moves)"
+        );
+        meta.pop_secret = Some(crate::proof_of_play::gen_world_secret());
+    }
     log::error!(
         "world '{folder_name}': world_meta.json rebuilt. RECOVERED from world.dat: seed {}. \
          SET CONSERVATIVELY: cheats_used=true, pure_survival=false, genesis_block_found=true \
          (never findable twice). DEFAULTED (world.dat doesn't hold them): game_mode, \
          world_type, ground, water_depth, time_lock, difficulty, world options. The damaged \
          original is kept as world_meta.json.corrupt-*",
-        save.seed
+        meta.seed
     );
     write_world_meta_file(&dir, &meta)?;
     Ok(meta)
@@ -3421,13 +3480,15 @@ fn recovered_meta(folder_name: &str, dat_path: &std::path::Path, save: &WorldSav
 
 /// Load world_meta.json for a world, or generate defaults if it doesn't exist.
 ///
-/// Infallible wrapper over [`try_load_world_meta`] for display/best-effort
-/// callers. On a damaged world it returns placeholder defaults, but those can
-/// never reach disk: `save_world_meta` refuses while the damage stands, and
-/// `load_world` refuses to open the world.
+/// Infallible, READ-ONLY wrapper over [`peek_world_meta`] for display /
+/// best-effort callers (the lobby's seed lookup, the dedicated server's boot):
+/// it never quarantines or rewrites a torn meta — only opening the world does
+/// (review 2026-10-06). On a damaged world it returns placeholder defaults, but
+/// those can never reach disk: `save_world_meta` refuses while the damage
+/// stands, and `load_world` refuses to open the world.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_world_meta(folder_name: &str) -> WorldMeta {
-    match try_load_world_meta(folder_name) {
+    match peek_world_meta(folder_name) {
         Ok(meta) => meta,
         Err(e) => {
             log::error!("world '{folder_name}': {e}");
@@ -3525,7 +3586,7 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
             // card, clearly labelled, so the player knows it exists; `load_world`
             // refuses to open it.
             let meta = if let Some(refusal) = save_refusal_in(&world_dir(&folder_name)) {
-                let mut m = try_load_world_meta(&folder_name)
+                let mut m = peek_world_meta(&folder_name)
                     .unwrap_or_else(|_| WorldMeta::from_folder(&folder_name, &dat_path));
                 let label = if refusal.is_newer_version() {
                     "needs a newer version"
@@ -3536,7 +3597,7 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
                 m.description = refusal.to_string();
                 m
             } else {
-                match try_load_world_meta(&folder_name) {
+                match peek_world_meta(&folder_name) {
                     Ok(meta) => meta,
                     Err(e) => {
                         let mut m = WorldMeta::from_folder(&folder_name, &dat_path);

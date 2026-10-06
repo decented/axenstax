@@ -222,9 +222,11 @@ impl super::GameState {
             ) {
                 Ok(crate::world_open::OpenedWorld::New) => None,
                 Ok(crate::world_open::OpenedWorld::Loaded { save, chunks, from }) => {
-                    if from == crate::world_open::OpenedFrom::Autosave {
-                        crate::save::clear_autosave(&self.world_name);
-                    }
+                    // An autosave the world opened from is KEPT until a save lands
+                    // (`world_exit::should_clear_autosave`, `pause_save`): with a
+                    // damaged world.dat it is the only good copy, and deleting it
+                    // here lost the world to a crash before the next save
+                    // (review 2026-10-06). The next autosave overwrites it anyway.
                     if let Some(note) = from.player_note() {
                         self.toast = Some((
                             note,
@@ -248,7 +250,8 @@ impl super::GameState {
         };
         // A world that opened (or is genuinely new) gets its Proof-of-Play secret
         // persisted now — deferred from the lobby so a refused world is never
-        // written (`GameState::apply_world_seed`).
+        // written (`GameState::apply_world_seed`) — or, when the open had to
+        // rebuild a torn meta, the session adopts the secret it persisted.
         #[cfg(not(target_arch = "wasm32"))]
         if self.persists_locally() {
             self.persist_pop_secret_if_missing();

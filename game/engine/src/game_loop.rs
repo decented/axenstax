@@ -1795,9 +1795,11 @@ impl super::GameState {
         // Leave through the one exit (saves the world so the hop doesn't lose
         // build progress, and tears down any hosted/joined/online session —
         // which used to keep running into the Workshop), then re-enter through
-        // the menu's world-load path.
-        self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
-        self.pending_workshop_for_skin = true;
+        // the menu's world-load path. A save that failed keeps the player here,
+        // told why — no hop.
+        if self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby) {
+            self.pending_workshop_for_skin = true;
+        }
     }
 
     /// Export a 64×64 skin as a Minecraft PNG. Web → browser download (the
@@ -2533,7 +2535,11 @@ impl super::GameState {
                 }
                 return 1;
             }
-            self.begin_load();
+            if !self.begin_load() {
+                // Refused: `begin_load` already left for the lobby with the
+                // notice. Nothing to build, and no Loading state to update.
+                return 0;
+            }
             let total = self.load_queue.len();
             if let GameMode::Loading(ref mut st) = self.mode {
                 st.setup_done = true;
@@ -2542,6 +2548,43 @@ impl super::GameState {
             total
         } else {
             self.step_load(crate::loading_screen::LOAD_BUDGET_PER_FRAME)
+        }
+    }
+
+    /// Draw the toast (bottom centre) while it lasts; clears it once expired.
+    /// Shared by the in-world HUD and the pause overlay, so a message raised
+    /// from the pause menu — a failed Save — is seen where it was raised.
+    fn draw_toast(&mut self) {
+        if let Some((ref msg, expiry)) = self.toast {
+            if Instant::now() < expiry {
+                let screen_w = self.renderer.width as f32;
+                // Wraps: the host/join toasts carry a full sentence (an address, or
+                // why hosting failed), which a fixed 240 px single line clipped.
+                let wrap_w = (screen_w - 64.0).clamp(240.0, 560.0);
+    
+                egui::Area::new(egui::Id::new("toast"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -134.0))
+                    .interactable(false)
+                    .show(&self.renderer.egui.ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgba_premultiplied(20, 24, 32, 220))
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .inner_margin(egui::Margin::symmetric(14, 8))
+                            .show(ui, |ui| {
+                                ui.set_max_width(wrap_w);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(msg.as_str())
+                                            .size(16.0)
+                                            .color(egui::Color32::from_rgb(100, 220, 100)),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                    });
+            } else {
+                self.toast = None;
+            }
         }
     }
 
@@ -3114,16 +3157,21 @@ impl super::GameState {
     /// Persist this session's Proof-of-Play secret into the world's meta when the
     /// meta has none (a world saved before per-world secrets). Run by `begin_load`
     /// once the world has opened — never earlier, so a world refused on load is
-    /// never written (Spec 02 §8.4).
+    /// never written (Spec 02 §8.4). When the meta HAS one, the session adopts it:
+    /// the lobby reads the meta read-only (`save::peek_world_meta`), so a secret
+    /// the open's torn-meta recovery had to generate is only known from here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn persist_pop_secret_if_missing(&self) {
+    pub(crate) fn persist_pop_secret_if_missing(&mut self) {
         let Ok(mut meta) = crate::save::try_load_world_meta(&self.world_name) else {
             return;
         };
-        if meta.pop_secret.is_none() {
-            meta.pop_secret = Some(self.pop_server_secret);
-            if let Err(e) = crate::save::save_world_meta(&self.world_name, &meta) {
-                log::error!("saving the new Proof-of-Play secret failed: {e}");
+        match meta.pop_secret {
+            Some(secret) => self.pop_server_secret = secret,
+            None => {
+                meta.pop_secret = Some(self.pop_server_secret);
+                if let Err(e) = crate::save::save_world_meta(&self.world_name, &meta) {
+                    log::error!("saving the new Proof-of-Play secret failed: {e}");
+                }
             }
         }
     }
@@ -8307,22 +8355,35 @@ impl super::GameState {
                         crate::scenario::ArenaMode::KeepNew => format!("{slug}-{fallback_seed:08x}"),
                         _ => slug,
                     };
-                    // Does a world for this experience already exist? The lobby list
-                    // is loaded on both native + wasm by the time Play is clicked.
-                    let world_exists = menu_state.worlds.iter().any(|e| e.folder_name == folder);
-                    let plan = crate::scenario::plan_arena_launch(mode, world_exists);
+                    // Does a world for this experience already exist? Native asks
+                    // the disk (`world_open::plan_arena_folder`: anything saved —
+                    // chunks or an autosave without a world.dat count — and a world
+                    // this build must not open is refused) BEFORE the Reuse wipe or
+                    // the fresh meta below writes anything (Spec 02 §8.4). The web
+                    // asks its lobby list (the IndexedDB records).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (plan, refusal) = match crate::world_open::plan_arena_folder(mode, &folder) {
+                        Ok(plan) => (plan, None),
+                        Err(why) => (crate::scenario::plan_arena_launch(mode, true), Some(why)),
+                    };
+                    #[cfg(target_arch = "wasm32")]
+                    let (plan, refusal) = (
+                        crate::scenario::plan_arena_launch(
+                            mode,
+                            menu_state.worlds.iter().any(|e| e.folder_name == folder),
+                        ),
+                        crate::save::world_open_refusal(&folder),
+                    );
                     let wipe = matches!(plan, crate::scenario::ArenaLaunch::Fresh { wipe: true });
                     let is_fresh = matches!(plan, crate::scenario::ArenaLaunch::Fresh { .. });
                     self.pending_spawn_pref = crate::spawn_pref::SpawnPref::default();
                     log::info!(
-                        "Stash Column: '{dname}' → world '{folder}' (mode {mode:?}, exists={world_exists}, plan {plan:?}, seed {seed})"
+                        "Stash Column: '{dname}' → world '{folder}' (mode {mode:?}, plan {plan:?}, refused={}, seed {seed})",
+                        refusal.is_some()
                     );
-                    // A world this build must not open (a newer build's save, an
-                    // unreadable world.dat) is checked BEFORE the Reuse wipe below
-                    // deletes it — not after (Spec 02 §8.4). Refused: no wipe, no
-                    // fresh meta, no armed launch; the check after this match keeps
-                    // the player in the lobby with the notice.
-                    let refused = crate::save::world_open_refusal(&folder).is_some();
+                    // Refused: no wipe, no fresh meta, no armed launch, not entered
+                    // — the player stays in the lobby with the notice.
+                    let refused = refusal.is_some();
                     if is_fresh && !refused {
                         // Fresh world seeded by arena_seed. For Reuse over a stale
                         // world, wipe first so the terrain regenerates clean (the
@@ -8388,7 +8449,10 @@ impl super::GameState {
                         menu_state.loading_world_name = Some(folder.clone());
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    { load_world = Some(folder); }
+                    match refusal {
+                        Some(why) => menu_state.notice = Some(why),
+                        None => load_world = Some(folder),
+                    }
                 }
                 crate::menu::MenuAction::AdoptSkin { bytes } => {
                     // Stash Column (Prague) — stash the downloaded skin blob; it's
@@ -9220,26 +9284,9 @@ impl super::GameState {
                     self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
                 }
                 crate::menu::PAUSE_SAVE => {
-                    // A joined session never writes a local save (no
-                    // "remote_game" folder) — the host owns that world.
-                    if self.persists_locally() {
-                        if let Err(e) = crate::save::save_world(
-                            &self.world_name, &self.world, &self.players, self.biome_gen.seed,
-                            &crate::save::carts_to_saved(&self.ecs),
-                            &crate::save::tamed_mobs_to_saved(&self.ecs),
-                        ) {
-                            log::error!("Save failed: {e}");
-                        }
-                        crate::save::clear_autosave(&self.world_name);
-                    }
-                    // Spec 40 persistence — flush the player wardrobe on world exit
-                    // so the latest pin/edit is never lost (the debounce may not have
-                    // fired yet). Best-effort; native writes a profile file, WASM the Stash.
-                    if self.wardrobe_dirty {
-                        self.wardrobe_dirty = false;
-                        self.wardrobe_save_counter = 0;
-                        crate::wardrobe_store::save(self.world.player_wardrobe.set());
-                    }
+                    // Save in place (`world_exit::pause_save`): the autosave is
+                    // cleared only once the save landed; a failure says why.
+                    self.pause_save();
                 }
                 crate::menu::PAUSE_SAVE_QUIT => {
                     // The one exit (`world_exit::leave_world`): save, flush the
@@ -9390,6 +9437,8 @@ impl super::GameState {
                 }
                 _ => {} // -1 = no click
             }
+            // Over the pause menu too: a failed Save says why where it was asked.
+            self.draw_toast();
 
             let num_players = self.players.len();
             let screens = crate::screen::compute_screen_layout(num_players, self.renderer.width, self.renderer.height);
@@ -21315,37 +21364,7 @@ impl super::GameState {
         }
 
         // ── Toast notification ────────────────────────────────────────────────
-        if let Some((ref msg, expiry)) = self.toast {
-            if Instant::now() < expiry {
-                let screen_w = self.renderer.width as f32;
-                // Wraps: the host/join toasts carry a full sentence (an address, or
-                // why hosting failed), which a fixed 240 px single line clipped.
-                let wrap_w = (screen_w - 64.0).clamp(240.0, 560.0);
-
-                egui::Area::new(egui::Id::new("toast"))
-                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -134.0))
-                    .interactable(false)
-                    .show(&self.renderer.egui.ctx, |ui| {
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgba_premultiplied(20, 24, 32, 220))
-                            .corner_radius(egui::CornerRadius::same(8))
-                            .inner_margin(egui::Margin::symmetric(14, 8))
-                            .show(ui, |ui| {
-                                ui.set_max_width(wrap_w);
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(msg.as_str())
-                                            .size(16.0)
-                                            .color(egui::Color32::from_rgb(100, 220, 100)),
-                                    )
-                                    .wrap(),
-                                );
-                            });
-                    });
-            } else {
-                self.toast = None;
-            }
-        }
+        self.draw_toast();
 
         // Drain a bounded slice of queued chunk-mesh rebuilds (Spec 39 A4) so a
         // lighting/boundary edit storm spreads across frames instead of stalling

@@ -18,6 +18,10 @@
 //! The existing keep-a-damaged-copy-aside recoveries still run when the rest of
 //! the load succeeds (a torn chunk, a torn `world_meta.json` rebuilt from
 //! `world.dat`, a partly decoded `world.dat`): no data is lost, so the world opens.
+//! Reading a world's info never writes (`save::peek_world_meta`): the torn-meta
+//! rebuild runs LAST, once everything else has loaded. If that rebuild itself
+//! fails, the world is refused, and a damaged chunk or autosave the load had
+//! already kept aside stays aside — moved, never lost.
 
 use crate::save::WorldSave;
 use crate::world::World;
@@ -107,15 +111,24 @@ pub(crate) fn open_world(
     }
     let has_dat = present(&dir, "world.dat")?;
     let has_autosave = present(&dir, "autosave/world.dat")?;
-    // Damaged-beyond-recovery world info refuses the world (a torn file is rebuilt
-    // from world.dat here, the existing recovery). Checked for a new world too: one
-    // whose meta can't be read would otherwise play under defaults and never save.
-    crate::save::try_load_world_meta(name)?;
+    // Damaged-beyond-recovery world info refuses the world. Checked for a new world
+    // too: one whose meta can't be read would otherwise play under defaults and
+    // never save. Read-only — a torn but recoverable meta is rebuilt from
+    // world.dat only once the world has loaded (`repaired`), so a world refused
+    // below is never written (review 2026-10-06).
+    crate::save::peek_world_meta(name)?;
+    // Every `Loaded` return goes through here: the torn-meta recovery (keep the
+    // damaged file aside, write the rebuilt meta) runs last, like the other
+    // keep-a-copy-aside recoveries.
+    let repaired = |opened: OpenedWorld| -> Result<OpenedWorld, String> {
+        crate::save::try_load_world_meta(name)?;
+        Ok(opened)
+    };
 
     if has_autosave && autosave == AutosavePolicy::Prefer {
         let autosave_err = match crate::save::load_autosave(name, world) {
             Ok((save, chunks)) => {
-                return Ok(OpenedWorld::Loaded {
+                return repaired(OpenedWorld::Loaded {
                     save: Box::new(save),
                     chunks,
                     from: OpenedFrom::Autosave,
@@ -137,7 +150,7 @@ pub(crate) fn open_world(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| kept.display().to_string());
-        return Ok(OpenedWorld::Loaded {
+        return repaired(OpenedWorld::Loaded {
             save: Box::new(save),
             chunks,
             from: OpenedFrom::LastSaveAfterAutosaveFailed { why: autosave_err, kept_as },
@@ -146,7 +159,7 @@ pub(crate) fn open_world(
 
     if has_dat {
         let (save, chunks) = crate::save::load_world(name, world)?;
-        return Ok(OpenedWorld::Loaded {
+        return repaired(OpenedWorld::Loaded {
             save: Box::new(save),
             chunks,
             from: OpenedFrom::LastSave,
@@ -155,7 +168,11 @@ pub(crate) fn open_world(
 
     // Nothing to load. Is anything else of a saved world here?
     if let Some(file) = saved_chunk_file(&dir)? {
-        return Err(format!("world.dat is missing, but saved chunks are here ({file})"));
+        return Err(format!(
+            "world.dat is missing, but saved chunks are here ({file}). If the world's first \
+             save was cut short, move its chunks folder aside and it starts again from its \
+             seed; otherwise restore world.dat from a backup"
+        ));
     }
     if has_autosave {
         return Err(
@@ -190,6 +207,27 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
     format!("world '{name}'{place} couldn't be opened: {why}. Nothing was changed.")
 }
 
+/// How a Trial arena launch treats its folder, decided from what is ON DISK and
+/// before anything is written (Spec 02 §8.4). A world is there when
+/// [`is_new_world`] says so — not when the lobby lists it (only folders with a
+/// `world.dat`): a Resume arena holding chunks but no `world.dat` used to be
+/// re-created with a fresh meta over its real one before the open refused it,
+/// and a Reuse arena in that state was never wiped, so it was refused on every
+/// launch. `Err` (the lobby notice) for a world this build must not open
+/// (`save::world_open_refusal`) or a folder that can't be checked — then
+/// nothing is wiped, created or entered. Reads only.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn plan_arena_folder(
+    mode: crate::scenario::ArenaMode,
+    name: &str,
+) -> Result<crate::scenario::ArenaLaunch, String> {
+    if let Some(why) = crate::save::world_open_refusal(name) {
+        return Err(why);
+    }
+    let on_disk = !is_new_world(name).map_err(|why| crate::save_format::unopenable_message(&why))?;
+    Ok(crate::scenario::plan_arena_launch(mode, on_disk))
+}
+
 /// True when nothing of a saved world is in `worlds/<name>/` — no `world.dat`, no
 /// `autosave/world.dat`, no `chunks/*.chunk` — so a fresh world may be generated
 /// (and the dedicated server may bootstrap its meta). `Err` when that can't be
@@ -214,7 +252,7 @@ fn present(dir: &std::path::Path, rel: &str) -> Result<bool, String> {
 /// `autosave/world.dat` is a torn autosave that nothing ever loads, so it doesn't
 /// count). `Err` when the folder can't be listed.
 #[cfg(not(target_arch = "wasm32"))]
-fn saved_chunk_file(dir: &std::path::Path) -> Result<Option<String>, String> {
+pub(crate) fn saved_chunk_file(dir: &std::path::Path) -> Result<Option<String>, String> {
     let entries = match std::fs::read_dir(dir.join("chunks")) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -351,8 +389,14 @@ mod tests {
         // Every writer refuses it too (its version is unknown).
         assert!(crate::save::save_world_meta("w", &WorldMeta::new("w")).is_err());
         assert!(crate::server::GameServer::new(0, "w".into(), 1).try_save().is_err());
+        // The refused world keeps its lobby card, labelled with why.
         let entries = crate::save::list_world_entries();
-        assert!(entries.is_empty() || entries[0].meta.display_name.contains("can't be opened"));
+        assert_eq!(entries.len(), 1, "a refused world is listed, not hidden");
+        assert!(
+            entries[0].meta.display_name.contains("can't be opened"),
+            "{}",
+            entries[0].meta.display_name
+        );
     }
 
     #[test]
@@ -441,6 +485,10 @@ mod tests {
         let dir = saved_world("w");
         fs::remove_file(dir.join("world.dat")).unwrap();
         assert_refused("w", "world.dat is missing, but saved chunks are here");
+        // The refusal tells the operator / player how to get the world back.
+        let err = open_world("w", &mut World::new(), AutosavePolicy::Ignore).unwrap_err();
+        assert!(err.contains("move its chunks folder aside"), "{err}");
+        assert!(err.contains("restore world.dat from a backup"), "{err}");
     }
 
     #[test]
@@ -619,5 +667,158 @@ mod tests {
         )
         .is_err());
         assert_eq!(snapshot(&dir), before);
+    }
+
+    // ── Review 2026-10-06 follow-ups ──
+
+    /// Opening never writes before it knows the world opens: a torn (but
+    /// recoverable) meta used to be quarantined and rebuilt at the top of
+    /// `open_world` — and by the lobby list and every `load_world_meta` read —
+    /// so a world then refused for another reason was no longer as it was.
+    #[test]
+    fn a_torn_meta_is_left_alone_by_reads_and_by_a_refused_open() {
+        let _g = WorldsRootGuard::new("open_torn_meta_refused");
+        let dir = saved_world("w");
+        fs::write(dir.join("world_meta.json"), b"{ torn").unwrap();
+        fs::write(dir.join("chunks/a_b_c.chunk"), b"x").unwrap();
+        let before = snapshot(&dir);
+        // The lobby card and the display / seed reads see the recovered info...
+        let entries = crate::save::list_world_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(crate::save::load_world_meta("w").seed, 77, "seed recovered from world.dat");
+        // ...and write nothing.
+        assert_eq!(snapshot(&dir), before, "reading a world's info never writes");
+        assert_refused("w", "chunks/a_b_c.chunk isn't a chunk file name");
+    }
+
+    /// The torn-meta recovery still runs — once the world has opened.
+    #[test]
+    fn a_torn_meta_is_rebuilt_once_the_world_has_opened() {
+        let _g = WorldsRootGuard::new("open_torn_meta_ok");
+        let dir = saved_world("w");
+        fs::write(dir.join("world_meta.json"), b"{ torn").unwrap();
+        let mut world = World::new();
+        assert!(matches!(
+            open_world("w", &mut world, AutosavePolicy::Prefer),
+            Ok(OpenedWorld::Loaded { from: OpenedFrom::LastSave, .. })
+        ));
+        let meta: WorldMeta =
+            serde_json::from_slice(&fs::read(dir.join("world_meta.json")).unwrap()).unwrap();
+        assert_eq!(meta.seed, 77, "rebuilt from world.dat");
+        assert!(meta.pop_secret.is_some(), "the rebuilt meta carries a real secret");
+        assert!(fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("world_meta.json.corrupt-")));
+        // A later save is no longer refused.
+        crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+    }
+
+    /// A Trial arena is planned from what is ON DISK, not from the lobby list
+    /// (folders with a `world.dat`): a Resume arena holding chunks but no
+    /// `world.dat` used to be re-created with a fresh meta written over its real
+    /// one before the open refused it, and a Reuse arena in that state was
+    /// refused on every launch, never wiped.
+    #[test]
+    fn an_arena_is_planned_from_the_disk_and_planning_writes_nothing() {
+        use crate::scenario::{ArenaLaunch, ArenaMode};
+        let _g = WorldsRootGuard::new("open_arena_plan");
+        let dir = saved_world("exp-a");
+        fs::remove_file(dir.join("world.dat")).unwrap();
+        let before = snapshot(&dir);
+        // Resume: a saved run is here — resumed (so the open refuses it with
+        // nothing written), never re-created over it.
+        assert_eq!(plan_arena_folder(ArenaMode::Resume, "exp-a"), Ok(ArenaLaunch::Resume));
+        // Reuse regenerates every play: the stale folder is wiped, not a lock-out.
+        assert_eq!(
+            plan_arena_folder(ArenaMode::Reuse, "exp-a"),
+            Ok(ArenaLaunch::Fresh { wipe: true })
+        );
+        assert_eq!(snapshot(&dir), before, "planning writes nothing");
+        // An autosave alone counts as saved too.
+        let slot = slot();
+        crate::save::autosave_world("exp-b", &World::new(), std::slice::from_ref(&slot), 1, &[], &[])
+            .unwrap();
+        assert_eq!(plan_arena_folder(ArenaMode::Resume, "exp-b"), Ok(ArenaLaunch::Resume));
+        // Nothing here (a meta alone is a new world): fresh, nothing to wipe.
+        crate::save::save_world_meta("exp-c", &WorldMeta::new("exp-c")).unwrap();
+        assert_eq!(
+            plan_arena_folder(ArenaMode::Resume, "exp-c"),
+            Ok(ArenaLaunch::Fresh { wipe: false })
+        );
+        assert_eq!(
+            plan_arena_folder(ArenaMode::Reuse, "exp-none"),
+            Ok(ArenaLaunch::Fresh { wipe: false })
+        );
+        // A world this build must not open is refused before any wipe.
+        let d = saved_world("exp-d");
+        fs::remove_file(d.join("world.dat")).unwrap();
+        fs::create_dir(d.join("world.dat")).unwrap();
+        let before = snapshot(&d);
+        for mode in [ArenaMode::Reuse, ArenaMode::Resume, ArenaMode::KeepNew] {
+            let err = plan_arena_folder(mode, "exp-d").unwrap_err();
+            assert!(err.contains("world.dat can't be read"), "{mode:?}: {err}");
+        }
+        assert_eq!(snapshot(&d), before);
+    }
+
+    /// A world's FIRST save writes `world.dat` before any chunk, so a first save
+    /// cut short (the dedicated server killed during its tick-0 save) leaves a
+    /// world that opens — not chunks without a `world.dat`, refused forever.
+    #[test]
+    fn a_first_save_cut_short_still_leaves_a_world_that_opens() {
+        let _g = WorldsRootGuard::new("open_first_save_cut");
+        // Every chunk write fails: a directory where each chunk's tmp file goes.
+        let fail_chunks = |name: &str| {
+            for f in ["0_4_0.chunk.tmp", "2_4_0.chunk.tmp"] {
+                fs::create_dir_all(world_dir(name).join("chunks").join(f)).unwrap();
+            }
+        };
+        let mut w = World::new();
+        w.set_block(3, 64, 5, crate::block::BEDROCK);
+        w.set_block(40, 64, 5, crate::block::BEDROCK);
+        // The client's writer.
+        fail_chunks("client");
+        crate::save::save_world_meta("client", &WorldMeta::new("client")).unwrap();
+        assert!(crate::save::save_world("client", &w, std::slice::from_ref(&slot()), 5, &[], &[])
+            .is_err());
+        assert!(world_dir("client").join("world.dat").is_file(), "world.dat written first");
+        assert!(matches!(
+            open_world("client", &mut World::new(), AutosavePolicy::Prefer),
+            Ok(OpenedWorld::Loaded { chunks: 0, .. })
+        ));
+        // The dedicated server's writer.
+        fail_chunks("server");
+        crate::save::save_world_meta("server", &WorldMeta::new("server")).unwrap();
+        let mut server = crate::server::GameServer::new(0, "server".into(), 5);
+        server.world = w;
+        let err = server.try_save().expect_err("every chunk write failed");
+        assert!(!err.contains("not updated"), "{err}");
+        assert!(world_dir("server").join("world.dat").is_file(), "world.dat written first");
+        assert!(!is_new_world("server").unwrap());
+        assert!(matches!(
+            open_world("server", &mut World::new(), AutosavePolicy::Ignore),
+            Ok(OpenedWorld::Loaded { chunks: 0, .. })
+        ));
+    }
+
+    /// Only the FIRST save reorders: a later save still writes chunks first and
+    /// `world.dat` last (its commit point), so when every chunk write fails the
+    /// last consistent `world.dat` is left as it was.
+    #[test]
+    fn a_later_save_keeps_world_dat_as_the_commit_point() {
+        let _g = WorldsRootGuard::new("open_later_save_commit");
+        let dir = saved_world("w");
+        let before = fs::read(dir.join("world.dat")).unwrap();
+        let mut world = World::new();
+        assert!(matches!(
+            open_world("w", &mut world, AutosavePolicy::Prefer),
+            Ok(OpenedWorld::Loaded { .. })
+        ));
+        fs::create_dir_all(dir.join("chunks/0_4_0.chunk.tmp")).unwrap();
+        world.set_block(4, 64, 5, crate::block::STONE);
+        assert!(crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[])
+            .is_err());
+        assert_eq!(fs::read(dir.join("world.dat")).unwrap(), before, "world.dat untouched");
     }
 }

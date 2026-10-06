@@ -115,6 +115,18 @@ pub(crate) fn should_clear_autosave(
     }
 }
 
+/// What the player is told when a save fails — Save, Save & Quit, or any exit
+/// that saves. The world on disk is whatever the last save that landed wrote
+/// (every writer refuses before it touches anything, or writes tmp + rename), so
+/// that copy is safe; the session itself is still in memory, and a failed Save &
+/// Quit keeps the player in it to retry (review 2026-10-06: it used to only log).
+pub(crate) fn save_failed_toast(why: &str) -> String {
+    format!("Couldn't save: {why}. Your last save is safe.")
+}
+
+/// How long the save-failure toast stays up.
+pub(crate) const SAVE_FAILED_TOAST_SECS: u64 = 10;
+
 /// How long an in-world arena launch waits for the web lobby's world list
 /// before it gives up and says so (review W3 S6).
 pub(crate) const QUEUED_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -313,21 +325,46 @@ pub(crate) fn kill_all_mobs(ecs: &mut hecs::World) {
 
 impl crate::GameState {
     /// Write the live world through the same `save_world` Save & Quit has
-    /// always used. True when the save landed.
-    fn save_live_world(&self) -> bool {
-        match crate::save::save_world(
+    /// always used.
+    fn save_live_world(&self) -> Result<(), String> {
+        crate::save::save_world(
             &self.world_name,
             &self.world,
             &self.players,
             self.biome_gen.seed,
             &crate::save::carts_to_saved(&self.ecs),
             &crate::save::tamed_mobs_to_saved(&self.ecs),
-        ) {
-            Ok(()) => true,
-            Err(e) => {
-                log::error!("Save failed: {e}");
-                false
+        )
+        .inspect_err(|e| log::error!("Save failed: {e}"))
+    }
+
+    /// Tell the player a save failed (see [`save_failed_toast`]).
+    fn show_save_failed(&mut self, why: &str) {
+        self.toast = Some((
+            save_failed_toast(why),
+            web_time::Instant::now() + std::time::Duration::from_secs(SAVE_FAILED_TOAST_SECS),
+        ));
+    }
+
+    /// The pause menu's Save: write the world in place and stay paused. The
+    /// crash-recovery autosave is cleared only once the save landed (it used to
+    /// be cleared even after a failed save, leaving neither copy of the
+    /// session); a failure says why. A joined session never writes a local save
+    /// (no "remote_game" folder) — the host owns that world.
+    pub(crate) fn pause_save(&mut self) {
+        if self.persists_locally() {
+            match self.save_live_world() {
+                Ok(()) => crate::save::clear_autosave(&self.world_name),
+                Err(why) => self.show_save_failed(&why),
             }
+        }
+        // Spec 40 persistence — flush the player wardrobe so the latest pin/edit
+        // is never lost (the debounce may not have fired yet). Best-effort;
+        // native writes a profile file, WASM the Stash.
+        if self.wardrobe_dirty {
+            self.wardrobe_dirty = false;
+            self.wardrobe_save_counter = 0;
+            crate::wardrobe_store::save(self.world.player_wardrobe.set());
         }
     }
 
@@ -346,10 +383,23 @@ impl crate::GameState {
     /// a showcase kiosk — the dead-end exit screen. The world data itself is
     /// wiped by `reset_for_world_change` on the next entry, which every load
     /// path runs before reading the new world in.
-    pub(crate) fn leave_world(&mut self, save: SaveChoice, to: ExitTo) {
+    ///
+    /// Returns whether the player left. A save that FAILS ends nothing: the
+    /// player stays in the world — still live, nothing torn down — with a toast
+    /// saying why, so the session can be saved again or deliberately thrown
+    /// away with "Quit without saving" (review 2026-10-06: a failed Save & Quit
+    /// used to only log, then leave, losing the session in silence). Callers
+    /// that hop somewhere after leaving must not hop on `false`.
+    pub(crate) fn leave_world(&mut self, save: SaveChoice, to: ExitTo) -> bool {
         let live = self.live_world.take();
         let joined = self.remote_client.is_some();
-        let saved = should_save_on_leave(save, live, joined) && self.save_live_world();
+        // Reaching the line after this means any save it asked for landed.
+        let saved = should_save_on_leave(save, live, joined);
+        if saved && let Err(why) = self.save_live_world() {
+            self.live_world = live;
+            self.show_save_failed(&why);
+            return false;
+        }
         // The crash-recovery copy: dropped only once a save superseded it or
         // the player chose to discard — never by a close or a lost connection.
         if should_clear_autosave(save, saved, live, joined) {
@@ -409,6 +459,7 @@ impl crate::GameState {
         } else {
             self.mode = crate::GameMode::Menu(Box::new(crate::menu::MenuState::new()));
         }
+        true
     }
 
     /// Leave a world whose session ended under the player (host quit or
@@ -433,8 +484,11 @@ impl crate::GameState {
             LaunchMode::Arena => {
                 // Leave first (saving; it cancels anything already queued),
                 // then queue the launch: the lobby's first frame fires it
-                // exactly as if the Trials menu's Play had been clicked.
-                self.leave_world(SaveChoice::Save, ExitTo::Lobby);
+                // exactly as if the Trials menu's Play had been clicked. A save
+                // that failed keeps the player here, told why — no hop.
+                if !self.leave_world(SaveChoice::Save, ExitTo::Lobby) {
+                    return true;
+                }
                 self.pending_menu_action = Some((
                     crate::menu::MenuAction::PlayScenario { def: Box::new(def) },
                     web_time::Instant::now(),
@@ -717,6 +771,15 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_says_why_and_that_the_last_save_is_safe() {
+        assert_eq!(
+            save_failed_toast("refusing to write: existing world_meta.json is damaged"),
+            "Couldn't save: refusing to write: existing world_meta.json is damaged. \
+             Your last save is safe."
+        );
+    }
+
+    #[test]
     fn clear_per_world_fields_drops_the_last_worlds_state() {
         let mut w = World::new();
         w.block_meta.insert((1, 2, 3), 7);
@@ -796,5 +859,130 @@ mod tests {
         let choice = close_choice(true, hg.state.live_world);
         hg.state.leave_world(choice, ExitTo::Quit);
         assert!(crate::save::world_exists("exit-arena-close"), "the arena run was saved");
+    }
+
+    /// A unique world name per harness test (they share one worlds dir).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn harness_world(tag: &str) -> String {
+        let name = format!("{tag}-{:?}", std::thread::current().id())
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
+        let _ = std::fs::remove_dir_all(crate::save::world_dir(&name));
+        name
+    }
+
+    /// Damage `name`'s meta so every save of it is refused (`meta_write_blocked`).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn make_saves_fail(name: &str) {
+        let dir = crate::save::world_dir(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("world_meta.json"), b"{ torn").unwrap();
+    }
+
+    /// Review 2026-10-06 — a failed Save & Quit used to only log, then leave:
+    /// the session was lost in silence. Now the player stays in the world, told
+    /// why, and the crash-recovery autosave is kept.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_failed_save_and_quit_keeps_the_player_in_the_world() {
+        isolate_saves();
+        let name = harness_world("exit-save-fails");
+        let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world(&name);
+        let s = &hg.state;
+        crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[]).unwrap();
+        make_saves_fail(&name);
+
+        hg.state.mode = crate::GameMode::Paused { confirm_quit: false, confirm_creative: false };
+        assert!(!hg.state.leave_world(SaveChoice::Save, ExitTo::Quit), "a failed save never leaves");
+        assert!(!matches!(hg.state.mode, crate::GameMode::Menu(_)), "still in the world");
+        assert_eq!(hg.state.live_world, Some(WorldKind::Local), "still live: a retry can save it");
+        let (toast, _) = hg.state.toast.clone().expect("the player is told");
+        assert!(toast.starts_with("Couldn't save: "), "{toast}");
+        assert!(toast.ends_with("Your last save is safe."), "{toast}");
+        assert!(
+            crate::save::world_dir(&name).join("autosave/world.dat").is_file(),
+            "the crash-recovery autosave is kept"
+        );
+        // Every other exit that saves stays too: the J-board arena hop...
+        let def = named_builtin_def("scavenger").unwrap();
+        assert!(hg.state.launch_scenario_from_world(def), "the hop is refused, not taken");
+        assert!(hg.state.pending_menu_action.is_none(), "no launch queued");
+        // ...and the Trial / end-card exits.
+        assert!(!hg.state.leave_world(SaveChoice::Save, ExitTo::Lobby));
+        assert_eq!(hg.state.live_world, Some(WorldKind::Local));
+
+        // "Quit without saving" still leaves.
+        assert!(hg.state.leave_world(SaveChoice::Discard, ExitTo::Quit));
+        assert!(hg.state.live_world.is_none());
+    }
+
+    /// Review 2026-10-06 — the pause menu's Save cleared the crash-recovery
+    /// autosave even when the save failed. Now: cleared only once a save
+    /// landed; a failure says why.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas — run: cargo test -- --ignored game_harness"]
+    fn game_harness_pause_save_keeps_the_autosave_unless_the_save_landed() {
+        isolate_saves();
+        let name = harness_world("exit-pause-save");
+        let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world(&name);
+        let dir = crate::save::world_dir(&name);
+        let s = &hg.state;
+        crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[]).unwrap();
+        let good_meta = std::fs::read(dir.join("world_meta.json")).ok();
+        make_saves_fail(&name);
+
+        hg.state.toast = None;
+        hg.state.pause_save();
+        assert!(dir.join("autosave/world.dat").is_file(), "a failed save keeps the autosave");
+        let (toast, _) = hg.state.toast.clone().expect("the player is told");
+        assert!(toast.starts_with("Couldn't save: ") && toast.ends_with("Your last save is safe."));
+
+        // Repaired: the save lands and supersedes the autosave.
+        match good_meta {
+            Some(bytes) => std::fs::write(dir.join("world_meta.json"), bytes).unwrap(),
+            None => std::fs::remove_file(dir.join("world_meta.json")).unwrap(),
+        }
+        hg.state.toast = None;
+        hg.state.pause_save();
+        assert!(crate::save::world_exists(&name), "the save landed");
+        assert!(!dir.join("autosave").exists(), "a landed save clears the autosave");
+        assert!(hg.state.toast.is_none(), "no failure toast");
+    }
+
+    /// Review 2026-10-06 — opening a world from its crash-recovery autosave
+    /// deleted that autosave straight away; with a damaged `world.dat` that was
+    /// the only good copy. It is now kept until a save writes `world.dat`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas — run: cargo test -- --ignored game_harness"]
+    fn game_harness_an_autosave_open_keeps_the_autosave_until_a_save_lands() {
+        isolate_saves();
+        let name = harness_world("exit-autosave-open");
+        let dir = crate::save::world_dir(&name);
+        let mut w = World::new();
+        w.set_block(3, 64, 5, crate::block::BEDROCK);
+        crate::save::write_world_folder(
+            &name,
+            &crate::save::WorldMeta::new(&name),
+            &crate::save::minimal_world_save_for_tests(7),
+            &w,
+        )
+        .unwrap();
+        let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.5, 80.0, 0.5), 1.0);
+        crate::save::autosave_world(&name, &w, std::slice::from_ref(&slot), 7, &[], &[]).unwrap();
+        // The last manual save is damaged (no footer, so the open isn't refused).
+        std::fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
+
+        let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world(&name);
+        assert_eq!(hg.state.world.get_block(3, 64, 5), crate::block::BEDROCK, "opened from the autosave");
+        assert!(dir.join("autosave/world.dat").is_file(), "the only good copy is kept");
+
+        // A save that lands writes world.dat, and only then is the autosave dropped.
+        assert!(hg.state.leave_world(SaveChoice::Save, ExitTo::Lobby));
+        assert!(!dir.join("autosave").exists());
+        let mut back = World::new();
+        crate::save::load_world(&name, &mut back).expect("world.dat is good again");
+        assert_eq!(back.get_block(3, 64, 5), crate::block::BEDROCK);
     }
 }

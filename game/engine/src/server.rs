@@ -1681,7 +1681,10 @@ impl GameServer {
     /// Same write discipline as the client save (`save::write_world_folder`):
     /// every file goes through tmp + rename, so a crash or full disk never
     /// leaves a torn file. Chunks are written FIRST (no per-file fsync, one
-    /// directory fsync at the end), then `world.dat`. Every chunk is attempted
+    /// directory fsync at the end), then `world.dat` — except on a world's first
+    /// save, which writes `world.dat` first (`save::is_first_save`). A mined-out
+    /// chunk's file is deleted by the client's rule (`save::partition_chunks_for_save`:
+    /// read or written this session, now all-air). Every chunk is attempted
     /// and each failure is logged with its path; any failure makes the save
     /// return `Err`. `world.dat` is still written when SOME chunks failed: the
     /// good chunks have already been renamed in, so skipping it would leave
@@ -1699,6 +1702,7 @@ impl GameServer {
         // A world saved by a newer build is never written (Spec 02 §8.4) — checked
         // before the first chunk, since chunks are written before `world.dat`.
         crate::save::refuse_write_over_newer_save(&dir)?;
+        let first_save = crate::save::is_first_save(&dir);
         let chunks_dir = dir.join("chunks");
         std::fs::create_dir_all(&chunks_dir)
             .map_err(|e| format!("mkdir {}: {e}", chunks_dir.display()))?;
@@ -1973,6 +1977,28 @@ impl GameServer {
         };
 
         let encoded = crate::save_format::encode_world_save(&save)?;
+        let world_dat = dir.join("world.dat");
+
+        // A world's FIRST save (the tick-0 save) writes world.dat before any
+        // chunk, so a server killed mid-save leaves a world that opens instead of
+        // chunks without a world.dat, refused at every boot (Spec 02 §8.4).
+        if first_save {
+            crate::save::write_atomic(&world_dat, &encoded)?;
+        }
+
+        // A mined-out chunk's file is deleted, by the client's rule
+        // (`save::partition_chunks_for_save`): only for a chunk this session read
+        // from disk or wrote, now all-air. Without it a mined-out chunk came back
+        // after a restart. A file the session never read is left alone.
+        let (_, to_delete) = crate::save::partition_chunks_for_save(&self.world);
+        for (cx, cy, cz) in to_delete {
+            let path = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
+            if let Err(e) = std::fs::remove_file(&path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("Server save: stale chunk delete failed ({}): {e}", path.display());
+            }
+        }
 
         // Spec 02 §7.5 — loaded + evicted chunks, written before the commit point.
         let mut chunk_attempts = 0usize;
@@ -1982,22 +2008,26 @@ impl GameServer {
             if chunk.is_empty() { continue; }
             chunk_attempts += 1;
             let path = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
-            if let Err(e) = crate::save::write_atomic_nosync(&path, &chunk.as_bytes()) {
-                log::error!("Server save: chunk write failed ({}): {e}", path.display());
-                chunk_failures += 1;
-                first_failure.get_or_insert(e);
+            match crate::save::write_atomic_nosync(&path, &chunk.as_bytes()) {
+                // Known on disk from here: a later save may delete it once mined out.
+                Ok(()) => self.world.note_disk_chunk((cx, cy, cz)),
+                Err(e) => {
+                    log::error!("Server save: chunk write failed ({}): {e}", path.display());
+                    chunk_failures += 1;
+                    first_failure.get_or_insert(e);
+                }
             }
         }
         crate::save::sync_dir(&chunks_dir);
-        if chunk_failures > 0 && chunk_failures == chunk_attempts {
-            return Err(format!(
-                "all {chunk_failures} chunk write(s) failed, world.dat not updated; first: {}",
-                first_failure.unwrap_or_default()
-            ));
+        if !first_save {
+            if chunk_failures > 0 && chunk_failures == chunk_attempts {
+                return Err(format!(
+                    "all {chunk_failures} chunk write(s) failed, world.dat not updated; first: {}",
+                    first_failure.unwrap_or_default()
+                ));
+            }
+            crate::save::write_atomic(&world_dat, &encoded)?;
         }
-
-        let world_dat = dir.join("world.dat");
-        crate::save::write_atomic(&world_dat, &encoded)?;
 
         // Creator-gallery (Spec 2026-06-19 §9) — write an `exhibits.json` sidecar
         // next to `world.dat` so the Operator Console (which can't decode the
@@ -2097,6 +2127,48 @@ mod tests {
         assert!(!dir.join("world.dat").exists(), "no world.dat when no chunk saved");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 2026-10-06 — the dedicated server deletes a mined-out chunk's file,
+    /// by the client's rule (Spec 02 §8.4): only a chunk this session read from
+    /// disk or wrote, now all-air. It never deleted any, so a mined-out chunk
+    /// came back after a restart.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn server_save_deletes_a_mined_out_chunk_it_read_or_wrote() {
+        let _g = crate::save::WorldsRootGuard::new("server_mined_out");
+        let dir = crate::save::world_dir("w");
+        let mut server = GameServer::new(0, "w".to_string(), 42);
+        server.world.set_block(3, 64, 5, crate::block::BEDROCK); // chunk 0_4_0
+        server.world.set_block(40, 64, 5, crate::block::BEDROCK); // chunk 2_4_0
+        server.try_save().expect("first save");
+        assert!(dir.join("chunks/0_4_0.chunk").is_file());
+        assert!(dir.join("chunks/2_4_0.chunk").is_file());
+
+        // A restarted server reads the files back in (the load `initial_load`
+        // runs, without its terrain generation), then 0_4_0 is mined out.
+        let mut server = GameServer::new(0, "w".to_string(), 42);
+        crate::save::load_world("w", &mut server.world).expect("the saved world loads");
+        server.world.set_block(3, 64, 5, crate::block::AIR);
+        // A chunk this session WROTE, then mined out.
+        server.world.set_block(70, 64, 5, crate::block::BEDROCK); // chunk 4_4_0
+        server.try_save().expect("save");
+        assert!(dir.join("chunks/4_4_0.chunk").is_file());
+        server.world.set_block(70, 64, 5, crate::block::AIR);
+        // A chunk file this session never read stays: unknown data.
+        let unknown = std::fs::read(dir.join("chunks/2_4_0.chunk")).unwrap();
+        std::fs::write(dir.join("chunks/9_4_9.chunk"), &unknown).unwrap();
+        server.world.set_block(9 * 16 + 1, 64, 9 * 16 + 1, crate::block::STONE);
+        server.world.set_block(9 * 16 + 1, 64, 9 * 16 + 1, crate::block::AIR);
+        server.try_save().expect("save");
+
+        assert!(!dir.join("chunks/0_4_0.chunk").exists(), "read-in chunk, mined out: deleted");
+        assert!(!dir.join("chunks/4_4_0.chunk").exists(), "written chunk, mined out: deleted");
+        assert!(dir.join("chunks/2_4_0.chunk").is_file(), "a solid chunk stays");
+        assert_eq!(std::fs::read(dir.join("chunks/9_4_9.chunk")).unwrap(), unknown, "unknown: kept");
+        let mut back = crate::world::World::new();
+        crate::save::load_world("w", &mut back).expect("reloads");
+        assert_eq!(back.get_block(3, 64, 5), crate::block::AIR, "no resurrection after a restart");
     }
 
     /// #8 — `GameServer::new` must seed its `BiomeGenerator` from the seed it is
