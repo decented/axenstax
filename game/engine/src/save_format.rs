@@ -54,6 +54,24 @@ pub const SAVE_FOOTER_LEN: usize = 4 + SAVE_FOOTER_MAGIC.len();
 pub const NEWER_WORLD_MESSAGE: &str =
     "This world was saved by a newer version of Axe'n'Stax. Update the game to open it.";
 
+/// Start of the lobby notice for a world that is on disk but failed to load
+/// (Spec 02 §8.4, load-failure rule). See [`unopenable_message`].
+pub const UNOPENABLE_PREFIX: &str = "This world couldn't be opened: ";
+
+/// The lobby notice for a world that is on disk but failed to load: it is never
+/// replaced by a freshly generated world, and nothing was written to it. `reason`
+/// is a short, file-naming cause ("world.dat can't be read (…)"). Idempotent, and
+/// a newer-version refusal keeps its own wording.
+pub fn unopenable_message(reason: &str) -> String {
+    if is_newer_world_error(reason) {
+        return NEWER_WORLD_MESSAGE.to_string();
+    }
+    if reason.starts_with(UNOPENABLE_PREFIX) {
+        return reason.to_string();
+    }
+    format!("{UNOPENABLE_PREFIX}{}. Nothing was changed.", reason.trim_end_matches('.'))
+}
+
 /// Why a `world.dat` byte stream could not be turned into a `WorldSave`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldSaveError {
@@ -62,6 +80,10 @@ pub enum WorldSaveError {
     NewerVersion { found: u32, supported: u32 },
     /// Not a decodable save (damaged, or not a world save at all).
     Undecodable(String),
+    /// The file is there but could not be read (an I/O error other than "not
+    /// found" — e.g. permissions after a restore). Its version is unknown, so the
+    /// world is neither opened nor written (Spec 02 §8.4).
+    Unreadable(String),
 }
 
 impl WorldSaveError {
@@ -77,6 +99,8 @@ impl fmt::Display for WorldSaveError {
             // the `String` error paths (`load_world`, `unpack_world`).
             Self::NewerVersion { .. } => f.write_str(NEWER_WORLD_MESSAGE),
             Self::Undecodable(why) => f.write_str(why),
+            // Player-facing too: it reaches the lobby through `world_open_refusal`.
+            Self::Unreadable(why) => f.write_str(&unopenable_message(why)),
         }
     }
 }
@@ -90,10 +114,8 @@ impl From<WorldSaveError> for String {
 }
 
 /// Whether an error string that came through a `String` error path (an archive
-/// unpack, a load) is the newer-version refusal, so the caller can surface it to
-/// the player rather than only log it. Used by the web load path (native checks
-/// the folder up front with `save::world_open_refusal`).
-#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+/// unpack, a load) is the newer-version refusal, which keeps its own wording in
+/// the lobby notice ([`unopenable_message`]).
 pub fn is_newer_world_error(err: &str) -> bool {
     err.contains(NEWER_WORLD_MESSAGE)
 }
@@ -149,19 +171,30 @@ pub fn check_version(found: Option<u32>) -> Result<(), WorldSaveError> {
 }
 
 /// The footer version of the `world.dat` at `path`, reading only its last
-/// [`SAVE_FOOTER_LEN`] bytes. `None` for a missing, short or footer-less file.
+/// [`SAVE_FOOTER_LEN`] bytes. `Ok(None)` for a missing, short or footer-less file.
+/// Any other I/O error is `Err`: an unreadable `world.dat` is not "a save without a
+/// footer" — its version is unknown, so the caller refuses the world rather than
+/// open it or write over it (Spec 02 §8.4).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn file_footer_version(path: &std::path::Path) -> Option<u32> {
+pub fn file_footer_version(path: &std::path::Path) -> Result<Option<u32>, String> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    if len < SAVE_FOOTER_LEN as u64 {
-        return None;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("open: {e}")),
+    };
+    let meta = f.metadata().map_err(|e| format!("stat: {e}"))?;
+    if !meta.is_file() {
+        return Err("not a file".to_string());
     }
-    f.seek(SeekFrom::End(-(SAVE_FOOTER_LEN as i64))).ok()?;
+    if meta.len() < SAVE_FOOTER_LEN as u64 {
+        return Ok(None);
+    }
+    f.seek(SeekFrom::End(-(SAVE_FOOTER_LEN as i64)))
+        .map_err(|e| format!("seek: {e}"))?;
     let mut tail = [0u8; SAVE_FOOTER_LEN];
-    f.read_exact(&mut tail).ok()?;
-    footer_version(&tail)
+    f.read_exact(&mut tail).map_err(|e| format!("read: {e}"))?;
+    Ok(footer_version(&tail))
 }
 
 #[cfg(test)]
@@ -220,6 +253,28 @@ mod tests {
         assert!(is_newer_world_error(&format!("import failed: {s}")));
         assert!(!is_newer_world_error("deserialize (legacy fallback): io error"));
         assert!(!WorldSaveError::Undecodable("x".into()).is_newer_version());
+        assert!(!WorldSaveError::Unreadable("x".into()).is_newer_version());
+    }
+
+    #[test]
+    fn unopenable_message_names_the_cause_and_says_nothing_changed() {
+        let m = unopenable_message("world.dat can't be read (Permission denied)");
+        assert_eq!(
+            m,
+            "This world couldn't be opened: world.dat can't be read (Permission denied). \
+             Nothing was changed."
+        );
+        assert_eq!(unopenable_message(&m), m, "idempotent");
+        assert_eq!(unopenable_message("x."), unopenable_message("x"), "no double full stop");
+        assert_eq!(
+            unopenable_message(&format!("load: {NEWER_WORLD_MESSAGE}")),
+            NEWER_WORLD_MESSAGE,
+            "the newer-version refusal keeps its own wording"
+        );
+        assert_eq!(
+            WorldSaveError::Unreadable("world.dat can't be read (x)".into()).to_string(),
+            unopenable_message("world.dat can't be read (x)")
+        );
     }
 
     /// TRIPWIRE: appending a `WorldSave` field without bumping
@@ -249,12 +304,27 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("world.dat");
         std::fs::write(&p, encode_world_save(&minimal_world_save_for_tests(3)).unwrap()).unwrap();
-        assert_eq!(file_footer_version(&p), Some(SAVE_FORMAT_VERSION));
+        assert_eq!(file_footer_version(&p), Ok(Some(SAVE_FORMAT_VERSION)));
         std::fs::write(&p, bincode::serialize(&minimal_world_save_for_tests(3)).unwrap()).unwrap();
-        assert_eq!(file_footer_version(&p), None, "footer-less legacy file");
+        assert_eq!(file_footer_version(&p), Ok(None), "footer-less legacy file");
         std::fs::write(&p, b"tiny").unwrap();
-        assert_eq!(file_footer_version(&p), None);
-        assert_eq!(file_footer_version(&dir.join("missing.dat")), None);
+        assert_eq!(file_footer_version(&p), Ok(None));
+        assert_eq!(file_footer_version(&dir.join("missing.dat")), Ok(None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable `world.dat` is an error, not "no footer": its version is
+    /// unknown, so the world must be refused rather than opened or written.
+    /// (A directory in its place fails the read without needing permissions, so
+    /// the test also holds as root.)
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn file_footer_version_reports_an_unreadable_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("axenstax-footer-io-{:?}", std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("world.dat")).unwrap();
+        assert!(file_footer_version(&dir.join("world.dat")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

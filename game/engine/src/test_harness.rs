@@ -68,7 +68,7 @@ impl TestHost {
         // the production hosted-server path).
         let mut server = GameServer::new(num_players, config.world_name.clone(), 42);
         if config.do_initial_load {
-            server.initial_load();
+            server.initial_load().expect("TestHost initial load");
         }
         server.set_play_mode(config.play_mode);
         server.difficulty = crate::survival::Difficulty::from_meta_str(&config.difficulty);

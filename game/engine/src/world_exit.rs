@@ -267,6 +267,8 @@ pub(crate) fn clear_per_world_fields(world: &mut World) {
     world.hostile_acts = Default::default();
     world.salt_licks.clear();
     world.tapped_rubber_logs.clear();
+    // The chunk files the last world folder held (Spec 02 §8.4).
+    world.forget_disk_chunks();
 }
 
 /// The wire form of a `/we` region edit: one `BlockChange` per changed cell,

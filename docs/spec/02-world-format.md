@@ -1802,9 +1802,82 @@ format version in a trailing footer — see the bincode note under Migration str
       Update the game to open it."* The web build shows the same banner when the
       IndexedDB / cloud blob fails to unpack for this reason. And every native writer
       (`save_world`, `write_world_folder`, `autosave_world`, `GameServer::try_save`,
-      `save_world_meta`) refuses the folder first, before any chunk is written, so a
-      load that fell through to a freshly generated world can never save over it.
+      `save_world_meta`) refuses the folder first, before any chunk is written —
+      belt and braces behind the load-failure rule below.
       The damaged-meta recovery does not quarantine or rebuild a newer world's meta.
+    - **An unreadable `world.dat` is refused the same way.**
+      `save_format::file_footer_version` returns `Err` for any I/O error other than
+      "not found" (permissions after a restore, a directory in its place) — the
+      version is unknown, so it is not "a save without a footer". The refusal is
+      `WorldSaveError::Unreadable`: `world_open_refusal` refuses the world ("This
+      world couldn't be opened: world.dat can't be read (…). Nothing was changed."),
+      the lobby card is labelled "(can't be opened)", and every writer refuses it.
+- **The load-failure rule (2026-10-06): a world that fails to load is never
+  replaced by a freshly generated one** — native client and dedicated server.
+  Before, any load error only logged a warning and generated a fresh world, which
+  was marked live and saved (5-min autosave, Save & Quit, window close, the
+  server's tick-0 save): the save deleted every chunk file that was all-air in the
+  fresh world, overwrote the spawn-area chunks and `world.dat`, and wrote the meta
+  last (so a damaged-meta refusal protected nothing).
+  - **"Nothing saved here" vs "saved but failed to load"** (`world_open::open_world`,
+    shared by `chunk_stream::begin_load` and `GameServer::initial_load`). A world is
+    *on disk* when `world.dat`, `autosave/world.dat` or any `chunks/*.chunk` is
+    there. `world_meta.json` alone is a **new** world: the Create dialog and the
+    dedicated server's bootstrap write it before the first save. (`autosave/chunks/`
+    without `autosave/world.dat` is a torn autosave nothing loads; it doesn't count.)
+    A world on disk that fails to load for ANY reason — an I/O error reading
+    `world.dat`, meta or a chunk; an undecodable `world.dat`; a chunk file whose name
+    isn't three integers; a damaged chunk or meta that can't be kept aside; saved
+    chunks with no `world.dat`; damaged world info — is refused: nothing generated,
+    the world never marked live, nothing written. The client returns to the lobby
+    with *"This world couldn't be opened: <short reason naming the file>. Nothing was
+    changed."* (`save_format::unopenable_message`, via `leave_world_with_notice`
+    with `SaveChoice::Abandon`); the dedicated server exits before its tick-0 save
+    with the folder path, the file and why (`HostedServer::start` propagates the
+    `Err`), and only bootstraps a new world's meta when `world_open::is_new_world`.
+  - **Loads are all or nothing**, so a refused folder is byte-for-byte as it was:
+    `load_chunk_dir` reads and decodes every chunk file before touching anything,
+    then keeps each damaged one aside (`<file>.corrupt-<ts>`; if one rename fails,
+    the earlier ones are moved back and the load fails), then inserts;
+    `keep_damaged_copy_once` for a partly decoded `world.dat` runs only after the
+    chunks loaded; the torn-meta recovery reads `world.dat` for the seed BEFORE it
+    quarantines the meta. These keep-a-copy-aside recoveries still open the world
+    when the rest loads — no data is lost, so they are not refusals.
+  - **Autosave fallback.** The client prefers the crash-recovery autosave. If it
+    fails to load (and is not a newer build's), the last manual save (`world.dat`)
+    is opened instead and the damaged autosave folder is renamed to
+    `autosave.corrupt-<ts>`, so neither the next autosave nor the leave-time
+    `clear_autosave` can destroy it; a toast says which copy the player got (an
+    autosave recovery is announced too). If that rename fails, or `world.dat` also
+    fails, the world is refused. The server never reads the autosave (it never
+    clears one, so preferring it would shadow every later server save); a folder
+    holding only an autosave is refused there ("open the world in the game once to
+    recover it").
+  - **A save never deletes a chunk file it didn't read or write.** `World` tracks the
+    coordinates whose `.chunk` file this session read in (`chunks/` or
+    `autosave/chunks/`) or wrote (`note_disk_chunk`); `partition_chunks_for_save`
+    queues an all-air chunk's file for deletion (the mined-out case, engine audit
+    2026-06-04 A) only for those. A file the session never read is unknown data and
+    is left alone. The set survives a Workshop reset (same folder) and is forgotten
+    on a world change.
+  - **Every save checks before it touches anything**: `save_world` and
+    `write_world_folder` run the newer/unreadable check AND the damaged-meta check
+    (`meta_write_blocked`) first — before the stale-chunk deletes, chunk writes and
+    `world.dat`.
+  - **Proof-of-Play secret**: a legacy meta without `pop_secret` gets one in the
+    lobby (`apply_world_seed`), but on native it is persisted only once the world
+    has opened (`persist_pop_secret_if_missing` in `begin_load`), so a refused world
+    is never written.
+  - **Trial Reuse arenas** are checked with `world_open_refusal` BEFORE the wipe
+    (`delete_world`); a refused arena is neither wiped, re-created nor entered.
+  - **Web**: the IndexedDB / cloud load already stayed in the lobby on failure (the
+    fresh-world branch runs only when there is no record at all), but it now shows
+    the notice for every failure, not just a newer build, and the play path unpacks
+    with `world_archive::unpack_world_to_play`, which refuses a damaged chunk rather
+    than skipping it — skipped, the chunk would regenerate and the next save would
+    repack the record without the original (the web has no side file to keep it
+    in). Import, backup download and replay stay lenient (the archive itself is
+    untouched there).
   - The first **non-append** change to `WorldSave` itself (reorder / removal /
     retype), and the bincode 1 → 3 move, need a real migration keyed on this
     version.

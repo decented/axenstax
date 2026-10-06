@@ -676,7 +676,7 @@ fn game_server_initial_load_restores_two_players() {
     save::save_world(name, &world, &[p1, p2], 42, &[], &[]).expect("save_world");
 
     let mut server = GameServer::new(2, name.to_string(), 42);
-    server.initial_load();
+    server.initial_load().expect("initial load");
 
     assert_eq!(server.players.len(), 2);
     assert_eq!(server.players[0].player.pos, Vec3::new(100.0, 81.0, 200.0));
@@ -1342,7 +1342,7 @@ fn cart_survives_full_game_server_save_load_and_keeps_rolling() {
     // Second session: a brand-new server for the same world loads from disk and
     // must re-spawn the cart into its ECS at the saved state.
     let mut server2 = GameServer::new(1, name.to_string(), 42);
-    server2.initial_load();
+    server2.initial_load().expect("the saved world loads");
 
     let restored: cart::CartData = server2
         .ecs

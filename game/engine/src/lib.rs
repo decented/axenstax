@@ -327,6 +327,7 @@ mod local_join;
 // Native-only modules
 mod save;
 mod save_format;
+mod world_open;
 mod data_dir;
 // Transport, server sim, and HostedServer are cross-platform so single-player
 // (alpha PWA target) can route through a local in-process HostedServer. The

@@ -421,7 +421,10 @@ impl HostedServer {
         // parity path) starts with ≥ 1, and the dedicated server
         // (`server_main`, the WebSocket dedicated path) starts with 0.
         server.simulates_block_machines = num_local_players == 0;
-        server.initial_load();
+        // A world on disk that fails to load is refused here — before the accept
+        // thread starts or anything is saved — never replaced by a fresh world
+        // (Spec 02 §8.4). The error names the file and why.
+        server.initial_load()?;
 
         // Pull difficulty from the world meta for JoinAccept and UI wiring.
         // play_mode is sourced from GameServer.play_mode (set by initial_load).

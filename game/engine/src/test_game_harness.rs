@@ -258,4 +258,75 @@ mod tests {
             crate::raid::KILLING_BLOW_REP_BONUS
         );
     }
+
+    /// Spec 02 §8.4 — the REAL client world entry never replaces a world that
+    /// failed to load: the Loading state's `begin_load` refuses it, the player is
+    /// back in the lobby with the notice, the world was never marked live (so no
+    /// autosave, Save & Quit or close-save can write it), and every file in its
+    /// folder is byte-for-byte as it was. (Before: a warning, a fresh world, and
+    /// the first save deleted/overwrote the real one.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_refuses_a_world_that_fails_to_load() {
+        isolate_saves();
+        let name = format!("harness-refused-{:?}", std::thread::current().id())
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+        let dir = crate::save::world_dir(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut w = crate::world::World::new();
+        w.set_block(3, 64, 5, crate::block::BEDROCK);
+        crate::save::write_world_folder(
+            &name,
+            &crate::save::WorldMeta::new(&name),
+            &crate::save::minimal_world_save_for_tests(7),
+            &w,
+        )
+        .unwrap();
+        std::fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
+        let snapshot = || {
+            let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut stack = vec![dir.clone()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).unwrap().flatten() {
+                    if e.path().is_dir() {
+                        stack.push(e.path());
+                    } else {
+                        files.push((e.path().display().to_string(), std::fs::read(e.path()).unwrap()));
+                    }
+                }
+            }
+            files.sort();
+            files
+        };
+        let before = snapshot();
+
+        let mut state = pollster::block_on(crate::GameState::new_headless(1280, 720));
+        state.world_name = name.clone();
+        state.graphics.controls_card_seen = true;
+        state.mode = GameMode::Loading(crate::loading_screen::LoadingState::new(name.clone()));
+        for _ in 0..20 {
+            state.update_and_render();
+            if !matches!(state.mode, GameMode::Loading(_)) {
+                break;
+            }
+        }
+        let GameMode::Menu(menu) = &state.mode else {
+            panic!("a world that fails to load must land back in the lobby");
+        };
+        let notice = menu.notice.clone().unwrap_or_default();
+        assert!(notice.starts_with("This world couldn't be opened: world.dat is damaged"), "{notice}");
+        assert!(notice.ends_with("Nothing was changed."), "{notice}");
+        assert!(state.live_world.is_none(), "never marked live");
+
+        // Lobby frames, then every exit that saves a live world: nothing writes.
+        for _ in 0..5 {
+            state.update_and_render();
+        }
+        state.leave_world(
+            crate::world_exit::SaveChoice::Save,
+            crate::world_exit::ExitTo::Lobby,
+        );
+        assert_eq!(snapshot(), before, "the refused world's files must be untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

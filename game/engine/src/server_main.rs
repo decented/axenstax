@@ -721,8 +721,19 @@ pub fn run(args: &[String]) {
     }
 
     // Bootstrap a fresh world's metadata so the chosen seed + game mode persist
-    // and the world shows the right mode. Existing worlds are loaded as-is.
-    if !crate::save::world_exists(&cfg.world) {
+    // and the world shows the right mode. Existing worlds are loaded as-is — and
+    // "existing" is anything saved in the folder, not just a world.dat: a folder
+    // that lost its world.dat but holds chunks must not get a new meta written
+    // over its real one before the load refuses it (Spec 02 §8.4).
+    let is_new = crate::world_open::is_new_world(&cfg.world).unwrap_or_else(|why| {
+        log::error!(
+            "world '{}' ({}) couldn't be opened: {why}. Nothing was changed.",
+            cfg.world,
+            crate::save::world_dir(&cfg.world).display()
+        );
+        std::process::exit(1);
+    });
+    if is_new {
         let mut meta = crate::save::WorldMeta::new(&cfg.world);
         meta.display_name = cfg.server_name.clone();
         meta.game_mode = cfg.game_mode.clone();
@@ -762,6 +773,10 @@ pub fn run(args: &[String]) {
     ) {
         Ok(hs) => hs,
         Err(e) => {
+            // A world that failed to load lands here with its file and cause
+            // ("world '<name>' (<dir>) couldn't be opened: … Nothing was changed."):
+            // the server exits BEFORE the tick-0 save below, so a broken world is
+            // never replaced by a fresh one (Spec 02 §8.4).
             log::error!("Failed to start dedicated server: {e}");
             std::process::exit(1);
         }
@@ -769,6 +784,7 @@ pub fn run(args: &[String]) {
 
     // Persist the freshly-generated world immediately so `world.dat` exists from
     // tick 0 (a crash before the first autosave doesn't lose the generation).
+    // Reached only when the world loaded or there was nothing saved to load.
     hs.server.save();
 
     log::info!("──────────────────────────────────────────────");

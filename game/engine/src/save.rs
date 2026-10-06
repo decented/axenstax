@@ -1364,6 +1364,12 @@ pub(crate) fn keep_damaged_copy_once(path: &std::path::Path) {
 /// chunk files, and the profile blobs (`skins.blob`, `wardrobe.blob`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn quarantine_corrupt(path: &std::path::Path) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if QUARANTINE_FAILS_FOR.with(|f| {
+        f.borrow().as_deref().is_some_and(|n| path.file_name().is_some_and(|f| f == n))
+    }) {
+        return Err(format!("quarantine {}: injected failure", path.display()));
+    }
     let dest = corrupt_sibling_path(path);
     fs::rename(path, &dest)
         .map_err(|e| format!("quarantine {} -> {}: {e}", path.display(), dest.display()))?;
@@ -1373,6 +1379,14 @@ pub(crate) fn quarantine_corrupt(path: &std::path::Path) -> Result<PathBuf, Stri
         dest.display()
     );
     Ok(dest)
+}
+
+// Test hook: make `quarantine_corrupt` fail for a file of this name, on this
+// thread (a failed rename can't be provoked portably — root ignores permissions).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    pub(crate) static QUARANTINE_FAILS_FOR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Session latch for profile blobs whose load FAILED (audit 2026-09-27): once a
@@ -1425,15 +1439,12 @@ fn has_quarantined_sibling(dir: &std::path::Path, file: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check if a saved world exists.
+/// Check if a saved world exists. World entry asks `world_open::open_world`
+/// instead, which tells "nothing saved here" from "saved but unloadable".
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn world_exists(name: &str) -> bool {
     world_dir(name).join("world.dat").exists()
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn world_exists(_name: &str) -> bool {
-    false
 }
 
 /// Serialize an inventory to a Vec of SavedSlots (36 slots).
@@ -1504,19 +1515,41 @@ fn serialize_inventory(inventory: &Inventory) -> Vec<SavedSlot> {
 /// delete-stale-file). A chunk that's loaded but all-air (e.g. fully mined
 /// out) must have its previously-saved file deleted, or the mined-out area
 /// resurrects from the stale file on reload (engine audit 2026-06-04, A).
+///
+/// Only a file this session read in or wrote is ever deleted
+/// (`World::knows_disk_chunk`, Spec 02 §8.4): an all-air chunk at a coordinate
+/// whose file the session never read — data it knows nothing about — leaves that
+/// file alone.
 #[cfg(not(target_arch = "wasm32"))]
 fn partition_chunks_for_save(world: &World) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
     let mut write = Vec::new();
     let mut delete = Vec::new();
     // Spec 02 §7.5 — loaded + evicted chunks (an unloaded edit must still save).
-    for ((cx, cy, cz), chunk) in world.persistable_chunks() {
-        if chunk.is_empty() {
-            delete.push((cx, cy, cz));
-        } else {
-            write.push((cx, cy, cz));
+    for (key, chunk) in world.persistable_chunks() {
+        if !chunk.is_empty() {
+            write.push(key);
+        } else if world.knows_disk_chunk(key) {
+            delete.push(key);
         }
     }
     (write, delete)
+}
+
+/// Every check a save runs before it touches `dir`: not a newer build's world nor
+/// one whose `world.dat` can't be read (`refuse_write_over_newer_save`), and not a
+/// world whose `world_meta.json` is damaged (`meta_write_blocked`). Run FIRST, so
+/// a refused save writes and deletes nothing — the meta used to be written last,
+/// after `world.dat`, so its refusal protected nothing (Spec 02 §8.4).
+#[cfg(not(target_arch = "wasm32"))]
+fn refuse_world_write(dir: &std::path::Path) -> Result<(), String> {
+    refuse_write_over_newer_save(dir)?;
+    match meta_write_blocked(dir) {
+        Some(why) => {
+            log::error!("refusing to write to {}: {why}", dir.display());
+            Err(format!("refusing to write: {why}"))
+        }
+        None => Ok(()),
+    }
 }
 
 /// Write a fully-formed world folder from already-assembled `meta`, `save`, and
@@ -1544,7 +1577,7 @@ pub fn write_world_folder(
     world: &World,
 ) -> Result<(), String> {
     let dir = world_dir(name);
-    refuse_write_over_newer_save(&dir)?;
+    refuse_world_write(&dir)?;
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
 
@@ -1570,6 +1603,7 @@ pub fn write_world_folder(
         let path = chunks_dir.join(&filename);
         let bytes = chunk.as_bytes();
         write_atomic_nosync(&path, &bytes).map_err(|e| format!("write chunk {filename}: {e}"))?;
+        world.note_disk_chunk((cx, cy, cz));
     }
     sync_dir(&chunks_dir);
 
@@ -1593,7 +1627,8 @@ pub fn save_world(
         return Err("save_world: no players to save".to_string());
     }
     let dir = world_dir(name);
-    refuse_write_over_newer_save(&dir)?;
+    // Before anything — including the stale-chunk deletes below — is touched.
+    refuse_world_write(&dir)?;
     let chunks_dir = dir.join("chunks");
     fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
 
@@ -1789,7 +1824,8 @@ pub fn save_world(
     // Delete stale air-chunk files before writing new ones: a chunk that's
     // been fully mined out (all-air) must not resurrect from its old file.
     // partition_chunks_for_save returns the (write, delete) split for loaded
-    // chunks; write_world_folder then writes only the non-empty ones.
+    // chunks — deleting only files this session read in or wrote (Spec 02 §8.4);
+    // write_world_folder then writes only the non-empty ones.
     let (_, to_delete) = partition_chunks_for_save(world);
     for (cx, cy, cz) in to_delete {
         let _ = fs::remove_file(chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk")));
@@ -2248,16 +2284,19 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
     }
 }
 
-/// The newer-version refusal for the world folder `dir`, if its `world.dat` — or
-/// its crash-recovery `autosave/world.dat` — was saved by a newer build (Spec 02
-/// §8.4). Reads only each file's 12-byte footer.
+/// Why this build must not open or write the world folder `dir`, if anything:
+/// its `world.dat` — or its crash-recovery `autosave/world.dat` — was saved by a
+/// newer build ([`WorldSaveError::NewerVersion`]), or is there but can't be read
+/// ([`WorldSaveError::Unreadable`]: its version is unknown). Spec 02 §8.4. Reads
+/// only each file's 12-byte footer.
 #[cfg(not(target_arch = "wasm32"))]
-fn newer_save_in(dir: &std::path::Path) -> Option<WorldSaveError> {
-    [dir.join("world.dat"), dir.join("autosave").join("world.dat")]
-        .iter()
-        .find_map(|p| {
-            crate::save_format::check_version(crate::save_format::file_footer_version(p)).err()
-        })
+fn save_refusal_in(dir: &std::path::Path) -> Option<WorldSaveError> {
+    ["world.dat", "autosave/world.dat"].iter().find_map(|rel| {
+        match crate::save_format::file_footer_version(&dir.join(rel)) {
+            Ok(version) => crate::save_format::check_version(version).err(),
+            Err(e) => Some(WorldSaveError::Unreadable(format!("{rel} can't be read ({e})"))),
+        }
+    })
 }
 
 /// The lobby message for a world this build must not open, if any. Checked before
@@ -2266,7 +2305,7 @@ fn newer_save_in(dir: &std::path::Path) -> Option<WorldSaveError> {
 /// a freshly generated one, and never written.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn world_open_refusal(folder_name: &str) -> Option<String> {
-    newer_save_in(&world_dir(folder_name)).map(|e| e.to_string())
+    save_refusal_in(&world_dir(folder_name)).map(|e| e.to_string())
 }
 
 /// Web: the IndexedDB / cloud blob is checked as it is unpacked
@@ -2277,15 +2316,14 @@ pub fn world_open_refusal(_folder_name: &str) -> Option<String> {
 }
 
 /// Refuse to write anything into the world folder `dir` while it holds a save
-/// from a newer build. Called FIRST by every native writer — `save_world`,
-/// `write_world_folder`, `autosave_world`, `GameServer::try_save`, and
-/// `save_world_meta` (via `meta_write_blocked`) — before any chunk, meta or
-/// `world.dat` is touched. Belt and braces behind [`world_open_refusal`]: a load
-/// that fails falls through to generating a fresh world, and without this its
-/// first save would land on top of the newer one.
+/// from a newer build, or a `world.dat` that can't be read. Called FIRST by every
+/// native writer — `save_world`, `write_world_folder`, `autosave_world`,
+/// `GameServer::try_save`, and `save_world_meta` (via `meta_write_blocked`) —
+/// before any chunk, meta or `world.dat` is touched. Belt and braces behind
+/// [`world_open_refusal`] and the load-failure rule (`world_open::open_world`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn refuse_write_over_newer_save(dir: &std::path::Path) -> Result<(), String> {
-    match newer_save_in(dir) {
+    match save_refusal_in(dir) {
         Some(e) => {
             log::error!("refusing to write to {}: {e:?}", dir.display());
             Err(format!("refusing to write: {e}"))
@@ -2326,6 +2364,27 @@ pub fn read_bounded<R: std::io::Read>(reader: R, max: u64) -> Result<Vec<u8>, St
     Ok(out)
 }
 
+/// Decode a `world.dat` read from `rel` (relative to the world folder), naming the
+/// file in the error. The newer-version refusal keeps its exact lobby wording.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_world_dat(data: &[u8], rel: &str) -> Result<(WorldSave, bool), String> {
+    read_world_save_reporting(data).map_err(|e| {
+        if e.is_newer_version() {
+            e.to_string()
+        } else {
+            format!("{rel} is damaged ({e})")
+        }
+    })
+}
+
+/// Load the world saved in `worlds/<name>/` into `world`.
+///
+/// All or nothing (Spec 02 §8.4, load-failure rule): on `Err`, `world` is
+/// untouched and nothing on disk was renamed, copied or written — so the caller
+/// can refuse the world (or fall back to another copy) knowing it is exactly as
+/// it was. The `Err` text is a short, file-naming reason for the lobby notice.
+/// The recovery flows that keep a damaged original aside (a torn chunk, a
+/// partly-decoded `world.dat`) run only once everything else has loaded.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_world(
     name: &str,
@@ -2338,16 +2397,16 @@ pub fn load_world(
     try_load_world_meta(name)?;
 
     let dat_path = dir.join("world.dat");
-    let data = fs::read(&dat_path).map_err(|e| format!("read world.dat: {e}"))?;
+    let data = fs::read(&dat_path).map_err(|e| format!("world.dat can't be read ({e})"))?;
     // Goal 3 / Task 1 — tolerant decode: recovers older saves that predate the
     // newest appended WorldSave field instead of EOF-falling-back to the lossy
     // LegacyWorldSave path (which would drop every block-entity).
-    let (save, partial) = read_world_save_reporting(&data)?;
+    let (save, partial) = decode_world_dat(&data, "world.dat")?;
+
+    let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
     }
-
-    let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
 
     // Goal 3 / Task 2 — restore all world-level state via the shared helper
     // (chunks above must already be inserted; the helper rebuilds the salt-lick +
@@ -2370,19 +2429,35 @@ pub fn load_world(
 /// Read every `<cx>_<cy>_<cz>.chunk` file in `chunks_dir` into `world`. Shared by
 /// `load_world` and `load_autosave`. Returns how many chunks were inserted.
 ///
-/// A chunk file that fails to decode (torn / wrong length) is renamed aside to
-/// `<file>.corrupt-<ts>` and logged — it is NOT inserted, so the streamer
-/// regenerates that chunk as before, but the damaged original is kept for
-/// recovery and the next save can never overwrite it (audit 2026-09-27).
+/// All or nothing, in three passes (Spec 02 §8.4): (1) every file is read and
+/// decoded with no side effect — a name that isn't three integers or a file that
+/// can't be read fails the load here, with nothing touched; (2) each chunk file
+/// that fails to decode (torn / wrong length) is renamed aside to
+/// `<file>.corrupt-<ts>` (audit 2026-09-27) — if one rename fails, the earlier
+/// ones are moved back and the load fails, so the next save can never overwrite
+/// the only copy; (3) only then are the good chunks inserted, and their
+/// coordinates recorded as known on disk (`World::note_disk_chunk`, which is what
+/// lets a later save delete a mined-out chunk's file). A damaged chunk is not
+/// inserted: the streamer regenerates it, with the original kept aside.
+/// Files whose name isn't `<a>_<b>_<c>.chunk` are left alone.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World) -> Result<u32, String> {
-    let mut loaded = 0u32;
-    if !chunks_dir.exists() {
-        return Ok(0);
-    }
-    let entries = fs::read_dir(chunks_dir).map_err(|e| format!("readdir: {e}"))?;
+    // Name the folder relative to the world folder in errors ("autosave/chunks").
+    let rel = match chunks_dir.parent().and_then(|p| p.file_name()) {
+        Some(parent) if parent == "autosave" => "autosave/chunks",
+        _ => "chunks",
+    };
+    let entries = match fs::read_dir(chunks_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("{rel}/ can't be read ({e})")),
+    };
+
+    // Pass 1 — read + decode, no side effects.
+    let mut good: Vec<((i32, i32, i32), Chunk)> = Vec::new();
+    let mut damaged: Vec<(PathBuf, String, usize)> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| format!("entry: {e}"))?;
+        let entry = entry.map_err(|e| format!("{rel}/ can't be listed ({e})"))?;
         let filename = entry.file_name();
         let name_str = filename.to_string_lossy();
 
@@ -2395,29 +2470,43 @@ fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World) -> Result<u32
         if parts.len() != 3 {
             continue;
         }
-        let cx: i32 = parts[0].parse().map_err(|_| format!("bad chunk name: {name_str}"))?;
-        let cy: i32 = parts[1].parse().map_err(|_| format!("bad chunk name: {name_str}"))?;
-        let cz: i32 = parts[2].parse().map_err(|_| format!("bad chunk name: {name_str}"))?;
+        let coord = |part: &str| {
+            part.parse::<i32>().map_err(|_| {
+                format!("{rel}/{name_str} isn't a chunk file name (expected <x>_<y>_<z>.chunk)")
+            })
+        };
+        let key = (coord(parts[0])?, coord(parts[1])?, coord(parts[2])?);
 
-        let data = fs::read(entry.path()).map_err(|e| format!("read chunk: {e}"))?;
+        let data = fs::read(entry.path())
+            .map_err(|e| format!("{rel}/{name_str} can't be read ({e})"))?;
         match Chunk::from_bytes(&data) {
-            Some(chunk) => {
-                world.insert_chunk(cx, cy, cz, chunk);
-                loaded += 1;
-            }
-            None => {
-                log::error!(
-                    "chunk file {name_str} is damaged ({} bytes); keeping it aside, the \
-                     chunk will regenerate",
-                    data.len()
-                );
-                if let Err(e) = quarantine_corrupt(&entry.path()) {
-                    // Couldn't move it: fail the load rather than let the next save
-                    // overwrite the only copy.
-                    return Err(format!("damaged chunk {name_str} could not be kept aside: {e}"));
+            Some(chunk) => good.push((key, chunk)),
+            None => damaged.push((entry.path(), format!("{rel}/{name_str}"), data.len())),
+        }
+    }
+
+    // Pass 2 — keep every damaged file aside, or none of them.
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (path, label, len) in &damaged {
+        log::error!("chunk file {label} is damaged ({len} bytes); keeping it aside, the chunk will regenerate");
+        match quarantine_corrupt(path) {
+            Ok(dest) => moved.push((path.clone(), dest)),
+            Err(e) => {
+                for (orig, dest) in moved.iter().rev() {
+                    if let Err(re) = fs::rename(dest, orig) {
+                        log::error!("could not move {} back to {}: {re}", dest.display(), orig.display());
+                    }
                 }
+                return Err(format!("{label} is damaged and couldn't be kept aside ({e})"));
             }
         }
+    }
+
+    // Pass 3 — insert.
+    let loaded = good.len() as u32;
+    for ((cx, cy, cz), chunk) in good {
+        world.insert_chunk(cx, cy, cz, chunk);
+        world.note_disk_chunk((cx, cy, cz));
     }
     Ok(loaded)
 }
@@ -2630,13 +2719,6 @@ pub fn apply_world_save_state(world: &mut World, save: &WorldSave) {
         .collect();
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn load_world(
-    _name: &str,
-    _world: &mut World,
-) -> Result<(WorldSave, u32), String> {
-    Err("load_world not available on WASM".to_string())
-}
 
 /// Restore inventory from save data.
 pub fn restore_inventory(inventory: &mut Inventory, slots: &[SavedSlot]) {
@@ -3161,7 +3243,8 @@ pub struct WorldEntry {
 /// - If `world.dat` can't supply the seed either, or the meta file can't be read
 ///   at all, the world's info is damaged → `Err`. The world list shows it as
 ///   "world info damaged", `load_world` refuses it, and `save_world_meta` refuses
-///   to write defaults over it.
+///   to write defaults over it. `world.dat` is checked BEFORE the damaged file is
+///   moved, so a refused world is left byte-for-byte as it was (Spec 02 §8.4).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
     let dir = world_dir(folder_name);
@@ -3170,22 +3253,22 @@ pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
 
     // Bytes, not read_to_string: a tear inside a multi-byte character must be
     // recovered like any other parse failure, not refused (review S4).
-    // The PoP secret lives ONLY in this file (never in world.dat, which travels
-    // in exports), so whatever of it is still readable in the damaged bytes is
-    // salvaged before they are moved aside.
-    let salvaged_secret = match fs::read(&meta_path) {
+    enum Damage {
+        /// The file is there but does not parse: its bytes, and why.
+        Torn(Vec<u8>, String),
+        /// Missing, and a damaged copy was quarantined earlier.
+        Quarantined,
+    }
+    let damage = match fs::read(&meta_path) {
         Ok(data) => match serde_json::from_slice::<WorldMeta>(&data) {
             Ok(meta) => return Ok(meta),
             Err(e) => {
                 // A newer build may write meta this build can't parse: refuse the
                 // world rather than quarantine and rebuild it (Spec 02 §8.4).
-                if let Some(newer) = newer_save_in(&dir) {
+                if let Some(newer) = save_refusal_in(&dir) {
                     return Err(newer.to_string());
                 }
-                log::error!("world '{folder_name}': world_meta.json does not parse ({e})");
-                quarantine_corrupt(&meta_path)
-                    .map_err(|qe| format!("world info damaged: {e}; {qe}"))?;
-                salvage_pop_secret(&data)
+                Damage::Torn(data, e.to_string())
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -3193,19 +3276,17 @@ pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
                 // Legacy world with no meta file at all. Don't write to disk yet.
                 return Ok(WorldMeta::from_folder(folder_name, &dat_path));
             }
-            if let Some(newer) = newer_save_in(&dir) {
+            if let Some(newer) = save_refusal_in(&dir) {
                 return Err(newer.to_string());
             }
-            log::error!(
-                "world '{folder_name}': world_meta.json missing and a damaged copy was \
-                 quarantined earlier; rebuilding from world.dat"
-            );
-            salvage_pop_secret_from_quarantine(&dir)
+            Damage::Quarantined
         }
-        Err(e) => return Err(format!("world info damaged: read world_meta.json: {e}")),
+        Err(e) => return Err(format!("world info damaged: world_meta.json can't be read ({e})")),
     };
 
     // Recovery: rebuild from world.dat's seed, never from the seed-42 default.
+    // world.dat is read FIRST, so an unrecoverable world is refused with nothing
+    // moved or written — the damaged meta stays exactly where it was (Spec 02 §8.4).
     let save = fs::read(&dat_path)
         .map_err(|e| format!("world info damaged: world_meta.json unreadable and world.dat unreadable ({e})"))
         .and_then(|data| {
@@ -3213,6 +3294,24 @@ pub fn try_load_world_meta(folder_name: &str) -> Result<WorldMeta, String> {
                 format!("world info damaged: world_meta.json unreadable and world.dat has no seed ({e})")
             })
         })?;
+    // The PoP secret lives ONLY in this file (never in world.dat, which travels
+    // in exports), so whatever of it is still readable in the damaged bytes is
+    // salvaged before they are moved aside.
+    let salvaged_secret = match damage {
+        Damage::Torn(data, e) => {
+            log::error!("world '{folder_name}': world_meta.json does not parse ({e})");
+            quarantine_corrupt(&meta_path)
+                .map_err(|qe| format!("world info damaged: {e}; {qe}"))?;
+            salvage_pop_secret(&data)
+        }
+        Damage::Quarantined => {
+            log::error!(
+                "world '{folder_name}': world_meta.json missing and a damaged copy was \
+                 quarantined earlier; rebuilding from world.dat"
+            );
+            salvage_pop_secret_from_quarantine(&dir)
+        }
+    };
     let mut meta = recovered_meta(folder_name, &dat_path, &save);
     // Keep the world's own PoP secret when it survived the tear (drop placement
     // stays put); only a truly unrecoverable one is replaced, and never by
@@ -3344,8 +3443,8 @@ pub fn load_world_meta(folder_name: &str) -> WorldMeta {
 #[cfg(not(target_arch = "wasm32"))]
 fn meta_write_blocked(dir: &std::path::Path) -> Option<String> {
     // A world saved by a newer build: its meta may carry fields this build would
-    // drop on re-write (Spec 02 §8.4).
-    if let Some(e) = newer_save_in(dir) {
+    // drop on re-write (Spec 02 §8.4). Or one whose world.dat can't be read.
+    if let Some(e) = save_refusal_in(dir) {
         return Some(e.to_string());
     }
     let meta_path = dir.join("world_meta.json");
@@ -3419,16 +3518,22 @@ pub fn list_world_entries() -> Vec<WorldEntry> {
             if folder_name == crate::workshop::WORKSHOP_FOLDER {
                 continue;
             }
-            // A world saved by a newer build (Spec 02 §8.4) keeps its card, labelled
-            // with why; opening it is refused with the same message.
+            // A world saved by a newer build, or whose world.dat can't be read
+            // (Spec 02 §8.4), keeps its card, labelled with why; opening it is
+            // refused with the same message.
             // A world whose info is damaged (see `try_load_world_meta`) still gets a
             // card, clearly labelled, so the player knows it exists; `load_world`
             // refuses to open it.
-            let meta = if let Some(why) = world_open_refusal(&folder_name) {
+            let meta = if let Some(refusal) = save_refusal_in(&world_dir(&folder_name)) {
                 let mut m = try_load_world_meta(&folder_name)
                     .unwrap_or_else(|_| WorldMeta::from_folder(&folder_name, &dat_path));
-                m.display_name = format!("{} (needs a newer version)", m.display_name);
-                m.description = why;
+                let label = if refusal.is_newer_version() {
+                    "needs a newer version"
+                } else {
+                    "can't be opened"
+                };
+                m.display_name = format!("{} ({label})", m.display_name);
+                m.description = refusal.to_string();
                 m
             } else {
                 match try_load_world_meta(&folder_name) {
@@ -3808,6 +3913,7 @@ pub fn autosave_world(
             let filename = format!("{cx}_{cy}_{cz}.chunk");
             write_atomic_nosync(&chunks_dir.join(&filename), &chunk.as_bytes())
                 .map_err(|e| format!("write autosave chunk {filename}: {e}"))?;
+            world.note_disk_chunk((cx, cy, cz));
             saved += 1;
         }
     }
@@ -3849,16 +3955,14 @@ pub fn autosave_world(
 
 /// Check if an autosave exists for this world.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn has_autosave(name: &str) -> bool {
     world_dir(name).join("autosave").join("world.dat").exists()
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn has_autosave(_name: &str) -> bool {
-    false
-}
-
-/// Load world from autosave (crash recovery). Returns same as load_world.
+/// Load world from autosave (crash recovery). Returns same as load_world, and
+/// is all or nothing in the same way (on `Err`, `world` and the disk are as they
+/// were) — so the caller can fall back to the last manual save.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_autosave(
     name: &str,
@@ -3866,14 +3970,16 @@ pub fn load_autosave(
 ) -> Result<(WorldSave, u32), String> {
     let dir = world_dir(name).join("autosave");
     let dat_path = dir.join("world.dat");
-    let data = fs::read(&dat_path).map_err(|e| format!("read autosave: {e}"))?;
-    // Goal 3 / Task 1 — same tolerant decode as load_world.
-    let (save, partial) = read_world_save_reporting(&data)?;
+    let data =
+        fs::read(&dat_path).map_err(|e| format!("autosave/world.dat can't be read ({e})"))?;
+    // Goal 3 / Task 1 — same tolerant decode as load_world. All or nothing, like
+    // load_world (Spec 02 §8.4).
+    let (save, partial) = decode_world_dat(&data, "autosave/world.dat")?;
+
+    let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
     }
-
-    let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
 
     // Goal 3 / Task 2 — crash-recovery integrity. `autosave_world` writes the FULL
     // `WorldSave` (block-entities + overlays included), but this path historically
@@ -3886,13 +3992,6 @@ pub fn load_autosave(
     Ok((save, loaded))
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn load_autosave(
-    _name: &str,
-    _world: &mut World,
-) -> Result<(WorldSave, u32), String> {
-    Err("load_autosave not available on WASM".to_string())
-}
 
 /// Delete the autosave directory for a world.
 #[cfg(not(target_arch = "wasm32"))]
@@ -5228,9 +5327,16 @@ mod tests {
         world.set_block(2, 70, 2, crate::block::STONE);       // non-empty chunk
         world.set_block(40, 70, 40, crate::block::STONE);     // load a chunk…
         world.set_block(40, 70, 40, crate::block::AIR);       // …then mine it empty
+        world.note_disk_chunk((2, 4, 2)); // …whose file this session read or wrote
+        world.set_block(80, 70, 80, crate::block::STONE);     // an all-air chunk whose
+        world.set_block(80, 70, 80, crate::block::AIR);       // file it never saw
         let (write, delete) = partition_chunks_for_save(&world);
         assert!(!write.is_empty(), "the stone chunk is queued to write");
-        assert!(!delete.is_empty(), "the mined-out chunk is queued for stale-file deletion");
+        assert!(delete.contains(&(2, 4, 2)), "the mined-out chunk is queued for stale-file deletion");
+        assert!(
+            !delete.contains(&(5, 4, 5)),
+            "a file this session never read or wrote is left alone (Spec 02 §8.4)"
+        );
         for p in &write { assert!(!world.get_chunk(p.0, p.1, p.2).unwrap().is_empty()); }
         for p in &delete { assert!(world.get_chunk(p.0, p.1, p.2).unwrap().is_empty()); }
     }
@@ -6487,8 +6593,10 @@ mod tests {
         assert!(load_world("w", &mut world).is_err());
         let defaults = load_world_meta("w");
         assert!(save_world_meta("w", &defaults).is_err(), "defaults must never persist");
-        assert!(!dir.join("world_meta.json").exists());
-        // Still refused on the next launch (the quarantined copy marks the damage).
+        // Nothing was moved: world.dat is checked before the meta is quarantined,
+        // so an unrecoverable world is left exactly as it was (Spec 02 §8.4).
+        assert_eq!(fs::read(dir.join("world_meta.json")).unwrap(), b"{ torn");
+        // Still refused on the next launch.
         assert!(try_load_world_meta("w").is_err());
     }
 
@@ -6824,7 +6932,7 @@ mod tests {
     fn every_world_dat_writer_appends_the_current_footer() {
         let _g = WorldsRootGuard::new("writers_footer");
         let slot = test_slot();
-        let current = Some(SAVE_FORMAT_VERSION);
+        let current = Ok(Some(SAVE_FORMAT_VERSION));
 
         write_world_folder("a", &WorldMeta::new("a"), &minimal_world_save_for_tests(1), &World::new())
             .unwrap();

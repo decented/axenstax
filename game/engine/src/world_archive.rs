@@ -211,9 +211,35 @@ pub fn pack_world(
 ///
 /// The decompression is bounded by [`MAX_IMPORT_DECOMPRESSED_BYTES`] to guard
 /// against decompression-bomb attacks on imported files.
+///
+/// Lenient about chunks: a chunk member that fails to decode is skipped (the
+/// archive file itself is untouched, so import, backup and replay lose nothing by
+/// it). The web PLAY path uses [`unpack_world_to_play`] instead.
 pub fn unpack_world(
     compressed: &[u8],
     world: &mut World,
+) -> Result<(WorldMeta, WorldSave, Vec<ExhibitImage>), String> {
+    unpack_world_inner(compressed, world, false)
+}
+
+/// [`unpack_world`] for a world about to be PLAYED from its only copy (the web's
+/// IndexedDB record or cloud blob): a chunk member that fails to decode refuses
+/// the whole world instead of being skipped. Skipping it would regenerate that
+/// chunk and the next save would repack the record without the original — the
+/// web has no side file to keep a damaged chunk in, so it is refused with nothing
+/// written (Spec 02 §8.4, the load-failure rule).
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+pub fn unpack_world_to_play(
+    compressed: &[u8],
+    world: &mut World,
+) -> Result<(WorldMeta, WorldSave, Vec<ExhibitImage>), String> {
+    unpack_world_inner(compressed, world, true)
+}
+
+fn unpack_world_inner(
+    compressed: &[u8],
+    world: &mut World,
+    strict_chunks: bool,
 ) -> Result<(WorldMeta, WorldSave, Vec<ExhibitImage>), String> {
     // Bounded gunzip — refuse a decompression bomb instead of OOMing the
     // process. The bounded tar transitively bounds every downstream entry +
@@ -249,13 +275,20 @@ pub fn unpack_world(
 
         if path == "world_meta.json" {
             meta = Some(
-                serde_json::from_slice(&data).map_err(|e| format!("parse meta: {e}"))?,
+                serde_json::from_slice(&data)
+                    .map_err(|e| format!("world_meta.json is damaged ({e})"))?,
             );
         } else if path == "world.dat" {
             // Tolerant decode shared with the native load paths. Cloud/Stash
             // blobs are byte-identical to local saves, so this protects
             // cloud-restored worlds from the same old-version data loss.
-            save = Some(crate::save::read_world_save(&data)?);
+            save = Some(crate::save::read_world_save(&data).map_err(|e| {
+                if e.is_newer_version() {
+                    e.to_string()
+                } else {
+                    format!("world.dat is damaged ({e})")
+                }
+            })?);
         } else if path.starts_with("chunks/") && path.ends_with(".chunk") {
             let stem = path
                 .strip_prefix("chunks/")
@@ -264,11 +297,13 @@ pub fn unpack_world(
                 .unwrap();
             let parts: Vec<&str> = stem.split('_').collect();
             if parts.len() == 3 {
-                let cx: i32 = parts[0].parse().map_err(|_| format!("bad chunk: {path}"))?;
-                let cy: i32 = parts[1].parse().map_err(|_| format!("bad chunk: {path}"))?;
-                let cz: i32 = parts[2].parse().map_err(|_| format!("bad chunk: {path}"))?;
-                if let Some(chunk) = crate::chunk::Chunk::from_bytes(&data) {
-                    world.insert_chunk(cx, cy, cz, chunk);
+                let cx: i32 = parts[0].parse().map_err(|_| format!("{path} isn't a chunk file name"))?;
+                let cy: i32 = parts[1].parse().map_err(|_| format!("{path} isn't a chunk file name"))?;
+                let cz: i32 = parts[2].parse().map_err(|_| format!("{path} isn't a chunk file name"))?;
+                match crate::chunk::Chunk::from_bytes(&data) {
+                    Some(chunk) => world.insert_chunk(cx, cy, cz, chunk),
+                    None if strict_chunks => return Err(format!("{path} is damaged")),
+                    None => log::warn!("skipping damaged chunk {path} in archive"),
                 }
             }
         } else if let Some(rest) = path.strip_prefix("exhibits/") {
@@ -285,8 +320,8 @@ pub fn unpack_world(
         }
     }
 
-    let meta = meta.ok_or("Missing world_meta.json in archive")?;
-    let save = save.ok_or("Missing world.dat in archive")?;
+    let meta = meta.ok_or("world_meta.json is missing")?;
+    let save = save.ok_or("world.dat is missing")?;
     Ok((meta, save, images))
 }
 
@@ -723,5 +758,42 @@ mod tests {
         let legacy = archive_with_world_dat(&meta, &bincode::serialize(&minimal_world_save(6)).unwrap());
         let (_, save, _) = unpack_world(&legacy, &mut World::new()).expect("footer-less loads");
         assert_eq!(save.seed, 6);
+    }
+
+    /// The web PLAY path (Spec 02 §8.4): a damaged chunk refuses the world, since
+    /// skipping it would regenerate that chunk and the next save would repack the
+    /// record without the original. Import / backup / replay stay lenient — the
+    /// archive file itself is untouched there.
+    #[test]
+    fn play_unpack_refuses_a_damaged_chunk_that_import_skips() {
+        let mut good = World::new();
+        good.set_block(3, 64, 5, block::BEDROCK);
+        let packed = pack_world(&WorldMeta::new("d"), &minimal_world_save(5), &good, &[]).unwrap();
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut ar = tar::Builder::new(&mut gz);
+            for (path, bytes) in [
+                ("world_meta.json", archive_member(&packed, "world_meta.json")),
+                ("world.dat", archive_member(&packed, "world.dat")),
+                ("chunks/0_4_0.chunk", archive_member(&packed, "chunks/0_4_0.chunk")),
+                ("chunks/1_4_1.chunk", vec![7u8; 100]),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                ar.append_data(&mut header, path, &bytes[..]).unwrap();
+            }
+            ar.finish().unwrap();
+        }
+        let blob = gz.finish().unwrap();
+
+        let err = unpack_world_to_play(&blob, &mut World::new()).err().expect("refused");
+        assert_eq!(err, "chunks/1_4_1.chunk is damaged");
+        let mut lenient = World::new();
+        unpack_world(&blob, &mut lenient).expect("import skips the damaged chunk");
+        assert_eq!(lenient.get_block(3, 64, 5), block::BEDROCK);
+        // An intact archive plays.
+        unpack_world_to_play(&packed, &mut World::new()).expect("an intact world plays");
     }
 }

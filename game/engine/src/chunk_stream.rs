@@ -161,7 +161,9 @@ impl super::GameState {
     /// unused (the load centre is derived from the restored/placed player);
     /// retained so the call-site signature is unchanged.
     pub(crate) fn initial_load(&mut self, _pcx: i32, _pcz: i32) {
-        self.begin_load();
+        if !self.begin_load() {
+            return; // refused: back in the lobby with the notice
+        }
         while !self.load_queue.is_empty() {
             self.step_load(usize::MAX);
         }
@@ -172,7 +174,12 @@ impl super::GameState {
     /// build `load_queue` (every column within render distance ∪ saved columns,
     /// nearest-first). The heavy per-column gen+light+mesh is drained by
     /// `step_load`, so the loading screen animates instead of freezing.
-    pub(crate) fn begin_load(&mut self) {
+    ///
+    /// Returns `false` when the world is on disk but failed to load: it is NOT
+    /// replaced by a fresh world — the player is back in the lobby with "This
+    /// world couldn't be opened: <why>. Nothing was changed.", the world was never
+    /// marked live, and nothing was written (Spec 02 §8.4, `world_open`).
+    pub(crate) fn begin_load(&mut self) -> bool {
         // Owner-inbox #18 — upload one shared baked shell per registered
         // micro-model type before chunks stream in (idempotent + cheap; empty
         // until a block is bound in Phase C). Per-chunk instance buffers are then
@@ -200,22 +207,52 @@ impl super::GameState {
         // on `GameState.world_preloaded`) — consumed here so it can never leak
         // into a later world entry.
         let world_preloaded = std::mem::take(&mut self.world_preloaded);
-        // Try loading a saved world first (check autosave for crash recovery)
+        // Try loading a saved world first (the autosave first, for crash
+        // recovery, falling back to the last manual save if it fails).
         // A joined session never reads a local save: an old "remote_game"
         // folder (written by builds before 2026-09-28) would otherwise restore
         // another server's inventory, position and chunks into this one.
         let load_result = if !self.persists_locally() {
-            Err("joined session — the host's world, no local save".to_string())
-        } else if crate::save::has_autosave(&self.world_name) {
-            log::info!("Autosave found for '{}' — recovering from crash...", self.world_name);
-            crate::save::load_autosave(&self.world_name, &mut self.world)
-                .inspect(|_| crate::save::clear_autosave(&self.world_name))
-        } else if crate::save::world_exists(&self.world_name) {
-            log::info!("Loading saved world '{}'...", self.world_name);
-            crate::save::load_world(&self.world_name, &mut self.world)
+            None
         } else {
-            Err("No save found".to_string())
+            match crate::world_open::open_world(
+                &self.world_name,
+                &mut self.world,
+                crate::world_open::AutosavePolicy::Prefer,
+            ) {
+                Ok(crate::world_open::OpenedWorld::New) => None,
+                Ok(crate::world_open::OpenedWorld::Loaded { save, chunks, from }) => {
+                    if from == crate::world_open::OpenedFrom::Autosave {
+                        crate::save::clear_autosave(&self.world_name);
+                    }
+                    if let Some(note) = from.player_note() {
+                        self.toast = Some((
+                            note,
+                            web_time::Instant::now() + std::time::Duration::from_secs(10),
+                        ));
+                    }
+                    Some((*save, chunks))
+                }
+                Err(why) => {
+                    // Never a fresh world over a world that is there but failed
+                    // to load: nothing is generated, the world is never marked
+                    // live, nothing is written.
+                    log::error!("world '{}' refused: {why}", self.world_name);
+                    self.leave_world_with_notice(
+                        crate::world_exit::SaveChoice::Abandon,
+                        crate::save_format::unopenable_message(&why),
+                    );
+                    return false;
+                }
+            }
         };
+        // A world that opened (or is genuinely new) gets its Proof-of-Play secret
+        // persisted now — deferred from the lobby so a refused world is never
+        // written (`GameState::apply_world_seed`).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.persists_locally() {
+            self.persist_pop_secret_if_missing();
+        }
 
         // Save path = resuming an existing world; the `else if` below is a
         // fresh world (no save / load failed AND nothing preloaded), which is
@@ -225,8 +262,8 @@ impl super::GameState {
         // NEITHER branch: the sync load always fails there, but the game_loop
         // poll branch already restored world + players (`world_preloaded`), so
         // running FRESH would clobber the restored position + kit slots.
-        let load_ok = load_result.is_ok();
-        if let Ok((save_data, _chunk_count)) = load_result {
+        let load_ok = load_result.is_some();
+        if let Some((save_data, _chunk_count)) = load_result {
             // Build per-player restore list: new saves have a `players` Vec;
             // old saves have an empty Vec — fall back to legacy single-player fields.
             let player_saves: Vec<crate::save::PlayerSaveData> = if save_data.players.is_empty() {
@@ -435,15 +472,9 @@ impl super::GameState {
                 self.ecs.len(),
             );
         } else if fresh_setup_wanted(load_ok, world_preloaded) {
-            // ── Fresh world (no save found, or load failed). ──
-            if let Err(ref e) = load_result
-                && self.persists_locally()
-                && (crate::save::world_exists(&self.world_name)
-                    || crate::save::has_autosave(&self.world_name))
-                {
-                    log::warn!("Failed to load world: {e}. Generating new world.");
-                }
-
+            // ── Fresh world: nothing saved here yet, or a joined session. A world
+            // that is saved here but failed to load never reaches this branch
+            // (refused above). ──
             // Generate the small spawn-placement area (3×3 columns around origin,
             // covering find_surface_spawn's block-radius-6 spiral) so the player
             // can be placed on real ground. Lighting too, so the first mesh built
@@ -581,6 +612,7 @@ impl super::GameState {
             dx * dx + dz * dz
         });
         self.load_queue = cols.into();
+        true
     }
 
     /// Move player 0 to `pos` (at rest) and pre-generate + light the 5×5

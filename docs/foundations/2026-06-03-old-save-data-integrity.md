@@ -310,3 +310,44 @@ touching it. No quarantine rename, no rebuilt meta. Full description: Spec 02 §
 
 Still open: a real migration for the first non-append change to `WorldSave` and for the
 bincode 1 → 3 move, which will key on this version.
+
+## Update 2026-10-06: a world that fails to load is never replaced
+
+The footer closed the "newer build" hole; the same review found the wider one beneath
+it. On the native client and the dedicated server, ANY load failure only logged a
+warning and generated a fresh world, which was then marked live and saved — the save
+deleted every chunk file that was all-air in the fresh world, overwrote the spawn-area
+chunks and `world.dat`, and wrote the meta last, so a damaged-meta refusal protected
+nothing. Triggers included an I/O error on `world.dat` or the meta (permissions after a
+restore), an undecodable `world.dat`, a chunk file whose name isn't three integers, a
+chunk read error or failed quarantine rename, and unparseable meta whose quarantine
+failed. An unreadable `world.dat` also read as "no footer", so it was neither refused
+nor guarded.
+
+Now (`world_open::open_world`, Spec 02 §8.4 "The load-failure rule"):
+
+- **"Nothing saved here" is told apart from "saved but failed to load".** On disk =
+  `world.dat`, `autosave/world.dat` or a `chunks/*.chunk`; a meta alone is a new world.
+  A world on disk that fails to load is refused — nothing generated, never marked live,
+  nothing written. The client goes back to the lobby with *"This world couldn't be
+  opened: <reason>. Nothing was changed."*; the dedicated server exits before its tick-0
+  save, naming the folder, the file and why.
+- **Loads are all or nothing**, so a refused folder is byte-for-byte unchanged (tested
+  by hashing the folder before and after, for every trigger above). The keep-a-copy-aside
+  recoveries (torn chunk, torn meta, partly decoded `world.dat`) still open the world —
+  they lose nothing.
+- **A failed autosave falls back to the last save**, with the damaged autosave renamed
+  to `autosave.corrupt-<ts>` so nothing later deletes it; the player is told which copy
+  they got.
+- **A save deletes only chunk files it read or wrote**, and checks the meta before it
+  touches anything.
+- **An unreadable `world.dat` is refused** (`WorldSaveError::Unreadable`), like a newer
+  one.
+- **Web**: the play path refuses a damaged chunk inside the IndexedDB / cloud blob
+  instead of skipping it (the next save would have repacked the record without it), and
+  every load failure shows the notice.
+
+Known, not fixed here: a successful autosave recovery clears the autosave at once (a
+second crash within five minutes loses the recovered progress); autosave recovery never
+reads the main `chunks/`, so a chunk mined to all-air before the autosave regenerates as
+terrain; a LAN host's server reads `world.dat` while its client prefers the autosave.

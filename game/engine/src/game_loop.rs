@@ -3077,15 +3077,43 @@ impl super::GameState {
     ///
     /// The PoP secret is the world's own random `WorldMeta.pop_secret` (never
     /// derived from the public seed). A world saved before per-world secrets
-    /// gets a fresh one here, written straight back to its meta.
-    fn apply_world_seed(&mut self, folder: &str, meta: &mut crate::save::WorldMeta) {
+    /// gets a fresh one here. On the web (whose world is already unpacked) it is
+    /// written straight back to its meta; on native this runs in the lobby,
+    /// BEFORE the world is read, so the write waits for `begin_load` to open the
+    /// world (`persist_pop_secret_if_missing`) — a world that then fails to load
+    /// is refused with nothing written (Spec 02 §8.4).
+    fn apply_world_seed(
+        &mut self,
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] folder: &str,
+        meta: &mut crate::save::WorldMeta,
+    ) {
         self.biome_gen = crate::biome::BiomeGenerator::new(meta.seed);
         let (secret, generated) = crate::proof_of_play::ensure_world_secret(&mut meta.pop_secret);
         self.pop_server_secret = secret;
+        #[cfg(target_arch = "wasm32")]
         if generated
             && let Err(e) = crate::save::save_world_meta(folder, meta)
         {
             log::error!("saving the new Proof-of-Play secret failed: {e}");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = generated;
+    }
+
+    /// Persist this session's Proof-of-Play secret into the world's meta when the
+    /// meta has none (a world saved before per-world secrets). Run by `begin_load`
+    /// once the world has opened — never earlier, so a world refused on load is
+    /// never written (Spec 02 §8.4).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn persist_pop_secret_if_missing(&self) {
+        let Ok(mut meta) = crate::save::try_load_world_meta(&self.world_name) else {
+            return;
+        };
+        if meta.pop_secret.is_none() {
+            meta.pop_secret = Some(self.pop_server_secret);
+            if let Err(e) = crate::save::save_world_meta(&self.world_name, &meta) {
+                log::error!("saving the new Proof-of-Play secret failed: {e}");
+            }
         }
     }
 
@@ -7495,7 +7523,10 @@ impl super::GameState {
                 self.reset_for_world_change();
                 match result {
                     Ok(Some(compressed)) => {
-                        match crate::wasm_save::unpack_world(&compressed, &mut self.world) {
+                        // Strict: a damaged chunk refuses the world rather than
+                        // regenerating it and repacking the record without it on
+                        // the next save (Spec 02 §8.4).
+                        match crate::world_archive::unpack_world_to_play(&compressed, &mut self.world) {
                             // #127 — keep the exhibit images that travelled inside the
                             // archive (P2a packs them). `request_exhibit_art` decodes
                             // these in preference to the same-origin `/exhibits/<ref>`
@@ -7710,11 +7741,12 @@ impl super::GameState {
                             }
                             Err(e) => {
                                 log::error!("Failed to unpack local world: {e}");
-                                // Saved by a newer build (Spec 02 §8.4): say why.
-                                if crate::save_format::is_newer_world_error(&e)
-                                    && let GameMode::Menu(ref mut ms) = self.mode
-                                {
-                                    ms.notice = Some(e);
+                                // Never a fresh world over one that failed to load:
+                                // stay in the lobby and say why — the newer-version
+                                // message as is, anything else as "couldn't be
+                                // opened … Nothing was changed." (Spec 02 §8.4).
+                                if let GameMode::Menu(ref mut ms) = self.mode {
+                                    ms.notice = Some(crate::save_format::unopenable_message(&e));
                                 }
                             }
                         }
@@ -7761,7 +7793,16 @@ impl super::GameState {
                         self.p1_gamepad = None;
                         self.capture_cursor();
                     }
-                    Err(e) => log::error!("Local world load failed: {e}"),
+                    Err(e) => {
+                        // The IndexedDB / cloud read failed: the record is still
+                        // there, so this is not a new world. Stay in the lobby.
+                        log::error!("Local world load failed: {e}");
+                        if let GameMode::Menu(ref mut ms) = self.mode {
+                            ms.notice = Some(crate::save_format::unopenable_message(&format!(
+                                "the saved world can't be read ({e})"
+                            )));
+                        }
+                    }
                 }
                 if matches!(self.mode, GameMode::Playing | GameMode::Loading(_)) {
                     // Phase 1c — load the avatar-skin wardrobe (replaces the old
@@ -8232,7 +8273,13 @@ impl super::GameState {
                     log::info!(
                         "Stash Column: '{dname}' → world '{folder}' (mode {mode:?}, exists={world_exists}, plan {plan:?}, seed {seed})"
                     );
-                    if is_fresh {
+                    // A world this build must not open (a newer build's save, an
+                    // unreadable world.dat) is checked BEFORE the Reuse wipe below
+                    // deletes it — not after (Spec 02 §8.4). Refused: no wipe, no
+                    // fresh meta, no armed launch; the check after this match keeps
+                    // the player in the lobby with the notice.
+                    let refused = crate::save::world_open_refusal(&folder).is_some();
+                    if is_fresh && !refused {
                         // Fresh world seeded by arena_seed. For Reuse over a stale
                         // world, wipe first so the terrain regenerates clean (the
                         // wasm wipe rides the async load below). Arm the runner to

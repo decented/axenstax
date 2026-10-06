@@ -435,6 +435,15 @@ pub struct World {
     /// trees, villages, structures — including spill into neighbouring chunks)
     /// don't mark a chunk `persist`. Runtime-only.
     worldgen_depth: u32,
+    /// Spec 02 §8.4 — chunk coordinates whose `.chunk` file this session read in
+    /// (`save::load_chunk_dir`, from `chunks/` or `autosave/chunks/`) or wrote (every
+    /// native save path). A save deletes a chunk's file — the all-air, mined-out
+    /// case — only for a coordinate in here: a file this session never read is
+    /// unknown data and is left alone, never deleted because the in-memory chunk
+    /// there happens to be empty. Interior-mutable because the savers take
+    /// `&World`. Runtime-only; forgotten on a change of world folder.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    disk_chunks: std::sync::Mutex<ahash::AHashSet<(i32, i32, i32)>>,
     /// Per-block-position state for blocks that need it (Wave 27 campfires;
     /// Spec 20 furnaces; future brewing stands, signs, etc). Keyed by
     /// world-space block position. The value is the tagged
@@ -721,6 +730,7 @@ impl World {
             evicted: AHashMap::new(),
             evicted_columns: ahash::AHashSet::new(),
             worldgen_depth: 0,
+            disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
             drying_racks: AHashMap::new(),
             village_anchors: AHashMap::new(),
@@ -915,6 +925,34 @@ impl World {
 
     pub fn has_chunk(&self, cx: i32, cy: i32, cz: i32) -> bool {
         self.chunks.contains_key(&(cx, cy, cz))
+    }
+
+    /// Record that the `.chunk` file for `key` was read in or written by this
+    /// session (see the `disk_chunks` field).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn note_disk_chunk(&self, key: (i32, i32, i32)) {
+        self.disk_chunks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+    }
+
+    /// Forget every known chunk file — on a change of world folder only.
+    pub(crate) fn forget_disk_chunks(&mut self) {
+        self.disk_chunks
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Whether this session read in or wrote the `.chunk` file for `key` — the
+    /// only chunk files a save may delete (Spec 02 §8.4).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn knows_disk_chunk(&self, key: (i32, i32, i32)) -> bool {
+        self.disk_chunks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&key)
     }
 
     /// Spec 02 §7.5 — stream a column out. If ANY of its chunks has `persist`,
@@ -1380,6 +1418,10 @@ impl World {
         self.evicted.clear();
         self.evicted_columns.clear();
         self.worldgen_depth = 0;
+        // `disk_chunks` is deliberately KEPT: it describes the world folder, which
+        // a Workshop reset clears in memory but keeps saving to — forgetting it
+        // would leave the old build's chunk files to resurrect. A world change
+        // forgets it (`world_exit::clear_per_world_fields`).
         self.block_entities.clear();
         self.face_attachments.clear();
         self.drying_racks.clear();

@@ -584,7 +584,13 @@ impl GameServer {
     }
 
     /// Run initial world load around the first player's position.
-    pub fn initial_load(&mut self) {
+    ///
+    /// A world that is on disk but fails to load is `Err` — never replaced by a
+    /// freshly generated world, which the tick-0 / periodic saves would then
+    /// write over it (Spec 02 §8.4, `world_open`). The `Err` names the file and
+    /// why; nothing in the folder was changed. A folder with nothing saved in it
+    /// generates a fresh world as before.
+    pub fn initial_load(&mut self) -> Result<(), String> {
         // Dedicated server runs with 0 local players — fall back to the world
         // spawn so initial_load doesn't index an empty player list (gap G4).
         let spawn = self
@@ -609,126 +615,134 @@ impl GameServer {
         self.fire_spread_enabled = meta.fire_spread_enabled;
         self.explosives_enabled = meta.explosives_enabled;
 
-        // Check for saved world
+        // Check for saved world. The server reads `world.dat` only: it never
+        // clears a crash-recovery autosave, so preferring one would shadow every
+        // later server save.
         let wname = self.world_name.clone();
-        if crate::save::world_exists(&wname) {
-            log::info!("Loading saved world '{wname}'...");
-            match crate::save::load_world(&wname, &mut self.world) {
-                Ok((save_data, chunk_count)) => {
-                    // Build per-player restore list: new saves have a `players` Vec;
-                    // old saves have an empty Vec — fall back to legacy single-player fields.
-                    let player_saves: Vec<crate::save::PlayerSaveData> = if save_data.players.is_empty() {
-                        vec![crate::save::PlayerSaveData {
-                            x: save_data.player_x,
-                            y: save_data.player_y,
-                            z: save_data.player_z,
-                            yaw: 0.0,
-                            pitch: 0.0,
-                            health: save_data.player_health,
-                            hotbar_slot: save_data.hotbar_slot,
-                            inventory: save_data.inventory.clone(),
-                            spawn_pos: None, // legacy single-player save
-                            hunger: 20,
-                            reputation: vec![],
-                            tamed_pets: vec![],
-                            armour_slots: [None, None, None, None],
-                            kill_counter: vec![],
-                            bounties_claimed: vec![],
-                        }]
-                    } else {
-                        save_data.players.clone()
-                    };
+        let opened = crate::world_open::open_world(
+            &wname,
+            &mut self.world,
+            crate::world_open::AutosavePolicy::Ignore,
+        )
+        .map_err(|why| {
+            format!(
+                "world '{wname}' ({}) couldn't be opened: {why}. Nothing was changed.",
+                crate::save::world_dir(&wname).display()
+            )
+        })?;
+        if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
+            log::info!("Loaded saved world '{wname}'.");
+            // Build per-player restore list: new saves have a `players` Vec;
+            // old saves have an empty Vec — fall back to legacy single-player fields.
+            let player_saves: Vec<crate::save::PlayerSaveData> = if save_data.players.is_empty() {
+                vec![crate::save::PlayerSaveData {
+                    x: save_data.player_x,
+                    y: save_data.player_y,
+                    z: save_data.player_z,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    health: save_data.player_health,
+                    hotbar_slot: save_data.hotbar_slot,
+                    inventory: save_data.inventory.clone(),
+                    spawn_pos: None, // legacy single-player save
+                    hunger: 20,
+                    reputation: vec![],
+                    tamed_pets: vec![],
+                    armour_slots: [None, None, None, None],
+                    kill_counter: vec![],
+                    bounties_claimed: vec![],
+                }]
+            } else {
+                save_data.players.clone()
+            };
 
-                    // Restore each player from save
-                    for (i, p_save) in player_saves.iter().enumerate() {
-                        if let Some(slot) = self.players.get_mut(i) {
-                            slot.player.pos = Vec3::new(p_save.x, p_save.y, p_save.z);
-                            slot.player.velocity = Vec3::ZERO;
-                            slot.player.reset_fall();
-                            // Note: ServerPlayer has no camera — yaw/pitch are only
-                            // restored in PlayerSlot (game_loop.rs) for the local client.
-                            slot.combat.health = p_save.health;
-                            slot.combat.hunger = p_save.hunger;
-                            slot.hotbar_slot = p_save.hotbar_slot;
-                            crate::save::restore_inventory(&mut slot.inventory, &p_save.inventory);
-                        }
-                    }
+            // Restore each player from save
+            for (i, p_save) in player_saves.iter().enumerate() {
+                if let Some(slot) = self.players.get_mut(i) {
+                    slot.player.pos = Vec3::new(p_save.x, p_save.y, p_save.z);
+                    slot.player.velocity = Vec3::ZERO;
+                    slot.player.reset_fall();
+                    // Note: ServerPlayer has no camera — yaw/pitch are only
+                    // restored in PlayerSlot (game_loop.rs) for the local client.
+                    slot.combat.health = p_save.health;
+                    slot.combat.hunger = p_save.hunger;
+                    slot.hotbar_slot = p_save.hotbar_slot;
+                    crate::save::restore_inventory(&mut slot.inventory, &p_save.inventory);
+                }
+            }
 
-                    // Position any extra players (beyond what's in the save) near player 0
-                    let p0_pos = self
-                        .players
-                        .first()
-                        .map(|p| p.player.pos)
-                        .unwrap_or(Vec3::new(0.5, 80.0, 0.5));
-                    for i in player_saves.len()..self.players.len() {
-                        self.players[i].player.pos = p0_pos + Vec3::new(i as f32 * 2.0, 0.0, 0.0);
-                        self.players[i].player.velocity = Vec3::ZERO;
-                        self.players[i].player.reset_fall();
-                    }
+            // Position any extra players (beyond what's in the save) near player 0
+            let p0_pos = self
+                .players
+                .first()
+                .map(|p| p.player.pos)
+                .unwrap_or(Vec3::new(0.5, 80.0, 0.5));
+            for i in player_saves.len()..self.players.len() {
+                self.players[i].player.pos = p0_pos + Vec3::new(i as f32 * 2.0, 0.0, 0.0);
+                self.players[i].player.velocity = Vec3::ZERO;
+                self.players[i].player.reset_fall();
+            }
 
-                    // Mark loaded columns
-                    for (cx, _cy, cz) in self.world.chunk_positions() {
+            // Mark loaded columns
+            for (cx, _cy, cz) in self.world.chunk_positions() {
+                self.loaded_columns.insert((cx, cz));
+            }
+
+            // Rail freight Phase 1 (Task 1.6) — re-spawn persisted carts
+            // into THIS server's ECS (the one `cart::tick_carts` advances
+            // each tick) so a saved in-flight cart resumes rolling on
+            // reload. Carts are ECS entities, not block-entities, so they
+            // bypass `apply_world_save_state`; the ECS handle is in scope
+            // here. Old saves have an empty `carts` Vec via
+            // `#[serde(default)]` → a no-op for pre-rail worlds.
+            for s in &save_data.carts {
+                crate::cart::spawn_cart_from(&mut self.ecs, s.data.clone());
+            }
+
+            // Spec 30 — light data isn't persisted; recompute
+            // from block state for every loaded column.
+            for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
+                crate::lighting::run_initial_pass_for_column(
+                    &mut self.world, cx, cz, &self.registry,
+                );
+            }
+
+            // Register water + lava sources
+            for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
+                self.water.register_column_sources(cx, cz, &self.world);
+                self.lava.register_column_sources(cx, cz, &self.world);
+                self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
+            }
+
+            // Generate missing columns (around p0_pos, computed above —
+            // the world spawn when there are no local players).
+            let pcx = (p0_pos.x.floor() as i32).div_euclid(cs);
+            let pcz = (p0_pos.z.floor() as i32).div_euclid(cs);
+            for dx in -rd..=rd {
+                for dz in -rd..=rd {
+                    let cx = pcx + dx;
+                    let cz = pcz + dz;
+                    if !self.loaded_columns.contains(&(cx, cz)) {
+                        self.world.generate_column(cx, cz, &self.biome_gen);
+                        crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
                         self.loaded_columns.insert((cx, cz));
-                    }
-
-                    // Rail freight Phase 1 (Task 1.6) — re-spawn persisted carts
-                    // into THIS server's ECS (the one `cart::tick_carts` advances
-                    // each tick) so a saved in-flight cart resumes rolling on
-                    // reload. Carts are ECS entities, not block-entities, so they
-                    // bypass `apply_world_save_state`; the ECS handle is in scope
-                    // here. Old saves have an empty `carts` Vec via
-                    // `#[serde(default)]` → a no-op for pre-rail worlds.
-                    for s in &save_data.carts {
-                        crate::cart::spawn_cart_from(&mut self.ecs, s.data.clone());
-                    }
-
-                    // Spec 30 — light data isn't persisted; recompute
-                    // from block state for every loaded column.
-                    for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
-                        crate::lighting::run_initial_pass_for_column(
-                            &mut self.world, cx, cz, &self.registry,
-                        );
-                    }
-
-                    // Register water + lava sources
-                    for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
                         self.water.register_column_sources(cx, cz, &self.world);
                         self.lava.register_column_sources(cx, cz, &self.world);
                         self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
                     }
-
-                    // Generate missing columns (around p0_pos, computed above —
-                    // the world spawn when there are no local players).
-                    let pcx = (p0_pos.x.floor() as i32).div_euclid(cs);
-                    let pcz = (p0_pos.z.floor() as i32).div_euclid(cs);
-                    for dx in -rd..=rd {
-                        for dz in -rd..=rd {
-                            let cx = pcx + dx;
-                            let cz = pcz + dz;
-                            if !self.loaded_columns.contains(&(cx, cz)) {
-                                self.world.generate_column(cx, cz, &self.biome_gen);
-                                crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
-                                self.loaded_columns.insert((cx, cz));
-                                self.water.register_column_sources(cx, cz, &self.world);
-                                self.lava.register_column_sources(cx, cz, &self.world);
-                                self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
-                            }
-                        }
-                    }
-
-                    // Scatter mobs
-                    for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
-                        entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
-                    }
-
-                    log::info!("Loaded {chunk_count} saved chunks. {} entities.", self.ecs.len());
-                    return;
                 }
-                Err(e) => log::warn!("Failed to load world: {e}. Generating new."),
             }
+
+            // Scatter mobs
+            for &(cx, cz) in &self.loaded_columns.iter().copied().collect::<Vec<_>>() {
+                entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
+            }
+
+            log::info!("Loaded {chunk_count} saved chunks. {} entities.", self.ecs.len());
+            return Ok(());
         }
 
-        // Fresh world generation
+        // Fresh world generation — nothing is saved in this folder yet.
         log::info!("Generating new world (render distance = {rd})...");
         for dx in -rd..=rd {
             for dz in -rd..=rd {
@@ -767,6 +781,7 @@ impl GameServer {
             p.player.velocity = Vec3::ZERO;
             p.player.reset_fall();
         }
+        Ok(())
     }
 
     /// Run one server simulation tick (20 TPS).
@@ -1653,7 +1668,7 @@ mod tests {
         assert!(leftovers.is_empty(), "atomic writes leave no .tmp: {leftovers:?}");
 
         let mut server2 = GameServer::new(1, name.to_string(), 42);
-        server2.initial_load();
+        server2.initial_load().expect("the saved world loads");
         assert_eq!(server2.world.get_block(3, 64, 5), crate::block::BEDROCK, "block survives save/load");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2144,7 +2159,7 @@ mod tests {
     fn tick_stays_under_budget() {
         // Create a minimal server with 1 player and pre-generated world.
         let mut server = GameServer::new(1, "bench".to_string(), 42);
-        server.initial_load();
+        server.initial_load().expect("initial load");
         let player_count = server.player_count();
         assert_eq!(player_count, 1);
 
