@@ -4707,7 +4707,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4744,7 +4744,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
             .expect("guest");
