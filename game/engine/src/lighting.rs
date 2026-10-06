@@ -270,6 +270,12 @@ fn bfs_propagate(
         }
         for &(dx, dy, dz) in &NEIGHBOURS {
             let np = (x + dx, y + dy, z + dz);
+            // Spec 02 §7.5 — an evicted column is a barrier: its light writes
+            // are dropped and its light reads 0, so entering it would re-queue
+            // the same cells forever. Restore runs the column's own light pass.
+            if world.is_evicted_at(np.0, np.2) {
+                continue;
+            }
             let block = world.get_block(np.0, np.1, np.2);
             let absorption = registry.light_absorption(block);
             if absorption >= 15 {
@@ -312,6 +318,29 @@ mod tests {
         w.set_block(0, 0, 0, block::AIR);
         let r = BlockRegistry::new();
         (w, r)
+    }
+
+    /// Spec 02 §7.5 — light writes into an evicted column are dropped and its
+    /// light reads as 0, so a BFS that entered it saw every cell as still dark
+    /// and re-queued its neighbours without end (exponential: an 8 GiB
+    /// allocation when the dedicated server restored a column beside a still-
+    /// evicted one holding lava, Phase B1). An evicted column is a light
+    /// barrier, as it is for the fluid and fire sims; restore relights it.
+    #[test]
+    fn block_light_stops_at_an_evicted_column() {
+        let r = BlockRegistry::new();
+        let mut w = World::new();
+        // Column (1, 0) holds an edit, so it is kept (evicted), not dropped.
+        w.set_block(20, 40, 8, block::STONE);
+        assert!(w.evict_column(1, 0));
+        // A lava source on column (0, 0)'s border with it.
+        w.set_block(15, 40, 8, block::LAVA);
+        propagate_block_light_from(&mut w, [(15, 40, 8)], &r);
+        assert_eq!(w.block_light_at(15, 40, 8), 15);
+        assert_eq!(w.block_light_at(14, 40, 8), 14, "spreads inside the live column");
+        assert!(!w.has_chunk(1, 2, 0), "never enters the evicted column");
+        assert!(w.restore_column(1, 0), "the evicted column is intact");
+        assert_eq!(w.get_block(20, 40, 8), block::STONE);
     }
 
     #[test]

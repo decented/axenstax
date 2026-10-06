@@ -430,10 +430,18 @@ impl HostedServer {
         // parity path) starts with ≥ 1, and the dedicated server
         // (`server_main`, the WebSocket dedicated path) starts with 0.
         server.simulates_block_machines = num_local_players == 0;
-        // A LAN / online host generates terrain ahead of its joiners' bodies
-        // (Spec 04 §5.3.1); a dedicated server's streaming is Phase B1's.
+        // One column-loading story per mode, never both. A LAN / online host
+        // generates terrain ahead of its joiners' bodies (Spec 04 §5.3.1; its
+        // host client streams its own). The dedicated server, with no host
+        // client streaming for it, loads / unloads columns around every
+        // connected player + the spawn itself (Phase B1, `server_stream.rs`).
+        // The streamer is its own flag, not an alias of
+        // `simulates_block_machines`: a host lending its world (D1/D4) will
+        // tick machines but not stream.
         if num_local_players > 0 {
             server.column_refill_per_tick = crate::server::HOST_COLUMN_REFILL_PER_TICK;
+        } else {
+            server.column_streamer = Some(crate::server_stream::ColumnStreamer::default());
         }
         // A world on disk that fails to load is refused here — before the accept
         // thread starts or anything is saved — never replaced by a fresh world

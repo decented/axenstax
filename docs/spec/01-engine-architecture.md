@@ -719,6 +719,77 @@ Rules:
   their other machine sweeps locally. Those pushes converge because they carry
   absolute state.)
 
+### 4.1.2 As-built: the dedicated server streams columns (Phase B1, 2026-10-06)
+
+**Bug this fixes.** `GameServer::initial_load` filled `loaded_columns` once, in
+a square around the world spawn (radius `render_distance`, default 10), and
+nothing ever grew it. On a dedicated server nobody else holds the world, so a
+joiner who walked out of that square fell through server-side air (their
+position is server-simulated), and every edit out there was refused as
+`EditRefusal::Unloaded` and bounced back. The old `STREAM_BUDGET` const in
+`server.rs` was dead code.
+
+**Mechanism.** `GameServer::stream_columns` (`server_stream.rs`) runs at the top
+of every `GameServer::tick`, after the tick counter and before mob spawning,
+physics and anything else that reads the world, so a column a player just
+entered is loaded and lit before it is used.
+
+- **Who streams.** Only the dedicated server: `HostedServer::start_inner` sets
+  `GameServer::column_streamer = Some(..)` iff it has 0 local players, the
+  same invariant as `simulates_block_machines` but a separate field (a host
+  that lends its world to the server will tick machines without streaming).
+  LAN / online hosts and `TestHost` keep `None` and the `initial_load` region.
+- **Anchors.** Every *connected* player's column (ghost slots kept for index
+  stability don't count) plus the world-spawn column `initial_load` centred on
+  (`GameServer::spawn_column`), so the spawn area stays warm for the next joiner.
+- **Radius.** `--sim-distance <columns>` / `AXENSTAX_SIM_DISTANCE`, default 8,
+  clamped 2..=16 (`server_stream::{DEFAULT,MIN,MAX}_SIM_DISTANCE`). Boot still
+  warms the default render distance (10) around spawn; the streamer trims or
+  extends to the sim distance from the first tick.
+- **Budget.** `SERVER_STREAM_BUDGET = 2` columns streamed in per tick (the
+  client streams 4 per frame). Unloads are not budgeted: they are hash-map
+  moves, no I/O.
+- **One policy, two callers.** The decision is the pure
+  `chunk_stream::plan_stream_step(anchors, nearest_to, radius, budget, loaded,
+  needs_reload)`: needed = every column within `radius` (Chebyshev) of an
+  anchor; wanted = needed and not loaded, plus loaded void columns
+  (`is_void_column`, the floor-grid-holes self-heal); ordered by squared
+  distance to the nearest `nearest_to` column, ties by `(cx, cz)`; the first
+  `budget` load. Unload = loaded columns beyond `radius + UNLOAD_HYSTERESIS`
+  (2) of every anchor. The client passes its local players as anchors and
+  player 0 alone as `nearest_to` (its order is unchanged); the server passes
+  its anchors as both, so each player's own column (distance 0) always loads
+  first.
+- **One per-column implementation.** `chunk_stream::ColumnSims` (the
+  `MachineCtx` pattern) borrows world, loaded set, registry, generator,
+  water / lava / fire and ECS from either side. `stream_in` = restore from the
+  evicted store, else `generate_column` (Spec 02 §7.5.1), then the column light
+  pass (mob spawning reads block light and crop growth reads light, so a
+  streamed column must be lit like a loaded one), water / lava / fire
+  registration, wildlife scatter, mark loaded. `stream_out` = unmark, despawn
+  the column's `Scattered` wildlife, `evict_column`. The client adds meshing
+  and mesh drops around these.
+- **Settled skip.** When a pass leaves nothing waiting, the streamer records
+  the anchor set and skips later passes until an anchor changes column (or the
+  sim distance changes). A void column is therefore re-checked only when an
+  anchor moves.
+- **Persistence.** Unload never writes and never deletes a file: an edited or
+  saved column moves to the in-memory evicted store and every server save
+  (`GameServer::try_save` → `World::persistable_chunks`) writes it. The
+  streamer never reads disk (the whole save is in memory from `load_world`), so
+  it can never write back a column that failed to load.
+
+**Measured** (dev profile, opt-level 1, laptop): a settled pass ≈ 50 ns; a pass
+streaming 2 fresh columns ≈ 14 ms mean, 16 ms max (≈ 7 ms per generated
+column). Release is several times faster.
+
+**Known limits.** Server RAM holds the whole saved world (all chunks load at
+boot; evicted columns stay in memory) — paging evicted columns to disk is the
+follow-up. More than `SERVER_STREAM_BUDGET` players entering distinct unloaded
+columns in the same tick (a mass teleport) leaves the extra ones over unloaded
+air for a tick or more; there is no physics hold for that case yet. Tests:
+`test_integration/server_streaming.rs`, `server_stream.rs`, `chunk_stream.rs`.
+
 ### 4.2 Client Frame Loop
 
 The client render loop is **decoupled from the tick rate** and runs as fast as the display allows (vsync or uncapped). The client maintains its own simulation state that is a prediction ahead of the last confirmed server state.

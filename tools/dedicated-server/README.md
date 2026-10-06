@@ -156,6 +156,7 @@ paths. Operator tools still need a direct QUIC connection. Details:
 | `AXENSTAX_SERVER_NAME` | `Axe'n'Stax Server` | Display name |
 | `AXENSTAX_WS_PORT` | `6767` | Native WebSocket game port ("STAX"/"6-7") |
 | `AXENSTAX_AUTOSAVE_SECS` | `60` | Autosave interval |
+| `AXENSTAX_SIM_DISTANCE` (or `--sim-distance`) | `8` | Radius, in 16-block columns, the server keeps loaded and simulated around each connected player and the world spawn (2–16). Higher = more RAM and CPU per player |
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
 | `AXENSTAX_SKIP_WIZARD` | `0` | `1` ⇒ skip the first-run setup gate; boot immediately on these defaults |
 

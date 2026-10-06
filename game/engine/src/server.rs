@@ -20,19 +20,14 @@ use crate::world::World;
 
 /// Maximum chunk Y coordinate for world generation.
 const MAX_CHUNK_Y: i32 = 5;
-// BRIDGE: `REACH_DISTANCE` (server-authoritative reach check) and
-// `STREAM_BUDGET` (server-side chunk-stream pacing) are declared but not yet
-// enforced here — reach checking and chunk streaming for real clients today
-// live in the single-player client path (block_interact.rs / chunk_stream.rs),
-// which GameServer doesn't run (see the "Single-player bypasses GameServer"
-// note in CLAUDE.md). Wire these in when the dedicated server needs its own
-// authoritative reach/stream enforcement.
+// BRIDGE: `REACH_DISTANCE` (server-authoritative reach check) is declared but
+// not enforced here — the joiner reach check lives in `hosted_server.rs`
+// (`block_change_within_reach`) and the local one in block_interact.rs. Wire
+// it in when GameServer owns its own reach enforcement. (Server-side column
+// streaming lives in `server_stream.rs`, Phase B1.)
 /// Block reach distance.
 #[allow(dead_code)]
 const REACH_DISTANCE: f32 = 5.0;
-/// Max columns to stream per frame.
-#[allow(dead_code)]
-const STREAM_BUDGET: usize = 4;
 
 /// Per-player server-side state.
 pub struct ServerPlayer {
@@ -616,6 +611,15 @@ pub struct GameServer {
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
+    /// Phase B1 — the dedicated server's column streamer (`server_stream.rs`):
+    /// loads / unloads columns around every connected player + the spawn each
+    /// tick. `Some` only on the dedicated server (set by
+    /// `HostedServer::start_inner` with 0 local players); `None` on hosts and
+    /// in `TestHost`, which keep the `initial_load` region.
+    pub column_streamer: Option<crate::server_stream::ColumnStreamer>,
+    /// The world-spawn column `initial_load` centred on — a permanent
+    /// streaming anchor, so the spawn area stays loaded for the next joiner.
+    pub spawn_column: (i32, i32),
     pub falling_tick_counter: u32,
     /// Monotonically-incrementing tick counter used as the clock for
     /// systems that must measure absolute durations (e.g. Rubber tap
@@ -696,6 +700,8 @@ impl GameServer {
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
             loaded_columns: ahash::AHashSet::new(),
+            column_streamer: None,
+            spawn_column: (0, 0),
             falling_tick_counter: 0,
             tick_counter: 0,
             weather: crate::weather::Weather::CLEAR,
@@ -774,6 +780,7 @@ impl GameServer {
         let cs = CHUNK_SIZE as i32;
         let pcx = (spawn.x.floor() as i32).div_euclid(cs);
         let pcz = (spawn.z.floor() as i32).div_euclid(cs);
+        self.spawn_column = (pcx, pcz);
         // Live server render distance (Spec 39 — was the `RENDER_DISTANCE` const).
         let rd = self.render_distance;
 
@@ -994,6 +1001,12 @@ impl GameServer {
         // Monotonic counter — used by anything that needs an absolute
         // age check (Rubber tap cooldown, future replenishers).
         self.tick_counter = self.tick_counter.wrapping_add(1);
+
+        // Phase B1 — the dedicated server streams columns around every
+        // connected player before anything below reads the world, so a column
+        // a player just entered is loaded and lit before spawning, physics or
+        // an edit touches it. No-op unless this server streams.
+        self.stream_columns();
 
         // P9 weather sync — advance the SAME formula the client uses
         // (`weather::advance`), every tick, so a dedicated/hosted server's

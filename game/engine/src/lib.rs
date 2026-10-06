@@ -336,6 +336,7 @@ mod data_dir;
 // tokio + quinn, which don't run in wasm32-unknown-unknown.
 mod transport;
 mod server;
+mod server_stream; // Phase B1 — the dedicated server's column streamer.
 mod block_machines; // T1-3 — GameServer's block-machine pass + the shared MachineCtx.
 mod hosted_server;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).

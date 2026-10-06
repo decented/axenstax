@@ -1451,6 +1451,23 @@ IndexedDB and `.axeworld` export) and `GameServer`'s save. The all-air
 delete rule applies to evicted chunks too. `World::clear` empties the store, so
 nothing leaks between worlds.
 
+**The dedicated server uses the same store (Phase B1, 2026-10-06).**
+`GameServer::stream_columns` (Spec 01 §4.1.2) streams columns in and out around
+every connected player through the same `chunk_stream::ColumnSims::stream_in` /
+`stream_out` the client streamer uses, so a server-side unload is an
+`evict_column` too, and `GameServer::try_save` writes the evicted chunks.
+
+**An evicted column is a light barrier (bug fixed 2026-10-06).** Light writes
+into an evicted column are dropped and its light reads as 0 (block light) from
+`World::chunks`. `lighting::bfs_propagate` used to enter it anyway: every cell
+it reached still read dark, so it re-queued its neighbours without end, an
+exponential blow-up (an 8 GiB allocation, found when the dedicated server
+restored a column next to a still-evicted one holding lava; the client could
+hit it the same way walking back into an edited area). The BFS now skips
+neighbours where `World::is_evicted_at` is true, as the water, lava and fire
+sims already did. Restore runs the column's own light pass. Regression test:
+`lighting::tests::block_light_stops_at_an_evicted_column`.
+
 **Memory bound.** Only edited or saved columns are kept: the columns a player
 changed, plus every column loaded from the save. Pristine columns are still
 dropped. The store is in memory and not paged to disk, so native and WASM behave

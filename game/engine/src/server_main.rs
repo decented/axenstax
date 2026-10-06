@@ -46,6 +46,9 @@ struct ServerConfig {
     ws_port: u16,
     server_name: String,
     autosave_secs: u64,
+    /// `--sim-distance` / `AXENSTAX_SIM_DISTANCE`: columns (radius) the server
+    /// keeps loaded around each connected player + the spawn (Phase B1).
+    sim_distance: i32,
 }
 
 /// `--key value` CLI lookup (overrides env). Returns the value following `--key`.
@@ -87,6 +90,11 @@ fn parse_config(args: &[String]) -> ServerConfig {
         .parse::<u64>()
         .unwrap_or(60)
         .max(5);
+    let sim_distance = crate::server_stream::clamp_sim_distance(
+        resolve(args, "--sim-distance", "AXENSTAX_SIM_DISTANCE", "")
+            .parse::<i32>()
+            .unwrap_or(crate::server_stream::DEFAULT_SIM_DISTANCE),
+    );
 
     ServerConfig {
         world,
@@ -99,6 +107,7 @@ fn parse_config(args: &[String]) -> ServerConfig {
         ws_port,
         server_name,
         autosave_secs,
+        sim_distance,
     }
 }
 
@@ -832,6 +841,11 @@ pub fn run(args: &[String]) {
         }
     };
 
+    // Phase B1 — stream columns around every connected player at this radius
+    // (boot warmed the default render distance around spawn; the streamer
+    // trims / extends to it from the first tick).
+    hs.server.set_sim_distance(cfg.sim_distance);
+
     // Persist the freshly-generated world immediately so `world.dat` exists from
     // tick 0 (a crash before the first autosave doesn't lose the generation).
     // Reached only when the world loaded or there was nothing saved to load.
@@ -844,6 +858,7 @@ pub fn run(args: &[String]) {
     log::info!("  seed       : {seed}");
     log::info!("  max players: {}", cfg.max_players);
     log::info!("  ws port    : {}", cfg.ws_port);
+    log::info!("  sim dist.  : {} columns", cfg.sim_distance);
     match classify_boot_identity(identity.as_ref(), nostr::Timestamp::now()) {
         BootIdentity::Verified(npub) => log::info!("  identity   : VERIFIED ({npub})"),
         BootIdentity::Expired => {
@@ -1209,6 +1224,20 @@ mod tests {
         assert_eq!(cfg.world_type, "flat");
         assert_eq!(cfg.ground, "sand");
         assert_eq!(cfg.water_depth, 5);
+    }
+
+    #[test]
+    fn parse_config_reads_and_clamps_the_sim_distance() {
+        let cfg = |a: &[&str]| parse_config(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        // Deterministic only while the env var is unset (CI / dev boxes).
+        if std::env::var("AXENSTAX_SIM_DISTANCE").is_err() {
+            assert_eq!(cfg(&[]).sim_distance, crate::server_stream::DEFAULT_SIM_DISTANCE);
+        }
+        // An unparseable value falls back to the default (CLI beats env).
+        assert_eq!(cfg(&["--sim-distance", "junk"]).sim_distance, 8);
+        assert_eq!(cfg(&["--sim-distance", "12"]).sim_distance, 12);
+        assert_eq!(cfg(&["--sim-distance", "0"]).sim_distance, crate::server_stream::MIN_SIM_DISTANCE);
+        assert_eq!(cfg(&["--sim-distance", "99"]).sim_distance, crate::server_stream::MAX_SIM_DISTANCE);
     }
 
     #[test]

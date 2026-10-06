@@ -8,25 +8,15 @@ impl super::GameState {
     /// Generate and mesh chunks around all players (union of needed columns).
     /// First call does a bulk initial load; subsequent calls stream incrementally.
     pub(crate) fn stream_chunks(&mut self) {
-        let cs = CHUNK_SIZE as i32;
         // Live render distance (Spec 39 — was the `RENDER_DISTANCE` const).
         let rd = self.graphics.render_distance;
 
         // ── Part G: Union chunk streaming — needed columns across all players ──
-        let mut needed_columns = ahash::AHashSet::new();
-        for slot in &self.players {
-            let pcx = (slot.player.pos.x.floor() as i32).div_euclid(cs);
-            let pcz = (slot.player.pos.z.floor() as i32).div_euclid(cs);
-            for dx in -rd..=rd {
-                for dz in -rd..=rd {
-                    needed_columns.insert((pcx + dx, pcz + dz));
-                }
-            }
-        }
+        let player_cols: Vec<(i32, i32)> =
+            self.players.iter().map(|slot| column_of(slot.player.pos)).collect();
 
         // Use player 0 for initial load centre
-        let pcx0 = (self.players[0].player.pos.x.floor() as i32).div_euclid(cs);
-        let pcz0 = (self.players[0].player.pos.z.floor() as i32).div_euclid(cs);
+        let (pcx0, pcz0) = player_cols[0];
 
         if self.loaded_columns.is_empty() {
             // Fallback path only: the normal world entry runs through the
@@ -40,78 +30,55 @@ impl super::GameState {
             return;
         }
 
-        // Normal terrain worlds floor every column with bedrock at y=0
-        // (`biome_block_at` is unconditional there); flat/Workshop floor at
-        // other Ys, so y=0 bedrock isn't their "is this generated?" signal.
-        let normal_terrain = !self.world.is_workshop && !self.world.has_flat_floor();
-
-        // Find unloaded columns within the union set, sorted closest to player 0.
-        // SELF-HEAL: also re-queue a column that's marked loaded but has NO bedrock
-        // floor — a "void column" (the floor-grid-holes bug) the player would drop
-        // through. The plain `!loaded` guard alone never revisits such a column, so
-        // a generate/bookkeeping divergence becomes a permanent hole. Re-running
-        // generate_column is idempotent (it skips already-filled chunks).
-        let mut to_load: Vec<(i32, i32, i32)> = Vec::new();
-        let mut healed = 0u32;
-        for &(cx, cz) in &needed_columns {
-            let loaded = self.loaded_columns.contains(&(cx, cz));
-            let void = loaded
-                && normal_terrain
-                && self.world.get_block(cx * cs + 8, 0, cz * cs + 8) != crate::block::BEDROCK;
-            if !loaded || void {
-                if void {
-                    healed += 1;
-                }
-                let dx = cx - pcx0;
-                let dz = cz - pcz0;
-                to_load.push((dx * dx + dz * dz, cx, cz));
-            }
-        }
-        if healed > 0 {
+        // The streaming decision (which columns to load this frame, nearest
+        // player 0 first, and which to unload) is the pure `plan_stream_step`,
+        // shared with the dedicated server's streamer (`server_stream.rs`).
+        // SELF-HEAL: a column that's marked loaded but has no bedrock floor (a
+        // "void column", the floor-grid-holes bug) is re-queued too — see
+        // `is_void_column`.
+        let world = &self.world;
+        let step = plan_stream_step(
+            &player_cols,
+            &[(pcx0, pcz0)],
+            rd,
+            STREAM_BUDGET,
+            &self.loaded_columns,
+            |cx, cz| is_void_column(world, cx, cz),
+        );
+        if step.healed > 0 {
             log::warn!(
-                "stream_chunks self-heal: re-generating {healed} void column(s) \
-                 (marked loaded but unfloored) near player 0"
+                "stream_chunks self-heal: re-generating {} void column(s) \
+                 (marked loaded but unfloored) near player 0",
+                step.healed
             );
         }
 
-        if !to_load.is_empty() {
-            to_load.sort_by_key(|&(d, _, _)| d);
+        for &(cx, cz) in &step.load {
+            // Spec 02 §7.5 — an evicted (edited / saved) column comes back
+            // from the store; only a never-kept column is (re)generated. This
+            // also covers the void self-heal: it never regenerates over an
+            // evicted column. The rest mirrors the save-load path (light,
+            // fluid/fire rescan, mesh).
+            self.column_sims().stream_in(cx, cz);
 
-            for &(_, cx, cz) in to_load.iter().take(STREAM_BUDGET) {
-                // Spec 02 §7.5 — an evicted (edited / saved) column comes back
-                // from the store; only a never-kept column is (re)generated. This
-                // also covers the void self-heal: it never regenerates over an
-                // evicted column. The rest mirrors the save-load path (light,
-                // fluid/fire rescan, mesh).
-                load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, true);
-                                crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
-                self.water.register_column_sources(cx, cz, &self.world);
-                self.lava.register_column_sources(cx, cz, &self.world);
-                self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
-                crate::entity::scatter_mobs_in_column(
-                    &mut self.ecs, cx, cz, &self.world, &self.biome_gen,
-                );
-                self.loaded_columns.insert((cx, cz));
-
-                // Mesh new chunks in this column
-                for cy in 0..=MAX_CHUNK_Y {
-                    if self.world.has_chunk(cx, cy, cz) {
-                        let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
-                        self.renderer.upload_chunk((cx, cy, cz), &meshes);
-                    }
+            // Mesh new chunks in this column
+            for cy in 0..=MAX_CHUNK_Y {
+                if self.world.has_chunk(cx, cy, cz) {
+                    let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
+                    self.renderer.upload_chunk((cx, cy, cz), &meshes);
                 }
+            }
 
-                // Re-mesh neighbouring columns' boundary chunks (so hidden faces cull properly)
-                for &(ndx, ndz) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let nx = cx + ndx;
-                    let nz = cz + ndz;
-                    if self.loaded_columns.contains(&(nx, nz)) {
-                        for cy in 0..=MAX_CHUNK_Y {
-                            if self.world.has_chunk(nx, cy, nz) {
-                                let meshes =
-                                    build_chunk_meshes(nx, cy, nz, &self.world, &self.registry);
-                                self.renderer.upload_chunk((nx, cy, nz), &meshes);
-                            }
+            // Re-mesh neighbouring columns' boundary chunks (so hidden faces cull properly)
+            for &(ndx, ndz) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let nx = cx + ndx;
+                let nz = cz + ndz;
+                if self.loaded_columns.contains(&(nx, nz)) {
+                    for cy in 0..=MAX_CHUNK_Y {
+                        if self.world.has_chunk(nx, cy, nz) {
+                            let meshes =
+                                build_chunk_meshes(nx, cy, nz, &self.world, &self.registry);
+                            self.renderer.upload_chunk((nx, cy, nz), &meshes);
                         }
                     }
                 }
@@ -119,28 +86,12 @@ impl super::GameState {
         }
 
         // Unload columns that are outside ALL players' render distance
-        let unload_dist = rd + 2;
-        let player_cols: Vec<(i32, i32)> = self
-            .players
-            .iter()
-            .map(|slot| {
-                (
-                    (slot.player.pos.x.floor() as i32).div_euclid(cs),
-                    (slot.player.pos.z.floor() as i32).div_euclid(cs),
-                )
-            })
-            .collect();
-        let to_remove = columns_to_unload(&self.loaded_columns, &player_cols, unload_dist);
-
-        for (cx, cz) in to_remove {
-            self.loaded_columns.remove(&(cx, cz));
-            // Reclaim the column's scattered wildlife so re-entry re-scatters a
-            // fresh set rather than piling onto the old (engine audit B). Tamed
-            // pets / villagers / golems aren't `Scattered`, so they survive.
-            crate::entity::despawn_mobs_in_column(&mut self.ecs, cx, cz);
-            // Spec 02 §7.5 — edited / saved columns are kept in the evicted
-            // store (and still saved); pristine world-gen is dropped.
-            unload_column_blocks(&mut self.world, cx, cz);
+        // (+ `UNLOAD_HYSTERESIS`). Planned before the loads above, which are
+        // all inside the render distance, so never in this set.
+        for &(cx, cz) in &step.unload {
+            // Reclaims the column's scattered wildlife and evicts / drops its
+            // blocks (Spec 02 §7.5) — see `ColumnSims::stream_out`.
+            self.column_sims().stream_out(cx, cz);
             for cy in 0..=MAX_CHUNK_Y {
                 self.renderer.chunk_meshes.remove(&(cx, cy, cz));
                 self.renderer.water_meshes.remove(&(cx, cy, cz));
@@ -152,6 +103,22 @@ impl super::GameState {
                 self.renderer.micro_meshes.remove(&(cx, cy, cz));
                 self.renderer.micro_billboard_meshes.remove(&(cx, cy, cz));
             }
+        }
+    }
+
+    /// The world-side state a column stream-in / stream-out touches, borrowed
+    /// from this client (see [`ColumnSims`]).
+    fn column_sims(&mut self) -> ColumnSims<'_> {
+        ColumnSims {
+            world: &mut self.world,
+            loaded: &mut self.loaded_columns,
+            registry: &self.registry,
+            biome_gen: &self.biome_gen,
+            water: &mut self.water,
+            lava: &mut self.lava,
+            fire: &mut self.fire,
+            ecs: &mut self.ecs,
+            tick: self.tick_counter,
         }
     }
 
@@ -685,6 +652,163 @@ impl super::GameState {
 
 }
 
+// ── Column-streaming policy (shared: client + dedicated server) ─────────────
+//
+// One decision, two callers: the client's `GameState::stream_chunks` (anchors =
+// its local players, radius = render distance, `STREAM_BUDGET` per frame) and
+// the dedicated server's `GameServer::stream_columns` (`server_stream.rs`;
+// anchors = every connected player + the world spawn, radius = `--sim-distance`,
+// `SERVER_STREAM_BUDGET` per tick). Spec 01 §4.1.2.
+
+/// Extra columns (Chebyshev) a loaded column may sit beyond the streaming
+/// radius before it unloads, so a player pacing along a column border doesn't
+/// thrash load/unload.
+pub(crate) const UNLOAD_HYSTERESIS: i32 = 2;
+
+/// The column `(cx, cz)` holding world position `pos`.
+pub(crate) fn column_of(pos: glam::Vec3) -> (i32, i32) {
+    let cs = CHUNK_SIZE as i32;
+    (
+        (pos.x.floor() as i32).div_euclid(cs),
+        (pos.z.floor() as i32).div_euclid(cs),
+    )
+}
+
+/// Is this loaded column a "void column" — normal terrain with no bedrock floor
+/// (the floor-grid-holes bug)? Normal terrain worlds floor every column with
+/// bedrock at y=0 (`biome_block_at` is unconditional there); flat/Workshop
+/// worlds floor at other Ys, so y=0 bedrock isn't their "is this generated?"
+/// signal and they never report void. A streamer re-queues a void column: the
+/// plain `!loaded` guard alone never revisits it, so a generate/bookkeeping
+/// divergence (e.g. a column marked loaded because a save held only a stray
+/// chunk of it) would stay a permanent hole. Re-running `generate_column` is
+/// idempotent (it skips already-filled chunks).
+pub(crate) fn is_void_column(world: &crate::world::World, cx: i32, cz: i32) -> bool {
+    let cs = CHUNK_SIZE as i32;
+    !world.is_workshop
+        && !world.has_flat_floor()
+        && world.get_block(cx * cs + 8, 0, cz * cs + 8) != crate::block::BEDROCK
+}
+
+/// One streaming step's decision (see [`plan_stream_step`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct StreamStep {
+    /// Columns to (re)load now, nearest first, at most `budget` of them.
+    pub load: Vec<(i32, i32)>,
+    /// How many columns wanted loading before the budget cut (`>= load.len()`).
+    pub pending: usize,
+    /// How many of those were loaded-but-void columns being re-generated.
+    pub healed: usize,
+    /// Loaded columns outside every anchor's `radius + UNLOAD_HYSTERESIS`.
+    pub unload: Vec<(i32, i32)>,
+}
+
+/// The column-streaming decision, pure.
+///
+/// Needed = every column within `radius` (Chebyshev) of any `anchors` column.
+/// Wanted = needed columns not in `loaded`, plus loaded ones `needs_reload`
+/// flags (the void self-heal). Wanted columns are ordered by squared distance
+/// to the NEAREST `nearest_to` column, ties broken by `(cx, cz)` so the order
+/// is deterministic, and the first `budget` are returned in `load`. `unload` is
+/// [`columns_to_unload`] at `radius + UNLOAD_HYSTERESIS`.
+///
+/// `nearest_to` is separate from `anchors` on purpose: the client orders by
+/// player 0 only (its split-screen players load after player 0's nearer
+/// columns, as before), while the server orders by every anchor, so each
+/// player's own column (distance 0) always loads first.
+pub(crate) fn plan_stream_step(
+    anchors: &[(i32, i32)],
+    nearest_to: &[(i32, i32)],
+    radius: i32,
+    budget: usize,
+    loaded: &ahash::AHashSet<(i32, i32)>,
+    mut needs_reload: impl FnMut(i32, i32) -> bool,
+) -> StreamStep {
+    let mut needed = ahash::AHashSet::new();
+    for &(ax, az) in anchors {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                needed.insert((ax + dx, az + dz));
+            }
+        }
+    }
+    let mut wanted: Vec<(i64, i32, i32)> = Vec::new();
+    let mut healed = 0usize;
+    for &(cx, cz) in &needed {
+        let is_loaded = loaded.contains(&(cx, cz));
+        let void = is_loaded && needs_reload(cx, cz);
+        if is_loaded && !void {
+            continue;
+        }
+        healed += usize::from(void);
+        // i64: a far teleport puts columns ~10^5 apart, whose square overflows i32.
+        let d = nearest_to
+            .iter()
+            .map(|&(px, pz)| {
+                let (dx, dz) = (i64::from(cx - px), i64::from(cz - pz));
+                dx * dx + dz * dz
+            })
+            .min()
+            .unwrap_or(0);
+        wanted.push((d, cx, cz));
+    }
+    let pending = wanted.len();
+    wanted.sort_unstable();
+    wanted.truncate(budget);
+    StreamStep {
+        load: wanted.into_iter().map(|(_, cx, cz)| (cx, cz)).collect(),
+        pending,
+        healed,
+        unload: columns_to_unload(loaded, anchors, radius + UNLOAD_HYSTERESIS),
+    }
+}
+
+/// The world-side state a column stream-in / stream-out touches, borrowed
+/// from whichever side streams it (the client's `GameState` or the dedicated
+/// `GameServer`), so the per-column steps can't drift between them (the
+/// `block_machines::MachineCtx` pattern). Rendering stays with the caller.
+pub(crate) struct ColumnSims<'a> {
+    pub world: &'a mut crate::world::World,
+    pub loaded: &'a mut ahash::AHashSet<(i32, i32)>,
+    pub registry: &'a crate::block::BlockRegistry,
+    pub biome_gen: &'a crate::biome::BiomeGenerator,
+    pub water: &'a mut crate::water::WaterSystem,
+    pub lava: &'a mut crate::lava::LavaSystem,
+    pub fire: &'a mut crate::fire::FireSystem,
+    pub ecs: &'a mut hecs::World,
+    /// The caller's monotonic tick counter (fire timestamps).
+    pub tick: u64,
+}
+
+impl ColumnSims<'_> {
+    /// Stream a column in: restore it from the evicted store, else generate it
+    /// (Spec 02 §7.5 — `load_column_blocks` with `regen_present`, which also
+    /// heals a void column); run the light pass (Spec 30: light isn't
+    /// persisted, and mob spawning + crop growth read it); register its water,
+    /// lava and fire; scatter its wildlife; mark it loaded.
+    pub(crate) fn stream_in(&mut self, cx: i32, cz: i32) {
+        load_column_blocks(self.world, cx, cz, self.biome_gen, true);
+        crate::lighting::run_initial_pass_for_column(self.world, cx, cz, self.registry);
+        self.water.register_column_sources(cx, cz, self.world);
+        self.lava.register_column_sources(cx, cz, self.world);
+        self.fire.register_column_fires(cx, cz, self.world, self.tick);
+        crate::entity::scatter_mobs_in_column(self.ecs, cx, cz, self.world, self.biome_gen);
+        self.loaded.insert((cx, cz));
+    }
+
+    /// Stream a column out: unmark it, reclaim its scattered wildlife so
+    /// re-entry re-scatters a fresh set rather than piling onto the old
+    /// (engine audit B — tamed pets / villagers / golems aren't `Scattered`, so
+    /// they survive), and evict its blocks: edited / saved columns go to the
+    /// evicted store (and are still written by every save path); pristine
+    /// world-gen is dropped (Spec 02 §7.5).
+    pub(crate) fn stream_out(&mut self, cx: i32, cz: i32) {
+        self.loaded.remove(&(cx, cz));
+        crate::entity::despawn_mobs_in_column(self.ecs, cx, cz);
+        unload_column_blocks(self.world, cx, cz);
+    }
+}
+
 /// Columns in `loaded` that are more than `unload_dist` chunks (Chebyshev,
 /// per axis) from EVERY player column — the ones `stream_chunks` unloads.
 pub(crate) fn columns_to_unload(
@@ -901,6 +1025,116 @@ mod tests {
         assert!(load_column_blocks(&mut world, 0, 0, &bg, false), "restored");
         assert_eq!(world.get_block(3, 70, 3), block::GLASS);
         assert_eq!(world.get_block(3, 20, 3), block::AIR);
+    }
+
+    fn set_of(cols: &[(i32, i32)]) -> ahash::AHashSet<(i32, i32)> {
+        cols.iter().copied().collect()
+    }
+
+    /// Phase B1 — the shared streaming decision: nearest first, capped at the
+    /// budget, deterministic on ties, `pending` counts the whole backlog.
+    #[test]
+    fn plan_loads_nearest_first_within_budget() {
+        let loaded = set_of(&[(0, 0)]);
+        let step = plan_stream_step(&[(0, 0)], &[(0, 0)], 1, 3, &loaded, |_, _| false);
+        assert_eq!(step.pending, 8, "the 3x3 square minus the loaded centre");
+        // The 4 edge neighbours (d²=1) beat the corners (d²=2); ties by (cx, cz).
+        assert_eq!(step.load, vec![(-1, 0), (0, -1), (0, 1)]);
+        assert_eq!(step.healed, 0);
+        assert!(step.unload.is_empty());
+
+        let all = plan_stream_step(&[(0, 0)], &[(0, 0)], 1, usize::MAX, &loaded, |_, _| false);
+        assert_eq!(all.load.len(), 8);
+        let ds: Vec<i32> = all.load.iter().map(|&(x, z)| x * x + z * z).collect();
+        assert!(ds.windows(2).all(|w| w[0] <= w[1]), "nearest first: {ds:?}");
+    }
+
+    /// With every anchor as a distance reference, each anchor's own column
+    /// (distance 0) loads before anything else — what keeps a server-simulated
+    /// player standing on ground when several players need columns at once.
+    #[test]
+    fn plan_orders_by_the_nearest_reference_column() {
+        let anchors = [(0, 0), (40, 0)];
+        let step = plan_stream_step(&anchors, &anchors, 2, 2, &set_of(&[]), |_, _| false);
+        assert_eq!(step.load, vec![(0, 0), (40, 0)], "both own columns first");
+        // Ordering by player 0 alone (the client) puts the far anchor last.
+        let p0 = plan_stream_step(&anchors, &[(0, 0)], 2, 50, &set_of(&[]), |_, _| false);
+        assert_eq!(p0.pending, 50, "two disjoint 5x5 squares");
+        assert_eq!(p0.load.last().map(|&(x, _)| x >= 38), Some(true));
+    }
+
+    /// The void self-heal: a loaded column the predicate flags is re-queued
+    /// (and counted); an unflagged loaded one is left alone.
+    #[test]
+    fn plan_requeues_flagged_loaded_columns_as_healed() {
+        let loaded = set_of(&[(0, 0), (1, 0)]);
+        let step = plan_stream_step(&[(0, 0)], &[(0, 0)], 0, 4, &loaded, |cx, _| cx == 0);
+        assert_eq!(step.load, vec![(0, 0)]);
+        assert_eq!(step.healed, 1);
+        assert_eq!(step.pending, 1);
+    }
+
+    /// Unload uses the radius plus `UNLOAD_HYSTERESIS`, against every anchor.
+    #[test]
+    fn plan_unloads_only_beyond_radius_plus_hysteresis_of_every_anchor() {
+        let r = 3;
+        let edge = r + UNLOAD_HYSTERESIS;
+        let loaded = set_of(&[(edge, 0), (edge + 1, 0), (0, -(edge + 1)), (100, 100)]);
+        let step = plan_stream_step(&[(0, 0), (100, 100)], &[(0, 0)], r, 0, &loaded, |_, _| false);
+        let mut unload = step.unload.clone();
+        unload.sort_unstable();
+        assert_eq!(unload, vec![(0, -(edge + 1)), (edge + 1, 0)]);
+        assert!(step.load.is_empty(), "a zero budget loads nothing");
+    }
+
+    /// `ColumnSims::stream_in` restores an evicted column (never generating
+    /// over it), lights it and marks it loaded; `stream_out` evicts an edited
+    /// column and drops a pristine one.
+    #[test]
+    fn column_sims_stream_in_and_out_round_trip_an_edited_column() {
+        let bg = BiomeGenerator::new(42);
+        let registry = crate::block::BlockRegistry::new();
+        let mut world = crate::world::World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut water = crate::water::WaterSystem::new();
+        let mut lava = crate::lava::LavaSystem::new();
+        let mut fire = crate::fire::FireSystem::new();
+        let mut ecs = hecs::World::new();
+        let mut sims = ColumnSims {
+            world: &mut world,
+            loaded: &mut loaded,
+            registry: &registry,
+            biome_gen: &bg,
+            water: &mut water,
+            lava: &mut lava,
+            fire: &mut fire,
+            ecs: &mut ecs,
+            tick: 0,
+        };
+        sims.stream_in(0, 0);
+        sims.stream_in(1, 0);
+        assert!(sims.loaded.contains(&(0, 0)) && sims.loaded.contains(&(1, 0)));
+        assert_eq!(sims.world.get_block(8, 0, 8), block::BEDROCK, "generated");
+        assert!(!is_void_column(sims.world, 0, 0));
+        // The light pass ran: the highest air cell inside a present chunk
+        // (fresh chunks start dark) is open to the sky.
+        let lit = (0..96).rev().find(|&y| {
+            sims.world.has_chunk(0, y / 16, 0) && sims.world.get_block(3, y, 3) == block::AIR
+        });
+        let y = lit.expect("an air cell inside a generated chunk");
+        assert_eq!(sims.world.sky_light_at(3, y, 3), 15, "light pass ran (y {y})");
+        sims.world.place_player_block(3, 90, 3, block::GLASS);
+
+        sims.stream_out(0, 0);
+        sims.stream_out(1, 0);
+        assert!(sims.loaded.is_empty());
+        assert!(sims.world.is_column_evicted(0, 0), "edited column kept");
+        assert!(!sims.world.is_column_evicted(1, 0), "pristine column dropped");
+        assert!(!sims.world.has_chunk(1, 0, 0));
+
+        sims.stream_in(0, 0);
+        assert!(!sims.world.is_column_evicted(0, 0), "restored to the live chunks");
+        assert_eq!(sims.world.get_block(3, 90, 3), block::GLASS, "the edit survives");
     }
 
     #[test]

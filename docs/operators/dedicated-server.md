@@ -213,10 +213,19 @@ Set these as environment variables in `docker-compose.yml`:
 | `AXENSTAX_MAX_PLAYERS` | `8` | Max concurrent remote players |
 | `AXENSTAX_SERVER_NAME` | `Axe'n'Stax Server` | Display name |
 | `AXENSTAX_AUTOSAVE_SECS` | `60` | Autosave interval |
+| `AXENSTAX_SIM_DISTANCE` (or `--sim-distance`) | `8` | Radius, in 16-block columns, the server keeps loaded and simulated around each connected player and the world spawn (2–16). Higher = more RAM and CPU per player |
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
 
 Worlds persist on the `axenstax-worlds` volume and are saved on autosave and on a
 graceful `docker stop`.
+
+**Simulation distance.** The server loads the world around every connected player
+(and around spawn) as they move, generating new ground or reloading saved ground
+a couple of columns per tick, and lets go of areas nobody is near. Built or dug
+areas are never lost when they unload: they stay in memory and are written on
+the next autosave. The default radius of 8 columns (128 blocks) suits a small
+server; each extra column of radius costs memory and generation time per player
+who wanders off alone.
 
 ---
 

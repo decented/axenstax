@@ -51,6 +51,8 @@ pub mod server_projectiles;
 pub mod joiner_death;
 // MP step 1 — a joiner's one position: server-simulated, predicted + reconciled.
 pub mod position_truth;
+// Phase B1 — the dedicated server streams columns around every player.
+pub mod server_streaming;
 
 // Online play by contact — the rendezvous end to end over an in-memory relay.
 #[cfg(not(target_arch = "wasm32"))]
