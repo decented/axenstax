@@ -1333,22 +1333,34 @@ impl HostedServer {
 
     /// Where a joiner is placed, and so where it respawns
     /// (`ServerPlayer::spawn_pos`): the one place that decides, and the spawn
-    /// `JoinAccept` names.
+    /// `JoinAccept` names — so the server's body for the joiner and the
+    /// joiner's own client start from one position (Spec 04 §5.3.1).
     ///
     /// A server with a host client (LAN / online host: `num_local_players > 0`)
-    /// puts the joiner beside the host's own body, as it always has. Otherwise
-    /// it is the world's spawn point (`GameServer::world_spawn`, the computed
-    /// surface spawn) — never another joiner's position: slot 0 is a stranger
-    /// on a dedicated server, and a respawn point taken from wherever they
-    /// happened to stand (a trap) would be everyone's.
+    /// puts the joiner beside the host's own body, as it always has — with the
+    /// columns round that spot loaded, since the host may have walked far from
+    /// where hosting began and a body can't step in an unloaded column.
+    /// Otherwise it is the world's spawn point (`GameServer::world_spawn`, the
+    /// computed surface spawn) — never another joiner's position: slot 0 is a
+    /// stranger on a dedicated server, and a respawn point taken from wherever
+    /// they happened to stand (a trap) would be everyone's.
     fn join_spawn(&mut self) -> glam::Vec3 {
-        if self.num_local_players > 0
-            && let Some(host) = self.server.players.first()
-        {
-            let p = host.player.pos;
-            return glam::Vec3::new(p.x + 3.0, p.y, p.z);
+        let host = self.server.players.first().map(|host| host.player.pos);
+        match host {
+            Some(p) if self.num_local_players > 0 => {
+                let spawn = glam::Vec3::new(p.x + 3.0, p.y, p.z);
+                let cs = crate::chunk::CHUNK_SIZE as i32;
+                let cx = (spawn.x.floor() as i32).div_euclid(cs);
+                let cz = (spawn.z.floor() as i32).div_euclid(cs);
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        self.server.ensure_column_loaded(cx + dx, cz + dz);
+                    }
+                }
+                spawn
+            }
+            _ => self.server.world_spawn(),
         }
-        self.server.world_spawn()
     }
 
     /// Attach one remote transport as a new server-simulated player slot and

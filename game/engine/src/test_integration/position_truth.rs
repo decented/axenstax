@@ -484,6 +484,40 @@ fn the_joiner_starts_exactly_where_the_server_body_starts() {
 }
 
 #[test]
+fn a_joiner_beside_a_far_travelled_host_can_move() {
+    // The host walked far from where hosting began, out of the columns the
+    // server loaded then. The joiner's spawn columns load with it, so its body
+    // moves instead of standing frozen at the terrain edge.
+    let mut hs = HostedServer::start(
+        1,
+        format!("position-truth-far-host-{}", std::process::id()),
+        42,
+        0,
+        RemoteTransport::WebSocket { port: 0 },
+    )
+    .expect("host starts");
+    hs.server.players[0].player.pos = Vec3::new(400.5, 95.0, 8.5);
+    assert!(!hs.server.loaded_columns.contains(&(25, 0)), "the host is beyond the loaded area");
+    let (client, slot) = join_guest(&mut hs, "Far");
+    let spawn = hs.server.players[slot].player.pos;
+    let col = ((spawn.x.floor() as i32).div_euclid(16), (spawn.z.floor() as i32).div_euclid(16));
+    assert!(hs.server.loaded_columns.contains(&col), "spawn column {col:?} loaded");
+    for seq in 1..=20 {
+        let input = InputPacket {
+            tick: seq,
+            yaw: EAST,
+            move_forward: 1.0,
+            health: 20.0,
+            ..Default::default()
+        };
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        hs.tick();
+    }
+    let at = hs.server.players[slot].player.pos;
+    assert!(at.x > spawn.x + 1.0 || at.y < spawn.y - 1.0, "the body moved: {spawn} -> {at}");
+}
+
+#[test]
 fn a_dedicated_server_spawns_joiners_on_the_surface_not_in_the_sky() {
     let mut hs = start_dedicated("surface");
     let (slot, spawn) = join_and_accept(&mut hs);
