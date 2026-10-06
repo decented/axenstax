@@ -920,9 +920,9 @@ believed **only downward** (`GameServer::report_player_death`): a report of
 health coming back never revives anyone. It is taken at the end of the packet
 that carries it, so the edits riding in that packet — made while the player was
 still alive — are applied first. When the server's OWN sim kills the body it
-sends `PlayerEvent { player_index, Died }` to every joined client, the player
-included — that is how a joiner whose server copy died unseen reaches its death
-screen (`OwnLifeEvent::Died` → `PlayerCombat::die`). A reported death is not
+sends `PlayerEvent { player_index, Died }` to **that player alone** (never
+broadcast) — that is how a joiner whose server copy died unseen reaches its
+death screen (`OwnLifeEvent::Died` → `PlayerCombat::die`). A reported death is not
 echoed: the reporting client already knows, and an echo landing after a quick
 Respawn click (the pointer is freed on the button) would kill it a second time
 while the server held it alive. While dead the body runs
@@ -934,14 +934,45 @@ Nothing revives it on a timer: the 40-tick BRIDGE (`respawn_timer`) is
 removed. The death screen's Respawn button respawns the joiner locally and
 sends `PacketType::Respawn`; the server, if it holds them dead, respawns the
 body (`GameServer::respawn_player`: full health, hunger and breath; in the
-column of `ServerPlayer.spawn_pos` — the join spawn `JoinAccept` named, which on
-a dedicated server is the air above the world spawn — standing on its first
-non-air block (`standing_spot`, the `initial_load` placement rule, so a respawn
-never starts with a fall); at rest, fall reset, intents cleared) and broadcasts
-`PlayerEvent { Respawned { x, y, z } }`, which the joiner snaps to. A `Respawn` from a living player is ignored — otherwise it
-would be a free teleport home. A joiner who disconnects while dead is dropped
-as usual (slot freed, body never revived). Not reconciliation: outside these
-two events the joiner still owns its own position (S1, next).
+column of `ServerPlayer.spawn_pos` — the join spawn `JoinAccept` named — standing
+on its first non-air block (`standing_spot`, the `initial_load` placement rule,
+so a respawn never starts with a fall); at rest, fall reset, intents cleared)
+and sends `PlayerEvent { Respawned { x, y, z } }` to **that player alone**, which
+the joiner snaps to (refusing a position outside the join-spawn range, as it
+does a `JoinAccept` spawn). A `Respawn` from a living player is ignored —
+otherwise it would be a free teleport home — and so is one from a body dead for
+fewer than `MIN_DEAD_TICKS_BEFORE_RESPAWN` (20) ticks (`ServerPlayer.dead_ticks`),
+or a client could report health 0 and ask at once for a teleport home at full
+health. A joiner who disconnects while dead is dropped as usual (slot freed, body
+never revived). Not reconciliation: outside these two events the joiner still
+owns its own position (S1, next).
+
+**The Respawn request is reliable at the application layer.** Past a client's
+10th packet in a tick the server drops the rest — but `Respawn` and `Disconnect`
+are control packets and are always read (everything else past the budget is
+still discarded), so a flood can neither strand a joiner dead nor hold a
+leaver's seat. A client whose `Respawn` has gone unanswered re-sends it every
+`RESPAWN_RESEND_TICKS` (20 = the dead-time minimum, so an honest click inside the
+first second lands on the resend), from `RemoteClient::send_input`, until its own
+`Respawned` arrives; the resend stops on disconnect, when the client is dropped
+on leaving the world, and when the player dies again (`cancel_respawn_resend`).
+
+**A slot is not in the world until its join completes.** A remote slot exists
+from the moment its transport attaches, but until the handshake finishes
+(`ServerPlayer.awaiting_join`) its body takes no survival damage (drowning could
+otherwise kill it inside the 600-tick pre-auth window), picks nothing up (the
+grant would be dropped) and is no mob's target. When the handshake completes
+`ServerPlayer::enter_world` resets its combat state — health, hunger, breath —
+to full, so a slow join never arrives hurt or dead.
+
+**The join spawn.** `HostedServer::join_spawn` is the single place a joiner's
+spawn and respawn point is decided, and `JoinAccept` names `ServerPlayer.spawn_pos`
+so the two cannot differ. On a server with a host client (LAN / online host) it
+is beside the host's body, as ever; on a dedicated server it is
+`GameServer::world_spawn()` — never another joiner's position (slot 0 there is a
+stranger, and a respawn point taken from wherever they stood would be everyone's).
+*BRIDGE:* `world_spawn()` is the fixed point in the air above the origin that
+`initial_load` falls back to; it becomes the computed surface spawn in one line.
 
 ### 4.3 Block Mutations
 
