@@ -781,13 +781,19 @@ entered is loaded and lit before it is used.
 
 **Measured** (dev profile, opt-level 1, laptop): a settled pass ≈ 50 ns; a pass
 streaming 2 fresh columns ≈ 14 ms mean, 16 ms max (≈ 7 ms per generated
-column). Release is several times faster.
+column). The release profile was not measured.
 
 **Known limits.** Server RAM holds the whole saved world (all chunks load at
 boot; evicted columns stay in memory) — paging evicted columns to disk is the
 follow-up. More than `SERVER_STREAM_BUDGET` players entering distinct unloaded
 columns in the same tick (a mass teleport) leaves the extra ones over unloaded
-air for a tick or more; there is no physics hold for that case yet. Tests:
+air for a tick or more; there is no physics hold for that case yet. The first
+tick after booting a large save evicts every saved column beyond
+`sim + UNLOAD_HYSTERESIS` at once (`despawn_mobs_in_column` scans the scattered
+mobs per column), a one-off spike with no I/O. `GameServer::try_save` skips an
+all-air chunk without deleting its old file, so a chunk dug down to all air
+comes back from that file after a restart (the client's save deletes it).
+Tests:
 `test_integration/server_streaming.rs`, `server_stream.rs`, `chunk_stream.rs`.
 
 ### 4.2 Client Frame Loop

@@ -1448,7 +1448,10 @@ the loaded chunks plus the evicted ones, with the evicted copy winning on a
 duplicate position. The writers are `partition_chunks_for_save` (so the native
 save and the autosave), `write_world_folder`, `world_archive::pack_world` (WASM
 IndexedDB and `.axeworld` export) and `GameServer`'s save. The all-air
-delete rule applies to evicted chunks too. `World::clear` empties the store, so
+delete rule applies to evicted chunks too. (Known gap, 2026-10-06:
+`GameServer::try_save` only *skips* all-air chunks — it deletes no stale
+`.chunk` file, so on a dedicated server a chunk dug to all air reappears from
+its old file after a restart.) `World::clear` empties the store, so
 nothing leaks between worlds.
 
 **The dedicated server uses the same store (Phase B1, 2026-10-06).**
