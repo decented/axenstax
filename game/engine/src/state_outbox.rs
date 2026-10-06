@@ -27,7 +27,14 @@
 //! - **A backlog coalesces.** Once the queued block changes are more than one
 //!   tick's budget, a further change to a cell that already has a queued change
 //!   overwrites that change in place (latest wins, the cell keeps its place in
-//!   line). Below that, the produced sequence is delivered exactly.
+//!   line). Below that, the produced sequence is delivered exactly. Not when
+//!   either change involves a block with apply-side effects (a power device, a
+//!   container or economy block, a plot marker —
+//!   [`crate::world::block_has_remote_apply_effects`]): the joiner's
+//!   `apply_remote_block_change` only resets that block's entity when it sees
+//!   the block change, so `chest → air → chest` has to arrive as written. Such
+//!   a change is appended as its own entry and the cell's coalescing index
+//!   points at it.
 //! - **Overflow resyncs.** Past [`CLIENT_QUEUE_MAX_BYTES`] the queued block
 //!   changes are dropped and their chunks recorded in a "needs resync" set,
 //!   read through [`ClientOutbox::take_chunk_resync_requests`]. That set is the
@@ -82,6 +89,19 @@ pub type ChunkCoord = (i32, i32, i32);
 fn chunk_of(b: &BlockChange) -> ChunkCoord {
     let cs = crate::chunk::CHUNK_SIZE as i32;
     (b.x.div_euclid(cs), b.y.div_euclid(cs), b.z.div_euclid(cs))
+}
+
+/// May `newer` overwrite the still-queued `queued` change to the same cell?
+///
+/// Not when either carries a block entity or other side effect on the joiner's
+/// apply ([`crate::world::block_has_remote_apply_effects`]). `A → B → A′`
+/// folded to `A′` leaves `World::apply_remote_block_change` looking at a block
+/// that never changed, so the power device / container entity / plot claim the
+/// break and the replacement would have reset stays stale. Plain blocks carry
+/// nothing but their id and meta, where the last value is the whole story.
+fn can_coalesce(queued: &BlockChange, newer: &BlockChange) -> bool {
+    use crate::world::block_has_remote_apply_effects as effects;
+    !(effects(queued.new_block) || effects(newer.new_block))
 }
 
 /// Exact bincode size of one wire item — the same encoding `serialize_packet`
@@ -214,6 +234,15 @@ impl ClientOutbox {
     /// changes queued after the overflow still apply on top of the snapshot,
     /// in order. Until Phase B lands nothing calls this and the overflow is
     /// only logged (rate-limited).
+    ///
+    /// **Phase B rule.** A chunk push is a snapshot at its place in the queue,
+    /// so no later change may be folded into a change queued *before* it —
+    /// that would apply the newer value ahead of the snapshot, and the
+    /// snapshot would then overwrite it with older state. When Phase B queues
+    /// a chunk push it must therefore remove that chunk's cells from
+    /// `coalesce_index` (every cell with `chunk_of == the chunk`), so a newer
+    /// change to one of them appends after the snapshot instead. Today nothing
+    /// queues a push, so nothing can be coalesced past one.
     pub fn take_chunk_resync_requests(&mut self) -> Vec<ChunkCoord> {
         std::mem::take(&mut self.resync).into_iter().collect()
     }
@@ -237,11 +266,16 @@ impl ClientOutbox {
         if let Some(index) = &self.coalesce_index
             && let Some(&seq) = index.get(&cell)
             && let Ok(at) = self.queue.binary_search_by_key(&seq, |e| e.seq)
+            && let Delta::Block(queued) = &self.queue[at].delta
+            && can_coalesce(queued, b)
         {
             // Latest wins, in place: same cell, same size, same slot in line.
             self.queue[at].delta = Delta::Block(b.clone());
             return;
         }
+        // Not coalescable (or nothing queued at this cell): a new entry, and
+        // the index points at it — it is now the cell's newest queued change,
+        // the one a later repeat is compared against.
         self.push_entry(Delta::Block(b.clone()));
         let seq = self.next_seq - 1;
         if let Some(index) = &mut self.coalesce_index {
@@ -253,20 +287,27 @@ impl ClientOutbox {
 
     /// Backlogged: fold every already-queued repeat of a cell into its first
     /// queued change (latest value wins) and index what's left, so later
-    /// pushes coalesce in O(log n).
+    /// pushes coalesce in O(log n). A repeat that [`can_coalesce`] refuses stays
+    /// queued as its own entry and becomes the cell's newest — the one the next
+    /// repeat is compared against, and the one the index ends up pointing at.
     fn enter_coalesce_mode(&mut self) {
-        let mut first: HashMap<(i32, i32, i32), usize> = HashMap::new();
+        let mut newest: HashMap<(i32, i32, i32), usize> = HashMap::new();
         let mut latest: HashMap<usize, BlockChange> = HashMap::new();
         let mut dead = vec![false; self.queue.len()];
         for (i, e) in self.queue.iter().enumerate() {
             if let Delta::Block(b) = &e.delta {
-                match first.get(&(b.x, b.y, b.z)) {
-                    Some(&j) => {
+                let cell = (b.x, b.y, b.z);
+                match newest.get(&cell) {
+                    // Entries are only ever folded into when coalescable, so the
+                    // original at `j` stands in for its folded value here.
+                    Some(&j)
+                        if matches!(&self.queue[j].delta, Delta::Block(q) if can_coalesce(q, b)) =>
+                    {
                         latest.insert(j, b.clone());
                         dead[i] = true;
                     }
-                    None => {
-                        first.insert((b.x, b.y, b.z), i);
+                    _ => {
+                        newest.insert(cell, i);
                     }
                 }
             }
@@ -286,6 +327,8 @@ impl ClientOutbox {
         });
         self.queued_bytes -= freed;
         self.queued_block_bytes -= freed;
+        // Later entries overwrite earlier ones in the collect, so each cell
+        // maps to its NEWEST queued change.
         let index = self
             .queue
             .iter()
@@ -598,6 +641,107 @@ mod tests {
             .flat_map(|s| s.block_changes.iter().map(|b| b.new_block))
             .collect();
         assert_eq!(after, vec![1, 2]);
+    }
+
+    // A cell edited back and forth around a block that carries a block entity
+    // (`apply_remote_block_change`'s power-device / container / plot-marker
+    // side effects) must reach the joiner as the sequence the server produced.
+    // Folded to its last value the joiner never sees the break, so it keeps
+    // the stale entity.
+
+    /// The block ids delivered for the cell at `x` (y = z = 0), in order.
+    fn at_cell(states: &[StateUpdatePacket], x: i32) -> Vec<u16> {
+        states
+            .iter()
+            .flat_map(|s| s.block_changes.iter().filter(move |b| b.x == x).map(|b| b.new_block))
+            .collect()
+    }
+
+    fn drain_all(ob: &mut ClientOutbox) -> Vec<StateUpdatePacket> {
+        let mut all = Vec::new();
+        for _ in 0..10 {
+            all.extend(tick(ob, true));
+        }
+        all
+    }
+
+    #[test]
+    fn a_backlog_does_not_coalesce_a_block_entity_cell_when_pushed_after_it() {
+        use crate::block::{AIR, CHEST};
+        let mut ob = ClientOutbox::new(true);
+        let filler: Vec<BlockChange> = (0..5_000).map(|i| bc(i, 1)).collect();
+        ob.push_tick(0, &[], &[], &filler, &[]);
+        assert!(ob.coalesce_index.is_some(), "the filler put this client in backlog mode");
+        // Chest placed, broken, replaced — in one tick and across two.
+        ob.push_tick(1, &[], &[], &[bc(-1, CHEST), bc(-1, AIR), bc(-1, CHEST)], &[]);
+        ob.push_tick(2, &[], &[], &[bc(-1, AIR), bc(-1, CHEST)], &[]);
+        // A plain cell beside it still coalesces (latest wins).
+        ob.push_tick(3, &[], &[], &[bc(-2, 1), bc(-2, 2), bc(-2, 10)], &[]);
+        let all = drain_all(&mut ob);
+        assert_eq!(at_cell(&all, -1), vec![CHEST, AIR, CHEST, AIR, CHEST], "exact sequence");
+        assert_eq!(at_cell(&all, -2), vec![10], "plain cells still fold");
+    }
+
+    #[test]
+    fn entering_backlog_does_not_fold_a_block_entity_cell() {
+        use crate::block::{AIR, CHEST};
+        let mut ob = ClientOutbox::new(true);
+        // The chest sequence is queued BEFORE the backlog starts, so it goes
+        // through the fold in `enter_coalesce_mode`, not the in-place push path.
+        let mut blocks = vec![bc(-1, CHEST), bc(-1, AIR), bc(-1, CHEST)];
+        blocks.extend([bc(-2, 1), bc(-2, 2), bc(-2, 10)]);
+        blocks.extend((0..5_000).map(|i| bc(i, 1)));
+        ob.push_tick(0, &[], &[], &blocks, &[]);
+        assert!(ob.coalesce_index.is_some());
+        // A later repeat compares against the newest entry at the cell.
+        ob.push_tick(1, &[], &[], &[bc(-1, AIR), bc(-2, 11)], &[]);
+        let all = drain_all(&mut ob);
+        assert_eq!(at_cell(&all, -1), vec![CHEST, AIR, CHEST, AIR]);
+        assert_eq!(at_cell(&all, -2), vec![11], "plain repeats still fold to one");
+    }
+
+    #[test]
+    fn a_coalesced_backlog_still_resets_the_joiners_stale_block_entities() {
+        // End to end through the joiner's apply: the battery at `pos` holds
+        // charge the server has since discarded (broken and rebuilt). Delivered
+        // as the full sequence the joiner re-registers a fresh device; folded to
+        // "battery" it would see no change and keep the stale one.
+        use crate::block::{AIR, BATTERY, CHEST};
+        let pos = (4, 64, 4);
+        let cell = |block| BlockChange::with_meta(pos.0, pos.1, pos.2, block, 0);
+        let mut ob = ClientOutbox::new(true);
+        let filler: Vec<BlockChange> = (0..5_000).map(|i| bc(i, 1)).collect();
+        ob.push_tick(0, &[], &[], &filler, &[]);
+        ob.push_tick(1, &[], &[], &[cell(AIR), cell(BATTERY)], &[]);
+        // And a chest at a second cell, broken and put back.
+        let chest_pos = (6, 64, 6);
+        let chest = |block| BlockChange::with_meta(chest_pos.0, chest_pos.1, chest_pos.2, block, 0);
+        ob.push_tick(2, &[], &[], &[chest(AIR), chest(CHEST)], &[]);
+
+        let mut w = crate::world::World::new();
+        w.set_block(pos.0, pos.1, pos.2, BATTERY);
+        let mut stale = crate::power::PowerDeviceData::new(
+            crate::power::PowerDeviceKind::Battery,
+            crate::meta::Facing::East,
+        );
+        stale.charge = 9;
+        w.insert_power_device(pos, stale);
+        w.set_block(chest_pos.0, chest_pos.1, chest_pos.2, CHEST);
+        w.insert_chest(chest_pos, crate::chest::ChestData::new());
+
+        for state in drain_all(&mut ob) {
+            for b in &state.block_changes {
+                w.apply_remote_block_change(b);
+            }
+        }
+        assert_eq!(w.get_block(pos.0, pos.1, pos.2), BATTERY);
+        assert_eq!(
+            w.power_device_at(pos).expect("the placement registers a device").charge,
+            0,
+            "a fresh battery, not the stale one"
+        );
+        assert_eq!(w.get_block(chest_pos.0, chest_pos.1, chest_pos.2), CHEST);
+        assert!(w.chest_at(chest_pos).is_none(), "the break dropped the stale chest entity");
     }
 
     #[test]

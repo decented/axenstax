@@ -18,7 +18,7 @@
 - **v62** (2026-09-07): **Device interactions on the wire (Wind/Copper/Electricity wave).** One new `PacketType` variant, appended: `DeviceInteract = 56` (C→S, `{ pos: (i32, i32, i32) }`). Until now nothing on the wire carried a *device interaction* at all: block placements and breaks travelled as `BlockChange`, and autonomous power sources (Windmill, Water Wheel, pressure plates, sensors, a generator burning fuel) reached the host through the server's own sim — but a **switch** had no carrier, so a joiner's lever/button/crank/mirror flipped only their own copy of the world while the host, which owns the authoritative power sim, never heard about it. See §2.3 for the packet row and the authority model. Append-only; no existing packet shape changed.
 - **v63** (2026-09-27): **Join channel binding (audit fix B).** `ChallengePacket` **loses** its `origin` field (packet shape CHANGED, v48 had added it). The joiner signs an origin it builds from its OWN transport (`signet::join_origin`: `axenstax-join:tls-exporter:<hex>` over the QUIC TLS exporter, or `axenstax-join:unbound`), and the host recomputes it from its own transport and requires an exact match. Closes the join-relay and web-login-oracle attacks. See §1.8.1 and Spec 08 §9.0.1.
 - **v64** (2026-09-28): **QUIC game-packet framing (audit wave 1).** Every game packet, both ways, now rides ONE reliable, ordered QUIC bidirectional stream per connection, framed as `u32 LE length + payload` (max 16 MiB — lowered to `MAX_WIRE_PACKET_LEN` on 2026-10-06, see the next entry); the client opens it with a zero-length hello frame and the server accepts it within 10 s. QUIC datagrams are no longer used (they were MTU-capped and never retransmitted, so busy `StateUpdate`s and large `JoinAccept`s were silently lost). The server closes a QUIC client with more than `MAX_OUTBOUND_QUEUE_BYTES = 8 MiB` queued ("connection too slow"). No packet shape changed; the framing did, so v63 and v64 peers are incompatible. See "Game-packet framing" in the Phase 1 implementation notes.
-- **Bounded StateUpdates (2026-10-06, gap-audit T1-5 + T2-12, NO wire change — still v64).** A tick's block changes and entity events no longer have to fit in one `StateUpdatePacket`: each joined client has an outbox (`state_outbox.rs`) that splits them across as many StateUpdates as needed, each at most `STATE_UPDATE_MAX_BYTES = 56 KiB` (measured, 8 KiB under the decode cap), and holds a remote client to `CLIENT_TICK_BUDGET_BYTES = 48 KiB` a tick (~1 MB/s), the rest following on later ticks in order. Every StateUpdate repeats the tick's snapshot fields. A backlog coalesces repeated edits to one cell (latest wins); past `CLIENT_QUEUE_MAX_BYTES = 2 MiB` the queued block changes are dropped and their chunks recorded for resync (`HostedServer::take_chunk_resync_requests`, the Phase B seam). The transport frame cap drops from 16 MiB to `protocol::MAX_WIRE_PACKET_LEN` (1-byte tag + `MAX_PACKET_SIZE` 64 KiB) on QUIC and on the WebSocket accept side. Why no bump: no packet shape changed; a v64 client already accumulates deltas across StateUpdates (2026-07-12 note above), so several per tick decode and apply correctly; and a frame between the two caps could never pass `safe_deserialize`, so refusing it at the header only changes *when* it fails. See "Bounded StateUpdates" in the Phase 1 implementation notes.
+- **Bounded StateUpdates (2026-10-06, gap-audit T1-5 + T2-12, NO wire change — still v64).** A tick's block changes and entity events no longer have to fit in one `StateUpdatePacket`: each joined client has an outbox (`state_outbox.rs`) that splits them across as many StateUpdates as needed, each at most `STATE_UPDATE_MAX_BYTES = 56 KiB` (measured, 8 KiB under the decode cap), and holds a remote client to `CLIENT_TICK_BUDGET_BYTES = 48 KiB` a tick (~1 MB/s), the rest following on later ticks in order. Every StateUpdate repeats the tick's snapshot fields. A backlog coalesces repeated edits to one cell (latest wins; never across a block that carries a block entity or other apply side effect); past `CLIENT_QUEUE_MAX_BYTES = 2 MiB` the queued block changes are dropped and their chunks recorded for resync (`HostedServer::take_chunk_resync_requests`, the Phase B seam). The transport frame cap drops from 16 MiB to `protocol::MAX_WIRE_PACKET_LEN` (1-byte tag + `MAX_PACKET_SIZE` 64 KiB) on QUIC and on the WebSocket accept side. Why no bump: no packet shape changed; a v64 client already accumulates deltas across StateUpdates (2026-07-12 note above), so several per tick decode and apply correctly; and a frame between the two caps could never pass `safe_deserialize`, so refusing it at the header only changes *when* it fails. See "Bounded StateUpdates" in the Phase 1 implementation notes.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -1587,7 +1587,18 @@ ghost entities), and the player positions. Separately (T2-12) the transport acce
   repeats the same way. Below the threshold the produced sequence is delivered exactly — the
   client's apply depends on the block it replaces (`World::apply_remote_block_change` re-registers
   a power device when the kind changes, resetting its state), so a same-cell sequence is not always
-  equivalent to its last value; under backlog that fidelity is traded for staying deliverable.
+  equivalent to its last value. **Block-entity carve-out (2026-10-06 review):** the apply runs its
+  side effects (power-device register/drop, container/economy entity drop, plot-marker release)
+  only when it sees the block change, so `chest → air → chest` folded to `chest` would leave a
+  joiner with the stale chest. A change is therefore never coalesced when either the queued change
+  or the new one has `world::block_has_remote_apply_effects` set (composed from the apply's own
+  predicates — `device_kind_for_block`, `mirrored_family`, `PLOT_MARKER`; extend it with any new
+  side-effect branch in the apply). Such a change is appended as its own entry and the cell's
+  coalescing index is repointed at it; plain blocks (stone, dirt, crops, water …) still fold, in
+  `enter_coalesce_mode` as well as on push. **Phase B rule:** a chunk push is a snapshot at its
+  place in the queue, so when one is queued that chunk's cells must be removed from the coalescing
+  index — a newer change to one of them then appends after the snapshot rather than being folded
+  ahead of it.
 - **Overflow → resync.** Past `CLIENT_QUEUE_MAX_BYTES = 2 MiB` (~140,000 changes, ~43 ticks of
   budget) the queued block changes are dropped and their chunks (`(cx, cy, cz)`, `ChunkDataPacket`
   addressing) recorded in the client's resync set. Spawns and despawns are kept (bounded by the
@@ -1612,15 +1623,20 @@ ghost entities), and the player positions. Separately (T2-12) the transport acce
 length prefix on the header (`network::frame_len`), before reading or buffering any body; the
 connection closes. Because an over-cap packet now closes the connection instead of being sent and
 silently undecodable, `RemoteClient::send_input` trims an input packet's block changes (oldest kept)
-to fit — the host honours at most `MAX_BLOCK_CHANGES_PER_TICK` edits a tick, and before this the
-host dropped the whole oversized input, position included.
+to fit — before this the host dropped the whole oversized input, position included. **The trimmed
+tail is carried over (2026-10-06 review):** it used to be discarded, so the host never saw those
+edits and could never refuse and un-ghost them on the sender (it sends back the real block for
+every edit past `MAX_BLOCK_CHANGES_PER_TICK`, but only for one it has received). `send_input` now
+keeps the trimmed remainder in a carry-over queue and puts it ahead of the next packet's own edits,
+so a burst spreads over several packets in the order it was made. The queue is bounded at
+`INPUT_CARRY_OVER_MAX_CHANGES = 16,384` (~240 KB); past that the oldest are dropped and logged.
 
 **Tests:** `state_outbox` unit tests (budget, order, coalescing, update gating and fairness,
 overflow) and `test_integration/state_budget.rs`, which drives a real join through
 `HostedServer::tick`: a 10,000-change tick reaches a joiner whole over several ticks with every
 packet under the cap and every tick under the budget; the host loopback gets it in one tick in
 several capped packets; repeated edits to one cell arrive exactly when nothing is backlogged and
-coalesce (latest wins) when it is; 2,000 drops behind a block backlog arrive spawn-before-update-
+coalesce (latest wins) when it is (state_outbox unit tests also pin the block-entity carve-out end to end through `apply_remote_block_change`, and `remote_client` tests the input carry-over and its bound); 2,000 drops behind a block backlog arrive spawn-before-update-
 before-despawn; an overflow empties the queue and every undelivered change's chunk is in the resync
 set. `network` tests cover the forged-header rejection over real quinn.
 

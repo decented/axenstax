@@ -62,8 +62,8 @@ pub fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
 /// `safe_deserialize` payload limit. It used to be 16 MiB, so a receiver
 /// would buffer up to 16 MiB of a frame it could never decode (gap-audit
 /// T2-12). Senders stay under it: `StateUpdate`s are split by `state_outbox`
-/// and an input packet's block changes are trimmed by
-/// `RemoteClient::send_input`. A packet that is still too big closes the
+/// and an input packet's block changes are spread over several packets by
+/// `RemoteClient::send_input` (the overflow rides the next packet). A packet that is still too big closes the
 /// connection rather than vanishing (see the bridge's writer).
 pub const MAX_FRAME_LEN: usize = crate::protocol::MAX_WIRE_PACKET_LEN;
 

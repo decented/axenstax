@@ -109,6 +109,23 @@ pub fn mirrored_family(b: BlockId) -> Option<MirroredFamily> {
     }
 }
 
+/// Does [`World::apply_remote_block_change`] run side effects beyond writing the
+/// block id when this block id enters or leaves a cell: a power-device
+/// block-entity (register / drop), a mirrored container / economy block-entity
+/// (drop on break), or a plot-marker claim (release)?
+///
+/// Those effects fire only when the apply SEES the block change, so a delivery
+/// path that folds `A → B → A′` at one cell into `A′` (`state_outbox`'s backlog
+/// coalescing) must not do it when either end carries them — the joiner would
+/// see no change at all and keep a stale entity. Composed from the very
+/// predicates the apply uses, so there is no second list to drift; **add a new
+/// side-effect branch to the apply and it belongs here too.**
+pub fn block_has_remote_apply_effects(b: BlockId) -> bool {
+    crate::power::device_kind_for_block(b).is_some()
+        || mirrored_family(b).is_some()
+        || b == block::PLOT_MARKER
+}
+
 impl BlockEntityData {
     /// The mirrored family this entity belongs to, if any.
     pub fn mirrored_family(&self) -> Option<MirroredFamily> {
@@ -2506,6 +2523,21 @@ mod tests {
         let (block, sky) = w.light_channels_at(9999.0, 40.0, 9999.0);
         assert_eq!(block, 0.0);
         assert!((sky - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn block_has_remote_apply_effects_names_every_block_the_apply_keeps_an_entity_for() {
+        use crate::block::*;
+        for b in [
+            CHEST, COPPER_CHEST, FURNACE, FURNACE_LIT, DISPENSER, GRAVE, VENDOR_BLOCK, TIP_JAR,
+            AUCTION_BLOCK, LEVER, BATTERY, ELECTRIC_LAMP, ELECTRIC_LAMP_LIT, WINDMILL,
+            PLOT_MARKER,
+        ] {
+            assert!(block_has_remote_apply_effects(b), "block {b} carries apply side effects");
+        }
+        for b in [AIR, STONE, DIRT, COBBLESTONE, CABLE, CABLE_LIT, WATER] {
+            assert!(!block_has_remote_apply_effects(b), "block {b} is a plain write");
+        }
     }
 
     #[test]

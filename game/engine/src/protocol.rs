@@ -1116,8 +1116,8 @@ pub const MAX_PACKET_SIZE: u64 = 65_536;
 /// frame cap on both ends (`network::MAX_FRAME_LEN`, the WebSocket accept
 /// config) — one number, so a receiver never buffers a frame it is bound to
 /// throw away. Senders stay under it: `StateUpdate`s are split by
-/// `state_outbox` (with headroom), and `RemoteClient::send_input` trims an
-/// input packet's block changes to fit.
+/// `state_outbox` (with headroom), and `RemoteClient::send_input` moves the
+/// block changes that don't fit an input packet into the next one.
 pub const MAX_WIRE_PACKET_LEN: usize = 1 + MAX_PACKET_SIZE as usize;
 
 /// Safely deserialize a network packet payload with a size limit.

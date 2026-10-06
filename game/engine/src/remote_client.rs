@@ -168,6 +168,13 @@ pub struct RemoteClient {
     pub pending_entity_updates: Vec<protocol::EntityUpdate>,
     pub pending_entity_despawns: Vec<u32>,
     pub pending_block_changes: Vec<protocol::BlockChange>,
+    /// Edits [`serialize_input_within_cap`] trimmed off an earlier input
+    /// packet, oldest first. [`Self::send_input`] puts them ahead of the next
+    /// packet's own edits, so a burst too big for one packet is spread over
+    /// several instead of the tail being lost (the host never saw it, so it
+    /// could never refuse and un-ghost it on this client). At most
+    /// [`INPUT_CARRY_OVER_MAX_CHANGES`].
+    input_carry_over: Vec<protocol::BlockChange>,
     /// World chat (Phase 2) — lines the server delivered to us this poll,
     /// drained by the game loop each frame into `ChatState`. Bounded like
     /// `pending_grants`: a hostile server can't grow this without limit
@@ -391,6 +398,7 @@ impl RemoteClient {
             pending_entity_updates: Vec::new(),
             pending_entity_despawns: Vec::new(),
             pending_block_changes: Vec::new(),
+            input_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -429,6 +437,7 @@ impl RemoteClient {
             pending_entity_updates: Vec::new(),
             pending_entity_despawns: Vec::new(),
             pending_block_changes: Vec::new(),
+            input_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -715,7 +724,23 @@ impl RemoteClient {
         input.tick = self.tick;
         self.tick += 1;
 
-        let packet = serialize_input_within_cap(&mut input);
+        // Edits trimmed from an earlier packet go first: the host validates
+        // them in the order they were made.
+        if !self.input_carry_over.is_empty() {
+            let mut edits = std::mem::take(&mut self.input_carry_over);
+            edits.append(&mut input.block_changes);
+            input.block_changes = edits;
+        }
+        let (packet, mut trimmed) = serialize_input_within_cap(&mut input);
+        if trimmed.len() > INPUT_CARRY_OVER_MAX_CHANGES {
+            let drop = trimmed.len() - INPUT_CARRY_OVER_MAX_CHANGES;
+            log::warn!(
+                "input edits are backing up: dropping the {drop} oldest of {} waiting to be sent",
+                trimmed.len()
+            );
+            trimmed.drain(..drop);
+        }
+        self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
     }
 
@@ -808,31 +833,42 @@ impl Drop for RemoteClient {
     }
 }
 
+/// Most trimmed input edits [`RemoteClient`] holds back for later packets.
+/// Past it the oldest are dropped (and logged): a client this far behind has
+/// more edits queued than the host's per-tick budget will clear in seconds, and
+/// holding them without bound would grow memory for nothing. About 240 KB.
+const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
+
 /// Serialize a `ClientInput`, trimming its block changes (newest first) until
 /// the packet fits [`protocol::MAX_WIRE_PACKET_LEN`] — the frame cap, which a
 /// bigger packet would trip, closing the connection (gap-audit T2-12). Before
 /// the cap was aligned such a packet still went out, and the host dropped the
-/// whole of it (position included) at `safe_deserialize`; the host honours at
-/// most a handful of edits a tick anyway, so the trimmed tail was never going
-/// to land.
-fn serialize_input_within_cap(input: &mut protocol::InputPacket) -> Vec<u8> {
+/// whole of it (position included) at `safe_deserialize`.
+///
+/// Returns the packet and the trimmed tail, oldest first. The caller carries it
+/// into the next packet (`RemoteClient::send_input`): the host applies at most
+/// `MAX_BLOCK_CHANGES_PER_TICK` edits a tick and sends back the real block for
+/// each it refuses, but it can only do that for an edit it has seen.
+fn serialize_input_within_cap(
+    input: &mut protocol::InputPacket,
+) -> (Vec<u8>, Vec<protocol::BlockChange>) {
     let packet = protocol::serialize_packet(PacketType::ClientInput, &*input);
     let Some(first) = input.block_changes.first() else {
-        return packet;
+        return (packet, Vec::new());
     };
     if packet.len() <= protocol::MAX_WIRE_PACKET_LEN {
-        return packet;
+        return (packet, Vec::new());
     }
     let per_change = bincode::serialized_size(first).expect("a block change sizes") as usize;
     let excess = packet.len() - protocol::MAX_WIRE_PACKET_LEN;
     let keep = input.block_changes.len().saturating_sub(excess.div_ceil(per_change));
     log::warn!(
-        "input packet over the {}-byte cap: sending {keep} of {} block changes",
+        "input packet over the {}-byte cap: sending {keep} of {} block changes, the rest in the next packet(s)",
         protocol::MAX_WIRE_PACKET_LEN,
         input.block_changes.len()
     );
-    input.block_changes.truncate(keep);
-    protocol::serialize_packet(PacketType::ClientInput, &*input)
+    let trimmed = input.block_changes.split_off(keep);
+    (protocol::serialize_packet(PacketType::ClientInput, &*input), trimmed)
 }
 
 #[cfg(test)]
@@ -1112,7 +1148,8 @@ mod tests {
             block_changes: vec![protocol::BlockChange::with_meta(1, 2, 3, 4, 0)],
             ..Default::default()
         };
-        let pkt = serialize_input_within_cap(&mut small);
+        let (pkt, trimmed) = serialize_input_within_cap(&mut small);
+        assert!(trimmed.is_empty(), "nothing trimmed under the cap");
         assert_eq!(small.block_changes.len(), 1, "a packet under the cap is untouched");
         assert_eq!(pkt, protocol::serialize_packet(PacketType::ClientInput, &small));
 
@@ -1122,12 +1159,94 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let pkt = serialize_input_within_cap(&mut big);
+        let (pkt, trimmed) = serialize_input_within_cap(&mut big);
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
         let back: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
         assert!(back.block_changes.len() > 4_000, "only the overflow is trimmed");
         assert_eq!(back.block_changes[0].x, 0, "the oldest changes are the ones kept");
+        // The trimmed tail is handed back, not lost: kept + trimmed is the lot, in order.
+        assert_eq!(back.block_changes.len() + trimmed.len(), 10_000);
+        let xs: Vec<i32> = back.block_changes.iter().chain(&trimmed).map(|b| b.x).collect();
+        assert_eq!(xs, (0..10_000).collect::<Vec<_>>());
+    }
+
+    /// A connected client whose server end the test can read.
+    fn connected_client() -> (Box<dyn ServerTransport>, RemoteClient) {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(client),
+            build_join_request_guest("Me", 0),
+            None,
+        );
+        rc.state = ConnectionState::Connected { player_index: 1, seed: 7 };
+        // Discard the JoinRequest so only input packets are left to read.
+        let _ = srv.try_recv_from_client();
+        (Box::new(srv), rc)
+    }
+
+    /// The block-change x's of the next `ClientInput` the server end holds.
+    fn next_input_xs(srv: &dyn ServerTransport) -> Vec<i32> {
+        let pkt = srv.try_recv_from_client().expect("an input packet was sent");
+        assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
+        let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();
+        assert_eq!(ptype, PacketType::ClientInput);
+        let input: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
+        input.block_changes.iter().map(|b| b.x).collect()
+    }
+
+    fn input_with(xs: impl IntoIterator<Item = i32>) -> protocol::InputPacket {
+        protocol::InputPacket {
+            block_changes: xs
+                .into_iter()
+                .map(|i| protocol::BlockChange::with_meta(i, 64, 0, 1, 0))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Review fix: the edits `serialize_input_within_cap` trims off one packet
+    /// used to vanish — the host never saw them, so it never un-ghosted them on
+    /// the sender. They ride the next packets instead, oldest first, ahead of
+    /// anything newer.
+    #[test]
+    fn trimmed_input_edits_ride_the_next_packets_in_order() {
+        let (srv, mut rc) = connected_client();
+        rc.send_input(&input_with(0..10_000));
+        let mut delivered = next_input_xs(&*srv);
+        assert!(delivered.len() < 10_000, "the first packet had to be trimmed");
+        // A newer edit lands behind the carried-over ones.
+        rc.send_input(&input_with([50_000]));
+        for _ in 0..10 {
+            delivered.extend(next_input_xs(&*srv));
+            rc.send_input(&protocol::InputPacket::default());
+        }
+        let mut expect: Vec<i32> = (0..10_000).collect();
+        expect.push(50_000);
+        assert_eq!(delivered, expect, "every edit arrives once, in the order it was made");
+        // Nothing left over: the carry-over queue drained.
+        assert!(rc.input_carry_over.is_empty());
+        assert!(next_input_xs(&*srv).is_empty(), "an idle tick carries no edits");
+    }
+
+    #[test]
+    fn the_input_carry_over_is_bounded_and_drops_the_oldest() {
+        let (srv, mut rc) = connected_client();
+        let n = 50_000;
+        rc.send_input(&input_with(0..n));
+        let first = next_input_xs(&*srv);
+        assert_eq!(first[0], 0, "the oldest edits go out first");
+        assert!(rc.input_carry_over.len() <= INPUT_CARRY_OVER_MAX_CHANGES);
+        assert_eq!(rc.input_carry_over.len(), INPUT_CARRY_OVER_MAX_CHANGES, "full, not emptied");
+        // What is left is the NEWEST edits, contiguous up to the last one made.
+        let mut rest = Vec::new();
+        for _ in 0..20 {
+            rc.send_input(&protocol::InputPacket::default());
+            rest.extend(next_input_xs(&*srv));
+        }
+        let kept = INPUT_CARRY_OVER_MAX_CHANGES as i32;
+        assert_eq!(rest, (n - kept..n).collect::<Vec<_>>());
+        assert!(rc.input_carry_over.is_empty());
     }
 
     #[test]
