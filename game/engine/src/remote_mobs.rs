@@ -1,4 +1,4 @@
-//! A joiner's mirror of the server's mobs and rail carts (Spec 04 §5.6,
+//! A joiner's mirror of the server's mobs and rail carts (Spec 04 §4.2c,
 //! MP-D2a).
 //!
 //! A client that has joined someone else's world runs NO mob simulation of

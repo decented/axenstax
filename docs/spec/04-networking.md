@@ -24,6 +24,7 @@
 - **v67** (2026-10-06, MP-A3): **Server projectiles + server-held death.** Three appends, no existing shape changed: `EntityKind::Projectile = 39` (a projectile in flight rides the ordinary entity spawn/update/despawn diff; `yaw` = flight heading, `EntityUpdate.state` 0 arrow / 1 blunt), `PacketType::Respawn = 57` (C→S, empty payload) and two `PlayerEventType` variants, `Died` and `Respawned { x, y, z }` (S→C). Before it a dedicated server's dispenser arrow was consumed, never flew, never hit and was never seen, and a joiner's server copy revived itself 40 ticks after death (the BRIDGE) and vacuumed up its own death drops while the joiner was still on the death screen. Bumped because a v66 peer can't decode the new variants. See §4.2b.
 - **Joiner position truth (2026-10-06, MP step 1, NO wire change — still v67).** `StateUpdatePacket.last_acked_input` now carries the real sequence number of the last input the server applied for that client (was always `0`); each queued joiner input is simulated with its own look; the joiner predicts its own body and reconciles against the server's (snap beyond 1 block, camera glide below); a dedicated server spawns joiners on the surface instead of at `(0.5, 80, 0.5)`. Review fixes the same day: the prediction records under the sequence number the connection stamped on the wire (`RemoteClient::send_input` returns it; it counts from 1 per connection), a frame hitch catches up instead of losing steps, a LAN / online host generates terrain ahead of its joiners, a ride sends no movement, and a joiner cannot teleport itself. See §5.3.1.
 - **Hosted mode: the host lends its world (2026-10-06, D1, NO wire change — still v67).** A LAN / online host's embedded server no longer keeps a second copy of the world: the host client lends it its `World` + ECS + fluid/fire/leaf systems for each tick (`sim_lend::LentSim`), so every joiner's `StateUpdate` is diffed from the host's real world and entities, and each shared sim system runs once (an ownership table + a per-world tally tripwire). The host's own edits are broadcast without the joiner budget/validation; `mirror_host_world_state` survives only on the `--no-lend` path. Review fixes the same day: the host client's streamer keeps every joiner's columns loaded (they anchor it at the server's sim distance), split-screen seats get server slots, and one owner per system per mode is pinned by a GPU-free table test. Why no bump: no packet shape changed, and a joiner cannot tell a lending host from an owning one except that what it is sent now matches what the host sees. `--no-lend` keeps the old owning server for one release. See "Hosted mode — the host lends its world" in the Phase 1 implementation notes.
+- **v68** (2026-10-07, MP-D2a): **Joiners see the server's mobs and are hurt by them.** `EntityUpdate` gains trailing `vx`/`vy`/`vz` (blocks/tick) and `flags` (`protocol::entity_flags`: hurt flash, baby, tamed, Satoshi) and is now sent **changed-only**; every entity event is filtered **per client** by an interest radius round a joiner's body (`entity_broadcast`), which also replaces the late-joiner backfill. `InputPacket` gains trailing `armour_points: u8` and `health_delta: f32`: the server lands hostile melee and lava/fire contact on a joiner's body, and a joiner's health is the server's (its client reports only the changes it still owns). A joiner runs no mobs of its own and draws the server's from a render-only mirror (`remote_mobs`). Packet shapes changed, hence the bump. See §4.2c and §5.3.2.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -908,7 +909,7 @@ and broadcasts it as `EntityKind::Projectile = 39`: one `EntitySpawn`
 health and item fields zero), an `EntityUpdate` every tick of the flight
 (`state` 0 arrow, 1 blunt slingshot ball), and — when a hit or the 100-tick
 `Lifetime` removes it — exactly one despawn through the alive-set diff.
-Late joiners get an in-flight projectile in their backfill. All of it rides the
+A joiner gets an in-flight projectile when it enters its interest radius (§4.2c), late joiners included. All of it rides the
 per-client outbox (`state_outbox.rs`) like every other entity event. A joiner
 holds them in `remote_entities::RemoteProjectiles` (render-only, never in its
 ECS), points each one along its spawn yaw until the first update and then along
@@ -922,8 +923,10 @@ filled in its own copy would fire in both sims.
 
 **Server-held death.** Death of a joined (server-simulated) player is a state
 the server holds, entered two ways: its copy of the player dies (fall or
-drowning in `tick_player_survival`), or the joiner's `InputPacket.health` is
-`<= 0` (its own sim's death — mobs and lava run there). The health report is
+drowning in `tick_player_survival`; since v68 also mob melee and lava/fire
+contact, §4.2c), or the joiner's `InputPacket.health` is `<= 0` (a death its
+own client caused — since v68 only the sources it still owns, such as
+starvation on Hard, §5.3.2). The health report is
 believed **only downward** (`GameServer::report_player_death`): a report of
 health coming back never revives anyone. It is taken at the end of the packet
 that carries it, so the edits riding in that packet — made while the player was
@@ -984,6 +987,95 @@ the origin are generated first if not loaded, then the rule a fresh single-playe
 world places its player by (`chunk_stream::world_spawn_point`). It replaced the
 fixed point in the air above the origin (`(0.5, 80, 0.5)`); `initial_load` keeps
 that point only as the centre it starts loading from when there is no player.
+
+### 4.2c Entity mirror and joiner damage (as built, protocol v68, MP-D2a)
+
+A joiner sees the server's mobs and carts, and the server's mobs (and its lava
+and fire) hurt the joiner's body. Before v68 a joiner rendered only dropped
+items and projectiles, ran its **own** private mob world (spawning, AI, species
+AI) and took hostile damage from those private mobs client-side; the server's
+mobs chased joiners but never damaged anyone.
+
+**Server feed (`entity_broadcast.rs`, `HostedServer::broadcast_state`).**
+- `EntityBroadcast::diff` gives every mob, cart, dropped item and projectile a
+  `ProtocolId` on first sight (stable for its life; on a lending host it lives
+  on the host's ECS) and builds each one's spawn and current update.
+- **Changed-only.** An `EntityUpdate` is sent only when it differs from the
+  last update broadcast for that entity: position or velocity by more than
+  `1e-3` (blocks, blocks/tick) on any axis, yaw by more than `1e-3` rad, or a
+  new `state`/`flags`. The comparison is against the last update **sent**, so
+  slow drift still crosses the epsilon. An idle herd costs nothing; a client
+  keeps the last update it got. A budget-held update is never lost: the
+  outbox keeps the newest unsent update per id (Bounded StateUpdates).
+- **Interest (per client, `ClientInterest`).** A joiner (a server-simulated
+  slot) hears about an entity once it is within **80 blocks** horizontally of
+  its server-held body (`INTEREST_ENTER_RADIUS`) and is told it is gone past
+  **96** (`INTEREST_LEAVE_RADIUS`; the gap stops a mob on the boundary
+  flapping). Entering sends an `EntitySpawn` built from the entity's state
+  **now** plus its current update; leaving sends a despawn. The host's own
+  loopback slot (and any local slot) hears about everything. The set resets
+  with the slot. **No backfill:** a late joiner's set starts empty, so every
+  entity in range enters on its first broadcast, with its full payload (item
+  stack, tool durability).
+- **Wire (v68, appended):** `EntityUpdate.vx/vy/vz` and `flags`
+  (`entity_flags`: `HURT = 1` — `Health::is_flashing`; `BABY = 2` —
+  `breeding::Baby`; `TAMED = 4` — `tameable::pet_owner_of`, no renderer reads
+  it yet; `SATOSHI = 8` — `SatoshiMarker`). These are what the entity
+  renderer reads (position, velocity for the walk cycle, facing, hurt flash,
+  baby scale, Satoshi's model); per-species tints are static per kind, so no
+  genetics are sent. An update is now 34 bytes (was 21).
+
+**Joiner mirror (`remote_mobs.rs`, `network_receive`).** Mob and cart spawns
+go into `RemoteMobs`, a **separate render-only `hecs::World`** — never the
+client's sim ECS — holding only what the renderer reads (`Position`,
+`Velocity`, `MobKind`, `Hitbox`, `MobAi.facing`, `Health` flash, `Baby`,
+`SatoshiMarker`; a cart is a parked `CartData` with the wire facing). The
+shared `build_entity_model_vertices` / `build_cart_vertices` draw it. Every
+client system that simulates, damages, tames, breeds, rides, trades with or
+attributes kills of mobs queries the sim ECS, so none of them can reach a
+mirrored mob or trip over its missing components. Motion: each update starts a
+one-tick glide from where the mob is drawn to the server's position, then
+extrapolates along the wire velocity for at most 2 ticks. Items and
+projectiles stay in `remote_entities` (unchanged).
+
+**No private mob world.** While `remote_client.is_some()` (`GameState::joined`)
+the client's spawn cycle, village / Satoshi / Knight / wanderer / hideout
+spawners and raids do not run, and `remote_mobs::purge_private_mobs` removes
+any mob that reaches the sim ECS anyway (the column scatter, a spawn egg, a
+command) every frame and tick. With no mobs, the client's mob AI, species AI,
+breeding, kill attribution and hostile damage have nothing to act on; the
+hostile-melee pass is also gated off. The joiner's own drops, carts and
+projectiles stay in its ECS.
+
+**Interactions refused until D2b.** A melee swing whose cone (the client's own
+`find_attack_target` rule) holds a mirrored mob, or a right-click whose
+crosshair ray hits one (nearer than any block, holding anything but a block),
+shows "Not available when you've joined someone else's world yet." and does
+nothing else — it neither mines the block behind nor places. Attack, tame,
+feed, breed, ride, lead, shear, milk and trade all need the server to act on
+its entity.
+
+**Server-side damage on joiners (`GameServer::tick_player_hazards`).** After
+the per-player combat timers, for every server-simulated body that is present,
+alive and not in a flying mode:
+- **Hostile melee** — `combat::hostile_melee_tick`, the rule the client runs on
+  its local players through `tick_mob_attacks` (every `Hostile` mob within 1.5
+  blocks horizontally and vertically overlapping hits for 3 × the difficulty
+  scale, knockback away), skipped when the difficulty table says hostiles do
+  not attack (Peaceful).
+- **Lava / fire contact** — `survival::contact_hazard`, the client's rule
+  (lava at the feet or head 2 HP, else fire 1 HP, every 10 ticks).
+- Both are reduced by `ServerPlayer.armour_points`, taken from the joiner's
+  latest `InputPacket.armour_points` (client-asserted, like `held_kind`;
+  armour lives in the client-held inventory). Armour **durability** does not
+  wear for these hits (the server holds no armour) — until inventory
+  authority (Phase C).
+- A lethal hit leaves `just_died`, which `HostedServer` turns into
+  `PlayerEvent::Died` (§4.2b) — the joiner's death screen follows.
+- On a lending host the mobs are the host's own (its client still runs their
+  AI); this pass is where they bite joiners. Species-AI attacks (bee sting,
+  goat charge, shark bite) are host-client-only and still reach only the
+  host's local players (open: D4).
 
 ### 4.3 Block Mutations
 
@@ -1105,7 +1197,7 @@ A joiner has **one** position: the one the server simulates from its inputs. Its
 **Client** (`prediction.rs`, `OwnPrediction`; glue in `game_loop.rs` `network_send_input` / `network_receive`):
 
 1. Every input sent is recorded (bounded, 128) as exactly what the server will simulate (`from_input_packet`, yaw, pitch) plus the body state after this client's step (position, velocity, `on_ground`, `flying`, `in_water`). **One counter:** the record's sequence number is the one `RemoteClient::send_input` stamped on the wire and returns (`OwnPrediction::send`); the connection counts from **1** (0 is the server's "nothing received" sentinel, `input_tick_is_fresh`) and restarts with each connection. `GameState.net_send_seq` (process-wide, never reset, also counting while hosting) only numbers the host's own loopback input — recording under it put every ack one off in a fresh process and matched none after an earlier host or join in the same process, so reconcile skipped for good. A sequence number not after the newest held one starts a new history (a new connection).
-2. On each `StateUpdate` the client takes its **own** `PlayerState` — position only; health stays client-side until D2a — and `last_acked_input`. Older records are dropped. If `|server − recorded(ack)| ≤ 0.001` block the two agree and nothing changes.
+2. On each `StateUpdate` the client takes its **own** `PlayerState` — its position here (its health since v68: §5.3.2) — and `last_acked_input`. Older records are dropped. If `|server − recorded(ack)| ≤ 0.001` block the two agree and nothing changes.
 3. Otherwise it rebases: position = the server's, the rest from its own record of that step (the server sends position only), then replays every unacknowledged input through `Player::tick` on its own world, rewriting the records as it goes (so the same update again agrees). If the replayed position is more than **1 block** from the predicted one it **snaps**; otherwise the body takes the corrected state at once and the difference becomes a camera-only offset that decays ×0.6 per tick (`slot.camera.position = eye_pos() + offset`). The physics body never holds a position part-way between two states, so a correction cannot embed it in a wall. Fall bookkeeping (`fall_distance`, `pending_landing`) is left alone so a replayed landing never hurts twice.
 4. Measured in `test_integration/position_truth.rs` (real `HostedServer`, channel transport, arena built identically in both worlds): over walking, sprinting, jumping, walking into a wall, crouching along it, walking off a 5-block ledge and swimming, with zero and with three ticks of delivery latency, and with inputs bunched two per tick, the server and the prediction agree to **< 1e-4 block at every acknowledged input** and reconciliation corrects nothing. The same holds through a real `RemoteClient` (its own wire numbering, junk in the caller's `tick`) across two joins in one process — with the acks confirming records, not merely skipped — and through a client frame hitch that sends ten inputs at once. A server teleport of 5 blocks snaps; a 0.3-block nudge glides and settles.
 5. **Riding** (BRIDGE: a cart or mount is this client's own sim until the server simulates rides). While mounted, the input goes out with no movement (`prediction::hold_still`: no forward/strafe, sprint, sneak, jump or flight toggle; look, hand and edits kept), so the steering keys no longer walk the server's body off — or into a pit — under a rider who isn't there; nothing is recorded, and `network_receive` only notes the server's position. On the first input after getting off (also sent still) the client puts its body on the server's at once — the last position the server sent, velocity zero, settled with one still `Player::tick` — and records from there, so getting off is one clean jump back to where the ride began, after which prediction and server agree again (tested: a 40-tick ride steering with every key leaves the server body unmoved, and walking on after it corrects nothing). Consequence until rides are server-side: a joiner's ride ends where it started.
@@ -1114,7 +1206,7 @@ Not reconciled / known divergence (each shows as a correction, which is the hone
 
 - **Rubber Boots**: the server keeps no armour for a joiner (Phase C), so a joined client predicts with `sprint_boots_mult = 1.0` (BRIDGE in `game_loop.rs` `tick`) — joiners get no boots bonus until armour is server-side.
 - Terrain the joiner's own world has and the server's lacks (or the reverse) until B2's chunk push.
-- **Mob push-out from the joiner's private mob sim** (`entity::push_player_from_entities` in `tick`, and knockback): a joiner still runs its own mob sim (the dual-sim debt), so a mob only it has can shove its body where the server's never went — a correction. Left until the dual sim goes (D2a), since the server's mobs are the ones that should push.
+- **Mob push-out and knockback** come from the server's mobs, on the server's body (`push_player_from_entities` and `hostile_melee_tick` in `GameServer::tick`); since D2a (v68) the joiner has no mobs of its own and does not predict either, so a shove or a hit's knockback shows as a correction.
 - **Self-teleports are refused for a joiner.** A waypoint jump (map screen, creative) shows the toast "Teleporting isn't available when you've joined someone else's world yet." and `/waypoint tp` returns the same error (a joiner's commands run below op, `world_exit::local_command_op_level`; `/tp` is op-only already). A client-only jump would only be put back by the server; the server takes no teleport from a client yet.
 - Velocity and flight are not on the wire. Open question: add an own-body block (velocity, flags) to the per-client `StateUpdate` if live two-machine tests show replay drift.
 
@@ -1123,6 +1215,46 @@ Not reconciled / known divergence (each shows as a correction, which is the hone
 **The host's own local slots are position-trusted by design, not debt**: a local slot is a player at the host's own machine, and the host *is* the authority's machine — simulating its input there buys no authority. Their `InputPacket.x/y/z` is applied as sent, and the host client never applies its own `PlayerState`.
 
 **Loading screen**: while a signed join waits for the player's signer (a phone approving), the Loading screen shows "Waiting for your signer to approve…" under the bar (A2's join timeout is unchanged).
+
+#### 5.3.2 As built: a joiner's own health (MP-D2a, protocol v68)
+
+A joiner's health is the server's. The server lands every hit the world deals
+its body — fall and drowning (`tick_player_survival`, as before), hostile melee
+and lava/fire contact (§4.2c) — and sends the result in the joiner's own
+`PlayerState.health`. The joiner's client no longer applies those hits: it
+still runs `survival::survival_hits` on its predicted body (breath, for the
+bubbles) but drops the hits, and skips its own lava/fire and hostile passes.
+
+Hunger stays client-side, so the joiner's client still owns **natural regen,
+starvation, poison, eating, sleeping and `/heal`**. Their net change since the
+previous input rides `InputPacket.health_delta`; the server adds it to its copy
+(clamped to max health; a loss takes no i-frames and records no cause) when it
+**simulates** that input (`tick_player_physics`), so the `StateUpdate`
+acknowledging the input (`last_acked_input`) already contains it. A dropped
+input's delta is carried into the next queued one (like its flight toggle). A
+reported loss that kills is a death its client already knows: no `Died` is
+echoed. The server runs only the hit timers (`PlayerCombat::tick_timers`) for a
+joiner — no hunger, regen or starvation of its own, which retired the
+non-lethal starvation-floor BRIDGE.
+
+**Client bookkeeping (`health_sync::OwnHealth`, `network_send_input` /
+`network_receive`):** each reported change is kept under the sequence number
+its input went out with until acknowledged; the bar shows the server's value
+plus the unacknowledged changes, plus anything changed since the last send
+(eating happens in frame-time input handling, between a tick's send and the
+next frame's apply). A server value below what the client showed flashes the
+hurt vignette. A server value of **zero is never applied** and nothing changes
+while the client is dead: death and revival are `Died` / `Respawned` (§4.2b)
+only — after a local Respawn the server still reports the dead body's zero for
+a round trip, and taking it would make the next input report a death and kill
+the respawned body. `Respawned` and a death reset the bookkeeping, so a
+respawn's jump to full health is never reported as a heal.
+
+Not closed: the death screen shows a generic cause for a server-side death
+(`Died` carries none); armour durability does not wear from server-landed hits
+(§4.2c); a modified client can report heals (and armour) it never earned — no
+worse than before v68, when its health was wholly its own; closing it needs
+server-side hunger and inventory (Phase C).
 
 ### 5.4 Block Prediction
 
@@ -1704,7 +1836,9 @@ ghost entities), and the player positions. Separately (T2-12) the transport acce
 - **One outbox per slot** (`HostedServer.outboxes`, parallel to `transports`; replaced on attach and
   on release, so nothing queued for one connection reaches the next). `broadcast_state` builds the
   tick's snapshot fields once (tick, players, world time, reserve, weather) and, per joined client,
-  pushes the backfill spawns (late joiners) then the tick's diff into its outbox and sends whatever
+  pushes its share of the tick's entity events (since v68 per-client: interest-filtered and
+  changed-only, §4.2c — a late joiner's first share carries every entity in range, replacing the
+  old backfill) and the tick's block changes into its outbox and sends whatever
   `drain_packets` returns.
 - **Reliable deltas** — block changes, entity spawns, entity despawns — sit in one FIFO in server
   order, each with its exact bincode size. Within a tick, spawns go in before despawns, block
@@ -1901,8 +2035,9 @@ reads them); the first lend strips any an earlier server left (ids are per `Host
 initial square; the per-client outbox (T1-5) bounds it, unmeasured under a full radius.
 
 **By design, not debt:** the host's local slots stay position- and health-trusted (the host's
-player on the host's machine); joiners take no mob contact damage yet (D2a); a joiner's edit is
-not relit on the host (it never was).
+player on the host's machine); a joiner's edit is not relit on the host (it never was). Since
+D2a (v68) the host's mobs bite joiners through the lent server's `tick_player_hazards` (§4.2c),
+and a joiner hears only about the host's entities near it.
 
 **`--no-lend`** (one release): the host's server owns a copy as before D1, fed the host's clock
 and weather and kept live by `mirror_host_world_state` (a BRIDGE that goes with the flag); it

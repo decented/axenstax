@@ -194,7 +194,7 @@ Collision uses **AABB (Axis-Aligned Bounding Box) vs voxel grid** intersection.
 
 **Tracking.** `Player::tick` records the foot height before its move and, after integration, accumulates any *downward* motion into `Player.fall_distance` while airborne. Flight, noclip, swimming (`in_water`) and ladders (`World::is_climbable`, so vines too when they ship) reset it. On the tick the body touches ground — or its foot cell becomes water — it emits a `physics::Landing { fall_distance, landing_block }` (`landing_block` is the cell a hair below the foot, or `WATER` for a splash-down) and resets. Only motion *inside* `tick` counts, so a teleport (`/tp`, respawn) is never a fall; respawn and mounting a cart call `Player::reset_fall` explicitly. Upward motion (a jump, knockback) never adds. A small epsilon (1e-3) is subtracted before `ceil` so the accumulated float sum of an exact 3-block drop stays free.
 
-**Who applies it (dual-sim, as built).** One shared driver, `survival::tick_player_survival(player, combat, world, mode)`, consumes the landing and applies the damage. **Local players** (single-player, split-screen, the host's own seat, and a joined client's own body): `game_loop.rs` per-player combat pass. **Server-simulated remote players**: `GameServer::tick_player_physics` → `tick_player_survival`. A remote player's own client and the host each compute it from their own copy of the physics — the client's copy drives that player's HUD and death, the host's copy is what other players see in `PlayerState.health`. (Single-player still bypasses `GameServer` — CLAUDE.md known debt.)
+**Who applies it (dual-sim, as built).** One shared driver, `survival::tick_player_survival(player, combat, world, mode)`, consumes the landing and applies the damage. **Local players** (single-player, split-screen, the host's own seat, and a joined client's own body): `game_loop.rs` per-player combat pass. **Server-simulated remote players**: `GameServer::tick_player_physics` → `tick_player_survival`. A remote player's own client and the host each compute it from their own copy of the physics — the client's copy drives that player's HUD and death, the host's copy is what other players see in `PlayerState.health`. **Since MP-D2a (protocol v68) the server's copy is the joiner's health:** the joined client runs `survival::survival_hits` on its own body for breath only and drops the hits; the server's fall / drowning damage arrives in the joiner's own `PlayerState.health` (Spec 04 §5.3.2). (Single-player still bypasses `GameServer` — CLAUDE.md known debt.)
 
 **I-frames.** Fall damage goes through `PlayerCombat::take_damage_from`, so it respects the 10-tick invulnerability window after another hit: a landing within 0.5 s of a mob hit does no fall damage. Deliberate simplification (Minecraft lets the larger hit through); not a bug.
 
@@ -1544,6 +1544,39 @@ Each damage type is a tagged enum, allowing armour and enchantments to selective
 - `Standard`: Cooldown-based (default, described above). More strategic.
 - `Custom`: Server/plugin defines custom timing via configuration.
 
+### 6.4.1 Combat for joiners (as built, MP-D2a, protocol v68)
+
+A player who has joined someone else's world (LAN / online host or dedicated
+server) fights the **server's** mobs — there is no private mob world on a
+joiner any more (Spec 04 §4.2c).
+
+- **Mobs hurt joiners server-side.** `GameServer::tick_player_hazards` runs the
+  same hostile-melee rule the client runs for its local players
+  (`combat::hostile_melee_tick`: every `Hostile` mob within 1.5 blocks
+  horizontally, overlapping the 1.8-block body, hits for 3 HP × the difficulty
+  scale, knockback 0.4 away + 0.3 up; Peaceful: no attacks) and the same
+  lava / fire contact rule (`survival::contact_hazard`: 2 HP lava / 1 HP fire
+  every 10 ticks at the feet or head) on every present, living, non-flying
+  joiner's body. Both are reduced by the armour points the joiner's input
+  reports (`InputPacket.armour_points`, client-asserted). The joiner's own
+  client no longer runs either for its body.
+- **The joiner's health is the server's.** It shows the server's value plus the
+  changes its own sources made that the server has not applied yet (eating,
+  natural regen, starvation, poison, sleeping, `/heal` — hunger stays
+  client-side), reported per input as `InputPacket.health_delta` (Spec 04
+  §5.3.2). A lethal server-side hit reaches the death screen through
+  `PlayerEvent::Died` (MP-A3).
+- **Attacking and every other mob interaction (tame, feed, breed, ride, lead,
+  shear, milk, trade) is not available to a joiner yet** (D2b): a swing at a
+  mob or a right-click on one shows "Not available when you've joined someone
+  else's world yet." and does nothing else.
+- **Not yet on a joiner:** armour durability does not wear from server-landed
+  hits (the server holds no armour; Phase C); the death screen's cause line is
+  generic for a server-side death (`Died` carries no cause); species-AI attacks
+  (bee sting, goat charge, shark bite, bear) run only on a host's client and
+  reach only its local players; mob push-out and knockback are not predicted
+  (each shows as a position correction).
+
 ### 6.5 Ranged Combat
 
 **Bow**:
@@ -1592,7 +1625,7 @@ On death (Survival):
 1. **Graves (#47, implemented 2026-06-16)** — the inventory is **NOT scattered**. The 36 slots are snapshotted into a recoverable `GRAVE` block placed at a safe cell at the death spot (`grave::find_safe_grave_pos` searches the death cell, then upward, then outward — never the void, never a hazard, never destroying a build; on the rare no-safe-cell it falls back to the legacy scatter so nothing is lost). The grave's `GraveData.slots` is **index-aligned** to the inventory, so recovery returns each stack to its **original slot** (Corpse-mod parity). Right-click the grave to reclaim (best-effort into free slots if the original is taken); it's removed when emptied. Breaking the grave spills its contents. Persisted in `WorldSave.graves` (append-only, serde-default). The death position is also toasted so the player can walk back.
 2. **Keep-inventory** — `WorldMeta.keep_inventory` (runtime-mirrored on `World`, default `false`; **`true` for blank-canvas/parkour worlds**). When on, death leaves the inventory intact and creates no grave. Toggle live with `/keepinventory [on|off]` (`/ki`).
 3. **No penalty** — death is sats/score/proof-of-play **penalty-free** (it only ever MOVES items; verified — the death path touches no `economy`/`proof_of_play`). XP retention is moot (no XP system).
-4. The death screen shows "You Died!", **a cause line** from the last damage that landed (`PlayerCombat.last_damage`, a `survival::DamageCause`, wording in `survival::death_message`): "You fell from a high place", "You drowned", "Killed by a <mob display name>", "You starved", "You tried to swim in lava", "You burned to death", "You were blown up", fallback "You died" — plus **"Your items are in a grave at x, y, z"** when this death placed a grave (`PlayerSlot.last_grave`), then Respawn. (W2, 2026-10-05. The cause is computed by whichever sim owns that player's body — a joined client's own sim for its own death — so it needs no wire field.) **No auto-respawn** (owner decision 2026-10-06, Minecraft-style — the old 2 s timer left no time to read these lines): the death screen stays up until the player chooses Respawn. Per-seat inputs: the **Respawn button** (mouse click, or a tap on touch — egui receives touch as pointer events); **Enter** for the keyboard seat (P1 only, ignored while chat is open, so one key press can't respawn every split-screen seat); **A on the seat's own controller** (`local_join::ui_pad_index`; pads can't reach egui buttons in-game, so this is their path). A hint line under the button names the seat's input. The press sets `PlayerCombat.respawn_requested` (`request_respawn`, a no-op while alive); the client death loop respawns on `should_respawn()` and `respawn()` clears it. P1's pointer is released on death (web included) and a stray click while dead does not re-lock it. **A joiner's death is server-held (MP-A3, protocol v67).** The server marks a joined (server-simulated) player dead when its copy of them dies (a fall or drowning in `GameServer::tick_player_survival`) or when their input reports zero health (their own sim's death: a mob, lava — believed only downward). While dead the body runs no physics, picks nothing up (its death drops stay on the ground for others), is no mob's target, presses no pressure plate, and its moves, edits and device interactions are ignored (each edit is sent back so the ghost block un-places). Nothing revives it on a timer — the old 40-tick `respawn_timer` restore is gone. When its own sim kills the body the server tells every client `PlayerEventType::Died`, so a joiner whose server copy died unseen still reaches its death screen (a reported death is not echoed back — the reporting client already knows); the Respawn button sends `PacketType::Respawn`, and only then does the server respawn the body (`GameServer::respawn_player`: full health, hunger and breath, standing on the ground in the column of the spawn point it holds — the join spawn; a bed or `/spawnpoint` is client-side only) and answer `PlayerEventType::Respawned { x, y, z }`, which the joiner snaps to. A Respawn from a living player is ignored (no free teleport). A player who disconnects while dead is dropped as usual and never revived. A subtle red screen-edge vignette (alpha ≤ 0.35, fading over 0.4 s — `combat::PLAYER_HURT_FLASH_TICKS`, `hud_ui::draw_hurt_vignette`) marks every hit that lands; never a full-screen flash.
+4. The death screen shows "You Died!", **a cause line** from the last damage that landed (`PlayerCombat.last_damage`, a `survival::DamageCause`, wording in `survival::death_message`): "You fell from a high place", "You drowned", "Killed by a <mob display name>", "You starved", "You tried to swim in lava", "You burned to death", "You were blown up", fallback "You died" — plus **"Your items are in a grave at x, y, z"** when this death placed a grave (`PlayerSlot.last_grave`), then Respawn. (W2, 2026-10-05. The cause is computed by whichever sim owns that player's body — a joined client's own sim for its own death — so it needs no wire field.) **No auto-respawn** (owner decision 2026-10-06, Minecraft-style — the old 2 s timer left no time to read these lines): the death screen stays up until the player chooses Respawn. Per-seat inputs: the **Respawn button** (mouse click, or a tap on touch — egui receives touch as pointer events); **Enter** for the keyboard seat (P1 only, ignored while chat is open, so one key press can't respawn every split-screen seat); **A on the seat's own controller** (`local_join::ui_pad_index`; pads can't reach egui buttons in-game, so this is their path). A hint line under the button names the seat's input. The press sets `PlayerCombat.respawn_requested` (`request_respawn`, a no-op while alive); the client death loop respawns on `should_respawn()` and `respawn()` clears it. P1's pointer is released on death (web included) and a stray click while dead does not re-lock it. **A joiner's death is server-held (MP-A3, protocol v67).** The server marks a joined (server-simulated) player dead when its copy of them dies (a fall or drowning in `GameServer::tick_player_survival`) or when their input reports zero health (a death their own client caused — since MP-D2a only the sources it still owns, such as starvation on Hard; mobs and lava/fire hit the server's copy, §6.4.1 — believed only downward). While dead the body runs no physics, picks nothing up (its death drops stay on the ground for others), is no mob's target, presses no pressure plate, and its moves, edits and device interactions are ignored (each edit is sent back so the ghost block un-places). Nothing revives it on a timer — the old 40-tick `respawn_timer` restore is gone. When its own sim kills the body the server tells every client `PlayerEventType::Died`, so a joiner whose server copy died unseen still reaches its death screen (a reported death is not echoed back — the reporting client already knows); the Respawn button sends `PacketType::Respawn`, and only then does the server respawn the body (`GameServer::respawn_player`: full health, hunger and breath, standing on the ground in the column of the spawn point it holds — the join spawn; a bed or `/spawnpoint` is client-side only) and answer `PlayerEventType::Respawned { x, y, z }`, which the joiner snaps to. A Respawn from a living player is ignored (no free teleport). A player who disconnects while dead is dropped as usual and never revived. A subtle red screen-edge vignette (alpha ≤ 0.35, fading over 0.4 s — `combat::PLAYER_HURT_FLASH_TICKS`, `hud_ui::draw_hurt_vignette`) marks every hit that lands; never a full-screen flash.
 5. Respawn location: the player's bed (if set and unobstructed) or the world spawn point.
 6. On respawn: **full health, full hunger**. Respawning hungry adds frustration without depth.
 
@@ -2270,7 +2303,7 @@ Every world carries an append-only integrity record in `world_meta.json`. These 
 | Normal (default) | Yes | ×1 | 1 HP |
 | Hard | Yes | ×1.5 | none — starvation kills |
 
-Applied to hostile melee (`combat::tick_mob_attacks`) and the neutral bee sting / goat charge / shark bite. Not applied to fall damage, drowning, lava, fire or explosions. A joined client adopts the host's difficulty from `JoinAccept.difficulty` (the field was always on the wire — no protocol change). Server-side, `GameServer.difficulty` (from `WorldMeta` on `initial_load`) sets the starvation floor of its copies of remote players — **bridged non-lethal** (`max(floor, 0.5)`), because a remote player's server copy of hunger drains but is never refilled (eating is client-side); see the BRIDGE note on `GameServer::tick_player_survival`.
+Applied to hostile melee (`combat::tick_mob_attacks`) and the neutral bee sting / goat charge / shark bite. Not applied to fall damage, drowning, lava, fire or explosions. A joined client adopts the host's difficulty from `JoinAccept.difficulty` (the field was always on the wire — no protocol change). Server-side, `GameServer.difficulty` (from `WorldMeta` on `initial_load`) scales the hostile melee it lands on joiners (§6.4.1) and turns it off on Peaceful. It runs no hunger or starvation for a joiner's copy since MP-D2a — a joiner's metabolism is its client's, applying the floor from the joined world's difficulty, and arrives as `InputPacket.health_delta` — which retired the old non-lethal starvation-floor BRIDGE.
 
 **Bitcoin integration** (Phase 5): The integrity ledger provides the data layer for reward eligibility decisions. Server operators will configure policies (e.g., "creative worlds earn zero Bitcoin", "hard mode gets 2x multiplier"). The engine records facts; the server applies rules; the protocol delivers rewards.
 
@@ -2851,6 +2884,11 @@ Mob drops are defined by **loot tables** — data-driven JSON structures that sp
 > that survived the `ItemRef` encoding were granted remotely — blocks and
 > materials — because tools/plans/armour collapse on the wire (tier-only /
 > `Empty`); see the phase-3 note below for what replaced that.
+>
+> **Superseded by MP-D2a (protocol v68):** each client now has its own
+> interest set (`entity_broadcast::ClientInterest`, Spec 04 §4.2c); a late
+> joiner's starts empty, so every entity near it enters — with its full
+> payload — on its first broadcast, and the separate backfill below is gone.
 >
 > **Late-joiner backfill (2026-07-12, no wire change).** The server's
 > `known_ids` diff set stays global (a spawn broadcasts once), but a client

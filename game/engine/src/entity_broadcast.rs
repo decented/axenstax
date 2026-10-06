@@ -1,4 +1,4 @@
-//! Server → client entity broadcast (Spec 04 §5.6 "Entity mirror", MP-D2a).
+//! Server → client entity broadcast (Spec 04 §4.2c "Entity mirror and joiner damage", MP-D2a).
 //!
 //! Every tick `HostedServer::broadcast_state` asks [`EntityBroadcast::diff`]
 //! for the broadcastable entities in the server's ECS — mobs, rail carts,
