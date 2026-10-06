@@ -7344,6 +7344,10 @@ impl super::GameState {
                 self.repair_void_columns_after_load();
                 self.reset_tick_timing();
                 self.mode = GameMode::Playing;
+                // The Host button's result ("Hosting on your network…" or why it
+                // failed), queued before this world's load cleared the toast.
+                #[cfg(not(target_arch = "wasm32"))]
+                self.entry_toast.deliver(&mut self.toast, Instant::now());
                 // First spawn on this device: show the controls card once. It is
                 // a modal (frees the cursor, freezes movement) until "Got it".
                 if !self.graphics.controls_card_seen {
@@ -7947,20 +7951,22 @@ impl super::GameState {
                                 crate::protocol::SERVER_PORT,
                                 access.join_addresses()
                             );
-                            self.toast = Some((
+                            // Queued, not set: the world reset below clears
+                            // `toast`, and toasts draw only while Playing.
+                            self.entry_toast.queue(
                                 crate::lan_host::hosting_toast(&access),
-                                Instant::now() + std::time::Duration::from_secs(8),
-                            ));
+                                std::time::Duration::from_secs(8),
+                            );
                             self.lan_host = Some(access);
                         }
                         Err(e) => {
                             log::error!("Failed to start hosted server: {e}");
                             // The world still opens (solo); tell the player why
                             // nobody can join instead of failing silently.
-                            self.toast = Some((
+                            self.entry_toast.queue(
                                 crate::lan_host::host_failure_toast(&e),
-                                Instant::now() + std::time::Duration::from_secs(12),
-                            ));
+                                std::time::Duration::from_secs(12),
+                            );
                         }
                     }
                     load_world = Some(folder_name);
@@ -21093,27 +21099,29 @@ impl super::GameState {
         if let Some((ref msg, expiry)) = self.toast {
             if Instant::now() < expiry {
                 let screen_w = self.renderer.width as f32;
-                let screen_h = self.renderer.height as f32;
+                // Wraps: the host/join toasts carry a full sentence (an address, or
+                // why hosting failed), which a fixed 240 px single line clipped.
+                let wrap_w = (screen_w - 64.0).clamp(240.0, 560.0);
 
                 egui::Area::new(egui::Id::new("toast"))
-                    .fixed_pos(egui::pos2(screen_w / 2.0 - 120.0, screen_h - 170.0))
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -134.0))
                     .interactable(false)
                     .show(&self.renderer.egui.ctx, |ui| {
-                        let rect = egui::Rect::from_min_size(
-                            egui::pos2(screen_w / 2.0 - 120.0, screen_h - 170.0),
-                            egui::vec2(240.0, 36.0),
-                        );
-                        ui.painter().rect_filled(
-                            rect, 8.0,
-                            egui::Color32::from_rgba_premultiplied(20, 24, 32, 220),
-                        );
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            msg,
-                            egui::FontId::proportional(16.0),
-                            egui::Color32::from_rgb(100, 220, 100),
-                        );
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgba_premultiplied(20, 24, 32, 220))
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .inner_margin(egui::Margin::symmetric(14, 8))
+                            .show(ui, |ui| {
+                                ui.set_max_width(wrap_w);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(msg.as_str())
+                                            .size(16.0)
+                                            .color(egui::Color32::from_rgb(100, 220, 100)),
+                                    )
+                                    .wrap(),
+                                );
+                            });
                     });
             } else {
                 self.toast = None;

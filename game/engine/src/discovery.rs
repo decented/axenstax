@@ -25,6 +25,12 @@ const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most servers one listener will remember — a flooding LAN cannot grow it.
 const MAX_DISCOVERED: usize = 100;
 
+/// Most datagrams read per `poll()`. `poll` runs every frame, so this bounds the
+/// work (and memory) one frame can spend on a broadcast flood while still being
+/// far above real traffic (one announcement per host per second); the rest wait
+/// in the OS socket buffer or are dropped by it.
+const MAX_PACKETS_PER_POLL: usize = 64;
+
 /// Longest server name (in characters) kept from an announcement.
 const MAX_SERVER_NAME_CHARS: usize = 64;
 
@@ -201,6 +207,14 @@ impl ServerListener {
         }
     }
 
+    /// A listener on an already-bound socket (tests bind an ephemeral loopback
+    /// port instead of the fixed discovery port).
+    #[cfg(test)]
+    fn from_socket(socket: UdpSocket) -> Self {
+        socket.set_nonblocking(true).expect("nonblocking");
+        Self { socket: Some(socket), servers: Vec::new() }
+    }
+
     /// Whether the discovery port was bound. `false` means the list will stay
     /// empty (another copy of the game on this machine already listens), which
     /// the UI says rather than showing a silently blank list.
@@ -229,8 +243,11 @@ impl ServerListener {
     pub fn poll(&mut self) {
         if let Some(socket) = &self.socket {
             let mut buf = [0u8; 1024];
-            let mut received: Vec<DiscoveredServer> = Vec::new();
-            while let Ok((len, src_addr)) = socket.recv_from(&mut buf) {
+            // At most MAX_PACKETS_PER_POLL parsed announcements per call, so the
+            // staging Vec is bounded no matter what the LAN throws at us.
+            let mut received: Vec<DiscoveredServer> = Vec::with_capacity(MAX_PACKETS_PER_POLL);
+            for _ in 0..MAX_PACKETS_PER_POLL {
+                let Ok((len, src_addr)) = socket.recv_from(&mut buf) else { break };
                 if let Some(found) = parse_announcement(&buf[..len], src_addr.ip()) {
                     received.push(found);
                 }
@@ -352,6 +369,28 @@ mod tests {
         l.prune();
         let names: Vec<&str> = l.servers().iter().map(|s| s.server_name.as_str()).collect();
         assert_eq!(names, ["Here"]);
+    }
+
+    #[test]
+    fn one_poll_reads_a_bounded_number_of_datagrams() {
+        // A flood of distinct announcements already queued on the socket: one
+        // poll() takes at most MAX_PACKETS_PER_POLL of them, the next poll()
+        // takes the next batch. (Both are below MAX_DISCOVERED, so the list cap
+        // is not what is being measured.)
+        let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind rx");
+        let rx_addr = rx.local_addr().unwrap();
+        let mut l = ServerListener::from_socket(rx);
+        assert!(l.is_listening());
+        let tx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind tx");
+        let total = MAX_PACKETS_PER_POLL + 20;
+        assert!(total < MAX_DISCOVERED);
+        for port in 1..=total as u16 {
+            tx.send_to(&datagram(&announce("flood", port)), rx_addr).expect("send");
+        }
+        l.poll();
+        assert_eq!(l.servers().len(), MAX_PACKETS_PER_POLL, "first poll is capped");
+        l.poll();
+        assert_eq!(l.servers().len(), total, "the remainder arrives on the next poll");
     }
 
     #[test]

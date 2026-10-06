@@ -47,7 +47,8 @@ expect to see slightly worse perf than native at 4 players.
 
 1. Create a world (or open an existing one) in **Survival** or
    **Creative**.
-2. From the world menu, click **Host LAN**. A message tells you the
+2. On the world's card in the lobby, click **Host**. Once the world has
+   loaded, a message tells you the
    address friends should use (your machine's local IP + port 7700). If
    hosting can't start — the port is already in use, or there's no network —
    the message says why, and your world opens for solo play instead.
@@ -58,7 +59,7 @@ expect to see slightly worse perf than native at 4 players.
 
 ### Join
 
-1. From the lobby, click **Join LAN**.
+1. From the lobby, click **Join Game**.
 2. Pick the host's world from **Games on this network** (it appears when
    your network supports UDP broadcast on port 7705; a game that is full or
    on a different version is greyed out and says why), or type the host's
@@ -68,10 +69,11 @@ expect to see slightly worse perf than native at 4 players.
    verified, signed identity and rejects a join attempt that doesn't have
    one. Your player name is just a display fallback; your real identity
    comes from your Signet sign-in. The host sees you under the name they
-   have for you in their own contacts, otherwise the name on your Signet
-   handle, otherwise a short form of your npub (like `npub1abcd…wxyz`) —
-   never a string of hex. If your name collides with another player's, the
-   game appends a short suffix to keep them distinct.
+   have for you in their own contacts. Otherwise they see the name on your
+   Signet handle (or the one you typed) followed by a short tag from your
+   npub, like `Sam-q3xk`, so nobody can pass as someone the host knows; with
+   no name at all, a short form of your npub (like `npub1abcd…wxyz`) —
+   never a string of hex. A guest shows as `Sam (guest)`.
 
 ### Network requirements
 

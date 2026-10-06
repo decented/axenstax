@@ -1144,10 +1144,15 @@ pub(crate) struct GameState {
     /// the shared network methods reference it without per-line cfg gating.
     pub(crate) hosted_server: Option<crate::hosted_server::HostedServer>,
     /// Where joiners reach this machine while it hosts a LAN game (gap-audit
-    /// T2-10): detected once when "Host Game" succeeds, shown in the pause menu,
+    /// T2-10): detected once when the world card's "Host" button succeeds, shown in the pause menu,
     /// cleared with `hosted_server`. `None` when not LAN-hosting.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) lan_host: Option<crate::lan_host::HostAccess>,
+    /// The Host button's result message, held until the world goes live: the
+    /// world reset clears `toast` and toasts draw only while Playing, so a toast
+    /// set at click time was never seen. Delivered on Loading -> Playing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) entry_toast: crate::lan_host::EntryToast,
     /// Remote client (when this machine has JOINED a server). Cross-platform now
     /// — the browser joins the dedicated WebSocket server through this too.
     pub(crate) remote_client: Option<crate::remote_client::RemoteClient>,
@@ -1759,6 +1764,8 @@ impl GameState {
             hosted_server: None,
             #[cfg(not(target_arch = "wasm32"))]
             lan_host: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            entry_toast: crate::lan_host::EntryToast::default(),
             remote_client: None,
             #[cfg(not(target_arch = "wasm32"))]
             online_host: None,

@@ -581,8 +581,11 @@ impl HostedServer {
         })
     }
 
-    /// Start a hosted server (LAN / dedicated). Unchanged behaviour: the accept
-    /// thread binds its own socket.
+    /// Start a hosted server (LAN / dedicated). On the QUIC LAN path (with at
+    /// least one remote slot) the UDP game port is bound **here, synchronously**
+    /// and the socket handed to the accept thread, so a taken port is an `Err`
+    /// with a readable reason (T2-10); the WebSocket dedicated server binds in
+    /// its own accept thread as before.
     pub fn start(
         num_local_players: usize,
         server_name: String,
@@ -1416,10 +1419,6 @@ impl HostedServer {
                             // signature carries the other leg's exporter.
                             let expected_origin =
                                 signet::join_origin(self.transports[i].channel_binding());
-                            // T2-8: the host's own contacts book names a known
-                            // joiner. Read per join (rare), never cached — a
-                            // Signet sync can change it mid-session.
-                            let host_book = crate::contacts::load_local_book();
                             match resolve_join_identity(
                                 i,
                                 &req,
@@ -1429,7 +1428,10 @@ impl HostedServer {
                                 &present_refs,
                                 &self.whitelist,
                                 &self.blocklist,
-                                &host_book,
+                                // T2-8: the host's own contacts book names a known
+                                // joiner. Read per verified join (rare), never
+                                // cached — a Signet sync can change it mid-session.
+                                crate::contacts::load_local_book,
                             ) {
                                 Ok(id) => {
                                     // One seat per verified identity. Without
@@ -2660,23 +2662,31 @@ fn sanitise_handle(raw: &str) -> String {
     cleaned.trim().chars().take(MAX_HANDLE_CHARS).collect::<String>().trim().to_string()
 }
 
-/// A guest's (unverified) name must never pass as a present player's handle —
-/// e.g. a guest taking the operator's name on a kids' server. On collision the
-/// guest's label is marked; verified players keep theirs.
+/// A guest's (unverified) name. It is **always** marked ` (guest)` — not only on
+/// a collision — so no guest can ever read as a verified player or a contact
+/// (whose names are bare); a name that is empty, generic, or shaped like an npub
+/// or a pubkey becomes plain `Player (guest)`. Two guests with the same name are
+/// told apart with a number. Sanitised like every other handle (audit
+/// 2026-09-28 A#18).
 #[cfg(not(target_arch = "wasm32"))]
 fn guest_display_name(asserted: &str, taken: &[&str]) -> String {
-    let name = sanitise_handle(asserted);
-    let name = if name.is_empty() { "Player".to_string() } else { name };
-    if taken.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
-        format!("{name} (guest)")
-    } else {
-        name
+    let name = usable_name(asserted).unwrap_or_else(|| "Player".to_string());
+    let base = format!("{name} (guest)");
+    let in_use = |candidate: &str| taken.iter().any(|t| t.eq_ignore_ascii_case(candidate));
+    if !in_use(&base) {
+        return base;
     }
+    (2u32..)
+        .map(|n| format!("{base} {n}"))
+        .find(|candidate| !in_use(candidate))
+        .expect("an unused guest number exists")
 }
 
-/// Disambiguate a verified handle against handles already in use by other
-/// present players. On collision, append `-<npub_suffix>` so two people sharing a
-/// handle stay distinguishable. The suffix is a readable label only — NOT a
+/// Disambiguate a contacts-book name against handles already in use by other
+/// present players. On collision (case-insensitive), append `-<npub_suffix>` so
+/// two people the host calls the same thing stay distinguishable. (Self-asserted
+/// names don't come through here: they always carry the suffix — see
+/// `verified_display_label`.) The suffix is a readable label only — NOT a
 /// security boundary. The full npub remains available via `verified_pubkey` for
 /// an inspect view.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2711,15 +2721,35 @@ fn short_npub(pubkey: &[u8; 32]) -> String {
     format!("npub1{head}\u{2026}{tail}")
 }
 
-/// Clean a candidate display name for the naming ladder: sanitise it like every
-/// other handle, then refuse an empty result and anything shaped like a raw
-/// pubkey (16+ hex digits) — a client can type whatever it likes, and a hex key
-/// must never be shown to a person.
+/// Whether `name` contains a run of 16 or more hex digits — the shape of a raw
+/// pubkey (or a slice of one), which must never be shown to a person.
+#[cfg(not(target_arch = "wasm32"))]
+fn has_pubkey_shaped_run(name: &str) -> bool {
+    let mut run = 0usize;
+    for c in name.chars() {
+        if c.is_ascii_hexdigit() {
+            run += 1;
+            if run >= 16 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// Clean a candidate display name for the naming ladder (verified joiners'
+/// contact, credential and typed names, and guests' typed names alike): sanitise
+/// it like every other handle, then refuse an empty result, anything containing
+/// a pubkey-shaped run (16+ hex digits) and anything that starts like an npub
+/// (`npub1…`, which also covers our own `npub1abcd…wxyz` short form) — a client
+/// can type whatever it likes, and a key must never be shown dressed as a name.
 #[cfg(not(target_arch = "wasm32"))]
 fn usable_name(raw: &str) -> Option<String> {
     let name = sanitise_handle(raw);
-    let hexish = name.len() >= 16 && name.chars().all(|c| c.is_ascii_hexdigit());
-    (!name.is_empty() && !hexish).then_some(name)
+    let npub_shaped = name.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("npub1"));
+    (!name.is_empty() && !npub_shaped && !has_pubkey_shaped_run(&name)).then_some(name)
 }
 
 /// The label the host sees for a **verified** joiner (gap-audit T2-8). Pure.
@@ -2727,20 +2757,27 @@ fn usable_name(raw: &str) -> Option<String> {
 /// Resolution order, first usable wins:
 ///   (a) `contact_name` — what the host's own contacts book (Signet contacts
 ///       sync / Kenspeckle / mirror) calls this npub. The host chose it, so it
-///       is the only name that may stand unchallenged.
+///       is the **only** kind of name that renders bare.
 ///   (b) `credential` — the `display-name` of the joiner's signed kind-31000
 ///       handle credential, if one was presented at join.
 ///   (c) `typed` — the `player_name` in the JoinRequest. A display fallback
 ///       only, never trusted; the generic `Player` the native client sends by
 ///       default counts as "no name" so it falls through to (d).
-///   (d) a short npub (`npub1abcd…wxyz`) — never hex.
+///   (d) a short npub (`npub1abcd…wxyz`) — never hex. It is the identity itself,
+///       not a claimed name, so it carries no tag.
 ///
-/// Collision rule: every name is checked, case-insensitively, against the
-/// handles of `present` players; a clash gets the readable `-<npub suffix>`
-/// (a label, not a security boundary — the full npub is in the inspect view).
-/// Self-asserted names — (b) and (c) — are additionally checked against
-/// `host_contact_names`, so a stranger cannot present as the host's contact
-/// "Mum" while Mum is offline. (d) cannot clash.
+/// **Anti-impersonation rule.** A self-asserted name — (b) or (c) — ALWAYS
+/// carries the `-<npub suffix>` tag, collision or not. A contact's name is
+/// bare, so no claimed name can ever render identically to one, whatever case,
+/// zero-width or lookalike trick it uses; no confusables table is needed. (The
+/// tag is a readable label, not a security boundary — it is only four bech32
+/// characters and grindable; the full npub is in the inspect view.) A guest
+/// always carries ` (guest)` (`guest_display_name`).
+///
+/// Every name is sanitised (`usable_name`) BEFORE any comparison. The only
+/// comparison left is for (a): a contact name equal (case-insensitively) to a
+/// present player's handle gets the suffix too, so two people the host calls
+/// "Sam" stay distinguishable.
 #[cfg(not(target_arch = "wasm32"))]
 fn verified_display_label(
     pubkey: &[u8; 32],
@@ -2748,18 +2785,13 @@ fn verified_display_label(
     credential: Option<&str>,
     typed: &str,
     present: &[&str],
-    host_contact_names: &[&str],
 ) -> String {
     if let Some(name) = contact_name.and_then(usable_name) {
         return disambiguate_handle(&name, pubkey, present);
     }
     let typed = usable_name(typed).filter(|n| !n.eq_ignore_ascii_case("player"));
-    let asserted = credential.and_then(usable_name).or(typed);
-    match asserted {
-        Some(name) => {
-            let taken: Vec<&str> = present.iter().chain(host_contact_names).copied().collect();
-            disambiguate_handle(&name, pubkey, &taken)
-        }
+    match credential.and_then(usable_name).or(typed) {
+        Some(name) => format!("{name}-{}", npub_suffix(pubkey, 4)),
         None => short_npub(pubkey),
     }
 }
@@ -2793,12 +2825,13 @@ struct JoinIdentity {
 /// `verify_join_signet_auth`):
 ///   - `auth_event` present  → verify it (tamper/invalid → `Err(reason)`); on
 ///     success name the joiner via `verified_display_label` (contacts book →
-///     credential handle → typed name → short npub, disambiguated against
-///     `present_handles`) and surface the pubkey. A present-but-invalid event is ALWAYS rejected — it never silently
-///     downgrades to a guest join.
+///     credential handle → typed name → short npub; only a contacts-book name
+///     renders bare, every self-asserted name carries the `-<npub suffix>` tag)
+///     and surface the pubkey. A present-but-invalid event is ALWAYS rejected —
+///     it never silently downgrades to a guest join.
 ///   - `auth_event` absent + `require_signin` → `Err` ("sign-in required").
 ///   - `auth_event` absent + open server      → guest: the sanitised asserted
-///     name (or "Player"), no verified pubkey.
+///     name (or "Player") marked ` (guest)`, no verified pubkey.
 ///
 /// Free function (not a method) so it borrows only the fields it needs, leaving
 /// the rest of `HostedServer` free in the caller. Returns owned `String` errors
@@ -2835,7 +2868,7 @@ fn resolve_join_identity(
     present_handles: &[&str],
     whitelist: &[[u8; 32]],
     blocklist: &[[u8; 32]],
-    host_book: &[crate::contacts::Contact],
+    load_host_book: impl FnOnce() -> Vec<crate::contacts::Contact>,
 ) -> Result<JoinIdentity, String> {
     if req.auth_event.is_some() {
         let (credential_handle, pubkey) =
@@ -2844,21 +2877,18 @@ fn resolve_join_identity(
         crate::access_policy::decide_access(Some(pubkey), blocklist, whitelist, require_signin)
             .map_err(crate::access_policy::reject_reason)?;
         // T2-8: name them from the host's contacts book first, then their
-        // signed credential, then the typed name, then a short npub.
-        let contact_name = crate::contacts::find(host_book, &pubkey)
+        // signed credential, then the typed name, then a short npub. The book is
+        // a disk read, so it happens only now — for a verified, admitted join —
+        // and never for a rejected packet or a guest.
+        let host_book = load_host_book();
+        let contact_name = crate::contacts::find(&host_book, &pubkey)
             .and_then(|c| c.display_name.as_deref());
-        let other_contacts: Vec<&str> = host_book
-            .iter()
-            .filter(|c| c.pubkey != pubkey)
-            .filter_map(|c| c.display_name.as_deref())
-            .collect();
         let display_name = verified_display_label(
             &pubkey,
             contact_name,
             credential_handle.as_deref(),
             &req.player_name,
             present_handles,
-            &other_contacts,
         );
         Ok(JoinIdentity { display_name, pubkey: Some(pubkey) })
     } else {
@@ -2867,8 +2897,8 @@ fn resolve_join_identity(
         crate::access_policy::decide_access(None, blocklist, whitelist, require_signin)
             .map_err(crate::access_policy::reject_reason)?;
         // Open server: a guest join keeps its asserted name as a display label
-        // only — never a trusted identity. Sanitised, and marked if it collides
-        // with a present player's handle (audit 2026-09-28 A#18).
+        // only — never a trusted identity. Sanitised and ALWAYS marked
+        // ` (guest)` (audit 2026-09-28 A#18; T2-8 review).
         let name = guest_display_name(&req.player_name, present_handles);
         Ok(JoinIdentity { display_name: name, pubkey: None })
     }
@@ -4210,11 +4240,13 @@ mod tests {
 
     #[test]
     fn guest_cannot_take_a_present_players_handle() {
+        // A guest is always marked, so it can never equal a present player's
+        // bare handle; the marker alone is the defence (no table needed).
         assert_eq!(guest_display_name("Operator", &["Operator"]), "Operator (guest)");
         assert_eq!(guest_display_name("operator", &["Operator"]), "operator (guest)");
         assert_eq!(guest_display_name("Oper\u{202E}ator", &["Operator"]), "Operator (guest)");
-        assert_eq!(guest_display_name("Steve", &["Operator"]), "Steve");
-        assert_eq!(guest_display_name("", &[]), "Player");
+        assert_eq!(guest_display_name("Steve", &["Operator"]), "Steve (guest)");
+        assert_eq!(guest_display_name("", &[]), "Player (guest)");
     }
 
     #[test]
@@ -4257,10 +4289,11 @@ mod tests {
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], &[])
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("valid signed join must be accepted");
-        assert_eq!(id.display_name, "Axolittle");
-        assert!(id.pubkey.is_some(), "verified join must surface the pubkey");
+        // A credential name is self-asserted: always tagged with the npub suffix.
+        let pk = id.pubkey.expect("verified join must surface the pubkey");
+        assert_eq!(id.display_name, format!("Axolittle-{}", npub_suffix(&pk, 4)));
     }
 
     #[test]
@@ -4272,7 +4305,7 @@ mod tests {
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &["Axolittle"], &[], &[], &[])
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &["Axolittle"], &[], &[], Vec::new)
             .expect("accepted");
         assert!(id.display_name.starts_with("Axolittle-"), "got {}", id.display_name);
     }
@@ -4288,7 +4321,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
         };
-        let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], &[]).unwrap_err();
+        let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
     }
 
@@ -4303,9 +4336,9 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
         };
-        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], &[])
+        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
-        assert_eq!(id.display_name, "Wanderer");
+        assert_eq!(id.display_name, "Wanderer (guest)");
         assert!(id.pubkey.is_none(), "guest has no verified pubkey");
     }
 
@@ -4326,7 +4359,7 @@ mod tests {
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
         let allow = vec![xonly_of([0x42; 32])];
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], &[])
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
             .expect("whitelisted npub must be accepted");
         assert!(id.pubkey.is_some());
     }
@@ -4340,7 +4373,7 @@ mod tests {
         let cred = signed_credential([0x42; 32], "Axolittle", None, now);
         let req = join_with_auth(ev, Some(cred));
         let allow = vec![xonly_of([0x99; 32])]; // a different operator-approved key
-        let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], &[])
+        let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
             .unwrap_err();
         assert!(err.to_lowercase().contains("allowlist"), "got {err}");
     }
@@ -4358,7 +4391,7 @@ mod tests {
         };
         // require_signin=false, but a non-empty whitelist forces sign-in.
         let allow = vec![xonly_of([0x42; 32])];
-        let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &allow, &[], &[])
+        let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &allow, &[], Vec::new)
             .unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
     }
@@ -4373,7 +4406,7 @@ mod tests {
         let req = join_with_auth(ev, None);
         // Even on an open server, a PRESENT-but-invalid auth event is rejected —
         // tamper never silently downgrades to a guest join.
-        let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], &[]).unwrap_err();
+        let err = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.contains("signature invalid"), "got {err}");
     }
 
@@ -4381,7 +4414,9 @@ mod tests {
     //
     // Ladder for a verified npub: (a) the host's contacts book, (b) the signed
     // kind-31000 display-name, (c) the typed `player_name` (display fallback),
-    // (d) a short npub. Never hex.
+    // (d) a short npub. Never hex. ONLY (a) renders bare: every self-asserted
+    // name, (b) and (c), always carries the `-<npub suffix>` tag, and a guest
+    // always carries ` (guest)`, so no claimed name can pass as a contact's.
 
     fn book_entry(pubkey: [u8; 32], name: Option<&str>) -> crate::contacts::Contact {
         crate::contacts::Contact {
@@ -4403,27 +4438,51 @@ mod tests {
         })
     }
 
+    /// The tag a self-asserted name carries.
+    fn tag(pk: &[u8; 32]) -> String {
+        format!("-{}", npub_suffix(pk, 4))
+    }
+
     #[test]
     fn label_prefers_contact_over_credential_over_typed() {
         let pk = [0x11u8; 32];
-        let l = verified_display_label(&pk, Some("Mum"), Some("Sam"), "Typed", &[], &[]);
-        assert_eq!(l, "Mum", "(a) the host's own contacts book wins");
-        let l = verified_display_label(&pk, None, Some("Sam"), "Typed", &[], &[]);
-        assert_eq!(l, "Sam", "(b) the signed credential beats the typed name");
-        let l = verified_display_label(&pk, None, None, "Typed", &[], &[]);
-        assert_eq!(l, "Typed", "(c) the typed name is the fallback");
+        let l = verified_display_label(&pk, Some("Mum"), Some("Sam"), "Typed", &[]);
+        assert_eq!(l, "Mum", "(a) the host's own contacts book wins, bare");
+        let l = verified_display_label(&pk, None, Some("Sam"), "Typed", &[]);
+        assert_eq!(l, format!("Sam{}", tag(&pk)), "(b) the signed credential beats the typed name");
+        let l = verified_display_label(&pk, None, None, "Typed", &[]);
+        assert_eq!(l, format!("Typed{}", tag(&pk)), "(c) the typed name is the fallback");
+    }
+
+    #[test]
+    fn only_contact_names_render_bare() {
+        // The impersonation defence: a self-asserted name ALWAYS carries the
+        // npub tag, collision or not, so it can never equal a bare contact name
+        // — whatever case, zero-width or lookalike trick it uses.
+        let pk = [0x11u8; 32];
+        for claimed in ["Mum", "mum", "MUM", "Mum\u{200B}", "M\u{200D}um", " Mum ", "Mum\u{202E}"] {
+            for l in [
+                verified_display_label(&pk, None, Some(claimed), "", &[]),
+                verified_display_label(&pk, None, None, claimed, &[]),
+            ] {
+                assert_ne!(l, "Mum", "claimed {claimed:?} rendered as a bare contact name");
+                assert!(l.ends_with(&tag(&pk)), "claimed {claimed:?} -> {l} must carry the tag");
+            }
+        }
+        // …and no collision with another player is needed for the tag.
+        let l = verified_display_label(&pk, None, Some("Zed"), "", &[]);
+        assert_eq!(l, format!("Zed{}", tag(&pk)));
     }
 
     #[test]
     fn label_falls_back_to_a_short_npub_never_hex() {
         let pk = [0x11u8; 32];
-        let l = verified_display_label(&pk, None, None, "", &[], &[]);
+        let l = verified_display_label(&pk, None, None, "", &[]);
         assert!(l.starts_with("npub1"), "got {l}");
         assert!(l.contains('\u{2026}'), "short form is elided: {l}");
         // npub1 + 4 + ellipsis + 4
         assert_eq!(l.chars().count(), 5 + 4 + 1 + 4, "got {l}");
         assert!(!looks_like_old_hex_label(&l));
-        assert!(!l.contains(&hex::encode(pk)[..8]), "no hex in the label: {l}");
         // The elided ends are the real npub's ends.
         let full = pubkey_to_npub(&pk);
         let head: String = full.chars().take(9).collect();
@@ -4436,66 +4495,63 @@ mod tests {
         let pk = [0x22u8; 32];
         // The native client hard-codes "Player" as its typed name.
         for typed in ["", "   ", "Player", "player", " PLAYER "] {
-            let l = verified_display_label(&pk, None, None, typed, &[], &[]);
+            let l = verified_display_label(&pk, None, None, typed, &[]);
             assert!(l.starts_with("npub1"), "typed {typed:?} must fall through, got {l}");
         }
         // A blank contact name or credential falls to the next rung.
-        let l = verified_display_label(&pk, Some("  "), Some("Sam"), "x", &[], &[]);
-        assert_eq!(l, "Sam");
-        let l = verified_display_label(&pk, Some(""), Some("\u{200B}"), "Typed", &[], &[]);
-        assert_eq!(l, "Typed", "a name that sanitises to nothing is absent");
+        let l = verified_display_label(&pk, Some("  "), Some("Sam"), "x", &[]);
+        assert_eq!(l, format!("Sam{}", tag(&pk)));
+        let l = verified_display_label(&pk, Some(""), Some("\u{200B}"), "Typed", &[]);
+        assert_eq!(l, format!("Typed{}", tag(&pk)), "a name that sanitises to nothing is absent");
     }
 
     #[test]
-    fn label_refuses_a_hex_looking_name_from_any_source() {
+    fn label_refuses_hex_and_npub_shaped_names_from_any_source() {
         let pk = [0x33u8; 32];
         let hexname = hex::encode(pk);
-        for l in [
-            verified_display_label(&pk, None, None, &hexname, &[], &[]),
-            verified_display_label(&pk, None, Some(&hexname), "", &[], &[]),
-            verified_display_label(&pk, Some(&hexname), None, "", &[], &[]),
+        let npubname = pubkey_to_npub(&[0x44u8; 32]);
+        let elided = "npub1abcd\u{2026}wxyz".to_string();
+        for bad in [
+            hexname.as_str(),
+            "deadbeefdeadbeefdeadbeef",
+            "Bob 0123456789abcdef01",
+            npubname.as_str(),
+            "NPUB1qqqq",
+            elided.as_str(),
         ] {
-            assert!(l.starts_with("npub1"), "a pubkey-shaped name must not be shown, got {l}");
+            for l in [
+                verified_display_label(&pk, None, None, bad, &[]),
+                verified_display_label(&pk, None, Some(bad), "", &[]),
+                verified_display_label(&pk, Some(bad), None, "", &[]),
+            ] {
+                assert!(l.starts_with("npub1") && l.contains('\u{2026}'), "{bad:?} must not be shown, got {l}");
+            }
+            let g = guest_display_name(bad, &[]);
+            assert_eq!(g, "Player (guest)", "a guest cannot wear {bad:?}");
         }
+        // Ordinary names that merely contain a few hex-able letters are fine.
+        assert_eq!(guest_display_name("Facade", &[]), "Facade (guest)");
     }
 
     #[test]
     fn label_is_sanitised_like_every_other_handle() {
         let pk = [0x44u8; 32];
-        let l = verified_display_label(&pk, Some("A\u{202E}xel"), None, "", &[], &[]);
+        let l = verified_display_label(&pk, Some("A\u{202E}xel"), None, "", &[]);
         assert_eq!(l, "Axel", "bidi override stripped from a contact name");
         let long = "n".repeat(100);
-        let l = verified_display_label(&pk, None, None, &long, &[], &[]);
-        assert_eq!(l.chars().count(), MAX_HANDLE_CHARS);
+        let l = verified_display_label(&pk, None, None, &long, &[]);
+        assert_eq!(l, format!("{}{}", "n".repeat(MAX_HANDLE_CHARS), tag(&pk)));
     }
 
     #[test]
-    fn label_collision_with_a_present_player_gets_the_npub_suffix() {
+    fn a_contact_name_is_sanitised_before_it_is_compared_with_present_players() {
+        // The contact is stored with a hidden character; the present player's
+        // handle is already clean. They must still be seen as the same name.
         let pk = [0x11u8; 32];
-        for (contact, cred, typed) in [
-            (Some("Sam"), None, ""),
-            (None, Some("Sam"), ""),
-            (None, None, "Sam"),
-        ] {
-            let l = verified_display_label(&pk, contact, cred, typed, &["sam"], &[]);
-            assert!(l.starts_with("Sam-"), "got {l}");
-            assert!(l.len() > "Sam-".len());
-        }
-    }
-
-    #[test]
-    fn a_self_asserted_name_cannot_borrow_a_contacts_name() {
-        // A stranger who types (or signs) "Mum" must not read as the host's
-        // contact called "Mum" — even while Mum is offline.
-        let pk = [0x11u8; 32];
-        let l = verified_display_label(&pk, None, Some("Mum"), "", &[], &["Mum"]);
-        assert!(l.starts_with("Mum-"), "credential: got {l}");
-        let l = verified_display_label(&pk, None, None, "mum", &[], &["Mum"]);
-        assert!(l.starts_with("mum-"), "typed: got {l}");
-        // …but the host's own petname for this very person is theirs to use,
-        // and two same-named contacts do not penalise each other.
-        let l = verified_display_label(&pk, Some("Mum"), None, "", &[], &["Mum"]);
-        assert_eq!(l, "Mum");
+        let l = verified_display_label(&pk, Some("S\u{200B}am"), None, "", &["Sam"]);
+        assert!(l.starts_with("Sam-"), "got {l}");
+        let l = verified_display_label(&pk, Some("Sam"), None, "", &["sam"]);
+        assert!(l.starts_with("Sam-"), "case-insensitive: got {l}");
     }
 
     #[test]
@@ -4504,6 +4560,26 @@ mod tests {
         let out = disambiguate_handle("axolittle", &pk, &["Axolittle"]);
         assert!(out.starts_with("axolittle-"), "got {out}");
         assert_eq!(disambiguate_handle("Sam", &pk, &["Other"]), "Sam");
+    }
+
+    #[test]
+    fn a_guest_always_carries_the_guest_marker() {
+        assert_eq!(guest_display_name("Wanderer", &[]), "Wanderer (guest)");
+        assert_eq!(guest_display_name("", &[]), "Player (guest)");
+        assert_eq!(guest_display_name("Player", &[]), "Player (guest)");
+        assert_eq!(guest_display_name("Oper\u{202E}ator", &[]), "Operator (guest)");
+        // A guest can never read as a contact called "Mum" (that is bare).
+        assert_ne!(guest_display_name("Mum", &[]), "Mum");
+    }
+
+    #[test]
+    fn two_guests_with_one_name_stay_distinguishable() {
+        assert_eq!(guest_display_name("Sam", &["Sam (guest)"]), "Sam (guest) 2");
+        assert_eq!(
+            guest_display_name("sam", &["Sam (guest)", "Sam (guest) 2"]),
+            "sam (guest) 3"
+        );
+        assert_eq!(guest_display_name("Steve", &["Operator"]), "Steve (guest)");
     }
 
     #[test]
@@ -4516,7 +4592,7 @@ mod tests {
         let req = join_with_auth(ev, Some(cred));
         let book = vec![book_entry(xonly_of([0x42; 32]), Some("Little Axo"))];
 
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], &book)
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], || book)
             .expect("accepted");
         assert_eq!(id.display_name, "Little Axo");
         assert!(id.pubkey.is_some());
@@ -4524,22 +4600,23 @@ mod tests {
 
     #[test]
     fn resolve_join_without_credential_uses_the_typed_name_then_npub_never_hex() {
-        // Typed name present → that.
+        // Typed name present -> that, tagged.
         let mut chals = ChallengeTable::default();
         let nonce_hex = issue_nonce(&mut chals, 0);
         let ev = signed_auth_event([0x55; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         let req = join_with_auth(ev, None); // typed: "client-asserted-name"
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], &[])
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("accepted");
-        assert_eq!(id.display_name, "client-asserted-name");
+        let pk = id.pubkey.expect("verified");
+        assert_eq!(id.display_name, format!("client-asserted-name{}", tag(&pk)));
 
-        // The real client types "Player" → short npub, not `Player 1a2b3c`.
+        // The real client types "Player" -> short npub, not `Player 1a2b3c`.
         let mut chals = ChallengeTable::default();
         let nonce_hex = issue_nonce(&mut chals, 0);
         let ev = signed_auth_event([0x55; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
         let mut req = join_with_auth(ev, None);
         req.player_name = "Player".into();
-        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], &[])
+        let id = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("accepted");
         assert!(id.display_name.starts_with("npub1"), "got {}", id.display_name);
         assert!(!looks_like_old_hex_label(&id.display_name));
@@ -4547,7 +4624,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_join_guest_keeps_todays_behaviour_without_hex() {
+    fn resolve_join_guest_is_marked_and_has_no_hex() {
         let mut chals = ChallengeTable::default();
         let req = protocol::JoinRequestPacket {
             protocol_version: protocol::PROTOCOL_VERSION,
@@ -4557,10 +4634,64 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
         };
-        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], &[])
+        let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
-        assert_eq!(id.display_name, "Player", "an unnamed guest is plain \"Player\"");
+        assert_eq!(id.display_name, "Player (guest)");
         assert!(!looks_like_old_hex_label(&id.display_name));
+        assert!(id.pubkey.is_none());
+    }
+
+    #[test]
+    fn the_contacts_book_is_read_only_after_verification_succeeds() {
+        use std::cell::Cell;
+        let reads = Cell::new(0u32);
+        let loader = || {
+            reads.set(reads.get() + 1);
+            Vec::new()
+        };
+
+        // A tampered join is rejected before the book is touched.
+        let mut chals = ChallengeTable::default();
+        let nonce_hex = issue_nonce(&mut chals, 0);
+        let mut ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
+        ev.sig[0] ^= 0xff;
+        let req = join_with_auth(ev, None);
+        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
+            .expect_err("tampered");
+        assert_eq!(reads.get(), 0, "no disk read for a failed verification");
+
+        // A guest has no npub to look up.
+        let mut chals = ChallengeTable::default();
+        let guest = protocol::JoinRequestPacket {
+            protocol_version: protocol::PROTOCOL_VERSION,
+            player_name: "G".into(),
+            auth_event: None,
+            handle_credential: None,
+            skin_key: 0,
+            client_nonce_hex: String::new(),
+        };
+        resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
+            .expect("guest");
+        assert_eq!(reads.get(), 0, "no disk read for a guest");
+
+        // A blocked key is refused before the book is touched.
+        let mut chals = ChallengeTable::default();
+        let nonce_hex = issue_nonce(&mut chals, 0);
+        let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
+        let req = join_with_auth(ev, None);
+        let blocked = vec![xonly_of([0x42; 32])];
+        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &blocked, loader)
+            .expect_err("blocked");
+        assert_eq!(reads.get(), 0, "no disk read for a refused key");
+
+        // A verified, admitted join reads it exactly once.
+        let mut chals = ChallengeTable::default();
+        let nonce_hex = issue_nonce(&mut chals, 0);
+        let ev = signed_auth_event([0x42; 32], &nonce_hex, TEST_ORIGIN, current_unix_ts());
+        let req = join_with_auth(ev, None);
+        resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
+            .expect("accepted");
+        assert_eq!(reads.get(), 1);
     }
 
     // ── T2-10: a taken LAN port is an error, not a log line ───────────────────

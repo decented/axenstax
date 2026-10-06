@@ -15,8 +15,8 @@ use crate::lan_host::HostAccess;
 
 pub const GAMES_HEADING: &str = "GAMES ON THIS NETWORK";
 pub const GAMES_SEARCHING: &str =
-    "Looking for games on your Wi-Fi or Ethernet. Ask a friend to choose Host Game, \
-     or type their address below.";
+    "Looking for games on your Wi-Fi or Ethernet. Ask a friend to press Host on their \
+     world, or type their address below.";
 pub const GAMES_NOT_LISTENING: &str =
     "Can't listen for games on this network (another copy of Axe'n'Stax on this computer is \
      already listening). You can still type an address below.";

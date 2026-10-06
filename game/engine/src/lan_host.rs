@@ -12,6 +12,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 
 /// Keep only addresses a neighbour on this network could dial, private (RFC 1918)
 /// ones first, without duplicates. Loopback, unspecified, link-local and
@@ -116,6 +117,50 @@ pub fn join_failure_notice(address: &str, reason: &str) -> String {
     format!("Couldn't join {}: {}", address.trim(), reason.trim())
 }
 
+/// A message to show once the world has finished loading.
+///
+/// Why this exists: the Host handler runs while the lobby is still up, but
+/// `reset_for_world_change` clears `GameState::toast` as the world loads, and
+/// toasts only draw while `Playing`; a toast set at click time was therefore
+/// never seen (the old "Hosting on LAN" toast had the same bug). So the handler
+/// queues the message here instead; the game loop `deliver`s it on the
+/// Loading -> Playing transition, which also starts its expiry clock from the
+/// moment the player can actually see it.
+#[derive(Debug, Default)]
+pub struct EntryToast {
+    pending: Option<(String, Duration)>,
+}
+
+impl EntryToast {
+    /// Queue `msg` to be shown for `show_for` once the world is live. A newer
+    /// message replaces an older unshown one.
+    pub fn queue(&mut self, msg: String, show_for: Duration) {
+        self.pending = Some((msg, show_for));
+    }
+
+    /// If a message is waiting, put it in `toast` (replacing whatever is there)
+    /// expiring `show_for` after `now`, and report that it did. One-shot.
+    pub fn deliver(&mut self, toast: &mut Option<(String, Instant)>, now: Instant) -> bool {
+        match self.pending.take() {
+            Some((msg, show_for)) => {
+                *toast = Some((msg, now + show_for));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forget an unshown message (the player left before the world went live).
+    pub fn discard(&mut self) {
+        self.pending = None;
+    }
+
+    #[cfg(test)]
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +246,51 @@ mod tests {
         assert!(f.contains("already in use") && f.contains("solo play"), "got {f}");
         assert!(host_failure_toast("something odd").contains("something odd. Opening"));
         assert!(join_failure_notice(" 10.0.0.2:7700 ", "timed out").starts_with("Couldn't join 10.0.0.2:7700"));
+    }
+
+    #[test]
+    fn a_queued_toast_survives_world_entry_and_starts_its_clock_when_live() {
+        // Model of the real sequence: Host click queues -> reset_for_world_change
+        // clears `toast` -> the loading screen runs for a while -> Playing.
+        let mut toast: Option<(String, Instant)> = None;
+        let mut entry = EntryToast::default();
+
+        entry.queue("Hosting on your network.".to_string(), Duration::from_secs(8));
+        assert!(toast.is_none(), "nothing is shown while the lobby/loading screen is up");
+
+        // reset_for_world_change: `self.toast = None` — the queue is untouched.
+        toast = None;
+        assert!(entry.is_pending(), "the world reset must not eat the queued message");
+
+        // Loading takes 20 s; frames in between must not deliver early.
+        let loading_started = Instant::now();
+        let went_live = loading_started + Duration::from_secs(20);
+        assert!(toast.is_none());
+
+        assert!(entry.deliver(&mut toast, went_live));
+        let (msg, expiry) = toast.clone().expect("toast is set on entering Playing");
+        assert_eq!(msg, "Hosting on your network.");
+        assert_eq!(expiry, went_live + Duration::from_secs(8), "expiry counts from going live");
+        assert!(went_live + Duration::from_secs(7) < expiry && went_live < expiry);
+
+        // One-shot: it does not re-fire on later frames or overwrite a newer toast.
+        toast = Some(("something else".to_string(), went_live));
+        assert!(!entry.deliver(&mut toast, went_live + Duration::from_secs(1)));
+        assert_eq!(toast.unwrap().0, "something else");
+    }
+
+    #[test]
+    fn leaving_before_the_world_goes_live_drops_the_queued_toast() {
+        let mut toast: Option<(String, Instant)> = None;
+        let mut entry = EntryToast::default();
+        entry.queue("Couldn't host".to_string(), Duration::from_secs(12));
+        entry.discard();
+        assert!(!entry.deliver(&mut toast, Instant::now()));
+        assert!(toast.is_none());
+        // A newer message replaces an older unshown one.
+        entry.queue("old".to_string(), Duration::from_secs(1));
+        entry.queue("new".to_string(), Duration::from_secs(1));
+        assert!(entry.deliver(&mut toast, Instant::now()));
+        assert_eq!(toast.unwrap().0, "new");
     }
 }
