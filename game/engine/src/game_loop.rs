@@ -6329,6 +6329,13 @@ impl super::GameState {
                 if i == 0 && self.input.cursor_captured {
                     self.release_cursor();
                 }
+                // MP-A3 — dying again before the server answered our last
+                // Respawn: its resend must not respawn the new death.
+                if i == 0
+                    && let Some(rc) = self.remote_client.as_mut()
+                {
+                    rc.cancel_respawn_resend();
+                }
                 // W2 — the death screen's grave line; set below if a grave
                 // is actually placed this death.
                 self.players[i].last_grave = None;

@@ -231,6 +231,12 @@ enum JoinFlow {
     },
 }
 
+/// MP-A3 — ticks between re-sends of an unanswered `Respawn` request. The
+/// server only honours a `Respawn` once its copy has been dead 20 ticks
+/// (`server::MIN_DEAD_TICKS_BEFORE_RESPAWN`), so a request sent the instant
+/// after a death is refused and this resend is what lands — keep the two equal.
+pub const RESPAWN_RESEND_TICKS: u64 = 20;
+
 /// MP-A3 — a server decision about the local player's own body.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OwnLifeEvent {
@@ -304,6 +310,12 @@ pub struct RemoteClient {
     /// respawned us after our `Respawn`, at the spawn point it holds. Other
     /// players' events are not queued. Drained each frame by `network_receive`.
     pub pending_life_events: Vec<OwnLifeEvent>,
+    /// MP-A3 — the tick (`self.tick`) our last `Respawn` request went out, while
+    /// the server has not yet answered with `Respawned`. `send_input` re-sends
+    /// every [`RESPAWN_RESEND_TICKS`] until it does: the server drops a
+    /// client's packets past its per-tick budget, and one lost `Respawn` would
+    /// otherwise leave us walking about a respawned body the server holds dead.
+    respawn_resend_from: Option<u64>,
     /// Entity-event and block-change DELTAS accumulated across every
     /// StateUpdate since the game loop last drained them. `latest_state` is
     /// last-write-wins, which is right for snapshot fields (players,
@@ -563,6 +575,7 @@ impl RemoteClient {
             pending_resource_pack: None,
             pending_grants: Vec::new(),
             pending_life_events: Vec::new(),
+            respawn_resend_from: None,
             pending_operator_snapshot_json: None,
             pending_entity_spawns: Vec::new(),
             pending_entity_updates: Vec::new(),
@@ -606,6 +619,7 @@ impl RemoteClient {
             pending_resource_pack: None,
             pending_grants: Vec::new(),
             pending_life_events: Vec::new(),
+            respawn_resend_from: None,
             pending_operator_snapshot_json: None,
             pending_entity_spawns: Vec::new(),
             pending_entity_updates: Vec::new(),
@@ -753,16 +767,22 @@ impl RemoteClient {
                                     }
                                 }
                                 protocol::PlayerEventType::Respawned { x, y, z } => {
-                                    if self.player_index() == Some(event.player_index)
-                                        && x.is_finite()
-                                        && y.is_finite()
-                                        && z.is_finite()
-                                        && self.pending_life_events.len() < 16
-                                    {
-                                        self.pending_life_events.push(OwnLifeEvent::Respawned(
-                                            glam::Vec3::new(*x, *y, *z),
-                                        ));
-                                        changed = true;
+                                    if self.player_index() == Some(event.player_index) {
+                                        // The server has answered: stop asking,
+                                        // whether or not the position is usable.
+                                        self.respawn_resend_from = None;
+                                        // Held to the same range as a JoinAccept
+                                        // spawn: a hostile host could otherwise
+                                        // put us anywhere finite.
+                                        let at = glam::Vec3::new(*x, *y, *z);
+                                        if at.is_finite()
+                                            && join_spawn_in_range(at)
+                                            && self.pending_life_events.len() < 16
+                                        {
+                                            self.pending_life_events
+                                                .push(OwnLifeEvent::Respawned(at));
+                                            changed = true;
+                                        }
                                     }
                                 }
                             }
@@ -930,6 +950,13 @@ impl RemoteClient {
         input.tick = self.tick;
         self.tick += 1;
 
+        // MP-A3 — an unanswered Respawn is asked again (see the field).
+        if let Some(sent) = self.respawn_resend_from
+            && self.tick.saturating_sub(sent) >= RESPAWN_RESEND_TICKS
+        {
+            self.send_respawn();
+        }
+
         // Edits trimmed from an earlier packet go first: the host validates
         // them in the order they were made.
         if !self.input_carry_over.is_empty() {
@@ -996,12 +1023,24 @@ impl RemoteClient {
         }
         let packet = protocol::serialize_packet(PacketType::Respawn, &());
         self.transport.send_to_server(&packet);
+        // Asked again every `RESPAWN_RESEND_TICKS` until the server answers
+        // `Respawned` (or this client disconnects / is dropped on leaving the
+        // world — the state lives and dies with the client).
+        self.respawn_resend_from = Some(self.tick);
+    }
+
+    /// MP-A3 — stop re-sending `Respawn`: we died again before the server
+    /// answered, so a late request would respawn the body out from under the
+    /// new death screen. The next death screen's own Respawn starts it afresh.
+    pub fn cancel_respawn_resend(&mut self) {
+        self.respawn_resend_from = None;
     }
 
     /// Send a graceful disconnect to the server.
     pub fn disconnect(&mut self) {
         let packet = protocol::serialize_packet(PacketType::Disconnect, &());
         self.transport.send_to_server(&packet);
+        self.respawn_resend_from = None;
         self.state = ConnectionState::Disconnected;
         log::info!("Disconnected from server");
     }
@@ -2017,5 +2056,101 @@ mod tests {
         let pkt = srv.try_recv_from_client().expect("a Respawn request");
         let (ptype, _) = protocol::deserialize_header(&pkt).unwrap();
         assert_eq!(ptype, PacketType::Respawn);
+    }
+
+    /// Respawn requests the server has been sent since the last call.
+    fn respawn_requests_seen(srv: &crate::transport::ChannelServerTransport) -> usize {
+        let mut n = 0;
+        while let Some(pkt) = srv.try_recv_from_client() {
+            if protocol::deserialize_header(&pkt).is_some_and(|(t, _)| t == PacketType::Respawn) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn input_ticks(rc: &mut RemoteClient, n: u32) {
+        for _ in 0..n {
+            rc.send_input(&protocol::InputPacket::default());
+        }
+    }
+
+    #[test]
+    fn a_respawn_request_is_resent_every_20_ticks_until_the_server_answers() {
+        // The server drops everything past a client's 10th packet in a tick,
+        // and a lost Respawn would leave the joiner walking about its own
+        // respawned body while the server holds it dead for good.
+        let (srv, mut rc) = joined_as(2);
+        rc.send_respawn();
+        assert_eq!(respawn_requests_seen(&srv), 1, "sent at once");
+
+        input_ticks(&mut rc, 19);
+        assert_eq!(respawn_requests_seen(&srv), 0, "not before the 20th tick");
+        input_ticks(&mut rc, 1);
+        assert_eq!(respawn_requests_seen(&srv), 1, "re-sent on the 20th");
+        input_ticks(&mut rc, 40);
+        assert_eq!(respawn_requests_seen(&srv), 2, "and every 20 after");
+
+        // Someone else's respawn is not the answer.
+        life_event(&srv, 5, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5 });
+        rc.poll();
+        input_ticks(&mut rc, 20);
+        assert_eq!(respawn_requests_seen(&srv), 1, "still asking");
+
+        // Ours is.
+        life_event(&srv, 2, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5 });
+        rc.poll();
+        input_ticks(&mut rc, 60);
+        assert_eq!(respawn_requests_seen(&srv), 0, "answered — no more requests");
+    }
+
+    #[test]
+    fn the_respawn_resend_stops_on_disconnect() {
+        let (srv, mut rc) = joined_as(1);
+        rc.send_respawn();
+        assert_eq!(respawn_requests_seen(&srv), 1);
+        rc.disconnect();
+        input_ticks(&mut rc, 60);
+        assert_eq!(respawn_requests_seen(&srv), 0, "a disconnected client asks nothing");
+    }
+
+    #[test]
+    fn a_new_death_cancels_a_pending_respawn_resend() {
+        // Respawned, then died again before the answer came: a late resend
+        // would respawn the body out from under the new death screen.
+        let (srv, mut rc) = joined_as(1);
+        rc.send_respawn();
+        assert_eq!(respawn_requests_seen(&srv), 1);
+        rc.cancel_respawn_resend();
+        input_ticks(&mut rc, 60);
+        assert_eq!(respawn_requests_seen(&srv), 0);
+    }
+
+    #[test]
+    fn a_respawned_event_outside_the_world_is_dropped_like_a_bad_join_spawn() {
+        // The same range the JoinAccept spawn is held to: a hostile host could
+        // otherwise teleport us anywhere finite and overflow the chunk maths.
+        for (x, y, z) in [
+            (1.0e9, 70.0, 0.5),
+            (0.5, 70.0, -1.0e9),
+            (0.5, -10_000.0, 0.5),
+            (0.5, 1.0e6, 0.5),
+        ] {
+            let (srv, mut rc) = joined_as(0);
+            life_event(&srv, 0, protocol::PlayerEventType::Respawned { x, y, z });
+            rc.poll();
+            assert!(
+                rc.pending_life_events.is_empty(),
+                "({x}, {y}, {z}) is outside the world and must not be queued"
+            );
+        }
+        let (srv, mut rc) = joined_as(0);
+        life_event(&srv, 0, protocol::PlayerEventType::Respawned { x: 25.5, y: 64.0, z: -40.5 });
+        rc.poll();
+        assert_eq!(
+            rc.pending_life_events,
+            vec![OwnLifeEvent::Respawned(glam::Vec3::new(25.5, 64.0, -40.5))],
+            "an ordinary respawn still goes through"
+        );
     }
 }
