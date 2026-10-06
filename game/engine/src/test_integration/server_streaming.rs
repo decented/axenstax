@@ -247,7 +247,8 @@ fn stream_pass_cost_is_bounded_and_a_settled_pass_is_free() {
     );
 }
 
-/// Only the dedicated server streams; a LAN / online host keeps its region.
+/// One column-loading story per mode: only the dedicated server streams, and
+/// only a LAN / online host refills round its joiners — never both.
 #[test]
 fn only_the_dedicated_server_gets_a_column_streamer() {
     let _g = WorldsRootGuard::new("server_streaming_flag");
@@ -264,7 +265,35 @@ fn only_the_dedicated_server_gets_a_column_streamer() {
     let dedicated = start(0, "dedicated");
     let streamer = dedicated.server.column_streamer.as_ref().expect("dedicated streams");
     assert_eq!(streamer.sim_distance(), crate::server_stream::DEFAULT_SIM_DISTANCE);
-    assert!(start(1, "host").server.column_streamer.is_none(), "a host client streams for its server");
+    assert_eq!(dedicated.server.column_refill_per_tick, 0, "the dedicated server does not also refill");
+    let host = start(1, "host");
+    assert!(host.server.column_streamer.is_none(), "a host client streams for its server");
+    assert_eq!(
+        host.server.column_refill_per_tick,
+        crate::server::HOST_COLUMN_REFILL_PER_TICK,
+        "a host refills round its joiners instead"
+    );
+}
+
+/// The streamer's spawn anchor follows the computed world spawn
+/// (`GameServer::world_spawn`, which replaced the fixed BRIDGE point): set at
+/// boot, the column a joiner is placed in, and re-recorded whenever the spawn
+/// is computed again.
+#[test]
+fn the_spawn_anchor_follows_the_computed_world_spawn() {
+    let _g = WorldsRootGuard::new("server_streaming_spawn");
+    let mut hs = start_dedicated(&format!("server-streaming-spawn-{}", std::process::id()));
+    let boot_anchor = hs.server.spawn_column;
+    let spawn = hs.server.world_spawn();
+    assert_eq!(boot_anchor, column_of(spawn), "the anchor is the computed spawn's column from boot");
+    let (_client, slot) = join_guest(&mut hs, "Newcomer");
+    let placed = column_of(hs.server.players[slot].spawn_pos);
+    assert_eq!(placed, hs.server.spawn_column, "joiners are placed in the anchored column");
+    assert!(hs.server.stream_anchors().contains(&placed));
+    // A stale anchor is corrected by the next computation.
+    hs.server.spawn_column = (7, 7);
+    let again = hs.server.world_spawn();
+    assert_eq!(hs.server.spawn_column, column_of(again));
 }
 
 /// A disconnected slot (kept for index stability) no longer pins columns.

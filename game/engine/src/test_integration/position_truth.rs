@@ -829,8 +829,11 @@ fn on_a_lan_host_a_joiner_goes_on_past_the_terrain_the_server_started_with() {
 fn a_body_pushing_at_the_edge_in_mid_air_still_comes_down() {
     // The edge stops a body sideways only. Reverting its height too left a
     // joiner who jumped or fell against the edge hanging in mid-air for as
-    // long as it pushed. (A dedicated server: no refill.)
+    // long as it pushed. (A dedicated server: no refill. Its streamer is off
+    // here so the edge stays put — the guard is the backstop for a body that
+    // outruns `SERVER_STREAM_BUDGET`, Phase B1.)
     let mut hs = start_dedicated("edge-fall");
+    hs.server.column_streamer = None;
     let (client, slot) = join_guest(&mut hs, "Faller");
     let edge_cx = (0..64).find(|cx| !hs.server.loaded_columns.contains(&(*cx, 0))).unwrap();
     let edge_x = edge_cx * 16;
@@ -866,8 +869,11 @@ fn a_body_pushing_at_the_edge_in_mid_air_still_comes_down() {
 fn a_joiner_body_stops_at_the_edge_of_the_servers_terrain() {
     // Beyond the columns the server generated its world is empty air. The
     // body must stop at the edge, not walk out and fall through the world —
-    // the joiner's client now follows it.
+    // the joiner's client now follows it. The dedicated streamer is off so the
+    // edge stays put: the guard is the backstop for a body that outruns the
+    // per-tick streaming budget (Phase B1).
     let mut hs = start_dedicated("edge");
+    hs.server.column_streamer = None;
     let (client, slot) = join_guest(&mut hs, "Edge");
     let edge_cx = (0..64).find(|cx| !hs.server.loaded_columns.contains(&(*cx, 0))).unwrap();
     let edge_x = edge_cx * 16;

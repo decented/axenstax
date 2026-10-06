@@ -447,6 +447,12 @@ impl HostedServer {
         // thread starts or anything is saved — never replaced by a fresh world
         // (Spec 02 §8.4). The error names the file and why.
         server.initial_load()?;
+        // The dedicated streamer's spawn anchor follows the computed world
+        // spawn (`world_spawn` records its column) from boot, not only from
+        // the first join.
+        if server.column_streamer.is_some() {
+            server.world_spawn();
+        }
 
         // Pull difficulty from the world meta for JoinAccept and UI wiring.
         // play_mode is sourced from GameServer.play_mode (set by initial_load).

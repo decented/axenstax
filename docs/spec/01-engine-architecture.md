@@ -738,10 +738,20 @@ entered is loaded and lit before it is used.
   `GameServer::column_streamer = Some(..)` iff it has 0 local players, the
   same invariant as `simulates_block_machines` but a separate field (a host
   that lends its world to the server will tick machines without streaming).
-  LAN / online hosts and `TestHost` keep `None` and the `initial_load` region.
+  LAN / online hosts keep `None` and instead generate the 3×3 round each
+  joiner, ≤ 2 a tick (`column_refill_per_tick`, Spec 04 §5.3.1), which is `0`
+  on the dedicated server: one column-loading story per mode, never both
+  (`server_streaming::only_the_dedicated_server_gets_a_column_streamer`). Both
+  load a column through the same terrain step,
+  `chunk_stream::ColumnSims::load_terrain` (restore-else-generate, light,
+  fluid/fire registration; `GameServer::ensure_column_loaded` on a host, which
+  scatters no wildlife). `TestHost` keeps `None` and a fixed region.
 - **Anchors.** Every *connected* player's column (ghost slots kept for index
-  stability don't count) plus the world-spawn column `initial_load` centred on
-  (`GameServer::spawn_column`), so the spawn area stays warm for the next joiner.
+  stability don't count) plus the world spawn's column
+  (`GameServer::spawn_column`, recorded by `GameServer::world_spawn` — the
+  computed surface spawn — each time it runs, and computed at boot by
+  `HostedServer::start_inner`), so the spawn area stays warm for the next
+  joiner.
 - **Radius.** `--sim-distance <columns>` / `AXENSTAX_SIM_DISTANCE`, default 8,
   clamped 2..=16 (`server_stream::{DEFAULT,MIN,MAX}_SIM_DISTANCE`). Boot still
   warms the default render distance (10) around spawn; the streamer trims or
@@ -795,13 +805,17 @@ column). The release profile was not measured.
 **Known limits.** Server RAM holds the whole saved world (all chunks load at
 boot; evicted columns stay in memory) — paging evicted columns to disk is the
 follow-up. More than `SERVER_STREAM_BUDGET` players entering distinct unloaded
-columns in the same tick (a mass teleport) leaves the extra ones over unloaded
-air for a tick or more; there is no physics hold for that case yet. The first
+columns in the same tick (a mass teleport) leaves the extra ones at the edge
+of the loaded columns for a tick or more: `tick_player_physics` stops a body
+sideways at that edge (Spec 04 §5.3.1), so it waits there rather than walking
+into air, but a body already *in* an unloaded column can still fall. The first
 tick after booting a large save evicts every saved column beyond
 `sim + UNLOAD_HYSTERESIS` at once (`despawn_mobs_in_column` scans the scattered
-and night-spawned mobs per column), a one-off spike with no I/O. `GameServer::try_save` skips an
-all-air chunk without deleting its old file, so a chunk dug down to all air
-comes back from that file after a restart (the client's save deletes it).
+and night-spawned mobs per column), a one-off spike with no I/O. Saves follow
+the client's rules (Spec 02 §7.5, §8.4): an evicted, edited column is written;
+a mined-out chunk's file is deleted only when this session read or wrote it and
+the chunk is `persist`, so a pristine column dropped on stream-out never costs
+its file (`server::tests::server_save_writes_evicted_columns_and_never_deletes_a_dropped_columns_file`).
 Tests:
 `test_integration/server_streaming.rs`, `server_stream.rs`, `chunk_stream.rs`.
 

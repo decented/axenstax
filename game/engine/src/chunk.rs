@@ -16,10 +16,10 @@ const PLACED_WORDS: usize = CHUNK_VOLUME / 64;
 /// Internal to the chunk codec — not part of the crate API.
 const PLACED_MASK_BYTES: usize = CHUNK_VOLUME / 8;
 
-/// Test-only: how many full recounts ([`Chunk::recount_non_air`]) this thread
-/// has run. Per-thread, so parallel tests cannot disturb each other.
 #[cfg(test)]
 thread_local! {
+    /// Test-only: how many full recounts ([`Chunk::recount_non_air`]) this
+    /// thread has run. Per-thread, so parallel tests cannot disturb each other.
     static FULL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

@@ -781,18 +781,26 @@ pub(crate) struct ColumnSims<'a> {
 }
 
 impl ColumnSims<'_> {
-    /// Stream a column in: restore it from the evicted store, else generate it
-    /// (Spec 02 §7.5 — `load_column_blocks` with `regen_present`, which also
-    /// heals a void column); run the light pass (Spec 30: light isn't
-    /// persisted, and mob spawning + crop growth read it); register its water,
-    /// lava and fire; scatter its wildlife; mark it loaded.
+    /// Stream a column in: [`Self::load_terrain`], then scatter its wildlife.
     pub(crate) fn stream_in(&mut self, cx: i32, cz: i32) {
+        self.load_terrain(cx, cz);
+        crate::entity::scatter_mobs_in_column(self.ecs, cx, cz, self.world, self.biome_gen);
+    }
+
+    /// The terrain half of [`Self::stream_in`]: restore the column from the
+    /// evicted store, else generate it (Spec 02 §7.5 — `load_column_blocks`
+    /// with `regen_present`, which also heals a void column); run the light
+    /// pass (Spec 30: light isn't persisted, and mob spawning + crop growth
+    /// read it); register its water, lava and fire; mark it loaded. A LAN /
+    /// online host's server loads the columns round its joiners with this
+    /// alone (`GameServer::ensure_column_loaded`): it scatters no wildlife on
+    /// the server, as its `initial_load` region has none either.
+    pub(crate) fn load_terrain(&mut self, cx: i32, cz: i32) {
         load_column_blocks(self.world, cx, cz, self.biome_gen, true);
         crate::lighting::run_initial_pass_for_column(self.world, cx, cz, self.registry);
         self.water.register_column_sources(cx, cz, self.world);
         self.lava.register_column_sources(cx, cz, self.world);
         self.fire.register_column_fires(cx, cz, self.world, self.tick);
-        crate::entity::scatter_mobs_in_column(self.ecs, cx, cz, self.world, self.biome_gen);
         self.loaded.insert((cx, cz));
     }
 

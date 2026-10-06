@@ -605,8 +605,8 @@ pub struct GameServer {
     /// Most columns [`Self::refill_columns_round_simulated_players`] may
     /// generate in one tick. [`HOST_COLUMN_REFILL_PER_TICK`] on a LAN / online
     /// host (set by `HostedServer::start_inner`, which has local players);
-    /// `0` — off — otherwise, the dedicated server included (its own
-    /// streaming is a separate change, Phase B1).
+    /// `0` — off — otherwise. The dedicated server streams instead
+    /// ([`Self::column_streamer`], Phase B1): one column-loading story per mode.
     pub column_refill_per_tick: usize,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
@@ -614,11 +614,14 @@ pub struct GameServer {
     /// Phase B1 — the dedicated server's column streamer (`server_stream.rs`):
     /// loads / unloads columns around every connected player + the spawn each
     /// tick. `Some` only on the dedicated server (set by
-    /// `HostedServer::start_inner` with 0 local players); `None` on hosts and
-    /// in `TestHost`, which keep the `initial_load` region.
+    /// `HostedServer::start_inner` with 0 local players); `None` on hosts
+    /// (which refill round their joiners instead, `column_refill_per_tick`)
+    /// and in `TestHost`, which keep the `initial_load` region.
     pub column_streamer: Option<crate::server_stream::ColumnStreamer>,
-    /// The world-spawn column `initial_load` centred on — a permanent
-    /// streaming anchor, so the spawn area stays loaded for the next joiner.
+    /// The column of the world spawn ([`Self::world_spawn`] records it each
+    /// time it computes the spawn; the dedicated server computes it at boot) —
+    /// a permanent streaming anchor, so the spawn area stays loaded for the
+    /// next joiner. `(0, 0)` (`INITIAL_LOAD_CENTRE`'s column) until computed.
     pub spawn_column: (i32, i32),
     pub falling_tick_counter: u32,
     /// Monotonically-incrementing tick counter used as the clock for
@@ -752,14 +755,18 @@ impl GameServer {
     /// places its player by (`chunk_stream::world_spawn_point`: the fixed floor
     /// on flat/Workshop worlds, else the nearest clear ground to the origin —
     /// never a buried or in-air cell), after generating the 3x3 columns it
-    /// searches if they are not loaded yet (hence `&mut self`).
+    /// searches if they are not loaded yet (hence `&mut self`). Records the
+    /// spawn's column as the dedicated streamer's spawn anchor
+    /// ([`Self::spawn_column`]), so the anchor follows the spawn.
     pub fn world_spawn(&mut self) -> Vec3 {
         for dx in -1..=1 {
             for dz in -1..=1 {
                 self.ensure_column_loaded(dx, dz);
             }
         }
-        crate::chunk_stream::world_spawn_point(&self.world, &self.biome_gen)
+        let spawn = crate::chunk_stream::world_spawn_point(&self.world, &self.biome_gen);
+        self.spawn_column = crate::chunk_stream::column_of(spawn);
+        spawn
     }
 
     /// Run initial world load around the first player's position.
@@ -780,7 +787,6 @@ impl GameServer {
         let cs = CHUNK_SIZE as i32;
         let pcx = (spawn.x.floor() as i32).div_euclid(cs);
         let pcz = (spawn.z.floor() as i32).div_euclid(cs);
-        self.spawn_column = (pcx, pcz);
         // Live server render distance (Spec 39 — was the `RENDER_DISTANCE` const).
         let rd = self.render_distance;
 
@@ -1470,10 +1476,13 @@ impl GameServer {
                 // instead — sideways only: its fall or jump carries on, so a
                 // body pushing at the edge in mid-air comes down rather than
                 // hanging there.
-                // BRIDGE: replaced when the server streams terrain around
-                // every player (Phase B1) — then the edge is never reached. A
-                // LAN / online host already refills ahead of its joiners
-                // (`refill_columns_round_simulated_players`).
+                // A backstop, not the plan: a LAN / online host refills ahead
+                // of its joiners (`refill_columns_round_simulated_players`) and
+                // the dedicated server streams round every player (Phase B1,
+                // `stream_columns`, before this runs), so a body meets the edge
+                // only when it outruns them — more players entering unloaded
+                // columns in one tick than the per-tick budget, or a host's
+                // refill budget spent.
                 if !column_loaded(&self.loaded_columns, sp.player.pos) {
                     sp.player.pos.x = pre.x;
                     sp.player.pos.z = pre.z;
@@ -1495,8 +1504,9 @@ impl GameServer {
     /// column's width of lead ahead of a body: over 14 ticks at fly-sprint,
     /// time enough at two columns a tick. Runs before the bodies step, so a
     /// step is never resolved against air that terrain then fills.
-    /// BRIDGE: off (`0`) on a dedicated server until B1 streams terrain round
-    /// every player there; this then folds into that.
+    /// Off (`0`) on the dedicated server, which streams round every player
+    /// instead (Phase B1, `server_stream.rs`); never both in one mode. The LAN
+    /// host's own anchors (D1, lending the host client's world) are a later step.
     fn refill_columns_round_simulated_players(&mut self) {
         let mut budget = self.column_refill_per_tick;
         if budget == 0 {
@@ -1659,19 +1669,18 @@ impl GameServer {
         Vec3::new(spawn.x, y as f32 + 1.0, spawn.z)
     }
 
-    /// Generate the column `(cx, cz)` — terrain, light, its fluid sources and
+    /// Load the column `(cx, cz)` — terrain, light, its fluid sources and
     /// fires — unless it is already loaded: `initial_load`'s generate-missing
-    /// step, for a column needed after load (a joiner's spawn).
+    /// step, for a column needed after load (a joiner's spawn, the world
+    /// spawn's 3x3, a LAN host's refill). The shared terrain step of the
+    /// column streamers (`chunk_stream::ColumnSims::load_terrain`), so it
+    /// restores an evicted column from the store rather than generating over
+    /// it (Spec 02 §7.5).
     pub(crate) fn ensure_column_loaded(&mut self, cx: i32, cz: i32) {
         if self.loaded_columns.contains(&(cx, cz)) {
             return;
         }
-        self.world.generate_column(cx, cz, &self.biome_gen);
-        crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
-        self.loaded_columns.insert((cx, cz));
-        self.water.register_column_sources(cx, cz, &self.world);
-        self.lava.register_column_sources(cx, cz, &self.world);
-        self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
+        self.column_sims().load_terrain(cx, cz);
     }
 
     /// Save the world (all players' state).
@@ -2194,6 +2203,70 @@ mod tests {
         let mut back = crate::world::World::new();
         crate::save::load_world("w", &mut back).expect("reloads");
         assert_eq!(back.get_block(3, 64, 5), crate::block::AIR, "no resurrection after a restart");
+    }
+
+    /// Phase B1 × the save rules (Spec 02 §7.5 / §8.4) — what the dedicated
+    /// streamer's stream-out leaves behind saves right: an evicted, edited
+    /// column is written, never deleted; a chunk mined out while evicted is
+    /// deleted (read or written this session, and `persist`); and a pristine
+    /// column dropped on stream-out never costs its file — not even one this
+    /// session wrote, and not when a write of air over the dropped column
+    /// conjures an empty chunk there (not `persist`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn server_save_writes_evicted_columns_and_never_deletes_a_dropped_columns_file() {
+        let _g = crate::save::WorldsRootGuard::new("server_evicted_save");
+        let dir = crate::save::world_dir("w");
+        let chunk_file = |(cx, cy, cz): (i32, i32, i32)| dir.join(format!("chunks/{cx}_{cy}_{cz}.chunk"));
+        let mut server = GameServer::new(0, "w".to_string(), 42);
+        let (kept, mined, pristine) = ((2, 0), (4, 0), (6, 0));
+        for (cx, cz) in [kept, mined, pristine] {
+            server.ensure_column_loaded(cx, cz);
+        }
+        // High in the sky slice (cy 5), where world-gen leaves only air.
+        let kept_cell = (kept.0 * 16 + 3, 90, 3);
+        let mined_cell = (mined.0 * 16 + 3, 90, 3);
+        server.world.set_block(kept_cell.0, kept_cell.1, kept_cell.2, block::GLASS);
+        server.world.set_block(mined_cell.0, mined_cell.1, mined_cell.2, block::GLASS);
+        server.try_save().expect("first save");
+        let mined_key = (mined.0, 5, mined.1);
+        assert!(chunk_file((kept.0, 5, kept.1)).is_file());
+        assert!(chunk_file(mined_key).is_file());
+        let pristine_files: Vec<_> = (0..=MAX_CHUNK_Y)
+            .map(|cy| (pristine.0, cy, pristine.1))
+            .filter(|k| chunk_file(*k).is_file())
+            .map(|k| (k, std::fs::read(chunk_file(k)).unwrap()))
+            .collect();
+        assert!(!pristine_files.is_empty(), "the first save wrote the pristine column too");
+
+        // Stream all three out, as the dedicated streamer does.
+        for (cx, cz) in [kept, mined, pristine] {
+            server.column_sims().stream_out(cx, cz);
+        }
+        assert!(server.world.is_column_evicted(kept.0, kept.1), "edited: kept in the store");
+        assert!(server.world.is_column_evicted(mined.0, mined.1), "edited: kept in the store");
+        assert!(!server.world.is_column_evicted(pristine.0, pristine.1), "pristine: dropped");
+        assert!(!(0..=MAX_CHUNK_Y).any(|cy| server.world.has_chunk(pristine.0, cy, pristine.1)));
+        // Mined out while evicted (the write goes through to the store)…
+        server.world.set_block(mined_cell.0, mined_cell.1, mined_cell.2, block::AIR);
+        // …and air written over the dropped column conjures an empty chunk on
+        // top of a file this session wrote.
+        let (pk, _) = &pristine_files[0];
+        server.world.set_block(pristine.0 * 16 + 1, pk.1 * 16 + 1, pristine.1 * 16 + 1, block::AIR);
+        let conjured = server.world.get_chunk(pk.0, pk.1, pk.2).expect("air over a dropped column conjures a chunk");
+        assert!(conjured.is_empty() && !conjured.persist(), "empty, and not persist");
+        server.try_save().expect("second save");
+
+        assert!(chunk_file((kept.0, 5, kept.1)).is_file(), "an evicted edit is written, never deleted");
+        assert!(!chunk_file(mined_key).exists(), "a chunk mined out while evicted is deleted");
+        for (k, bytes) in &pristine_files {
+            assert_eq!(&std::fs::read(chunk_file(*k)).unwrap(), bytes, "dropped column's file {k:?} kept");
+        }
+        let mut back = crate::world::World::new();
+        crate::save::load_world("w", &mut back).expect("reloads");
+        assert_eq!(back.get_block(kept_cell.0, kept_cell.1, kept_cell.2), block::GLASS);
+        assert_eq!(back.get_block(mined_cell.0, mined_cell.1, mined_cell.2), block::AIR);
+        assert!(back.has_chunk(pk.0, pk.1, pk.2), "the dropped column's chunk loads back");
     }
 
     /// #8 — `GameServer::new` must seed its `BiomeGenerator` from the seed it is

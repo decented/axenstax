@@ -18,8 +18,11 @@
 //! to write back.
 //!
 //! LAN / online hosts (≥ 1 local player) do not use this: their host client
-//! streams, and the server keeps its `initial_load` region (a later step lends
-//! the host client's world to the server).
+//! streams, and the server keeps its `initial_load` region plus the 3×3 it
+//! generates round each joiner (`GameServer::column_refill_per_tick`, `0`
+//! here) — one column-loading story per mode. Both load a column through the
+//! same terrain step (`ColumnSims::load_terrain`). A later step lends the host
+//! client's world to the server.
 
 use crate::chunk_stream::{column_of, is_void_column, plan_stream_step, ColumnSims};
 use crate::server::GameServer;
@@ -144,7 +147,9 @@ impl GameServer {
         step.load.len()
     }
 
-    fn column_sims(&mut self) -> ColumnSims<'_> {
+    /// The world-side state a column load / unload touches (shared with the
+    /// client streamer and `GameServer::ensure_column_loaded`).
+    pub(crate) fn column_sims(&mut self) -> ColumnSims<'_> {
         ColumnSims {
             world: &mut self.world,
             loaded: &mut self.loaded_columns,
