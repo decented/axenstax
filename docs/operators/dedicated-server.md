@@ -142,17 +142,44 @@ binding — the TLS ends at Caddy).
 
 | Set | Example | Notes |
 |-----|---------|-------|
-| `AXENSTAX_PUBLIC_HOST` (or `--public-host`, repeatable) | `play.example.org` or `play.example.org,192.168.1.20` | Comma-separated host names or IPs, each optionally `:port`. The first is also the one advertised in the connect-string |
+| `AXENSTAX_PUBLIC_HOST` (or `--public-host`, repeatable) | `play.example.org` or `203.0.113.7:6767` | Comma-separated public host names or IPs, each optionally `:port`. The first is also the one advertised in the connect-string. Use public addresses (see the LAN caveat below) |
 | `AXENSTAX_DOMAIN` | `play.example.com` | Already set on a VPS with a real domain; it is added to the list automatically |
 
-- **An entry without a port covers every port** on that host (`wss://host/ws`
-  through Caddy, `wss://host:8443/ws`, `ws://host:6767`). With a port it covers
-  only that port (`:443` / `:80` also cover a join that left the port out).
+- **An entry without a port covers only the default ports, your own WebSocket
+  port and 8443**: `wss://host/ws` through Caddy (443), plain `ws://host` (80),
+  `ws://host:6767` (the server's `--port` / `AXENSTAX_WS_PORT`) and
+  `wss://host:8443/ws` (the Caddy front on `:8443`). A join on any other port of
+  that name is refused, so a hostile server listening on another port of your
+  name cannot pass. If you really serve on another port (a different Docker host
+  port mapping, your own reverse proxy), list it: `play.example.org:9000`.
+- **An entry with a port covers only that port.** `:443` and `:80` also cover a
+  join that left the port out.
+- **The scheme is not part of what is signed.** A player's signature names the
+  host and, unless it is the scheme's default, the port; it does not say `ws` or
+  `wss`. So a `:443` entry (or a port-less one) also admits a plaintext
+  `ws://host` join on port 80, and a `:80` entry also admits `wss://host` on port
+  443. If you want TLS only, enforce it at your proxy (close port 80), not here.
 - **List every address players use.** A player who joins by an address that is
-  not on the list is refused with: *you connected to '203.0.113.7:6767', but this
-  server only accepts joins addressed to 'play.example.org'. Reconnect using that
-  address.* If your LAN players join by the box's local IP, add it as another entry.
-- **Check:** the start-up log says `public host: 'play.example.org' …`. With
+  not on the list is refused with a generic *this server expects to be reached at
+  its public address*. The refusal deliberately does not say which addresses the
+  server is configured with (anyone who can reach the port could read it); the
+  server's own log does, as `Rejecting JoinRequest … joiner dialled '…', which is
+  not one of this server's public hosts (…)`.
+- **LAN addresses are not relay-protected.** If your LAN players join by the
+  box's local IP, you can add it as another entry and LAN joins work (the
+  dedicated server is WebSocket-only). But an address that is not unique to your
+  server (RFC 1918 `10/8`, `172.16/12`, `192.168/16`; CGNAT `100.64/10`;
+  loopback; link-local `169.254/16`, `fe80::/10`; IPv6 ULA `fc00::/7`; names
+  ending `.local`, `.lan`, `.home.arpa`; single-label names such as `myserver`)
+  is one a hostile machine on a player's own network can also hold. It gets that
+  player to sign a join for that address and replays it to your public endpoint,
+  where your list admits it. The server still boots and still accepts them, but
+  the start-up log warns once per entry: `not relay-protected: 192.168.1.20 is
+  not unique to this server`. Relay protection is only as strong as your
+  public-address entries, so prefer a public domain or IP and have players use it;
+  the trade-off is that players on the LAN then join through it too.
+- **Check:** the start-up log says `public host: 'play.example.org' …` (and a
+  `not relay-protected: …` warning for any LAN-style entry). With
   nothing set it warns instead: `WebSocket joins are not relay-protected: set
   --public-host …` — the server then accepts a join signed for any address, as
   before.
@@ -164,11 +191,14 @@ binding — the TLS ends at Caddy).
 > `AXENSTAX_PUBLIC_HOST`, `--public-host` or `AXENSTAX_DOMAIN`, the check is now on:
 > players who join by a different address (for example the LAN IP of a box that
 > also has a domain) are refused until you add that address to
-> `AXENSTAX_PUBLIC_HOST`. **If your existing value carries a port** (older docs
-> said `host:port`), drop the port or add the bare host as a second entry: a
+> `AXENSTAX_PUBLIC_HOST` (it will be accepted, with the not-relay-protected
+> warning above). **If your existing value carries a port** (older docs said
+> `host:port`), drop the port or add the bare host as a second entry: a
 > `host:6767` entry admits only `ws://host:6767`, so browsers coming through
-> Caddy (`wss://host/ws`, `wss://host:8443/ws`) would be refused. Players also
-> need a v66 game build to join.
+> Caddy (`wss://host/ws`, `wss://host:8443/ws`) would be refused. **If you serve
+> on a port that is neither 80, 443, 8443 nor your `--port`**, list it explicitly
+> (`play.example.org:9000`): a port-less entry no longer means "any port".
+> Players also need a v66 game build to join.
 
 ---
 
@@ -290,7 +320,9 @@ In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 
 The domain also becomes the server's public address for join checks (see "Tell
 the server its public address"): players who join by the box's IP instead are
-refused, so add any other address they use to `AXENSTAX_PUBLIC_HOST`.
+refused, so add any other address they use to `AXENSTAX_PUBLIC_HOST` (a LAN
+address works but is not relay-protected; see "Tell the server its public
+address").
 
 ---
 

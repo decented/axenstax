@@ -1476,9 +1476,14 @@ impl HostedServer {
                                 &self.ws_public_hosts,
                             ) {
                                 Ok(origin) => origin,
-                                Err(reason) => {
-                                    log::warn!("Rejecting JoinRequest on slot {i}: {reason}");
-                                    let _ = self.release_slot(i, Some(&reason));
+                                Err(refusal) => {
+                                    // The joiner gets the generic reason; the
+                                    // configured hosts stay in our own log.
+                                    log::warn!(
+                                        "Rejecting JoinRequest on slot {i}: {}",
+                                        refusal.detail
+                                    );
+                                    let _ = self.release_slot(i, Some(&refusal.reason));
                                     break;
                                 }
                             }
@@ -5396,7 +5401,7 @@ mod tests {
     }
 
     fn h_hosts() -> PublicHosts {
-        PublicHosts::parse(&["h.example.org"]).unwrap()
+        PublicHosts::parse(&["h.example.org"], 6767).unwrap()
     }
 
     /// The relay scenario: V dialled M and signed for M's address; M forwards
@@ -5433,16 +5438,48 @@ mod tests {
     }
 
     /// IP-vs-domain: a player who dialled the server's IP while it answers as
-    /// its domain is told which address to use.
+    /// its domain is refused with a generic reason. The rejection goes to an
+    /// unauthenticated peer, so it must not list the configured hosts (LAN
+    /// addresses included); they are logged server-side instead.
     #[test]
-    fn a_ws_join_by_ip_to_a_domain_server_is_told_which_address_to_use() {
+    fn a_ws_join_by_ip_to_a_domain_server_is_refused_without_naming_its_hosts() {
         let mut h = start_room_test_server("ws-ip-domain", 1);
-        h.set_ws_public_hosts(h_hosts());
+        h.set_ws_public_hosts(
+            PublicHosts::parse(&["h.example.org", "192.168.1.20"], 6767).unwrap(),
+        );
         let (_c, res) =
             ws_join(&mut h, "203.0.113.7:6767", Some(([0x46; 32], ws_host_origin("203.0.113.7:6767"))));
         let err = res.unwrap_err();
         assert!(err.starts_with("auth event origin mismatch"), "{err}");
-        assert!(err.contains("'203.0.113.7:6767'") && err.contains("'h.example.org'"), "{err}");
+        assert!(err.contains("expects to be reached at its public address"), "{err}");
+        for configured in ["h.example.org", "192.168.1.20"] {
+            assert!(!err.contains(configured), "the JoinReject leaked '{configured}': {err}");
+        }
+    }
+
+    /// A LAN address in the public hosts still admits LAN joins (the server is
+    /// WS-only), but the boot log marks it as not relay-protected.
+    #[test]
+    fn a_lan_public_host_still_admits_lan_joins_but_is_flagged_at_boot() {
+        let mut h = start_room_test_server("ws-lan", 1);
+        let hosts = PublicHosts::parse(&["h.example.org", "192.168.1.20"], 6767).unwrap();
+        assert_eq!(hosts.non_unique(), vec!["192.168.1.20".to_string()]);
+        h.set_ws_public_hosts(hosts);
+        let (_c, res) = ws_join(&mut h, "192.168.1.20:6767", None);
+        res.expect("a LAN join to a listed LAN address is admitted");
+    }
+
+    /// A relay listening on another port of the server's own name is refused:
+    /// a port-less entry no longer means "any port".
+    #[test]
+    fn a_ws_join_on_an_unlisted_port_of_the_servers_name_is_refused() {
+        let mut h = start_room_test_server("ws-port", 1);
+        h.set_ws_public_hosts(h_hosts());
+        let (_c, res) =
+            ws_join(&mut h, "h.example.org:9000", Some(([0x48; 32], ws_host_origin("h.example.org:9000"))));
+        assert!(res.unwrap_err().starts_with("auth event origin mismatch"));
+        let (_c, res) = ws_join(&mut h, "h.example.org:8443", None);
+        res.expect("8443 (Caddy) is admitted by a port-less entry");
     }
 
     /// Guests are checked too: the identity proof is signed over their host.

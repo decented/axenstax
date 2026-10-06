@@ -48,8 +48,11 @@ services:
       # Public address(es) players use — comma list of host or host:port. Joins
       # signed for any other address are refused (relay protection, protocol v66);
       # unset → any address is accepted and the log warns. The first entry is the
-      # host advertised in the connect-string. List the LAN IP too if players use it.
-      # AXENSTAX_PUBLIC_HOST: "play.example.com,192.168.1.20"
+      # host advertised in the connect-string. Use a PUBLIC domain or IP here. A
+      # LAN IP or .local/.lan name can be listed too if players join that way, but
+      # it is NOT relay-protected (any machine on that network can hold the same
+      # address; the start-up log warns) — see the README, "Public address".
+      # AXENSTAX_PUBLIC_HOST: "play.example.com"
       # AXENSTAX_PAIR_RELAY: "wss://relay.damus.io"   # any public relay you trust
       # AXENSTAX_DELEGATION_DAYS: "90"
       # --- Access control (optional; see README) ---

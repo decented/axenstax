@@ -746,7 +746,7 @@ pub fn run(args: &[String]) {
     // v66 — the addresses WebSocket joins must be addressed to (relay
     // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo must refuse to boot,
     // not silently leave the server unprotected.
-    let public_hosts = match crate::signet::ws_host::PublicHosts::parse(&public_host_entries_from(args)) {
+    let public_hosts = match crate::signet::ws_host::PublicHosts::parse(&public_host_entries_from(args), cfg.ws_port) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("{e} (from --public-host / AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN)");
@@ -853,9 +853,8 @@ pub fn run(args: &[String]) {
             log::info!("  identity   : anonymous (run --pair-server to add one)")
         }
     }
-    match crate::signet::ws_host::relay_protection_warning(&public_hosts) {
-        Some(w) => log::warn!("  public host: none — {w}"),
-        None => log::info!("  public host: {} (WebSocket joins to any other address are refused)", public_hosts.describe()),
+    for (level, line) in crate::signet::ws_host::boot_messages(&public_hosts) {
+        log::log!(level, "{line}");
     }
     hs.set_ws_public_hosts(public_hosts);
     log::info!("  native join: ws://<host>:{}", cfg.ws_port);

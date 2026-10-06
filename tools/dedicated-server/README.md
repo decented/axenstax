@@ -112,23 +112,39 @@ address(es) and it refuses joins signed for anything else, so another server
 can't pass a player's sign-in on to yours and join as them:
 
 ```yaml
-      AXENSTAX_PUBLIC_HOST: "play.example.org,192.168.1.20"   # or --public-host (repeatable)
+      AXENSTAX_PUBLIC_HOST: "play.example.org"   # or --public-host (repeatable)
 ```
 
 `AXENSTAX_DOMAIN` is added to the list automatically. An entry without a port
-covers every port on that host (`wss://host/ws`, `wss://host:8443/ws`,
-`ws://host:6767`); `host:port` covers that port only. List every address players
-(and browsers opening the `:8443` page) use: a join by any other address is
-refused with "you connected to '…', but this server only accepts joins addressed
-to '…'". With nothing set the start-up log warns `WebSocket joins are not
+covers the default ports (`wss://host/ws` on 443, `ws://host` on 80), the
+server's own WebSocket port (`ws://host:6767`) and 8443 (`wss://host:8443/ws`);
+any other port is refused, so a relay listening on another port of your name
+can't pass. `host:port` covers that port only; if you serve on a port that is
+none of those, list it (`play.example.org:9000`). The scheme is not part of what
+is signed: a `:443` entry also admits a plaintext `ws://host` join on port 80,
+and `:80` also admits `wss://host`. List every address players (and browsers
+opening the `:8443` page) use: a join by any other address is refused with a
+generic "this server expects to be reached at its public address" (the refusal
+never says which addresses the server is configured with; the server's own log
+does). With nothing set the start-up log warns `WebSocket joins are not
 relay-protected: set --public-host …` and any address is accepted, as before v66.
-A malformed entry stops the server at start-up. **Upgrading:** if you already set
+A malformed entry stops the server at start-up.
+
+**LAN addresses are not relay-protected.** You can list a LAN IP (`192.168.x.x`,
+`10.x.x.x`, `172.16-31.x.x`), a CGNAT / link-local / loopback / IPv6 ULA address,
+or a `.local` / `.lan` / `.home.arpa` / single-label name, and LAN joins keep
+working (the server is WebSocket-only). But such an address is not unique to your
+server: a hostile machine on a player's own network can hold the same address,
+get that player to sign a join for it, and replay it to your public endpoint. The
+start-up log says `not relay-protected: <entry> is not unique to this server` for
+each. For full protection list only a public domain or public IP, and have
+players use that address. **Upgrading:** if you already set
 `AXENSTAX_PUBLIC_HOST` or `AXENSTAX_DOMAIN`, the check is now on — add any other
-address your players use (for example the LAN IP). If your existing value carries
-a port (older docs said `host:port`), drop the port or add the bare host too: a
-`host:6767` entry admits only `ws://host:6767`, not the Caddy `wss://` paths. Operator tools still need a
-direct QUIC connection. Details: `docs/operators/dedicated-server.md`, Spec 04
-§1.8.1.
+address your players use (a LAN IP works, with the caveat above). If your existing
+value carries a port (older docs said `host:port`), drop the port or add the bare
+host too: a `host:6767` entry admits only `ws://host:6767`, not the Caddy `wss://`
+paths. Operator tools still need a direct QUIC connection. Details:
+`docs/operators/dedicated-server.md`, Spec 04 §1.8.1.
 
 ## Configuration (env in `docker-compose.yml`)
 
