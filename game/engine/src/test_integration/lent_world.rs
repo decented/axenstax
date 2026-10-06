@@ -335,3 +335,67 @@ fn a_joiners_columns_stay_loaded_when_the_host_walks_away() {
     host.lend_tick(&mut hs);
     assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::GLASS);
 }
+
+/// D1 review fix 3 (LOW) — a split-screen host: only player 1 sends input
+/// over the loopback, so player 2's server slot stood where the server put it.
+/// On a lent world the server runs power (plates) and mob spawning (anchors)
+/// on the host's world from its slots, so every local slot's position must
+/// reach it: `GameState::tick_hosted_server` hands them all to
+/// `HostedServer::sync_local_slots` before each server tick.
+#[test]
+fn a_split_screen_second_player_presses_a_plate_on_a_lent_world() {
+    let mut hs = HostedServer::start(
+        2,
+        format!("lent-split-screen-{}", std::process::id()),
+        42,
+        0,
+        crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+    )
+    .expect("hosted server starts");
+    let mut host = OwnedSimParts::take_from(&mut hs);
+    // A plate in the air near the host, as the host client places one.
+    let base = hs.server.players[0].player.pos;
+    let plate = (base.x.floor() as i32 + 6, 120, base.z.floor() as i32);
+    host.world.set_block(plate.0, plate.1, plate.2, block::PRESSURE_PLATE);
+    host.world.insert_power_device(
+        plate,
+        crate::power::PowerDeviceData::new(
+            crate::power::device_kind_for_block(block::PRESSURE_PLATE).expect("a device"),
+            crate::meta::Facing::Up,
+        ),
+    );
+    host.world.set_meta(plate, crate::meta::with_facing(0, crate::meta::Facing::Up));
+    host.world.mark_dirty(plate);
+    host.world.notify_neighbours(plate);
+    let on = |host: &OwnedSimParts| host.world.power_device_at(plate).expect("plate").on;
+
+    host.lend_tick(&mut hs);
+    host.lend_tick(&mut hs);
+    assert!(!on(&host), "nobody on the plate yet");
+
+    // Player 2 (local slot 1) walks onto it in the host client.
+    let on_plate = glam::Vec3::new(plate.0 as f32 + 0.5, (plate.1 + 1) as f32, plate.2 as f32 + 0.5);
+    let p1 = hs.server.players[0].player.pos;
+    let slots = [(p1, 0.0, 0.0, 20.0), (on_plate, 0.0, 0.0, 20.0)];
+    hs.sync_local_slots(&slots);
+    host.lend_tick(&mut hs);
+    host.lend_tick(&mut hs);
+    assert_eq!(hs.server.players[1].player.pos, on_plate);
+    assert!(on(&host), "player 2 presses the plate on the lent world");
+    assert_eq!(hs.server.players[0].player.pos, p1, "slot 0 is fed by its own input");
+}
+
+/// `sync_local_slots` touches local slots 1.. only: never slot 0 (its input
+/// carries it), never a joiner's server-simulated slot, never a non-finite
+/// position.
+#[test]
+fn sync_local_slots_never_moves_slot_zero_or_a_joiner() {
+    let (mut hs, mut host) = start_lent("sync-slots");
+    let (_client, slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    let p0 = hs.server.players[0].player.pos;
+    let joiner = hs.server.players[slot].player.pos;
+    let far = glam::Vec3::new(500.0, 90.0, 500.0);
+    hs.sync_local_slots(&vec![(far, 0.0, 0.0, 20.0); slot + 1]);
+    assert_eq!(hs.server.players[0].player.pos, p0);
+    assert_eq!(hs.server.players[slot].player.pos, joiner);
+}

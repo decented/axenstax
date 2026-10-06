@@ -42,8 +42,9 @@ pub enum HostWorld {
 }
 
 /// `--no-lend`: the one-release escape hatch back to a host whose embedded
-/// server owns a second copy of the world (the pre-D1 behaviour, minus the
-/// host→server block-entity mirror). Set once at startup.
+/// server owns a second copy of the world (the pre-D1 behaviour, its
+/// host→server block-entity mirror included —
+/// [`HostedServer::mirror_host_world_state`]). Set once at startup.
 #[cfg(not(target_arch = "wasm32"))]
 static NO_LEND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -785,6 +786,29 @@ impl HostedServer {
         cols.sort_unstable();
         cols.dedup();
         cols
+    }
+
+    /// D1 review fix 3 — the host client's local players as it simulated them
+    /// this tick, `(position, yaw, pitch, health)` per local slot in order.
+    /// Only slot 0 sends input over the loopback (its edits and intent ride
+    /// it), so a split-screen player 2.. would otherwise stand on the server
+    /// wherever the server put them — and on a lent world the server runs
+    /// power (pressure plates), mob spawning (its anchors) and the joiners'
+    /// view of them from these slots. Position-trusted, as every local slot is
+    /// by design. Slot 0, any slot past the local ones (a joiner's) and a
+    /// non-finite position are left alone.
+    pub fn sync_local_slots(&mut self, slots: &[(glam::Vec3, f32, f32, f32)]) {
+        let locals = self.num_local_players.min(self.server.players.len());
+        for (i, &(pos, yaw, pitch, health)) in slots.iter().enumerate().take(locals).skip(1) {
+            let sp = &mut self.server.players[i];
+            if sp.server_simulated || !pos.is_finite() {
+                continue;
+            }
+            sp.player.pos = pos;
+            sp.yaw = yaw;
+            sp.pitch = pitch;
+            sp.combat.health = health.clamp(0.0, 20.0);
+        }
     }
 
     /// Test-only: switch how this server holds its world after it started
@@ -2517,6 +2541,69 @@ impl HostedServer {
         Ok(())
     }
 
+    /// Mirror the host client's live block-entity state into the server world
+    /// (review B1/S1) — on an OWNING host (`--no-lend`) only. The host's client
+    /// is where chests are filled, furnaces fed, vendors stocked and plots
+    /// claimed; an owning server's copy would otherwise be frozen at world
+    /// load, so a joiner's break would spill stale contents (duplication) while
+    /// the host's `World::apply_remote_block_change` dropped the live chest
+    /// unspilled (loss), and the plot / economy gates would miss anything
+    /// claimed or placed since. Called once a tick, just before
+    /// [`Self::tick`], from the one place the host feeds its hosted server
+    /// (`GameState::tick_hosted_server`). A lending host (D1) has one world
+    /// and nothing to mirror.
+    ///
+    /// An entity is copied only where the server's block agrees on its family,
+    /// so a container a joiner just broke (block already gone here, entity not
+    /// yet cleared on the host) is never resurrected; entities the host no
+    /// longer has are dropped. Plots and market hubs are copied whole.
+    ///
+    /// BRIDGE: host-client → server mirroring for the `--no-lend` escape hatch
+    /// — delete with `--no-lend` (one release after D1), when every host lends.
+    pub fn mirror_host_world_state(&mut self, host: &crate::world::World) {
+        // A lent world IS the host's: mirroring it into itself is a no-op at
+        // best, and outside the window it would write into the server's empty
+        // placeholder world.
+        debug_assert!(!self.lends_host_world(), "mirror_host_world_state on a lending host");
+        // T1-3 — the mirror exists because a host CLIENT owns the machines;
+        // a server that ticks them itself (the dedicated server) has no host
+        // client to mirror, and mirroring would overwrite its own sim.
+        debug_assert!(
+            !self.server.simulates_block_machines,
+            "mirror_host_world_state on a server that ticks its own block machines"
+        );
+        use crate::world::BlockEntityData as E;
+        let server = &mut self.server.world;
+        for (&pos, data) in &host.block_entities {
+            let Some(family) = data.mirrored_family() else {
+                continue;
+            };
+            if crate::world::mirrored_family(server.get_block(pos.0, pos.1, pos.2)) != Some(family) {
+                continue;
+            }
+            match (server.block_entities.get_mut(&pos), data) {
+                // Cheap equality where the types have it (a chest is the
+                // common, big one); everything else is small, so copy.
+                (Some(E::Chest(a)), E::Chest(b)) if a == b => {}
+                (Some(E::TipJar(a)), E::TipJar(b)) if a == b => {}
+                (Some(existing), _) => existing.clone_from(data),
+                (None, _) => {
+                    server.block_entities.insert(pos, data.clone());
+                }
+            }
+        }
+        server.block_entities.retain(|pos, d| {
+            d.mirrored_family().is_none()
+                || host.block_entities.get(pos).and_then(E::mirrored_family) == d.mirrored_family()
+        });
+        if server.plots != host.plots {
+            server.plots.clone_from(&host.plots);
+        }
+        if server.market_hubs != host.market_hubs {
+            server.market_hubs.clone_from(&host.market_hubs);
+        }
+    }
+
     /// Queue the block that is REALLY at a refused edit's cell onto the next
     /// StateUpdate, so the sender's optimistic local edit is overwritten. Rides
     /// the ordinary block-change broadcast (idempotent for everyone else).
@@ -2555,8 +2642,9 @@ impl HostedServer {
     /// already spilled them). On an owning server (`--no-lend`, dedicated)
     /// the host's breaks discard the server's copy, and a host client clears
     /// its entity for a joiner's break without spilling
-    /// (`World::apply_remote_block_change`). An owning LAN host's copy is the
-    /// state at load — the pre-D1 host→server mirror is gone.
+    /// (`World::apply_remote_block_change`); an owning LAN host's copy is
+    /// kept live by [`Self::mirror_host_world_state`], so a joiner's break
+    /// there spills what the host's chest holds now, not what it held at load.
     fn spill_container_on_change(
         &mut self,
         cell: (i32, i32, i32),

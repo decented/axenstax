@@ -1056,7 +1056,7 @@ impl GameServer {
         // Per-world active-tick clock (Goal 1) — mirrors GameState::tick so
         // hosted / headless (TestHost) worlds accrue the same world-clock stat
         // (total_ticks). Source of truth on disk is WorldMeta.
-        if self.runs(SimSystem::WorldClock) {
+        if self.runs(SimSystem::ActiveTicks) {
             self.world.tick_world_clock();
         }
         // Spec 29 — drain legacy meat ejected from v1 furnaces during

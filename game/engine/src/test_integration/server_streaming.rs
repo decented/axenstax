@@ -266,13 +266,28 @@ fn only_the_dedicated_server_gets_a_column_streamer() {
     let streamer = dedicated.server.column_streamer.as_ref().expect("dedicated streams");
     assert_eq!(streamer.sim_distance(), crate::server_stream::DEFAULT_SIM_DISTANCE);
     assert_eq!(dedicated.server.column_refill_per_tick, 0, "the dedicated server does not also refill");
+    // `start` is an owning server: with a host client, the `--no-lend` host.
     let host = start(1, "host");
     assert!(host.server.column_streamer.is_none(), "a host client streams for its server");
     assert_eq!(
         host.server.column_refill_per_tick,
         crate::server::HOST_COLUMN_REFILL_PER_TICK,
-        "a host refills round its joiners instead"
+        "an owning host refills round its joiners instead"
     );
+    // D1 — a host that lends its world loads no column on the server side at
+    // all: its host client's streamer anchors on every joiner
+    // (`chunk_stream::client_stream_anchors`).
+    let lent = HostedServer::start_host(
+        1,
+        format!("server-streaming-flag-lent-{}", std::process::id()),
+        42,
+        0,
+        RemoteTransport::WebSocket { port: 0 },
+        crate::hosted_server::HostWorld::Lent,
+    )
+    .expect("lending host starts");
+    assert!(lent.server.column_streamer.is_none(), "a lending host's server does not stream");
+    assert_eq!(lent.server.column_refill_per_tick, 0, "nor refill");
 }
 
 /// The streamer's spawn anchor follows the computed world spawn

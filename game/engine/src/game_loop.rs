@@ -4251,7 +4251,9 @@ impl super::GameState {
     /// block changes the server already made here.
     ///
     /// **Owned (`--no-lend`, one release):** the server ticks its own copy of
-    /// the world, fed the host's clock and weather, as before D1.
+    /// the world, fed the host's clock and weather and kept live by the
+    /// host→server block-entity mirror (`mirror_host_world_state`), as before
+    /// D1.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn tick_hosted_server(
         &mut self,
@@ -4261,6 +4263,15 @@ impl super::GameState {
         let Some(hs) = self.hosted_server.as_mut() else {
             return report;
         };
+        // Split-screen players 2.. send no input (only slot 0 does, over the
+        // loopback): hand the server where every local player stands, so its
+        // plates, spawning anchors and joiners' view see them (D1 review 3).
+        let local_slots: Vec<(glam::Vec3, f32, f32, f32)> = self
+            .players
+            .iter()
+            .map(|p| (p.player.pos, p.camera.yaw, p.camera.pitch, p.combat.health))
+            .collect();
+        hs.sync_local_slots(&local_slots);
         if !hs.lends_host_world() {
             // P9 weather sync — the host's window, translated into the
             // SERVER's tick frame: its `tick_counter` need not equal ours (it
@@ -4276,6 +4287,10 @@ impl super::GameState {
                 rain_left,
                 storm_left,
             );
+            // The host's client owns chest / vendor / plot state; keep the
+            // owning server's copy live so joiner breaks and gates see it
+            // (review B1/S1). BRIDGE: goes with `--no-lend`.
+            hs.mirror_host_world_state(&self.world);
             // The host's clock is the world's clock: `/time set`, `/time
             // speed` and sleeping all move `self.world_time`.
             hs.server.world_time = self.world_time;
@@ -4508,7 +4523,7 @@ impl super::GameState {
         // `sim_runs`: while hosting, the embedded server ticks the same
         // (lent) world, and `sim_lend::SimSystem::lent_owner` gives each
         // system to exactly one side.
-        if self.sim_runs(SimSystem::WorldClock) {
+        if self.sim_runs(SimSystem::ActiveTicks) {
             self.world.tick_world_clock();
         }
         // Spec 29 — drain any legacy meat ejected from v1 furnaces

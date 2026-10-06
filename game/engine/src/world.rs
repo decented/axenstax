@@ -142,9 +142,10 @@ pub enum BlockEntityData {
 /// containers a joiner's break spills (`HostedServer::spill_container_on_change`),
 /// and the economy blocks whose owner the server checks. A lit/unlit furnace
 /// or a chest tier change stays in its family, so the entity survives it.
-/// (The name is historical: until D1 a LAN host mirrored these families into
-/// its server's second copy of the world. A host now lends the server its one
-/// world — `sim_lend` — so there is nothing to mirror.)
+/// A lending host (D1, `sim_lend`) has one world, so nothing is mirrored; an
+/// owning `--no-lend` host still mirrors these families from its client into
+/// its server's copy (`HostedServer::mirror_host_world_state`, a BRIDGE that
+/// goes with `--no-lend`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MirroredFamily {
     Chest,

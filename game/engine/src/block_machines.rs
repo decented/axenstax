@@ -12,7 +12,9 @@
 //!   host. On a host it pushes the results into `pending_block_changes` → the
 //!   server → joiners. A host lends the server its one world every tick (D1,
 //!   `sim_lend`), so the machines' block-entities the server reads ARE the
-//!   host's.
+//!   host's; an owning `--no-lend` host instead copies them into its server's
+//!   world every tick (`HostedServer::mirror_host_world_state`, a BRIDGE that
+//!   goes with `--no-lend`).
 //! - **`GameServer::tick`** — only when [`GameServer::simulates_block_machines`]
 //!   is set, i.e. when no local host client simulates them: the dedicated server
 //!   (`HostedServer::start` with 0 local players — `server_main` and the
@@ -20,9 +22,10 @@
 //!
 //! The flag is the no-double-tick rule: on a LAN host the server must NOT tick
 //! these, or every piston would fire twice on the one lent world (or, with
-//! `--no-lend`, once in each world). Changes the server makes land in
-//! `GameServer::pending_block_changes`,
-//! which `HostedServer` drains into every `StateUpdatePacket` — the same road
+//! `--no-lend`, once in each world, and the server's copy would fight the
+//! mirror — `mirror_host_world_state` debug-asserts the flag is off). Changes
+//! the server makes land in `GameServer::pending_block_changes`, which
+//! `HostedServer` drains into every `StateUpdatePacket` — the same road
 //! leaf decay, falling blocks, fluids and power already take to joiners.
 //!
 //! Not ticked here (still host-client only): campfires, drying racks, animated

@@ -398,6 +398,91 @@ fn the_hosts_own_chest_break_never_spills_on_the_server() {
 // (D1), so there is no second copy to keep in step. An owning server
 // (`--no-lend`, the dedicated server) holds the state it loaded.
 
+/// B1 scenarios B/C, on an OWNING host (`--no-lend`, D1 review fix 2): the
+/// host fills a chest AFTER load (client-only state); a joiner breaks it. The
+/// server spills the LIVE contents (kept live by `mirror_host_world_state`)
+/// exactly once, and the host's world is left with no orphan entity.
+#[test]
+fn no_lend_a_joiner_break_spills_the_live_contents_once_and_leaves_no_host_orphan() {
+    let mut hs = start_open_server("live-chest");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    // The server knows the block (the host's place was broadcast) but, like a
+    // chest placed this session, holds no contents for it.
+    hs.server.world.set_block(cell.0, cell.1, cell.2, block::CHEST);
+    let mut host = crate::world::World::new();
+    host.set_block(cell.0, cell.1, cell.2, block::CHEST);
+    host.insert_chest(cell, chest_of_bones(7));
+
+    hs.mirror_host_world_state(&host);
+    send_edits(&hs, &client, slot, 1, &[(cell, block::AIR)]);
+    hs.tick();
+    assert_eq!(bones_on_server(&hs), 7, "the live contents spill");
+    assert!(hs.server.world.chest_at(cell).is_none());
+
+    // The host hasn't consumed the broadcast yet: mirroring must not
+    // resurrect the chest on the server, and nothing spills twice.
+    hs.mirror_host_world_state(&host);
+    hs.tick();
+    assert!(hs.server.world.chest_at(cell).is_none(), "not resurrected");
+    assert_eq!(bones_on_server(&hs), 7);
+
+    // The host applies the broadcast: entity cleared, no local spill.
+    for bc in block_changes_seen(&hs.local_transports[0]) {
+        host.apply_remote_block_change(&bc);
+    }
+    assert!(host.chest_at(cell).is_none(), "no orphan on the host");
+    hs.mirror_host_world_state(&host);
+    hs.tick();
+    assert_eq!(bones_on_server(&hs), 7, "exactly one spill");
+}
+
+/// S1, on an owning host (`--no-lend`): a plot claimed on the host after load
+/// protects against a joiner.
+#[test]
+fn no_lend_a_plot_claimed_after_load_protects_against_a_joiner() {
+    let mut hs = start_open_server("live-plot");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    hs.server.world.set_block(cell.0, cell.1, cell.2, block::AIR);
+    let mut host = crate::world::World::new();
+    host.plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::LocalPlayer(0),
+        cell.0,
+        cell.1 - 5,
+        cell.2,
+    ));
+    hs.mirror_host_world_state(&host);
+
+    send_edits(&hs, &client, slot, 1, &[(cell, block::STONE)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::AIR);
+}
+
+/// S1, on an owning host (`--no-lend`): a vendor the host placed this session
+/// is protected too.
+#[test]
+fn no_lend_a_vendor_placed_after_load_is_protected_from_a_joiner() {
+    let mut hs = start_open_server("live-vendor");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    hs.server.world.set_block(cell.0, cell.1, cell.2, block::VENDOR_BLOCK);
+    let mut host = crate::world::World::new();
+    host.set_block(cell.0, cell.1, cell.2, block::VENDOR_BLOCK);
+    host.insert_vendor(
+        cell,
+        crate::vendor::VendorData {
+            owner: Some(crate::vendor::VendorOwner::LocalPlayer(0)),
+            ..Default::default()
+        },
+    );
+    hs.mirror_host_world_state(&host);
+
+    send_edits(&hs, &client, slot, 1, &[(cell, block::AIR)]);
+    hs.tick();
+    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::VENDOR_BLOCK);
+}
+
 /// S4: reach is measured from the eye. A block straight overhead whose bottom
 /// face is at the client's 5-block ray limit is in reach.
 #[test]

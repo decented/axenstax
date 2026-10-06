@@ -54,8 +54,10 @@ pub enum SimSide {
 /// double-tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimSystem {
-    /// `World::tick_world_clock` (the persisted active-tick total).
-    WorldClock,
+    /// `World::tick_world_clock`: the persisted active-tick total
+    /// (`WorldMeta.total_ticks`) — not the day/night clock, which is
+    /// [`SimSystem::Clock`].
+    ActiveTicks,
     /// `world_time` and the monotonic `tick_counter`.
     Clock,
     /// The rain / storm window (`weather::advance`).
@@ -99,7 +101,7 @@ impl SimSystem {
     pub const COUNT: usize = 19;
 
     pub const ALL: [SimSystem; Self::COUNT] = [
-        SimSystem::WorldClock,
+        SimSystem::ActiveTicks,
         SimSystem::Clock,
         SimSystem::Weather,
         SimSystem::MobSpawning,
@@ -128,7 +130,7 @@ impl SimSystem {
             | SimSystem::MobAi
             | SimSystem::EntityPhysics
             | SimSystem::DespawnDead => SimSide::HostClient,
-            SimSystem::WorldClock
+            SimSystem::ActiveTicks
             | SimSystem::MobSpawning
             | SimSystem::FallingBlocks
             | SimSystem::Fluids
@@ -428,6 +430,60 @@ mod tests {
         for (i, s) in SimSystem::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }
+    }
+
+    /// D1 review fix 4 — every shared sim system has exactly one owner per
+    /// world in every mode, asked through the one predicate both sides use
+    /// (`runs_on`: `GameState::sim_runs` as `HostClient`, `GameServer::runs`
+    /// as `Server`, each with its own lent flag):
+    /// - lent host — ONE world, ticked by the host client and the server, so
+    ///   exactly one of them runs each system;
+    /// - owning host (`--no-lend`) — TWO worlds, each side runs every system
+    ///   on its own (the documented dual sim): one owner per world;
+    /// - dedicated server — the server alone, owning its world;
+    /// - single-player — the client alone (no server).
+    /// The GPU-free half of the tripwire `GameState::tick_hosted_server`
+    /// debug-asserts over a real combined tick.
+    #[test]
+    fn every_shared_system_has_exactly_one_owner_per_world_in_every_mode() {
+        use SimSide::{HostClient, Server};
+        let modes: [(&str, bool, &[&[SimSide]]); 4] = [
+            ("lent host", true, &[&[HostClient, Server]]),
+            ("owning host (--no-lend)", false, &[&[HostClient], &[Server]]),
+            ("dedicated server", false, &[&[Server]]),
+            ("single-player", false, &[&[HostClient]]),
+        ];
+        for (mode, lent, worlds) in modes {
+            for (w, sides) in worlds.iter().enumerate() {
+                for s in SimSystem::ALL {
+                    let owners = sides.iter().filter(|&&side| s.runs_on(side, lent)).count();
+                    assert_eq!(owners, 1, "{mode}, world {w}: {s:?} has {owners} owners");
+                }
+            }
+        }
+        // `ALL` is every variant once, in index order (the tally indexes by it).
+        for (i, s) in SimSystem::ALL.iter().enumerate() {
+            assert_eq!(s.index(), i, "{s:?}");
+        }
+        // Only a lending server's flag is ever set, and only inside the window.
+        let mut hs = lent_server("modes");
+        assert!(hs.lends_host_world() && !hs.server.lent);
+        let mut host = host_parts();
+        let clock = host.clock;
+        LentSim::lend(&mut hs, host.parts(), clock).tick();
+        assert!(!hs.server.lent, "cleared when the window closes");
+        assert!(
+            crate::hosted_server::HostedServer::start_host(
+                0,
+                format!("sim-lend-no-host-{}", std::process::id()),
+                42,
+                0,
+                crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+                crate::hosted_server::HostWorld::Lent,
+            )
+            .is_err(),
+            "a dedicated server has no host client to lend it a world"
+        );
     }
 
     #[test]
