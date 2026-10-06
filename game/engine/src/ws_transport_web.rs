@@ -33,6 +33,9 @@ pub struct WebSocketClientTransport {
     _on_open: Closure<dyn FnMut()>,
     _on_error: Closure<dyn FnMut(web_sys::Event)>,
     _on_close: Closure<dyn FnMut(web_sys::Event)>,
+    /// The normalised `host[:port]` of the URL the browser actually opened
+    /// (`WebSocket.url`, already punycoded) — the v66 join origin's host.
+    ws_host: String,
 }
 
 impl ClientTransport for WebSocketClientTransport {
@@ -51,6 +54,10 @@ impl ClientTransport for WebSocketClientTransport {
 
     fn is_closed(&self) -> bool {
         *self.closed.borrow()
+    }
+
+    fn ws_host(&self) -> Option<String> {
+        Some(self.ws_host.clone())
     }
 }
 
@@ -99,6 +106,14 @@ pub fn showcase_config() -> crate::showcase::ShowcaseConfig {
 /// the handshake completes asynchronously and queued sends flush on open.
 pub fn connect_ws(url: &str) -> Result<WebSocketClientTransport, String> {
     let ws = WebSocket::new(url).map_err(|e| format!("WebSocket::new({url}) failed: {e:?}"))?;
+    // The browser resolved and punycoded the URL; sign what it really dialled.
+    let ws_host = match crate::signet::ws_host::ws_url_host(&ws.url()) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = ws.close();
+            return Err(format!("Can't join '{url}': {e}"));
+        }
+    };
     ws.set_binary_type(BinaryType::Arraybuffer);
 
     let inbound: Rc<RefCell<VecDeque<Packet>>> = Rc::new(RefCell::new(VecDeque::new()));
@@ -160,5 +175,6 @@ pub fn connect_ws(url: &str) -> Result<WebSocketClientTransport, String> {
         _on_open: on_open,
         _on_error: on_error,
         _on_close: on_close,
+        ws_host,
     })
 }

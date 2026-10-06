@@ -92,9 +92,10 @@ fn hint_should_fire(shown: &mut std::collections::HashSet<Hint>, h: Hint) -> boo
     shown.insert(h)
 }
 
-/// Build the native sign-driver for an authenticated QUIC join: given the
-/// server's `nonce_hex` and the CLIENT-built `origin` (`signet::join_origin`
-/// over this connection's TLS exporter — never a server-supplied value), sign
+/// Build the native sign-driver for an authenticated QUIC or WebSocket join:
+/// given the server's `nonce_hex` and the CLIENT-built `origin`
+/// (`signet::client_join_origin`: this connection's TLS exporter, or the WS
+/// host actually dialled — never a server-supplied value), sign
 /// a kind-21236 auth event with the restored bunker on a worker thread (its own
 /// current-thread tokio runtime, mirroring `native_signin`), and deliver the signed wire event over a channel. The bunker
 /// round-trip owns its timeout (`SessionOptions`), so an offline/locked signer
@@ -131,7 +132,9 @@ fn native_join_sign_driver(
 
 /// Dial a dedicated server over WebSocket from the native client. Signed in →
 /// an AUTHENTICATED join (waits for the server's challenge, signs it with the
-/// restored bunker on a worker thread — the same driver the QUIC join uses);
+/// restored bunker on a worker thread — the same driver the QUIC join uses —
+/// over `axenstax-join:ws-host:<url's host>`, so `url` must be the address
+/// actually dialled, after any `axenstax://` / relay resolution);
 /// otherwise a guest join, which a sign-in-required server (every dedicated
 /// server by default since 2026-10-06) refuses with its reason.
 #[cfg(not(target_arch = "wasm32"))]

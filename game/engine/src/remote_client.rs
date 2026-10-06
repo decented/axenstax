@@ -329,6 +329,7 @@ pub fn build_join_request_guest(player_name: &str, skin_key: u64) -> protocol::J
         skin_key,
         client_nonce_hex: random_nonce_hex(),
         worldgen_version: crate::world::worldgen_fingerprint(),
+        ws_host: String::new(),
     }
 }
 
@@ -375,10 +376,21 @@ pub fn build_join_request(
         skin_key,
         client_nonce_hex: random_nonce_hex(),
         worldgen_version: crate::world::worldgen_fingerprint(),
+        ws_host: String::new(),
     }
 }
 
 impl RemoteClient {
+    /// The join origin THIS client signs and verifies the server's identity
+    /// proof over, built from its own transport (`signet::client_join_origin`):
+    /// the QUIC exporter, else the WebSocket host it dialled, else `unbound`.
+    fn own_join_origin(&self) -> String {
+        crate::signet::client_join_origin(
+            self.transport.channel_binding(),
+            self.transport.ws_host().as_deref(),
+        )
+    }
+
     /// Connect to a remote server as a **guest** (QUIC) — sends the JoinRequest
     /// immediately, no Signet auth. A sign-in-required host (`require_signin`)
     /// rejects this with "sign-in required"; an open server accepts it. For an
@@ -402,7 +414,7 @@ impl RemoteClient {
     /// Connect to a remote server with **verified identity** (QUIC). Does NOT
     /// send the JoinRequest on connect: it waits for the server's
     /// `ChallengePacket`, runs `driver(nonce, origin)` (origin built client-side by
-    /// `signet::join_origin` from the transport's channel binding) to sign a kind-21236 auth
+    /// `signet::client_join_origin` from the transport's channel binding) to sign a kind-21236 auth
     /// event off the main loop, then sends the JoinRequest with the signed event.
     /// The live signature (a bunker round-trip) is the owner boundary; the
     /// reordered state machine itself is unit-tested with a fake driver.
@@ -479,9 +491,10 @@ impl RemoteClient {
     /// the caller may fall back to a guest `connect_websocket`.
     /// Live callers: the native `ws://` / `axenstax://` joins in game_loop.rs
     /// (signed by the restored bunker via `native_join_sign_driver`) and the
-    /// wasm join path. Over WebSocket both ends derive the `unbound` join
-    /// origin (no channel binding), so the Spec 04 §1.8.1 relay residual
-    /// applies.
+    /// wasm join path. WebSocket has no channel binding, so the joiner signs
+    /// `axenstax-join:ws-host:<the host it dialled>` (v66) and declares that
+    /// host in the JoinRequest; a server with `--public-host` refuses any other
+    /// host (Spec 04 §1.8.1). `url` must be the address actually dialled.
     pub fn connect_websocket_authed(
         url: &str,
         player_name: &str,
@@ -507,9 +520,12 @@ impl RemoteClient {
     /// (guest path). Transport-agnostic (QUIC / WebSocket / channel).
     pub(crate) fn from_transport(
         transport: Box<dyn ClientTransport>,
-        join_req: protocol::JoinRequestPacket,
+        mut join_req: protocol::JoinRequestPacket,
         pinned_op_npub: Option<String>,
     ) -> Self {
+        // v66: a WebSocket joiner declares the host it dialled — the server
+        // checks it and signs its identity proof over it, guests included.
+        join_req.ws_host = transport.ws_host().unwrap_or_default();
         let client_nonce = hex::decode(&join_req.client_nonce_hex).unwrap_or_default();
         let packet = protocol::serialize_packet(PacketType::JoinRequest, &join_req);
         transport.send_to_server(&packet);
@@ -548,10 +564,12 @@ impl RemoteClient {
     /// it via `driver`, and only then sends (see `poll`).
     fn from_transport_authed(
         transport: Box<dyn ClientTransport>,
-        base: protocol::JoinRequestPacket,
+        mut base: protocol::JoinRequestPacket,
         driver: SignDriverFn,
         pinned_op_npub: Option<String>,
     ) -> Self {
+        // v66: declare the dialled WS host; the signed origin names the same one.
+        base.ws_host = transport.ws_host().unwrap_or_default();
         let client_nonce = hex::decode(&base.client_nonce_hex).unwrap_or_default();
         Self {
             transport,
@@ -610,9 +628,11 @@ impl RemoteClient {
                                     self.pinned_op_npub.as_deref(),
                                     accept.server_identity.as_ref(),
                                     &self.client_nonce,
-                                    // v63: verify over OUR channel binding, so
-                                    // a proof relayed from another leg fails.
-                                    self.transport.channel_binding(),
+                                    // v63/v66: verify over OUR join origin
+                                    // (channel binding, or the WS host we
+                                    // dialled), so a proof relayed from
+                                    // another leg or address fails.
+                                    &self.own_join_origin(),
                                     nostr::Timestamp::now(),
                                 ) {
                                     ServerAuthOutcome::Verified(op) => {
@@ -731,13 +751,12 @@ impl RemoteClient {
                                         }
                                         Some(d) => {
                                             // Audit fix B (v63): the origin is
-                                            // built from OUR transport's channel
-                                            // binding — never taken from the
-                                            // server, which could be a relay or
-                                            // be fishing for a web login.
-                                            let origin = crate::signet::join_origin(
-                                                self.transport.channel_binding(),
-                                            );
+                                            // built from OUR transport (channel
+                                            // binding, or the WS host we dialled,
+                                            // v66) — never taken from the server,
+                                            // which could be a relay or be
+                                            // fishing for a web login.
+                                            let origin = self.own_join_origin();
                                             let rx = d(chal.nonce_hex, origin);
                                             self.join = JoinFlow::Signing { base, rx };
                                         }
@@ -1187,6 +1206,67 @@ mod tests {
         assert_eq!(seen.lock().unwrap().as_deref(), Some(expected.as_str()));
         let req = read_join_request(&srv).expect("signed JoinRequest sent");
         assert_eq!(req.auth_event.unwrap().tags[1], vec!["origin".to_string(), expected]);
+    }
+
+    /// A client transport that dialled a WebSocket host (stands in for
+    /// `ws_transport::connect_ws`).
+    struct WsClient {
+        inner: crate::transport::ChannelClientTransport,
+        host: &'static str,
+    }
+    impl ClientTransport for WsClient {
+        fn send_to_server(&self, data: &[u8]) {
+            self.inner.send_to_server(data)
+        }
+        fn try_recv_from_server(&self) -> Option<crate::transport::Packet> {
+            self.inner.try_recv_from_server()
+        }
+        fn ws_host(&self) -> Option<String> {
+            Some(self.host.to_string())
+        }
+    }
+
+    /// v66: a WS joiner signs the host it dialled and declares the same host.
+    #[test]
+    fn authed_websocket_join_signs_and_declares_the_dialled_host() {
+        let (srv, client) = channel_pair();
+        let driver: SignDriverFn = Box::new(move |nonce, origin| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(Ok(SignedJoin { auth_event: wire_signed_over(&nonce, &origin), credential: None }))
+                .unwrap();
+            rx
+        });
+        let mut rc = RemoteClient::from_transport_authed(
+            Box::new(WsClient { inner: client, host: "play.example.org:6767" }),
+            build_join_request_guest("Axo", 0),
+            driver,
+            None,
+        );
+        let chal = protocol::ChallengePacket { nonce_hex: "d".repeat(64) };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Challenge, &chal));
+        rc.poll();
+        rc.poll();
+        let req = read_join_request(&srv).expect("signed JoinRequest sent");
+        assert_eq!(req.ws_host, "play.example.org:6767");
+        assert_eq!(
+            req.auth_event.unwrap().tags[1],
+            vec!["origin".to_string(), "axenstax-join:ws-host:play.example.org:6767".to_string()]
+        );
+    }
+
+    /// A guest WS join declares its host too: the server's identity proof (a
+    /// `#op=` pin) is signed over it.
+    #[test]
+    fn guest_websocket_join_declares_the_dialled_host() {
+        let (srv, client) = channel_pair();
+        let _rc = RemoteClient::from_transport(
+            Box::new(WsClient { inner: client, host: "[2001:db8::1]:6767" }),
+            build_join_request_guest("Axo", 0),
+            None,
+        );
+        let req = read_join_request(&srv).expect("guest JoinRequest sent at once");
+        assert_eq!(req.ws_host, "[2001:db8::1]:6767");
+        assert!(req.auth_event.is_none());
     }
 
     #[test]

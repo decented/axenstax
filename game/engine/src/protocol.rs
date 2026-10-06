@@ -123,9 +123,18 @@ pub struct JoinRequestPacket {
     /// The joiner's own [`crate::world::worldgen_fingerprint`] (v65, gap-audit
     /// T2-9). A joiner regenerates the host's terrain locally, so the host
     /// records this on the player (`ServerPlayer::worldgen_mismatch`) to know
-    /// whose terrain may differ from its own. APPEND-ONLY: stays last.
+    /// whose terrain may differ from its own.
     #[serde(default)]
     pub worldgen_version: u32,
+    /// WebSocket joins only (v66, Spec 04 §1.8.1): the normalised
+    /// `host[:port]` the joiner actually dialled (`signet::ws_host::
+    /// ws_url_host`). Its join auth event signs `axenstax-join:ws-host:<this>`,
+    /// and the server re-normalises it, checks it against its `--public-host`
+    /// list and signs its identity proof over the same origin. Empty on
+    /// QUIC / in-process joins, where it is ignored. Untrusted: a lie only
+    /// makes the signature (or the proof) fail. APPEND-ONLY: stays last.
+    #[serde(default)]
+    pub ws_host: String,
 }
 
 /// Server accepts a join request.
@@ -1143,7 +1152,15 @@ pub struct ServerAnnouncePacket {
 ///   A server that can't decode a JoinRequest still reads its leading
 ///   `protocol_version` ([`peek_protocol_version`]) so an older client gets
 ///   the mismatch reason instead of silence.
-pub const PROTOCOL_VERSION: u32 = 65;
+/// - v66 (2026-10-06): WebSocket join origin (Spec 08 §9.0.1 T-JOIN-RELAY,
+///   WebSocket residual). `JoinRequestPacket` gains trailing `ws_host: String`
+///   (the normalised `host[:port]` a WS joiner dialled). A WS join now signs
+///   `axenstax-join:ws-host:<ws_host>` instead of `axenstax-join:unbound`; a
+///   dedicated server with `--public-host` refuses any other host, and signs
+///   its `JoinAccept` identity proof over the same origin. QUIC and in-process
+///   joins are unchanged. Bumped because a v65 WS client signs `unbound`,
+///   which a v66 server refuses — the version reason is clearer.
+pub const PROTOCOL_VERSION: u32 = 66;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1305,7 +1322,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 65);
+        assert_eq!(super::PROTOCOL_VERSION, 66);
     }
 
     #[test]
@@ -1783,7 +1800,9 @@ mod tests {
         //   queue cap per QUIC client. No packet shape changed.
         // v65 (2026-10-06): JoinAccept gains world_rules + worldgen_version,
         //   JoinRequest gains worldgen_version (gap-audit T2-9).
-        assert_eq!(PROTOCOL_VERSION, 65);
+        // v66 (2026-10-06): JoinRequest gains ws_host; a WS join signs
+        //   `axenstax-join:ws-host:<host>` (T-JOIN-RELAY WebSocket residual).
+        assert_eq!(PROTOCOL_VERSION, 66);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -1904,6 +1923,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -1967,6 +1987,7 @@ mod tests {
             skin_key: 0x0123_4567_89AB_CDEF,
             client_nonce_hex: "abc123".to_string(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: "play.example.org:6767".to_string(),
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (_ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -1982,6 +2003,7 @@ mod tests {
             back.skin_key, 0x0123_4567_89AB_CDEF,
             "a populated skin reference survives the bincode round-trip"
         );
+        assert_eq!(back.ws_host, "play.example.org:6767", "v66 dialled host round-trips");
     }
 
     #[test]

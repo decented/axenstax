@@ -189,6 +189,15 @@ pub struct HostedServer {
     #[cfg(not(target_arch = "wasm32"))]
     identity: Option<crate::server_identity::ServerIdentity>,
 
+    /// v66 — the public addresses this server answers to (`--public-host`,
+    /// `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`). A WebSocket join whose
+    /// declared dialled host isn't one of them is refused, so a relayed
+    /// signature (made for the relay's address) can't get in (Spec 08 §9.0.1
+    /// T-JOIN-RELAY). Empty ⇒ any host is accepted (the residual). Set by the
+    /// dedicated server via [`HostedServer::set_ws_public_hosts`].
+    #[cfg(not(target_arch = "wasm32"))]
+    ws_public_hosts: crate::signet::ws_host::PublicHosts,
+
     /// Track 4 — operator allowlist of verified pubkeys (x-only, 32 bytes). When
     /// non-empty, only these npubs may join (a whitelist implies sign-in). Empty
     /// ⇒ no allowlist. Set by the dedicated server from config; runtime-mutable
@@ -564,6 +573,9 @@ impl HostedServer {
             // Set by the dedicated server after `start` via `set_identity`.
             #[cfg(not(target_arch = "wasm32"))]
             identity: None,
+            // Set by the dedicated server after `start` via `set_ws_public_hosts`.
+            #[cfg(not(target_arch = "wasm32"))]
+            ws_public_hosts: Default::default(),
             // Set by the dedicated server after `start` via `set_access_policy`.
             #[cfg(not(target_arch = "wasm32"))]
             whitelist: Vec::new(),
@@ -692,6 +704,14 @@ impl HostedServer {
         self.require_signin = require_signin;
         self.whitelist = whitelist;
         self.blocklist = blocklist;
+    }
+
+    /// Set the public addresses WebSocket joins must be addressed to (v66).
+    /// Empty leaves WS joins unprotected against relaying; `server_main` logs
+    /// `signet::ws_host::relay_protection_warning` once at boot in that case.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_ws_public_hosts(&mut self, hosts: crate::signet::ws_host::PublicHosts) {
+        self.ws_public_hosts = hosts;
     }
 
     /// `(players present, total slots)` — what the online host needs in order to
@@ -1340,6 +1360,21 @@ impl HostedServer {
         self.attach_remote_transport(Box::new(transport::BoundServerTransport {
             inner: server_side,
             binding,
+            websocket: false,
+        }));
+        client_side
+    }
+
+    /// Test-only: attach a remote whose server side reports `is_websocket()`
+    /// (no channel binding) — stands in for a WebSocket connection.
+    #[cfg(test)]
+    pub(crate) fn attach_test_remote_ws(&mut self) -> transport::ChannelClientTransport {
+        let (server_side, client_side) = transport::channel_pair();
+        self.current_remote.fetch_add(1, Ordering::Relaxed);
+        self.attach_remote_transport(Box::new(transport::BoundServerTransport {
+            inner: server_side,
+            binding: None,
+            websocket: true,
         }));
         client_side
     }
@@ -1426,6 +1461,31 @@ impl HostedServer {
                             break;
                         }
 
+                        // The origin this join must have signed — and the
+                        // one our identity proof is signed over — built from
+                        // OUR side, never from anything a relay supplied:
+                        // audit fix B (v63) for QUIC (this connection's TLS
+                        // exporter); v66 for WebSocket (the host the joiner
+                        // declares it dialled, re-normalised and checked
+                        // against our public hosts — guests included, since
+                        // the proof is signed over it).
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let expected_origin = if self.transports[i].is_websocket() {
+                            match crate::signet::ws_host::expected_ws_join_origin(
+                                &req.ws_host,
+                                &self.ws_public_hosts,
+                            ) {
+                                Ok(origin) => origin,
+                                Err(reason) => {
+                                    log::warn!("Rejecting JoinRequest on slot {i}: {reason}");
+                                    let _ = self.release_slot(i, Some(&reason));
+                                    break;
+                                }
+                            }
+                        } else {
+                            signet::join_origin(self.transports[i].channel_binding())
+                        };
+
                         // Phase 4 — verified identity. Verify any present
                         // auth_event (tamper/invalid → reject); reject an absent
                         // one only on a sign-in-required server. The verified
@@ -1446,12 +1506,6 @@ impl HostedServer {
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             let present_refs: Vec<&str> = present.iter().map(String::as_str).collect();
-                            // Audit fix B (v63): the expected origin comes from
-                            // THIS connection's channel binding, never from
-                            // anything the client or a relay supplied. A relayed
-                            // signature carries the other leg's exporter.
-                            let expected_origin =
-                                signet::join_origin(self.transports[i].channel_binding());
                             match resolve_join_identity(
                                 i,
                                 &req,
@@ -1587,14 +1641,15 @@ impl HostedServer {
                                 .filter(|n| !n.is_empty())
                                 .and_then(|nonce| {
                                     // Sign over the fixed domain-separation origin
-                                    // (C1) joined to THIS connection's channel
-                                    // binding (v63), so a relaying host can't
-                                    // forward our proof to a pinned client.
+                                    // (C1) joined to THIS join's origin (v63
+                                    // channel binding; v66 checked WS host), so
+                                    // a relaying host can't forward our proof to
+                                    // a pinned client.
                                     crate::server_identity::identity_proof(
                                         id,
                                         &nonce,
                                         &crate::server_identity::proof::server_identity_origin(
-                                            self.transports[i].channel_binding(),
+                                            &expected_origin,
                                         ),
                                     )
                                 })
@@ -4117,6 +4172,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         }
     }
 
@@ -4174,6 +4230,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("missing auth_event"));
@@ -4280,6 +4337,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("signature length invalid"));
@@ -4395,6 +4453,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
@@ -4411,6 +4470,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4465,6 +4525,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         // require_signin=false, but a non-empty whitelist forces sign-in.
         let allow = vec![xonly_of([0x42; 32])];
@@ -4711,6 +4772,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4748,6 +4810,7 @@ mod tests {
             skin_key: 0,
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            ws_host: String::new(),
         };
         resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
             .expect("guest");
@@ -5273,6 +5336,183 @@ mod tests {
         let (snapshot, notice) = operator_join_over("op-bound", Some([0x5a; 32]));
         assert!(snapshot, "a channel-bound operator join receives the OperatorSnapshot");
         assert!(!notice, "no notice on a direct connection");
+    }
+
+    // ── WebSocket join origin (v66, T-JOIN-RELAY WebSocket residual) ─────────
+    //
+    // A WS joiner signs `axenstax-join:ws-host:<the host it dialled>` and
+    // declares that host in its JoinRequest. A server that knows its public
+    // address refuses a signature made for any other — so a relaying server
+    // M can't replay victim V's signature (made for M) to the real server H.
+
+    use crate::signet::ws_host::{relay_protection_warning, ws_host_origin, PublicHosts};
+
+    const WS_NONCE: [u8; 32] = [0x77; 32];
+
+    /// One WebSocket join against `hs`: the joiner declares `declared` as the
+    /// host it dialled and, when `signed` is `Some((seckey, origin))`, carries
+    /// an auth event signed over `origin` (else it is a guest). Returns the
+    /// client and `Ok(JoinAccept)` / `Err(reject reason)`.
+    fn ws_join(
+        hs: &mut HostedServer,
+        declared: &str,
+        signed: Option<([u8; 32], String)>,
+    ) -> (ChannelClientTransport, Result<protocol::JoinAcceptPacket, String>) {
+        use crate::transport::ClientTransport as _;
+        let client = hs.attach_test_remote_ws();
+        let chal = loop {
+            let pkt = client.try_recv_from_server().expect("challenge issued on attach");
+            let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();
+            if ptype == protocol::PacketType::Challenge {
+                break protocol::safe_deserialize::<protocol::ChallengePacket>(payload).unwrap();
+            }
+        };
+        let mut req = match signed {
+            Some((seckey, origin)) => join_with_auth(
+                signed_auth_event(seckey, &chal.nonce_hex, &origin, current_unix_ts()),
+                None,
+            ),
+            None => crate::remote_client::build_join_request_guest("Guest", 0),
+        };
+        req.ws_host = declared.to_string();
+        req.client_nonce_hex = hex::encode(WS_NONCE);
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
+        hs.tick();
+        let mut out = None;
+        while let Some(pkt) = client.try_recv_from_server() {
+            let Some((ptype, payload)) = protocol::deserialize_header(&pkt) else { continue };
+            match ptype {
+                protocol::PacketType::JoinAccept if out.is_none() => {
+                    out = Some(Ok(protocol::safe_deserialize(payload).unwrap()));
+                }
+                protocol::PacketType::JoinReject if out.is_none() => {
+                    let r: protocol::JoinRejectPacket = protocol::safe_deserialize(payload).unwrap();
+                    out = Some(Err(r.reason));
+                }
+                _ => {}
+            }
+        }
+        (client, out.expect("neither JoinAccept nor JoinReject after tick"))
+    }
+
+    fn h_hosts() -> PublicHosts {
+        PublicHosts::parse(&["h.example.org"]).unwrap()
+    }
+
+    /// The relay scenario: V dialled M and signed for M's address; M forwards
+    /// it to H, which knows its own address.
+    #[test]
+    fn a_relayed_ws_signature_is_refused_by_a_server_that_knows_its_address() {
+        let mut h = start_room_test_server("ws-relay-h", 1);
+        h.set_ws_public_hosts(h_hosts());
+        let v = [0x44; 32];
+        let for_m = ws_host_origin("m.example.net:6767");
+        // M forwards V's JoinRequest verbatim (declaring M's host)…
+        let (_c, res) = ws_join(&mut h, "m.example.net:6767", Some((v, for_m.clone())));
+        let err = res.unwrap_err();
+        assert!(err.starts_with("auth event origin mismatch"), "{err}");
+        // …or rewrites the declared host to H's: V's signature still names M.
+        let (_c, res) = ws_join(&mut h, "h.example.org:6767", Some((v, for_m)));
+        assert!(res.unwrap_err().contains("auth event origin mismatch"));
+        // A player who really dialled H gets in.
+        let (_c, res) = ws_join(&mut h, "h.example.org:6767", Some((v, ws_host_origin("h.example.org:6767"))));
+        res.expect("an honest WS join to H's own address is accepted");
+    }
+
+    /// Without `--public-host` the residual stands (any host is accepted) and
+    /// the boot warning fires.
+    #[test]
+    fn an_unconfigured_server_still_accepts_a_relayed_ws_signature_and_warns() {
+        let mut h = start_room_test_server("ws-relay-open", 1);
+        assert!(relay_protection_warning(&h.ws_public_hosts).is_some(), "boot warning");
+        let (_c, res) =
+            ws_join(&mut h, "m.example.net:6767", Some(([0x45; 32], ws_host_origin("m.example.net:6767"))));
+        res.expect("unconfigured: the WS relay residual is accepted");
+        h.set_ws_public_hosts(h_hosts());
+        assert_eq!(relay_protection_warning(&h.ws_public_hosts), None);
+    }
+
+    /// IP-vs-domain: a player who dialled the server's IP while it answers as
+    /// its domain is told which address to use.
+    #[test]
+    fn a_ws_join_by_ip_to_a_domain_server_is_told_which_address_to_use() {
+        let mut h = start_room_test_server("ws-ip-domain", 1);
+        h.set_ws_public_hosts(h_hosts());
+        let (_c, res) =
+            ws_join(&mut h, "203.0.113.7:6767", Some(([0x46; 32], ws_host_origin("203.0.113.7:6767"))));
+        let err = res.unwrap_err();
+        assert!(err.starts_with("auth event origin mismatch"), "{err}");
+        assert!(err.contains("'203.0.113.7:6767'") && err.contains("'h.example.org'"), "{err}");
+    }
+
+    /// Guests are checked too: the identity proof is signed over their host.
+    #[test]
+    fn a_guest_ws_join_to_another_address_is_refused_when_configured() {
+        let mut h = start_room_test_server("ws-guest", 1);
+        h.set_ws_public_hosts(h_hosts());
+        let (_c, res) = ws_join(&mut h, "m.example.net:6767", None);
+        assert!(res.unwrap_err().starts_with("auth event origin mismatch"));
+        let (_c, res) = ws_join(&mut h, "h.example.org", None);
+        res.expect("a guest that dialled H is admitted on a guest-open server");
+    }
+
+    /// A v65-style WS join (signed `unbound`, no declared host) no longer passes.
+    #[test]
+    fn an_unbound_or_undeclared_ws_join_is_refused() {
+        let mut h = start_room_test_server("ws-unbound", 1);
+        let (_c, res) =
+            ws_join(&mut h, "h.example.org", Some(([0x47; 32], crate::signet::join_origin(None))));
+        assert!(res.unwrap_err().contains("auth event origin mismatch"));
+        let (_c, res) = ws_join(&mut h, "", None);
+        assert!(res.unwrap_err().contains("didn't say which address"));
+    }
+
+    /// The JoinAccept identity proof is bound to the WS host: it verifies for
+    /// a client that dialled that host and fails for one that dialled a relay.
+    #[test]
+    fn the_ws_identity_proof_is_bound_to_the_dialled_host() {
+        use nostr::ToBech32;
+        let mut h = start_room_test_server("ws-proof", 1);
+        h.set_identity(Some(operator_paired_identity("ws-proof")));
+        h.set_ws_public_hosts(h_hosts());
+        let (_c, res) = ws_join(&mut h, "h.example.org:6767", None);
+        let accept = res.expect("guest join to H's address");
+        let proof = accept.server_identity.expect("a provisioned server sends a proof");
+        let npub = nostr::Keys::new(nostr::SecretKey::from_slice(&OPERATOR_SECKEY).unwrap())
+            .public_key()
+            .to_bech32()
+            .unwrap();
+        use crate::server_identity::proof::{evaluate_server_identity, ServerAuthOutcome};
+        let now = nostr::Timestamp::now();
+        let at_h = ws_host_origin("h.example.org:6767");
+        assert_eq!(
+            evaluate_server_identity(Some(&npub), Some(&proof), &WS_NONCE, &at_h, now),
+            ServerAuthOutcome::Verified(npub.clone())
+        );
+        let at_m = ws_host_origin("m.example.net:6767");
+        assert!(matches!(
+            evaluate_server_identity(Some(&npub), Some(&proof), &WS_NONCE, &at_m, now),
+            ServerAuthOutcome::Refused(_)
+        ));
+    }
+
+    /// Operator privileges still need a channel-bound (QUIC) join, even when
+    /// the WS join is relay-protected by a configured public host.
+    #[test]
+    fn a_relay_protected_ws_operator_join_still_gets_no_snapshot() {
+        use crate::transport::ClientTransport as _;
+        let mut h = start_room_test_server("ws-op", 1);
+        h.set_identity(Some(operator_paired_identity("ws-op")));
+        h.set_ws_public_hosts(h_hosts());
+        let (client, res) =
+            ws_join(&mut h, "h.example.org", Some((OPERATOR_SECKEY, ws_host_origin("h.example.org"))));
+        res.expect("the operator plays normally over WS");
+        h.broadcast_operator_snapshot();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((ptype, _)) = protocol::deserialize_header(&pkt) {
+                assert_ne!(ptype, protocol::PacketType::OperatorSnapshot, "no snapshot over WS");
+            }
+        }
     }
 }
 

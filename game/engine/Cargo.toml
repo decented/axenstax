@@ -95,6 +95,10 @@ quinn = "0.11"
 # tasks. Native-only: browsers use `web_sys::WebSocket` (see ws_transport_web.rs).
 tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Punycode for the WebSocket join origin's dialled host (`signet::ws_host`,
+# protocol v66). Already in the tree via `url` (nostr, ureq, igd-next), so no new
+# crate is built. Native-only: the browser punycodes `WebSocket.url` itself.
+idna = "1"
 # SIGINT/SIGTERM handler so the dedicated server saves the world on graceful
 # shutdown (`docker stop` sends SIGTERM). Native-only, dependency-light.
 ctrlc = "3"

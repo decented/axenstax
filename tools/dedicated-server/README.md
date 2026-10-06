@@ -104,6 +104,32 @@ Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
   (the native Join dialog accepts `ws://`/`wss://` URLs as well as the legacy
   `ip:port` QUIC form).
 
+### Public address (relay protection)
+
+Since protocol v66 every WebSocket join is signed for the address the player
+dialled (`axenstax-join:ws-host:<host[:port]>`). Tell the server its public
+address(es) and it refuses joins signed for anything else, so another server
+can't pass a player's sign-in on to yours and join as them:
+
+```yaml
+      AXENSTAX_PUBLIC_HOST: "play.example.org,192.168.1.20"   # or --public-host (repeatable)
+```
+
+`AXENSTAX_DOMAIN` is added to the list automatically. An entry without a port
+covers every port on that host (`wss://host/ws`, `wss://host:8443/ws`,
+`ws://host:6767`); `host:port` covers that port only. List every address players
+(and browsers opening the `:8443` page) use: a join by any other address is
+refused with "you connected to '…', but this server only accepts joins addressed
+to '…'". With nothing set the start-up log warns `WebSocket joins are not
+relay-protected: set --public-host …` and any address is accepted, as before v66.
+A malformed entry stops the server at start-up. **Upgrading:** if you already set
+`AXENSTAX_PUBLIC_HOST` or `AXENSTAX_DOMAIN`, the check is now on — add any other
+address your players use (for example the LAN IP). If your existing value carries
+a port (older docs said `host:port`), drop the port or add the bare host too: a
+`host:6767` entry admits only `ws://host:6767`, not the Caddy `wss://` paths. Operator tools still need a
+direct QUIC connection. Details: `docs/operators/dedicated-server.md`, Spec 04
+§1.8.1.
+
 ## Configuration (env in `docker-compose.yml`)
 
 | Var | Default | Meaning |
@@ -173,7 +199,7 @@ Identity configuration (env in `docker-compose.yml`):
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
 | `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
-| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | `host:port` advertised in the connect-string |
+| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | Public host name(s)/IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all are the addresses WebSocket joins must be signed for (see "Public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
 
 A bare `ws://host:6767` join stays anonymous; a connect-string with `#op=npub…`
@@ -343,6 +369,8 @@ Caddy then fetches a real Let's Encrypt certificate — players just open
 In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 `AXENSTAX_DOMAIN: "play.example.com"`, then `./build.sh && docker compose up -d`.
 (The self-signed `:8443` front is used only when `AXENSTAX_DOMAIN` is unset.)
+The domain also becomes the server's public address for join checks (see "Public
+address"); add any other address players use to `AXENSTAX_PUBLIC_HOST`.
 
 ## Deploying on a NAS
 

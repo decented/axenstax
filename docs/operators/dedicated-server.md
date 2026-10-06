@@ -131,6 +131,45 @@ On a no-domain box the Caddy front uses a self-signed certificate, so a `wss://`
 join needs that certificate trusted on the player's machine; use a real domain
 (see "Deploying on a VPS") to avoid that.
 
+### Tell the server its public address (recommended)
+
+A signed-in player's join is signed for the address they typed (since protocol
+v66): `play.example.org`, `203.0.113.7:6767` and so on. If the server knows its own
+public address, it refuses a join signed for any other one. That stops a hostile
+server from passing a player's sign-in on to yours and joining **as them** (it
+could otherwise forward the join, because `ws://` / `wss://` has no end-to-end
+binding — the TLS ends at Caddy).
+
+| Set | Example | Notes |
+|-----|---------|-------|
+| `AXENSTAX_PUBLIC_HOST` (or `--public-host`, repeatable) | `play.example.org` or `play.example.org,192.168.1.20` | Comma-separated host names or IPs, each optionally `:port`. The first is also the one advertised in the connect-string |
+| `AXENSTAX_DOMAIN` | `play.example.com` | Already set on a VPS with a real domain; it is added to the list automatically |
+
+- **An entry without a port covers every port** on that host (`wss://host/ws`
+  through Caddy, `wss://host:8443/ws`, `ws://host:6767`). With a port it covers
+  only that port (`:443` / `:80` also cover a join that left the port out).
+- **List every address players use.** A player who joins by an address that is
+  not on the list is refused with: *you connected to '203.0.113.7:6767', but this
+  server only accepts joins addressed to 'play.example.org'. Reconnect using that
+  address.* If your LAN players join by the box's local IP, add it as another entry.
+- **Check:** the start-up log says `public host: 'play.example.org' …`. With
+  nothing set it warns instead: `WebSocket joins are not relay-protected: set
+  --public-host …` — the server then accepts a join signed for any address, as
+  before.
+- A malformed entry (a scheme, a path, a bad port) stops the server at start-up
+  with the reason.
+- Operator tools still need a direct (QUIC) connection, whatever you set here.
+
+> **Upgrading from an engine before protocol v66?** If you already set
+> `AXENSTAX_PUBLIC_HOST`, `--public-host` or `AXENSTAX_DOMAIN`, the check is now on:
+> players who join by a different address (for example the LAN IP of a box that
+> also has a domain) are refused until you add that address to
+> `AXENSTAX_PUBLIC_HOST`. **If your existing value carries a port** (older docs
+> said `host:port`), drop the port or add the bare host as a second entry: a
+> `host:6767` entry admits only `ws://host:6767`, so browsers coming through
+> Caddy (`wss://host/ws`, `wss://host:8443/ws`) would be refused. Players also
+> need a v66 game build to join.
+
 ---
 
 ## Configuration
@@ -177,7 +216,7 @@ docker compose run --rm axenstax-server axenstax-engine --refresh-delegation
 | `AXENSTAX_REQUIRE_VERIFIED` | `0` | `1` ⇒ refuse to start without a valid, non-expired attestation |
 | `AXENSTAX_IDENTITY_DIR` | `<worlds>/.identity` | where the runtime key + attestation + session live |
 | `AXENSTAX_PAIR_RELAY` | `wss://relay.damus.io` | public relay used for the NIP-46 pairing round-trip (`--pair-relay` on the CLI); also the default `AXENSTAX_ADMIN_RELAY` |
-| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | `host:port` advertised in the connect-string |
+| `AXENSTAX_PUBLIC_HOST` | _(unset)_ | This server's public host name(s) or IP(s), comma-separated (`--public-host`, repeatable). The first is advertised in the connect-string as `axenstax://<host>:<ws port>`; all of them are the addresses joins must be signed for (see "Tell the server its public address") |
 | `AXENSTAX_DELEGATION_DAYS` | `90` | validity window minted at pairing time |
 
 A bare `ws://host:6767` join stays anonymous; a connect-string with `#op=npub…`
@@ -248,6 +287,10 @@ Caddy then fetches a real Let's Encrypt certificate — players just open
 
 In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 `AXENSTAX_DOMAIN: "play.example.com"`, then `./build.sh && docker compose up -d`.
+
+The domain also becomes the server's public address for join checks (see "Tell
+the server its public address"): players who join by the box's IP instead are
+refused, so add any other address they use to `AXENSTAX_PUBLIC_HOST`.
 
 ---
 

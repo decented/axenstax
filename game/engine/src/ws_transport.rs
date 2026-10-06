@@ -54,6 +54,9 @@ impl ServerTransport for WebSocketServerTransport {
     fn try_recv_from_client(&self) -> Option<Packet> {
         self.inbound.try_recv().ok()
     }
+    fn is_websocket(&self) -> bool {
+        true
+    }
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
@@ -71,6 +74,8 @@ pub const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct WebSocketClientTransport {
     outbound: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     inbound: mpsc::Receiver<Packet>,
+    /// The normalised `host[:port]` this socket dialled (v66 join origin).
+    ws_host: String,
     _thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -80,6 +85,9 @@ impl ClientTransport for WebSocketClientTransport {
     }
     fn try_recv_from_server(&self) -> Option<Packet> {
         self.inbound.try_recv().ok()
+    }
+    fn ws_host(&self) -> Option<String> {
+        Some(self.ws_host.clone())
     }
     /// The bridge thread returns when the socket closes or errors.
     fn is_closed(&self) -> bool {
@@ -250,7 +258,13 @@ pub fn spawn_ws_accept_thread(
 /// Bytes queued via `send_to_server` before the socket opens are flushed once
 /// connected. Native joiners use `ws://host:6767`; the browser uses the
 /// Caddy-fronted `wss://host:8443/ws`.
+///
+/// `url` must be the address actually dialled (after any `axenstax://` /
+/// relay resolution): its normalised host becomes the join origin the player
+/// signs (v66), so a URL whose host can't be normalised is refused here.
 pub fn connect_ws(url: &str) -> Result<WebSocketClientTransport, String> {
+    let ws_host = crate::signet::ws_host::ws_url_host(url)
+        .map_err(|e| format!("Can't join '{url}': {e}"))?;
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (in_tx, in_rx) = mpsc::channel::<Packet>();
     let url = url.to_string();
@@ -295,7 +309,7 @@ pub fn connect_ws(url: &str) -> Result<WebSocketClientTransport, String> {
         })
         .map_err(|e| format!("Failed to spawn ws client thread: {e}"))?;
 
-    Ok(WebSocketClientTransport { outbound: out_tx, inbound: in_rx, _thread: Some(handle) })
+    Ok(WebSocketClientTransport { outbound: out_tx, inbound: in_rx, ws_host, _thread: Some(handle) })
 }
 
 #[cfg(test)]

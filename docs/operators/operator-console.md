@@ -36,6 +36,12 @@ The honest line, which the UI keeps: **identity is _verified_; the privacy postu
 is _declared_.** The open-source default build genuinely honours "no tracking";
 trusting a modified build is a reputation matter.
 
+It also does not set the server's **public address** (the relay protection for
+WebSocket joins, protocol v66) — neither the setup wizard nor the dashboard has
+that field yet. Set `AXENSTAX_PUBLIC_HOST` (and/or `AXENSTAX_DOMAIN`) in
+`docker-compose.yml`; see "Tell the server its public address" in the
+[dedicated server guide](dedicated-server.md).
+
 ---
 
 ## Prerequisites

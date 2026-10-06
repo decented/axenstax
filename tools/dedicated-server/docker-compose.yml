@@ -42,9 +42,14 @@ services:
       # AXENSTAX_SEED: "12345"           # optional — fixed terrain for a new world
       # --- VPS with a real domain (optional; see README) ---
       # AXENSTAX_DOMAIN: "play.example.com"  # set → Caddy gets a real Let's Encrypt cert on :443
+      #                                      #   (also a public host for join checks, below)
       # --- Verified operator identity (optional; see README) ---
       # AXENSTAX_REQUIRE_VERIFIED: "0"   # "1" → refuse to boot without a valid attestation
-      # AXENSTAX_PUBLIC_HOST: ""         # host:port advertised in the connect-string
+      # Public address(es) players use — comma list of host or host:port. Joins
+      # signed for any other address are refused (relay protection, protocol v66);
+      # unset → any address is accepted and the log warns. The first entry is the
+      # host advertised in the connect-string. List the LAN IP too if players use it.
+      # AXENSTAX_PUBLIC_HOST: "play.example.com,192.168.1.20"
       # AXENSTAX_PAIR_RELAY: "wss://relay.damus.io"   # any public relay you trust
       # AXENSTAX_DELEGATION_DAYS: "90"
       # --- Access control (optional; see README) ---

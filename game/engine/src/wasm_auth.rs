@@ -66,8 +66,12 @@ pub fn register_boot_hooks() {
 // upstream Signet change. `auth.js` exposes `__axenstax_sign_auth_event`; this
 // module calls it and adapts the async JS Promise into the synchronous
 // `RemoteClient` handshake via a channel. LIVE browser+phone verification is the
-// owner boundary; the dedicated server stays guest-open, so a missing/failed
-// signer degrades to a guest join (`has_js_signer` gate at the call site).
+// owner boundary. A missing/failed signer degrades to a guest join
+// (`has_js_signer` gate at the call site), which a dedicated server refuses
+// unless its operator admits guests: sign-in is required by default since
+// 2026-10-06 (`--allow-guests` opens it; Spec 04 §1.8). The web build is the
+// anonymous offline taster and has no signer today (audit 2026-10-04), so in
+// practice this path is a guest join.
 
 /// Whether a sign-capable signer is currently retained on the page. The WASM
 /// JoinGame path uses this to choose an authenticated vs guest join — false on
@@ -90,7 +94,8 @@ pub fn has_js_signer() -> bool {
 
 /// Build a [`crate::remote_client::SignDriverFn`] that signs the join auth event
 /// in the browser. Given the server's nonce and the client-built origin
-/// (`signet::join_origin`; `axenstax-join:unbound` on web) it calls the JS hook,
+/// (`signet::client_join_origin`: `axenstax-join:ws-host:<the host the page's
+/// WebSocket dialled>`, v66) it calls the JS hook,
 /// awaits the Promise on the microtask queue (`spawn_local`), parses the signed
 /// event, and delivers it over the channel `RemoteClient::poll` drains.
 pub fn js_sign_driver() -> crate::remote_client::SignDriverFn {

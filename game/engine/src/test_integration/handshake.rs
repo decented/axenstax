@@ -184,7 +184,10 @@ fn protocol_version_is_the_pinned_value() {
     //   client with more than 8 MiB queued. No packet shape changed.
     // v65 (2026-10-06): JoinAccept gains `world_rules` + `worldgen_version`,
     //   JoinRequest gains `worldgen_version` (gap-audit T2-9).
-    assert_eq!(protocol::PROTOCOL_VERSION, 65);
+    // v66 (2026-10-06): JoinRequest gains `ws_host`; a WebSocket join signs
+    //   `axenstax-join:ws-host:<dialled host>` and a server with
+    //   `--public-host` refuses any other host (T-JOIN-RELAY WS residual).
+    assert_eq!(protocol::PROTOCOL_VERSION, 66);
 }
 
 #[test]
@@ -197,6 +200,7 @@ fn join_request_round_trips_bincode() {
         skin_key: 0,
         client_nonce_hex: String::new(),
         worldgen_version: crate::world::worldgen_fingerprint(),
+        ws_host: String::new(),
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinRequest, &req);
     let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

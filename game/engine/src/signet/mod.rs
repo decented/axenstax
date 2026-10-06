@@ -26,6 +26,10 @@ pub mod verify;
 // never touch the wasm32 bundle. The WASM sign-in path lives in `auth.js`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_signer;
+// WebSocket join origin (v66): the dialled-host normaliser both ends use, plus
+// the dedicated server's public-host check. Cross-platform — the browser's WS
+// client declares its dialled host too; the server half is native-only inside.
+pub mod ws_host;
 // Wire DTOs are cross-platform — a WASM client builds and sends them inside
 // `JoinRequestPacket`. Only the in-memory crypto types + verify call sites
 // stay native-only.
@@ -67,8 +71,10 @@ pub use wire::WireError;
 /// BOTH sides build it from their OWN transport — the client never signs an
 /// origin the server supplied. With a channel binding (the QUIC connection's TLS
 /// keying-material exporter, `network::channel_binding_of`) it is
-/// `axenstax-join:tls-exporter:<64 lowercase hex>`; without one (WebSocket,
-/// in-process channel) it is `axenstax-join:unbound`.
+/// `axenstax-join:tls-exporter:<64 lowercase hex>`; without one (in-process
+/// channel, or an exporter failure) it is `axenstax-join:unbound`. A WebSocket
+/// join signs the address it dialled instead — see [`client_join_origin`] and
+/// [`ws_host`] (protocol v66).
 ///
 /// - **Relay:** a malicious host M that forwards a real host H's challenge to a
 ///   victim V gets V's signature over the V↔M exporter; H computes the H↔M
@@ -79,13 +85,26 @@ pub use wire::WireError;
 ///   `https://` website origin, so a join signature can never double as a
 ///   website sign-in, on any transport.
 ///
-/// Residual: WebSocket TLS terminates at the reverse proxy, so there is no
-/// end-to-end binding there (`unbound`) and a relay is not detected on that
-/// transport. The oracle is still closed.
+/// WebSocket TLS terminates at the reverse proxy, so there is no end-to-end
+/// binding there; a WS join is bound to its dialled host instead
+/// (`axenstax-join:ws-host:<host[:port]>`), which a server with `--public-host`
+/// checks. The oracle is closed on every transport.
 pub fn join_origin(binding: Option<[u8; 32]>) -> String {
     match binding {
         Some(b) => format!("{JOIN_ORIGIN_BOUND_PREFIX}{}", hex::encode(b)),
         None => JOIN_ORIGIN_UNBOUND.to_string(),
+    }
+}
+
+/// The origin a JOINER signs, from its own transport: the QUIC exporter when
+/// there is one, else the normalised host it dialled over WebSocket
+/// (`ws_host::ws_host_origin`), else `unbound` (in-process channel). The
+/// server builds the same value from its side (`hosted_server`).
+pub fn client_join_origin(binding: Option<[u8; 32]>, ws_host: Option<&str>) -> String {
+    match (binding, ws_host) {
+        (Some(b), _) => join_origin(Some(b)),
+        (None, Some(h)) => ws_host::ws_host_origin(h),
+        (None, None) => join_origin(None),
     }
 }
 
@@ -112,6 +131,15 @@ mod join_origin_tests {
             join_origin(Some(b)),
             format!("axenstax-join:tls-exporter:ab{}01", "00".repeat(30))
         );
+    }
+
+    #[test]
+    fn client_origin_prefers_the_binding_then_the_dialled_ws_host() {
+        use super::client_join_origin;
+        let b = [0xcd; 32];
+        assert_eq!(client_join_origin(Some(b), Some("h:1")), join_origin(Some(b)));
+        assert_eq!(client_join_origin(None, Some("h:1")), "axenstax-join:ws-host:h:1");
+        assert_eq!(client_join_origin(None, None), "axenstax-join:unbound");
     }
 
     #[test]

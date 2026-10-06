@@ -470,6 +470,7 @@ dependencies = [
  "hecs",
  "hex",
  "hmac 0.13.0",
+ "idna",
  "igd-next",
  "image",
  "js-sys",

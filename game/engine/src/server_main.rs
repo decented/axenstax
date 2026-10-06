@@ -151,10 +151,53 @@ fn cli_runtime() -> tokio::runtime::Runtime {
     }
 }
 
+/// Every value of a repeatable `--key value` flag, in order.
+fn cli_values(args: &[String], key: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, a)| *a == key)
+        .filter_map(|(i, _)| args.get(i + 1).cloned())
+        .collect()
+}
+
+/// The configured public addresses, in order: every `--public-host` (each may
+/// also be a comma list) or else `AXENSTAX_PUBLIC_HOST` (comma list); then
+/// `AXENSTAX_DOMAIN` (the ACME/Caddy domain) when set. Pure over its inputs.
+/// The first is the one advertised (connect-string, Server Card); all of them
+/// are the hosts a WebSocket join may be addressed to (v66).
+fn public_host_entries(cli: &[String], env_hosts: Option<&str>, env_domain: Option<&str>) -> Vec<String> {
+    let split = |v: &str| -> Vec<String> {
+        v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+    let mut out: Vec<String> = cli.iter().flat_map(|v| split(v)).collect();
+    if out.is_empty() {
+        out = env_hosts.map(split).unwrap_or_default();
+    }
+    if let Some(d) = env_domain.map(str::trim).filter(|d| !d.is_empty()) {
+        out.push(d.to_string());
+    }
+    out
+}
+
+fn public_host_entries_from(args: &[String]) -> Vec<String> {
+    public_host_entries(
+        &cli_values(args, "--public-host"),
+        std::env::var("AXENSTAX_PUBLIC_HOST").ok().as_deref(),
+        std::env::var("AXENSTAX_DOMAIN").ok().as_deref(),
+    )
+}
+
+/// The ONE advertised public host (connect-string, Server Card endpoint,
+/// pairing): the first `--public-host` / `AXENSTAX_PUBLIC_HOST` entry.
+/// `AXENSTAX_DOMAIN` is not used here (unchanged behaviour).
 fn public_host(args: &[String]) -> Option<String> {
-    cli_value(args, "--public-host")
-        .or_else(|| std::env::var("AXENSTAX_PUBLIC_HOST").ok())
-        .filter(|s| !s.is_empty())
+    public_host_entries(
+        &cli_values(args, "--public-host"),
+        std::env::var("AXENSTAX_PUBLIC_HOST").ok().as_deref(),
+        None,
+    )
+    .into_iter()
+    .next()
 }
 
 fn delegation_days(args: &[String]) -> u64 {
@@ -700,6 +743,17 @@ pub fn run(args: &[String]) {
     }
     let cfg = parse_config(args);
 
+    // v66 — the addresses WebSocket joins must be addressed to (relay
+    // protection, Spec 08 §9.0.1 T-JOIN-RELAY). A typo must refuse to boot,
+    // not silently leave the server unprotected.
+    let public_hosts = match crate::signet::ws_host::PublicHosts::parse(&public_host_entries_from(args)) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("{e} (from --public-host / AXENSTAX_PUBLIC_HOST / AXENSTAX_DOMAIN)");
+            std::process::exit(1);
+        }
+    };
+
     // Server identity (Heartwood-backed). Loaded before anything starts so
     // `AXENSTAX_REQUIRE_VERIFIED` can refuse to boot; additive otherwise.
     let identity = crate::server_identity::load(&id_dir()).ok().flatten();
@@ -799,6 +853,11 @@ pub fn run(args: &[String]) {
             log::info!("  identity   : anonymous (run --pair-server to add one)")
         }
     }
+    match crate::signet::ws_host::relay_protection_warning(&public_hosts) {
+        Some(w) => log::warn!("  public host: none — {w}"),
+        None => log::info!("  public host: {} (WebSocket joins to any other address are refused)", public_hosts.describe()),
+    }
+    hs.set_ws_public_hosts(public_hosts);
     log::info!("  native join: ws://<host>:{}", cfg.ws_port);
     log::info!("  web join   : open the Caddy HTTPS URL (wss://<host>/ws)");
     log::info!("──────────────────────────────────────────────");
@@ -1098,6 +1157,26 @@ mod tests {
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("axe_srvmain_{}_{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn public_host_entries_cli_wins_env_is_comma_split_and_domain_is_added() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Repeatable CLI flag (each may be a comma list) beats the env list.
+        let args = a(&["--server", "--public-host", "play.example.org", "--public-host", "203.0.113.7:6767,lan.local"]);
+        assert_eq!(cli_values(&args, "--public-host"), a(&["play.example.org", "203.0.113.7:6767,lan.local"]));
+        assert_eq!(
+            public_host_entries(&cli_values(&args, "--public-host"), Some("ignored.example"), Some("d.example")),
+            a(&["play.example.org", "203.0.113.7:6767", "lan.local", "d.example"])
+        );
+        // No CLI → env comma list; blanks dropped.
+        assert_eq!(
+            public_host_entries(&[], Some(" a.example , ,b.example:6767"), None),
+            a(&["a.example", "b.example:6767"])
+        );
+        // Only the ACME domain → it alone protects the server.
+        assert_eq!(public_host_entries(&[], None, Some("play.example.org")), a(&["play.example.org"]));
+        assert!(public_host_entries(&[], Some(""), Some(" ")).is_empty());
     }
 
     #[test]

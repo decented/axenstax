@@ -39,6 +39,13 @@ pub trait ServerTransport: MaybeSend {
     fn channel_binding(&self) -> Option<[u8; 32]> {
         None
     }
+    /// Whether this connection is a WebSocket. A WS join has no channel
+    /// binding; its origin is the host the joiner declares it dialled
+    /// (`JoinRequestPacket::ws_host`), checked against the server's public
+    /// hosts (`signet::ws_host::expected_ws_join_origin`, protocol v66).
+    fn is_websocket(&self) -> bool {
+        false
+    }
     /// Whether the underlying connection is gone for good (peer closed, read
     /// error, idle timeout). `HostedServer` polls this every tick and frees
     /// the slot, so a laptop lid closing never leaves a ghost player holding a
@@ -57,6 +64,12 @@ pub trait ClientTransport: MaybeSend {
     /// [`ServerTransport::channel_binding`] — equal on both ends of one QUIC
     /// connection. `None` without one.
     fn channel_binding(&self) -> Option<[u8; 32]> {
+        None
+    }
+    /// For a WebSocket: the normalised `host[:port]` actually dialled
+    /// (`signet::ws_host::ws_url_host`), which the joiner declares in its
+    /// JoinRequest and signs into its join origin. `None` for other transports.
+    fn ws_host(&self) -> Option<String> {
         None
     }
     /// Whether the link to the server is gone for good (the host quit,
@@ -155,6 +168,8 @@ impl ClientTransport for ChannelClientTransport {
 pub struct BoundServerTransport {
     pub inner: ChannelServerTransport,
     pub binding: Option<[u8; 32]>,
+    /// Report `is_websocket()` (stands in for a WebSocket connection).
+    pub websocket: bool,
 }
 
 #[cfg(test)]
@@ -167,6 +182,9 @@ impl ServerTransport for BoundServerTransport {
     }
     fn channel_binding(&self) -> Option<[u8; 32]> {
         self.binding
+    }
+    fn is_websocket(&self) -> bool {
+        self.websocket
     }
     fn is_closed(&self) -> bool {
         self.inner.is_closed()

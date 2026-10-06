@@ -25,15 +25,19 @@ use crate::signet::verify::schnorr_verify_bip340;
 pub const SERVER_IDENTITY_ORIGIN: &str = "axenstax:server-identity:v1";
 
 /// The origin the join proof is actually signed and verified over (protocol v63,
-/// audit fix B): `SERVER_IDENTITY_ORIGIN + "|" + signet::join_origin(binding)`,
-/// where `binding` is each side's OWN view of the QUIC TLS exporter. Without the
-/// binding, a relaying host M could forward a pinned client's nonce to the real
-/// host H and hand H's proof back, so the client would show "verified operator"
-/// while talking to M. With it, H's proof carries the H↔M exporter and the
-/// client (on V↔M) refuses it. Residual: WebSocket is unbound on both legs
-/// (TLS ends at the proxy), so there a relay still passes.
-pub fn server_identity_origin(binding: Option<[u8; 32]>) -> String {
-    format!("{SERVER_IDENTITY_ORIGIN}|{}", crate::signet::join_origin(binding))
+/// audit fix B; v66 for WebSocket): `SERVER_IDENTITY_ORIGIN + "|" + join_origin`,
+/// where `join_origin` is each side's OWN view of the join: the QUIC TLS
+/// exporter origin, or for WebSocket `axenstax-join:ws-host:<dialled host>`
+/// (the client's own URL; the server's checked copy of the declared host).
+/// Without the binding, a relaying host M could forward a pinned client's
+/// nonce to the real host H and hand H's proof back, so the client would show
+/// "verified operator" while talking to M. With it, H's proof carries the H↔M
+/// exporter (QUIC) or H's own address (WS, when H has `--public-host`) and the
+/// client (on V↔M) refuses it. Residual: a WS server with no public host
+/// configured signs for whatever host the joiner declares, so there a relay
+/// that declares its own address still passes.
+pub fn server_identity_origin(join_origin: &str) -> String {
+    format!("{SERVER_IDENTITY_ORIGIN}|{join_origin}")
 }
 
 /// The client's join-time verdict on a server's identity (C1).
@@ -123,13 +127,13 @@ pub fn verify_server_proof(
 /// connect-string `#op=` fragment, `None` = anonymous) and the proof the server
 /// returned in `JoinAccept`, decide whether to trust, refuse, or ignore. Pure +
 /// total, so the connect flow just maps the outcome to a state transition. The
-/// proof is verified over [`server_identity_origin`] of the client's OWN
-/// transport channel binding.
+/// proof is verified over [`server_identity_origin`] of the client's OWN join
+/// origin (`signet::client_join_origin`).
 pub fn evaluate_server_identity(
     pinned_op_npub: Option<&str>,
     proof: Option<&ServerIdentityProof>,
     client_nonce: &[u8],
-    binding: Option<[u8; 32]>,
+    join_origin: &str,
     now: Timestamp,
 ) -> ServerAuthOutcome {
     let Some(pin) = pinned_op_npub else {
@@ -140,7 +144,7 @@ pub fn evaluate_server_identity(
             "you pinned an operator, but this server offered no identity proof".to_string(),
         );
     };
-    let origin = server_identity_origin(binding);
+    let origin = server_identity_origin(join_origin);
     match verify_server_proof(proof, client_nonce, &origin, pin, now) {
         Ok(op) => ServerAuthOutcome::Verified(op.to_bech32().unwrap_or_default()),
         Err(e) => ServerAuthOutcome::Refused(format!("server identity check failed: {e:?}")),
@@ -153,6 +157,10 @@ mod tests {
     use crate::server_identity::attestation::mint_attestation;
     use crate::server_identity::store::generate_runtime;
     use nostr::Keys;
+
+    fn jo(binding: Option<[u8; 32]>) -> String {
+        crate::signet::join_origin(binding)
+    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("axe_proof_{}_{}", tag, std::process::id()))
@@ -329,7 +337,7 @@ mod tests {
     #[test]
     fn anonymous_when_no_operator_pinned() {
         // No `#op=` in the connect string → ignore any proof, join anonymously.
-        let out = evaluate_server_identity(None, None, NONCE, None, Timestamp::from(1));
+        let out = evaluate_server_identity(None, None, NONCE, &jo(None), Timestamp::from(1));
         assert_eq!(out, ServerAuthOutcome::Anonymous);
     }
 
@@ -339,9 +347,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let op = Keys::generate();
         let id = provisioned(&dir, &op).await;
-        let proof = identity_proof(&id, NONCE, &server_identity_origin(None)).unwrap();
+        let proof = identity_proof(&id, NONCE, &server_identity_origin(&jo(None))).unwrap();
         let npub = op.public_key().to_bech32().unwrap();
-        let out = evaluate_server_identity(Some(&npub), Some(&proof), NONCE, None, Timestamp::from(100));
+        let out = evaluate_server_identity(Some(&npub), Some(&proof), NONCE, &jo(None), Timestamp::from(100));
         assert_eq!(out, ServerAuthOutcome::Verified(npub));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -349,7 +357,7 @@ mod tests {
     #[test]
     fn refused_when_pinned_but_no_proof_offered() {
         // Pinned an operator but the server sent no proof (unprovisioned / older) → refuse.
-        let out = evaluate_server_identity(Some("npub1whatever"), None, NONCE, None, Timestamp::from(1));
+        let out = evaluate_server_identity(Some("npub1whatever"), None, NONCE, &jo(None), Timestamp::from(1));
         assert!(matches!(out, ServerAuthOutcome::Refused(_)));
     }
 
@@ -359,10 +367,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let op = Keys::generate();
         let id = provisioned(&dir, &op).await;
-        let proof = identity_proof(&id, NONCE, &server_identity_origin(None)).unwrap();
+        let proof = identity_proof(&id, NONCE, &server_identity_origin(&jo(None))).unwrap();
         let other_npub = Keys::generate().public_key().to_bech32().unwrap();
         let out =
-            evaluate_server_identity(Some(&other_npub), Some(&proof), NONCE, None, Timestamp::from(100));
+            evaluate_server_identity(Some(&other_npub), Some(&proof), NONCE, &jo(None), Timestamp::from(100));
         assert!(matches!(out, ServerAuthOutcome::Refused(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -376,11 +384,11 @@ mod tests {
     fn server_identity_origin_appends_the_join_origin() {
         let b = [0x11; 32];
         assert_eq!(
-            server_identity_origin(Some(b)),
+            server_identity_origin(&jo(Some(b))),
             format!("{SERVER_IDENTITY_ORIGIN}|{}", crate::signet::join_origin(Some(b)))
         );
         assert_eq!(
-            server_identity_origin(None),
+            server_identity_origin(&jo(None)),
             format!("{SERVER_IDENTITY_ORIGIN}|axenstax-join:unbound")
         );
     }
@@ -392,9 +400,9 @@ mod tests {
         let op = Keys::generate();
         let id = provisioned(&dir, &op).await;
         let a = Some([0xaa; 32]);
-        let proof = identity_proof(&id, NONCE, &server_identity_origin(a)).unwrap();
+        let proof = identity_proof(&id, NONCE, &server_identity_origin(&jo(a))).unwrap();
         let npub = op.public_key().to_bech32().unwrap();
-        let out = evaluate_server_identity(Some(&npub), Some(&proof), NONCE, a, Timestamp::from(100));
+        let out = evaluate_server_identity(Some(&npub), Some(&proof), NONCE, &jo(a), Timestamp::from(100));
         assert_eq!(out, ServerAuthOutcome::Verified(npub));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -406,13 +414,13 @@ mod tests {
         let op = Keys::generate();
         let id = provisioned(&dir, &op).await;
         // H signed on the H↔M channel (A); V checks on the V↔M channel (B).
-        let proof = identity_proof(&id, NONCE, &server_identity_origin(Some([0xaa; 32]))).unwrap();
+        let proof = identity_proof(&id, NONCE, &server_identity_origin(&jo(Some([0xaa; 32])))).unwrap();
         let npub = op.public_key().to_bech32().unwrap();
         let out = evaluate_server_identity(
             Some(&npub),
             Some(&proof),
             NONCE,
-            Some([0xbb; 32]),
+            &jo(Some([0xbb; 32])),
             Timestamp::from(100),
         );
         assert!(matches!(out, ServerAuthOutcome::Refused(ref r) if r.contains("BadChallengeSig")), "{out:?}");
@@ -431,9 +439,49 @@ mod tests {
             Some(&npub),
             Some(&proof),
             NONCE,
-            Some([0xaa; 32]),
+            &jo(Some([0xaa; 32])),
             Timestamp::from(100),
         );
+        assert!(matches!(out, ServerAuthOutcome::Refused(_)), "{out:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── WebSocket join origin (v66) ───────────────────────────────────────────
+    // On WS the proof is signed over the dialled host. A server with
+    // `--public-host` only accepts (and so only signs for) its own address, so
+    // a relay M forwarding a pinned client's nonce gets a proof for H's
+    // address, which the client — who dialled M — refuses.
+
+    #[tokio::test]
+    async fn verified_when_ws_proof_names_the_host_the_client_dialled() {
+        let dir = tmp("eval_ws_ok");
+        let _ = std::fs::remove_dir_all(&dir);
+        let op = Keys::generate();
+        let id = provisioned(&dir, &op).await;
+        let origin = crate::signet::ws_host::ws_host_origin("play.example.org:6767");
+        let proof = identity_proof(&id, NONCE, &server_identity_origin(&origin)).unwrap();
+        let npub = op.public_key().to_bech32().unwrap();
+        let out = evaluate_server_identity(Some(&npub), Some(&proof), NONCE, &origin, Timestamp::from(100));
+        assert_eq!(out, ServerAuthOutcome::Verified(npub));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn relayed_ws_proof_for_another_host_is_refused() {
+        let dir = tmp("eval_ws_relay");
+        let _ = std::fs::remove_dir_all(&dir);
+        let op = Keys::generate();
+        let id = provisioned(&dir, &op).await;
+        // H (public host h.example.org) signed for its own address; V dialled M.
+        let h = crate::signet::ws_host::ws_host_origin("h.example.org");
+        let m = crate::signet::ws_host::ws_host_origin("m.example.net:6767");
+        let proof = identity_proof(&id, NONCE, &server_identity_origin(&h)).unwrap();
+        let npub = op.public_key().to_bech32().unwrap();
+        let out = evaluate_server_identity(Some(&npub), Some(&proof), NONCE, &m, Timestamp::from(100));
+        assert!(matches!(out, ServerAuthOutcome::Refused(ref r) if r.contains("BadChallengeSig")), "{out:?}");
+        // …and an `unbound` (pre-v66) proof no longer satisfies a WS client.
+        let legacy = identity_proof(&id, NONCE, &server_identity_origin(&jo(None))).unwrap();
+        let out = evaluate_server_identity(Some(&npub), Some(&legacy), NONCE, &m, Timestamp::from(100));
         assert!(matches!(out, ServerAuthOutcome::Refused(_)), "{out:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
