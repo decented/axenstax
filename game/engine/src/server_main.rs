@@ -11,7 +11,8 @@
 //!
 //! Access: **sign-in is required by default** (owner decision 2026-10-06, O-7
 //! #3) — only players with a verified Signet identity may join. `--allow-guests`
-//! (or `AXENSTAX_ALLOW_GUESTS=1`) also admits anonymous guests. The retired
+//! (bare, or `--allow-guests 1`) or `AXENSTAX_ALLOW_GUESTS=1` also admits
+//! anonymous guests; `--allow-guests 0` / `=false` does not. The retired
 //! `--require-signin <v>` / `AXENSTAX_REQUIRE_SIGNIN` are accepted and ignored
 //! (logged once at boot) so existing scripts keep starting. See
 //! [`load_access_policy`].
@@ -227,16 +228,71 @@ fn parse_whitelist_npubs(entries: &[String]) -> Vec<[u8; 32]> {
         .collect()
 }
 
-/// `1` / `true` / `yes` / `on`, any case.
-fn is_truthy(v: &str) -> bool {
-    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+/// A boolean word, any case: `1` / `true` / `yes` / `on` → `true`,
+/// `0` / `false` / `no` / `off` → `false`, anything else → `None`.
+fn parse_bool_word(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
-/// Did the operator open this server to anonymous guests? A bare
-/// `--allow-guests` flag, or a truthy `AXENSTAX_ALLOW_GUESTS` (`env`). Without
-/// either, sign-in is required (owner decision 2026-10-06).
+fn bad_bool_message(source: &str, value: &str) -> String {
+    format!(
+        "invalid value '{value}' for {source} — expected 1/true/yes/on or 0/false/no/off"
+    )
+}
+
+/// `--allow-guests` on the command line. `Ok(None)` = not given. A bare flag
+/// (last argument, or followed by another `-…` flag) means `true`; otherwise it
+/// takes an optional boolean value — `--allow-guests 0`, `--allow-guests=false`
+/// — like the other boolean flags, so a falsy value cannot open the server.
+/// A value that is not a boolean word is an error rather than a silent "yes".
+fn allow_guests_cli(args: &[String]) -> Result<Option<bool>, String> {
+    const FLAG: &str = "--allow-guests";
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(value) = arg.strip_prefix("--allow-guests=") {
+            return parse_bool_word(value)
+                .map(Some)
+                .ok_or_else(|| bad_bool_message(FLAG, value));
+        }
+        if arg == FLAG {
+            return match args.get(i + 1) {
+                Some(next) if !next.starts_with('-') => parse_bool_word(next)
+                    .map(Some)
+                    .ok_or_else(|| bad_bool_message(FLAG, next)),
+                _ => Ok(Some(true)),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// `AXENSTAX_ALLOW_GUESTS`: only an explicit truthy word enables; empty/unset
+/// is "not given"; anything unrecognised is an error.
+fn allow_guests_env(env: Option<&str>) -> Result<Option<bool>, String> {
+    match env.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) => parse_bool_word(v)
+            .map(Some)
+            .ok_or_else(|| bad_bool_message("AXENSTAX_ALLOW_GUESTS", v)),
+    }
+}
+
+/// Did the operator open this server to anonymous guests? `--allow-guests`
+/// (CLI wins, like every other flag here) else `AXENSTAX_ALLOW_GUESTS` (`env`);
+/// neither means sign-in is required (owner decision 2026-10-06). `Err` for a
+/// value that is not a boolean word — boot refuses to start on it.
+fn parse_allow_guests(args: &[String], env: Option<&str>) -> Result<bool, String> {
+    Ok(allow_guests_cli(args)?
+        .or(allow_guests_env(env)?)
+        .unwrap_or(false))
+}
+
+/// [`parse_allow_guests`], failing closed: a malformed value never admits guests.
 fn allow_guests(args: &[String], env: Option<&str>) -> bool {
-    args.iter().any(|a| a == "--allow-guests") || env.is_some_and(is_truthy)
+    parse_allow_guests(args, env).unwrap_or(false)
 }
 
 /// Is the retired sign-in switch still configured? It no longer does anything
@@ -635,6 +691,13 @@ pub fn run_show_connect(args: &[String]) {
 
 /// Entry point dispatched from `main()` when `--server` is present.
 pub fn run(args: &[String]) {
+    // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
+    // refuse to boot rather than guess whether the operator meant to open the
+    // server (the access policy itself fails closed on it).
+    if let Err(e) = parse_allow_guests(args, std::env::var("AXENSTAX_ALLOW_GUESTS").ok().as_deref()) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     let cfg = parse_config(args);
 
     // Server identity (Heartwood-backed). Loaded before anything starts so
@@ -1177,6 +1240,77 @@ mod tests {
         assert!(!rs, "--allow-guests admits guests");
         assert!(allow_guests(&[], Some("1")) && allow_guests(&[], Some("TRUE")));
         assert!(!allow_guests(&[], Some("0")) && !allow_guests(&[], None));
+    }
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `--allow-guests` takes an optional boolean value (as the other boolean
+    /// flags do): bare means yes, but `--allow-guests 0` / `=false` must not
+    /// open the server (it used to — the flag was matched without its value).
+    #[test]
+    fn allow_guests_flag_takes_an_optional_boolean_value() {
+        // Bare, or followed by another flag: admits guests.
+        assert!(allow_guests(&argv(&["--allow-guests"]), None));
+        assert!(allow_guests(&argv(&["--allow-guests", "--port", "7000"]), None));
+        assert!(allow_guests(&argv(&["--server", "--allow-guests"]), None));
+        // An explicit truthy value.
+        for v in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(allow_guests(&argv(&["--allow-guests", v]), None), "{v}");
+            assert!(allow_guests(&argv(&[&format!("--allow-guests={v}")]), None), "={v}");
+        }
+        // An explicit falsy value does NOT admit guests.
+        for v in ["0", "false", "False", "no", "off"] {
+            assert!(!allow_guests(&argv(&["--allow-guests", v]), None), "{v}");
+            assert!(!allow_guests(&argv(&[&format!("--allow-guests={v}")]), None), "={v}");
+        }
+        // The value belongs to the flag: a following flag is not swallowed.
+        assert!(!allow_guests(&argv(&["--allow-guests", "0", "--port", "1"]), None));
+    }
+
+    /// An unrecognised value is an error, never a silent "yes" — and the policy
+    /// fails closed (sign-in required) while boot refuses to start.
+    #[test]
+    fn allow_guests_rejects_an_unrecognised_value() {
+        for args in [
+            argv(&["--allow-guests", "maybe"]),
+            argv(&["--allow-guests=2"]),
+            argv(&["--allow-guests="]),
+        ] {
+            let err = parse_allow_guests(&args, None).unwrap_err();
+            assert!(err.contains("--allow-guests"), "{err}");
+            assert!(!allow_guests(&args, None), "fails closed: {args:?}");
+        }
+        let err = parse_allow_guests(&[], Some("maybe")).unwrap_err();
+        assert!(err.contains("AXENSTAX_ALLOW_GUESTS"), "{err}");
+        assert!(!allow_guests(&[], Some("maybe")), "a garbled env value fails closed");
+    }
+
+    /// Env: only an explicit truthy word enables; empty is unset. The CLI
+    /// (like every other flag here) overrides the env var, in both directions.
+    #[test]
+    fn allow_guests_env_and_cli_precedence() {
+        for v in ["1", "true", "Yes", "on"] {
+            assert!(allow_guests(&[], Some(v)), "{v}");
+        }
+        for v in ["0", "false", "no", "off", "", "  "] {
+            assert!(!allow_guests(&[], Some(v)), "{v:?}");
+        }
+        assert!(!allow_guests(&argv(&["--allow-guests", "0"]), Some("1")), "CLI 0 beats env 1");
+        assert!(allow_guests(&argv(&["--allow-guests"]), Some("0")), "bare CLI beats env 0");
+        assert_eq!(parse_allow_guests(&[], None), Ok(false), "unset: sign-in required");
+    }
+
+    /// End to end through the policy: a falsy flag value keeps sign-in required.
+    #[test]
+    fn allow_guests_zero_keeps_sign_in_required() {
+        let dir = tmp("signin-allow-guests-zero");
+        let _ = std::fs::remove_dir_all(&dir);
+        for args in [argv(&["--allow-guests", "0"]), argv(&["--allow-guests=false"])] {
+            assert!(load_access_policy(&args, &dir).0, "{args:?} still requires sign-in");
+        }
+        assert!(!load_access_policy(&argv(&["--allow-guests", "1"]), &dir).0);
     }
 
     #[test]

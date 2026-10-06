@@ -214,7 +214,7 @@ identity above):
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join** |
+| `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join**. The flag may stand alone (`--allow-guests`) or take a value (`--allow-guests 1`, `--allow-guests=0`; `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`) — a falsy value keeps sign-in required, and any other value refuses to start |
 | `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-empty allowlist **implies** sign-in |
 
 The sign-in requirement is **on by default**. `AXENSTAX_REQUIRE_SIGNIN` and
@@ -223,6 +223,24 @@ scripts still start); use `AXENSTAX_ALLOW_GUESTS` / `--allow-guests` to open the
 server to guests. A `<identity-dir>/require_signin` file — written by the
 `require-signin` admin command or the Operator Console's toggle — overrides both,
 so a box that was opened to guests from the console stays open after a restart.
+
+**Upgraded from before 2026-10-06? Check your box.** The old setup wizard's "Who can
+come in?" step defaulted to *Anyone*, and it saved that choice as a
+`<identity-dir>/require_signin` file reading `false` (`<identity-dir>` is
+`<worlds>/.identity`, i.e. `/worlds/.identity` in the Docker setup, unless
+`AXENSTAX_IDENTITY_DIR` says otherwise). That file beats the new default, so a
+server set up that way **keeps admitting guests** after the engine upgrade until you
+change it. The engine reads only that file: `true` = sign-in required, anything else
+(including an empty file) = guests admitted.
+
+- **Check:** the start-up log line `access :` says `sign-in required` or `guests
+  admitted`; the Operator Console shows the same in *Access → Require sign-in*; or
+  `cat /worlds/.identity/require_signin`.
+- **Switch to sign-in:** tick *Require sign-in* in the Console (or re-run the setup
+  wizard and pick *Signed-in players*), or write `true` into the file, or delete it
+  (the default then applies — sign-in required, unless the server is started with
+  `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`). The running server picks it up
+  within about 5 seconds; no restart.
 
 The allowlist can also live in `<identity-dir>/whitelist.txt` — one npub per line,
 `#` comments allowed — which is easier to edit and is what runtime admin commands

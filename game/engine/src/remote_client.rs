@@ -52,9 +52,51 @@ pub const HOST_UNREACHABLE: &str = "Couldn't reach the host";
 /// that can't read our request.
 pub const HOST_NO_ANSWER: &str = "The host didn't let us in. Try joining again.";
 
-/// How long the loading screen waits for the host's `JoinAccept`. Generous:
-/// a signed-in join waits on the player's signer (possibly a phone) first.
+/// How long the loading screen waits for the host's `JoinAccept` before it
+/// gives up. This is the *client's* patience, and it is longer than the host's:
+/// a host frees a slot that has not completed its join after 30 s
+/// (`hosted_server::PRE_AUTH_TIMEOUT_TICKS`, the join challenge's lifetime) and
+/// refuses it with "Join timed out". So a signed-in join that waits on a slow
+/// signer (possibly a phone) is cut off by the host at about 30 s, well before
+/// this clock; 90 s is only the backstop for a host that neither accepts nor
+/// refuses — e.g. one on another protocol version that can't read our request.
 pub const JOIN_ACCEPT_TIMEOUT_SECS: f32 = 90.0;
+
+/// Furthest a host may place a joiner horizontally (blocks, either side of the
+/// origin, on both x and z). Horizontal terrain is unbounded by design
+/// (`World::set_block`), so this is a sanity cap, not a world border: past it
+/// the chunk coordinates derived from the spawn stop being safe to compute.
+pub const MAX_JOIN_SPAWN_HORIZONTAL: f32 = 30_000_000.0;
+
+/// Lowest y a host may place a joiner at: the void-rescue line
+/// (`physics::Player::tick` lifts anyone below it back to the surface).
+pub const MIN_JOIN_SPAWN_Y: f32 = -64.0;
+
+/// Highest y a host may place a joiner at: the world's top
+/// (`(world::MAX_CHUNK_Y + 1) * CHUNK_SIZE`, Y 0..=95) plus headroom.
+pub const MAX_JOIN_SPAWN_Y: f32 = ((crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32) as f32 + 64.0;
+
+/// Shown when the host's `JoinAccept` places us outside any sane world.
+pub const HOST_BAD_SPAWN: &str =
+    "The host sent a starting position outside the world, so we didn't join. Try another game.";
+
+/// Is a *finite* host-chosen spawn inside the range the joiner will accept?
+/// (Non-finite spawns are not refused — they are dropped, see
+/// [`JoinedWorld::from_accept`].)
+fn join_spawn_in_range(spawn: glam::Vec3) -> bool {
+    spawn.x.abs() <= MAX_JOIN_SPAWN_HORIZONTAL
+        && spawn.z.abs() <= MAX_JOIN_SPAWN_HORIZONTAL
+        && (MIN_JOIN_SPAWN_Y..=MAX_JOIN_SPAWN_Y).contains(&spawn.y)
+}
+
+/// Why a `JoinAccept` must be refused over its spawn, if it must: a finite
+/// position outside the accepted range. A hostile host could otherwise send a
+/// huge-but-finite spawn that overflows the chunk coordinates derived from it
+/// (debug panic, wrong terrain in release).
+pub fn join_spawn_refusal(accept: &protocol::JoinAcceptPacket) -> Option<&'static str> {
+    let spawn = glam::Vec3::new(accept.spawn_x, accept.spawn_y, accept.spawn_z);
+    (spawn.is_finite() && !join_spawn_in_range(spawn)).then_some(HOST_BAD_SPAWN)
+}
 
 /// Toast for a joiner whose terrain generator differs from the host's.
 pub const WORLDGEN_MISMATCH_NOTICE: &str = "This world was made with a different version of the game. Some terrain may look different until you update.";
@@ -584,6 +626,10 @@ impl RemoteClient {
                             };
                             #[cfg(target_arch = "wasm32")]
                             let refusal: Option<String> = None;
+                            // A spawn no sane world could hold is refused before
+                            // anything is derived from it (chunk coordinates).
+                            let refusal =
+                                refusal.or_else(|| join_spawn_refusal(&accept).map(str::to_string));
 
                             if let Some(reason) = refusal {
                                 log::warn!("Refusing server (identity): {reason}");
@@ -1565,6 +1611,80 @@ mod tests {
         assert_eq!(JoinedWorld::from_accept(&acc).spawn, None);
         acc.spawn_y = f32::INFINITY;
         assert_eq!(JoinedWorld::from_accept(&acc).spawn, None);
+    }
+
+    fn accept_at(x: f32, y: f32, z: f32) -> protocol::JoinAcceptPacket {
+        let mut acc = proofless_accept();
+        acc.spawn_x = x;
+        acc.spawn_y = y;
+        acc.spawn_z = z;
+        acc
+    }
+
+    #[test]
+    fn a_spawn_inside_the_range_is_not_refused() {
+        for (x, y, z) in [
+            (0.0, 64.0, 0.0),
+            (MAX_JOIN_SPAWN_HORIZONTAL, MIN_JOIN_SPAWN_Y, -MAX_JOIN_SPAWN_HORIZONTAL),
+            (-MAX_JOIN_SPAWN_HORIZONTAL, MAX_JOIN_SPAWN_Y, MAX_JOIN_SPAWN_HORIZONTAL),
+        ] {
+            assert_eq!(join_spawn_refusal(&accept_at(x, y, z)), None, "({x}, {y}, {z})");
+        }
+    }
+
+    #[test]
+    fn a_huge_but_finite_spawn_is_refused() {
+        for (x, y, z) in [
+            (1.0e10, 64.0, 0.0),
+            (0.0, 64.0, -1.0e10),
+            (MAX_JOIN_SPAWN_HORIZONTAL + 100.0, 64.0, 0.0),
+            (0.0, MAX_JOIN_SPAWN_Y + 1.0, 0.0),
+            (0.0, MIN_JOIN_SPAWN_Y - 1.0, 0.0),
+            (0.0, 1.0e9, 0.0),
+            (f32::MAX, f32::MAX, f32::MAX),
+        ] {
+            assert_eq!(
+                join_spawn_refusal(&accept_at(x, y, z)),
+                Some(HOST_BAD_SPAWN),
+                "({x}, {y}, {z})"
+            );
+        }
+    }
+
+    /// Non-finite spawns keep their old treatment (dropped, not refused): see
+    /// `a_non_finite_join_spawn_is_dropped`.
+    #[test]
+    fn a_non_finite_spawn_is_not_a_range_refusal() {
+        assert_eq!(join_spawn_refusal(&accept_at(f32::NAN, 64.0, 0.0)), None);
+        assert_eq!(join_spawn_refusal(&accept_at(0.0, f32::INFINITY, 0.0)), None);
+    }
+
+    /// End to end through `poll`: a hostile host's out-of-range spawn refuses
+    /// the join with a readable reason and queues nothing for the loader.
+    #[test]
+    fn join_accept_with_an_out_of_range_spawn_refuses_the_join() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(client),
+            build_join_request_guest("Me", 0),
+            None,
+        );
+        srv.send_to_client(&protocol::serialize_packet(
+            PacketType::JoinAccept,
+            &accept_at(2.0e9, 64.0, 0.0),
+        ));
+        assert!(rc.poll());
+        assert!(
+            matches!(&rc.state, ConnectionState::Failed(reason) if reason == HOST_BAD_SPAWN),
+            "the join is refused with the readable reason"
+        );
+        assert_eq!(rc.pending_joined_world, None, "nothing reaches the world loader");
+        assert_eq!(rc.spawn_pos, None);
+        assert_eq!(
+            join_gate(&rc.state, rc.pending_joined_world.take(), 0.0),
+            JoinGate::Ended(HOST_BAD_SPAWN.to_string()),
+            "the loading screen leaves with the readable reason"
+        );
     }
 
     #[test]

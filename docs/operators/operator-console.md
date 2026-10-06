@@ -89,8 +89,10 @@ AXENSTAX_IDENTITY_DIR=/path/to/your/.identity ./start.sh
    other identity is refused.
 2. **Access** — add npubs to the **allowlist** (only listed npubs may join; blank =
    open) or **blocklist** (refused even if allowlisted — block always wins). Toggle
-   *require sign-in* — on by default; turning it off admits anonymous guests and
-   stays off across restarts. *Kick* removes a connected player (queued; applied
+   *require sign-in* — on by default for a new server; turning it off admits anonymous
+   guests and stays off across restarts. (A server set up with the old wizard, whose
+   default was "Anyone", already has it off — tick it if you want sign-in; see the
+   upgrade note in the [dedicated server guide](dedicated-server.md#access-control-optional).) *Kick* removes a connected player (queued; applied
    within ~5s).
 3. **Server** — set the name / blurb / region / max players, and toggle *announce*
    to publish a discoverable Server Card so players can find you by your npub.

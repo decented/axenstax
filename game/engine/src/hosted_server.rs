@@ -171,9 +171,13 @@ pub struct HostedServer {
 
     /// Phase 4: whether a join must carry a verified `auth_event`. `true` for the
     /// QUIC LAN host (the verified-identity deliverable — absent auth is
-    /// rejected); `false` for the dedicated WebSocket server, which stays
-    /// guest-open until the web signing bridge (4b) lands. A *present* auth_event
-    /// is always verified regardless of this flag.
+    /// rejected). A WebSocket host starts `false` here only until
+    /// [`HostedServer::set_access_policy`] runs; the dedicated server always
+    /// calls it at boot (`server_main::load_access_policy`), and since
+    /// 2026-10-06 that requires sign-in unless the operator opens the server
+    /// (`--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`, or a `require_signin`
+    /// file saying `false`). A *present* auth_event is always verified
+    /// regardless of this flag.
     #[cfg(not(target_arch = "wasm32"))]
     require_signin: bool,
 
@@ -548,8 +552,10 @@ impl HostedServer {
             difficulty,
             #[cfg(not(target_arch = "wasm32"))]
             challenges: signet::ChallengeTable::default(),
-            // QUIC LAN host requires sign-in (verified identity deliverable);
-            // the dedicated WebSocket server stays guest-open until 4b lands.
+            // QUIC LAN host requires sign-in (verified identity deliverable).
+            // A WebSocket host starts open only until `set_access_policy` runs;
+            // the dedicated server applies its (sign-in-by-default) policy at
+            // boot, before the main loop processes its first join.
             #[cfg(not(target_arch = "wasm32"))]
             require_signin: matches!(remote_transport, RemoteTransport::Quic),
             // Set by the dedicated server after `start` via `set_identity`.
