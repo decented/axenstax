@@ -2876,6 +2876,7 @@ impl super::GameState {
         self.workshop_play = false;
         self.remote_swing.clear();
         self.remote_items.clear();
+        self.remote_projectiles.clear();
         self.remote_players.clear();
         self.local_swing.clear();
         self.local_sneak.clear();
@@ -6404,6 +6405,15 @@ impl super::GameState {
                 self.players[i].player.velocity = glam::Vec3::ZERO;
                 // W2 — a death mid-fall must not land at the spawn point.
                 self.players[i].player.reset_fall();
+                // MP-A3 — a joiner's body is server-held: the server keeps it
+                // dead until it hears this choice, then respawns it at the
+                // spawn point it holds and says where (`Respawned`, applied in
+                // `network_receive`).
+                if i == 0
+                    && let Some(rc) = self.remote_client.as_mut()
+                {
+                    rc.send_respawn();
+                }
             }
         }
     }
@@ -16377,6 +16387,15 @@ impl super::GameState {
                 self.players[pidx].player.eye_pos(),
                 light_at,
             ));
+            // Server-broadcast projectiles (MP-A3) — a dedicated server's
+            // dispenser arrows, drawn as the same arrow; empty unless joined.
+            if !self.remote_projectiles.is_empty() {
+                entity_verts.extend(crate::entity_model::build_remote_projectile_vertices(
+                    &self.remote_projectiles,
+                    self.players[pidx].player.eye_pos(),
+                    light_at,
+                ));
+            }
             // Rail freight (Phase 1) — carts ride the block-textured entity pipeline.
             entity_verts.extend(crate::entity_model::build_cart_vertices(
                 &self.ecs,
@@ -21365,6 +21384,7 @@ impl super::GameState {
         let mut pending_snapshot_json = None;
         let mut pending_exhibits = None;
         let mut pending_grants = Vec::new();
+        let mut pending_life_events = Vec::new();
         let mut pending_entity_spawns = Vec::new();
         let mut pending_entity_updates = Vec::new();
         let mut pending_entity_despawns = Vec::new();
@@ -21387,6 +21407,7 @@ impl super::GameState {
             pending_snapshot_json = client.pending_operator_snapshot_json.take();
             pending_exhibits = client.pending_exhibits.take();
             pending_grants = std::mem::take(&mut client.pending_grants);
+            pending_life_events = std::mem::take(&mut client.pending_life_events);
             // Deltas accumulated across every StateUpdate since last frame —
             // sourced from the accumulators, NOT latest_state, so a frame
             // hitch that batches two server ticks loses nothing.
@@ -21575,6 +21596,37 @@ impl super::GameState {
             &pending_entity_updates,
             &pending_entity_despawns,
         );
+        // MP-A3 — and the server's projectiles in flight (same diff).
+        self.remote_projectiles.apply(
+            &pending_entity_spawns,
+            &pending_entity_updates,
+            &pending_entity_despawns,
+        );
+
+        // MP-A3 — the server's word on our own body. `Died`: the server holds
+        // us dead (a fall or drowning it saw; our own reported death comes
+        // back too, and is a no-op) — enter the death screen, whose Respawn
+        // asks the server. `Respawned`: it put us at the spawn point it holds;
+        // stand there. Creative bodies never die (the death loop agrees).
+        if !self.players.is_empty() {
+            for ev in &pending_life_events {
+                match *ev {
+                    crate::remote_client::OwnLifeEvent::Died => {
+                        if !self.is_creative {
+                            self.players[0]
+                                .combat
+                                .die(crate::survival::DamageCause::Generic);
+                        }
+                    }
+                    crate::remote_client::OwnLifeEvent::Respawned(at) => {
+                        let p = &mut self.players[0].player;
+                        p.pos = at;
+                        p.velocity = glam::Vec3::ZERO;
+                        p.reset_fall();
+                    }
+                }
+            }
+        }
 
         // Death-drops phase 2b — stacks the server picked up for us. Decode
         // into the local player's inventory; overflow spills at our feet as a

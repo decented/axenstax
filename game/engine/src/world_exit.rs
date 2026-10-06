@@ -376,6 +376,7 @@ impl crate::GameState {
         #[cfg(not(target_arch = "wasm32"))]
         self.stop_online();
         self.remote_items.clear();
+        self.remote_projectiles.clear();
         self.remote_players.clear();
         self.remote_swing.clear();
         self.pending_block_changes.clear();

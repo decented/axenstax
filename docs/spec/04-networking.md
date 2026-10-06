@@ -21,6 +21,7 @@
 - **Bounded StateUpdates (2026-10-06, gap-audit T1-5 + T2-12, NO wire change — still v64).** A tick's block changes and entity events no longer have to fit in one `StateUpdatePacket`: each joined client has an outbox (`state_outbox.rs`) that splits them across as many StateUpdates as needed, each at most `STATE_UPDATE_MAX_BYTES = 56 KiB` (measured, 8 KiB under the decode cap), and holds a remote client to `CLIENT_TICK_BUDGET_BYTES = 48 KiB` a tick (~1 MB/s), the rest following on later ticks in order. Every StateUpdate repeats the tick's snapshot fields. A backlog coalesces repeated edits to one cell (latest wins; never across a block that carries a block entity or other apply side effect); past `CLIENT_QUEUE_MAX_BYTES = 2 MiB` the queued block changes are dropped and their chunks recorded for resync (`HostedServer::take_chunk_resync_requests`, the Phase B seam). The transport frame cap drops from 16 MiB to `protocol::MAX_WIRE_PACKET_LEN` (1-byte tag + `MAX_PACKET_SIZE` 64 KiB) on QUIC and on the WebSocket accept side. Why no bump: no packet shape changed; a v64 client already accumulates deltas across StateUpdates (2026-07-12 note above), so several per tick decode and apply correctly; and a frame between the two caps could never pass `safe_deserialize`, so refusing it at the header only changes *when* it fails. See "Bounded StateUpdates" in the Phase 1 implementation notes.
 - **v65** (2026-10-06): **Join world flags + worldgen version (gap-audit T2-9).** `JoinAcceptPacket` gains trailing `world_rules: WorldRules` (`world_type`, `ground`, `water_depth`, `is_workshop`, `time_lock`, `mobs_enabled`, `explosives_enabled`, `fire_spread_enabled`, `keep_inventory` — exactly the `WorldMeta` fields that change terrain output or gameplay rules; `commands_enabled` is deliberately not carried, it would also gate a joiner's chat key) + `worldgen_version: u32` (the host's `world::worldgen_fingerprint()`: since Phase B0 `WORLDGEN_VERSION` folded with the bundled plan registry's content hash, Spec 02 §5.2). `JoinRequestPacket` gains trailing `worldgen_version: u32` (the joiner's), stored on `ServerPlayer.client_worldgen_version` and read through `ServerPlayer::worldgen_mismatch()` (Phase B will push real chunks to such a client). **Joiner behaviour fixed with it:** before v65 the joiner never applied the `JoinAccept` seed or spawn — it entered `GameMode::Loading` at once and generated from a blank `WorldMeta::new` with a *random* seed (`RemoteClient::poll` only ran in Playing). Now the loading screen polls the client and does not run `begin_load` until `JoinAccept` arrives (`remote_client::join_gate`; refusal / lost link → lobby with the reason; no answer within `JOIN_ACCEPT_TIMEOUT_SECS = 90` → "The host didn't let us in. Try joining again."). It then builds the joined world's meta from the accept (`JoinedWorld::to_meta`: seed + rules, never saved), applies it (`apply_world_seed` + `World::apply_meta_rules` + the explosives / fire caches) and places player 0 at the accept's spawn (non-finite spawns are dropped; a finite spawn outside ±30,000,000 blocks horizontally or outside Y −64 … 160 is **refused** — `remote_client::join_spawn_refusal`, "The host sent a starting position outside the world…" — because chunk coordinates derived from it would overflow) before any column is generated. A different `worldgen_version` shows the toast "This world was made with a different version of the game. Some terrain may look different until you update." and logs a warning. A server that cannot decode a JoinRequest now reads its leading `protocol_version` (`protocol::peek_protocol_version`) and refuses it with the mismatch reason, so an older client no longer waits in silence.
 - **v66** (2026-10-06): **WebSocket join origin (T-JOIN-RELAY WebSocket residual).** `JoinRequestPacket` gains a trailing `ws_host: String`: the normalised `host[:port]` a WebSocket joiner actually dialled (`signet::ws_host::ws_url_host`; empty on QUIC and in-process joins). A WS join now signs `axenstax-join:ws-host:<ws_host>` instead of `axenstax-join:unbound`. The server re-normalises the declared host, refuses it unless it is one of its public hosts (`--public-host`, `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`; an unconfigured server accepts any host), requires the auth event's origin to match exactly, and signs its `JoinAccept` identity proof over the same origin. Bumped because a v65 WS client signs `unbound`, which a v66 server refuses; the version reason is clearer. See §1.8.1 and Spec 08 §9.0.1.
+- **v67** (2026-10-06, MP-A3): **Server projectiles + server-held death.** Three appends, no existing shape changed: `EntityKind::Projectile = 39` (a projectile in flight rides the ordinary entity spawn/update/despawn diff; `yaw` = flight heading, `EntityUpdate.state` 0 arrow / 1 blunt), `PacketType::Respawn = 57` (C→S, empty payload) and two `PlayerEventType` variants, `Died` and `Respawned { x, y, z }` (S→C). Before it a dedicated server's dispenser arrow was consumed, never flew, never hit and was never seen, and a joiner's server copy revived itself 40 ticks after death (the BRIDGE) and vacuumed up its own death drops while the joiner was still on the death screen. Bumped because a v66 peer can't decode the new variants. See §4.2b.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -502,11 +503,12 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x31 | `Ping` | Both | Unreliable | RTT measurement (timestamp echo). |
 | 0x32 | `TimeSync` | S->C | Unreliable | Server tick number + timestamp for clock synchronisation. |
 | 0x38 | `DeviceInteract` | C->S | Reliable | Client asks the server to apply one right-click to the power device in a named cell: `{ pos: (i32, i32, i32) }`, 12 bytes. **Implemented tag** (`PacketType::DeviceInteract = 56`, protocol v62). |
+| 0x39 | `Respawn` | C->S | Reliable | The joiner chose Respawn on its death screen. Empty payload — it asserts the wish only; the server respawns the player only if it holds them dead, at the spawn point it holds, and answers `PlayerEvent { Respawned { x, y, z } }`. **Implemented tag** (`PacketType::Respawn = 57`, protocol v67). See §4.2b. |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
 > discriminants live in `game/engine/src/protocol.rs` and are the wire-stable
-> ones. `DeviceInteract` is listed at its **implemented** value because it was
-> added after the engine existed.
+> ones. `DeviceInteract` and `Respawn` are listed at their **implemented**
+> values because they were added after the engine existed.
 
 **Authority model for `DeviceInteract`.** The packet asserts a cell and nothing
 else. The host looks up the `PowerDevice` standing there, decides what a
@@ -878,6 +880,63 @@ block-only `held_item: u16` field is retained alongside for back-compat.)
   needed by the spectator system) requires a new wire addition — an
   index→handle field (or a small roster packet). When added it MUST carry the
   handle/npub, never hex.
+
+### 4.2b Server projectiles and server-held death (as built, protocol v67, MP-A3)
+
+**Projectiles.** A dedicated server (`GameServer::simulates_block_machines`, set
+when no host client exists) runs `entity::tick_projectiles` every tick — the
+same pure function the client runs, in the same place (after entity physics,
+before item lifetimes). Its dispensers' arrows therefore fly, take gravity,
+stop at the first solid block, and hit the first mob whose hitbox they enter,
+through `combat::Health` and the server's ordinary `despawn_dead` →
+`death_drops` path. Projectiles hit **mobs only**, on both sides; nothing
+fired damages a player. A LAN host's server does NOT run the tick: its
+projectiles live in its host client's sim, and a second tick would be a
+second sim.
+
+`diff_entities` gives each `ProjectileEntity` a `ProtocolId` on first sight
+and broadcasts it as `EntityKind::Projectile = 39`: one `EntitySpawn`
+(position; `yaw` = `(-vx).atan2(-vz)`, the heading the arrow renderer uses;
+health and item fields zero), an `EntityUpdate` every tick of the flight
+(`state` 0 arrow, 1 blunt slingshot ball), and — when a hit or the 100-tick
+`Lifetime` removes it — exactly one despawn through the alive-set diff.
+Late joiners get an in-flight projectile in their backfill. All of it rides the
+per-client outbox (`state_outbox.rs`) like every other entity event. A joiner
+holds them in `remote_entities::RemoteProjectiles` (render-only, never in its
+ECS), points each one along its spawn yaw until the first update and then along
+the motion between updates (which carries the gravity arc), and draws it with
+the very arrow cuboid a local arrow uses (`entity_model::push_arrow`).
+
+*Not closed:* a joiner's client still runs its own dispenser tick (dual-sim
+debt). Chunks carry no block entities, so a server world's dispensers are inert
+on the joiner and never double-fire — but a dispenser the joiner placed and
+filled in its own copy would fire in both sims.
+
+**Server-held death.** Death of a joined (server-simulated) player is a state
+the server holds, entered two ways: its copy of the player dies (fall or
+drowning in `tick_player_survival`), or the joiner's `InputPacket.health` is
+`<= 0` (its own sim's death — mobs and lava run there). The health report is
+believed **only downward** (`GameServer::report_player_death`): a report of
+health coming back never revives anyone. On the transition the server sends
+`PlayerEvent { player_index, Died }` to every joined client, the player
+included — that is how a joiner whose server copy died unseen reaches its death
+screen (`OwnLifeEvent::Died` → `PlayerCombat::die`). While dead the body runs
+no physics, keeps no queued moves, picks nothing up (its death drops stay on
+the ground for others), is excluded from mob targeting and from pressure-plate
+positions, and its moves, look, block edits and `DeviceInteract`s are ignored —
+each refused edit is sent back so the joiner's ghost block un-places.
+Nothing revives it on a timer: the 40-tick BRIDGE (`respawn_timer`) is
+removed. The death screen's Respawn button respawns the joiner locally and
+sends `PacketType::Respawn`; the server, if it holds them dead, respawns the
+body (`GameServer::respawn_player`: full health, hunger and breath; in the
+column of `ServerPlayer.spawn_pos` — the join spawn `JoinAccept` named, which on
+a dedicated server is the air above the world spawn — standing on its first
+non-air block (`standing_spot`, the `initial_load` placement rule, so a respawn
+never starts with a fall); at rest, fall reset, intents cleared) and broadcasts
+`PlayerEvent { Respawned { x, y, z } }`, which the joiner snaps to. A `Respawn` from a living player is ignored — otherwise it
+would be a free teleport home. A joiner who disconnects while dead is dropped
+as usual (slot freed, body never revived). Not reconciliation: outside these
+two events the joiner still owns its own position (S1, next).
 
 ### 4.3 Block Mutations
 

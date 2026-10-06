@@ -136,7 +136,7 @@ fn remote_player_drowns_server_side_even_without_input() {
 }
 
 #[test]
-fn a_server_copy_killed_by_a_fall_respawns() {
+fn a_server_copy_killed_by_a_fall_stays_dead_until_respawn_is_requested() {
     let mut host = TestHost::start_with(TestConfig::default());
     stone_floor(&mut host);
     // 40 blocks → 37 HP: lethal.
@@ -153,9 +153,23 @@ fn a_server_copy_killed_by_a_fall_respawns() {
     assert!(died, "a 40-block fall must kill");
     assert_eq!(host.server.players[0].combat.last_damage, DamageCause::Fall);
 
-    // The 2 s respawn timer runs out → the server copy is alive again.
-    tick_with_idle_input(&mut host, 45);
+    // MP-A3 — no revive on a timer (the old 40-tick BRIDGE): the body stays
+    // where it fell, however long the joiner sits on the death screen.
+    let body = host.server.players[0].player.pos;
+    tick_with_idle_input(&mut host, 200);
+    let sp = &host.server.players[0];
+    assert!(sp.combat.dead, "time alone never revives a server copy");
+    assert_eq!(sp.player.pos, body, "a dead body runs no physics");
+
+    // Only the joiner's explicit Respawn brings it back: in its spawn point's
+    // column, standing on the floor — not in the air above it.
+    let spawn = host.server.players[0].spawn_pos;
+    let stood = host.server.respawn_player(0).expect("dead → respawned");
+    assert_eq!((stood.x, stood.z), (spawn.x, spawn.z), "the spawn point's column");
+    assert_eq!(stood.y, 5.0, "on the stone floor (top face y = 5)");
     let sp = &host.server.players[0];
     assert!(!sp.combat.dead);
     assert_eq!(sp.combat.health, sp.combat.max_health);
+    assert_eq!(sp.player.pos, stood);
+    assert_eq!(host.server.respawn_player(0), None, "a living player has nothing to respawn");
 }

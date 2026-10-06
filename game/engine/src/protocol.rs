@@ -80,6 +80,12 @@ pub enum PacketType {
     /// server's own sim; a switch had no carrier at all, so a joiner's lever
     /// flipped only their own copy of the world.
     DeviceInteract = 56,
+    /// Client → Server: the player chose Respawn on their death screen
+    /// (protocol v67, MP-A3). Empty payload — it asserts the wish and nothing
+    /// else: the server respawns the player only if IT holds them dead, at the
+    /// spawn point IT holds, and answers with `PlayerEventType::Respawned`.
+    /// Sent by a joiner only; a host's own players respawn in its client sim.
+    Respawn = 57,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -671,6 +677,11 @@ pub enum EntityKind {
     // (server-side loot from death_drops.rs). Not a mob: no AI, no health;
     // the stack it carries rides EntitySpawn's item_* fields.
     Item = 38,
+    // MP-A3 (2026-10-06, v67) — a projectile in flight (`ProjectileEntity`:
+    // a dispenser's arrow on the dedicated server today). Not a mob: no AI,
+    // no health. `yaw` is its flight heading; `EntityUpdate.state` is 0 for
+    // an arrow, 1 for a blunt slingshot ball. Render-only on the joiner.
+    Projectile = 39,
 }
 
 /// Server → client: a new entity appeared. Sent in the tick the entity spawns.
@@ -781,7 +792,7 @@ pub struct ChunkDataPacket {
 
 // ─── Player events ───
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PlayerEventType {
     /// `name` is the display handle (verified credential name, disambiguated, or
     /// guest fallback). `npub` is the joiner's full verified npub (NIP-19 bech32)
@@ -790,6 +801,16 @@ pub enum PlayerEventType {
     /// collision suffix (Phase 4).
     Joined { name: String, npub: String },
     Left,
+    /// MP-A3 (v67) — the server now holds this player dead: no physics, no
+    /// pickups, no edits, no mob targeting, until they send
+    /// `PacketType::Respawn`. Sent to every joined client, the player included,
+    /// on the death transition — whether the server copy died (a fall, drowning)
+    /// or the joiner's own input reported zero health. The player's own client
+    /// enters its death screen if it is not already on it.
+    Died,
+    /// MP-A3 (v67) — the server respawned this player at the spawn point it
+    /// holds for them. The player's own client moves there.
+    Respawned { x: f32, y: f32, z: f32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1160,7 +1181,13 @@ pub struct ServerAnnouncePacket {
 ///   its `JoinAccept` identity proof over the same origin. QUIC and in-process
 ///   joins are unchanged. Bumped because a v65 WS client signs `unbound`,
 ///   which a v66 server refuses — the version reason is clearer.
-pub const PROTOCOL_VERSION: u32 = 66;
+/// - v67 (2026-10-06, MP-A3): server-held death + server projectiles.
+///   `PacketType::Respawn = 57` (C→S, empty), `PlayerEventType::Died` and
+///   `PlayerEventType::Respawned { x, y, z }` (S→C), and
+///   `EntityKind::Projectile = 39`, all appended. A dead joiner stays dead on
+///   the server until it asks to respawn (the 40-tick revive BRIDGE is gone);
+///   a dedicated server's dispenser arrows fly, hit and reach joiners.
+pub const PROTOCOL_VERSION: u32 = 67;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1220,6 +1247,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         54 => PacketType::ChatSay,
         55 => PacketType::ChatDeliver,
         56 => PacketType::DeviceInteract,
+        57 => PacketType::Respawn,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -1322,7 +1350,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 66);
+        assert_eq!(super::PROTOCOL_VERSION, 67);
     }
 
     #[test]
@@ -1802,7 +1830,11 @@ mod tests {
         //   JoinRequest gains worldgen_version (gap-audit T2-9).
         // v66 (2026-10-06): JoinRequest gains ws_host; a WS join signs
         //   `axenstax-join:ws-host:<host>` (T-JOIN-RELAY WebSocket residual).
-        assert_eq!(PROTOCOL_VERSION, 66);
+        // v67 (2026-10-06, MP-A3): `PacketType::Respawn = 57` (C→S),
+        //   `PlayerEventType::{Died, Respawned}` and `EntityKind::Projectile =
+        //   39`, all appended — a dead joiner stays dead on the server until it
+        //   asks, and server-side arrows reach joiners.
+        assert_eq!(PROTOCOL_VERSION, 67);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -1910,6 +1942,32 @@ mod tests {
         let mut meta = crate::save::WorldMeta::new("joined");
         rules.apply_to_meta(&mut meta);
         assert_eq!(WorldRules::from_meta(&meta), rules);
+    }
+
+    #[test]
+    fn respawn_request_and_life_events_round_trip() {
+        let bytes = serialize_packet(PacketType::Respawn, &());
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::Respawn, "header tag 57 maps back");
+        assert!(payload.is_empty(), "a Respawn request asserts nothing but the wish");
+        for event in [
+            PlayerEventType::Died,
+            PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -3.5 },
+        ] {
+            let pkt = PlayerEventPacket { player_index: 4, event };
+            let bytes = serialize_packet(PacketType::PlayerEvent, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            let back: PlayerEventPacket = safe_deserialize(payload).unwrap();
+            assert_eq!(back.player_index, 4);
+            assert_eq!(back.event, pkt.event);
+        }
+    }
+
+    #[test]
+    fn projectile_entity_kind_is_appended() {
+        // Wire-stable: Item stays 38; Projectile takes the next value.
+        assert_eq!(EntityKind::Item as u8, 38);
+        assert_eq!(EntityKind::Projectile as u8, 39);
     }
 
     #[test]

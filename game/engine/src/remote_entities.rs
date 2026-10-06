@@ -9,6 +9,10 @@
 //! the entity (removing it here via the diff) and delivers the stack with an
 //! `InventoryGrantPacket`, applied by [`apply_inventory_grant`].
 //!
+//! Projectiles in flight (MP-A3, protocol v66) get the same treatment in
+//! [`RemoteProjectiles`]: a dedicated server's dispenser arrows fly, hit and
+//! despawn in the SERVER's sim, and a joiner only draws them.
+//!
 //! Mob/cart spawns in the same diff are ignored for now — remote mob
 //! rendering rides the dual-sim rework (see CLAUDE.md known debt); items go
 //! first because server-side loot is otherwise invisible and unlootable.
@@ -94,6 +98,71 @@ impl RemoteItems {
 
     #[cfg(test)]
     fn get(&self, id: u32) -> Option<&RemoteItem> {
+        self.map.get(&id)
+    }
+}
+
+/// One server-side projectile in flight, keyed by its wire `ProtocolId`.
+pub struct RemoteProjectile {
+    pub pos: Vec3,
+    /// Unit heading the arrow model points along: from the spawn's yaw until
+    /// the first update arrives, then from the motion between updates (which
+    /// also carries the arc gravity puts on it — the yaw alone is flat).
+    pub dir: Vec3,
+}
+
+/// The remote-projectile table for the current server session (MP-A3).
+#[derive(Default)]
+pub struct RemoteProjectiles {
+    map: HashMap<u32, RemoteProjectile>,
+}
+
+impl RemoteProjectiles {
+    /// Fold one tick's entity diff in. Non-`Projectile` spawns and updates for
+    /// ids it doesn't hold (mobs, carts, items) pass through untouched.
+    pub fn apply(
+        &mut self,
+        spawns: &[crate::protocol::EntitySpawn],
+        updates: &[crate::protocol::EntityUpdate],
+        despawns: &[u32],
+    ) {
+        for s in spawns {
+            if s.kind != crate::protocol::EntityKind::Projectile {
+                continue;
+            }
+            // Inverse of the server's `(-vx).atan2(-vz)` heading yaw.
+            let dir = Vec3::new(-s.yaw.sin(), 0.0, -s.yaw.cos());
+            self.map.insert(s.id, RemoteProjectile { pos: Vec3::new(s.x, s.y, s.z), dir });
+        }
+        for u in updates {
+            if let Some(p) = self.map.get_mut(&u.id) {
+                let next = Vec3::new(u.x, u.y, u.z);
+                if let Some(dir) = (next - p.pos).try_normalize() {
+                    p.dir = dir;
+                }
+                p.pos = next;
+            }
+        }
+        for id in despawns {
+            self.map.remove(id);
+        }
+    }
+
+    /// Drop the whole table — call when the server session ends.
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &RemoteProjectile> {
+        self.map.values()
+    }
+
+    #[cfg(test)]
+    fn get(&self, id: u32) -> Option<&RemoteProjectile> {
         self.map.get(&id)
     }
 }
@@ -278,6 +347,70 @@ mod tests {
         items.apply(&[item_spawn(7, item_kind::BLOCK, 3, 1)], &[], &[]);
         items.apply(&[], &[], &[7, 42]);
         assert!(items.is_empty(), "picked-up/decayed item leaves the table");
+    }
+
+    // ── MP-A3: server-side projectiles ─────────────────────────────────────
+
+    fn projectile_spawn(id: u32, x: f32, yaw: f32) -> EntitySpawn {
+        EntitySpawn {
+            id,
+            kind: EntityKind::Projectile,
+            x,
+            y: 80.0,
+            z: 0.0,
+            yaw,
+            health: 0,
+            item_kind: 0,
+            item_id: 0,
+            item_count: 0,
+            full_item: WireItem::None,
+        }
+    }
+
+    #[test]
+    fn projectiles_are_tracked_apart_from_items_and_mobs() {
+        let mut items = RemoteItems::default();
+        let mut arrows = RemoteProjectiles::default();
+        let spawns = [projectile_spawn(9, 1.0, 0.0), mob_spawn(8), item_spawn(7, item_kind::BLOCK, 3, 1)];
+        items.apply(&spawns, &[], &[]);
+        arrows.apply(&spawns, &[], &[]);
+        assert!(items.get(9).is_none(), "an arrow is not a pickup-able item");
+        assert!(items.get(7).is_some());
+        assert_eq!(arrows.iter().count(), 1, "only the projectile spawn is an arrow");
+        assert!(arrows.get(9).is_some());
+    }
+
+    #[test]
+    fn a_projectile_points_along_its_spawn_yaw_then_along_its_flight() {
+        let mut arrows = RemoteProjectiles::default();
+        // Spawn yaw for "flying +x": the renderer's `(-vx).atan2(-vz)` rule.
+        let east = (-1.0f32).atan2(-0.0);
+        arrows.apply(&[projectile_spawn(9, 1.0, east)], &[], &[]);
+        let dir = arrows.get(9).unwrap().dir;
+        assert!(dir.x > 0.99 && dir.y.abs() < 1e-5, "from the yaw alone: {dir:?}");
+
+        // Then the server's updates: the motion between them is the heading,
+        // dipping as gravity takes it.
+        arrows.apply(
+            &[],
+            &[EntityUpdate { id: 9, x: 2.0, y: 79.5, z: 0.0, yaw: east, state: 0 }],
+            &[],
+        );
+        let a = arrows.get(9).unwrap();
+        assert_eq!(a.pos, Vec3::new(2.0, 79.5, 0.0));
+        assert!(a.dir.x > 0.0 && a.dir.y < 0.0, "east and falling: {:?}", a.dir);
+        assert!((a.dir.length() - 1.0).abs() < 1e-4);
+
+        arrows.apply(&[], &[], &[9]);
+        assert_eq!(arrows.iter().count(), 0, "a hit removes it");
+    }
+
+    #[test]
+    fn clear_empties_the_projectile_table() {
+        let mut arrows = RemoteProjectiles::default();
+        arrows.apply(&[projectile_spawn(1, 0.0, 0.0)], &[], &[]);
+        arrows.clear();
+        assert_eq!(arrows.iter().count(), 0);
     }
 
     fn grant(kind: u8, id: u16, count: u8, full_item: WireItem) -> crate::protocol::InventoryGrantPacket {

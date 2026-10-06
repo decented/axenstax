@@ -1249,6 +1249,10 @@ pub(crate) struct GameState {
     /// joined to a server; pickup is server-authoritative (InventoryGrant).
     /// Cross-platform — the browser renders server loot when joined.
     pub(crate) remote_items: crate::remote_entities::RemoteItems,
+    /// Server-broadcast projectiles in flight (MP-A3, v66) — a dedicated
+    /// server's dispenser arrows. Render-only; the server's sim flies them,
+    /// lands the hit and despawns them.
+    pub(crate) remote_projectiles: crate::remote_entities::RemoteProjectiles,
     /// Block changes made this tick, to be sent to the server. Cross-platform so
     /// `network_send_input` can drain it on both targets. NOTE: the ~30 push
     /// sites stay native-gated for now, so a browser joiner does not yet
@@ -1804,6 +1808,7 @@ impl GameState {
             remote_players: Vec::new(),
             remote_swing: std::collections::HashMap::new(),
             remote_items: crate::remote_entities::RemoteItems::default(),
+            remote_projectiles: crate::remote_entities::RemoteProjectiles::default(),
             pending_block_changes: Vec::new(),
             touch: crate::touch_input::TouchInput::new(),
             #[cfg(target_arch = "wasm32")]

@@ -134,6 +134,11 @@ pub struct ServerPlayer {
     /// Local players run this build, so they start at ours. Read through
     /// [`ServerPlayer::worldgen_mismatch`].
     pub client_worldgen_version: u32,
+    /// Where this player respawns (MP-A3): the position they were created at,
+    /// which for a joiner is the spawn its `JoinAccept` named. The joiner's
+    /// bed / `/spawnpoint` spawns are client-side only, so the server's
+    /// respawn point is still the join spawn.
+    pub spawn_pos: Vec3,
 }
 
 /// Resolve the [`ItemRef`] a player is currently holding from the item in
@@ -272,6 +277,7 @@ impl ServerPlayer {
             contacts: std::collections::HashMap::new(),
             chat_rate: crate::comms::RateLimiter::new(),
             client_worldgen_version: crate::world::worldgen_fingerprint(),
+            spawn_pos: spawn,
         }
     }
 
@@ -280,6 +286,13 @@ impl ServerPlayer {
     /// pushed rather than regenerating them from the seed (Phase B).
     pub fn worldgen_mismatch(&self) -> bool {
         self.client_worldgen_version != crate::world::worldgen_fingerprint()
+    }
+
+    /// Can a mob target this player, or a pressure plate feel them? Not when
+    /// they've left, and not while dead (MP-A3 — a dead joiner's body stays
+    /// where it fell until they choose Respawn, and nothing should chase it).
+    pub fn is_present_and_alive(&self) -> bool {
+        self.connected && !self.combat.dead
     }
 }
 
@@ -959,8 +972,14 @@ impl GameServer {
         self.tick_player_physics();
 
         // Mob AI — targets nearest player. Rebuild positions — player_physics
-        // may have moved server_simulated players.
-        let player_positions: Vec<Vec3> = self.players.iter().map(|sp| sp.player.pos).collect();
+        // may have moved server_simulated players. Living, present players
+        // only (MP-A3): a dead joiner's body is no target.
+        let player_positions: Vec<Vec3> = self
+            .players
+            .iter()
+            .filter(|sp| sp.is_present_and_alive())
+            .map(|sp| sp.player.pos)
+            .collect();
         // HP-3 — brigand AI pre-pass runs BEFORE the main dispatcher so
         // tier-specific detect-range + flee-gate + day/night chase-gate
         // overrides land first.
@@ -1031,6 +1050,24 @@ impl GameServer {
         // full-durability tool client-side is worse than leaving the drop).
         // Grants are per-tick data, drained by hosted_server.rs into
         // per-connection InventoryGrantPacket sends right after this tick.
+        //
+        // Projectiles (MP-A3) — the SAME pure tick the client runs, in the same
+        // place (after entity physics, before item lifetimes), wherever the
+        // server owns the machines that fire them (a dispenser's arrows). Hits
+        // land on mobs through `combat::Health` and `despawn_dead` below, the
+        // server's ordinary damage path; `diff_entities` (hosted_server.rs)
+        // broadcasts the flight. Shooter-sneak map empty: every server-fired
+        // projectile today is ownerless, so no friendly-fire shield applies.
+        // A LAN host's projectiles live in its CLIENT sim — a second tick here
+        // would be a second sim, hence the same flag as the machines.
+        if self.simulates_block_machines {
+            crate::entity::tick_projectiles(
+                &mut self.ecs,
+                &self.world,
+                &self.registry,
+                &std::collections::HashMap::new(),
+            );
+        }
         crate::entity::tick_item_lifetimes(&mut self.ecs);
         self.pending_item_grants.clear();
         {
@@ -1062,6 +1099,7 @@ impl GameServer {
             let mut power_positions: Vec<(f32, f32, f32)> = self
                 .players
                 .iter()
+                .filter(|p| p.is_present_and_alive())
                 .map(|p| (p.player.pos.x, p.player.pos.y, p.player.pos.z))
                 .collect();
             for (_id, pos) in self.ecs.query::<&crate::entity::Position>().iter() {
@@ -1104,12 +1142,15 @@ impl GameServer {
 
         // Per-player entity collision + combat timers
         for i in 0..self.players.len() {
-            let player = &mut self.players[i].player;
-            crate::entity::push_player_from_entities(
-                &self.ecs,
-                &mut player.pos,
-                &mut player.velocity,
-            );
+            // A dead body runs no physics (MP-A3): nothing shoves it.
+            if !self.players[i].combat.dead {
+                let player = &mut self.players[i].player;
+                crate::entity::push_player_from_entities(
+                    &self.ecs,
+                    &mut player.pos,
+                    &mut player.velocity,
+                );
+            }
             self.players[i].combat.tick();
         }
 
@@ -1190,6 +1231,13 @@ impl GameServer {
             if !sp.server_simulated {
                 continue;
             }
+            if sp.combat.dead {
+                // MP-A3 — a dead body runs no physics and keeps no backlog of
+                // moves to replay the moment it respawns.
+                sp.pending_intent = None;
+                sp.intent_queue.clear();
+                continue;
+            }
             let Some(intent) = sp.pending_intent.take().or_else(|| sp.intent_queue.pop_front())
             else {
                 continue;
@@ -1245,7 +1293,11 @@ impl GameServer {
             .max(crate::combat::POISON_HEALTH_FLOOR);
         for sp in &mut self.players {
             sp.combat.starvation_floor = starvation_floor;
-            if !sp.server_simulated || !sp.connected {
+            // A dead copy stays dead (MP-A3): the 40-tick revive BRIDGE is
+            // gone. It waits for the joiner's explicit Respawn
+            // (`Self::respawn_player`). The death's `just_died` one-shot is
+            // left for `HostedServer` to turn into a `PlayerEventType::Died`.
+            if !sp.server_simulated || !sp.connected || sp.combat.dead {
                 continue;
             }
             crate::survival::tick_player_survival(
@@ -1254,23 +1306,73 @@ impl GameServer {
                 &self.world,
                 self.play_mode,
             );
-            if sp.combat.dead {
-                // BRIDGE: respawn restores health/hunger/breath only; position
-                // stays intent-driven, so the client's own respawn teleport
-                // isn't mirrored (without it a server copy killed by a fall
-                // stayed dead and stopped picking items up) — replace when
-                // single-player routes through HostedServer (dual-sim debt).
-                // No server-side death handler consumes the one-shot. The
-                // copy restores on `respawn_timer` because the server can't
-                // see the client's Respawn choice (the client itself waits on
-                // its death screen — no auto-respawn since 2026-10-06).
-                sp.combat.just_died = false;
-                if sp.combat.respawn_timer == 0 {
-                    sp.combat.respawn();
-                    sp.player.reset_fall();
-                }
-            }
         }
+    }
+
+    /// A server-simulated player's client reports it died (MP-A3): its input
+    /// carries zero health — a mob, lava, anything its own sim ran. The server
+    /// takes the death (only ever downward: a report of health coming BACK is
+    /// never believed — only `respawn_player` revives). Returns whether this
+    /// was a new death.
+    pub fn report_player_death(&mut self, idx: usize) -> bool {
+        let Some(sp) = self.players.get_mut(idx) else {
+            return false;
+        };
+        if !sp.server_simulated || sp.combat.dead || self.play_mode.is_creative() {
+            return false;
+        }
+        sp.combat.die(crate::survival::DamageCause::Generic);
+        sp.pending_intent = None;
+        sp.intent_queue.clear();
+        true
+    }
+
+    /// The player chose Respawn (MP-A3, `PacketType::Respawn`). If the server
+    /// holds them dead: full health, hunger and breath, standing in their
+    /// spawn point's column ([`Self::standing_spot`]), at rest, no fall in
+    /// progress and no stale moves queued. Returns where they now stand, or
+    /// `None` (and changes nothing) for a living player — otherwise Respawn
+    /// would be a free teleport home.
+    pub fn respawn_player(&mut self, idx: usize) -> Option<Vec3> {
+        let spawn = self.standing_spot(self.players.get(idx)?.spawn_pos);
+        let sp = &mut self.players[idx];
+        if !sp.combat.dead {
+            return None;
+        }
+        sp.combat.respawn();
+        sp.combat.just_died = false;
+        sp.player.pos = spawn;
+        sp.player.velocity = Vec3::ZERO;
+        sp.player.reset_fall();
+        sp.pending_intent = None;
+        sp.intent_queue.clear();
+        Some(spawn)
+    }
+
+    /// Where a body put at `spawn` actually stands: the same column, feet on
+    /// the first non-air block at or below it — or, when the spawn cell is
+    /// buried, on top of the buried run — the rule `initial_load` places
+    /// players by. A joiner's spawn is the air above the world spawn
+    /// (`attach_remote_transport`), so without this every respawn would start
+    /// with a damaging fall. `spawn` unchanged when the column is empty.
+    fn standing_spot(&self, spawn: Vec3) -> Vec3 {
+        let (x, z) = (spawn.x.floor() as i32, spawn.z.floor() as i32);
+        let top = (MAX_CHUNK_Y + 1) * CHUNK_SIZE as i32 - 1;
+        let mut y = (spawn.y.floor() as i32).clamp(0, top);
+        let air = |y: i32| self.world.get_block(x, y, z) == block::AIR;
+        if !air(y) {
+            while y < top && !air(y) {
+                y += 1;
+            }
+            return Vec3::new(spawn.x, y as f32, spawn.z);
+        }
+        while y > 0 && air(y) {
+            y -= 1;
+        }
+        if air(y) {
+            return spawn;
+        }
+        Vec3::new(spawn.x, y as f32 + 1.0, spawn.z)
     }
 
     /// Save the world (all players' state).

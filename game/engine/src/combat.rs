@@ -119,12 +119,12 @@ pub struct PlayerCombat {
     /// applies the amount by which it exceeds this. Meaningful only while
     /// `invincible_timer > 0`.
     pub last_hit_damage: f32,
+    /// Dead until respawned. Nothing respawns a player on a timer: the client
+    /// waits for `respawn_requested` (W2 owner decision 2026-10-06 — the death
+    /// screen stays up until the player chooses Respawn), and a server holds a
+    /// joiner's copy dead until that joiner sends `PacketType::Respawn`
+    /// (MP-A3, `GameServer::respawn_player`).
     pub dead: bool,
-    /// Ticks until a dead *server copy* of a remote player is restored
-    /// (`GameServer::tick_player_physics`, BRIDGE there). The local client never
-    /// auto-respawns: it waits for `respawn_requested` (W2 owner decision
-    /// 2026-10-06 — the death screen stays up until the player chooses Respawn).
-    pub respawn_timer: u32,
     /// Set by the death screen (Respawn button / Enter / pad A) via
     /// [`PlayerCombat::request_respawn`]; the client's death loop respawns the
     /// player on the next tick and `respawn()` clears it.
@@ -194,7 +194,6 @@ impl PlayerCombat {
             invincible_timer: 0,
             last_hit_damage: 0.0,
             dead: false,
-            respawn_timer: 0,
             respawn_requested: false,
             just_died: false,
             poison_ticks: 0,
@@ -233,9 +232,6 @@ impl PlayerCombat {
         }
         if self.invincible_timer > 0 {
             self.invincible_timer -= 1;
-        }
-        if self.dead && self.respawn_timer > 0 {
-            self.respawn_timer -= 1;
         }
         if self.poison_ticks > 0 {
             self.poison_ticks -= 1;
@@ -326,14 +322,30 @@ impl PlayerCombat {
         self.health = (self.health - applied).max(0.0);
         self.flash_timer = PLAYER_HURT_FLASH_TICKS;
         if self.health <= 0.0 {
-            self.dead = true;
-            // Server-copy restore delay only (see field doc) — the client
-            // waits on the death screen for `request_respawn`.
-            self.respawn_timer = 40;
-            self.respawn_requested = false;
-            self.just_died = true;
+            self.mark_dead();
         }
         true
+    }
+
+    /// Die now, whatever the health: the death a joiner's client takes when
+    /// the server tells it its body died (`PlayerEventType::Died`), and the
+    /// death a server records when a joiner's input reports zero health.
+    /// Records `cause` for the death-screen line. No-op when already dead, so
+    /// the `just_died` one-shot fires once per death.
+    pub fn die(&mut self, cause: crate::survival::DamageCause) {
+        if self.dead {
+            return;
+        }
+        self.last_damage = cause;
+        self.health = 0.0;
+        self.mark_dead();
+    }
+
+    /// The death transition, shared by a lethal hit and [`Self::die`].
+    fn mark_dead(&mut self) {
+        self.dead = true;
+        self.respawn_requested = false;
+        self.just_died = true;
     }
 
     pub fn respawn(&mut self) {
@@ -342,7 +354,6 @@ impl PlayerCombat {
         self.flash_timer = 0;
         self.invincible_timer = 0;
         self.last_hit_damage = 0.0;
-        self.respawn_timer = 0;
         self.respawn_requested = false;
         // Respawn restores hunger too (MC parity).
         self.hunger = self.max_hunger;
@@ -857,13 +868,27 @@ mod tests {
     // --- PlayerCombat ---
 
     #[test]
-    fn player_combat_death_triggers_respawn_timer() {
+    fn player_combat_death_sets_the_just_died_one_shot() {
         let mut p = PlayerCombat::new();
         p.take_damage(25.0);
         assert!(p.dead);
         assert_eq!(p.health, 0.0);
-        assert_eq!(p.respawn_timer, 40);
         assert!(p.just_died, "death tick must set the just_died one-shot");
+    }
+
+    #[test]
+    fn die_kills_outright_once_and_records_the_cause() {
+        use crate::survival::DamageCause;
+        let mut p = PlayerCombat::new();
+        p.invincible_timer = 5; // mid-invulnerability makes no difference
+        p.die(DamageCause::Fall);
+        assert!(p.dead && p.just_died);
+        assert_eq!(p.health, 0.0);
+        assert_eq!(p.last_damage, DamageCause::Fall);
+        p.just_died = false; // consumed
+        p.die(DamageCause::Drowning);
+        assert!(!p.just_died, "already dead: no second death transition");
+        assert_eq!(p.last_damage, DamageCause::Fall, "nor a rewritten cause");
     }
 
     #[test]
@@ -909,7 +934,6 @@ mod tests {
         p.respawn();
         assert!(!p.dead);
         assert_eq!(p.health, p.max_health);
-        assert_eq!(p.respawn_timer, 0);
     }
 
     #[test]

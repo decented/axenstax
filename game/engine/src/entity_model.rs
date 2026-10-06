@@ -2027,70 +2027,97 @@ pub fn build_projectile_vertices(
         .query::<(&crate::entity::Position, &crate::entity::Velocity, &ProjectileEntity)>()
         .iter()
     {
-        // Skip if the arrow is right at the camera (avoid "inside the model").
-        if (pos.0 - player_pos).length_squared() < 0.04 {
-            continue;
-        }
-        let verts_start = verts.len();
-        // Yaw + pitch from velocity. Arrow shaft points along its travel.
-        let v = vel.0;
-        let yaw = (-v.x).atan2(-v.z);
-        let horiz_len = (v.x * v.x + v.z * v.z).sqrt();
-        let pitch = (-v.y).atan2(horiz_len.max(1e-4));
-
-        // Arrow cuboid: long along Z (length 0.5), thin in X/Y (0.06).
-        let half_x = 0.03;
-        let half_y = 0.03;
-        let half_z = 0.25;
-
-        let mut corners = [
-            Vec3::new(-half_x, -half_y, -half_z),
-            Vec3::new( half_x, -half_y, -half_z),
-            Vec3::new( half_x,  half_y, -half_z),
-            Vec3::new(-half_x,  half_y, -half_z),
-            Vec3::new(-half_x, -half_y,  half_z),
-            Vec3::new( half_x, -half_y,  half_z),
-            Vec3::new( half_x,  half_y,  half_z),
-            Vec3::new(-half_x,  half_y,  half_z),
-        ];
-        // Pitch (around X axis).
-        let cos_p = pitch.cos();
-        let sin_p = pitch.sin();
-        for c in &mut corners {
-            let dy = c.y;
-            let dz = c.z;
-            c.y = dy * cos_p - dz * sin_p;
-            c.z = dy * sin_p + dz * cos_p;
-        }
-        // Yaw (around Y axis) + translate to world.
-        let cos_y = yaw.cos();
-        let sin_y = yaw.sin();
-        for c in &mut corners {
-            let rx = c.x * cos_y - c.z * sin_y;
-            let rz = c.x * sin_y + c.z * cos_y;
-            c.x = rx + pos.0.x;
-            c.y += pos.0.y;
-            c.z = rz + pos.0.z;
-        }
-
-        let tex = TEX_ITEM_ARROW;
-        push_textured_quad(&mut verts, tex, [1.0, 0.0, 0.0],
-            corners[1], corners[5], corners[6], corners[2]);
-        push_textured_quad(&mut verts, tex, [-1.0, 0.0, 0.0],
-            corners[4], corners[0], corners[3], corners[7]);
-        push_textured_quad(&mut verts, tex, [0.0, 1.0, 0.0],
-            corners[3], corners[2], corners[6], corners[7]);
-        push_textured_quad(&mut verts, tex, [0.0, -1.0, 0.0],
-            corners[4], corners[5], corners[1], corners[0]);
-        push_textured_quad(&mut verts, tex, [0.0, 0.0, 1.0],
-            corners[5], corners[4], corners[7], corners[6]);
-        push_textured_quad(&mut verts, tex, [0.0, 0.0, -1.0],
-            corners[0], corners[1], corners[2], corners[3]);
-
-        // Campaign N — projectiles dim with the world's light.
-        apply_light_channels(&mut verts[verts_start..], light_at(pos.0));
+        push_arrow(&mut verts, pos.0, vel.0, player_pos, &light_at);
     }
     verts
+}
+
+/// Build vertices for the server-broadcast projectiles (MP-A3) — the very same
+/// arrow `build_projectile_vertices` draws for the local sim's own, posed from
+/// the server's per-tick positions and the heading between them.
+pub fn build_remote_projectile_vertices(
+    arrows: &crate::remote_entities::RemoteProjectiles,
+    player_pos: Vec3,
+    light_at: impl Fn(Vec3) -> (f32, f32),
+) -> Vec<Vertex> {
+    let mut verts = Vec::new();
+    for a in arrows.iter() {
+        push_arrow(&mut verts, a.pos, a.dir, player_pos, &light_at);
+    }
+    verts
+}
+
+/// One arrow: a thin cuboid at `pos` pointing along `heading` (any length —
+/// only its direction is used). Skipped when it sits right at the camera
+/// (avoid "inside the model").
+fn push_arrow(
+    verts: &mut Vec<Vertex>,
+    pos: Vec3,
+    heading: Vec3,
+    player_pos: Vec3,
+    light_at: &impl Fn(Vec3) -> (f32, f32),
+) {
+    if (pos - player_pos).length_squared() < 0.04 {
+        return;
+    }
+    let verts_start = verts.len();
+    // Yaw + pitch from the heading. Arrow shaft points along its travel.
+    let v = heading;
+    let yaw = (-v.x).atan2(-v.z);
+    let horiz_len = (v.x * v.x + v.z * v.z).sqrt();
+    let pitch = (-v.y).atan2(horiz_len.max(1e-4));
+
+    // Arrow cuboid: long along Z (length 0.5), thin in X/Y (0.06).
+    let half_x = 0.03;
+    let half_y = 0.03;
+    let half_z = 0.25;
+
+    let mut corners = [
+        Vec3::new(-half_x, -half_y, -half_z),
+        Vec3::new( half_x, -half_y, -half_z),
+        Vec3::new( half_x,  half_y, -half_z),
+        Vec3::new(-half_x,  half_y, -half_z),
+        Vec3::new(-half_x, -half_y,  half_z),
+        Vec3::new( half_x, -half_y,  half_z),
+        Vec3::new( half_x,  half_y,  half_z),
+        Vec3::new(-half_x,  half_y,  half_z),
+    ];
+    // Pitch (around X axis).
+    let cos_p = pitch.cos();
+    let sin_p = pitch.sin();
+    for c in &mut corners {
+        let dy = c.y;
+        let dz = c.z;
+        c.y = dy * cos_p - dz * sin_p;
+        c.z = dy * sin_p + dz * cos_p;
+    }
+    // Yaw (around Y axis) + translate to world.
+    let cos_y = yaw.cos();
+    let sin_y = yaw.sin();
+    for c in &mut corners {
+        let rx = c.x * cos_y - c.z * sin_y;
+        let rz = c.x * sin_y + c.z * cos_y;
+        c.x = rx + pos.x;
+        c.y += pos.y;
+        c.z = rz + pos.z;
+    }
+
+    let tex = TEX_ITEM_ARROW;
+    push_textured_quad(verts, tex, [1.0, 0.0, 0.0],
+        corners[1], corners[5], corners[6], corners[2]);
+    push_textured_quad(verts, tex, [-1.0, 0.0, 0.0],
+        corners[4], corners[0], corners[3], corners[7]);
+    push_textured_quad(verts, tex, [0.0, 1.0, 0.0],
+        corners[3], corners[2], corners[6], corners[7]);
+    push_textured_quad(verts, tex, [0.0, -1.0, 0.0],
+        corners[4], corners[5], corners[1], corners[0]);
+    push_textured_quad(verts, tex, [0.0, 0.0, 1.0],
+        corners[5], corners[4], corners[7], corners[6]);
+    push_textured_quad(verts, tex, [0.0, 0.0, -1.0],
+        corners[0], corners[1], corners[2], corners[3]);
+
+    // Campaign N — projectiles dim with the world's light.
+    apply_light_channels(&mut verts[verts_start..], light_at(pos));
 }
 
 // ── Rail freight (Phase 1) — cart render ─────────────────────────────────────
@@ -3247,6 +3274,36 @@ mod tests {
             3 * 36,
             "block + material + tool render one cube each; unknowns skipped"
         );
+    }
+
+    #[test]
+    fn remote_projectiles_render_as_the_same_arrow_as_local_ones() {
+        // MP-A3 — a server-shot arrow draws the very cuboid a local arrow
+        // does (`push_arrow` is shared); one too close to the eye is skipped.
+        use crate::protocol::{EntityKind, EntitySpawn, WireItem};
+        let mut arrows = crate::remote_entities::RemoteProjectiles::default();
+        let spawn = |id: u32, x: f32| EntitySpawn {
+            id,
+            kind: EntityKind::Projectile,
+            x,
+            y: 65.0,
+            z: 0.0,
+            yaw: 0.0,
+            health: 0,
+            item_kind: 0,
+            item_id: 0,
+            item_count: 0,
+            full_item: WireItem::None,
+        };
+        arrows.apply(&[spawn(1, 4.0), spawn(2, 8.0), spawn(3, -10.0)], &[], &[]);
+        let eye = glam::Vec3::new(-10.0, 65.0, 0.0);
+        let remote = build_remote_projectile_vertices(&arrows, eye, |_| (1.0, 0.0));
+
+        let mut ecs = hecs::World::new();
+        crate::entity::spawn_arrow(&mut ecs, glam::Vec3::new(4.0, 65.0, 0.0), glam::Vec3::new(0.0, 0.0, -1.0), 4.0, None);
+        let local = build_projectile_vertices(&ecs, eye, |_| (1.0, 0.0));
+        assert!(!local.is_empty());
+        assert_eq!(remote.len(), 2 * local.len(), "two arrows drawn; the one at the eye skipped");
     }
 
     #[test]

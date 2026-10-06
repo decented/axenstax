@@ -1171,6 +1171,40 @@ impl HostedServer {
         }
     }
 
+    /// Send `pkt` to every handshake-complete, connected client.
+    fn send_to_all_joined(&self, pkt: &[u8]) {
+        self.send_to_joined_except(usize::MAX, pkt);
+    }
+
+    /// Is slot `i` a server-simulated joiner the server holds dead (MP-A3)?
+    fn joiner_is_dead(&self, i: usize) -> bool {
+        self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.combat.dead)
+    }
+
+    /// MP-A3 — turn this tick's joiner deaths (the `just_died` one-shot: a
+    /// server-side fall or drowning in `GameServer::tick`, or a death the
+    /// joiner's own input reported) into `PlayerEventType::Died`, sent to every
+    /// joined client, the dead player included. That is how a joiner whose
+    /// server copy died — when its own sim didn't see it — reaches its death
+    /// screen, and with it the Respawn button the server is waiting on.
+    fn announce_joiner_deaths(&mut self) {
+        for i in 0..self.server.players.len() {
+            let sp = &mut self.server.players[i];
+            if !sp.server_simulated || !sp.combat.just_died {
+                continue;
+            }
+            sp.combat.just_died = false;
+            let pkt = protocol::serialize_packet(
+                protocol::PacketType::PlayerEvent,
+                &protocol::PlayerEventPacket {
+                    player_index: i as u32,
+                    event: protocol::PlayerEventType::Died,
+                },
+            );
+            self.send_to_all_joined(&pkt);
+        }
+    }
+
     /// Free every remote slot whose connection has gone (peer closed, network
     /// error, idle timeout) or that has sat past `PRE_AUTH_TIMEOUT_TICKS`
     /// without completing its join. Runs every tick after inbound packets, so a
@@ -1221,6 +1255,7 @@ impl HostedServer {
         self.process_inbound_packets();
         self.reap_slots();
         self.server.tick();
+        self.announce_joiner_deaths();
         // World chat §4.2 — inbound room lines, delivered under the same
         // hearing rule as an in-world speaker. No-op unless a room is attached.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1785,6 +1820,23 @@ impl HostedServer {
                             continue;
                         }
                         sp.last_input_tick = input.tick;
+                        // MP-A3 — death is server-held for a joiner. Zero
+                        // health in its input is its own sim reporting a death
+                        // (only ever believed downward; health coming back is
+                        // never taken — only a `Respawn` revives). While dead
+                        // its input is ignored: no moves, no look, no edits —
+                        // each edit is sent back so the ghost block un-places.
+                        let simulated = sp.server_simulated;
+                        if simulated && input.health <= 0.0 {
+                            self.server.report_player_death(i);
+                        }
+                        if simulated && self.server.players[i].combat.dead {
+                            for bc in &input.block_changes {
+                                self.send_back_authoritative_block(bc);
+                            }
+                            continue;
+                        }
+                        let sp = &mut self.server.players[i];
                         sp.yaw = input.yaw;
                         sp.pitch = input.pitch;
                         sp.held_item = input.held_item;
@@ -1973,7 +2025,37 @@ impl HostedServer {
                         else {
                             continue;
                         };
+                        if self.joiner_is_dead(i) {
+                            // MP-A3 — a dead joiner flips nothing.
+                            continue;
+                        }
                         self.handle_device_interact(i, req.pos);
+                    }
+                    protocol::PacketType::Respawn => {
+                        // MP-A3 — the joiner chose Respawn on its death screen.
+                        // Honoured only for a joined, server-simulated player
+                        // the server holds dead; anything else is ignored (a
+                        // living player's Respawn would be a free teleport).
+                        if !self.handshake_done[i] || self.disconnected[i] {
+                            continue;
+                        }
+                        if !self.server.players.get(i).is_some_and(|sp| sp.server_simulated) {
+                            continue;
+                        }
+                        if let Some(at) = self.server.respawn_player(i) {
+                            let pkt = protocol::serialize_packet(
+                                protocol::PacketType::PlayerEvent,
+                                &protocol::PlayerEventPacket {
+                                    player_index: i as u32,
+                                    event: protocol::PlayerEventType::Respawned {
+                                        x: at.x,
+                                        y: at.y,
+                                        z: at.z,
+                                    },
+                                },
+                            );
+                            self.send_to_all_joined(&pkt);
+                        }
                     }
                     // Native-only — the web build carries no chat surface at
                     // all (docs/foundations/2026-09-05-world-chat.md §6); on
@@ -3225,7 +3307,45 @@ fn backfill_entity_events(
             full_item,
         });
     }
+    for (_e, (pid, _proj, pos, vel)) in ecs
+        .query::<(&ProtocolId, &crate::entity::ProjectileEntity, &Position, &crate::entity::Velocity)>()
+        .iter()
+    {
+        if !known_ids.contains(&pid.0) {
+            continue;
+        }
+        spawns.push(projectile_spawn(pid.0, pos.0, vel.0));
+    }
     spawns
+}
+
+/// MP-A3 — a projectile's flight heading as a wire yaw: the same
+/// `(-vx).atan2(-vz)` the arrow renderer derives from its velocity, so a
+/// joiner can point the arrow before its first update arrives.
+fn projectile_yaw(vel: glam::Vec3) -> f32 {
+    (-vel.x).atan2(-vel.z)
+}
+
+/// MP-A3 — `EntityUpdate.state` for a projectile: 0 arrow, 1 blunt ball.
+fn projectile_state(proj: &crate::entity::ProjectileEntity) -> u8 {
+    u8::from(proj.is_blunt)
+}
+
+/// MP-A3 — the `EntitySpawn` for a projectile in flight (diff + backfill).
+fn projectile_spawn(id: u32, pos: glam::Vec3, vel: glam::Vec3) -> protocol::EntitySpawn {
+    protocol::EntitySpawn {
+        id,
+        kind: protocol::EntityKind::Projectile,
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        yaw: projectile_yaw(vel),
+        health: 0,
+        item_kind: 0,
+        item_id: 0,
+        item_count: 0,
+        full_item: protocol::WireItem::None,
+    }
 }
 
 fn diff_entities(
@@ -3411,6 +3531,39 @@ fn diff_entities(
             z: pos.0.z,
             yaw: 0.0,
             state: 0,
+        });
+    }
+
+    // MP-A3 — projectiles in flight (a dedicated server's dispenser arrows)
+    // join the same broadcast: ProtocolId on first sight, spawn once, an update
+    // every tick of the flight, and — when a hit or lifetime expiry removes the
+    // entity — exactly one despawn via the alive-set diff below. They carry no
+    // MobKind/CartData/ItemEntity, so no other pass above ever sees them.
+    let missing_projectiles: Vec<hecs::Entity> = ecs
+        .query::<hecs::Without<(&crate::entity::ProjectileEntity, &Position), &ProtocolId>>()
+        .iter()
+        .map(|(e, _)| e)
+        .collect();
+    for entity in missing_projectiles {
+        let id = *next_entity_id;
+        *next_entity_id = next_entity_id.saturating_add(1);
+        let _ = ecs.insert_one(entity, ProtocolId(id));
+    }
+    for (_e, (pid, proj, pos, vel)) in ecs
+        .query::<(&ProtocolId, &crate::entity::ProjectileEntity, &Position, &Velocity)>()
+        .iter()
+    {
+        current_ids.insert(pid.0);
+        if !known_ids.contains(&pid.0) {
+            spawns.push(projectile_spawn(pid.0, pos.0, vel.0));
+        }
+        updates.push(protocol::EntityUpdate {
+            id: pid.0,
+            x: pos.0.x,
+            y: pos.0.y,
+            z: pos.0.z,
+            yaw: projectile_yaw(vel.0),
+            state: projectile_state(proj),
         });
     }
 
@@ -4079,6 +4232,71 @@ mod tests {
         assert!(spawns2.is_empty());
         assert_eq!(updates2.len(), 2);
         assert!(despawns2.is_empty());
+    }
+
+    // ── Server-side projectiles (MP-A3): arrows join the entity broadcast ────
+
+    #[test]
+    fn projectile_broadcasts_spawn_then_updates_then_despawns_once() {
+        let (mut ecs, mut next_id, mut known) = fresh_state();
+        // Flying due east (+x): yaw follows the same `(-vx).atan2(-vz)` rule
+        // the arrow renderer uses.
+        entity::spawn_arrow(
+            &mut ecs,
+            Vec3::new(1.0, 70.0, 2.0),
+            Vec3::new(0.85, 0.0, 0.0),
+            entity::ARROW_DAMAGE,
+            None,
+        );
+        entity::spawn_blunt_projectile(
+            &mut ecs,
+            Vec3::new(5.0, 70.0, 5.0),
+            Vec3::new(0.0, 0.0, 0.5),
+            1.0,
+            None,
+        );
+
+        let (spawns, updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
+        assert_eq!(spawns.len(), 2, "each projectile in flight broadcasts a spawn");
+        assert!(spawns.iter().all(|s| s.kind == protocol::EntityKind::Projectile));
+        let arrow = spawns.iter().find(|s| (s.x - 1.0).abs() < 1e-6).expect("arrow spawn");
+        assert!((arrow.y - 70.0).abs() < 1e-6 && (arrow.z - 2.0).abs() < 1e-6);
+        let east_yaw = (-0.85f32).atan2(-0.0);
+        assert!((arrow.yaw - east_yaw).abs() < 1e-5, "yaw follows the flight direction");
+        assert_eq!(arrow.health, 0, "projectiles carry neutral health");
+        assert_eq!(updates.len(), 2, "first broadcast also carries an update");
+        let tag = |id: u32| updates.iter().find(|u| u.id == id).unwrap().state;
+        let ball = spawns.iter().find(|s| (s.x - 5.0).abs() < 1e-6).unwrap();
+        assert_eq!(tag(arrow.id), 0, "state 0 = arrow");
+        assert_eq!(tag(ball.id), 1, "state 1 = blunt (slingshot ball)");
+        assert!(despawns.is_empty());
+
+        // In flight: update-only, never re-spawned.
+        let (spawns2, updates2, despawns2) = diff_entities(&mut ecs, &mut next_id, &mut known);
+        assert!(spawns2.is_empty());
+        assert_eq!(updates2.len(), 2);
+        assert!(despawns2.is_empty());
+
+        // The late-joiner backfill carries an already-broadcast projectile too.
+        let backfill = backfill_entity_events(&ecs, &known);
+        assert_eq!(
+            backfill.iter().filter(|s| s.kind == protocol::EntityKind::Projectile).count(),
+            2
+        );
+
+        // A hit (or lifetime expiry) removes it → exactly one despawn.
+        let ids: Vec<hecs::Entity> = ecs
+            .query::<&entity::ProjectileEntity>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+        for e in ids {
+            let _ = ecs.despawn(e);
+        }
+        let (_, _, despawns3) = diff_entities(&mut ecs, &mut next_id, &mut known);
+        assert_eq!(despawns3.len(), 2, "each projectile despawns once");
+        let (_, _, despawns4) = diff_entities(&mut ecs, &mut next_id, &mut known);
+        assert!(despawns4.is_empty(), "…and only once");
     }
 
     // ── Phase 3: verify_join_signet_auth ─────────────────────────────────────

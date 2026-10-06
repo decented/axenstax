@@ -46,6 +46,9 @@ pub mod survival;
 pub mod worldgen_golden;
 // T2-9 — a joiner builds the host's world (seed + rules + spawn) from JoinAccept.
 pub mod join_world;
+// MP-A3 — server-side projectiles reach joiners; a dead joiner stays dead.
+pub mod server_projectiles;
+pub mod joiner_death;
 
 // Online play by contact — the rendezvous end to end over an in-memory relay.
 #[cfg(not(target_arch = "wasm32"))]

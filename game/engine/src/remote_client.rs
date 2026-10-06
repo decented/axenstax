@@ -231,6 +231,15 @@ enum JoinFlow {
     },
 }
 
+/// MP-A3 — a server decision about the local player's own body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OwnLifeEvent {
+    /// The server holds us dead: enter the death screen if not already on it.
+    Died,
+    /// The server respawned us here (after our `Respawn` request).
+    Respawned(glam::Vec3),
+}
+
 /// A remote game client connected to a server.
 pub struct RemoteClient {
     transport: Box<dyn ClientTransport>,
@@ -290,6 +299,11 @@ pub struct RemoteClient {
     /// `InventoryGrantPacket`). Drained each frame by `network_receive`,
     /// which decodes and adds them to the local player's inventory.
     pub pending_grants: Vec<protocol::InventoryGrantPacket>,
+    /// MP-A3 — what the server decided about OUR body: it died (a fall or
+    /// drowning the server saw, or our own reported death echoed back), or it
+    /// respawned us after our `Respawn`, at the spawn point it holds. Other
+    /// players' events are not queued. Drained each frame by `network_receive`.
+    pub pending_life_events: Vec<OwnLifeEvent>,
     /// Entity-event and block-change DELTAS accumulated across every
     /// StateUpdate since the game loop last drained them. `latest_state` is
     /// last-write-wins, which is right for snapshot fields (players,
@@ -548,6 +562,7 @@ impl RemoteClient {
             verified_operator: None,
             pending_resource_pack: None,
             pending_grants: Vec::new(),
+            pending_life_events: Vec::new(),
             pending_operator_snapshot_json: None,
             pending_entity_spawns: Vec::new(),
             pending_entity_updates: Vec::new(),
@@ -590,6 +605,7 @@ impl RemoteClient {
             verified_operator: None,
             pending_resource_pack: None,
             pending_grants: Vec::new(),
+            pending_life_events: Vec::new(),
             pending_operator_snapshot_json: None,
             pending_entity_spawns: Vec::new(),
             pending_entity_updates: Vec::new(),
@@ -724,6 +740,30 @@ impl RemoteClient {
                                     log::info!("Player {} left", event.player_index);
                                     self.roster.remove(&event.player_index);
                                     changed = true;
+                                }
+                                // MP-A3 — death and respawn are server-held.
+                                // Only our own body's are ours to act on;
+                                // bounded like `pending_grants`.
+                                protocol::PlayerEventType::Died => {
+                                    if self.player_index() == Some(event.player_index)
+                                        && self.pending_life_events.len() < 16
+                                    {
+                                        self.pending_life_events.push(OwnLifeEvent::Died);
+                                        changed = true;
+                                    }
+                                }
+                                protocol::PlayerEventType::Respawned { x, y, z } => {
+                                    if self.player_index() == Some(event.player_index)
+                                        && x.is_finite()
+                                        && y.is_finite()
+                                        && z.is_finite()
+                                        && self.pending_life_events.len() < 16
+                                    {
+                                        self.pending_life_events.push(OwnLifeEvent::Respawned(
+                                            glam::Vec3::new(*x, *y, *z),
+                                        ));
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
@@ -943,6 +983,18 @@ impl RemoteClient {
             PacketType::ChatSay,
             &protocol::ChatSayPacket { text: text.to_string() },
         );
+        self.transport.send_to_server(&packet);
+    }
+
+    /// MP-A3 — tell the server we chose Respawn on the death screen. It
+    /// respawns us only if it holds us dead, and answers with
+    /// `PlayerEventType::Respawned`. No-op before the join completes —
+    /// mirrors `send_input`'s guard.
+    pub fn send_respawn(&mut self) {
+        if !matches!(self.state, ConnectionState::Connected { .. }) {
+            return;
+        }
+        let packet = protocol::serialize_packet(PacketType::Respawn, &());
         self.transport.send_to_server(&packet);
     }
 
@@ -1899,5 +1951,71 @@ mod tests {
 
         assert!(matches!(rc.state, ConnectionState::Failed(_)), "signer error → Failed");
         assert!(read_join_request(&srv).is_none(), "no JoinRequest on signer failure");
+    }
+
+    // ── MP-A3: death + respawn are server-held ───────────────────────────────
+
+    fn joined_as(index: u32) -> (crate::transport::ChannelServerTransport, RemoteClient) {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(client),
+            build_join_request_guest("Me", 0),
+            None,
+        );
+        let accept = protocol::JoinAcceptPacket { player_index: index, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        assert!(rc.is_connected());
+        while srv.try_recv_from_client().is_some() {}
+        (srv, rc)
+    }
+
+    fn life_event(srv: &dyn ServerTransport, index: u32, event: protocol::PlayerEventType) {
+        let ev = protocol::PlayerEventPacket { player_index: index, event };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::PlayerEvent, &ev));
+    }
+
+    #[test]
+    fn own_death_and_respawn_events_are_queued_for_the_game_loop() {
+        let (srv, mut rc) = joined_as(3);
+        life_event(&srv, 3, protocol::PlayerEventType::Died);
+        // Someone else's death is theirs to show, not ours to act on.
+        life_event(&srv, 4, protocol::PlayerEventType::Died);
+        life_event(&srv, 3, protocol::PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -2.5 });
+        rc.poll();
+        assert_eq!(
+            std::mem::take(&mut rc.pending_life_events),
+            vec![
+                OwnLifeEvent::Died,
+                OwnLifeEvent::Respawned(glam::Vec3::new(1.5, 70.0, -2.5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_respawned_event_with_a_non_finite_position_is_dropped() {
+        let (srv, mut rc) = joined_as(0);
+        life_event(&srv, 0, protocol::PlayerEventType::Respawned { x: f32::NAN, y: 0.0, z: 0.0 });
+        rc.poll();
+        assert!(rc.pending_life_events.is_empty());
+    }
+
+    #[test]
+    fn send_respawn_asks_the_server_once_joined() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(client),
+            build_join_request_guest("Me", 0),
+            None,
+        );
+        while srv.try_recv_from_client().is_some() {}
+        rc.send_respawn();
+        assert!(srv.try_recv_from_client().is_none(), "nothing before the join completes");
+
+        let (srv, mut rc) = joined_as(2);
+        rc.send_respawn();
+        let pkt = srv.try_recv_from_client().expect("a Respawn request");
+        let (ptype, _) = protocol::deserialize_header(&pkt).unwrap();
+        assert_eq!(ptype, PacketType::Respawn);
     }
 }
