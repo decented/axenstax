@@ -1,5 +1,17 @@
 # Single-player → HostedServer routing
 
+> **SUPERSEDED (2026-10-06, D1).** Do not build from this doc. Its target —
+> the client ECS as a render-only mirror fed over an in-process transport —
+> is the rejected alternative. The chosen design is **lending**: a host
+> client lends its one `World` + ECS to its embedded `GameServer` for each
+> tick (`game/engine/src/sim_lend.rs`, RAII `LentSim`), with one owner per
+> shared system (`SimSystem::lent_owner`) and a per-world tally tripwire.
+> Built for LAN / online hosts in D1 (Spec 01 §4.1.2, Spec 04 "Hosted mode —
+> the host lends its world"); single-player joins the same path in D3 (a
+> lending `HostedServer` with no transport). Phase 0a below is retired:
+> `parity_check` and `ENABLE_SINGLEPLAYER_HOSTED_SERVER` were deleted in D1.
+> Kept for history.
+
 **Status**: Phase 0a DELIVERED 2026-05-03 on `main` (commit `47adf4b` — `parity_check` module + `WorldParityHash` + `ENABLE_SINGLEPLAYER_HOSTED_SERVER=false` flag-gated wiring). Phase 0b onwards remains READY TO BUILD — needs Axolittle for each phase's regression session before the next one starts.
 **Date**: 2026-04-20 (original); Phase 0a delivery 2026-05-03.
 **Branch**: original work on `feat/hostedserver-phase0-transport`, merged to main. Phase 0b: branch off main again.

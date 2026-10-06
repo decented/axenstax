@@ -23,6 +23,7 @@
 - **v66** (2026-10-06): **WebSocket join origin (T-JOIN-RELAY WebSocket residual).** `JoinRequestPacket` gains a trailing `ws_host: String`: the normalised `host[:port]` a WebSocket joiner actually dialled (`signet::ws_host::ws_url_host`; empty on QUIC and in-process joins). A WS join now signs `axenstax-join:ws-host:<ws_host>` instead of `axenstax-join:unbound`. The server re-normalises the declared host, refuses it unless it is one of its public hosts (`--public-host`, `AXENSTAX_PUBLIC_HOST`, `AXENSTAX_DOMAIN`; an unconfigured server accepts any host), requires the auth event's origin to match exactly, and signs its `JoinAccept` identity proof over the same origin. Bumped because a v65 WS client signs `unbound`, which a v66 server refuses; the version reason is clearer. See §1.8.1 and Spec 08 §9.0.1.
 - **v67** (2026-10-06, MP-A3): **Server projectiles + server-held death.** Three appends, no existing shape changed: `EntityKind::Projectile = 39` (a projectile in flight rides the ordinary entity spawn/update/despawn diff; `yaw` = flight heading, `EntityUpdate.state` 0 arrow / 1 blunt), `PacketType::Respawn = 57` (C→S, empty payload) and two `PlayerEventType` variants, `Died` and `Respawned { x, y, z }` (S→C). Before it a dedicated server's dispenser arrow was consumed, never flew, never hit and was never seen, and a joiner's server copy revived itself 40 ticks after death (the BRIDGE) and vacuumed up its own death drops while the joiner was still on the death screen. Bumped because a v66 peer can't decode the new variants. See §4.2b.
 - **Joiner position truth (2026-10-06, MP step 1, NO wire change — still v67).** `StateUpdatePacket.last_acked_input` now carries the real sequence number of the last input the server applied for that client (was always `0`); each queued joiner input is simulated with its own look; the joiner predicts its own body and reconciles against the server's (snap beyond 1 block, camera glide below); a dedicated server spawns joiners on the surface instead of at `(0.5, 80, 0.5)`. Review fixes the same day: the prediction records under the sequence number the connection stamped on the wire (`RemoteClient::send_input` returns it; it counts from 1 per connection), a frame hitch catches up instead of losing steps, a LAN / online host generates terrain ahead of its joiners, a ride sends no movement, and a joiner cannot teleport itself. See §5.3.1.
+- **Hosted mode: the host lends its world (2026-10-06, D1, NO wire change — still v67).** A LAN / online host's embedded server no longer keeps a second copy of the world: the host client lends it its `World` + ECS + fluid/fire/leaf systems for each tick (`sim_lend::LentSim`), so every joiner's `StateUpdate` is diffed from the host's real world and entities, and each shared sim system runs once (an ownership table + a per-world tally tripwire). The host's own edits are broadcast without the joiner budget/validation; `mirror_host_world_state` is deleted. Why no bump: no packet shape changed, and a joiner cannot tell a lending host from an owning one except that what it is sent now matches what the host sees. `--no-lend` keeps the old owning server for one release. See "Hosted mode — the host lends its world" in the Phase 1 implementation notes.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -897,7 +898,9 @@ through `combat::Health` and the server's ordinary `despawn_dead` →
 `death_drops` path. Projectiles hit **mobs only**, on both sides; nothing
 fired damages a player. A LAN host's server does NOT run the tick: its
 projectiles live in its host client's sim, and a second tick would be a
-second sim.
+second sim. On a lending host (D1, "Hosted mode — the host lends its world"
+below) that sim's ECS is the one the server diffs, so joiners see the host's
+own arrows in flight through this same `EntityKind::Projectile` channel.
 
 `diff_entities` gives each `ProjectileEntity` a `ProtocolId` on first sight
 and broadcasts it as `EntityKind::Projectile = 39`: one `EntitySpawn`
@@ -1809,19 +1812,78 @@ other refusal. `DeviceInteract` passes the same play-mode and plot gates as a bl
 behind the pending one, one simulated per tick), not overwritten, so jitter-bunched inputs don't
 drop a step. A plot marker's owner breaking it releases the plot.
 
-**Container and economy state is LIVE on the server (review 2026-09-28).** The host's client world
-is where chests are filled, vendors stocked and plots claimed; the server's copy used to be frozen
-at world load, so a joiner's break spilled stale contents (and the host's break spilled twice) and
-the plot/economy gates missed anything placed or claimed since. Now, once a tick before the hosted
-server ticks, `HostedServer::mirror_host_world_state` copies the host world's container (chest,
-furnace, dispenser, grave) and economy (vendor, tip jar, auction) block-entities, plots and market
-hubs into the server world — only where the server's block agrees on the family, so a container a
-joiner just broke is never resurrected — and drops the ones the host no longer has (BRIDGE until
-the server owns these entities). **Exactly one spill per container break:** a validated REMOTE
-break spills the server's live copy; the host's own break (pickaxe or keg blast) already spilled on
-its client, so the server discards its copy; and `World::apply_remote_block_change` clears a broken
-container / economy entity (and releases a broken plot marker's plot) without spilling. **Remaining gap (BRIDGE):** a place of an item the joiner doesn't hold is not
+**Container and economy state is LIVE on the server (review 2026-09-28; mechanism replaced by D1,
+2026-10-06).** The host's client world is where chests are filled, vendors stocked and plots
+claimed; the server's copy used to be frozen at world load, so a joiner's break spilled stale
+contents (and the host's break spilled twice) and the plot/economy gates missed anything placed or
+claimed since. The 2026-09-28 fix mirrored those block-entities, plots and market hubs into the
+server world every tick (`HostedServer::mirror_host_world_state`, a BRIDGE). **Superseded:** a
+host now LENDS the server its one world (below), so the gates read and the spill empties the
+host's own live entities — there is nothing to mirror, and the mirror is deleted. **Exactly one
+spill per container break:** a validated REMOTE break spills the live container into the host's
+own ECS and drops any orphaned economy entity (`World::drop_orphaned_family_entity`); the host's
+own break (pickaxe or keg blast) already spilled on its client and is only broadcast by a lending
+server (an owning `--no-lend` server discards its copy). **Remaining gap (BRIDGE):** a place of an item the joiner doesn't hold is not
 refused — the server keeps no authoritative remote inventory.
+
+### Hosted mode — the host lends its world (D1, as built 2026-10-06; no wire change, v67)
+
+**Bug class closed:** a LAN / online host ran two simulations of one world — its client's (what
+the host sees) and its embedded `GameServer`'s (what joiners were sent), each with its own mobs,
+fluids, fire, power and carts. They drifted from the first tick: joiners saw mobs the host never
+had, power ping-ponged lit/unlit between the two, the host's own power changes were broadcast
+twice, and every client-made state (chest contents, plots, vendors) needed a mirror.
+
+**Correct approach:** one world, one simulation. `HostedServer::start_host` / `start_online` take
+a `HostWorld`: `Lent` (default for a host client) or `Owned` (the dedicated server, and a host
+started with `--no-lend`). A lending server loads only the meta rules and saved players
+(`GameServer::initial_load_lent`); the host client's own load is the only world load, and it
+refuses a damaged `world.dat` itself (leaving the world drops the server). Each tick:
+
+1. the host client ticks (`GameState::tick`) and sends its input on the local channel;
+2. `GameState::tick_hosted_server` opens the lend window —
+   `LentSim::lend(hs, SimParts{world, ecs, water, lava, fire, leaf_decay, loaded_columns},
+   HostClock{world_time, tick_counter, weather}).tick()` — an RAII guard that swaps the seven
+   fields into `hs.server` and back on drop (panic-safe);
+3. inside the window `HostedServer::tick` runs unchanged: accept, inbound packets (joiner edits
+   validated against, and applied to, the host's world), `GameServer::tick`, the entity diff
+   and `broadcast_state` — all on the host's world and ECS;
+4. after it, the host remeshes what the server changed (`take_lent_changes`), replays the server's
+   power events, and re-pins cart riders.
+
+**Who runs what** is one table (`sim_lend::SimSystem::lent_owner`, Spec 01 §4.1.2): the server
+runs the block/entity housekeeping (fluids, fire, leaf decay, falling blocks, spawning, power,
+carts, item lifetimes, entity health timers, snowfall, rubber, salt lick, bounties, hideouts,
+world clock); the host client keeps its clock and weather (it owns `/time` and sleeping — the
+server reads `HostClock` and never advances it), the mob-locomotion block (species AI overrides
+sit between `mob_ai` and entity physics) with the joiners as extra targets, and the death sweep
+(single kill-attribution site). A per-world tally (`World::sim_tally`) checked after every lent
+tick (`SimTally::one_tick_faults`) catches a system that ran twice or not at all.
+
+**Local-slot edits** (the host's own, on the local channel) are already in the world and meshed:
+a lending server broadcasts them and does nothing else — no `MAX_BLOCK_CHANGES_PER_TICK` budget,
+reach, Unloaded gate or validation, and never a send-back. (Before, a host machine burst of more
+than four changes a tick — pistons, a dispenser, a keg — had the excess sent back to the host,
+reverting it through the loopback.) **Joiner edits** keep every gate in "Host authority over
+joiner block edits" above.
+
+**The host's loopback** `StateUpdate` no longer re-applies `block_changes` on a lending host: the
+server made them in this very world, so `apply_remote_block_change` would find nothing to change
+(and nothing would remesh), and re-applying could race a same-frame host edit. The cells come back
+through `HostedServer::take_lent_changes` instead.
+
+**Entities.** Joiners are diffed from the host's real ECS, so they see its villagers, fish, items
+and projectiles — the population the host sees. `ProtocolId`s land on host entities (no save query
+reads them); the first lend strips any an earlier server left (ids are per `HostedServer`).
+**Load note:** the diffed population is the host's whole render distance, not the old server's
+initial square; the per-client outbox (T1-5) bounds it, unmeasured under a full radius.
+
+**By design, not debt:** the host's local slots stay position- and health-trusted (the host's
+player on the host's machine); joiners take no mob contact damage yet (D2a); a joiner's edit is
+not relit on the host (it never was).
+
+**`--no-lend`** (one release): the host's server owns a copy as before D1, fed the host's clock
+and weather — without the deleted mirror, so its chests, plots and vendors are the state at load.
 
 ### What Is Deferred to Phase 2+
 
