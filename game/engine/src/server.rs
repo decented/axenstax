@@ -145,7 +145,18 @@ pub struct ServerPlayer {
     /// client that reports zero health and immediately asks to respawn does not
     /// get a free teleport home with full health.
     pub dead_ticks: u32,
+    /// MP-A3 — a remote slot whose join handshake has not completed. Such a
+    /// body is not in the world yet: it takes no survival damage (a slow
+    /// handshake underwater used to drown it inside the pre-auth window), picks
+    /// nothing up (the grant would be dropped) and is no mob's target. Set when
+    /// the transport attaches; cleared, with a full reset of its combat state,
+    /// by [`ServerPlayer::enter_world`] when the handshake completes. `false`
+    /// for every other player (local ones never handshake).
+    pub awaiting_join: bool,
 }
+
+/// See [`GameServer::world_spawn`].
+const WORLD_SPAWN: Vec3 = Vec3::new(0.5, 80.0, 0.5);
 
 /// Ticks a server-simulated player's copy must have been dead before a
 /// `Respawn` request is honoured (MP-A3). One second at 20 TPS — about the
@@ -293,6 +304,7 @@ impl ServerPlayer {
             client_worldgen_version: crate::world::worldgen_fingerprint(),
             spawn_pos: spawn,
             dead_ticks: 0,
+            awaiting_join: false,
         }
     }
 
@@ -307,7 +319,24 @@ impl ServerPlayer {
     /// they've left, and not while dead (MP-A3 — a dead joiner's body stays
     /// where it fell until they choose Respawn, and nothing should chase it).
     pub fn is_present_and_alive(&self) -> bool {
-        self.connected && !self.combat.dead
+        self.is_in_world() && !self.combat.dead
+    }
+
+    /// Is this body in the world at all: its transport live and its join
+    /// complete (see [`ServerPlayer::awaiting_join`])? Dead or alive.
+    pub fn is_in_world(&self) -> bool {
+        self.connected && !self.awaiting_join
+    }
+
+    /// The join handshake completed: the body enters the world at full health,
+    /// hunger and breath, whatever was done to the copy while it waited, with
+    /// no fall in progress and no death pending.
+    pub fn enter_world(&mut self) {
+        self.awaiting_join = false;
+        self.combat.respawn();
+        self.combat.just_died = false;
+        self.dead_ticks = 0;
+        self.player.reset_fall();
     }
 }
 
@@ -611,6 +640,18 @@ impl GameServer {
         }
     }
 
+    /// The world's spawn point: where a joiner to a server with no host client
+    /// (a dedicated server) is placed, and so where they respawn
+    /// (`ServerPlayer::spawn_pos`).
+    ///
+    /// BRIDGE: a fixed point in the air above the origin, the same one
+    /// `initial_load` falls back to. Replace with the computed surface spawn
+    /// (`chunk_stream::find_surface_spawn` over the generated world, never a
+    /// buried or in-air cell) — this is the single place to change it.
+    pub fn world_spawn(&self) -> Vec3 {
+        WORLD_SPAWN
+    }
+
     /// Run initial world load around the first player's position.
     ///
     /// A world that is on disk but fails to load is `Err` — never replaced by a
@@ -625,7 +666,7 @@ impl GameServer {
             .players
             .first()
             .map(|p| p.player.pos)
-            .unwrap_or(Vec3::new(0.5, 80.0, 0.5));
+            .unwrap_or_else(|| self.world_spawn());
         let cs = CHUNK_SIZE as i32;
         let pcx = (spawn.x.floor() as i32).div_euclid(cs);
         let pcz = (spawn.z.floor() as i32).div_euclid(cs);
@@ -1088,7 +1129,7 @@ impl GameServer {
         {
             let mut eligible_players: Vec<(usize, Vec3, &mut Inventory)> = Vec::new();
             for (idx, sp) in self.players.iter_mut().enumerate() {
-                if !sp.server_simulated || !sp.connected || sp.combat.dead {
+                if !sp.server_simulated || !sp.is_in_world() || sp.combat.dead {
                     continue;
                 }
                 eligible_players.push((idx, sp.player.pos, &mut sp.inventory));
@@ -1322,7 +1363,8 @@ impl GameServer {
                 continue;
             }
             sp.dead_ticks = 0;
-            if !sp.connected {
+            // Not in the world yet (join incomplete) or gone: nothing happens.
+            if !sp.is_in_world() {
                 continue;
             }
             crate::survival::tick_player_survival(

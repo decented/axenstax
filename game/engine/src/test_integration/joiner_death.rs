@@ -18,7 +18,7 @@ use crate::item::{Item, ItemStack, MaterialId};
 use crate::protocol::{self, PlayerEventType};
 use crate::transport::{ChannelClientTransport, ClientTransport};
 
-use super::joiner_authority::join_guest;
+use super::joiner_authority::{join_guest, join_guest_accept, send_guest_join, start_open_server};
 
 fn start_dedicated_server(tag: &str) -> HostedServer {
     HostedServer::start(
@@ -494,4 +494,108 @@ fn a_respawn_right_after_reporting_zero_health_is_not_a_free_teleport_home() {
     tick_n(&mut hs, &client, &mut inbox, 1);
     assert!(!hs.server.players[slot].combat.dead, "honoured after 20 ticks dead");
     assert_eq!(inbox.respawned(slot).len(), 1);
+}
+
+// ── Nothing happens to a body before its join completes ─────────────────────
+
+/// A water column over the dedicated server's spawn column (0, 0) and a floor
+/// under it, so a body standing at the world spawn has its head in water.
+fn flood_the_spawn_column(hs: &mut HostedServer) {
+    let world = &mut hs.server.world;
+    world.set_block(0, 78, 0, block::STONE);
+    for y in 79..=90 {
+        world.set_block(0, y, 0, block::WATER);
+    }
+}
+
+#[test]
+fn a_slow_handshake_underwater_joins_alive() {
+    // The pre-auth clock allows 600 ticks, a drowning takes about 500. A body
+    // that sat in the water the whole time must not arrive dead — or even
+    // hurt: the slot is not in the world until its join completes.
+    let mut hs = start_dedicated_server("slow-join");
+    flood_the_spawn_column(&mut hs);
+    let client = hs.attach_test_remote();
+    let slot = 0;
+    assert!(!hs.server.players[slot].is_present_and_alive(), "not in the world yet");
+    let mut inbox = Inbox::default();
+
+    tick_n(&mut hs, &client, &mut inbox, 520);
+    let sp = &hs.server.players[slot];
+    assert!(!sp.combat.dead, "no drowning before the join completes");
+    assert_eq!(sp.combat.health, sp.combat.max_health, "nor any damage at all");
+    assert_eq!(inbox.died(slot), 0);
+    assert!(!hs.slot_is_free(slot), "still inside the pre-auth window");
+
+    // Anything that did land on the copy before the join (a fall, a stray
+    // hit…) is wiped when the join completes: full health, hunger and breath.
+    let sp = &mut hs.server.players[slot];
+    sp.combat.health = 3.0;
+    sp.combat.hunger = 2;
+    sp.combat.breath.air = 10;
+
+    send_guest_join(&client, "Slowpoke");
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    let sp = &hs.server.players[slot];
+    assert!(sp.is_present_and_alive(), "in the world once joined");
+    assert!(!sp.combat.dead);
+    assert_eq!(sp.combat.health, sp.combat.max_health, "joins at full health");
+    assert_eq!(sp.combat.hunger, sp.combat.max_hunger, "and full hunger");
+    assert!(
+        sp.combat.breath.air >= crate::survival::MAX_AIR_TICKS - 2,
+        "and full lungs (one tick of water at most): {:?}",
+        sp.combat.breath
+    );
+    tick_n(&mut hs, &client, &mut inbox, 5);
+    assert_eq!(inbox.died(slot), 0, "never told it died");
+}
+
+#[test]
+fn a_slot_that_has_not_joined_collects_nothing() {
+    // Pickups are granted only to joined clients; a pre-join body hoovering up
+    // items would destroy them (the grant would be dropped).
+    let mut hs = start_dedicated_server("prejoin-pickup");
+    let client = hs.attach_test_remote();
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, 0);
+    scatter_bones_at(&mut hs, at, 3);
+    tick_n(&mut hs, &client, &mut inbox, 200);
+    assert_eq!(bones_on_ground(&hs), 6, "the items are still on the ground");
+}
+
+// ── The respawn point is the world's, not whoever happens to be in slot 0 ───
+
+#[test]
+fn a_dedicated_servers_joiners_all_get_the_world_spawn_whoever_is_in_slot_0() {
+    let mut hs = start_dedicated_server("world-spawn");
+    let (_ca, a, accept_a) = join_guest_accept(&mut hs, "Griefer");
+    let world_spawn = hs.server.world_spawn();
+    assert_eq!(
+        Vec3::new(accept_a.spawn_x, accept_a.spawn_y, accept_a.spawn_z),
+        world_spawn
+    );
+
+    // Slot 0 wanders into a trap far away.
+    hs.server.players[a].player.pos = Vec3::new(120.5, 45.0, -80.5);
+
+    let (_cb, b, accept_b) = join_guest_accept(&mut hs, "Victim");
+    assert_ne!(a, b);
+    let sent = Vec3::new(accept_b.spawn_x, accept_b.spawn_y, accept_b.spawn_z);
+    assert_eq!(sent, world_spawn, "JoinAccept names the world spawn, not slot 0's position");
+    assert_eq!(hs.server.players[b].spawn_pos, sent, "and that is where they respawn");
+    assert_eq!(hs.server.players[b].player.pos, sent);
+    assert_eq!(hs.server.players[a].spawn_pos, world_spawn);
+}
+
+#[test]
+fn a_hosts_joiners_still_arrive_beside_the_host() {
+    // A LAN host's slot 0 is the host client's own body: joiners land beside
+    // it, as they always have, and respawn at that spot — the one place player
+    // 0's position is still a spawn source.
+    let mut hs = start_open_server("host-spawn");
+    hs.server.players[0].player.pos = Vec3::new(100.5, 50.0, 100.5);
+    let (_c, j, accept) = join_guest_accept(&mut hs, "Friend");
+    let sent = Vec3::new(accept.spawn_x, accept.spawn_y, accept.spawn_z);
+    assert_eq!(sent, Vec3::new(103.5, 50.0, 100.5));
+    assert_eq!(hs.server.players[j].spawn_pos, sent);
 }

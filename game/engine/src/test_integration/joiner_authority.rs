@@ -25,7 +25,7 @@ pub(super) fn start_open_server(tag: &str) -> HostedServer {
     .expect("hosted server starts")
 }
 
-fn send_guest_join(client: &ChannelClientTransport, name: &str) {
+pub(super) fn send_guest_join(client: &ChannelClientTransport, name: &str) {
     let req = crate::remote_client::build_join_request_guest(name, 0);
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
 }
@@ -39,16 +39,33 @@ pub(super) fn join_guest(hs: &mut HostedServer, name: &str) -> (ChannelClientTra
     (client, slot)
 }
 
-fn accepted_index(client: &ChannelClientTransport) -> Option<usize> {
+/// Attach + join a guest; returns (client, slot, the `JoinAccept` it got).
+pub(super) fn join_guest_accept(
+    hs: &mut HostedServer,
+    name: &str,
+) -> (ChannelClientTransport, usize, protocol::JoinAcceptPacket) {
+    let client = hs.attach_test_remote();
+    send_guest_join(&client, name);
+    hs.tick();
+    let accept = accepted(&client).expect("guest join accepted");
+    let slot = accept.player_index as usize;
+    (client, slot, accept)
+}
+
+fn accepted(client: &ChannelClientTransport) -> Option<protocol::JoinAcceptPacket> {
     while let Some(pkt) = client.try_recv_from_server() {
         if let Some((ptype, payload)) = protocol::deserialize_header(&pkt)
             && ptype == protocol::PacketType::JoinAccept
             && let Ok(a) = protocol::safe_deserialize::<protocol::JoinAcceptPacket>(payload)
         {
-            return Some(a.player_index as usize);
+            return Some(a);
         }
     }
     None
+}
+
+fn accepted_index(client: &ChannelClientTransport) -> Option<usize> {
+    accepted(client).map(|a| a.player_index as usize)
 }
 
 fn got_reject(client: &ChannelClientTransport) -> Option<String> {

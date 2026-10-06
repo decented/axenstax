@@ -1336,22 +1336,36 @@ impl HostedServer {
         }
     }
 
+    /// Where a joiner is placed, and so where it respawns
+    /// (`ServerPlayer::spawn_pos`): the one place that decides, and the spawn
+    /// `JoinAccept` names.
+    ///
+    /// A server with a host client (LAN / online host: `num_local_players > 0`)
+    /// puts the joiner beside the host's own body, as it always has. Otherwise
+    /// it is the world's spawn point — never another joiner's position: slot 0
+    /// is a stranger on a dedicated server, and a respawn point taken from
+    /// wherever they happened to stand (a trap) would be everyone's.
+    fn join_spawn(&self) -> glam::Vec3 {
+        if self.num_local_players > 0
+            && let Some(host) = self.server.players.first()
+        {
+            let p = host.player.pos;
+            return glam::Vec3::new(p.x + 3.0, p.y, p.z);
+        }
+        self.server.world_spawn()
+    }
+
     /// Attach one remote transport as a new server-simulated player slot and
     /// issue its Phase 4 join challenge. Shared by the accept-thread drain
     /// above and the in-process test harness.
     #[cfg(not(target_arch = "wasm32"))]
     fn attach_remote_transport(&mut self, transport: Box<dyn ServerTransport>) {
-        // Spawn new remote near player 0 (world spawn point is not
-        // yet in metadata — drives off the host's current position).
-        let spawn_pos = if !self.server.players.is_empty() {
-            let p0 = self.server.players[0].player.pos;
-            glam::Vec3::new(p0.x + 3.0, p0.y, p0.z)
-        } else {
-            glam::Vec3::new(0.5, 80.0, 0.5)
-        };
-        let mut remote = crate::server::ServerPlayer::new(spawn_pos);
+        let mut remote = crate::server::ServerPlayer::new(self.join_spawn());
         // Remote players run server-simulated physics (Task 1d).
         remote.server_simulated = true;
+        // Not in the world until the join handshake completes: no survival
+        // damage, no pickups, no mob targeting (`ServerPlayer::awaiting_join`).
+        remote.awaiting_join = true;
         // Reuse the lowest freed remote slot before growing the vectors, so
         // they stay bounded by peak concurrency however many connections come
         // and go (audit 2026-09-27).
@@ -1714,10 +1728,12 @@ impl HostedServer {
                             }
                         }
 
+                        // The spawn point this slot was created at
+                        // (`join_spawn`) — also where it respawns.
                         let spawn = if let Some(sp) = self.server.players.get(i) {
-                            sp.player.pos
+                            sp.spawn_pos
                         } else {
-                            glam::Vec3::new(0.5, 80.0, 0.5)
+                            self.server.world_spawn()
                         };
                         // Track 3 — server-identity proof bound to the client's
                         // nonce, if this server is provisioned. Native-only
@@ -1770,6 +1786,12 @@ impl HostedServer {
                         let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &accept);
                         self.transports[i].send_to_client(&pkt);
                         self.handshake_done[i] = true;
+                        // The body enters the world now, at full health,
+                        // hunger and breath, whatever happened to the copy
+                        // while the handshake dragged on.
+                        if let Some(sp) = self.server.players.get_mut(i) {
+                            sp.enter_world();
+                        }
 
                         // The operator joining without a channel binding plays
                         // normally but gets no operator tools — say so, so the
