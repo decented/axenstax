@@ -658,7 +658,7 @@ are ticked by exactly ONE side per world, decided by
 | World | Who ticks the machines | `simulates_block_machines` |
 |---|---|---|
 | Single-player (client sim) | the client loop (`game_loop.rs`) | n/a (no `GameServer`) |
-| LAN / online **host** (≥ 1 local player) | the host's client loop; results reach joiners via the host's `pending_block_changes`. The host lends the server its one world every tick (§4.1.2), so the machines' block-entities the server reads are the host's own | `false` |
+| LAN / online **host** (≥ 1 local player) | the host's client loop; results reach joiners via the host's `pending_block_changes`. The host lends the server its one world every tick (§4.1.3), so the machines' block-entities the server reads are the host's own | `false` |
 | **Dedicated server** (`HostedServer::start` with 0 local players — `server_main`, the WebSocket dedicated path) | `GameServer::tick` → `block_machines.rs` | `true` |
 
 Rules:
@@ -668,8 +668,9 @@ Rules:
   world has its machines ticked by the host client, so the flag is never set on
   a lending server (server projectiles follow the same flag). `TestHost` leaves
   the flag off (its `tick_furnaces` / `tick_pistons` stand in for the host
-  client). (Until D1 a host also mirrored its machine block-entities into the
-  server's second copy of the world, `mirror_host_world_state`; deleted.)
+  client). (A lending host's server reads the host's own block-entities; only
+  a `--no-lend` host still mirrors them into its server's second copy each
+  tick, `mirror_host_world_state` — a BRIDGE that goes with that flag.)
 - **One implementation, two callers.** Each machine's logic is a pure free
   function both sides call: `bee_hive::accumulate_honey`, `growth::tick_growth`,
   `dispenser::tick_dispensers` + `dispenser::realise_order` (via
@@ -692,7 +693,7 @@ Rules:
   editing slot being `server_simulated`, **not** on `simulates_block_machines`.
   The server decays the canopy, broadcasts each leaf as a `BlockChange` and
   rolls the saplings once. Joiners see those saplings as ghost items and get
-  them through `InventoryGrant` on pickup. On a lending host (§4.1.2) the
+  them through `InventoryGrant` on pickup. On a lending host (§4.1.3) the
   decay queue IS the host's: the host client's own breaks feed it through its
   break arms' `on_log_broken`, joiners' breaks through the server's edit
   apply, and the server ticks it once on the one world — so a tree the HOST
@@ -723,92 +724,6 @@ Rules:
   (Joiners still run their other machine sweeps locally. Those pushes converge
   because they carry absolute state.)
 
-### 4.1.2 As-built: a host lends its world to its server (D1, 2026-10-06)
-
-A LAN / online **host** runs ONE `World` + ECS and ONE simulation. Its
-embedded `GameServer` loads no world of its own (`HostedServer::start_host` /
-`start_online` with `HostWorld::Lent` → `GameServer::initial_load_lent`: the
-meta rules and saved players only). Each logical tick the game loop runs the
-host client's `GameState::tick`, sends its input, then opens the **lend
-window** (`GameState::tick_hosted_server`):
-
-```rust
-LentSim::lend(hs, SimParts { world, ecs, water, lava, fire, leaf_decay, loaded_columns },
-              HostClock { world_time, tick_counter, weather }).tick();
-```
-
-`sim_lend::LentSim` is an RAII guard: it `mem::swap`s those seven fields into
-`hs.server`, sets `GameServer::lent`, and swaps them back on `Drop` — a panic
-unwinding out of the tick still returns the host's world. Everything the
-hosted server does that tick — joiners' edits, device flips, the
-`GameServer::tick` systems below, the entity diff every joiner's
-`StateUpdate` is built from — acts on the host's real world. Outside the window
-the server holds an empty world and ECS; nothing reads them.
-
-**One owner per shared system.** Every world-sim system both
-`GameState::tick` and `GameServer::tick` carry asks one table,
-`sim_lend::SimSystem::lent_owner`, through `sim_runs` (client) / `runs`
-(server):
-
-| Side when lent | Systems |
-|---|---|
-| **Server** (`GameServer::tick`, inside the window) | world clock (`tick_world_clock`), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
-| **Host client** (`GameState::tick`) | `world_time` + `tick_counter` (it owns `/time`, sleeping), weather (and a trial's weather lock), the mob-locomotion block — brigand pre-pass → `mob_ai` → entity physics — and the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
-
-Why the client keeps mob locomotion: the client's species AI, wolf follow,
-tethers, builder NPCs and Satoshi overwrite `mob_ai`'s velocities **between**
-`mob_ai` and `tick_entities`; splitting that block across the two ticks would
-erase every override. Its targets include the joiners' server-held bodies
-(`lent_joiner_positions`). It moves server-side, with the death sweep (behind
-a `SimEvents` outbox for attribution), as the client-only systems around it
-do (D4). A lent server never advances `world_time` (it reads the host's clock
-from `HostClock`) and never runs `despawn_dead`.
-
-**Tripwire.** Each run is tallied on the world it ran on
-(`World::sim_tally`, never persisted). The game loop snapshots the tally
-before the client tick and, after the lent server tick, calls
-`SimTally::one_tick_faults`: every system at most once, every every-tick
-system exactly once. A fault is a missed gate — `debug_assert!`ed, logged once
-in release. It is the only check that sees a double-tick without a GPU.
-
-**Edits.** The host's own (local-slot) edits are already in the world and
-meshed: the server broadcasts them and nothing else — no budget, reach,
-Unloaded gate, validation or send-back. A joiner's edit is validated as
-before (Spec 04, "Host authority over joiner block edits") and applied to the host's world; its cell, the
-server's own sim changes (copied from `server.pending_block_changes` before
-`broadcast_state` drains them) and device flips come back through
-`HostedServer::take_lent_changes`, and the host remeshes each touched chunk
-once, immediately, with its seam neighbours queued (`lent_remesh_chunks`).
-The host's loopback `StateUpdate` no longer re-applies block changes
-(`apply_remote_block_change` would find nothing to change and race a
-same-frame host edit). Power changes made by the server replay their scenario
-events on the host (`fire_power_challenges`); carts advanced inside the window
-re-pin their riders (`apply_riding_follow`). Lighting is not recomputed for a
-joiner's edit on the host (it never was on the old loopback path either).
-
-**Entities.** `diff_entities` numbers the host's own ECS (`ProtocolId`
-components land on host entities; save queries ignore them). The first lend of
-a server strips any `ProtocolId` an earlier server left, since ids are
-numbered per `HostedServer`. Joiners therefore see the host's real
-population — villagers, fish, items, projectiles — not a second, drifting
-simulation; the per-client `StateUpdate` outbox (T1-5) bounds the load.
-
-**What stays split, by design.** Local slots stay position- and
-health-trusted (`hosted_server.rs` ClientInput): the host's player on the
-host's machine, simulated by the client that owns the world. `ServerPlayer`
-and `PlayerSlot` stay dual for local slots. Pickups stay complementary (local
-players in the client tick, server-simulated joiners in the server tick).
-Mob-on-player contact damage still applies to local players only (joiners
-take none until D2a).
-
-**Escape hatch.** `--no-lend` (one release) starts the host's server with
-`HostWorld::Owned`: it loads and simulates its own copy, fed the host's clock
-and weather, as before D1 — minus the deleted block-entity mirror, so its
-copy of chests, plots and vendors is the state at load. Single-player runs no
-server at all (D3 will lend there too); the dedicated server always owns its
-world. Native only: the web build never hosts.
-
-
 ### 4.1.2 As-built: the dedicated server streams columns (Phase B1, 2026-10-06)
 
 **Bug this fixes.** `GameServer::initial_load` filled `loaded_columns` once, in
@@ -828,14 +743,18 @@ entered is loaded and lit before it is used.
   `GameServer::column_streamer = Some(..)` iff it has 0 local players, the
   same invariant as `simulates_block_machines` but a separate field (a host
   that lends its world to the server will tick machines without streaming).
-  LAN / online hosts keep `None` and instead generate the 3×3 round each
-  joiner, ≤ 2 a tick (`column_refill_per_tick`, Spec 04 §5.3.1), which is `0`
-  on the dedicated server: one column-loading story per mode, never both
-  (`server_streaming::only_the_dedicated_server_gets_a_column_streamer`). Both
+  LAN / online hosts keep `None`: an owning (`--no-lend`) host instead
+  generates the 3×3 round each joiner, ≤ 2 a tick (`column_refill_per_tick`,
+  Spec 04 §5.3.1), which is `0` on the dedicated server; a lending host does
+  neither, its host client's streamer anchoring on every joiner (§4.1.3). One
+  column-loading story per mode, never two
+  (`hosted_server::assign_column_loading`;
+  `server_streaming::only_the_dedicated_server_gets_a_column_streamer`). All
   load a column through the same terrain step,
   `chunk_stream::ColumnSims::load_terrain` (restore-else-generate, light,
-  fluid/fire registration; `GameServer::ensure_column_loaded` on a host, which
-  scatters no wildlife). `TestHost` keeps `None` and a fixed region.
+  fluid/fire registration; `GameServer::ensure_column_loaded` on an owning
+  host, which scatters no wildlife). `TestHost` keeps `None` and a fixed
+  region.
 - **Anchors.** Every *connected* player's column (ghost slots kept for index
   stability don't count) plus the world spawn's column
   (`GameServer::spawn_column`, recorded by `GameServer::world_spawn` — the
@@ -851,13 +770,16 @@ entered is loaded and lit before it is used.
   moves, no I/O.
 - **One policy, two callers.** The decision is the pure
   `chunk_stream::plan_stream_step(anchors, nearest_to, radius, budget, loaded,
-  needs_reload)`: needed = every column within `radius` (Chebyshev) of an
+  needs_reload)` (a one-radius wrapper over `plan_stream_step_for`, whose
+  anchors each carry their own radius — the lending host's client passes its
+  players at the render distance and its joiners at the sim distance,
+  §4.1.3): needed = every column within `radius` (Chebyshev) of an
   anchor; wanted = needed and not loaded, plus loaded void columns
   (`is_void_column`, the floor-grid-holes self-heal); ordered by squared
   distance to the nearest `nearest_to` column, ties by `(cx, cz)`; the first
   `budget` load. Unload = loaded columns beyond `radius + UNLOAD_HYSTERESIS`
   (2) of every anchor. The client passes its local players as anchors and
-  player 0 alone as `nearest_to` (its order is unchanged); the server passes
+  player 0 alone as `nearest_to` (plus, lending, its joiners — §4.1.3); the server passes
   its anchors as both, so each player's own column (distance 0) always loads
   first.
 - **One per-column implementation.** `chunk_stream::ColumnSims` (the
@@ -908,6 +830,132 @@ the chunk is `persist`, so a pristine column dropped on stream-out never costs
 its file (`server::tests::server_save_writes_evicted_columns_and_never_deletes_a_dropped_columns_file`).
 Tests:
 `test_integration/server_streaming.rs`, `server_stream.rs`, `chunk_stream.rs`.
+
+### 4.1.3 As-built: a host lends its world to its server (D1, 2026-10-06)
+
+A LAN / online **host** runs ONE `World` + ECS and ONE simulation. Its
+embedded `GameServer` loads no world of its own (`HostedServer::start_host` /
+`start_online` with `HostWorld::Lent` → `GameServer::initial_load_lent`: the
+meta rules and saved players only). Each logical tick the game loop runs the
+host client's `GameState::tick`, sends its input, then opens the **lend
+window** (`GameState::tick_hosted_server`):
+
+```rust
+LentSim::lend(hs, SimParts { world, ecs, water, lava, fire, leaf_decay, loaded_columns },
+              HostClock { world_time, tick_counter, weather }).tick();
+```
+
+`sim_lend::LentSim` is an RAII guard: it `mem::swap`s those seven fields into
+`hs.server`, sets `GameServer::lent`, and swaps them back on `Drop` — a panic
+unwinding out of the tick still returns the host's world. Everything the
+hosted server does that tick — joiners' edits, device flips, the
+`GameServer::tick` systems below, the entity diff every joiner's
+`StateUpdate` is built from — acts on the host's real world. Outside the window
+the server holds an empty world and ECS; nothing reads them.
+
+**One owner per shared system.** Every world-sim system both
+`GameState::tick` and `GameServer::tick` carry asks one table,
+`sim_lend::SimSystem::lent_owner`, through `sim_runs` (client) / `runs`
+(server):
+
+| Side when lent | Systems |
+|---|---|
+| **Server** (`GameServer::tick`, inside the window) | the active-tick total (`tick_world_clock`, `SimSystem::ActiveTicks` — not the day/night clock), mob spawning, falling blocks, fluids (water + lava + fire), leaf decay + saplings, hideout replenisher, snowfall, rubber cooldowns, salt lick, bounty rotation, item lifetimes, power, carts, entity `Health` timers |
+| **Host client** (`GameState::tick`) | `world_time` + `tick_counter` (it owns `/time`, sleeping), weather (and a trial's weather lock), the mob-locomotion block — brigand pre-pass → `mob_ai` → entity physics — and the death sweep (`despawn_dead`, the single kill-attribution site: kill counters, the Vow, raids, challenges) |
+
+Why the client keeps mob locomotion: the client's species AI, wolf follow,
+tethers, builder NPCs and Satoshi overwrite `mob_ai`'s velocities **between**
+`mob_ai` and `tick_entities`; splitting that block across the two ticks would
+erase every override. Its targets include the joiners' server-held bodies
+(`lent_joiner_positions`). It moves server-side, with the death sweep (behind
+a `SimEvents` outbox for attribution), as the client-only systems around it
+do (D4). A lent server never advances `world_time` (it reads the host's clock
+from `HostClock`) and never runs `despawn_dead`.
+
+**Tripwire.** Each run is tallied on the world it ran on
+(`World::sim_tally`, never persisted). The game loop snapshots the tally
+before the client tick and, after the lent server tick, calls
+`SimTally::one_tick_faults`: every system at most once, every every-tick
+system exactly once. A fault is a missed gate — `debug_assert!`ed, logged once
+in release. It is the only check that sees a double-tick without a GPU.
+
+**Edits.** The host's own (local-slot) edits are already in the world and
+meshed: the server broadcasts them and nothing else — no budget, reach,
+Unloaded gate, validation or send-back. A joiner's edit is validated as
+before (Spec 04, "Host authority over joiner block edits") and applied to the host's world; its cell, the
+server's own sim changes (copied from `server.pending_block_changes` before
+`broadcast_state` drains them) and device flips come back through
+`HostedServer::take_lent_changes`, and the host remeshes each touched chunk
+once, immediately, with its seam neighbours queued (`lent_remesh_chunks`).
+The host's loopback `StateUpdate` no longer re-applies block changes
+(`apply_remote_block_change` would find nothing to change and race a
+same-frame host edit). Power changes made by the server replay their scenario
+events on the host (`fire_power_challenges`); carts advanced inside the window
+re-pin their riders (`apply_riding_follow`). Lighting is not recomputed for a
+joiner's edit on the host (it never was on the old loopback path either).
+
+**Entities.** `diff_entities` numbers the host's own ECS (`ProtocolId`
+components land on host entities; save queries ignore them). The first lend of
+a server strips any `ProtocolId` an earlier server left, since ids are
+numbered per `HostedServer`. Joiners therefore see the host's real
+population — villagers, fish, items, projectiles — not a second, drifting
+simulation; the per-client `StateUpdate` outbox (T1-5) bounds the load.
+
+**What stays split, by design.** Local slots stay position- and
+health-trusted (`hosted_server.rs` ClientInput): the host's player on the
+host's machine, simulated by the client that owns the world. `ServerPlayer`
+and `PlayerSlot` stay dual for local slots. Pickups stay complementary (local
+players in the client tick, server-simulated joiners in the server tick).
+Mob-on-player contact damage still applies to local players only (joiners
+take none until D2a).
+
+**Columns (review fix 1, B1b).** The lent world is the only one the server
+simulates a joiner on, so the host client's streamer keeps the joiners'
+ground loaded, not just its own: `stream_chunks` plans with
+`chunk_stream::plan_stream_step_for` over per-anchor radii
+(`client_stream_anchors`): each local player at the render distance, and each
+connected joiner's server body (`HostedServer::lent_joiner_columns`) at
+`LENT_JOINER_SIM_DISTANCE` (= the dedicated default sim distance, 8). A column
+unloads only beyond every anchor's own radius + `UNLOAD_HYSTERESIS`, so a host
+walking away no longer drops a joiner's column (the body fell through server
+air; edits there were refused Unloaded). Loads are ordered by player 0 and the
+joiners, so a joiner's own column is never stuck behind the host's far ring;
+the shared `STREAM_BUDGET` bounds them. Joiner-only columns are meshed too (a
+column already marked loaded is never meshed later, so skipping would leave
+holes once the host walks over) — the far-joiner meshing cost is a known
+follow-up. One column-loading story per mode
+(`hosted_server::assign_column_loading`): dedicated = the B1 streamer (§4.1.2);
+owning `--no-lend` host = the server's refill round its joiners (Spec 04
+§5.3.1); lending host = neither on the server — the host client's streamer
+loads for both, and `join_spawn` no longer generates on a lent server.
+`GameServer::tick` debug-asserts a lent world is never streamed or refilled.
+
+**Split-screen seats (review fix 3).** Hosting starts the server with one
+local slot and only seat 0 sends input, yet a split-screen save loaded for
+hosting gives the host client more seats. `tick_hosted_server` hands every
+seat's position, look and health to `HostedServer::sync_local_slots` before
+each server tick: on the first (before any joiner can be seated, so slot
+indices — the wire's `player_index` — stay put) it grows a position-trusted
+local slot per extra seat, behind a `NullServerTransport`; afterwards it
+follows them, and a seat that leaves takes its slot out of the world. So the
+server's power (pressure plates), falling blocks and spawn anchors see every
+local player on a lent world, and joiners see them.
+
+**Ownership check without a GPU (review fix 4).** `sim_lend`'s predicate
+table test asserts every shared system has exactly one owner per world in
+every mode: lent host (one world, client + server), owning host (two worlds,
+the documented dual sim), dedicated (server), single-player (client).
+
+**Escape hatch.** `--no-lend` (one release) starts the host's server with
+`HostWorld::Owned`: it loads and simulates its own copy, fed the host's clock
+and weather, as before D1, with the host→server block-entity mirror
+(`HostedServer::mirror_host_world_state`, called each tick on that path only)
+keeping its chests, plots and vendors live — so a joiner's chest break there
+spills the live contents once instead of load-time ones (review fix 2). BRIDGE:
+the mirror goes with `--no-lend`. Single-player runs no server at all (D3 will
+lend there too); the dedicated server always owns its world. Native only: the
+web build never hosts.
+
 
 ### 4.2 Client Frame Loop
 

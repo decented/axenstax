@@ -67,7 +67,7 @@ pub fn host_world_mode() -> HostWorld {
 }
 
 /// One column-loading story per mode, never two generators on one world
-/// (Spec 01 §4.1.2):
+/// (Spec 01 §4.1.2-4.1.3):
 /// - the dedicated server (0 local players, no host client streaming for it)
 ///   loads / unloads columns round every connected player + the spawn itself
 ///   (Phase B1, `server_stream.rs`);

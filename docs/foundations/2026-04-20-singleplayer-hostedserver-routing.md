@@ -6,7 +6,7 @@
 > client lends its one `World` + ECS to its embedded `GameServer` for each
 > tick (`game/engine/src/sim_lend.rs`, RAII `LentSim`), with one owner per
 > shared system (`SimSystem::lent_owner`) and a per-world tally tripwire.
-> Built for LAN / online hosts in D1 (Spec 01 §4.1.2, Spec 04 "Hosted mode —
+> Built for LAN / online hosts in D1 (Spec 01 §4.1.3, Spec 04 "Hosted mode —
 > the host lends its world"); single-player joins the same path in D3 (a
 > lending `HostedServer` with no transport). Phase 0a below is retired:
 > `parity_check` and `ENABLE_SINGLEPLAYER_HOSTED_SERVER` were deleted in D1.
