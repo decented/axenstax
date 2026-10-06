@@ -406,9 +406,10 @@ impl RemoteClient {
         )
     }
 
-    /// Connect to a dedicated server over WebSocket — the path BOTH the browser
-    /// PWA and the native client use (browsers can't speak QUIC). Guest join
-    /// (no Signet auth yet). `url` is `ws://host:port` (native) or
+    /// Connect to a dedicated server over WebSocket as a **guest** — the path
+    /// the browser PWA (which has no signer) and a signed-out native client use
+    /// (browsers can't speak QUIC). A sign-in-required server — every dedicated
+    /// server by default — refuses it. `url` is `ws://host:port` (native) or
     /// `wss://host/ws` (browser, via the Caddy front).
     pub fn connect_websocket(
         url: &str,
@@ -434,9 +435,11 @@ impl RemoteClient {
     /// until the challenge arrives, then signs via `driver(nonce, origin)`. The
     /// web driver bridges to the page's Signet signer (4b); on any signer error
     /// the caller may fall back to a guest `connect_websocket`.
-    /// Live caller: game_loop.rs, wasm32-only today (the native authed path
-    /// goes through `native_join_sign_driver` + the QUIC transport instead).
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    /// Live callers: the native `ws://` / `axenstax://` joins in game_loop.rs
+    /// (signed by the restored bunker via `native_join_sign_driver`) and the
+    /// wasm join path. Over WebSocket both ends derive the `unbound` join
+    /// origin (no channel binding), so the Spec 04 §1.8.1 relay residual
+    /// applies.
     pub fn connect_websocket_authed(
         url: &str,
         player_name: &str,

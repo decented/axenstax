@@ -91,9 +91,15 @@ Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
 
 ## How clients join
 
+> **Sign-in is required by default** (since 2026-10-06): only players with a
+> verified Signet identity may join. Start the server with `--allow-guests`
+> (or set `AXENSTAX_ALLOW_GUESTS=1`) to admit anonymous guests too.
+
 - **Web (Chromium PWA):** opening `https://BOX:8443` boots a guest and
-  auto-joins this server (the page sets `window.AXENSTAX_DEDICATED_WS`). No
-  sign-in needed — a self-hosted server doesn't require Signet.
+  auto-joins this server (the page sets `window.AXENSTAX_DEDICATED_WS`). The
+  web build has no sign-in, so browser players can only join a server that
+  admits guests (`AXENSTAX_ALLOW_GUESTS=1`); otherwise they are turned away
+  with "sign-in required".
 - **Native:** in the lobby choose **Join Game** and enter `ws://BOX:6767`
   (the native Join dialog accepts `ws://`/`wss://` URLs as well as the legacy
   `ip:port` QUIC form).
@@ -208,8 +214,15 @@ identity above):
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `AXENSTAX_REQUIRE_SIGNIN` | `0` | `1` ⇒ only players with a verified Signet identity may join (no anonymous guests) |
+| `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join** |
 | `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-empty allowlist **implies** sign-in |
+
+The sign-in requirement is **on by default**. `AXENSTAX_REQUIRE_SIGNIN` and
+`--require-signin` are no longer read (they are accepted, and logged, so old
+scripts still start); use `AXENSTAX_ALLOW_GUESTS` / `--allow-guests` to open the
+server to guests. A `<identity-dir>/require_signin` file — written by the
+`require-signin` admin command or the Operator Console's toggle — overrides both,
+so a box that was opened to guests from the console stays open after a restart.
 
 The allowlist can also live in `<identity-dir>/whitelist.txt` — one npub per line,
 `#` comments allowed — which is easier to edit and is what runtime admin commands
@@ -231,6 +244,8 @@ Turn this box into a contained, unattended **gallery / booth**: a guest opening
 `:8443` is locked to read-only **Adventure**, walks a curated room, **clicks
 exhibits to collect** them into a personal basket, and **exits to one terminal
 screen** (no escape to the lobby). Off by default — a normal server is unaffected.
+Kiosk visitors are browser guests, so a kiosk box also needs
+`AXENSTAX_ALLOW_GUESTS=1` (sign-in is required by default).
 
 **1 — Author the gallery (native, on your own machine).** In a creative world,
 drop your images into `worlds/<name>/exhibits/` and place them with the
@@ -327,8 +342,10 @@ In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 
 ## Known limitations (alpha)
 
-- **Guest identity only.** Joiners are anonymous (Signet auth — Spec 1 Phase 4 —
-  is blocked upstream). Display names are client-asserted.
+- **Web joiners are guests.** The browser build has no sign-in, so a server
+  serving web players must set `AXENSTAX_ALLOW_GUESTS=1`. Native clients that
+  are signed in join with their verified Signet identity; a guest's display
+  name is client-asserted.
 - **Web-player edits not yet propagated.** A browser joiner sees the shared world
   and everyone moving, but its own block edits aren't sent to the server yet
   (the ~30 edit hooks are still native-gated). Native joiners' edits propagate.

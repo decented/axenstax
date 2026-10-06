@@ -20,7 +20,7 @@ set the rules that run on your box.
 | **One shared world** | Native players join the same world over WebSocket (`ws://` or `wss://`) |
 | **You own it** | World saves live on a Docker volume on *your* hardware; nothing phones home |
 | **Optional verified identity** | Root the server in your own Nostr signer so players can verify *who* runs it (see below) |
-| **Optional access control** | Allowlist / blocklist by npub, require-sign-in — managed by env, file, or the [Operator Console](operator-console.md) |
+| **Signed-in players by default** | Only players with a verified Signet identity may join unless you open it to guests; plus allowlist / blocklist by npub — managed by env, file, or the [Operator Console](operator-console.md) |
 | **Anywhere** | Spare PC, x86 or arm64 NAS, or a VPS with a real domain (auto-HTTPS) |
 
 It is **not** the large-scale Agones fleet (that's Spec 07) — it's a single,
@@ -193,8 +193,16 @@ identity above):
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `AXENSTAX_REQUIRE_SIGNIN` | `0` | `1` ⇒ only players with a verified Signet identity may join (no anonymous guests) |
+| `AXENSTAX_ALLOW_GUESTS` (or `--allow-guests`) | `0` | `1` ⇒ also admit anonymous guests. Unset, **only players with a verified Signet identity may join** |
 | `AXENSTAX_WHITELIST` | _(unset)_ | Comma-separated npubs allowed to join. A non-empty allowlist **implies** sign-in |
+
+**Sign-in is required by default** (since 2026-10-06). The old
+`AXENSTAX_REQUIRE_SIGNIN` / `--require-signin` switch is no longer read — it is
+still accepted (and logged) so existing scripts start, but it changes nothing. To
+let guests in, set `AXENSTAX_ALLOW_GUESTS=1` or start with `--allow-guests`. The
+Operator Console's *require sign-in* toggle (and the `require-signin` admin
+command) writes `<identity-dir>/require_signin`, which overrides both and survives
+restarts.
 
 The allowlist can also live in `<identity-dir>/whitelist.txt` (one npub per line,
 `#` comments allowed) — which is what the **[Operator Console](operator-console.md)**
@@ -239,8 +247,9 @@ In `docker-compose.yml`: uncomment the `80:80` / `443:443` ports and set
 
 ## Known limitations (alpha)
 
-- **Guest identity only.** Joiners are anonymous unless a server requires sign-in;
-  display names are otherwise client-asserted.
+- **Signed-in joiners by default.** A player must be signed in (a verified Signet
+  identity) unless the server admits guests; a guest's display name is
+  client-asserted.
 - **Native joiners only.** The web build does not join servers.
 - **Not the full simulation yet.** The dedicated server currently does not tick
   pistons, hoppers, kegs, dispensers or crops, and inventory and combat are not yet

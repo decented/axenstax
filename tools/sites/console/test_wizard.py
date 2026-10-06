@@ -78,6 +78,10 @@ def test_apply_gallery():
     check(identity.settings()["server_name"] == "My Gallery", "name saved to console.json")
     check(identity.settings()["announce"] is True, "announce saved")
     check(identity.require_signin() is False, "open access ⇒ no sign-in")
+    env_text = (identity.identity_dir() / "server.env").read_text()
+    check("AXENSTAX_ALLOW_GUESTS='1'" in env_text or "AXENSTAX_ALLOW_GUESTS=1" in env_text,
+          "open access ⇒ server.env admits guests")
+    check("AXENSTAX_REQUIRE_SIGNIN" not in env_text, "the retired env var is not written")
     env = (identity.identity_dir() / "server.env").read_text()
     check("AXENSTAX_GAMEMODE='creative'" in env or "AXENSTAX_GAMEMODE=creative" in env,
           "server.env carries creative gamemode")
@@ -121,6 +125,27 @@ def test_env_quoting():
         parsed[k] = shlex.split(v)[0] if v else ""
     check(parsed.get("AXENSTAX_SERVER_NAME") == "Axe'n'Stax Server",
           "apostrophe name round-trips through shell quoting")
+
+
+def test_signin_is_the_default():
+    print("test_signin_is_the_default")
+    fresh_env()
+    wizard = reimport()
+    import identity
+    # A fresh box: no require_signin file yet ⇒ the engine default (required).
+    check(identity.require_signin() is True, "no file ⇒ sign-in required (engine default)")
+    check(wizard.DEFAULT_ACCESS == "signin", "the wizard preselects sign-in")
+    check(wizard.current_state_for_form()["access"] == "signin", "fresh form shows sign-in")
+    # The dashboard toggle turning sign-in off is honoured, and the form shows it.
+    identity.set_require_signin(False)
+    check(identity.require_signin() is False, "an explicit 'false' file admits guests")
+    check(wizard.current_state_for_form()["access"] == "open", "form reflects the open toggle")
+    # A wizard run that omits `access` gets the default.
+    wizard.apply({"server_type": "survival", "server_name": "S"})
+    check(identity.require_signin() is True, "omitted access ⇒ sign-in required")
+    env = (identity.identity_dir() / "server.env").read_text()
+    check("AXENSTAX_ALLOW_GUESTS='0'" in env or "AXENSTAX_ALLOW_GUESTS=0" in env,
+          "sign-in ⇒ server.env does not admit guests")
 
 
 def test_friends():
@@ -246,7 +271,8 @@ def main():
     # Make local imports resolve when run from anywhere.
     sys.path.insert(0, str(Path(__file__).parent))
     for t in (test_first_run, test_apply_gallery, test_gallery_open_toggle, test_env_quoting,
-              test_friends, test_rerun_mode_change_resets_world, test_rerun_same_mode_no_reset,
+              test_signin_is_the_default, test_friends, test_rerun_mode_change_resets_world,
+              test_rerun_same_mode_no_reset,
               test_apply_terrain_flat, test_rerun_terrain_change_resets_world,
               test_invalid_terrain_falls_back_to_defaults, test_skip):
         t()

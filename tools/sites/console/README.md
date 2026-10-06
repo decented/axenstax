@@ -19,7 +19,9 @@ Zero engine change. Design: `docs/superpowers/specs/2026-06-18-operator-console-
   the dedicated-server entrypoint sources) and the `setup-complete` gate marker. Module:
   `wizard.py`; design `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
 - **Identity** — your operator npub, the runtime key, delegation expiry.
-- **Access** — allowlist + blocklist (npubs), require-sign-in toggle, kick a player.
+- **Access** — allowlist + blocklist (npubs), require-sign-in toggle (on by default — the
+  engine requires sign-in unless the `require_signin` file says `false` or it was started
+  with `--allow-guests`), kick a player.
 - **Server** — name / about / region / max players / announce (publish a Server Card).
 - **Privacy** — tracking level (`none` default / `sessions:<days>`), retention, and the
   erasure controls (forget one player / purge all history). Identity is *verified*;

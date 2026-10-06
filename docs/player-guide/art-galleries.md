@@ -205,6 +205,9 @@ The smoothest workflow, especially with a helper:
 
 ## Stage 4 — Open the doors · *you, a couple of clicks*
 
+- **Let visitors in.** Servers require sign-in by default, and a web browser can't
+  sign in, so pick **Anyone** in the setup wizard's *Who can come in?* step (or untick
+  *Require sign-in* in the Console's Access panel).
 - **Just share it.** Anyone you give the web address to can walk the gallery in their
   browser. Exhibits show up for every visitor automatically.
 - **Kiosk / booth mode (optional).** In the Console's **World / Showcase** panel,

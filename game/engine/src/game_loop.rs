@@ -129,6 +129,31 @@ fn native_join_sign_driver(
     })
 }
 
+/// Dial a dedicated server over WebSocket from the native client. Signed in →
+/// an AUTHENTICATED join (waits for the server's challenge, signs it with the
+/// restored bunker on a worker thread — the same driver the QUIC join uses);
+/// otherwise a guest join, which a sign-in-required server (every dedicated
+/// server by default since 2026-10-06) refuses with its reason.
+#[cfg(not(target_arch = "wasm32"))]
+fn connect_websocket_native(
+    url: &str,
+    operator_npub: Option<String>,
+) -> Result<crate::remote_client::RemoteClient, String> {
+    match crate::signet::native_signer::restore_signer() {
+        Ok(Some(session)) => crate::remote_client::RemoteClient::connect_websocket_authed(
+            url,
+            "Player",
+            native_join_sign_driver(session),
+            operator_npub,
+        ),
+        Ok(None) => crate::remote_client::RemoteClient::connect_websocket(url, "Player", operator_npub),
+        Err(e) => {
+            log::warn!("restore_signer failed ({e}); guest join");
+            crate::remote_client::RemoteClient::connect_websocket(url, "Player", operator_npub)
+        }
+    }
+}
+
 /// Resolve an `axenstax://<npub>` connect-string to a live endpoint and dial it
 /// (Spec A task 7). OWNER BOUNDARY: the relay lookup needs a live relay. Resolution
 /// runs on a worker thread with its own runtime (matching `native_join_sign_driver`),
@@ -161,11 +186,7 @@ fn resolve_and_join_by_npub(
         .first()
         .ok_or_else(|| "resolved server has no endpoint".to_string())?
         .clone();
-    let client = crate::remote_client::RemoteClient::connect_websocket(
-        &endpoint,
-        "Player",
-        Some(operator_npub.to_string()),
-    )?;
+    let client = connect_websocket_native(&endpoint, Some(operator_npub.to_string()))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -8077,11 +8098,7 @@ impl super::GameState {
                             Ok(crate::server_identity::connect::ConnectInfo::Direct {
                                 url,
                                 operator_npub,
-                            }) => crate::remote_client::RemoteClient::connect_websocket(
-                                &url,
-                                "Player",
-                                operator_npub,
-                            ),
+                            }) => connect_websocket_native(&url, operator_npub),
                             // Resolve the operator npub to a live endpoint via
                             // relays, then dial + remember it (Spec A task 7).
                             Ok(crate::server_identity::connect::ConnectInfo::Resolve {

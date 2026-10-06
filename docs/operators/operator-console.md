@@ -89,7 +89,9 @@ AXENSTAX_IDENTITY_DIR=/path/to/your/.identity ./start.sh
    other identity is refused.
 2. **Access** — add npubs to the **allowlist** (only listed npubs may join; blank =
    open) or **blocklist** (refused even if allowlisted — block always wins). Toggle
-   *require sign-in*. *Kick* removes a connected player (queued; applied within ~5s).
+   *require sign-in* — on by default; turning it off admits anonymous guests and
+   stays off across restarts. *Kick* removes a connected player (queued; applied
+   within ~5s).
 3. **Server** — set the name / blurb / region / max players, and toggle *announce*
    to publish a discoverable Server Card so players can find you by your npub.
 4. **Privacy** — choose **None** (keep nothing — the default) or **Sessions** with a

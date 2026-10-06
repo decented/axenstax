@@ -310,7 +310,7 @@ never checked for a key, so room lines from strangers reached exactly the player
 excludes.
 
 Consequence: a world that admits unauthenticated players (`HostedServer.require_signin == false`,
-today's dedicated WebSocket server) has chat only for those who did sign in. Operators are told
+a dedicated server started with `--allow-guests`; sign-in is its default since 2026-10-06) has chat only for those who did sign in. Operators are told
 this plainly, once, in the operator docs — not as a disclaimer, as a fact about what the software
 does.
 

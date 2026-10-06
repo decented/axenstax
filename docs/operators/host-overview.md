@@ -78,7 +78,8 @@ app and point it at your box. Both land in the same world.
 
 ## Good to know (alpha honesty)
 
-This is early. Today a self-hosted server is a **single shared world**, players join
-as **guests** by default, and a couple of multiplayer pieces are still being wired up
+This is early. Today a self-hosted server is a **single shared world**, players must
+be **signed in** to join by default (you can open it to guests), and a couple of
+multiplayer pieces are still being wired up
 (listed at the bottom of the [Run Your Own Server](dedicated-server.md) page). It's
 real and it works — just know it's a moving target while we're in alpha.

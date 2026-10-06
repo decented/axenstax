@@ -8,6 +8,13 @@
 //! Config comes from env vars (Docker-friendly) with `--flag value` CLI
 //! overrides. The world lives under `AXENSTAX_WORLDS_DIR` (a mounted volume) and
 //! autosaves on a timer + on graceful shutdown (SIGINT/SIGTERM).
+//!
+//! Access: **sign-in is required by default** (owner decision 2026-10-06, O-7
+//! #3) — only players with a verified Signet identity may join. `--allow-guests`
+//! (or `AXENSTAX_ALLOW_GUESTS=1`) also admits anonymous guests. The retired
+//! `--require-signin <v>` / `AXENSTAX_REQUIRE_SIGNIN` are accepted and ignored
+//! (logged once at boot) so existing scripts keep starting. See
+//! [`load_access_policy`].
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -220,17 +227,37 @@ fn parse_whitelist_npubs(entries: &[String]) -> Vec<[u8; 32]> {
         .collect()
 }
 
-/// Resolve the access policy from config: `AXENSTAX_REQUIRE_SIGNIN` and the
-/// operator allowlist (from `AXENSTAX_WHITELIST` comma-list + a `whitelist.txt`
-/// in the identity dir, one npub per line). A non-empty allowlist forces sign-in.
+/// `1` / `true` / `yes` / `on`, any case.
+fn is_truthy(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
+/// Did the operator open this server to anonymous guests? A bare
+/// `--allow-guests` flag, or a truthy `AXENSTAX_ALLOW_GUESTS` (`env`). Without
+/// either, sign-in is required (owner decision 2026-10-06).
+fn allow_guests(args: &[String], env: Option<&str>) -> bool {
+    args.iter().any(|a| a == "--allow-guests") || env.is_some_and(is_truthy)
+}
+
+/// Is the retired sign-in switch still configured? It no longer does anything
+/// (sign-in is the default); boot logs a pointer to `--allow-guests` instead.
+fn retired_signin_switch_present(args: &[String], env: Option<&str>) -> bool {
+    args.iter().any(|a| a == "--require-signin") || env.is_some()
+}
+
+/// Resolve the access policy: the sign-in requirement and the operator
+/// allowlist (from `AXENSTAX_WHITELIST` comma-list + a `whitelist.txt` in the
+/// identity dir, one npub per line). A non-empty allowlist forces sign-in.
+///
+/// Sign-in precedence: the `<identity-dir>/require_signin` file (written by the
+/// `require-signin` admin command / the Operator Console toggle — survives
+/// restarts, toggles at runtime) wins; otherwise sign-in is required unless
+/// [`allow_guests`]. `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are not read.
 fn load_access_policy(args: &[String], dir: &std::path::Path) -> (bool, Vec<[u8; 32]>) {
-    // A `require_signin` file (written by an admin command) overrides env so the
-    // setting survives restarts and can be toggled at runtime.
     let require_signin = if let Ok(s) = std::fs::read_to_string(dir.join("require_signin")) {
         s.trim().eq_ignore_ascii_case("true")
     } else {
-        let v = resolve(args, "--require-signin", "AXENSTAX_REQUIRE_SIGNIN", "0");
-        v == "1" || v.eq_ignore_ascii_case("true")
+        !allow_guests(args, std::env::var("AXENSTAX_ALLOW_GUESTS").ok().as_deref())
     };
     let mut entries: Vec<String> = Vec::new();
     if let Ok(env) = std::env::var("AXENSTAX_WHITELIST") {
@@ -704,6 +731,12 @@ pub fn run(args: &[String]) {
     hs.set_identity(identity);
 
     // Access policy (Track 4): sign-in requirement + operator allowlist.
+    if retired_signin_switch_present(args, std::env::var("AXENSTAX_REQUIRE_SIGNIN").ok().as_deref()) {
+        log::warn!(
+            "--require-signin / AXENSTAX_REQUIRE_SIGNIN is no longer read: sign-in is \
+             required by default. Use --allow-guests (AXENSTAX_ALLOW_GUESTS=1) to admit guests."
+        );
+    }
     let (require_signin, whitelist) = load_access_policy(args, &id_dir());
     if require_signin || !whitelist.is_empty() {
         log::info!(
@@ -714,6 +747,8 @@ pub fn run(args: &[String]) {
                 format!(" + allowlist ({} npub(s))", whitelist.len())
             }
         );
+    } else {
+        log::info!("  access     : guests admitted (--allow-guests / require_signin file)");
     }
     hs.set_access_policy(require_signin, whitelist, load_blocklist(&id_dir()));
 
@@ -1118,6 +1153,112 @@ mod tests {
         let reloaded = crate::console_telemetry::SessionLog::load(&dir);
         assert_eq!(reloaded.sessions.len(), 1);
         assert_eq!(reloaded.sessions[0].npub, "npub1other");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Owner decision 2026-10-06 (O-7 #3): a dedicated server with no
+    /// configuration requires sign-in. (Reads the real `AXENSTAX_ALLOW_GUESTS`,
+    /// which is unset in the test environment; tests never set env vars.)
+    #[test]
+    fn sign_in_is_required_by_default() {
+        let dir = tmp("signin-default");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (rs, wl) = load_access_policy(&[], &dir);
+        assert!(rs, "no flag, no env, no file => sign-in required");
+        assert!(wl.is_empty());
+    }
+
+    #[test]
+    fn allow_guests_flag_opens_the_server() {
+        let dir = tmp("signin-allow-guests");
+        let _ = std::fs::remove_dir_all(&dir);
+        let args = vec!["--allow-guests".to_string()];
+        let (rs, _wl) = load_access_policy(&args, &dir);
+        assert!(!rs, "--allow-guests admits guests");
+        assert!(allow_guests(&[], Some("1")) && allow_guests(&[], Some("TRUE")));
+        assert!(!allow_guests(&[], Some("0")) && !allow_guests(&[], None));
+    }
+
+    #[test]
+    fn retired_require_signin_switch_is_a_no_op() {
+        let dir = tmp("signin-retired");
+        let _ = std::fs::remove_dir_all(&dir);
+        // The old way to open a server no longer opens it…
+        let args = vec!["--require-signin".to_string(), "0".to_string()];
+        let (rs, _wl) = load_access_policy(&args, &dir);
+        assert!(rs, "--require-signin 0 is ignored: still sign-in required");
+        // …but it is still recognised, so boot can point at --allow-guests.
+        assert!(retired_signin_switch_present(&args, None));
+        assert!(retired_signin_switch_present(&[], Some("0")));
+        assert!(!retired_signin_switch_present(&[], None));
+    }
+
+    /// Join `hs` as an unsigned guest; `Ok(())` on JoinAccept, `Err(reason)`
+    /// on JoinReject.
+    fn guest_join(hs: &mut HostedServer) -> Result<(), String> {
+        use crate::transport::ClientTransport;
+        let client = hs.attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Guest", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(
+            crate::protocol::PacketType::JoinRequest,
+            &req,
+        ));
+        hs.tick();
+        let mut outcome = Err("no answer".to_string());
+        while let Some(pkt) = client.try_recv_from_server() {
+            match crate::protocol::deserialize_header(&pkt) {
+                Some((crate::protocol::PacketType::JoinAccept, _)) => outcome = Ok(()),
+                Some((crate::protocol::PacketType::JoinReject, payload)) => {
+                    let rej: crate::protocol::JoinRejectPacket =
+                        crate::protocol::safe_deserialize(payload).unwrap();
+                    outcome = Err(rej.reason);
+                }
+                _ => {}
+            }
+        }
+        outcome
+    }
+
+    /// End to end through the real join path: the dedicated server's default
+    /// policy refuses an unsigned joiner; `--allow-guests` admits it.
+    #[test]
+    fn default_policy_refuses_an_unsigned_join_and_allow_guests_admits_it() {
+        let dir = tmp("signin-e2e");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut hs = HostedServer::start(
+            0,
+            "signin-e2e-test".to_string(),
+            42,
+            0,
+            RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("hosted server starts");
+
+        let (rs, wl) = load_access_policy(&[], &dir);
+        hs.set_access_policy(rs, wl, Vec::new());
+        assert_eq!(
+            guest_join(&mut hs),
+            Err(crate::access_policy::reject_reason(
+                crate::access_policy::AccessReject::SignInRequired
+            )),
+            "default: an unsigned join is refused with the sign-in reason"
+        );
+
+        let (rs, wl) = load_access_policy(&["--allow-guests".to_string()], &dir);
+        hs.set_access_policy(rs, wl, Vec::new());
+        assert_eq!(guest_join(&mut hs), Ok(()), "--allow-guests admits the guest");
+    }
+
+    #[test]
+    fn require_signin_file_beats_the_flag_both_ways() {
+        use crate::server_identity::AdminCommand;
+        let dir = tmp("signin-file-wins");
+        let _ = std::fs::remove_dir_all(&dir);
+        let guests = vec!["--allow-guests".to_string()];
+        apply_admin_command_to_files(&AdminCommand::SetRequireSignin(true), &dir).unwrap();
+        assert!(load_access_policy(&guests, &dir).0, "file 'true' beats --allow-guests");
+        apply_admin_command_to_files(&AdminCommand::SetRequireSignin(false), &dir).unwrap();
+        assert!(!load_access_policy(&[], &dir).0, "file 'false' (console toggle) admits guests");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

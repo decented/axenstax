@@ -56,7 +56,9 @@ SERVER_TYPES = {
 DEFAULT_TYPE = "survival"
 
 ACCESS_MODES = ("open", "signin", "friends")
-DEFAULT_ACCESS = "open"
+# Sign-in by default (owner decision 2026-10-06): a dedicated server admits only
+# verified Signet identities unless the operator explicitly opens it to guests.
+DEFAULT_ACCESS = "signin"
 
 # Terrain preset (Publish flow P1). "normal" = seeded biome terrain; "flat" = a
 # blank canvas at a fixed ground. The engine's dedicated-server path reads these
@@ -159,7 +161,7 @@ def current_state_for_form() -> dict:
         "server_name": name,
         "about": prev.get("about") if prev.get("about") is not None else settings.get("about", ""),
         "access": prev.get("access") or (
-            "signin" if identity.require_signin() else DEFAULT_ACCESS),
+            "signin" if identity.require_signin() else "open"),
         "announce": bool(prev.get("announce", settings.get("announce", False))),
         "keep_history": bool(prev.get("keep_history",
                                       settings.get("privacy_level") == "sessions")),
@@ -321,7 +323,11 @@ def apply(choices: dict) -> dict:
         "AXENSTAX_EXIT_ACTION": "board",
         "AXENSTAX_AUTO_LOOP_SECS": "0",
         "AXENSTAX_SERVER_NAME": name,
-        "AXENSTAX_REQUIRE_SIGNIN": "1" if require_signin else "0",
+        # The engine requires sign-in unless told otherwise; `open` is the only
+        # choice that admits guests. (The `require_signin` file written above
+        # is what the engine actually reads first; this keeps a fresh boot in
+        # step with it.)
+        "AXENSTAX_ALLOW_GUESTS": "0" if require_signin else "1",
         "AXENSTAX_ANNOUNCE": "1" if announce else "0",
         "AXENSTAX_WORLD_TYPE": world_type,
         "AXENSTAX_GROUND": ground,

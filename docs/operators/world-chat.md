@@ -74,10 +74,11 @@ is meaningless: an anonymous player is a stranger to everybody. More importantly
 if anonymous players could chat, a child would escape their guardian's ceiling by
 simply not signing in. The gate has to be the key.
 
-**What this means for your world:** if you admit unauthenticated players (the
-dedicated WebSocket server does today), those players have no chat. Everyone who
-signed in still does. If it matters to you that every player is governed by their
-guardian's settings, require sign-in.
+**What this means for your world:** if you admit unauthenticated players (a
+dedicated server started with `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`; sign-in
+is required by default), those players have no chat. Everyone who signed in still
+does. If it matters to you that every player is governed by their guardian's
+settings, keep sign-in required.
 
 Hosting a world yourself? Your own slot takes its identity from your sign-in on
 that machine, so you can chat in a world you host. **Split-screen players 2 and

@@ -8,7 +8,7 @@ single source of truth for those files:
       attestation.json   operator-signed delegation event (operator npub = its pubkey)
       whitelist.txt      one npub per line (allowlist)
       blocklist.txt      one npub per line (blocklist; block wins)
-      require_signin     "true" / "false"
+      require_signin     "true" / "false" (absent = the engine default: sign-in required)
       console.json       ConsoleSettings (name/about/region/cap/announce/privacy)
       sessions.jsonl     operator-private session log (npub + timestamps, no IP/geo)
       kick               queued npubs to disconnect (consumed by the engine)
@@ -351,7 +351,16 @@ def blocklist() -> list[str]:
 
 
 def require_signin() -> bool:
-    return _read_text(identity_dir() / "require_signin").strip().lower() == "true"
+    """The sign-in requirement the engine enforces. Mirrors
+    `server_main::load_access_policy`: the file, when present, decides
+    ("true" = required, anything else = guests admitted); with no file the
+    dedicated server requires sign-in (owner decision 2026-10-06) unless it was
+    started with `--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`, which the
+    console can't see — so the console reports the default."""
+    path = identity_dir() / "require_signin"
+    if not path.exists():
+        return True
+    return _read_text(path).strip().lower() == "true"
 
 
 def add_to_list(which: str, npub: str) -> None:

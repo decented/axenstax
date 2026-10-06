@@ -48,12 +48,16 @@ services:
       # AXENSTAX_PAIR_RELAY: "wss://relay.damus.io"   # any public relay you trust
       # AXENSTAX_DELEGATION_DAYS: "90"
       # --- Access control (optional; see README) ---
-      # AXENSTAX_REQUIRE_SIGNIN: "0"     # "1" → only verified Signet identities may join
+      # Sign-in is REQUIRED by default: only players with a verified Signet
+      # identity may join. The browser client this box serves on :8443 has no
+      # sign-in, so web players (and the showcase kiosk below) need guests:
+      # AXENSTAX_ALLOW_GUESTS: "1"       # "1" → also admit anonymous guests
       # AXENSTAX_WHITELIST: ""           # comma-separated npubs (implies sign-in)
       # --- Creator Gallery / showcase kiosk (optional; Spec 2026-06-19 §8) ---
       # Turn this box into a contained, unattended gallery/booth: a guest opening
       # :8443 is locked to read-only Adventure, can click exhibits to collect them
       # into a basket, and exits to one terminal screen (no escape to the lobby).
+      # Visitors are guests, so a kiosk also needs AXENSTAX_ALLOW_GUESTS: "1".
       # Off by default — a normal server is unaffected. The served world's
       # `<world>/exhibits/*.png|jpg` are fetched same-origin via the /exhibits route.
       # AXENSTAX_SHOWCASE: "1"           # "1" → arm the kiosk loop

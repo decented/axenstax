@@ -112,6 +112,7 @@ The UDP + WebRTC design above is the destination. The **alpha self-hostable dedi
 - **Native clients** connect directly to a plain WebSocket: **`ws://host:6767`**.
 - **Browser clients** connect over a single HTTPS origin that Caddy fronts, which reverse-proxies `/ws` to the engine: **`wss://host:8443/ws`** on a no-domain/LAN box (self-signed cert), or **`wss://host/ws`** on 443 when a real domain is configured (`AXENSTAX_DOMAIN` → ACME). WebGPU *requires* a secure context off-localhost, so the web path is always TLS.
 - The game socket port is **configurable** via `--port` / `AXENSTAX_WS_PORT`; the default lives in `ws_transport::DEFAULT_WS_PORT`.
+- **Sign-in is required by default** (2026-10-06, owner decision O-7 #3; see Spec 08 §9.0.1). `server_main::load_access_policy`: the `<identity-dir>/require_signin` file wins; else `require_signin = !allow_guests` (`--allow-guests` / `AXENSTAX_ALLOW_GUESTS=1`). `--require-signin` / `AXENSTAX_REQUIRE_SIGNIN` are accepted, logged and ignored. A signed-in **native** client joins `ws://` / `axenstax://` **authenticated** (`game_loop::connect_websocket_native` → `RemoteClient::connect_websocket_authed`, signed by the restored bunker over the `axenstax-join:unbound` origin — WS has no channel binding, so the §1.8.1 relay residual applies); a signed-out one joins as a guest and is refused unless the server admits guests. Browser clients have no signer, so they need a guest-open server.
 
 #### Why port 6767
 
