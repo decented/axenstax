@@ -17,12 +17,15 @@
 //! is in memory from boot — so there is no "column that failed to load" for it
 //! to write back.
 //!
-//! LAN / online hosts (≥ 1 local player) do not use this: their host client
-//! streams, and the server keeps its `initial_load` region plus the 3×3 it
-//! generates round each joiner (`GameServer::column_refill_per_tick`, `0`
-//! here) — one column-loading story per mode. Both load a column through the
-//! same terrain step (`ColumnSims::load_terrain`). A later step lends the host
-//! client's world to the server.
+//! LAN / online hosts (≥ 1 local player) do not use this — one column-loading
+//! story per mode (`hosted_server::assign_column_loading`). A host that lends
+//! its world (D1, the default) has its host client's streamer keep every
+//! joiner's columns loaded as well (`chunk_stream::client_stream_anchors`, at
+//! [`DEFAULT_SIM_DISTANCE`]); an owning `--no-lend` host's server keeps its
+//! `initial_load` region plus the 3×3 it generates round each joiner
+//! (`GameServer::column_refill_per_tick`, `0` here). Every path loads a column
+//! through the same terrain step (`ColumnSims::load_terrain`) and plans with
+//! the same `plan_stream_step_for`.
 
 use crate::chunk_stream::{column_of, is_void_column, plan_stream_step, ColumnSims};
 use crate::server::GameServer;

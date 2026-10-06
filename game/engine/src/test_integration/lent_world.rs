@@ -256,3 +256,82 @@ fn the_first_lend_clears_protocol_ids_an_earlier_server_left() {
     let id = host.ecs.get::<&crate::entity::ProtocolId>(cow).expect("re-numbered").0;
     assert_ne!(id, 1_000_000, "a stale id from an earlier server never reaches joiners");
 }
+
+/// One idle input from a joiner (no movement, no edits): the server steps a
+/// joiner's body only on its inputs, so gravity acts only while they arrive.
+fn send_idle(hs: &HostedServer, client: &ChannelClientTransport, slot: usize, seq: u64) {
+    send_edits(hs, client, slot, seq, &[]);
+}
+
+/// D1 review fix 1 (HIGH) — the host walks far from a joiner. The host
+/// client's streamer anchors on every joiner's server body
+/// (`chunk_stream::client_stream_anchors`, fed `HostedServer::lent_joiner_columns`
+/// exactly as `GameState::stream_chunks` feeds it), so the joiner's columns stay
+/// loaded: their body stays on its ground and their edit there is accepted.
+/// Before, the anchors were the host's own players alone — the column unloaded,
+/// the body fell through server air and every edit there was refused Unloaded.
+#[test]
+fn a_joiners_columns_stay_loaded_when_the_host_walks_away() {
+    use crate::chunk_stream::{
+        client_stream_anchors, column_of, plan_stream_step_for, UNLOAD_HYSTERESIS,
+    };
+    let (mut hs, mut host) = start_lent("anchors");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    assert!(
+        hs.server.loaded_columns.is_empty(),
+        "a lending server generates nothing of its own (one column-loading story)"
+    );
+    let mut seq = 1;
+    for _ in 0..30 {
+        send_idle(&hs, &client, slot, seq);
+        seq += 1;
+        host.lend_tick(&mut hs);
+    }
+    let settled = hs.server.players[slot].player.pos;
+    let joiner_col = column_of(settled);
+    assert_eq!(hs.lent_joiner_columns(), vec![joiner_col]);
+
+    // The host walks off, beyond its render distance + hysteresis.
+    let rd = 4;
+    let host_col = (joiner_col.0 + rd + UNLOAD_HYSTERESIS + 1, joiner_col.1);
+    let host_only = client_stream_anchors(&[host_col], rd, &[]);
+    let pre_fix = plan_stream_step_for(&host_only, &[host_col], 0, &host.loaded_columns, |_, _| false);
+    assert!(pre_fix.unload.contains(&joiner_col), "control: host anchors alone drop it");
+    for _ in 0..3 {
+        // Frames of the host's streamer, as `stream_chunks` runs it.
+        let joiners = hs.lent_joiner_columns();
+        let anchors = client_stream_anchors(&[host_col], rd, &joiners);
+        let mut nearest = vec![host_col];
+        nearest.extend_from_slice(&joiners);
+        let step = plan_stream_step_for(&anchors, &nearest, 2, &host.loaded_columns, |_, _| false);
+        let mut sims = host.column_sims(&hs.server);
+        for &(cx, cz) in &step.unload {
+            sims.stream_out(cx, cz);
+        }
+        for &(cx, cz) in &step.load {
+            sims.stream_in(cx, cz);
+        }
+    }
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let col = (joiner_col.0 + dx, joiner_col.1 + dz);
+            assert!(host.loaded_columns.contains(&col), "joiner's column {col:?} kept");
+        }
+    }
+
+    // Their body stays on its ground…
+    for _ in 0..40 {
+        send_idle(&hs, &client, slot, seq);
+        seq += 1;
+        host.lend_tick(&mut hs);
+    }
+    let now = hs.server.players[slot].player.pos;
+    assert!((now.y - settled.y).abs() < 0.5, "the joiner's body fell: {settled} -> {now}");
+
+    // …and their edit there is accepted, in the host's world.
+    let cell = cell_beside(&hs, slot, 1, 1, 0);
+    host.world.set_block(cell.0, cell.1, cell.2, block::AIR);
+    send_edits(&hs, &client, slot, seq, &[(cell, block::GLASS)]);
+    host.lend_tick(&mut hs);
+    assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::GLASS);
+}

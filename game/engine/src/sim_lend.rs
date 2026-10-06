@@ -334,6 +334,26 @@ impl OwnedSimParts {
         LentSim::lend(hs, self.parts(), clock).tick();
     }
 
+    /// The host client's column stream-in / stream-out state, as its
+    /// `GameState::column_sims` borrows it (`registry` and `biome_gen` are the
+    /// server's copies, which are never lent and match the host's).
+    pub(crate) fn column_sims<'a>(
+        &'a mut self,
+        server: &'a crate::server::GameServer,
+    ) -> crate::chunk_stream::ColumnSims<'a> {
+        crate::chunk_stream::ColumnSims {
+            world: &mut self.world,
+            loaded: &mut self.loaded_columns,
+            registry: &server.registry,
+            biome_gen: &server.biome_gen,
+            water: &mut self.water,
+            lava: &mut self.lava,
+            fire: &mut self.fire,
+            ecs: &mut self.ecs,
+            tick: self.clock.tick_counter,
+        }
+    }
+
     pub(crate) fn parts(&mut self) -> SimParts<'_> {
         SimParts {
             world: &mut self.world,

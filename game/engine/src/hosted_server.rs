@@ -65,6 +65,36 @@ pub fn host_world_mode() -> HostWorld {
     }
 }
 
+/// One column-loading story per mode, never two generators on one world
+/// (Spec 01 §4.1.2):
+/// - the dedicated server (0 local players, no host client streaming for it)
+///   loads / unloads columns round every connected player + the spawn itself
+///   (Phase B1, `server_stream.rs`);
+/// - a LAN / online host that keeps its own copy (`--no-lend`) generates
+///   terrain ahead of its joiners' bodies (Spec 04 §5.3.1); its host client
+///   streams its own;
+/// - a host that LENDS its world (D1) does neither: its host client's streamer
+///   anchors on every joiner's server body too
+///   ([`HostedServer::lent_joiner_columns`] → `chunk_stream::client_stream_anchors`),
+///   so it loads and keeps their columns, and a second generator here would
+///   write the host's own world behind that streamer's back.
+///
+/// The streamer is its own flag, not an alias of `simulates_block_machines`: a
+/// host lending its world (D4) will tick machines but not stream.
+fn assign_column_loading(
+    server: &mut crate::server::GameServer,
+    num_local_players: usize,
+    host_world: HostWorld,
+) {
+    server.column_streamer =
+        (num_local_players == 0).then(crate::server_stream::ColumnStreamer::default);
+    server.column_refill_per_tick = if num_local_players > 0 && host_world == HostWorld::Owned {
+        crate::server::HOST_COLUMN_REFILL_PER_TICK
+    } else {
+        0
+    };
+}
+
 /// Which network transport accepts remote players.
 ///
 /// Existing native LAN peer-hosting ("Host Game") uses QUIC. The dedicated
@@ -478,26 +508,7 @@ impl HostedServer {
         // WebSocket dedicated path) starts with 0. A lent world's machines
         // are the host client's, so this is never set on a lending server.
         server.simulates_block_machines = num_local_players == 0;
-        // One column-loading story per mode, never two generators on one world:
-        // - the dedicated server (0 local players, no host client streaming for
-        //   it) loads / unloads columns round every connected player + the
-        //   spawn itself (Phase B1, `server_stream.rs`);
-        // - a LAN / online host that keeps its own copy (`--no-lend`) generates
-        //   terrain ahead of its joiners' bodies (Spec 04 §5.3.1); its host
-        //   client streams its own;
-        // - a host that LENDS its world (D1) does neither: its host client's
-        //   streamer anchors on every joiner's server body too
-        //   (`chunk_stream::stream_anchors`), so it loads and keeps their
-        //   columns, and a second generator here would write the host's own
-        //   world behind that streamer's back.
-        // The streamer is its own flag, not an alias of
-        // `simulates_block_machines`: a host lending its world (D4) will tick
-        // machines but not stream.
-        if num_local_players == 0 {
-            server.column_streamer = Some(crate::server_stream::ColumnStreamer::default());
-        } else if host_world == HostWorld::Owned {
-            server.column_refill_per_tick = crate::server::HOST_COLUMN_REFILL_PER_TICK;
-        }
+        assign_column_loading(&mut server, num_local_players, host_world);
         match host_world {
             // A world on disk that fails to load is refused here — before the
             // accept thread starts or anything is saved — never replaced by a
@@ -753,12 +764,36 @@ impl HostedServer {
         self.host_world == HostWorld::Lent
     }
 
+    /// D1 review fix 1 — the column of every connected joiner's server body,
+    /// on a world this host lends (empty otherwise; sorted, deduplicated). The
+    /// host client's streamer keeps them loaded at the server's sim distance
+    /// (`chunk_stream::client_stream_anchors`): the lent world is the only one
+    /// the server simulates a joiner on, so a column only the host's players
+    /// kept would unload under the joiner when the host walked away. Read
+    /// outside the lend window — `players` is never lent.
+    pub fn lent_joiner_columns(&self) -> Vec<(i32, i32)> {
+        if !self.lends_host_world() {
+            return Vec::new();
+        }
+        let mut cols: Vec<(i32, i32)> = self
+            .server
+            .players
+            .iter()
+            .filter(|sp| sp.server_simulated && sp.connected && sp.player.pos.is_finite())
+            .map(|sp| crate::chunk_stream::column_of(sp.player.pos))
+            .collect();
+        cols.sort_unstable();
+        cols.dedup();
+        cols
+    }
+
     /// Test-only: switch how this server holds its world after it started
     /// (`sim_lend::OwnedSimParts::take_from` takes an owning server's loaded
     /// world out of it and makes it lend from then on).
     #[cfg(test)]
     pub(crate) fn set_host_world_for_test(&mut self, host_world: HostWorld) {
         self.host_world = host_world;
+        assign_column_loading(&mut self.server, self.num_local_players, host_world);
     }
 
     /// D1 — called by `sim_lend::LentSim::lend` once the host's world is in.
@@ -1523,7 +1558,9 @@ impl HostedServer {
     /// A server with a host client (LAN / online host: `num_local_players > 0`)
     /// puts the joiner beside the host's own body, as it always has — with the
     /// columns round that spot loaded, since the host may have walked far from
-    /// where hosting began and a body can't step in an unloaded column.
+    /// where hosting began and a body can't step in an unloaded column (an
+    /// owning `--no-lend` server generates them; a lending host's streamer
+    /// holds them already, as they are beside the host).
     /// Otherwise it is the world's spawn point (`GameServer::world_spawn`, the
     /// computed surface spawn) — never another joiner's position: slot 0 is a
     /// stranger on a dedicated server, and a respawn point taken from wherever
@@ -1533,12 +1570,18 @@ impl HostedServer {
         match host {
             Some(p) if self.num_local_players > 0 => {
                 let spawn = glam::Vec3::new(p.x + 3.0, p.y, p.z);
-                let cs = crate::chunk::CHUNK_SIZE as i32;
-                let cx = (spawn.x.floor() as i32).div_euclid(cs);
-                let cz = (spawn.z.floor() as i32).div_euclid(cs);
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        self.server.ensure_column_loaded(cx + dx, cz + dz);
+                // A lent world's columns are the host client's streamer's to
+                // load (it anchors on every joiner, D1): beside the host they
+                // are loaded already, and generating here — outside the lend
+                // window, into the server's empty between-window world, or
+                // inside it, behind the streamer's back — would be a second
+                // generator.
+                if !self.lends_host_world() {
+                    let (cx, cz) = crate::chunk_stream::column_of(spawn);
+                    for dx in -1..=1 {
+                        for dz in -1..=1 {
+                            self.server.ensure_column_loaded(cx + dx, cz + dz);
+                        }
                     }
                 }
                 spawn

@@ -597,16 +597,18 @@ pub struct GameServer {
     /// hoppers — see `block_machines.rs`)? `true` only when no local host
     /// client simulates them: set by `HostedServer::start_inner` iff it has 0
     /// local players (the dedicated server). A LAN / online host's client
-    /// already ticks every machine and mirrors its block-entities in, so a
-    /// second server-side tick would double every piston push and fight the
-    /// mirror. Default `false` (also for `TestHost`, whose
+    /// already ticks every machine — on the one world it lends (D1), or, with
+    /// `--no-lend`, mirroring its block-entities into the server's copy — so a
+    /// second server-side tick would double every piston push (and, owning,
+    /// fight the mirror). Default `false` (also for `TestHost`, whose
     /// `tick_furnaces` / `tick_pistons` stand-ins would otherwise double up).
     pub simulates_block_machines: bool,
     /// Most columns [`Self::refill_columns_round_simulated_players`] may
-    /// generate in one tick. [`HOST_COLUMN_REFILL_PER_TICK`] on a LAN / online
-    /// host (set by `HostedServer::start_inner`, which has local players);
+    /// generate in one tick. [`HOST_COLUMN_REFILL_PER_TICK`] on an owning
+    /// (`--no-lend`) LAN / online host (set by `HostedServer::start_inner`);
     /// `0` — off — otherwise. The dedicated server streams instead
-    /// ([`Self::column_streamer`], Phase B1): one column-loading story per mode.
+    /// ([`Self::column_streamer`], Phase B1), and a lending host's client
+    /// streamer anchors on its joiners (D1): one column-loading story per mode.
     pub column_refill_per_tick: usize,
     /// D1 — is the host client's world lent in right now (`sim_lend::LentSim`
     /// sets it for the window and clears it on drop)? While set, `world`,
@@ -622,8 +624,9 @@ pub struct GameServer {
     /// loads / unloads columns around every connected player + the spawn each
     /// tick. `Some` only on the dedicated server (set by
     /// `HostedServer::start_inner` with 0 local players); `None` on hosts
-    /// (which refill round their joiners instead, `column_refill_per_tick`)
-    /// and in `TestHost`, which keep the `initial_load` region.
+    /// (an owning one refills round its joiners, `column_refill_per_tick`; a
+    /// lending one's client streamer anchors on them) and in `TestHost`,
+    /// which keeps the `initial_load` region.
     pub column_streamer: Option<crate::server_stream::ColumnStreamer>,
     /// The column of the world spawn ([`Self::world_spawn`] records it each
     /// time it computes the spawn; the dedicated server computes it at boot) —
@@ -1044,6 +1047,12 @@ impl GameServer {
     /// client still simulates everything (CLAUDE.md known debt).
     pub fn tick(&mut self) {
         use crate::sim_lend::SimSystem;
+        // One column-loading story per mode (`hosted_server::assign_column_loading`):
+        // a lent world's columns are its host client's streamer's alone.
+        debug_assert!(
+            !self.lent || (self.column_refill_per_tick == 0 && self.column_streamer.is_none()),
+            "a lent world must not be streamed or refilled by its server"
+        );
         // Per-world active-tick clock (Goal 1) — mirrors GameState::tick so
         // hosted / headless (TestHost) worlds accrue the same world-clock stat
         // (total_ticks). Source of truth on disk is WorldMeta.
@@ -1624,8 +1633,10 @@ impl GameServer {
     /// time enough at two columns a tick. Runs before the bodies step, so a
     /// step is never resolved against air that terrain then fills.
     /// Off (`0`) on the dedicated server, which streams round every player
-    /// instead (Phase B1, `server_stream.rs`); never both in one mode. The LAN
-    /// host's own anchors (D1, lending the host client's world) are a later step.
+    /// instead (Phase B1, `server_stream.rs`), and on a host that lends its
+    /// world (D1), whose host client's streamer anchors on every joiner
+    /// instead (`chunk_stream::client_stream_anchors`); so only an owning
+    /// (`--no-lend`) host refills. Never two in one mode.
     fn refill_columns_round_simulated_players(&mut self) {
         let mut budget = self.column_refill_per_tick;
         if budget == 0 {

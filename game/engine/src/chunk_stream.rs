@@ -5,8 +5,10 @@ use crate::mesh::build_chunk_meshes;
 use super::{MAX_CHUNK_Y, STREAM_BUDGET};
 
 impl super::GameState {
-    /// Generate and mesh chunks around all players (union of needed columns).
-    /// First call does a bulk initial load; subsequent calls stream incrementally.
+    /// Generate and mesh chunks around all players (union of needed columns)
+    /// and, on a world this host lends its server (D1), around every joiner's
+    /// server body. First call does a bulk initial load; subsequent calls
+    /// stream incrementally.
     pub(crate) fn stream_chunks(&mut self) {
         // Live render distance (Spec 39 — was the `RENDER_DISTANCE` const).
         let rd = self.graphics.render_distance;
@@ -31,16 +33,33 @@ impl super::GameState {
         }
 
         // The streaming decision (which columns to load this frame, nearest
-        // player 0 first, and which to unload) is the pure `plan_stream_step`,
-        // shared with the dedicated server's streamer (`server_stream.rs`).
-        // SELF-HEAL: a column that's marked loaded but has no bedrock floor (a
-        // "void column", the floor-grid-holes bug) is re-queued too — see
-        // `is_void_column`.
+        // player 0 first, and which to unload) is the pure
+        // `plan_stream_step_for`, shared with the dedicated server's streamer
+        // (`server_stream.rs`). SELF-HEAL: a column that's marked loaded but
+        // has no bedrock floor (a "void column", the floor-grid-holes bug) is
+        // re-queued too — see `is_void_column`.
+        //
+        // D1 review fix 1 — on a world this host lends its server, every
+        // joiner's server body anchors the streamer too, at the server's sim
+        // distance (`client_stream_anchors`): this world is the only one the
+        // server simulates them on, so the host walking off must not unload
+        // the ground under them. A joiner's own column orders like player 0's,
+        // so it is never stuck behind the host's far ring. Every streamed
+        // column is meshed, joiner-only ones too: a column already marked
+        // loaded is never meshed later, so skipping would leave holes when the
+        // host walks over (the far-joiner meshing cost is a known follow-up).
+        let joiner_cols = self
+            .hosted_server
+            .as_ref()
+            .map(|hs| hs.lent_joiner_columns())
+            .unwrap_or_default();
+        let anchors = client_stream_anchors(&player_cols, rd, &joiner_cols);
+        let mut nearest_to = vec![(pcx0, pcz0)];
+        nearest_to.extend_from_slice(&joiner_cols);
         let world = &self.world;
-        let step = plan_stream_step(
-            &player_cols,
-            &[(pcx0, pcz0)],
-            rd,
+        let step = plan_stream_step_for(
+            &anchors,
+            &nearest_to,
             STREAM_BUDGET,
             &self.loaded_columns,
             |cx, cz| is_void_column(world, cx, cz),
@@ -85,9 +104,10 @@ impl super::GameState {
             }
         }
 
-        // Unload columns that are outside ALL players' render distance
-        // (+ `UNLOAD_HYSTERESIS`). Planned before the loads above, which are
-        // all inside the render distance, so never in this set.
+        // Unload columns that are outside ALL anchors' radius (+
+        // `UNLOAD_HYSTERESIS`) — the players' render distance, and a lent
+        // world's joiners' sim distance. Planned before the loads above, which
+        // are all inside an anchor's radius, so never in this set.
         for &(cx, cz) in &step.unload {
             // Reclaims the column's scattered wildlife and evicts / drops its
             // blocks (Spec 02 §7.5) — see `ColumnSims::stream_out`.
@@ -703,29 +723,84 @@ pub(crate) struct StreamStep {
     pub unload: Vec<(i32, i32)>,
 }
 
-/// The column-streaming decision, pure.
-///
-/// Needed = every column within `radius` (Chebyshev) of any `anchors` column.
-/// Wanted = needed columns not in `loaded`, plus loaded ones `needs_reload`
-/// flags (the void self-heal). Wanted columns are ordered by squared distance
-/// to the NEAREST `nearest_to` column, ties broken by `(cx, cz)` so the order
-/// is deterministic, and the first `budget` are returned in `load`. `unload` is
-/// [`columns_to_unload`] at `radius + UNLOAD_HYSTERESIS`.
-///
-/// `nearest_to` is separate from `anchors` on purpose: the client orders by
-/// player 0 only (its split-screen players load after player 0's nearer
-/// columns, as before), while the server orders by every anchor, so each
-/// player's own column (distance 0) always loads first.
+/// A streaming anchor: a column, and how far round it (Chebyshev, in
+/// columns) is kept loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StreamAnchor {
+    pub col: (i32, i32),
+    pub radius: i32,
+}
+
+/// How far round each joiner's server body a LENDING host's client streamer
+/// keeps its world loaded (D1 review fix 1): the dedicated server's default
+/// sim distance, so a joiner on a lent world is simulated over the same ground
+/// a dedicated server would give them — physics, reach, mob AI and spawning
+/// round them all need loaded columns, and the server's own copy that used to
+/// hold them is gone.
+pub(crate) const LENT_JOINER_SIM_DISTANCE: i32 = crate::server_stream::DEFAULT_SIM_DISTANCE;
+
+/// The anchors a client's streamer keeps loaded round: every local player's
+/// column at the render distance and — on a world it lends its server (D1;
+/// `joiner_cols` is empty otherwise, see `HostedServer::lent_joiner_columns`)
+/// — every joiner's server-body column at [`LENT_JOINER_SIM_DISTANCE`]. The
+/// lent world IS the server's, so a column only the host's players were
+/// keeping would otherwise unload under a joiner the moment the host walked
+/// away: the body falls through, its edits are refused as Unloaded.
+pub(crate) fn client_stream_anchors(
+    local_cols: &[(i32, i32)],
+    render_distance: i32,
+    joiner_cols: &[(i32, i32)],
+) -> Vec<StreamAnchor> {
+    local_cols
+        .iter()
+        .map(|&col| StreamAnchor { col, radius: render_distance })
+        .chain(
+            joiner_cols
+                .iter()
+                .map(|&col| StreamAnchor { col, radius: LENT_JOINER_SIM_DISTANCE }),
+        )
+        .collect()
+}
+
+/// [`plan_stream_step_for`] with one `radius` for every anchor (the dedicated
+/// server's streamer).
 pub(crate) fn plan_stream_step(
     anchors: &[(i32, i32)],
     nearest_to: &[(i32, i32)],
     radius: i32,
     budget: usize,
     loaded: &ahash::AHashSet<(i32, i32)>,
+    needs_reload: impl FnMut(i32, i32) -> bool,
+) -> StreamStep {
+    let anchors: Vec<StreamAnchor> =
+        anchors.iter().map(|&col| StreamAnchor { col, radius }).collect();
+    plan_stream_step_for(&anchors, nearest_to, budget, loaded, needs_reload)
+}
+
+/// The column-streaming decision, pure.
+///
+/// Needed = every column within its anchor's `radius` (Chebyshev) of any
+/// `anchors` column. Wanted = needed columns not in `loaded`, plus loaded ones
+/// `needs_reload` flags (the void self-heal). Wanted columns are ordered by
+/// squared distance to the NEAREST `nearest_to` column, ties broken by
+/// `(cx, cz)` so the order is deterministic, and the first `budget` are
+/// returned in `load`. `unload` is every loaded column beyond EVERY anchor's
+/// own `radius + UNLOAD_HYSTERESIS` ([`columns_outside_anchors`]).
+///
+/// `nearest_to` is separate from `anchors` on purpose: the client orders by
+/// player 0 (and, lending, its joiners — see `stream_chunks`), so its
+/// split-screen players load after player 0's nearer columns, as before; the
+/// server orders by every anchor, so each player's own column (distance 0)
+/// always loads first.
+pub(crate) fn plan_stream_step_for(
+    anchors: &[StreamAnchor],
+    nearest_to: &[(i32, i32)],
+    budget: usize,
+    loaded: &ahash::AHashSet<(i32, i32)>,
     mut needs_reload: impl FnMut(i32, i32) -> bool,
 ) -> StreamStep {
     let mut needed = ahash::AHashSet::new();
-    for &(ax, az) in anchors {
+    for &StreamAnchor { col: (ax, az), radius } in anchors {
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 needed.insert((ax + dx, az + dz));
@@ -759,7 +834,7 @@ pub(crate) fn plan_stream_step(
         load: wanted.into_iter().map(|(_, cx, cz)| (cx, cz)).collect(),
         pending,
         healed,
-        unload: columns_to_unload(loaded, anchors, radius + UNLOAD_HYSTERESIS),
+        unload: columns_outside_anchors(loaded, anchors, UNLOAD_HYSTERESIS),
     }
 }
 
@@ -855,17 +930,30 @@ pub(crate) fn apply_remote_change_to_unloaded_column(
 }
 
 /// Columns in `loaded` that are more than `unload_dist` chunks (Chebyshev,
-/// per axis) from EVERY player column — the ones `stream_chunks` unloads.
+/// per axis) from EVERY player column.
 pub(crate) fn columns_to_unload(
     loaded: &ahash::AHashSet<(i32, i32)>,
     player_cols: &[(i32, i32)],
     unload_dist: i32,
 ) -> Vec<(i32, i32)> {
+    let anchors: Vec<StreamAnchor> =
+        player_cols.iter().map(|&col| StreamAnchor { col, radius: unload_dist }).collect();
+    columns_outside_anchors(loaded, &anchors, 0)
+}
+
+/// Columns in `loaded` that are more than their anchor's `radius + slack`
+/// (Chebyshev, per axis) from EVERY anchor — the ones a streamer unloads.
+pub(crate) fn columns_outside_anchors(
+    loaded: &ahash::AHashSet<(i32, i32)>,
+    anchors: &[StreamAnchor],
+    slack: i32,
+) -> Vec<(i32, i32)> {
     loaded
         .iter()
         .filter(|&&(cx, cz)| {
-            player_cols.iter().all(|&(pcx, pcz)| {
-                (cx - pcx).abs() > unload_dist || (cz - pcz).abs() > unload_dist
+            anchors.iter().all(|&StreamAnchor { col: (ax, az), radius }| {
+                let dist = radius + slack;
+                (cx - ax).abs() > dist || (cz - az).abs() > dist
             })
         })
         .copied()
@@ -1130,6 +1218,51 @@ mod tests {
         unload.sort_unstable();
         assert_eq!(unload, vec![(0, -(edge + 1)), (edge + 1, 0)]);
         assert!(step.load.is_empty(), "a zero budget loads nothing");
+    }
+
+    /// D1 review fix 1 — each anchor keeps its OWN radius: a far anchor with a
+    /// smaller radius loads and keeps only its own square, and a column inside
+    /// any anchor's radius + hysteresis is never unloaded.
+    #[test]
+    fn plan_keeps_each_anchor_at_its_own_radius() {
+        let anchors = [
+            StreamAnchor { col: (0, 0), radius: 3 },
+            StreamAnchor { col: (40, 0), radius: 1 },
+        ];
+        let all = set_of(&[]);
+        let step = plan_stream_step_for(&anchors, &[(0, 0), (40, 0)], usize::MAX, &all, |_, _| false);
+        assert_eq!(step.pending, 7 * 7 + 3 * 3, "a 7x7 and a 3x3 square");
+        assert!(step.load.contains(&(41, 1)) && !step.load.contains(&(42, 0)));
+        let small_edge = 1 + UNLOAD_HYSTERESIS;
+        let loaded = set_of(&[(40 + small_edge, 0), (40 + small_edge + 1, 0), (3 + UNLOAD_HYSTERESIS, 0)]);
+        let step = plan_stream_step_for(&anchors, &[(0, 0)], 0, &loaded, |_, _| false);
+        assert_eq!(step.unload, vec![(40 + small_edge + 1, 0)]);
+    }
+
+    /// D1 review fix 1 — a LENDING host's streamer keeps a joiner's column
+    /// however far the host walks: every joiner's server body is an anchor at
+    /// the server's sim distance, beside the local players at the render
+    /// distance. Without it (the pre-fix client, local players only) the
+    /// joiner's column unloads under them.
+    #[test]
+    fn a_lending_hosts_stream_anchors_keep_a_far_joiners_column() {
+        let rd = 4;
+        let joiner = (0, 0);
+        let host = (rd + UNLOAD_HYSTERESIS + 1, 0);
+        let loaded = set_of(&[joiner, (1, 0), host]);
+        // Negative control: the host's own anchors alone drop the joiner's column.
+        let host_only = client_stream_anchors(&[host], rd, &[]);
+        let step = plan_stream_step_for(&host_only, &[host], 0, &loaded, |_, _| false);
+        assert!(step.unload.contains(&joiner), "pre-fix: the joiner's column unloads");
+
+        let anchors = client_stream_anchors(&[host], rd, &[joiner]);
+        assert!(anchors.contains(&StreamAnchor { col: host, radius: rd }));
+        assert!(anchors.contains(&StreamAnchor { col: joiner, radius: LENT_JOINER_SIM_DISTANCE }));
+        let step = plan_stream_step_for(&anchors, &[host, joiner], 0, &loaded, |_, _| false);
+        assert!(step.unload.is_empty(), "nothing near the joiner unloads: {:?}", step.unload);
+        // And a joiner standing in an unloaded column has it loaded first.
+        let step = plan_stream_step_for(&anchors, &[host, joiner], 1, &set_of(&[host]), |_, _| false);
+        assert_eq!(step.load, vec![joiner]);
     }
 
     /// `ColumnSims::stream_in` restores an evicted column (never generating
