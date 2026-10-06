@@ -329,22 +329,80 @@ pub fn tick_player_survival(
     world: &World,
     mode: PlayMode,
 ) {
+    for (damage, cause) in survival_hits(player, combat, world, mode) {
+        combat.take_damage_from(damage, cause);
+    }
+}
+
+/// [`tick_player_survival`] without applying the hits: consumes the landing
+/// event and advances breath, and returns the fall / drowning damage this
+/// tick would land. A joiner's client runs this on its predicted body
+/// (MP-D2a) — its breath bubbles stay live, but the hits are the server's,
+/// which runs the same rule on the server-held body and owns the health.
+pub fn survival_hits(
+    player: &mut Player,
+    combat: &mut PlayerCombat,
+    world: &World,
+    mode: PlayMode,
+) -> Vec<(f32, DamageCause)> {
     // Creative / Spectator take no environmental damage (Spec 05 §8.2).
     let immune = mode.flies();
     let landing = player.pending_landing.take();
+    let mut hits = Vec::new();
     if combat.dead {
-        return;
+        return hits;
     }
     if let Some(l) = landing {
         let dmg = fall_damage(l.fall_distance, l.landing_block, FallFlags { immune });
         if dmg > 0 {
-            combat.take_damage_from(dmg as f32, DamageCause::Fall);
+            hits.push((dmg as f32, DamageCause::Fall));
         }
     }
     let (breath, drown) = tick_breath(combat.breath, head_in_water(world, player), immune);
     combat.breath = breath;
     if drown > 0 {
-        combat.take_damage_from(drown as f32, DamageCause::Drowning);
+        hits.push((drown as f32, DamageCause::Drowning));
+    }
+    hits
+}
+
+// ─── Lava / fire contact ────────────────────────────────────────────────────
+
+/// Lava and fire burn on a cadence, not every tick: one hit every this many
+/// ticks (0.5 s), so contact is a steady burn rather than an instakill.
+pub const CONTACT_HAZARD_PERIOD_TICKS: u64 = 10;
+/// Raw damage of one lava contact hit (≈ 4 HP/s), before armour.
+pub const LAVA_CONTACT_DAMAGE: f32 = 2.0;
+/// Raw damage of one fire contact hit — half lava's — before armour. No
+/// lingering "on fire" status yet: contact only.
+pub const FIRE_CONTACT_DAMAGE: f32 = 1.0;
+
+/// P10 — the lava / fire contact hit a body standing with its feet at `pos`
+/// takes on tick `tick`, before armour: lava at the feet or head burns for
+/// [`LAVA_CONTACT_DAMAGE`], else fire for [`FIRE_CONTACT_DAMAGE`], once every
+/// [`CONTACT_HAZARD_PERIOD_TICKS`]. `None` for a flying mode (Creative /
+/// Spectator are immune) or off-cadence. The one rule for both sides
+/// (MP-D2a): the client applies it to its local players, a server to every
+/// joiner's body.
+pub fn contact_hazard(
+    world: &World,
+    pos: glam::Vec3,
+    tick: u64,
+    mode: PlayMode,
+) -> Option<(f32, DamageCause)> {
+    if mode.flies() || !tick.is_multiple_of(CONTACT_HAZARD_PERIOD_TICKS) {
+        return None;
+    }
+    let bx = pos.x.floor() as i32;
+    let bz = pos.z.floor() as i32;
+    let feet = world.get_block(bx, pos.y.floor() as i32, bz);
+    let head = world.get_block(bx, (pos.y + 1.0).floor() as i32, bz);
+    if feet == block::LAVA || head == block::LAVA {
+        Some((LAVA_CONTACT_DAMAGE, DamageCause::Lava))
+    } else if feet == block::FIRE || head == block::FIRE {
+        Some((FIRE_CONTACT_DAMAGE, DamageCause::Fire))
+    } else {
+        None
     }
 }
 

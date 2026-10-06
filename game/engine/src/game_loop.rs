@@ -2978,6 +2978,9 @@ impl super::GameState {
         self.remote_swing.clear();
         self.remote_items.clear();
         self.remote_projectiles.clear();
+        self.remote_mobs.clear();
+        self.remote_mobs_clock = None;
+        self.own_health.reset();
         self.remote_players.clear();
         self.local_swing.clear();
         self.local_sneak.clear();
@@ -4180,6 +4183,14 @@ impl super::GameState {
         self.hosted_server.as_ref().is_some_and(|hs| hs.lends_host_world())
     }
 
+    /// MP-D2a — has this client joined someone else's world? Then it runs no
+    /// mobs of its own: the server's are mirrored into `remote_mobs`, its
+    /// spawners are off, and the hits the world lands on its body (mob,
+    /// lava/fire, fall, drowning) are the server's.
+    pub(crate) fn joined(&self) -> bool {
+        self.remote_client.is_some()
+    }
+
     /// D1 — does this client's tick run the shared world-sim `system`?
     /// Always, unless the world is lent and `SimSystem::lent_owner` gives it
     /// to the server. A run is tallied on the world (`World::sim_tally`) for
@@ -4826,7 +4837,16 @@ impl super::GameState {
         // Blank-canvas time-lock: use the effective time so locked-day worlds
         // never trigger night-mob spawns and locked-night worlds always do.
         let eff_world_time = self.world.effective_world_time(self.world_time);
-        if self.world_time.is_multiple_of(400) && self.sim_runs(SimSystem::MobSpawning) {
+        // MP-D2a — a joiner's mobs are the server's (mirrored in
+        // `remote_mobs`): it spawns none, and keeps none that slipped in.
+        let joined = self.joined();
+        if joined {
+            crate::remote_mobs::purge_private_mobs(&mut self.ecs);
+        }
+        if !joined
+            && self.world_time.is_multiple_of(400)
+            && self.sim_runs(SimSystem::MobSpawning)
+        {
             crate::spawning::tick_mob_spawning(
                 &mut self.ecs,
                 &self.world,
@@ -4840,7 +4860,7 @@ impl super::GameState {
         // whose population hasn't been instantiated yet. Idempotent;
         // `populated_villages` marks each cell after spawn so we don't
         // duplicate when the player walks away and back.
-        if self.tick_counter.is_multiple_of(20) {
+        if !joined && self.tick_counter.is_multiple_of(20) {
             crate::village_gen::spawn_initial_villagers(
                 &mut self.world,
                 &self.biome_gen,
@@ -5025,8 +5045,9 @@ impl super::GameState {
         // cadence as reputation decay (once per in-game day). Eligible
         // villages roll a deterministic per-(seed, vid, day) chance;
         // hits drain the treasury + schedule a Warning-state raid.
-        if self.tick_counter
-            .is_multiple_of(crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS)
+        if !joined
+            && self.tick_counter
+                .is_multiple_of(crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS)
         {
             let current_day = self.tick_counter
                 / crate::reputation::REPUTATION_DECAY_INTERVAL_TICKS;
@@ -5081,8 +5102,10 @@ impl super::GameState {
 
         // Spec 22 Phase 4 + 6 — per-tick raid lifecycle. Warning→Active
         // spawns the wave + tags each mob with `RaidMember`. Active→
-        // Cleared/Failed produces a resolution the caller settles.
-        {
+        // Cleared/Failed produces a resolution the caller settles. Not on a
+        // joiner (MP-D2a): raids are the host's, and a raid's mobs would be
+        // private ones.
+        if !joined {
             let (to_spawn, resolutions) =
                 crate::raid::tick_raids(&mut self.world, self.tick_counter);
             for (raid_id, spawns) in to_spawn {
@@ -6263,43 +6286,42 @@ impl super::GameState {
 
             // W2 — fall damage (from this tick's physics landing) + drowning.
             // The same shared driver runs server-side for remote players
-            // (`GameServer::tick_player_physics`).
+            // (`GameServer::tick_player_survival`). A joiner's body is the
+            // server's (MP-D2a): its breath still runs here (the bubbles),
+            // but the hits are landed by the server and arrive as its health.
             {
                 let slot = &mut self.players[i];
-                crate::survival::tick_player_survival(
-                    &mut slot.player,
-                    &mut slot.combat,
-                    &self.world,
-                    self.play_mode,
-                );
+                if joined {
+                    let _server_owns = crate::survival::survival_hits(
+                        &mut slot.player,
+                        &mut slot.combat,
+                        &self.world,
+                        self.play_mode,
+                    );
+                } else {
+                    crate::survival::tick_player_survival(
+                        &mut slot.player,
+                        &mut slot.combat,
+                        &self.world,
+                        self.play_mode,
+                    );
+                }
             }
 
-            // P10 — lava contact damage. A body in lava burns at ~4 dmg/sec.
-            // Flying modes (Creative/Spectator) are immune; gated to every 10
-            // ticks (0.5 s) so it's a steady burn, not a per-tick instakill.
-            if !self.play_mode.flies()
+            // P10 — lava / fire contact damage (`survival::contact_hazard`:
+            // a steady burn every 0.5 s, flying modes immune). The server
+            // lands it on a joiner's body (MP-D2a).
+            if !joined
                 && !self.players[i].combat.dead
-                && self.tick_counter.is_multiple_of(10)
+                && let Some((damage, cause)) = crate::survival::contact_hazard(
+                    &self.world,
+                    self.players[i].player.pos,
+                    self.tick_counter,
+                    self.play_mode,
+                )
+                && self.players[i].take_damage_with_armour_from(damage, cause)
             {
-                let p = self.players[i].player.pos;
-                let bx = p.x.floor() as i32;
-                let bz = p.z.floor() as i32;
-                let feet = self.world.get_block(bx, p.y.floor() as i32, bz);
-                let head = self.world.get_block(bx, (p.y + 1.0).floor() as i32, bz);
-                let landed = if feet == crate::block::LAVA || head == crate::block::LAVA {
-                    self.players[i]
-                        .take_damage_with_armour_from(2.0, crate::survival::DamageCause::Lava)
-                } else if feet == crate::block::FIRE || head == crate::block::FIRE {
-                    // Fire burns at half lava strength (1 HP / 0.5 s). No
-                    // lingering "on fire" status yet — contact only.
-                    self.players[i]
-                        .take_damage_with_armour_from(1.0, crate::survival::DamageCause::Fire)
-                } else {
-                    false
-                };
-                if landed {
-                    self.dismount_parrots_on_owner_damage(i);
-                }
+                self.dismount_parrots_on_owner_damage(i);
             }
         }
 
@@ -6315,7 +6337,9 @@ impl super::GameState {
         // W2 — the difficulty table decides whether hostiles attack at all
         // (Peaceful: no) and scales the hits that land.
         let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
-        if !self.is_creative && difficulty.rules().hostiles_attack {
+        // A joiner's attackers are the server's mobs, landing on the server's
+        // body (MP-D2a, `GameServer::tick_player_hazards`).
+        if !joined && !self.is_creative && difficulty.rules().hostiles_attack {
             for i in 0..self.players.len() {
                 let attackers = {
                     let p = &mut self.players[i];
@@ -10862,7 +10886,24 @@ impl super::GameState {
                     }
                 };
 
-                let attacked = if villager_grace {
+                // MP-D2a — a joiner's mobs are the server's mirror: a swing
+                // at one can't land until the server takes attacks (D2b).
+                // It is still a swing at a mob, not a block behind it.
+                let joined_target = if self.joined() {
+                    self.remote_mobs.attack_target(p_eye, look_dir)
+                } else {
+                    None
+                };
+                let attacked = if joined_target.is_some() {
+                    if self.players[pidx].combat.can_attack() {
+                        self.players[pidx].combat.attack_cooldown = crate::combat::ATTACK_COOLDOWN;
+                        self.toast = Some((
+                            crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                    }
+                    true
+                } else if villager_grace {
                     // Consume the attack cooldown so the player feels the
                     // swing, but skip damage. Set the warn timer; the next
                     // swing within 30 s lands.
@@ -12463,6 +12504,35 @@ impl super::GameState {
             // consume the Lead from inventory. Runs BEFORE the
             // villager-dialogue branch so the Lead wins over the
             // talk-to-villager interaction when held.
+            // MP-D2a — a right-click ON a mirrored mob (the crosshair is on
+            // it) while holding anything but a block would be an interaction
+            // (tame, feed, breed, ride, lead, shear, milk, trade) the server
+            // has to perform: refused with a toast until D2b. Holding a
+            // block falls through, so building beside a cow still places.
+            if intent.place_block
+                && intent.cursor_captured
+                && self.players[pidx].place_cooldown == 0
+                && self.joined()
+            {
+                let holding_block = self.players[pidx]
+                    .inventory
+                    .hotbar_block_id(self.players[pidx].hotbar_slot)
+                    .is_some();
+                let eye = self.players[pidx].player.eye_pos();
+                let look_dir = self.players[pidx].camera.forward();
+                // A block in front of the mob (a chest, a door) wins.
+                let reach = cast_ray(eye, look_dir, crate::combat::ATTACK_REACH, &self.world, &self.registry)
+                    .map_or(crate::combat::ATTACK_REACH, |hit| hit.distance);
+                if !holding_block && self.remote_mobs.ray_target(eye, look_dir, reach).is_some() {
+                    self.players[pidx].place_cooldown = 16;
+                    self.toast = Some((
+                        crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    continue;
+                }
+            }
+
             let mut lead_consumed = false;
             if intent.place_block
                 && intent.cursor_captured
@@ -16727,6 +16797,23 @@ impl super::GameState {
                 self.players[pidx].player.eye_pos(),
                 light_at,
             ));
+            // MP-D2a — the server's mobs and carts, mirrored for a joiner
+            // (their own render-only ECS; empty unless joined). The same
+            // builders draw them as draw the host's.
+            if !self.remote_mobs.is_empty() {
+                entity_verts.extend(crate::entity_model::build_entity_model_vertices(
+                    self.remote_mobs.ecs(),
+                    self.falling_tick_counter,
+                    self.players[pidx].player.eye_pos(),
+                    &self.world.override_registry,
+                    light_at,
+                ));
+                entity_verts.extend(crate::entity_model::build_cart_vertices(
+                    self.remote_mobs.ecs(),
+                    self.players[pidx].player.eye_pos(),
+                    light_at,
+                ));
+            }
             // #19 Rig Studio — authored rigs render posed + animated, playing the
             // clip their author picked. A part whose assigned block has a baked
             // #18 micro-model draws that shell; the rest stay cuboids.
@@ -21875,15 +21962,33 @@ impl super::GameState {
                 target_sats: state.reserve_target_sats,
                 current_sats: state.reserve_current_sats,
             };
-            // Our own body as the server holds it (Spec 04 §5.3) — position
-            // only; health stays this client's for now.
-            let own_server_pos = state
-                .players
-                .iter()
-                .find(|p| p.player_index == my_idx)
+            // Our own body as the server holds it (Spec 04 §5.3): its
+            // position, and (MP-D2a) its health — the server lands every hit
+            // the world deals us; `own_health` keeps our own reported changes
+            // (eating, regen, …) on top until the server has applied them.
+            let own_server = state.players.iter().find(|p| p.player_index == my_idx);
+            let own_server_pos = own_server
                 .map(|p| glam::Vec3::new(p.x, p.y, p.z))
                 .filter(|p| p.is_finite());
+            let own_server_health = own_server.map(|p| p.health);
             let acked = state.last_acked_input;
+            if let Some(server_health) = own_server_health
+                && let Some(slot) = self.players.first_mut()
+                && !self.is_creative
+            {
+                let applied = self.own_health.apply_server(
+                    server_health,
+                    acked,
+                    slot.combat.health,
+                    slot.combat.max_health,
+                    slot.combat.dead,
+                );
+                slot.combat.health = applied.health;
+                if applied.hurt {
+                    // The hit's flash + red vignette, as a local hit shows.
+                    slot.combat.flash_timer = crate::combat::PLAYER_HURT_FLASH_TICKS;
+                }
+            }
             self.remote_players = state.players.into_iter()
                 .filter(|p| p.player_index != my_idx)
                 // Discard players with non-finite positions (NaN/inf from
@@ -21972,6 +22077,23 @@ impl super::GameState {
             &pending_entity_updates,
             &pending_entity_despawns,
         );
+        // MP-D2a — and its mobs and carts, into the render-only mirror; this
+        // client keeps no mobs of its own while joined. The mirror glides
+        // every frame between the server's (changed-only) updates.
+        if self.joined() {
+            self.remote_mobs.apply(
+                &pending_entity_spawns,
+                &pending_entity_updates,
+                &pending_entity_despawns,
+            );
+            crate::remote_mobs::purge_private_mobs(&mut self.ecs);
+            let now = Instant::now();
+            let dt = self
+                .remote_mobs_clock
+                .replace(now)
+                .map_or(0.0, |prev| (now - prev).as_secs_f32().min(0.25));
+            self.remote_mobs.advance(dt);
+        }
 
         // MP-A3 — the server's word on our own body. `Died`: the server holds
         // us dead (a fall or drowning it saw; our own reported death comes
@@ -21989,6 +22111,9 @@ impl super::GameState {
                         }
                     }
                     crate::remote_client::OwnLifeEvent::Respawned(at) => {
+                        // Back at full health: nothing reported before the
+                        // death still applies.
+                        self.own_health.reset();
                         let p = &mut self.players[0].player;
                         p.pos = at;
                         p.velocity = glam::Vec3::ZERO;
@@ -22114,6 +22239,15 @@ impl super::GameState {
         self.net_send_seq += 1;
         let send_tick = self.net_send_seq;
 
+        // MP-D2a — a joiner's health is the server's: report only the change
+        // its own sources made since the last send (`health_sync`). A host's
+        // own loopback slot sends its health as-is (`health`).
+        let health_delta = if has_client {
+            self.own_health.pending(slot.combat.health, slot.combat.dead)
+        } else {
+            0.0
+        };
+
         let input = crate::protocol::InputPacket {
             tick: send_tick,
             x: slot.player.pos.x,
@@ -22137,6 +22271,8 @@ impl super::GameState {
             drop_item: intent.drop_item,
             hotbar_slot: wire_hotbar,
             block_changes: std::mem::take(&mut self.pending_block_changes),
+            armour_points: slot.total_armour_points(),
+            health_delta,
         };
 
         // Serialize once, send to whichever transport is active
@@ -22162,7 +22298,7 @@ impl super::GameState {
             // puts us back on that body (`OwnPrediction::send`).
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
-            self.own_prediction.send(
+            let seq = self.own_prediction.send(
                 client,
                 &input,
                 &mut slot.player,
@@ -22171,6 +22307,11 @@ impl super::GameState {
                 &self.registry,
                 self.play_mode,
             );
+            // The reported change is in flight under the stamped sequence; an
+            // unsent input (not joined yet) keeps it for the next one.
+            if let Some(seq) = seq {
+                self.own_health.sent(seq, health_delta, slot.combat.health, slot.combat.dead);
+            }
         }
 
         // Cinematic replay (Phase 2c) — tee one frame per sim tick into the

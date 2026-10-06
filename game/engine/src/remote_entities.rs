@@ -13,9 +13,8 @@
 //! [`RemoteProjectiles`]: a dedicated server's dispenser arrows fly, hit and
 //! despawn in the SERVER's sim, and a joiner only draws them.
 //!
-//! Mob/cart spawns in the same diff are ignored for now — remote mob
-//! rendering rides the dual-sim rework (see CLAUDE.md known debt); items go
-//! first because server-side loot is otherwise invisible and unlootable.
+//! Mob and cart spawns in the same diff go to the joiner's mob mirror,
+//! `remote_mobs::RemoteMobs` (MP-D2a); these tables pass them through.
 
 use glam::Vec3;
 use std::collections::HashMap;
@@ -43,7 +42,8 @@ pub struct RemoteItems {
 
 impl RemoteItems {
     /// Fold one tick's entity diff into the table. Non-`Item` spawns and
-    /// updates for unknown ids (mobs, carts) pass through untouched.
+    /// updates for unknown ids (mobs, carts — `remote_mobs` takes those)
+    /// pass through untouched.
     pub fn apply(
         &mut self,
         spawns: &[crate::protocol::EntitySpawn],
@@ -71,8 +71,8 @@ impl RemoteItems {
                 },
             );
         }
-        // Updates arrive for every broadcast entity (mobs + carts too) —
-        // only ids already in the table are items we track.
+        // Updates arrive for every shown entity that changed (mobs + carts
+        // too) — only ids already in the table are items we track.
         for u in updates {
             if let Some(it) = self.map.get_mut(&u.id) {
                 it.pos = Vec3::new(u.x, u.y, u.z);
@@ -331,9 +331,9 @@ mod tests {
         items.apply(
             &[],
             &[
-                EntityUpdate { id: 7, x: 4.0, y: 66.0, z: -1.0, yaw: 0.0, state: 0 },
+                EntityUpdate { id: 7, x: 4.0, y: 66.0, z: -1.0, yaw: 0.0, state: 0, ..Default::default() },
                 // A mob's update — unknown id here, must be a no-op.
-                EntityUpdate { id: 99, x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, state: 2 },
+                EntityUpdate { id: 99, x: 0.0, y: 0.0, z: 0.0, yaw: 0.0, state: 2, ..Default::default() },
             ],
             &[],
         );
@@ -393,7 +393,7 @@ mod tests {
         // dipping as gravity takes it.
         arrows.apply(
             &[],
-            &[EntityUpdate { id: 9, x: 2.0, y: 79.5, z: 0.0, yaw: east, state: 0 }],
+            &[EntityUpdate { id: 9, x: 2.0, y: 79.5, z: 0.0, yaw: east, state: 0, ..Default::default() }],
             &[],
         );
         let a = arrows.get(9).unwrap();

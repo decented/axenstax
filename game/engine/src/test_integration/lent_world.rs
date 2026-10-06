@@ -108,18 +108,25 @@ fn a_joiners_diff_carries_the_hosts_own_mobs() {
     let cows: Vec<_> = spawns.iter().filter(|s| s.id == cow_id).collect();
     assert_eq!(cows.len(), 1, "the host's cow reaches the joiner exactly once");
     assert_eq!(cows[0].kind, protocol::EntityKind::Cow);
-    // Every mob in the host's world reached the joiner — the diff is the
-    // host's ECS, not a second population.
-    let mut host_mobs = 0;
-    for (_e, (pid, _kind)) in host
+    // Every mob of the host's world near the joiner reached it — the diff is
+    // the host's ECS, not a second population — and none far from it did
+    // (MP-D2a: a joiner hears about the entities in its interest radius).
+    let joiner = hs.server.players.last().expect("the joiner's slot").player.pos;
+    let mut near_mobs = 0;
+    for (_e, (pid, pos, _kind)) in host
         .ecs
-        .query::<(&crate::entity::ProtocolId, &crate::entity::MobKind)>()
+        .query::<(&crate::entity::ProtocolId, &crate::entity::Position, &crate::entity::MobKind)>()
         .iter()
     {
-        host_mobs += 1;
-        assert!(spawns.iter().any(|s| s.id == pid.0), "host mob {} not sent", pid.0);
+        let d = glam::Vec2::new(pos.0.x - joiner.x, pos.0.z - joiner.z).length();
+        if d <= crate::entity_broadcast::INTEREST_ENTER_RADIUS {
+            near_mobs += 1;
+            assert!(spawns.iter().any(|s| s.id == pid.0), "host mob {} not sent", pid.0);
+        } else if d > crate::entity_broadcast::INTEREST_LEAVE_RADIUS {
+            assert!(!spawns.iter().any(|s| s.id == pid.0), "far host mob {} sent", pid.0);
+        }
     }
-    assert!(host_mobs >= 1);
+    assert!(near_mobs >= 1);
     assert_eq!(hs.server.ecs.len(), 0, "the server keeps no population of its own");
 }
 

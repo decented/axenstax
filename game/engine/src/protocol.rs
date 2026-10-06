@@ -442,7 +442,10 @@ pub struct InputPacket {
     /// Look direction (absolute, not delta — server doesn't accumulate)
     pub yaw: f32,
     pub pitch: f32,
-    /// Health (client-authoritative for Phase D)
+    /// Health as this client sees it. Applied as sent for a host's own local
+    /// (position-trusted) slot. For a joiner the server's copy is the truth
+    /// (MP-D2a): this field only reports a death the client's own sim caused
+    /// (`<= 0`, MP-A3); its owned changes ride `health_delta`.
     pub health: f32,
     /// Currently held item (block ID or 0)
     ///
@@ -472,6 +475,26 @@ pub struct InputPacket {
     pub hotbar_slot: Option<u8>,
     /// Block changes this tick (placed or broken blocks)
     pub block_changes: Vec<BlockChange>,
+    /// MP-D2a (v68) — the armour points this player is wearing
+    /// (`PlayerSlot::total_armour_points`). A joiner's armour lives in its
+    /// client-held inventory (CLAUDE.md known debt), so the server, which now
+    /// lands mob and lava/fire hits on a joiner's body, is told how much of
+    /// each hit armour soaks up. Client-asserted, like `held_kind`: a lying
+    /// client could only claim armour it isn't wearing, and until D2a its
+    /// health was wholly its own anyway. Ignored for a local slot.
+    /// APPEND-ONLY with `health_delta` (bincode is positional).
+    #[serde(default)]
+    pub armour_points: u8,
+    /// MP-D2a (v68) — the change this client made to its own health since its
+    /// previous input from the sources it still owns: eating, natural regen
+    /// and starvation (hunger stays client-side), poison, sleeping, `/heal`.
+    /// A joiner's health is the server's; the server adds this to its copy
+    /// when it simulates the input, so the next `StateUpdate` acknowledging
+    /// the input (`last_acked_input`) carries it. Fall, drowning, mob and
+    /// lava/fire damage are NOT in it: the server applies those itself.
+    /// Zero from a local slot (its `health` is applied as sent).
+    #[serde(default)]
+    pub health_delta: f32,
 }
 
 // ─── State sync (Server → Client, every tick, unreliable datagram) ───
@@ -735,10 +758,33 @@ pub struct EntitySpawn {
     pub full_item: WireItem,
 }
 
-/// Server → client: an existing entity's position/state changed this tick.
-/// Sent every tick for every entity whose state differs from last broadcast.
-/// `state` is an AI-state tag for animation (idle=0, wander=1, chase=2, attack=3).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Bit flags carried in `EntityUpdate.flags` (MP-D2a, v68): the per-entity
+/// render state a joiner's mirror draws. Wire-stable bit positions; append
+/// only.
+pub mod entity_flags {
+    /// The mob's damage flash is showing (`combat::Health::is_flashing`).
+    pub const HURT: u8 = 1;
+    /// A juvenile (`breeding::Baby`) — drawn at the baby scale.
+    pub const BABY: u8 = 2;
+    /// Somebody's tamed pet or kept steed (`tameable::pet_owner_of`). No
+    /// renderer reads it yet; it is the hook the joiner's pet interactions
+    /// (D2b) and a collar/nameplate will read.
+    pub const TAMED: u8 = 4;
+    /// Satoshi the guide (`satoshi::SatoshiMarker`) — a Villager drawn with
+    /// his own hooded model.
+    pub const SATOSHI: u8 = 8;
+}
+
+/// Server → client: an existing entity's position/state changed.
+///
+/// **Changed-only (MP-D2a, v68):** sent when the entity's state differs from
+/// the last update broadcast for it (position, velocity or yaw beyond a small
+/// epsilon, or a `state`/`flags` change), and once when the entity enters a
+/// client's interest radius (alongside its `EntitySpawn`). An entity that
+/// sends nothing has not changed; the client keeps the last update it got.
+/// `state` is an AI-state tag for animation (idle=0, wander=1, chase=2,
+/// attack=3); for a projectile 0 = arrow, 1 = blunt ball.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EntityUpdate {
     pub id: u32,
     pub x: f32,
@@ -746,6 +792,18 @@ pub struct EntityUpdate {
     pub z: f32,
     pub yaw: f32,
     pub state: u8,
+    /// MP-D2a (v68) — velocity in blocks per tick (`entity::Velocity`), for
+    /// the walk cycle and to smooth the motion between updates. Zero for an
+    /// entity with no velocity (a cart). APPEND-ONLY with `flags`.
+    #[serde(default)]
+    pub vx: f32,
+    #[serde(default)]
+    pub vy: f32,
+    #[serde(default)]
+    pub vz: f32,
+    /// MP-D2a (v68) — [`entity_flags`] bits.
+    #[serde(default)]
+    pub flags: u8,
 }
 
 /// State update sent from server to client each tick.
@@ -1216,7 +1274,16 @@ pub struct ServerAnnouncePacket {
 ///   `EntityKind::Projectile = 39`, all appended. A dead joiner stays dead on
 ///   the server until it asks to respawn (the 40-tick revive BRIDGE is gone);
 ///   a dedicated server's dispenser arrows fly, hit and reach joiners.
-pub const PROTOCOL_VERSION: u32 = 67;
+/// - v68 (2026-10-07, MP-D2a): joiners see the server's mobs and are hurt by
+///   them. `EntityUpdate` gains trailing `vx`/`vy`/`vz` + `flags`
+///   ([`entity_flags`]: hurt flash, baby, tamed, Satoshi) and is sent
+///   changed-only; entity events are filtered per client by an interest
+///   radius around a joiner's body (`entity_broadcast`). `InputPacket` gains
+///   trailing `armour_points` + `health_delta`: a joiner's health is the
+///   server's (it lands mob and lava/fire hits server-side), and the client
+///   reports only the changes it still owns (eating, regen, poison,
+///   starvation). Packet shapes CHANGED, hence the bump.
+pub const PROTOCOL_VERSION: u32 = 68;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1379,7 +1446,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 67);
+        assert_eq!(super::PROTOCOL_VERSION, 68);
     }
 
     #[test]
@@ -1566,10 +1633,15 @@ mod tests {
             drop_item: false,
             hotbar_slot: Some(4),
             block_changes: vec![BlockChange { x: 0, y: 64, z: 0, new_block: 3, meta: 0 }],
+            armour_points: 11,
+            health_delta: -1.5,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.tick, pkt.tick);
+        // MP-D2a (v68) — the trailing vitals survive the round-trip.
+        assert_eq!(back.armour_points, 11);
+        assert_eq!(back.health_delta, -1.5);
         assert_eq!(back.hotbar_slot, pkt.hotbar_slot);
         // Tool-capable held ref survives the round-trip.
         assert_eq!(back.held_kind, item_kind::TOOL);
@@ -1641,6 +1713,7 @@ mod tests {
                 id: 9,
                 x: 6.5, y: 65.0, z: 12.5,
                 yaw: 1.5707964, state: 0,
+                ..Default::default()
             }],
             entity_despawns: vec![],
             reserve_richness: 0.0,
@@ -1659,6 +1732,29 @@ mod tests {
         assert_eq!(back.entity_updates.len(), 1);
         assert_eq!(back.entity_updates[0].id, 9);
         assert!((back.entity_updates[0].x - 6.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn entity_update_carries_velocity_and_flags() {
+        // MP-D2a (v68) — what a joiner's mirror needs to draw a mob: its
+        // velocity (walk cycle, smoothing) and the render flags.
+        let upd = EntityUpdate {
+            id: 4,
+            x: 1.0,
+            y: 65.0,
+            z: -3.0,
+            yaw: 0.5,
+            state: 2,
+            vx: 0.12,
+            vy: -0.08,
+            vz: 0.0,
+            flags: entity_flags::HURT | entity_flags::BABY,
+        };
+        let bytes = bincode::serialize(&upd).unwrap();
+        // id + 4 f32 + state + 3 f32 + flags, fixint.
+        assert_eq!(bytes.len(), 4 + 16 + 1 + 12 + 1);
+        let back: EntityUpdate = safe_deserialize(&bytes).unwrap();
+        assert_eq!(back, upd);
     }
 
     #[test]
@@ -1863,7 +1959,11 @@ mod tests {
         //   `PlayerEventType::{Died, Respawned}` and `EntityKind::Projectile =
         //   39`, all appended — a dead joiner stays dead on the server until it
         //   asks, and server-side arrows reach joiners.
-        assert_eq!(PROTOCOL_VERSION, 67);
+        // v68 (2026-10-07, MP-D2a): `EntityUpdate` gains velocity + flags and
+        //   goes changed-only behind a per-client interest radius;
+        //   `InputPacket` gains `armour_points` + `health_delta` (a joiner's
+        //   health is the server's).
+        assert_eq!(PROTOCOL_VERSION, 68);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

@@ -190,7 +190,11 @@ fn protocol_version_is_the_pinned_value() {
     // v67 (2026-10-06, MP-A3): server-held death + server projectiles —
     //   `PacketType::Respawn = 57` (C→S), `PlayerEventType::{Died, Respawned}`
     //   (S→C) and `EntityKind::Projectile = 39`, all appended.
-    assert_eq!(protocol::PROTOCOL_VERSION, 67);
+    // v68 (2026-10-07, MP-D2a): `EntityUpdate` gains velocity + flags and is
+    //   sent changed-only behind a per-client interest radius; `InputPacket`
+    //   gains `armour_points` + `health_delta` (a joiner's health is the
+    //   server's).
+    assert_eq!(protocol::PROTOCOL_VERSION, 68);
 }
 
 #[test]

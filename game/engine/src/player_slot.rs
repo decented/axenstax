@@ -442,20 +442,24 @@ impl PlayerSlot {
         let reduced = crate::armour::damage_after_armour(raw_damage, total_points);
         let landed = self.combat.take_damage_from(reduced, cause);
         if landed {
-            for slot in self.armour_slots.iter_mut() {
-                if let Some(piece) = slot.as_mut()
-                    && !piece.is_broken() {
-                        piece.durability = piece.durability.saturating_sub(1);
-                    }
-                // Drop the piece entirely when it breaks so total
-                // points stays accurate and the UI doesn't show a
-                // zero-durability ghost.
-                if slot.as_ref().is_some_and(|p| p.is_broken()) {
-                    *slot = None;
-                }
-            }
+            self.wear_armour();
         }
         landed
+    }
+
+    /// One landed hit's wear on the equipped armour: every worn piece loses
+    /// one durability, and a piece that breaks is unequipped so it neither
+    /// keeps contributing points nor lingers as a zero-durability ghost.
+    pub fn wear_armour(&mut self) {
+        for slot in self.armour_slots.iter_mut() {
+            if let Some(piece) = slot.as_mut()
+                && !piece.is_broken() {
+                    piece.durability = piece.durability.saturating_sub(1);
+                }
+            if slot.as_ref().is_some_and(|p| p.is_broken()) {
+                *slot = None;
+            }
+        }
     }
 
     /// True when the creative break cooldown has elapsed, so a block may be

@@ -234,16 +234,19 @@ fn a_backlogged_queue_coalesces_repeated_edits_latest_wins() {
 #[test]
 fn entity_spawns_and_despawns_survive_splitting_in_order() {
     let mut hs = start_open_server("state-budget-entities-test");
-    // Keep the join tick: its backfilled spawns are part of the order.
+    // Keep the join tick: its entity spawns are part of the order.
     let (client, join_tick) = join_remote_keeping(&mut hs);
+    // Round the joiner's body, inside its interest radius (MP-D2a): a 100 x
+    // 80 grid centred on it reaches at most 64 blocks out.
+    let centre = hs.server.players.last().expect("the joiner's slot").player.pos;
 
     // A block backlog in front, then 2,000 drops — far more than one budget.
     hs.server.pending_block_changes.extend(burst(8_000, crate::block::STONE));
     for i in 0..2_000u32 {
         let at = glam::Vec3::new(
-            -200.0 + (i % 50) as f32 * 3.0,
+            centre.x - 50.0 + (i % 50) as f32 * 2.0,
             120.0,
-            -200.0 + (i / 50) as f32 * 3.0,
+            centre.z - 40.0 + (i / 50) as f32 * 2.0,
         );
         crate::entity::spawn_item(
             &mut hs.server.ecs,

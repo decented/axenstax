@@ -65,7 +65,9 @@ const _: () = assert!(CLIENT_TICK_BUDGET_BYTES <= STATE_UPDATE_MAX_BYTES);
 
 /// The slice of a remote client's tick budget offered to entity updates
 /// BEFORE the reliable queue, so a block backlog never freezes the mobs on
-/// its screen. About 390 updates; whatever they don't use goes to the queue.
+/// its screen. About 240 updates (34 bytes each since v68's velocity and
+/// flags); whatever they don't use goes to the queue. Updates are
+/// changed-only (`entity_broadcast`), so an idle herd takes none of it.
 pub const ENTITY_UPDATE_RESERVE_BYTES: usize = 8 * 1024;
 
 /// Hard bound on a remote client's queued reliable bytes. Past it the queued
@@ -536,7 +538,7 @@ mod tests {
     }
 
     fn update(id: u32, x: f32) -> EntityUpdate {
-        EntityUpdate { id, x, y: 64.0, z: 0.0, yaw: 0.0, state: 0 }
+        EntityUpdate { id, x, y: 64.0, z: 0.0, yaw: 0.0, state: 0, ..Default::default() }
     }
 
     fn decode(pkt: &[u8]) -> StateUpdatePacket {
@@ -560,7 +562,7 @@ mod tests {
     #[test]
     fn block_change_and_update_sizes_match_the_documented_wire_sizes() {
         assert_eq!(wire_size(&bc(1, 1)), 15);
-        assert_eq!(wire_size(&update(1, 0.0)), 21);
+        assert_eq!(wire_size(&update(1, 0.0)), 34);
         assert_eq!(wire_size(&3u32), 4);
     }
 

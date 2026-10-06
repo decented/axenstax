@@ -568,6 +568,9 @@ impl crate::GameState {
         self.stop_online();
         self.remote_items.clear();
         self.remote_projectiles.clear();
+        self.remote_mobs.clear();
+        self.remote_mobs_clock = None;
+        self.own_health.reset();
         self.remote_players.clear();
         self.remote_swing.clear();
         self.pending_block_changes.clear();

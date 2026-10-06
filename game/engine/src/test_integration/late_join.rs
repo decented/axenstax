@@ -1,14 +1,15 @@
-//! Late-joiner entity backfill (wave-hardening backlog, 2026-07-12).
+//! Late joiners see the entities already in the world (wave-hardening
+//! backlog, 2026-07-12; reworked for MP-D2a).
 //!
-//! `HostedServer.known_entity_ids` is a GLOBAL set: an entity's
-//! `EntitySpawn` is broadcast exactly once — on the first tick after it
-//! enters the server ECS. A client whose handshake completes AFTER that
-//! tick used to receive only `EntityUpdate`s for ids it had never seen, so
-//! every pre-existing drop (and mob/cart, once those render remotely) was
-//! permanently invisible to a late joiner. These tests drive a REAL join
-//! through `HostedServer::tick` (channel transport, no sockets or accept
-//! threads) and pin the backfill: the joiner's first StateUpdate carries a
-//! spawn for every already-broadcast entity, exactly once.
+//! An entity's `EntitySpawn` used to be broadcast exactly once, globally, so
+//! a client whose handshake completed later got only `EntityUpdate`s for ids
+//! it had never seen — every pre-existing drop and mob invisible. A one-shot
+//! backfill fixed that; since MP-D2a each client has its own interest set
+//! (`entity_broadcast::ClientInterest`), which starts empty, so every entity
+//! near the joiner simply enters on its first broadcast. These tests drive a
+//! REAL join through `HostedServer::tick` (channel transport, no sockets or
+//! accept threads) and pin the observable: the joiner gets a spawn for every
+//! pre-existing entity near it, exactly once, with its full payload.
 
 use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::protocol;
@@ -70,7 +71,7 @@ fn late_joiner_receives_spawns_for_preexisting_entities() {
         crate::mob::MobType::Cow,
         glam::Vec3::new(6.0, 64.0, 6.0),
     );
-    hs.tick(); // first broadcast — both entities enter known_entity_ids
+    hs.tick(); // first broadcast — the host has shown both already
 
     let client = hs.attach_test_remote();
     send_guest_join(&client);
@@ -99,15 +100,15 @@ fn late_joiner_receives_spawns_for_preexisting_entities() {
     assert_eq!(
         bones.len(),
         1,
-        "pre-existing drop must be backfilled to the late joiner exactly once"
+        "a pre-existing drop must reach the late joiner exactly once"
     );
-    assert_eq!(bones[0].item_count, 3, "stack count rides the backfilled spawn");
+    assert_eq!(bones[0].item_count, 3, "stack count rides the spawn");
 
     let mob_spawns: Vec<_> = all_spawns.iter().filter(|s| s.id == mob_id).collect();
     assert_eq!(
         mob_spawns.len(),
         1,
-        "pre-existing mob must be backfilled exactly once"
+        "a pre-existing mob must reach the late joiner exactly once"
     );
     assert_eq!(mob_spawns[0].kind, protocol::EntityKind::Cow);
 }
@@ -134,12 +135,12 @@ fn same_tick_entities_arrive_once_and_dead_entities_are_not_backfilled() {
     for e in dead {
         hs.server.ecs.despawn(e).expect("despawn pre-join item");
     }
-    hs.tick(); // despawn broadcast — the id leaves known_entity_ids
+    hs.tick(); // despawn broadcast — the id is gone for good
 
     let client = hs.attach_test_remote();
     send_guest_join(&client);
-    // An item born the SAME tick the join is processed: the regular diff
-    // owns its spawn — the backfill must not double it.
+    // An item born the SAME tick the join is processed: new to everyone and
+    // new to the joiner's interest set alike — it must still arrive once.
     crate::entity::spawn_item(
         &mut hs.server.ecs,
         glam::Vec3::new(9.0, 64.0, 9.0),
@@ -163,7 +164,7 @@ fn same_tick_entities_arrive_once_and_dead_entities_are_not_backfilled() {
     assert_eq!(
         bones.len(),
         1,
-        "a same-tick spawn must arrive exactly once (no backfill duplicate)"
+        "a same-tick spawn must arrive exactly once"
     );
     assert_eq!(bones[0].item_count, 5);
 
@@ -176,14 +177,14 @@ fn same_tick_entities_arrive_once_and_dead_entities_are_not_backfilled() {
             s.kind == protocol::EntityKind::Item
                 && (s.item_kind, s.item_id) == beef_wire
         }),
-        "an entity that died before the join must not be backfilled"
+        "an entity that died before the join must never reach the joiner"
     );
 }
 
 /// Death-drops phase 3 (2026-09-06, v61) — a late joiner must get the FULL
 /// fidelity of a pre-existing tool drop, not just its bare material tier.
-/// The backfill is a second encode site (`backfill_entity_events`), separate
-/// from the per-tick diff, and it was the one easy to miss.
+/// (Before MP-D2a the late-join spawn was a second encode site; it is now the
+/// same spawn every client gets when the entity enters its interest.)
 #[test]
 fn late_joiner_backfill_carries_full_item_fidelity() {
     use crate::crafting::{Tool, ToolMaterial, ToolType};
@@ -196,7 +197,7 @@ fn late_joiner_backfill_carries_full_item_fidelity() {
         crate::item::ItemStack::new_tool(pick),
         0,
     );
-    hs.tick(); // first broadcast — the drop enters known_entity_ids
+    hs.tick(); // first broadcast — the host has shown the drop already
 
     let client = hs.attach_test_remote();
     send_guest_join(&client);
@@ -212,6 +213,6 @@ fn late_joiner_backfill_carries_full_item_fidelity() {
     assert_eq!(
         tools,
         vec![crate::item::Item::Tool(pick)],
-        "the backfilled tool spawn carries type + material + durability, once"
+        "the late joiner's tool spawn carries type + material + durability, once"
     );
 }

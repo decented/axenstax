@@ -8,7 +8,7 @@ use crate::entity::{Hitbox, MobKind, Position, Velocity};
 use crate::mob::{self, MobCategory};
 
 /// Attack reach in blocks (Spec 05 Section 6.4).
-const ATTACK_REACH: f32 = 3.0;
+pub const ATTACK_REACH: f32 = 3.0;
 /// Attack cooldown in ticks (0.5 seconds at 20 TPS).
 pub const ATTACK_COOLDOWN: u32 = 10;
 /// Spec 19 — per-player rolling window during which a swing on a villager
@@ -33,7 +33,7 @@ const SWEEP_DAMAGE_FRACTION: f32 = 0.4;
 /// (≈ within 60° of where you're looking), the same cone as the primary pick.
 const SWING_MIN_DOT: f32 = 0.5;
 /// Baseline hostile-mob contact damage per hit.
-const HOSTILE_MELEE_DAMAGE: f32 = 3.0;
+pub(crate) const HOSTILE_MELEE_DAMAGE: f32 = 3.0;
 /// Baseline hostile-mob attack cooldown (1 second).
 #[allow(dead_code)]
 const HOSTILE_MELEE_COOLDOWN: u32 = 20;
@@ -223,7 +223,16 @@ impl PlayerCombat {
         self.hunger >= HUNGER_THRESHOLD_FOR_REGEN
     }
 
+    /// One tick of everything: the hit/attack timers, then the metabolism.
     pub fn tick(&mut self) {
+        self.tick_timers();
+        self.tick_metabolism();
+    }
+
+    /// One tick of the hit and attack timers only — what a server runs for a
+    /// joiner's body (MP-D2a): its metabolism (hunger, regen, starvation,
+    /// poison) is its own client's, reported as `InputPacket.health_delta`.
+    pub fn tick_timers(&mut self) {
         if self.attack_cooldown > 0 {
             self.attack_cooldown -= 1;
         }
@@ -233,6 +242,10 @@ impl PlayerCombat {
         if self.invincible_timer > 0 {
             self.invincible_timer -= 1;
         }
+    }
+
+    /// One tick of poison, hunger drain, natural regen and starvation.
+    pub fn tick_metabolism(&mut self) {
         if self.poison_ticks > 0 {
             self.poison_ticks -= 1;
             // Damage on every interval boundary. Drop health but never below
@@ -325,6 +338,26 @@ impl PlayerCombat {
             self.mark_dead();
         }
         true
+    }
+
+    /// MP-D2a — apply a joiner's reported change to its own health (the
+    /// sources its client still owns: eating, regen, poison, starvation,
+    /// sleeping, `/heal`; `InputPacket.health_delta`). A heal is clamped to
+    /// max health. A loss takes no hit-invulnerability window and records no
+    /// cause (it is not a hit). Nothing for the dead: only a Respawn revives,
+    /// and a report never kills twice. Returns whether this report killed
+    /// the player — its client already knows (it reported the loss), so the
+    /// caller clears the `just_died` one-shot rather than echo a `Died`.
+    pub fn apply_reported_change(&mut self, delta: f32) -> bool {
+        if self.dead || !delta.is_finite() || delta == 0.0 {
+            return false;
+        }
+        self.health = (self.health + delta).clamp(0.0, self.max_health);
+        if self.health <= 0.0 {
+            self.mark_dead();
+            return true;
+        }
+        false
     }
 
     /// Die now, whatever the health: the death a joiner's client takes when
@@ -724,12 +757,58 @@ pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Op
     out
 }
 
-/// Hostile mob contact damage — all `MobCategory::Hostile` mobs near the player deal damage.
-/// Routes the per-mob damage through the player's equipped armour
-/// (Spec 28e) before hitting health.
+/// Hostile mob contact damage on one player body — every
+/// `MobCategory::Hostile` mob within melee reach of `player_pos` hits for the
+/// baseline melee damage, scaled by the difficulty table (W2), reduced by
+/// `armour_points` (Spec 28e), and knocks the body back.
 ///
-/// Returns the mobs that actually LANDED damage this call (armour-gated
-/// hits that connected, not just proximate hostiles) so the caller can
+/// The one rule for both sides (MP-D2a): the client runs it on its local
+/// players through [`tick_mob_attacks`] (which also wears their armour), and
+/// `GameServer::tick` runs it on every joiner's server-held body, with the
+/// armour points the joiner's input reports. Returns the mobs whose hit
+/// LANDED (not merely in reach — the i-frame window can refuse one).
+pub fn hostile_melee_tick(
+    ecs: &hecs::World,
+    player_pos: Vec3,
+    player_vel: &mut Vec3,
+    combat: &mut PlayerCombat,
+    armour_points: u8,
+    difficulty: crate::survival::Difficulty,
+) -> Vec<hecs::Entity> {
+    let mut landed: Vec<hecs::Entity> = Vec::new();
+    if combat.dead {
+        return landed;
+    }
+    let damage = crate::armour::damage_after_armour(
+        crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, difficulty),
+        armour_points,
+    );
+    for (id, (pos, kind, _hitbox)) in ecs.query::<(&Position, &MobKind, &Hitbox)>().iter() {
+        if mob::mob_def(kind.0).category != MobCategory::Hostile {
+            continue;
+        }
+        let to_player = player_pos - pos.0;
+        let horiz_dist = Vec3::new(to_player.x, 0.0, to_player.z).length();
+        let vert_overlap = to_player.y >= 0.0 && to_player.y < 1.8; // Player height
+        if horiz_dist < HOSTILE_MELEE_RANGE
+            && vert_overlap
+            && combat.take_damage_from(damage, crate::survival::DamageCause::Mob(kind.0))
+        {
+            // Knockback away from the attacker.
+            let kb_dir = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
+            player_vel.x += kb_dir.x * KNOCKBACK_BASE;
+            player_vel.y += 0.3;
+            player_vel.z += kb_dir.z * KNOCKBACK_BASE;
+            landed.push(id);
+        }
+    }
+    landed
+}
+
+/// [`hostile_melee_tick`] on a local player: their equipped armour soaks the
+/// hit and wears one durability per landed hit (Spec 28e).
+///
+/// Returns the mobs that actually LANDED damage this call so the caller can
 /// feed downstream "the player was attacked by M" events — Task 8b uses
 /// this to rally the player's tamed wolves into their revenge pivot.
 pub fn tick_mob_attacks(
@@ -737,37 +816,12 @@ pub fn tick_mob_attacks(
     slot: &mut crate::player_slot::PlayerSlot,
     difficulty: crate::survival::Difficulty,
 ) -> Vec<hecs::Entity> {
-    let mut landed: Vec<hecs::Entity> = Vec::new();
-    if slot.combat.dead {
-        return landed;
-    }
-
-    let player_pos = slot.player.pos;
-    for (id, (pos, kind, _hitbox)) in
-        ecs.query::<(&Position, &MobKind, &Hitbox)>().iter()
-    {
-        let def = mob::mob_def(kind.0);
-        if def.category != MobCategory::Hostile {
-            continue;
-        }
-
-        // Per-mob contact damage. All hostile mobs use the baseline
-        // melee damage, scaled by the difficulty table (W2) before armour.
-        let damage = crate::survival::scale_mob_damage(HOSTILE_MELEE_DAMAGE, difficulty);
-
-        let to_player = player_pos - pos.0;
-        let horiz_dist = Vec3::new(to_player.x, 0.0, to_player.z).length();
-        let vert_overlap = to_player.y >= 0.0 && to_player.y < 1.8; // Player height
-
-        if horiz_dist < HOSTILE_MELEE_RANGE && vert_overlap
-            && slot.take_damage_with_armour_from(damage, crate::survival::DamageCause::Mob(kind.0)) {
-                // Knockback player away from the attacker
-                let kb_dir = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
-                slot.player.velocity.x += kb_dir.x * KNOCKBACK_BASE;
-                slot.player.velocity.y += 0.3;
-                slot.player.velocity.z += kb_dir.z * KNOCKBACK_BASE;
-                landed.push(id);
-            }
+    let points = slot.total_armour_points();
+    let pos = slot.player.pos;
+    let landed =
+        hostile_melee_tick(ecs, pos, &mut slot.player.velocity, &mut slot.combat, points, difficulty);
+    for _ in &landed {
+        slot.wear_armour();
     }
     landed
 }

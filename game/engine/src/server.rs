@@ -164,6 +164,11 @@ pub struct ServerPlayer {
     /// by [`ServerPlayer::enter_world`] when the handshake completes. `false`
     /// for every other player (local ones never handshake).
     pub awaiting_join: bool,
+    /// MP-D2a — the armour points this joiner's latest input says it wears
+    /// (`InputPacket.armour_points`). Its armour lives in its client's
+    /// inventory (known debt); the server only needs the total to soak the
+    /// mob and lava/fire hits it lands on the body. 0 for a local slot.
+    pub armour_points: u8,
 }
 
 /// Where `initial_load` centres a world with no player to centre it on (a
@@ -320,6 +325,7 @@ impl ServerPlayer {
             spawn_pos: spawn,
             dead_ticks: 0,
             awaiting_join: false,
+            armour_points: 0,
         }
     }
 
@@ -389,6 +395,10 @@ pub struct QueuedInput {
     pub yaw: f32,
     pub pitch: f32,
     pub intent: crate::player_intent::PlayerIntent,
+    /// MP-D2a — the client-owned health change this input reports
+    /// (`InputPacket.health_delta`), applied when the input is simulated so
+    /// the `StateUpdate` acknowledging it carries it.
+    pub health_delta: f32,
 }
 
 impl QueuedInput {
@@ -399,6 +409,7 @@ impl QueuedInput {
             yaw: pkt.yaw,
             pitch: pkt.pitch,
             intent: crate::player_intent::PlayerIntent::from_input_packet(pkt),
+            health_delta: if pkt.health_delta.is_finite() { pkt.health_delta } else { 0.0 },
         }
     }
 }
@@ -418,12 +429,16 @@ impl ServerPlayer {
         }
         if self.intent_queue.len() >= MAX_QUEUED_INTENTS
             && let Some(dropped) = self.intent_queue.pop_front()
-            && dropped.intent.toggle_flight
         {
-            match self.intent_queue.front_mut() {
-                Some(next) => next.intent.toggle_flight ^= true,
-                None => input.intent.toggle_flight ^= true,
-            }
+            // A dropped input's one-shot effects ride the next one: its
+            // flight toggle, and the health change its client reported
+            // (MP-D2a — a lost heal would never come back).
+            let next = match self.intent_queue.front_mut() {
+                Some(next) => next,
+                None => &mut input,
+            };
+            next.intent.toggle_flight ^= dropped.intent.toggle_flight;
+            next.health_delta += dropped.health_delta;
         }
         self.intent_queue.push_back(input);
     }
@@ -433,7 +448,7 @@ impl ServerPlayer {
     #[cfg(test)]
     pub fn queue_intent(&mut self, intent: crate::player_intent::PlayerIntent) {
         let (yaw, pitch) = (self.yaw, self.pitch);
-        self.queue_input(QueuedInput { seq: 0, yaw, pitch, intent });
+        self.queue_input(QueuedInput { seq: 0, yaw, pitch, intent, health_delta: 0.0 });
     }
 
     /// This player's own classification of `other`, from their own address
@@ -1446,8 +1461,20 @@ impl GameServer {
                     &mut player.velocity,
                 );
             }
-            self.players[i].combat.tick();
+            // MP-D2a — a joiner's metabolism (hunger, regen, starvation,
+            // poison) is its client's: it arrives as `health_delta`. Only the
+            // hit timers tick here, or regen and starvation would count twice.
+            if self.players[i].server_simulated {
+                self.players[i].combat.tick_timers();
+            } else {
+                self.players[i].combat.tick();
+            }
         }
+
+        // MP-D2a — hostile melee and lava/fire contact on every joiner's
+        // body, the same rules the client runs on its local players. A lent
+        // world's mobs are the host's own: this is where they bite joiners.
+        self.tick_player_hazards();
 
         // Entity health timers
         if self.runs(SimSystem::EntityHealth) {
@@ -1565,6 +1592,17 @@ impl GameServer {
                 // Whatever the step below does, this input's effect is now in
                 // the server's state — acknowledge it (Spec 04 §5.3).
                 sp.last_applied_input = sp.last_applied_input.max(input.seq);
+                // MP-D2a — and the health change its client reported (eating,
+                // regen, poison, …), in the same acknowledged step. A loss
+                // that kills is a death the client already knows about.
+                if sp.combat.apply_reported_change(input.health_delta) {
+                    sp.combat.just_died = false;
+                    sp.dead_ticks = 0;
+                    // A dead body takes no step and keeps no backlog (MP-A3).
+                    sp.pending_intent = None;
+                    sp.intent_queue.clear();
+                    break;
+                }
                 let pre = sp.player.pos;
                 // Server has no GPU camera; construct a throwaway one from the
                 // look this input was simulated with on the client.
@@ -1684,17 +1722,12 @@ impl GameServer {
     /// (`survival::tick_player_survival`). Its own pass, so a tick with no
     /// queued intent (a dropped packet) still advances breath.
     fn tick_player_survival(&mut self) {
-        // BRIDGE: starvation floored non-lethal (`POISON_HEALTH_FLOOR`) on the
-        // server copy — a remote player's server-side hunger drains here but is
-        // never refilled (eating is client-side; ServerPlayer vs PlayerSlot
-        // duplication, see CLAUDE.md), so Hard's lethal starvation would kill
-        // every remote player's server copy ~10 min in — replace when hunger
-        // becomes server-authoritative.
-        let starvation_floor = self
-            .difficulty
-            .rules()
-            .starvation_floor
-            .max(crate::combat::POISON_HEALTH_FLOOR);
+        // A joiner's metabolism (and so its starvation) is its client's, which
+        // applies the difficulty's floor and reports the loss as
+        // `health_delta` (MP-D2a); the server runs no hunger for it. The
+        // floor set here is for a local slot's copy, whose health its input
+        // overwrites anyway.
+        let starvation_floor = self.difficulty.rules().starvation_floor;
         for sp in &mut self.players {
             sp.combat.starvation_floor = starvation_floor;
             if !sp.server_simulated {
@@ -1721,6 +1754,46 @@ impl GameServer {
                 &self.world,
                 self.play_mode,
             );
+        }
+    }
+
+    /// MP-D2a — the hits the world lands on every joiner's (server-simulated)
+    /// body: hostile melee contact (`combat::hostile_melee_tick`, unless the
+    /// difficulty keeps hostiles from attacking) and lava / fire contact
+    /// (`survival::contact_hazard`), each soaked by the armour points the
+    /// joiner's input reports. Flying modes are immune, as on the client;
+    /// the dead and the absent are skipped. A lethal hit leaves the
+    /// `just_died` one-shot for `HostedServer` to turn into a
+    /// `PlayerEventType::Died`. Local slots are their client's own.
+    fn tick_player_hazards(&mut self) {
+        if self.play_mode.flies() {
+            return;
+        }
+        let hostiles_attack = self.difficulty.rules().hostiles_attack;
+        for sp in &mut self.players {
+            if !sp.server_simulated || !sp.is_present_and_alive() {
+                continue;
+            }
+            if hostiles_attack {
+                let pos = sp.player.pos;
+                crate::combat::hostile_melee_tick(
+                    &self.ecs,
+                    pos,
+                    &mut sp.player.velocity,
+                    &mut sp.combat,
+                    sp.armour_points,
+                    self.difficulty,
+                );
+            }
+            if let Some((raw, cause)) = crate::survival::contact_hazard(
+                &self.world,
+                sp.player.pos,
+                self.tick_counter,
+                self.play_mode,
+            ) {
+                let damage = crate::armour::damage_after_armour(raw, sp.armour_points);
+                sp.combat.take_damage_from(damage, cause);
+            }
         }
     }
 

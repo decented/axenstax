@@ -418,17 +418,23 @@ mod tests {
                 spawned.extend(s.entity_spawns.iter().map(|e| e.id));
             }
         }
+        // MP-D2a — every host mob near the joiner's body reached it (a
+        // joiner hears about the entities inside its interest radius).
+        let joiner = hg.state.hosted_server.as_ref().unwrap().server.players.last().unwrap().player.pos;
         let mut host_mobs = 0;
-        for (_e, (pid, _kind)) in hg
+        for (_e, (pid, pos, _kind)) in hg
             .state
             .ecs
-            .query::<(&crate::entity::ProtocolId, &crate::entity::MobKind)>()
+            .query::<(&crate::entity::ProtocolId, &crate::entity::Position, &crate::entity::MobKind)>()
             .iter()
         {
-            host_mobs += 1;
-            assert!(spawned.contains(&pid.0), "host mob {} never reached the joiner", pid.0);
+            let d = glam::Vec2::new(pos.0.x - joiner.x, pos.0.z - joiner.z).length();
+            if d <= crate::entity_broadcast::INTEREST_ENTER_RADIUS {
+                host_mobs += 1;
+                assert!(spawned.contains(&pid.0), "host mob {} never reached the joiner", pid.0);
+            }
         }
-        assert!(host_mobs > 0, "a fresh world has mobs around the host");
+        assert!(host_mobs > 0, "a fresh world has mobs around the host (and its joiner)");
         let hs = hg.state.hosted_server.as_ref().unwrap();
         assert_eq!(hs.server.ecs.len(), 0, "the server keeps no population of its own");
     }
@@ -484,5 +490,68 @@ mod tests {
         }
         let reports = hg.hosted_ticks(4);
         assert!(reports.iter().all(|r| r.faults.is_empty()));
+    }
+
+    /// MP-D2a — a client joined to someone else's server keeps no mobs of
+    /// its own (its spawners are off and anything that slips in is purged),
+    /// draws the server's mobs from its mirror, and shows the health the
+    /// server holds for its body.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_mirrors_the_servers_mobs_and_runs_none_of_its_own() {
+        use crate::entity::{MobKind, ProtocolId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-mirror");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-mirror-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Mirror", 0),
+            None,
+        ));
+        // A private mob that slipped into the joiner's own sim (the booted
+        // world's scatter already put some there).
+        crate::entity::spawn_mob(&mut hg.state.ecs, crate::mob::MobType::Brigand, glam::Vec3::ZERO);
+        let step = |server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame| {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        };
+        for _ in 0..5 {
+            step(&mut server, &mut hg);
+        }
+        let body = server.server.players.last().expect("the joiner is seated").player.pos;
+        let cow = crate::entity::spawn_mob(
+            &mut server.server.ecs,
+            crate::mob::MobType::Cow,
+            body + glam::Vec3::new(3.0, 0.0, 0.0),
+        );
+        for _ in 0..20 {
+            step(&mut server, &mut hg);
+        }
+        let id = server.server.ecs.get::<&ProtocolId>(cow).expect("broadcast").0;
+        assert!(hg.state.remote_mobs.drawn(id).is_some(), "the joiner mirrors the server's cow");
+        assert_eq!(
+            hg.state.ecs.query::<&MobKind>().iter().count(),
+            0,
+            "the joiner keeps no mobs of its own"
+        );
+
+        // Its health is the server's.
+        server.server.players.last_mut().unwrap().combat.health = 11.0;
+        for _ in 0..3 {
+            step(&mut server, &mut hg);
+        }
+        let hp = hg.state.players[0].combat.health;
+        assert!((10.0..=11.5).contains(&hp), "the joiner shows the server's health, got {hp}");
     }
 }

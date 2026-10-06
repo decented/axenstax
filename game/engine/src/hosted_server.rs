@@ -22,7 +22,7 @@
 //! Dropping the HostedServer shuts down the QUIC accept thread if it was
 //! spawned (native-only).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use crate::protocol;
 #[cfg(not(target_arch = "wasm32"))]
@@ -204,22 +204,15 @@ pub struct HostedServer {
     outboxes: Vec<crate::state_outbox::ClientOutbox>,
     /// Monotonic server tick counter sent with every StateUpdate.
     server_tick: u64,
-    /// Next protocol id to hand out to a newly-broadcast entity. Monotonic
-    /// within a server run; not persisted.
-    next_entity_id: u32,
-    /// Protocol ids that were in the previous broadcast. Used to compute
-    /// entity_spawns (in current but not known) and entity_despawns (in
-    /// known but not current) each tick. The set is GLOBAL — a spawn is
-    /// broadcast once — so a client that joins later gets a one-shot
-    /// backfill of this set via `pending_entity_backfill`.
-    known_entity_ids: HashSet<u32>,
-    /// Late-joiner backfill queue: `(slot, spawns)` for clients whose
-    /// handshake completed this tick. Pushed into that slot's outbox ahead of
-    /// the tick's diff by `broadcast_state` (so the spawns reach the client
-    /// before anything that refers to them) and cleared. The spawns are the
-    /// known-set entities at join time; anything newer rides the regular
-    /// diff, which the joiner now receives too.
-    pending_entity_backfill: Vec<(usize, Vec<protocol::EntitySpawn>)>,
+    /// MP-D2a — the server-wide half of the entity broadcast: `ProtocolId`
+    /// assignment and the changed-only baseline (`entity_broadcast`).
+    entity_broadcast: crate::entity_broadcast::EntityBroadcast,
+    /// MP-D2a — per slot, indexed like `outboxes`: the entities that client
+    /// has been told about. A joiner hears only about entities near its body
+    /// (interest radius); a fresh set is empty, so a late joiner gets every
+    /// entity in range on its first broadcast — no separate backfill. Reset
+    /// whenever a slot is attached or released.
+    entity_interest: Vec<crate::entity_broadcast::ClientInterest>,
     /// How many of the front slots are local players. Remote slot count =
     /// `server.players.len() - num_local_players`.
     num_local_players: usize,
@@ -654,9 +647,8 @@ impl HostedServer {
                 .map(|_| crate::state_outbox::ClientOutbox::new(false))
                 .collect(),
             server_tick: 0,
-            next_entity_id: 1,
-            known_entity_ids: HashSet::new(),
-            pending_entity_backfill: Vec::new(),
+            entity_broadcast: crate::entity_broadcast::EntityBroadcast::new(),
+            entity_interest: (0..num_local_players).map(|_| Default::default()).collect(),
             num_local_players,
             max_remote_players,
             port,
@@ -892,6 +884,7 @@ impl HostedServer {
         self.disconnected.push(false);
         self.attached_tick.push(self.server_tick);
         self.outboxes.push(crate::state_outbox::ClientOutbox::new(false));
+        self.entity_interest.push(Default::default());
         self.num_local_players += 1;
     }
 
@@ -1464,9 +1457,9 @@ impl HostedServer {
                 }
             }
             self.transports[i] = Box::new(transport::ClosedTransport);
-            self.pending_entity_backfill.retain(|(slot, _)| *slot != i);
             // Nothing queued for the old connection reaches the next one.
             self.outboxes[i] = crate::state_outbox::ClientOutbox::new(true);
+            self.entity_interest[i] = Default::default();
         }
         log::info!("Slot {i} released");
         was_joined.then(|| {
@@ -1735,6 +1728,7 @@ impl HostedServer {
                 self.disconnected[j] = false;
                 self.attached_tick[j] = self.server_tick;
                 self.outboxes[j] = crate::state_outbox::ClientOutbox::new(true);
+                self.entity_interest[j] = Default::default();
                 j
             }
             None => {
@@ -1744,6 +1738,7 @@ impl HostedServer {
                 self.disconnected.push(false);
                 self.attached_tick.push(self.server_tick);
                 self.outboxes.push(crate::state_outbox::ClientOutbox::new(true));
+                self.entity_interest.push(Default::default());
                 self.transports.len() - 1
             }
         };
@@ -2158,21 +2153,10 @@ impl HostedServer {
                             self.send_chat_system(i, OPERATOR_NEEDS_DIRECT_NOTICE);
                         }
 
-                        // Late-joiner backfill: every entity broadcast before
-                        // this join (the global known-set) gets its spawn
-                        // re-sent to THIS client, merged into its next
-                        // StateUpdate by broadcast_state. Without it the
-                        // joiner only ever sees updates for ids it never got
-                        // a spawn for — pre-existing drops stay invisible.
-                        let backfill =
-                            backfill_entity_events(&self.server.ecs, &self.known_entity_ids);
-                        if !backfill.is_empty() {
-                            log::info!(
-                                "Backfilling {} entity spawn(s) to late joiner slot {i}",
-                                backfill.len()
-                            );
-                            self.pending_entity_backfill.push((i, backfill));
-                        }
+                        // Late joiner: no entity backfill needed — its
+                        // interest set (`entity_interest[i]`) is empty, so
+                        // every entity near it enters, with its spawn, on
+                        // this tick's broadcast (MP-D2a).
 
                         // Operator telemetry (Spec B §6 / Spec C): record the
                         // connect for a verified REMOTE player — gated by the
@@ -2265,6 +2249,10 @@ impl HostedServer {
                         // inventory/hotbar_slot are not kept live).
                         sp.held_kind = input.held_kind;
                         sp.held_id = input.held_id;
+                        // MP-D2a — what its client says it wears; soaks the
+                        // mob and lava/fire hits the server lands on a
+                        // joiner (`GameServer::tick_player_hazards`).
+                        sp.armour_points = input.armour_points;
                         // Keep hotbar_slot live so server_player_item_ref is
                         // correct for the local (position-trusted) path.
                         if let Some(slot) = input.hotbar_slot
@@ -2848,7 +2836,7 @@ impl HostedServer {
             .map(|(idx, sp)| crate::server::collect_player_state(sp, idx as u32))
             .collect();
 
-        let (entity_spawns, entity_updates, entity_despawns) = self.build_entity_events();
+        let entity_tick = self.entity_broadcast.diff(&mut self.server.ecs);
 
         // Deepslate Reserve snapshot (Spec 16). Synthetic value in alpha
         // pending Sentinel D-003 reversal — see `reserve::ReserveState::synthetic_default`.
@@ -2886,26 +2874,22 @@ impl HostedServer {
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
 
-        // Late-joiner backfill (one-shot per join): the slot's backfilled
-        // spawns go into its outbox AHEAD of this tick's diff, so they reach
-        // the client first, in order. An entity that died during this very
-        // tick nets out client-side: its backfilled spawn is queued before
-        // its despawn.
-        let backfills = std::mem::take(&mut self.pending_entity_backfill);
         for i in 0..self.transports.len() {
             if !self.handshake_done[i] || self.disconnected[i] {
                 continue;
             }
+            // MP-D2a — this client's share of the entity events: a joiner
+            // hears about entities near its body, changed-only (a late
+            // joiner's empty interest set doubles as its backfill).
+            let anchor = self.entity_interest_anchor(i);
+            let entities = self.entity_interest[i].events(&entity_tick, anchor);
             let outbox = &mut self.outboxes[i];
-            for (_, spawns) in backfills.iter().filter(|(slot, _)| *slot == i) {
-                outbox.push_spawns(spawns);
-            }
             outbox.push_tick(
                 self.server_tick,
-                &entity_spawns,
-                &entity_despawns,
+                &entities.spawns,
+                &entities.despawns,
                 &block_changes,
-                &entity_updates,
+                &entities.updates,
             );
             // The last input of THIS client's that its server state includes
             // — its prediction drops those and replays the rest (§5.3).
@@ -3044,24 +3028,11 @@ impl HostedServer {
         self.send_raw_to_slot(to, &pkt);
     }
 
-    /// Diff the server ECS against the last broadcast's entity set and
-    /// produce the spawn/update/despawn lists for the outgoing
-    /// StateUpdate. Assigns a `ProtocolId` to any mob entity that doesn't
-    /// yet have one — first-seen entities always produce an EntitySpawn
-    /// plus an EntityUpdate in the same tick (the update gives the
-    /// initial AI state for animation).
-    fn build_entity_events(
-        &mut self,
-    ) -> (
-        Vec<protocol::EntitySpawn>,
-        Vec<protocol::EntityUpdate>,
-        Vec<u32>,
-    ) {
-        diff_entities(
-            &mut self.server.ecs,
-            &mut self.next_entity_id,
-            &mut self.known_entity_ids,
-        )
+    /// MP-D2a — where slot `i`'s entity interest is centred: a joiner's
+    /// (server-simulated) body. `None` for a local slot — the host's own
+    /// loopback hears about every entity.
+    fn entity_interest_anchor(&self, i: usize) -> Option<glam::Vec3> {
+        self.server.players.get(i).filter(|sp| sp.server_simulated).map(|sp| sp.player.pos)
     }
 
     fn heartbeat_discovery(&mut self) {
@@ -3634,409 +3605,6 @@ fn build_grant_packets(
         .collect()
 }
 
-/// Compute the entity-sync delta for one tick: assign a `ProtocolId` to any
-/// mob OR cart that doesn't have one, then build (spawns, updates, despawns)
-/// from the ECS against `known_ids`. Mobs and carts share the one ProtocolId
-/// space and the one alive-set, so a persisting cart emits spawn-once then
-/// updates (never a spurious despawn). Updates `known_ids` in place so the
-/// next call produces a correct delta.
-///
-/// Extracted from `HostedServer::build_entity_events` so unit tests can
-/// drive it against a handcrafted ECS without spinning up a full
-/// HostedServer (which runs `initial_load` and generates a world).
-/// The `MobType` → wire `EntityKind` mapping, shared by the per-tick diff
-/// and the late-joiner backfill. Purely mechanical; exhaustive so a new
-/// species is a compile error until it gets a wire discriminant.
-fn wire_kind_for(kind: crate::mob::MobType) -> protocol::EntityKind {
-    use crate::mob::MobType;
-    match kind {
-        MobType::Cow => protocol::EntityKind::Cow,
-        MobType::Chicken => protocol::EntityKind::Chicken,
-        MobType::Pig => protocol::EntityKind::Pig,
-        MobType::Sheep => protocol::EntityKind::Sheep,
-        MobType::Villager => protocol::EntityKind::Villager,
-        MobType::Peddler => protocol::EntityKind::WanderingVillager,
-        MobType::Wolf => protocol::EntityKind::Wolf,
-        MobType::Horse => protocol::EntityKind::Horse,
-        MobType::Rabbit => protocol::EntityKind::Rabbit,
-        MobType::Goat => protocol::EntityKind::Goat,
-        MobType::Bee => protocol::EntityKind::Bee,
-        MobType::Squid => protocol::EntityKind::Squid,
-        MobType::Nostrich => protocol::EntityKind::Nostrich,
-        // HP-2 — mechanical-only mapping to satisfy the exhaustive
-        // match. AI / network broadcast logic for these species
-        // lives in their respective modules.
-        MobType::Bear => protocol::EntityKind::Bear,
-        MobType::Hyena => protocol::EntityKind::Hyena,
-        // HP-3 — three human-tier brigand discriminants. AI lives
-        // on the shared `tick_mob_ai` dispatch + tier-tunable
-        // hooks in `brigand.rs`; this is purely the wire mapping.
-        MobType::Brigand => protocol::EntityKind::Brigand,
-        MobType::Marauder => protocol::EntityKind::Marauder,
-        MobType::Berserker => protocol::EntityKind::Berserker,
-        // HP-4 — Knight village defender. AI reuses the existing
-        // `AiState::GolemGuard` so no new state-tag is needed; the
-        // EntityKind discriminant carries identity on the wire.
-        MobType::Knight => protocol::EntityKind::Knight,
-        // Aquatic wave — wire mapping for the three new ocean species.
-        MobType::Fish => protocol::EntityKind::Fish,
-        MobType::Shark => protocol::EntityKind::Shark,
-        MobType::GlowSquid => protocol::EntityKind::GlowSquid,
-        // Wild fauna wave — wire mapping.
-        MobType::Fox => protocol::EntityKind::Fox,
-        MobType::PolarBear => protocol::EntityKind::PolarBear,
-        MobType::Reindeer => protocol::EntityKind::Reindeer,
-        // Companions wave — wire mapping.
-        MobType::Cat => protocol::EntityKind::Cat,
-        MobType::Parrot => protocol::EntityKind::Parrot,
-        // Logistics wave — wire mapping.
-        MobType::Donkey => protocol::EntityKind::Donkey,
-        MobType::Mule => protocol::EntityKind::Mule,
-        // Pets wave Task 13 — Crab wire mapping.
-        MobType::Crab => protocol::EntityKind::Crab,
-    }
-}
-
-/// Late-joiner backfill: an `EntitySpawn` for every entity the diff has
-/// ALREADY broadcast (present in `known_ids`). Entities the diff hasn't
-/// seen yet are excluded — their spawn rides the next regular diff, which
-/// the (by then handshake-complete) joiner also receives, so including
-/// them here would deliver a duplicate. Read-only: never assigns
-/// `ProtocolId`s and never mutates the known set.
-fn backfill_entity_events(
-    ecs: &hecs::World,
-    known_ids: &HashSet<u32>,
-) -> Vec<protocol::EntitySpawn> {
-    use crate::cart::CartData;
-    use crate::entity::{ItemEntity, MobKind, Position, ProtocolId};
-    use crate::mob_ai::MobAi;
-
-    let mut spawns: Vec<protocol::EntitySpawn> = Vec::new();
-    for (_e, (pid, kind, pos, ai)) in ecs
-        .query::<(&ProtocolId, &MobKind, &Position, &MobAi)>()
-        .iter()
-    {
-        if !known_ids.contains(&pid.0) {
-            continue;
-        }
-        spawns.push(protocol::EntitySpawn {
-            id: pid.0,
-            kind: wire_kind_for(kind.0),
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: ai.facing,
-            health: crate::mob::mob_def(kind.0).health,
-            item_kind: 0,
-            item_id: 0,
-            item_count: 0,
-            full_item: protocol::WireItem::None,
-        });
-    }
-    for (_e, (pid, cart, pos)) in ecs.query::<(&ProtocolId, &CartData, &Position)>().iter() {
-        if !known_ids.contains(&pid.0) {
-            continue;
-        }
-        spawns.push(protocol::EntitySpawn {
-            id: pid.0,
-            kind: protocol::EntityKind::Cart,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: cart.facing,
-            health: 0,
-            item_kind: 0,
-            item_id: 0,
-            item_count: 0,
-            full_item: protocol::WireItem::None,
-        });
-    }
-    for (_e, (pid, item, pos)) in ecs.query::<(&ProtocolId, &ItemEntity, &Position)>().iter() {
-        if !known_ids.contains(&pid.0) {
-            continue;
-        }
-        let (item_kind, item_id) = crate::inventory::item_to_ref(&item.stack.item).to_wire();
-        let full_item = crate::inventory::item_to_wire_full(&item.stack.item);
-        spawns.push(protocol::EntitySpawn {
-            id: pid.0,
-            kind: protocol::EntityKind::Item,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: 0.0,
-            health: 0,
-            item_kind,
-            item_id,
-            item_count: item.stack.count,
-            full_item,
-        });
-    }
-    for (_e, (pid, _proj, pos, vel)) in ecs
-        .query::<(&ProtocolId, &crate::entity::ProjectileEntity, &Position, &crate::entity::Velocity)>()
-        .iter()
-    {
-        if !known_ids.contains(&pid.0) {
-            continue;
-        }
-        spawns.push(projectile_spawn(pid.0, pos.0, vel.0));
-    }
-    spawns
-}
-
-/// MP-A3 — a projectile's flight heading as a wire yaw: the same
-/// `(-vx).atan2(-vz)` the arrow renderer derives from its velocity, so a
-/// joiner can point the arrow before its first update arrives.
-fn projectile_yaw(vel: glam::Vec3) -> f32 {
-    (-vel.x).atan2(-vel.z)
-}
-
-/// MP-A3 — `EntityUpdate.state` for a projectile: 0 arrow, 1 blunt ball.
-fn projectile_state(proj: &crate::entity::ProjectileEntity) -> u8 {
-    u8::from(proj.is_blunt)
-}
-
-/// MP-A3 — the `EntitySpawn` for a projectile in flight (diff + backfill).
-fn projectile_spawn(id: u32, pos: glam::Vec3, vel: glam::Vec3) -> protocol::EntitySpawn {
-    protocol::EntitySpawn {
-        id,
-        kind: protocol::EntityKind::Projectile,
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-        yaw: projectile_yaw(vel),
-        health: 0,
-        item_kind: 0,
-        item_id: 0,
-        item_count: 0,
-        full_item: protocol::WireItem::None,
-    }
-}
-
-fn diff_entities(
-    ecs: &mut hecs::World,
-    next_entity_id: &mut u32,
-    known_ids: &mut HashSet<u32>,
-) -> (
-    Vec<protocol::EntitySpawn>,
-    Vec<protocol::EntityUpdate>,
-    Vec<u32>,
-) {
-    use crate::cart::CartData;
-    use crate::entity::{MobKind, Position, ProtocolId, Velocity};
-    use crate::mob_ai::{AiState, MobAi};
-
-    // Assign a fresh ProtocolId to every mob that lacks one. Collect
-    // candidate entities first to release the query borrow before the
-    // insert_one call.
-    let missing: Vec<hecs::Entity> = ecs
-        .query::<hecs::Without<(&MobKind, &Position), &ProtocolId>>()
-        .iter()
-        .map(|(e, _)| e)
-        .collect();
-    for entity in missing {
-        let id = *next_entity_id;
-        *next_entity_id = next_entity_id.saturating_add(1);
-        let _ = ecs.insert_one(entity, ProtocolId(id));
-    }
-
-    // Rail freight Phase 1 — carts join the same broadcast path. They're
-    // track-driven entities (no MobKind / AI), so they get their own
-    // ProtocolId-assignment pass keyed on (CartData, Position).
-    let missing_carts: Vec<hecs::Entity> = ecs
-        .query::<hecs::Without<(&CartData, &Position), &ProtocolId>>()
-        .iter()
-        .map(|(e, _)| e)
-        .collect();
-    for entity in missing_carts {
-        let id = *next_entity_id;
-        *next_entity_id = next_entity_id.saturating_add(1);
-        let _ = ecs.insert_one(entity, ProtocolId(id));
-    }
-
-    let mut current_ids: HashSet<u32> = HashSet::new();
-    let mut spawns: Vec<protocol::EntitySpawn> = Vec::new();
-    let mut updates: Vec<protocol::EntityUpdate> = Vec::new();
-    for (_e, (pid, kind, pos, vel, ai)) in ecs
-        .query::<(&ProtocolId, &MobKind, &Position, &Velocity, &MobAi)>()
-        .iter()
-    {
-        current_ids.insert(pid.0);
-        let wire_kind = wire_kind_for(kind.0);
-        // Yaw: mob's persistent facing for idle/wander, velocity-derived
-        // during chase so the model turns toward the target naturally.
-        let yaw = match &ai.state {
-            AiState::Chase if vel.0.x.abs() + vel.0.z.abs() > 1e-4 => {
-                (-vel.0.x).atan2(-vel.0.z)
-            }
-            _ => ai.facing,
-        };
-        let state_tag: u8 = match ai.state {
-            AiState::Idle { .. } => 0,
-            AiState::Wander { .. } => 1,
-            AiState::Chase => 2,
-            // Wave 28 — InvestigateCampfire renders the same as Idle on
-            // the wire (the network protocol doesn't model the new state
-            // explicitly; remote clients see the mob holding position
-            // near a campfire which reads visually as idle). Server-side
-            // logic is what matters.
-            AiState::InvestigateCampfire { .. } => 0,
-            // Spec 19 phase 8 — GolemGuard renders as Wander on the wire;
-            // there's no separate animation state at the moment.
-            AiState::GolemGuard { .. } => 1,
-            // P2 — a fleeing prey animal is moving, so it renders as Wander
-            // (walking) on the wire; no dedicated flee animation state.
-            AiState::Flee { .. } => 1,
-        };
-        if !known_ids.contains(&pid.0) {
-            let health = crate::mob::mob_def(kind.0).health;
-            spawns.push(protocol::EntitySpawn {
-                id: pid.0,
-                kind: wire_kind,
-                x: pos.0.x,
-                y: pos.0.y,
-                z: pos.0.z,
-                yaw,
-                health,
-                item_kind: 0,
-                item_id: 0,
-                item_count: 0,
-                full_item: protocol::WireItem::None,
-            });
-        }
-        updates.push(protocol::EntityUpdate {
-            id: pid.0,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw,
-            state: state_tag,
-        });
-    }
-
-    // Rail freight Phase 1 — carts emit into the SAME spawn/update lists and,
-    // critically, into the SAME `current_ids` alive-set so the despawn diff
-    // below never spuriously despawns a still-alive cart. A cart that persists
-    // across ticks emits exactly one EntitySpawn (first broadcast) then an
-    // EntityUpdate every tick. Position is the lerped render anchor; yaw is
-    // `CartData.facing` (the model yaw). Carts aren't combat entities → the
-    // wire health/state are neutral (0). No MobKind / AI / Velocity here.
-    for (_e, (pid, cart, pos)) in ecs
-        .query::<(&ProtocolId, &CartData, &Position)>()
-        .iter()
-    {
-        current_ids.insert(pid.0);
-        if !known_ids.contains(&pid.0) {
-            spawns.push(protocol::EntitySpawn {
-                id: pid.0,
-                kind: protocol::EntityKind::Cart,
-                x: pos.0.x,
-                y: pos.0.y,
-                z: pos.0.z,
-                yaw: cart.facing,
-                health: 0,
-                item_kind: 0,
-                item_id: 0,
-                item_count: 0,
-                full_item: protocol::WireItem::None,
-            });
-        }
-        updates.push(protocol::EntityUpdate {
-            id: pid.0,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: cart.facing,
-            state: 0,
-        });
-    }
-
-    // Death-drops phase 2 (2026-07-11) — dropped items join the broadcast
-    // path so remote clients can SEE server-side loot (death_drops.rs spawns
-    // it into the server ECS since phase 1). Same ProtocolId-assignment
-    // shape as mobs/carts; the stack rides the spawn's item_* fields, and
-    // per-tick updates carry the settle/magnet motion.
-    let missing_items: Vec<hecs::Entity> = ecs
-        .query::<hecs::Without<(&crate::entity::ItemEntity, &Position), &ProtocolId>>()
-        .iter()
-        .map(|(e, _)| e)
-        .collect();
-    for entity in missing_items {
-        let id = *next_entity_id;
-        *next_entity_id = next_entity_id.saturating_add(1);
-        let _ = ecs.insert_one(entity, ProtocolId(id));
-    }
-    for (_e, (pid, item, pos)) in ecs
-        .query::<(&ProtocolId, &crate::entity::ItemEntity, &Position)>()
-        .iter()
-    {
-        current_ids.insert(pid.0);
-        if !known_ids.contains(&pid.0) {
-            let (item_kind, item_id) =
-                crate::inventory::item_to_ref(&item.stack.item).to_wire();
-            let full_item = crate::inventory::item_to_wire_full(&item.stack.item);
-            spawns.push(protocol::EntitySpawn {
-                id: pid.0,
-                kind: protocol::EntityKind::Item,
-                x: pos.0.x,
-                y: pos.0.y,
-                z: pos.0.z,
-                yaw: 0.0,
-                health: 0,
-                item_kind,
-                item_id,
-                item_count: item.stack.count,
-                full_item,
-            });
-        }
-        updates.push(protocol::EntityUpdate {
-            id: pid.0,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: 0.0,
-            state: 0,
-        });
-    }
-
-    // MP-A3 — projectiles in flight (a dedicated server's dispenser arrows)
-    // join the same broadcast: ProtocolId on first sight, spawn once, an update
-    // every tick of the flight, and — when a hit or lifetime expiry removes the
-    // entity — exactly one despawn via the alive-set diff below. They carry no
-    // MobKind/CartData/ItemEntity, so no other pass above ever sees them.
-    let missing_projectiles: Vec<hecs::Entity> = ecs
-        .query::<hecs::Without<(&crate::entity::ProjectileEntity, &Position), &ProtocolId>>()
-        .iter()
-        .map(|(e, _)| e)
-        .collect();
-    for entity in missing_projectiles {
-        let id = *next_entity_id;
-        *next_entity_id = next_entity_id.saturating_add(1);
-        let _ = ecs.insert_one(entity, ProtocolId(id));
-    }
-    for (_e, (pid, proj, pos, vel)) in ecs
-        .query::<(&ProtocolId, &crate::entity::ProjectileEntity, &Position, &Velocity)>()
-        .iter()
-    {
-        current_ids.insert(pid.0);
-        if !known_ids.contains(&pid.0) {
-            spawns.push(projectile_spawn(pid.0, pos.0, vel.0));
-        }
-        updates.push(protocol::EntityUpdate {
-            id: pid.0,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: projectile_yaw(vel.0),
-            state: projectile_state(proj),
-        });
-    }
-
-    let despawns: Vec<u32> = known_ids.difference(&current_ids).copied().collect();
-    *known_ids = current_ids;
-
-    (spawns, updates, despawns)
-}
-
 /// How long one incoming QUIC connection gets to complete its handshake.
 #[cfg(not(target_arch = "wasm32"))]
 const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -4142,9 +3710,6 @@ fn spawn_quic_accept_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::{self, ProtocolId};
-    use crate::mob::MobType;
-    use glam::Vec3;
 
     // ── Death-drops phase 2b: pickup grants ride the wire per connection ──
 
@@ -4343,425 +3908,8 @@ mod tests {
         ));
     }
 
-    fn fresh_state() -> (hecs::World, u32, HashSet<u32>) {
-        (hecs::World::new(), 1u32, HashSet::new())
-    }
-
-    #[test]
-    fn first_broadcast_emits_spawn_and_update_for_new_mob() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(3.0, 4.0, 5.0));
-
-        let (spawns, updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
-
-        assert_eq!(spawns.len(), 1, "new mob must produce one EntitySpawn");
-        assert_eq!(updates.len(), 1, "new mob must also produce an EntityUpdate so yaw/state are set");
-        assert_eq!(despawns.len(), 0);
-        assert_eq!(spawns[0].kind, protocol::EntityKind::Cow);
-        assert_eq!(spawns[0].x, 3.0);
-        assert_eq!(spawns[0].y, 4.0);
-        assert_eq!(spawns[0].z, 5.0);
-        // Assigned id should be 1 (first hand-out from the counter).
-        assert_eq!(spawns[0].id, 1);
-        assert_eq!(next_id, 2, "next_entity_id must advance");
-        assert!(known.contains(&1));
-    }
-
-    #[test]
-    fn second_broadcast_emits_updates_only() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(0.0, 0.0, 0.0));
-
-        // First tick — spawn visible.
-        let _ = diff_entities(&mut ecs, &mut next_id, &mut known);
-        // Second tick — same entity, no new spawn.
-        let (spawns, updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
-
-        assert!(spawns.is_empty(), "already-broadcast mob must not re-spawn");
-        assert_eq!(updates.len(), 1);
-        assert!(despawns.is_empty());
-    }
-
-    #[test]
-    fn despawned_mob_appears_in_despawns_list_once() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        let entity = {
-            entity::spawn_mob(&mut ecs, MobType::Chicken, Vec3::new(1.0, 2.0, 3.0));
-            // Grab the only entity we just spawned.
-            ecs.iter().next().unwrap().entity()
-        };
-
-        let (spawns, _updates, _) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        let id = spawns[0].id;
-
-        ecs.despawn(entity).expect("despawn");
-        let (spawns2, updates2, despawns2) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(spawns2.is_empty());
-        assert!(updates2.is_empty());
-        assert_eq!(despawns2, vec![id]);
-
-        // Third tick — the gap is sealed, no further despawns.
-        let (_, _, despawns3) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(despawns3.is_empty(), "despawn must only fire once");
-    }
-
-    // --- Late-joiner backfill (2026-07-12) --------------------------------
-
-    #[test]
-    fn backfill_covers_known_entities_only_with_stack_payload() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(3.0, 4.0, 5.0));
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(1.0, 65.0, 2.0),
-            crate::item::ItemStack::new_material(crate::item::MaterialId::Bone, 3),
-            0,
-        );
-        let _ = diff_entities(&mut ecs, &mut next_id, &mut known); // both broadcast
-
-        // A later drop the diff hasn't seen yet — the regular spawn path
-        // owns it; backfilling it too would double it for the joiner.
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(9.0, 65.0, 9.0),
-            crate::item::ItemStack::new_material(crate::item::MaterialId::IronIngot, 1),
-            0,
-        );
-
-        let spawns = backfill_entity_events(&ecs, &known);
-
-        assert_eq!(
-            spawns.len(),
-            2,
-            "backfill = exactly the already-broadcast entities"
-        );
-        assert!(spawns.iter().any(|s| s.kind == protocol::EntityKind::Cow));
-        let item = spawns
-            .iter()
-            .find(|s| s.kind == protocol::EntityKind::Item)
-            .expect("known item backfilled");
-        let (bk, bid) = crate::inventory::item_to_ref(&crate::item::Item::Material(
-            crate::item::MaterialId::Bone,
-        ))
-        .to_wire();
-        assert_eq!(
-            (item.item_kind, item.item_id, item.item_count),
-            (bk, bid, 3),
-            "the stack payload rides the backfilled spawn"
-        );
-        assert_eq!(item.full_item, protocol::WireItem::None);
-    }
-
-    #[test]
-    fn backfilled_tool_spawn_carries_full_fidelity() {
-        // Death-drops phase 3 — the LATE-JOINER path must carry the payload
-        // too, not just the per-tick diff (two separate encode sites).
-        use crate::crafting::{Tool, ToolMaterial, ToolType};
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        let mut axe = Tool::new(ToolType::Axe, ToolMaterial::Diamond);
-        axe.durability = 91;
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(1.0, 65.0, 2.0),
-            crate::item::ItemStack::new_tool(axe),
-            0,
-        );
-        let _ = diff_entities(&mut ecs, &mut next_id, &mut known);
-
-        let spawns = backfill_entity_events(&ecs, &known);
-        let item = spawns
-            .iter()
-            .find(|s| s.kind == protocol::EntityKind::Item)
-            .expect("known tool drop backfilled");
-        assert_eq!(
-            crate::inventory::item_from_wire_full(&item.full_item),
-            Some(crate::item::Item::Tool(axe)),
-            "the backfilled spawn carries the tool at its true durability"
-        );
-    }
-
-    // --- Death-drops phase 2 (2026-07-11): item entities on the wire -----
-
-    #[test]
-    fn dropped_item_broadcasts_spawn_with_stack_payload_then_despawns_once() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(1.0, 65.0, 2.0),
-            crate::item::ItemStack::new_material(crate::item::MaterialId::RawBeef, 3),
-            7,
-        );
-
-        let (spawns, _updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert_eq!(spawns.len(), 1, "a dropped item must broadcast a spawn");
-        assert_eq!(spawns[0].kind, protocol::EntityKind::Item);
-        let (wire_kind, wire_id) = crate::inventory::item_to_ref(&crate::item::Item::Material(
-            crate::item::MaterialId::RawBeef,
-        ))
-        .to_wire();
-        assert_eq!(spawns[0].item_kind, wire_kind, "stack kind rides the spawn");
-        assert_eq!(spawns[0].item_id, wire_id, "stack id rides the spawn");
-        assert_eq!(spawns[0].item_count, 3, "stack count rides the spawn");
-        assert!(despawns.is_empty());
-
-        // Second tick: no re-spawn.
-        let (spawns2, _, despawns2) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(spawns2.is_empty(), "already-broadcast item must not re-spawn");
-        assert!(despawns2.is_empty());
-
-        // Pickup/decay removes the entity → exactly one despawn.
-        let ids: Vec<hecs::Entity> = ecs
-            .query::<&entity::ItemEntity>()
-            .iter()
-            .map(|(e, _)| e)
-            .collect();
-        for e in ids {
-            let _ = ecs.despawn(e);
-        }
-        let (_, _, despawns3) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert_eq!(despawns3.len(), 1, "a picked-up item despawns exactly once");
-    }
-
-    #[test]
-    fn dropped_tool_and_armour_broadcast_full_fidelity() {
-        // Death-drops phase 3 — the per-tick diff's item pass. A tool's
-        // legacy pair still reads as its bare material tier (wire-stable);
-        // the fidelity rides `full_item` alongside it.
-        use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};
-        use crate::crafting::{Tool, ToolMaterial, ToolType};
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        let mut pick = Tool::new(ToolType::Pickaxe, ToolMaterial::Iron);
-        pick.durability = 37;
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(1.0, 65.0, 2.0),
-            crate::item::ItemStack::new_tool(pick),
-            0,
-        );
-        let mut helm = ArmourItem::new(ArmourSlot::Helmet, ArmourMaterial::Chainmail);
-        helm.durability = 5;
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(4.0, 65.0, 2.0),
-            crate::item::ItemStack { item: crate::item::Item::Armour(helm), count: 1 },
-            0,
-        );
-
-        let (spawns, _, _) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        let decoded: Vec<crate::item::Item> = spawns
-            .iter()
-            .filter(|s| s.kind == protocol::EntityKind::Item)
-            .filter_map(|s| crate::inventory::item_from_wire_full(&s.full_item))
-            .collect();
-        assert!(decoded.contains(&crate::item::Item::Tool(pick)));
-        assert!(decoded.contains(&crate::item::Item::Armour(helm)));
-
-        let tool_spawn = spawns
-            .iter()
-            .find(|s| s.item_kind == protocol::item_kind::TOOL)
-            .expect("the tool's legacy pair is unchanged (material tier)");
-        assert_eq!(tool_spawn.item_id, 2, "iron tier still rides the legacy pair");
-    }
-
-    #[test]
-    fn dropped_plan_broadcasts_no_payload_on_either_channel() {
-        // Plans stay floor-bound: nothing on the legacy pair, nothing on
-        // `full_item` — the client skips the spawn rather than drawing a
-        // ghost cube for something it can never receive.
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_item(
-            &mut ecs,
-            Vec3::new(1.0, 65.0, 2.0),
-            crate::item::ItemStack {
-                item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),
-                count: 1,
-            },
-            0,
-        );
-        let (spawns, _, _) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        let plan = spawns
-            .iter()
-            .find(|s| s.kind == protocol::EntityKind::Item)
-            .expect("the entity is still broadcast");
-        assert_eq!(plan.item_kind, protocol::item_kind::EMPTY);
-        assert_eq!(plan.full_item, protocol::WireItem::None);
-    }
-
-    #[test]
-    fn protocol_ids_are_stable_across_ticks() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(0.0, 0.0, 0.0));
-        entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(10.0, 0.0, 0.0));
-
-        let (spawns1, _, _) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert_eq!(spawns1.len(), 2);
-        let first_ids: HashSet<u32> = spawns1.iter().map(|s| s.id).collect();
-
-        // After a tick, ProtocolId components exist; verify they're unchanged.
-        let mut ids_from_ecs: HashSet<u32> = HashSet::new();
-        for (_e, pid) in ecs.query::<&ProtocolId>().iter() {
-            ids_from_ecs.insert(pid.0);
-        }
-        assert_eq!(first_ids, ids_from_ecs);
-    }
-
-    // ── Rail freight Phase 1: carts join the entity broadcast ────────────────
-
-    #[test]
-    fn cart_first_broadcast_emits_spawn_and_update() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        // Spawn a parked cart at cell (3,4,5). spawn_cart sets Position to the
-        // cell centre; facing defaults to 0.
-        crate::cart::spawn_cart(&mut ecs, (3, 4, 5));
-
-        let (spawns, updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
-
-        assert_eq!(spawns.len(), 1, "new cart must produce one EntitySpawn");
-        assert_eq!(spawns[0].kind, protocol::EntityKind::Cart);
-        assert_eq!(spawns[0].health, 0, "carts broadcast neutral health 0");
-        // Wire position is the cart's lerped render anchor: cell centre lifted
-        // by CART_Y_OFFSET; yaw is CartData.facing (0 for a fresh cart).
-        assert!((spawns[0].x - 3.5).abs() < 1e-6);
-        assert!((spawns[0].y - (4.0 + crate::cart::CART_Y_OFFSET)).abs() < 1e-6);
-        assert!((spawns[0].z - 5.5).abs() < 1e-6);
-        assert!((spawns[0].yaw - 0.0).abs() < 1e-6);
-        assert_eq!(updates.len(), 1, "new cart must also emit an EntityUpdate");
-        assert!(despawns.is_empty());
-        assert_eq!(spawns[0].id, 1);
-        assert_eq!(next_id, 2, "cart consumes one ProtocolId");
-        assert!(known.contains(&1));
-    }
-
-    #[test]
-    fn cart_persisting_emits_update_only_no_spurious_despawn() {
-        // The despawn-diff regression guard: a cart that survives across ticks
-        // must NEVER appear in the despawn list while it exists. Spawn once,
-        // then update-only forever.
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        crate::cart::spawn_cart(&mut ecs, (1, 0, 1));
-
-        let _ = diff_entities(&mut ecs, &mut next_id, &mut known);
-        // Two more ticks — cart still alive.
-        for _ in 0..2 {
-            let (spawns, updates, despawns) =
-                diff_entities(&mut ecs, &mut next_id, &mut known);
-            assert!(spawns.is_empty(), "alive cart must not re-spawn");
-            assert_eq!(updates.len(), 1, "alive cart updates every tick");
-            assert!(
-                despawns.is_empty(),
-                "alive cart must never be spuriously despawned (flicker bug)"
-            );
-        }
-    }
-
-    #[test]
-    fn despawned_cart_appears_in_despawns_list_once() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        let entity = crate::cart::spawn_cart(&mut ecs, (2, 0, 2));
-
-        let (spawns, _updates, _) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        let id = spawns[0].id;
-
-        ecs.despawn(entity).expect("despawn cart");
-        let (spawns2, updates2, despawns2) =
-            diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(spawns2.is_empty());
-        assert!(updates2.is_empty());
-        assert_eq!(despawns2, vec![id], "vanished cart despawns exactly once");
-
-        let (_, _, despawns3) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(despawns3.is_empty(), "cart despawn fires only once");
-    }
-
-    #[test]
-    fn carts_and_mobs_share_the_broadcast_without_id_collision() {
-        // A mob and a cart in the same ECS each get a distinct ProtocolId and
-        // both ride the same spawn/update lists; neither despawns the other.
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 0.0, 0.0));
-        crate::cart::spawn_cart(&mut ecs, (10, 0, 10));
-
-        let (spawns, updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert_eq!(spawns.len(), 2, "one mob spawn + one cart spawn");
-        assert_eq!(updates.len(), 2);
-        assert!(despawns.is_empty());
-        assert!(spawns.iter().any(|s| s.kind == protocol::EntityKind::Cow));
-        assert!(spawns.iter().any(|s| s.kind == protocol::EntityKind::Cart));
-        let ids: HashSet<u32> = spawns.iter().map(|s| s.id).collect();
-        assert_eq!(ids.len(), 2, "mob and cart must not share a ProtocolId");
-
-        // Next tick — both stay alive, both update-only.
-        let (spawns2, updates2, despawns2) =
-            diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(spawns2.is_empty());
-        assert_eq!(updates2.len(), 2);
-        assert!(despawns2.is_empty());
-    }
-
-    // ── Server-side projectiles (MP-A3): arrows join the entity broadcast ────
-
-    #[test]
-    fn projectile_broadcasts_spawn_then_updates_then_despawns_once() {
-        let (mut ecs, mut next_id, mut known) = fresh_state();
-        // Flying due east (+x): yaw follows the same `(-vx).atan2(-vz)` rule
-        // the arrow renderer uses.
-        entity::spawn_arrow(
-            &mut ecs,
-            Vec3::new(1.0, 70.0, 2.0),
-            Vec3::new(0.85, 0.0, 0.0),
-            entity::ARROW_DAMAGE,
-            None,
-        );
-        entity::spawn_blunt_projectile(
-            &mut ecs,
-            Vec3::new(5.0, 70.0, 5.0),
-            Vec3::new(0.0, 0.0, 0.5),
-            1.0,
-            None,
-        );
-
-        let (spawns, updates, despawns) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert_eq!(spawns.len(), 2, "each projectile in flight broadcasts a spawn");
-        assert!(spawns.iter().all(|s| s.kind == protocol::EntityKind::Projectile));
-        let arrow = spawns.iter().find(|s| (s.x - 1.0).abs() < 1e-6).expect("arrow spawn");
-        assert!((arrow.y - 70.0).abs() < 1e-6 && (arrow.z - 2.0).abs() < 1e-6);
-        let east_yaw = (-0.85f32).atan2(-0.0);
-        assert!((arrow.yaw - east_yaw).abs() < 1e-5, "yaw follows the flight direction");
-        assert_eq!(arrow.health, 0, "projectiles carry neutral health");
-        assert_eq!(updates.len(), 2, "first broadcast also carries an update");
-        let tag = |id: u32| updates.iter().find(|u| u.id == id).unwrap().state;
-        let ball = spawns.iter().find(|s| (s.x - 5.0).abs() < 1e-6).unwrap();
-        assert_eq!(tag(arrow.id), 0, "state 0 = arrow");
-        assert_eq!(tag(ball.id), 1, "state 1 = blunt (slingshot ball)");
-        assert!(despawns.is_empty());
-
-        // In flight: update-only, never re-spawned.
-        let (spawns2, updates2, despawns2) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(spawns2.is_empty());
-        assert_eq!(updates2.len(), 2);
-        assert!(despawns2.is_empty());
-
-        // The late-joiner backfill carries an already-broadcast projectile too.
-        let backfill = backfill_entity_events(&ecs, &known);
-        assert_eq!(
-            backfill.iter().filter(|s| s.kind == protocol::EntityKind::Projectile).count(),
-            2
-        );
-
-        // A hit (or lifetime expiry) removes it → exactly one despawn.
-        let ids: Vec<hecs::Entity> = ecs
-            .query::<&entity::ProjectileEntity>()
-            .iter()
-            .map(|(e, _)| e)
-            .collect();
-        for e in ids {
-            let _ = ecs.despawn(e);
-        }
-        let (_, _, despawns3) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert_eq!(despawns3.len(), 2, "each projectile despawns once");
-        let (_, _, despawns4) = diff_entities(&mut ecs, &mut next_id, &mut known);
-        assert!(despawns4.is_empty(), "…and only once");
-    }
+    // The entity-broadcast diff tests (spawn/update/despawn, items, carts,
+    // projectiles, interest) live with the code in `entity_broadcast.rs`.
 
     // ── Phase 3: verify_join_signet_auth ─────────────────────────────────────
     //

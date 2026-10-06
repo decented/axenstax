@@ -350,6 +350,9 @@ mod lan_host;
 mod lan_ui;
 mod remote_client;
 mod remote_entities;
+mod entity_broadcast;
+mod remote_mobs;
+mod health_sync;
 // WebSocket transport — the dedicated-server pipe that BOTH the browser PWA and
 // the native client speak (browsers can't do QUIC). Native half here; the
 // browser half is `ws_transport_web` (wasm32-only).
@@ -1262,6 +1265,15 @@ pub(crate) struct GameState {
     /// server's dispenser arrows. Render-only; the server's sim flies them,
     /// lands the hit and despawns them.
     pub(crate) remote_projectiles: crate::remote_entities::RemoteProjectiles,
+    /// MP-D2a — the server's mobs and carts, mirrored for a joiner from the
+    /// StateUpdate entity diff (render-only, in its own ECS; this client runs
+    /// no mobs of its own while joined). Empty unless joined.
+    pub(crate) remote_mobs: crate::remote_mobs::RemoteMobs,
+    /// MP-D2a — when the mirror was last advanced (its per-frame glide).
+    pub(crate) remote_mobs_clock: Option<web_time::Instant>,
+    /// MP-D2a — a joiner's own health is the server's: the client-owned
+    /// changes it reports and has not seen acknowledged (`health_sync`).
+    pub(crate) own_health: crate::health_sync::OwnHealth,
     /// Block changes made this tick, to be sent to the server. Cross-platform so
     /// `network_send_input` can drain it on both targets. NOTE: the ~30 push
     /// sites stay native-gated for now, so a browser joiner does not yet
@@ -1823,6 +1835,9 @@ impl GameState {
             remote_swing: std::collections::HashMap::new(),
             remote_items: crate::remote_entities::RemoteItems::default(),
             remote_projectiles: crate::remote_entities::RemoteProjectiles::default(),
+            remote_mobs: crate::remote_mobs::RemoteMobs::default(),
+            remote_mobs_clock: None,
+            own_health: crate::health_sync::OwnHealth::new(),
             pending_block_changes: Vec::new(),
             touch: crate::touch_input::TouchInput::new(),
             #[cfg(target_arch = "wasm32")]
