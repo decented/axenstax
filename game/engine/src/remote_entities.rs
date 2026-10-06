@@ -9,7 +9,7 @@
 //! the entity (removing it here via the diff) and delivers the stack with an
 //! `InventoryGrantPacket`, applied by [`apply_inventory_grant`].
 //!
-//! Projectiles in flight (MP-A3, protocol v66) get the same treatment in
+//! Projectiles in flight (MP-A3, protocol v67) get the same treatment in
 //! [`RemoteProjectiles`]: a dedicated server's dispenser arrows fly, hit and
 //! despawn in the SERVER's sim, and a joiner only draws them.
 //!

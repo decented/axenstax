@@ -1249,7 +1249,7 @@ pub(crate) struct GameState {
     /// joined to a server; pickup is server-authoritative (InventoryGrant).
     /// Cross-platform — the browser renders server loot when joined.
     pub(crate) remote_items: crate::remote_entities::RemoteItems,
-    /// Server-broadcast projectiles in flight (MP-A3, v66) — a dedicated
+    /// Server-broadcast projectiles in flight (MP-A3, v67) — a dedicated
     /// server's dispenser arrows. Render-only; the server's sim flies them,
     /// lands the hit and despawns them.
     pub(crate) remote_projectiles: crate::remote_entities::RemoteProjectiles,
