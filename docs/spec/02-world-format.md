@@ -1459,6 +1459,13 @@ nothing leaks between worlds.
 every connected player through the same `chunk_stream::ColumnSims::stream_in` /
 `stream_out` the client streamer uses, so a server-side unload is an
 `evict_column` too, and `GameServer::try_save` writes the evicted chunks.
+The streamer has no disk path: boot loads the whole save through `world_open`
+(§8.4 — all or nothing, a torn chunk file kept aside), and streaming restores
+from the in-memory store else generates, so it never generates over a column
+file it failed to read (it reads none) and never writes or deletes one. Test:
+`streaming_a_column_in_and_out_never_touches_a_chunk_file_on_disk`. Paging
+evicted columns to disk, when it lands, must treat an unreadable column file as
+unloadable (skip, log, leave the file) rather than generate over it.
 
 **An evicted column is a light barrier (bug fixed 2026-10-06).** Light writes
 into an evicted column are dropped and its light reads as 0 (block light) from

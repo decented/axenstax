@@ -278,3 +278,51 @@ fn a_disconnected_ghost_slot_is_not_a_streaming_anchor() {
     hs.server.players[slot].connected = false;
     assert_eq!(hs.server.stream_anchors(), vec![hs.server.spawn_column]);
 }
+
+/// Spec 02 §8.4 — an on-disk column is never generated over or touched by the
+/// streamer. It has no disk path at all: boot loads the whole save through
+/// `world_open` (all or nothing; a torn chunk file is kept aside there), and
+/// streaming restores from the in-memory evicted store else generates. So a
+/// `.chunk` file the session never read (here: one planted after boot, under a
+/// column the streamer then loads and unloads, and a save then passes) stays
+/// byte-for-byte as it was; streaming itself writes and deletes no file.
+#[test]
+fn streaming_a_column_in_and_out_never_touches_a_chunk_file_on_disk() {
+    let _g = WorldsRootGuard::new("server_streaming_disk");
+    let name = format!("server-streaming-disk-{}", std::process::id());
+    let mut hs = start_dedicated(&name);
+
+    let target = (21, 0);
+    let chunks_dir = crate::save::world_dir(&name).join("chunks");
+    std::fs::create_dir_all(&chunks_dir).expect("chunks dir");
+    let planted = chunks_dir.join(format!("{}_4_{}.chunk", target.0, target.1));
+    let planted_bytes = b"not a chunk: a column file the streamer must never read or replace".to_vec();
+    std::fs::write(&planted, &planted_bytes).expect("plant a chunk file");
+    let snapshot = || -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<_> = std::fs::read_dir(&chunks_dir)
+            .expect("list chunks dir")
+            .map(|e| {
+                let e = e.expect("dir entry");
+                (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).expect("read"))
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    let before = snapshot();
+
+    let (client, slot) = join_guest(&mut hs, "Walker");
+    let mut j = Journey { hs: &mut hs, client: &client, slot, tick: 0 };
+    j.fly_to_x(target.0 as f32 * 16.0 + 8.0);
+    assert!(j.hs.server.loaded_columns.contains(&target), "the column streamed in");
+    j.land();
+    j.fly_to_x(0.5);
+    assert!(!j.hs.server.loaded_columns.contains(&target), "and streamed back out");
+    assert_eq!(snapshot(), before, "streaming wrote and deleted nothing");
+
+    // A save writes the world it holds (its own chunk files appear), but the
+    // planted column was generated, never edited: nothing of it is persisted,
+    // so its file is neither rewritten nor removed.
+    j.hs.server.try_save().expect("server save");
+    assert_eq!(std::fs::read(&planted).expect("still there"), planted_bytes);
+}
