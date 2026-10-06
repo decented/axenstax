@@ -1505,6 +1505,17 @@ ignite, grow a canopy or retract into it. Queue entries and fire cells inside
 it are dropped when next processed, and the FIRE and fluid blocks stay in the
 chunk. Entities there are frozen (Spec 05 §9.4).
 
+*Cost.* The check runs per entity per tick on client and server, and per fluid,
+fire and sapling spread step, so it must be O(1) per chunk. `Chunk` keeps a
+non-air cell count, updated by `set` and counted once in `from_bytes` (the only
+two places its block array can change), and `Chunk::is_empty` reads it. The
+first version scanned cells for a block: about 3,800 reads for a flat world's
+floor, which sits in the top layer of its chunk. Measured on a flat world:
+about 675 ns per call before, about 52 ns after (a half present, half absent
+mix, optimised test profile). The `non_air_count_*` and `chunk_counts_*` tests
+pin the count against a full recount through random edits, worldgen, byte
+loads, decompression, eviction and restore.
+
 *Bug this fixes.* The barrier used to be `is_evicted_at` only. Cave lava
 (y 2-10) at the edge of the loaded area flowed into a never-loaded neighbour,
 whose reads are air; `set_block` created a cy 0 chunk there; when that column

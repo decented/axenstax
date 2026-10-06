@@ -16,10 +16,29 @@ const PLACED_WORDS: usize = CHUNK_VOLUME / 64;
 /// Internal to the chunk codec — not part of the crate API.
 const PLACED_MASK_BYTES: usize = CHUNK_VOLUME / 8;
 
+/// Test-only: how many full recounts ([`Chunk::recount_non_air`]) this thread
+/// has run. Per-thread, so parallel tests cannot disturb each other.
+#[cfg(test)]
+thread_local! {
+    static FULL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reader for the thread's full-recount counter.
+#[cfg(test)]
+pub(crate) fn full_scans_on_this_thread() -> usize {
+    FULL_SCANS.with(std::cell::Cell::get)
+}
+
 /// A 16x16x16 sub-chunk of block data.
 pub struct Chunk {
     /// Flat array of block IDs. Index = x + z * 16 + y * 256.
     blocks: [BlockId; CHUNK_VOLUME],
+    /// How many cells of `blocks` are not `AIR`. Maintained on every write
+    /// (`set`, `from_bytes`) so [`Chunk::is_empty`] is O(1) — the world sims ask
+    /// "does this column hold a real block?" per entity per tick. `blocks` is
+    /// private, so those two are the only places it can change; the
+    /// `non_air_count_*` tests pin the count against a full recount.
+    non_air: u16,
     /// Spec 30 — packed per-voxel light: `(sky_light << 4) | block_light`.
     /// Each nibble is 0..15. Initialised to 0 (dark); world-gen + place
     /// hooks fill in via the `lighting` BFS module. Not persisted on
@@ -46,6 +65,7 @@ impl Chunk {
     pub fn new() -> Self {
         Self {
             blocks: [AIR; CHUNK_VOLUME],
+            non_air: 0,
             light: [0; CHUNK_VOLUME],
             placed: [0; PLACED_WORDS],
             mesh_dirty: true,
@@ -80,13 +100,39 @@ impl Chunk {
 
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, block: BlockId) {
-        self.blocks[Self::index(x, y, z)] = block;
+        let slot = &mut self.blocks[Self::index(x, y, z)];
+        let was_air = *slot == AIR;
+        *slot = block;
+        match (was_air, block == AIR) {
+            (true, false) => self.non_air += 1,
+            (false, true) => self.non_air -= 1,
+            _ => {}
+        }
         self.mesh_dirty = true;
     }
 
-    /// Check if chunk is entirely air.
+    /// Check if chunk is entirely air. O(1): reads the maintained
+    /// [`Chunk::non_air_count`], never scans the cells.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.blocks.iter().all(|&b| b == AIR)
+        self.non_air == 0
+    }
+
+    /// How many cells hold a block other than `AIR`. O(1). Test-only: the
+    /// engine itself only asks the yes/no [`Chunk::is_empty`].
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn non_air_count(&self) -> usize {
+        usize::from(self.non_air)
+    }
+
+    /// Full recount of the non-air cells — the oracle the maintained count is
+    /// tested against. Test-only; it bumps [`full_scans_on_this_thread`] so a
+    /// test can prove a code path never fell back to counting cells.
+    #[cfg(test)]
+    pub(crate) fn recount_non_air(&self) -> usize {
+        FULL_SCANS.with(|c| c.set(c.get() + 1));
+        self.blocks.iter().filter(|&&b| b != AIR).count()
     }
 
     // ── Spec 06 §2.2 — per-voxel "player-placed" mask ────────────────
@@ -193,8 +239,10 @@ impl Chunk {
             _ => return None,
         };
         let mut blocks = [AIR; CHUNK_VOLUME];
+        let mut non_air = 0u16;
         for (i, chunk) in data[..block_bytes].as_chunks::<2>().0.iter().enumerate() {
             blocks[i] = u16::from_le_bytes(*chunk);
+            non_air += u16::from(blocks[i] != AIR);
         }
         let mut placed = [0u64; PLACED_WORDS];
         if has_mask {
@@ -204,6 +252,7 @@ impl Chunk {
         }
         Some(Self {
             blocks,
+            non_air,
             light: [0; CHUNK_VOLUME],
             placed,
             mesh_dirty: true,
@@ -365,5 +414,99 @@ mod tests {
         c.mesh_dirty = false;
         c.set(0, 0, 0, STONE);
         assert!(c.mesh_dirty, "set() must flag mesh dirty");
+    }
+
+    // ── maintained non-air count (O(1) `is_empty`) ───────────────────
+
+    /// Tiny deterministic PRNG (xorshift64*) so the random-edit tests need no
+    /// dependency and reproduce exactly.
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn assert_count_exact(c: &Chunk, what: &str) {
+        assert_eq!(c.non_air_count(), c.recount_non_air(), "{what}: maintained count != full recount");
+        assert_eq!(c.is_empty(), c.recount_non_air() == 0, "{what}: is_empty != (recount == 0)");
+    }
+
+    #[test]
+    fn non_air_count_matches_full_recount_after_random_edits() {
+        let mut c = Chunk::new();
+        assert_count_exact(&c, "new");
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        for step in 0..20_000 {
+            let r = next(&mut rng);
+            let (x, y, z) = ((r & 15) as usize, ((r >> 4) & 15) as usize, ((r >> 8) & 15) as usize);
+            // A third of the writes are AIR (X->AIR and AIR->AIR), the rest
+            // non-air (AIR->X and X->Y), so every transition is exercised.
+            let block = if (r >> 16) % 3 == 0 { AIR } else { 1 + ((r >> 20) % 40) as u16 };
+            c.set(x, y, z, block);
+            assert_eq!(c.get(x, y, z), block);
+            if step % 97 == 0 {
+                assert_count_exact(&c, &format!("step {step}"));
+            }
+        }
+        assert_count_exact(&c, "after 20,000 random edits");
+        // Dig it all out: back to empty, count back to zero.
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    c.set(x, y, z, AIR);
+                }
+            }
+        }
+        assert_eq!(c.non_air_count(), 0);
+        assert!(c.is_empty());
+        assert_count_exact(&c, "dug out");
+    }
+
+    #[test]
+    fn non_air_count_covers_every_transition_and_the_full_volume() {
+        let mut c = Chunk::new();
+        c.set(3, 3, 3, AIR); // AIR -> AIR: no change
+        assert_eq!((c.non_air_count(), c.is_empty()), (0, true));
+        c.set(3, 3, 3, STONE); // AIR -> X
+        assert_eq!((c.non_air_count(), c.is_empty()), (1, false));
+        c.set(3, 3, 3, DIRT); // X -> Y: no change
+        assert_eq!(c.non_air_count(), 1);
+        c.set(3, 3, 3, STONE); // same block again: no change
+        assert_eq!(c.non_air_count(), 1);
+        c.set(3, 3, 3, AIR); // X -> AIR
+        assert_eq!((c.non_air_count(), c.is_empty()), (0, true));
+        // A completely solid chunk is CHUNK_VOLUME (4096) — fits the field.
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    c.set(x, y, z, STONE);
+                }
+            }
+        }
+        assert_eq!(c.non_air_count(), CHUNK_VOLUME);
+        assert_count_exact(&c, "solid");
+    }
+
+    #[test]
+    fn non_air_count_is_exact_after_from_bytes_and_a_byte_roundtrip() {
+        let mut c = Chunk::new();
+        let mut rng = 0xDEAD_BEEF_CAFE_F00Du64;
+        for _ in 0..3_000 {
+            let r = next(&mut rng);
+            c.set((r & 15) as usize, ((r >> 4) & 15) as usize, ((r >> 8) & 15) as usize, ((r >> 16) % 50) as u16);
+        }
+        let back = Chunk::from_bytes(&c.as_bytes()).expect("roundtrip");
+        assert_eq!(back.non_air_count(), c.non_air_count());
+        assert_count_exact(&back, "from_bytes");
+        // The legacy (no placed mask) layout counts the same way.
+        let legacy = &c.as_bytes()[..CHUNK_VOLUME * 2];
+        assert_count_exact(&Chunk::from_bytes(legacy).expect("legacy"), "from_bytes legacy");
+        // An all-air payload is empty; an edit after loading keeps the count exact.
+        let mut empty = Chunk::from_bytes(&[0u8; CHUNK_VOLUME * 2]).expect("all-air");
+        assert!(empty.is_empty());
+        empty.set(0, 0, 0, STONE);
+        assert_count_exact(&empty, "edit after load");
+        assert_eq!(empty.non_air_count(), 1);
     }
 }

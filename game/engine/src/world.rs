@@ -4080,4 +4080,190 @@ mod tests {
         w.set_block(100, 10, 100, crate::block::STONE);
         assert!(w.has_chunk(6, 0, 6), "no evicted data: behaviour unchanged");
     }
+
+    // ── column-presence cost (B1 review perf follow-up) ──────────────────
+    //
+    // `is_column_present_at` runs per entity per tick on the client AND the
+    // server, and per fluid/fire/sapling spread step. It used to scan chunk
+    // cells for a non-air block (~3,800 reads for a flat floor in a chunk's top
+    // layer); `Chunk` now maintains a non-air count, so it is O(1) per chunk.
+
+    /// The question `is_column_present_at` answers, computed the slow, obvious
+    /// way: one of the column's live chunks holds a non-air cell, by full recount.
+    fn column_present_by_full_scan(w: &World, x: i32, z: i32) -> bool {
+        let (cx, cz) = (x.div_euclid(CHUNK_SIZE as i32), z.div_euclid(CHUNK_SIZE as i32));
+        (0..=MAX_CHUNK_Y)
+            .any(|cy| w.chunks.get(&(cx, cy, cz)).is_some_and(|c| c.recount_non_air() > 0))
+    }
+
+    /// Every chunk the world holds — live and evicted — carries an exact
+    /// non-air count, and the O(1) presence answer agrees with a full scan over
+    /// a grid of columns (including ones that were never loaded).
+    fn assert_world_counts_exact(w: &World, what: &str) {
+        for (key, c) in w.chunks.iter().chain(w.evicted.iter()) {
+            assert_eq!(
+                c.non_air_count(),
+                c.recount_non_air(),
+                "{what}: chunk {key:?} count != full recount",
+            );
+        }
+        for cx in -2..=3 {
+            for cz in -2..=3 {
+                let (x, z) = (cx * CHUNK_SIZE as i32 + 5, cz * CHUNK_SIZE as i32 + 9);
+                assert_eq!(
+                    w.is_column_present_at(x, z),
+                    column_present_by_full_scan(w, x, z),
+                    "{what}: presence at ({x}, {z}) disagrees with a full scan",
+                );
+            }
+        }
+    }
+
+    /// A flat world with column (0, 0) generated.
+    fn flat_world_with_one_column() -> World {
+        let bg = crate::biome::BiomeGenerator::new(1);
+        let mut w = World::new();
+        w.world_type = "flat".to_string();
+        w.generate_column(0, 0, &bg);
+        w
+    }
+
+    #[test]
+    fn column_presence_cost_micro_benchmark() {
+        // Rough and non-flaky: this only MEASURES and reports (run with
+        // `--nocapture`). The deterministic bound — no full scans — is
+        // `column_presence_does_no_full_chunk_scans`. Before the maintained count
+        // this read ~3,800 cells per present column on a flat world.
+        let w = flat_world_with_one_column();
+        let t = std::time::Instant::now();
+        let mut present = 0usize;
+        for i in 0..1_000 {
+            // Spread over the column's 16x16 footprint, plus an absent column.
+            let (x, z) = (i % 16, (i / 16) % 16);
+            present += usize::from(w.is_column_present_at(x, z));
+            assert!(!w.is_column_present_at(200 + x, 200 + z));
+        }
+        let per_call_ns = t.elapsed().as_nanos() / 2_000;
+        eprintln!("is_column_present_at: {per_call_ns} ns/call over 2,000 calls (half present, half absent)");
+        assert_eq!(present, 1_000, "every footprint cell of the generated flat column is present");
+    }
+
+    #[test]
+    fn column_presence_does_no_full_chunk_scans() {
+        // Deterministic bound on the per-call work: 1,000 calls on a flat world
+        // (present and absent columns) never fall back to counting a chunk's
+        // cells. The counter bumps only in the test-only full recount.
+        let w = flat_world_with_one_column();
+        let before = crate::chunk::full_scans_on_this_thread();
+        for i in 0..1_000 {
+            let (x, z) = (i % 16, (i / 16) % 16);
+            assert!(w.is_column_present_at(x, z));
+            assert!(!w.is_column_present_at(200 + x, 200 + z));
+        }
+        assert_eq!(
+            crate::chunk::full_scans_on_this_thread(),
+            before,
+            "is_column_present_at must read the maintained count, not scan cells",
+        );
+    }
+
+    #[test]
+    fn chunk_counts_stay_exact_through_worldgen() {
+        // Biome terrain (trees and vegetation spill into the neighbours),
+        // a flat world, and the Workshop floor — every bulk writer.
+        let bg = crate::biome::BiomeGenerator::new(11);
+        let mut normal = World::new();
+        normal.generate_column(0, 0, &bg);
+        normal.generate_column(1, 0, &bg);
+        assert_world_counts_exact(&normal, "biome worldgen");
+
+        let flat = flat_world_with_one_column();
+        assert_world_counts_exact(&flat, "flat worldgen");
+
+        let mut workshop = World::new();
+        workshop.is_workshop = true;
+        workshop.generate_column(0, 0, &bg);
+        assert_world_counts_exact(&workshop, "workshop worldgen");
+        assert!(workshop.is_column_present_at(3, 3));
+    }
+
+    #[test]
+    fn chunk_counts_stay_exact_through_random_world_edits() {
+        // set_block / place_player_block over generated, empty-phantom and
+        // never-loaded columns, with AIR and non-air writes. Schematic pastes and
+        // `/we` reach cells only through these setters (`Chunk::blocks` is private).
+        let bg = crate::biome::BiomeGenerator::new(5);
+        let mut w = World::new();
+        w.generate_column(0, 0, &bg);
+        let mut rng = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = || {
+            rng ^= rng >> 12;
+            rng ^= rng << 25;
+            rng ^= rng >> 27;
+            rng.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        for step in 0..4_000 {
+            let r = next();
+            let x = (r % 80) as i32 - 24; // spills into never-loaded neighbours
+            let z = ((r >> 8) % 80) as i32 - 24;
+            let y = ((r >> 16) % 110) as i32;
+            let block = if (r >> 28) % 3 == 0 { AIR } else { 1 + ((r >> 32) % 30) as u16 };
+            if (r >> 40) % 4 == 0 {
+                w.place_player_block(x, y, z, block);
+            } else {
+                w.set_block(x, y, z, block);
+            }
+            if step % 1_000 == 999 {
+                assert_world_counts_exact(&w, &format!("random edits, step {step}"));
+            }
+        }
+        assert_world_counts_exact(&w, "after random edits");
+    }
+
+    #[test]
+    fn chunk_counts_stay_exact_through_load_from_bytes_and_decompression() {
+        // The wire path a joiner takes (game_loop's chunk packet handler):
+        // as_bytes -> LZ4 compress -> decompress -> from_bytes -> insert_chunk.
+        let bg = crate::biome::BiomeGenerator::new(7);
+        let mut src = World::new();
+        src.generate_column(0, 0, &bg);
+        src.set_block(4, 40, 4, crate::block::GLASS);
+        let mut dst = World::new();
+        for cy in 0..=MAX_CHUNK_Y {
+            let Some(chunk) = src.get_chunk(0, cy, 0) else { continue };
+            let wire = crate::protocol::compress_chunk(&chunk.as_bytes());
+            let raw = crate::protocol::decompress_chunk(&wire).expect("valid LZ4");
+            let loaded = Chunk::from_bytes(&raw).expect("valid chunk bytes");
+            assert_eq!(loaded.non_air_count(), chunk.non_air_count(), "cy {cy}");
+            dst.insert_chunk(0, cy, 0, loaded);
+        }
+        assert_world_counts_exact(&dst, "decompressed + loaded");
+        assert!(dst.is_column_present_at(4, 4));
+        // An edit on top of a loaded chunk keeps the count exact.
+        dst.set_block(4, 40, 4, AIR);
+        dst.set_block(5, 41, 5, crate::block::STONE);
+        assert_world_counts_exact(&dst, "edit after load");
+    }
+
+    #[test]
+    fn chunk_counts_and_presence_stay_exact_through_eviction_and_restore() {
+        let mut w = evicted_world();
+        assert_world_counts_exact(&w, "evicted");
+        assert!(!w.is_column_present_at(4, 4), "an evicted column is absent from the sims");
+        // Write-through into the evicted store keeps ITS counts exact too.
+        w.set_block(5, 40, 5, crate::block::STONE);
+        w.set_block(4, 40, 4, AIR);
+        w.place_player_block(5, 90, 5, crate::block::GLASS); // an absent cy, created in the store
+        assert_world_counts_exact(&w, "write-through to evicted");
+        assert!(w.restore_column(0, 0));
+        assert_world_counts_exact(&w, "restored");
+        assert!(w.is_column_present_at(4, 4), "a restored column is present again");
+        // Evict again: drop-vs-keep, then a never-persisted column is dropped.
+        assert!(w.evict_column(0, 0));
+        assert!(!w.is_column_present_at(4, 4));
+        assert_world_counts_exact(&w, "re-evicted");
+        w.clear();
+        assert!(!w.is_column_present_at(4, 4));
+        assert_world_counts_exact(&w, "cleared");
+    }
 }
