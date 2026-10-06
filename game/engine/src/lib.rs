@@ -1296,6 +1296,10 @@ pub(crate) struct GameState {
     /// player position as its reference. Cleared back to `Default` once
     /// applied so a later in-game reload doesn't re-teleport.
     pub(crate) pending_spawn_pref: crate::spawn_pref::SpawnPref,
+    /// Where the host placed us in a joined session (`JoinAccept` spawn, T2-9).
+    /// Set by the join gate just before `begin_load`, which moves player 0
+    /// there and builds the load queue around it. `None` otherwise.
+    pub(crate) pending_join_spawn: Option<glam::Vec3>,
     /// One-shot: the next `begin_load` is a RESUME whose world + players were
     /// already restored (the WASM poll branch unpacks the IndexedDB blob and
     /// restores everything before entering `GameMode::Loading`). Gates
@@ -1810,6 +1814,7 @@ impl GameState {
             fund_dialog: None,
             sats_policy: crate::economy::ServerSatsPolicy::default(),
             pending_spawn_pref: crate::spawn_pref::SpawnPref::Default,
+            pending_join_spawn: None,
             world_preloaded: false,
             pending_workshop_reset: false,
             pending_scenario_launch: None,

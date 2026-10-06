@@ -47,6 +47,93 @@ pub const HOST_CONNECTION_LOST: &str = "Disconnected from host";
 /// Shown when the link closes before the join completed.
 pub const HOST_UNREACHABLE: &str = "Couldn't reach the host";
 
+/// Shown when the host never lets us in (no `JoinAccept`, no refusal) within
+/// [`JOIN_ACCEPT_TIMEOUT_SECS`] — e.g. a host on another protocol version
+/// that can't read our request.
+pub const HOST_NO_ANSWER: &str = "The host didn't let us in. Try joining again.";
+
+/// How long the loading screen waits for the host's `JoinAccept`. Generous:
+/// a signed-in join waits on the player's signer (possibly a phone) first.
+pub const JOIN_ACCEPT_TIMEOUT_SECS: f32 = 90.0;
+
+/// Toast for a joiner whose terrain generator differs from the host's.
+pub const WORLDGEN_MISMATCH_NOTICE: &str = "This world was made with a different version of the game. Some terrain may look different until you update.";
+
+/// Folder name of a joined session's world. Never read from or written to
+/// disk: a joined world is the host's (`GameState::persists_locally`).
+pub const JOINED_WORLD_FOLDER: &str = "remote_game";
+
+/// What the host's `JoinAccept` says the joined world IS (gap-audit T2-9): the
+/// joiner builds its world meta from this and generates terrain only after it
+/// has arrived, so its world matches the host's seed and rules.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinedWorld {
+    pub seed: u32,
+    pub rules: protocol::WorldRules,
+    /// The host's `WORLDGEN_VERSION`.
+    pub worldgen_version: u32,
+    /// Where the host placed us. `None` when the host sent a non-finite
+    /// position (NaN/inf would poison every f32→i32 cast downstream).
+    pub spawn: Option<glam::Vec3>,
+}
+
+impl JoinedWorld {
+    pub fn from_accept(accept: &protocol::JoinAcceptPacket) -> Self {
+        let spawn = glam::Vec3::new(accept.spawn_x, accept.spawn_y, accept.spawn_z);
+        Self {
+            seed: accept.seed,
+            rules: accept.world_rules.clone(),
+            worldgen_version: accept.worldgen_version,
+            spawn: spawn.is_finite().then_some(spawn),
+        }
+    }
+
+    /// The joiner's world meta: a blank meta (fresh Proof-of-Play secret, no
+    /// owner) carrying the host's seed and rules.
+    pub fn to_meta(&self) -> crate::save::WorldMeta {
+        let mut meta = crate::save::WorldMeta::new(JOINED_WORLD_FOLDER);
+        meta.seed = self.seed;
+        self.rules.apply_to_meta(&mut meta);
+        meta
+    }
+
+    /// The toast to show when the host's generator differs from ours.
+    pub fn worldgen_mismatch_notice(&self) -> Option<&'static str> {
+        (self.worldgen_version != crate::world::WORLDGEN_VERSION)
+            .then_some(WORLDGEN_MISMATCH_NOTICE)
+    }
+}
+
+/// Where a joined session's world load stands.
+#[derive(Debug, PartialEq)]
+pub enum JoinGate {
+    /// The host's world is known — build it, then load.
+    Ready(JoinedWorld),
+    /// Still waiting for the host's `JoinAccept`.
+    Waiting,
+    /// The join is over (refused, link lost, or no answer): leave with this.
+    Ended(String),
+}
+
+/// Pure decision for the loading screen of a joined session: a session that
+/// has ended wins, then an arrived `JoinAccept`, then the timeout.
+pub fn join_gate(
+    state: &ConnectionState,
+    accepted: Option<JoinedWorld>,
+    waited_secs: f32,
+) -> JoinGate {
+    match state {
+        ConnectionState::Failed(reason) => return JoinGate::Ended(reason.clone()),
+        ConnectionState::Disconnected => return JoinGate::Ended(HOST_CONNECTION_LOST.to_string()),
+        ConnectionState::Connecting | ConnectionState::Connected { .. } => {}
+    }
+    match accepted {
+        Some(world) => JoinGate::Ready(world),
+        None if waited_secs >= JOIN_ACCEPT_TIMEOUT_SECS => JoinGate::Ended(HOST_NO_ANSWER.to_string()),
+        None => JoinGate::Waiting,
+    }
+}
+
 /// What a closed transport means for a session in `state`: `None` when the
 /// session already ended (its own reason stands).
 fn transport_closed_reason(state: &ConnectionState) -> Option<String> {
@@ -130,6 +217,10 @@ pub struct RemoteClient {
     /// world's authored 2D art. `None` until a JoinAccept arrives; empty for a
     /// normal world.
     pub pending_exhibits: Option<Vec<crate::exhibit::Exhibit>>,
+    /// The host's world (seed, rules, spawn) from `JoinAccept`. Taken once by
+    /// the loading screen, which builds the joined world from it BEFORE any
+    /// terrain is generated (gap-audit T2-9).
+    pub pending_joined_world: Option<JoinedWorld>,
     /// Join handshake state — drives whether/when the JoinRequest is sent.
     join: JoinFlow,
     /// Present remote players keyed by server slot, for the inspect view. Built
@@ -195,6 +286,7 @@ pub fn build_join_request_guest(player_name: &str, skin_key: u64) -> protocol::J
         handle_credential: None,
         skin_key,
         client_nonce_hex: random_nonce_hex(),
+        worldgen_version: crate::world::WORLDGEN_VERSION,
     }
 }
 
@@ -240,6 +332,7 @@ pub fn build_join_request(
         handle_credential,
         skin_key,
         client_nonce_hex: random_nonce_hex(),
+        worldgen_version: crate::world::WORLDGEN_VERSION,
     }
 }
 
@@ -367,7 +460,7 @@ impl RemoteClient {
 
     /// Build a client around a transport, sending the JoinRequest immediately
     /// (guest path). Transport-agnostic (QUIC / WebSocket / channel).
-    fn from_transport(
+    pub(crate) fn from_transport(
         transport: Box<dyn ClientTransport>,
         join_req: protocol::JoinRequestPacket,
         pinned_op_npub: Option<String>,
@@ -386,6 +479,7 @@ impl RemoteClient {
             pending_difficulty: None,
             pending_world_time: None,
             pending_exhibits: None,
+            pending_joined_world: None,
             join: JoinFlow::Sent,
             roster: HashMap::new(),
             pinned_op_npub,
@@ -425,6 +519,7 @@ impl RemoteClient {
             pending_difficulty: None,
             pending_world_time: None,
             pending_exhibits: None,
+            pending_joined_world: None,
             join: JoinFlow::AwaitingChallenge { base, driver: Some(driver) },
             roster: HashMap::new(),
             pinned_op_npub,
@@ -502,6 +597,9 @@ impl RemoteClient {
                                 self.pending_play_mode = Some(accept.play_mode);
                                 self.pending_difficulty = Some(accept.difficulty.clone());
                                 self.pending_world_time = Some(accept.world_time);
+                                // The host's world (seed + rules + spawn) for the
+                                // loading screen to build ours from (T2-9).
+                                self.pending_joined_world = Some(JoinedWorld::from_accept(&accept));
                                 // Queue authored exhibits for the game loop to apply
                                 // into world.exhibits (Creator Gallery render path).
                                 self.pending_exhibits = Some(accept.exhibits);
@@ -1401,7 +1499,111 @@ mod tests {
             difficulty: "normal".into(),
             server_identity: None,
             exhibits: Vec::new(),
+            world_rules: protocol::WorldRules::default(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         }
+    }
+
+    fn flat_sand_rules() -> protocol::WorldRules {
+        protocol::WorldRules {
+            world_type: "flat".into(),
+            ground: "sand".into(),
+            mobs_enabled: false,
+            keep_inventory: true,
+            ..protocol::WorldRules::default()
+        }
+    }
+
+    #[test]
+    fn join_accept_queues_the_hosts_world_for_the_loader() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(client),
+            build_join_request_guest("Me", 0),
+            None,
+        );
+        let mut acc = proofless_accept();
+        acc.seed = 4242;
+        acc.spawn_x = 100.5;
+        acc.spawn_y = 41.0;
+        acc.spawn_z = -7.5;
+        acc.world_rules = flat_sand_rules();
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &acc));
+        rc.poll();
+        assert_eq!(
+            rc.pending_joined_world,
+            Some(JoinedWorld {
+                seed: 4242,
+                rules: flat_sand_rules(),
+                worldgen_version: crate::world::WORLDGEN_VERSION,
+                spawn: Some(glam::Vec3::new(100.5, 41.0, -7.5)),
+            })
+        );
+    }
+
+    #[test]
+    fn joined_world_meta_is_built_from_the_accept() {
+        let mut acc = proofless_accept();
+        acc.seed = 99;
+        acc.world_rules = flat_sand_rules();
+        let meta = JoinedWorld::from_accept(&acc).to_meta();
+        assert_eq!(meta.seed, 99, "the host's seed, not a random one");
+        assert_eq!(meta.world_type, "flat");
+        assert_eq!(meta.ground, "sand");
+        assert!(!meta.mobs_enabled);
+        assert!(meta.keep_inventory);
+        assert!(meta.pop_secret.is_some(), "a blank meta never needs saving back");
+    }
+
+    #[test]
+    fn a_non_finite_join_spawn_is_dropped() {
+        let mut acc = proofless_accept();
+        acc.spawn_y = f32::NAN;
+        assert_eq!(JoinedWorld::from_accept(&acc).spawn, None);
+        acc.spawn_y = f32::INFINITY;
+        assert_eq!(JoinedWorld::from_accept(&acc).spawn, None);
+    }
+
+    #[test]
+    fn worldgen_mismatch_notice_only_for_another_version() {
+        let mut acc = proofless_accept();
+        assert_eq!(JoinedWorld::from_accept(&acc).worldgen_mismatch_notice(), None);
+        acc.worldgen_version = crate::world::WORLDGEN_VERSION + 1;
+        assert_eq!(
+            JoinedWorld::from_accept(&acc).worldgen_mismatch_notice(),
+            Some(WORLDGEN_MISMATCH_NOTICE)
+        );
+    }
+
+    #[test]
+    fn join_gate_waits_then_builds_then_times_out() {
+        let world = JoinedWorld::from_accept(&proofless_accept());
+        assert_eq!(join_gate(&ConnectionState::Connecting, None, 1.0), JoinGate::Waiting);
+        assert_eq!(
+            join_gate(&ConnectionState::Connected { player_index: 1, seed: 1 }, Some(world.clone()), 1.0),
+            JoinGate::Ready(world.clone())
+        );
+        assert_eq!(
+            join_gate(&ConnectionState::Connecting, None, JOIN_ACCEPT_TIMEOUT_SECS),
+            JoinGate::Ended(HOST_NO_ANSWER.to_string())
+        );
+        // A late JoinAccept still wins over the clock.
+        assert_eq!(
+            join_gate(&ConnectionState::Connecting, Some(world.clone()), 500.0),
+            JoinGate::Ready(world)
+        );
+    }
+
+    #[test]
+    fn join_gate_ends_on_a_refusal_or_a_lost_link() {
+        assert_eq!(
+            join_gate(&ConnectionState::Failed("Sign-in required".into()), None, 0.0),
+            JoinGate::Ended("Sign-in required".into())
+        );
+        assert_eq!(
+            join_gate(&ConnectionState::Disconnected, None, 0.0),
+            JoinGate::Ended(HOST_CONNECTION_LOST.to_string())
+        );
     }
 
     /// C1 — a client that pinned an operator (`#op=`) must refuse a server that

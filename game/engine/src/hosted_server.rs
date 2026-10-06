@@ -1378,6 +1378,19 @@ impl HostedServer {
                         }
                         let Ok(req) = protocol::safe_deserialize::<protocol::JoinRequestPacket>(payload)
                         else {
+                            // Another version's JoinRequest shape doesn't
+                            // decode; its leading `protocol_version` still
+                            // reads, so the joiner learns why (not silence).
+                            if let Some(v) = protocol::peek_protocol_version(payload)
+                                && v != protocol::PROTOCOL_VERSION
+                            {
+                                log::warn!(
+                                    "Rejecting undecodable JoinRequest on slot {i}: protocol v{v} (server v{})",
+                                    protocol::PROTOCOL_VERSION
+                                );
+                                let _ = self.release_slot(i, Some(&protocol::protocol_mismatch_reason(v)));
+                                break;
+                            }
                             continue;
                         };
                         const MAX_PLAYER_NAME_LEN: usize = 32;
@@ -1399,11 +1412,7 @@ impl HostedServer {
                                 "Rejecting '{}': protocol v{} (server v{})",
                                 req.player_name, req.protocol_version, protocol::PROTOCOL_VERSION
                             );
-                            let reason = format!(
-                                "Protocol mismatch: client v{}, server v{}",
-                                req.protocol_version,
-                                protocol::PROTOCOL_VERSION
-                            );
+                            let reason = protocol::protocol_mismatch_reason(req.protocol_version);
                             let _ = self.release_slot(i, Some(&reason));
                             break;
                         }
@@ -1543,6 +1552,15 @@ impl HostedServer {
                         // themselves are delivered out-of-band (gated).
                         if let Some(sp) = self.server.players.get_mut(i) {
                             sp.skin_key = req.skin_key;
+                            // T2-9 — whose terrain generator differs from ours.
+                            sp.client_worldgen_version = req.worldgen_version;
+                            if sp.worldgen_mismatch() {
+                                log::warn!(
+                                    "Slot {i} generates terrain with worldgen v{} (host v{}): its terrain may differ",
+                                    req.worldgen_version,
+                                    crate::world::WORLDGEN_VERSION
+                                );
+                            }
                         }
 
                         let spawn = if let Some(sp) = self.server.players.get(i) {
@@ -1592,6 +1610,10 @@ impl HostedServer {
                             // authored exhibits, so the joiner renders them (they
                             // can't be regenerated client-side like the gallery).
                             exhibits: self.server.world.exhibits.clone(),
+                            // T2-9 — the flags + generator version a joiner
+                            // needs to build the same world before any terrain.
+                            world_rules: self.server.world_rules(),
+                            worldgen_version: crate::world::WORLDGEN_VERSION,
                         };
                         let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &accept);
                         self.transports[i].send_to_client(&pkt);
@@ -4085,6 +4107,7 @@ mod tests {
             handle_credential: cred.as_ref().map(SignetCredentialWire::from),
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         }
     }
 
@@ -4141,6 +4164,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("missing auth_event"));
@@ -4246,6 +4270,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("signature length invalid"));
@@ -4360,6 +4385,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
@@ -4375,6 +4401,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4428,6 +4455,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         // require_signin=false, but a non-empty whitelist forces sign-in.
         let allow = vec![xonly_of([0x42; 32])];

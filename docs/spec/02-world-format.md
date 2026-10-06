@@ -797,6 +797,38 @@ fn stage_seed(world_seed: u64, stage_salt: u64, cx: i32, cz: i32) -> u64 {
 }
 ```
 
+**As built (2026-10-06, gap-audit T2-9) — `WORLDGEN_VERSION`.** The shipped seed is a
+`u32` (`WorldMeta.seed`; text seeds hash via FNV-1a, `save::seed_from_text`). A
+multiplayer joiner regenerates the host's terrain locally from the seed plus the world
+flags in `JoinAcceptPacket.world_rules` (Spec 04 v65), so generator output is a wire
+contract: `world::WORLDGEN_VERSION` (currently **1**) names it. **Bump it whenever
+generation output for a given seed + flags changes** — anything reached from
+`World::generate_column`: terrain shape, biomes, caves, ore, trees, vegetation, villages,
+hideouts, ravines, mineshafts, or the flat / water / Workshop-void presets. Host and
+joiner exchange it in `JoinAccept` / `JoinRequest`; a joiner on another version gets a
+toast ("Some terrain may look different until you update") and the host flags the player
+(`ServerPlayer::worldgen_mismatch`) so a later pass can push real chunks instead.
+
+The golden test `test_integration/worldgen_golden.rs` hashes every cell (block id + meta,
+in coordinate order, never chunk-map order) of a fixed column set for seed `20261006` —
+normal terrain with caves and ore, plus flat grass, flat water and the Workshop void —
+and fails with "worldgen output changed: bump WORLDGEN_VERSION and update this hash"
+until both land together. It also checks the output is identical when generated twice
+and when generated in reverse column order. Verified 2026-10-06: deterministic within
+and across processes (`AHashMap` random state does not leak into block output) and
+column-order-independent for that set.
+
+**Not yet pure (Phase B0).** The claim above ("always the exact same result regardless of
+what other chunks exist") does not fully hold as built. Known hidden inputs:
+`BiomeGenerator::reserve_richness` (live server state from `StateUpdate`; picks deepslate
+variants, and a joiner's first columns use the default before an update arrives), Brigand
+Hideouts reading `village_anchors` (order-dependent), the bundled plan registry villages
+build from, and `sin`/`cos`/`powf` rounding differences between native and WASM libm.
+
+| Worldgen version | Date | Change |
+|---|---|---|
+| 1 | 2026-10-06 | Baseline: output as of protocol v65. |
+
 ### 5.3 Stage Details
 
 #### 5.3.1 Shape (Density / Height)

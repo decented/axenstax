@@ -120,6 +120,12 @@ pub struct JoinRequestPacket {
     /// client that pinned an operator npub verify the server. Empty string = the
     /// client doesn't request server-identity proof (anonymous join, unchanged).
     pub client_nonce_hex: String,
+    /// The joiner's own [`crate::world::WORLDGEN_VERSION`] (v65, gap-audit
+    /// T2-9). A joiner regenerates the host's terrain locally, so the host
+    /// records this on the player (`ServerPlayer::worldgen_mismatch`) to know
+    /// whose terrain may differ from its own. APPEND-ONLY: stays last.
+    #[serde(default)]
+    pub worldgen_version: u32,
 }
 
 /// Server accepts a join request.
@@ -153,11 +159,86 @@ pub struct JoinAcceptPacket {
     /// Creator-gallery exhibits (Spec 2026-06-19 §9) — the world's authored 2D art
     /// placements, sent on join so a remote/web client renders them (they are
     /// authored data, not procedural, so unlike the gallery they can't be
-    /// regenerated client-side). APPEND-ONLY: must stay LAST (bincode is
-    /// positional). Empty for a normal world; `#[serde(default)]` so a v53 peer's
-    /// shorter packet still decodes.
+    /// regenerated client-side). APPEND-ONLY (bincode is positional): later
+    /// fields go after it, never before. Empty for a normal world.
     #[serde(default)]
     pub exhibits: Vec<crate::exhibit::Exhibit>,
+    /// The world's generation flags + rules (v65, gap-audit T2-9). A joiner
+    /// applies them BEFORE it generates any terrain, so a flat or void world
+    /// generates flat or void on the joiner too, and mobs / fire / explosives /
+    /// keep-inventory / the day lock behave as on the host.
+    #[serde(default)]
+    pub world_rules: WorldRules,
+    /// The host's [`crate::world::WORLDGEN_VERSION`] (v65). A joiner on a
+    /// different version warns its player that terrain may look different.
+    #[serde(default)]
+    pub worldgen_version: u32,
+}
+
+/// The rule + generation flags of a world that a joiner needs to generate and
+/// behave like the host (v65, gap-audit T2-9). Exactly the `WorldMeta` fields
+/// that change terrain output or gameplay rules; the seed, play mode,
+/// difficulty and clock travel in their own `JoinAcceptPacket` fields.
+/// `commands_enabled` is deliberately NOT carried: on a joiner it would also
+/// gate the chat key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldRules {
+    /// `WorldMeta.world_type`: `"normal"`, `"flat"`, `"testlab"`, ….
+    pub world_type: String,
+    /// `WorldMeta.ground`: the flat world's floor block.
+    pub ground: String,
+    /// `WorldMeta.water_depth`: water layers for `ground = "water"`.
+    pub water_depth: u8,
+    /// `WorldMeta.is_workshop`: the void Workshop preset.
+    pub is_workshop: bool,
+    /// `WorldMeta.time_lock`: `"cycle"`, `"day"` or `"night"`.
+    pub time_lock: String,
+    /// `WorldMeta.mobs_enabled`.
+    pub mobs_enabled: bool,
+    /// `WorldMeta.explosives_enabled` (Spec 49).
+    pub explosives_enabled: bool,
+    /// `WorldMeta.fire_spread_enabled`.
+    pub fire_spread_enabled: bool,
+    /// `WorldMeta.keep_inventory` (#47).
+    pub keep_inventory: bool,
+}
+
+impl Default for WorldRules {
+    /// A fresh world's rules (the `WorldMeta::new` defaults).
+    fn default() -> Self {
+        Self::from_meta(&crate::save::WorldMeta::new(""))
+    }
+}
+
+impl WorldRules {
+    /// The rules a saved world's meta records.
+    pub fn from_meta(meta: &crate::save::WorldMeta) -> Self {
+        Self {
+            world_type: meta.world_type.clone(),
+            ground: meta.ground.clone(),
+            water_depth: meta.water_depth,
+            is_workshop: meta.is_workshop,
+            time_lock: meta.time_lock.clone(),
+            mobs_enabled: meta.mobs_enabled,
+            explosives_enabled: meta.explosives_enabled,
+            fire_spread_enabled: meta.fire_spread_enabled,
+            keep_inventory: meta.keep_inventory,
+        }
+    }
+
+    /// Write these rules into `meta` (the joiner builds its world meta from
+    /// `JoinAcceptPacket` this way). Touches only the fields listed above.
+    pub fn apply_to_meta(&self, meta: &mut crate::save::WorldMeta) {
+        meta.world_type = self.world_type.clone();
+        meta.ground = self.ground.clone();
+        meta.water_depth = self.water_depth;
+        meta.is_workshop = self.is_workshop;
+        meta.time_lock = self.time_lock.clone();
+        meta.mobs_enabled = self.mobs_enabled;
+        meta.explosives_enabled = self.explosives_enabled;
+        meta.fire_spread_enabled = self.fire_spread_enabled;
+        meta.keep_inventory = self.keep_inventory;
+    }
 }
 
 /// Server → Client (inside `JoinAcceptPacket`): proof of the server's operator
@@ -1053,7 +1134,29 @@ pub struct ServerAnnouncePacket {
 ///   `MAX_WIRE_PACKET_LEN` (tag + 64 KiB). No packet shape changed, and a v64
 ///   client already accumulated deltas across StateUpdates; frames between
 ///   the two caps could never decode anyway. See `state_outbox`.
-pub const PROTOCOL_VERSION: u32 = 64;
+/// - v65 (2026-10-06): join world flags (gap-audit T2-9). `JoinAcceptPacket`
+///   gains trailing `world_rules: WorldRules` (world type, flat ground, water
+///   depth, Workshop void, time lock, mobs, explosives, fire spread, keep
+///   inventory) + `worldgen_version: u32`; `JoinRequestPacket` gains trailing
+///   `worldgen_version: u32`. The joiner now waits for `JoinAccept` and builds
+///   its world meta from it (seed + rules + spawn) before generating terrain.
+///   A server that can't decode a JoinRequest still reads its leading
+///   `protocol_version` ([`peek_protocol_version`]) so an older client gets
+///   the mismatch reason instead of silence.
+pub const PROTOCOL_VERSION: u32 = 65;
+
+/// The `protocol_version` of a JoinRequest payload that doesn't decode as this
+/// build's `JoinRequestPacket` (an older or newer client's shape). It is the
+/// packet's first field, a fixint `u32` LE, in every version. `None` when the
+/// payload is shorter than that.
+pub fn peek_protocol_version(payload: &[u8]) -> Option<u32> {
+    payload.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// The refusal a joiner on another protocol version is shown.
+pub fn protocol_mismatch_reason(client: u32) -> String {
+    format!("Protocol mismatch: client v{client}, server v{PROTOCOL_VERSION}")
+}
 
 /// Magic bytes for LAN discovery packets. `discovery.rs` hardcodes the same
 /// `*b"AXNS"` literal directly (both writing and checking it) rather than
@@ -1202,7 +1305,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 64);
+        assert_eq!(super::PROTOCOL_VERSION, 65);
     }
 
     #[test]
@@ -1678,7 +1781,116 @@ mod tests {
         // v64 (2026-09-28): QUIC game packets ride one reliable framed stream
         //   (u32 LE length + payload) instead of datagrams; 8 MiB outbound
         //   queue cap per QUIC client. No packet shape changed.
-        assert_eq!(PROTOCOL_VERSION, 64);
+        // v65 (2026-10-06): JoinAccept gains world_rules + worldgen_version,
+        //   JoinRequest gains worldgen_version (gap-audit T2-9).
+        assert_eq!(PROTOCOL_VERSION, 65);
+    }
+
+    fn sample_accept() -> JoinAcceptPacket {
+        JoinAcceptPacket {
+            player_index: 2,
+            seed: 777,
+            spawn_x: 1.5,
+            spawn_y: 70.0,
+            spawn_z: -3.5,
+            world_time: 1234,
+            is_creative: false,
+            play_mode: crate::play_mode::PlayMode::Survival,
+            difficulty: "hard".into(),
+            server_identity: None,
+            exhibits: Vec::new(),
+            world_rules: WorldRules {
+                world_type: "flat".into(),
+                ground: "sand".into(),
+                water_depth: 5,
+                is_workshop: false,
+                time_lock: "day".into(),
+                mobs_enabled: false,
+                explosives_enabled: false,
+                fire_spread_enabled: false,
+                keep_inventory: true,
+            },
+            worldgen_version: 9,
+        }
+    }
+
+    #[test]
+    fn join_accept_carries_world_rules_and_worldgen_version() {
+        let acc = sample_accept();
+        let bytes = serialize_packet(PacketType::JoinAccept, &acc);
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::JoinAccept);
+        let back: JoinAcceptPacket = safe_deserialize(payload).unwrap();
+        assert_eq!(back.world_rules, acc.world_rules, "every rule flag survives the wire");
+        assert_eq!(back.worldgen_version, 9);
+        assert_eq!(back.seed, 777);
+    }
+
+    #[test]
+    fn join_request_carries_worldgen_version() {
+        let mut req = crate::remote_client::build_join_request_guest("Stax", 0);
+        assert_eq!(
+            req.worldgen_version,
+            crate::world::WORLDGEN_VERSION,
+            "a joiner announces its own generator version"
+        );
+        req.worldgen_version = 41;
+        let bytes = serialize_packet(PacketType::JoinRequest, &req);
+        let (_ptype, payload) = deserialize_header(&bytes).unwrap();
+        let back: JoinRequestPacket = safe_deserialize(payload).unwrap();
+        assert_eq!(back.worldgen_version, 41);
+    }
+
+    #[test]
+    fn an_older_join_request_still_yields_its_protocol_version() {
+        // A v64 client's JoinRequest is one field shorter, so it no longer
+        // decodes; the server must still read its version to explain why.
+        #[derive(serde::Serialize)]
+        struct V64JoinRequest {
+            protocol_version: u32,
+            player_name: String,
+            auth_event: Option<crate::signet::SignetAuthEventWire>,
+            handle_credential: Option<crate::signet::SignetCredentialWire>,
+            skin_key: u64,
+            client_nonce_hex: String,
+        }
+        let old = V64JoinRequest {
+            protocol_version: 64,
+            player_name: "Old".into(),
+            auth_event: None,
+            handle_credential: None,
+            skin_key: 0,
+            client_nonce_hex: String::new(),
+        };
+        let bytes = serialize_packet(PacketType::JoinRequest, &old);
+        let (_ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert!(
+            safe_deserialize::<JoinRequestPacket>(payload).is_err(),
+            "the shorter shape does not decode (bincode is positional)"
+        );
+        assert_eq!(peek_protocol_version(payload), Some(64));
+        assert_eq!(peek_protocol_version(&[1, 2]), None);
+        assert_eq!(
+            protocol_mismatch_reason(64),
+            format!("Protocol mismatch: client v64, server v{PROTOCOL_VERSION}")
+        );
+    }
+
+    #[test]
+    fn world_rules_default_is_a_fresh_worlds_rules() {
+        let r = WorldRules::default();
+        assert_eq!(r.world_type, "normal");
+        assert_eq!(r.time_lock, "cycle");
+        assert!(r.mobs_enabled && r.explosives_enabled && r.fire_spread_enabled);
+        assert!(!r.keep_inventory && !r.is_workshop);
+    }
+
+    #[test]
+    fn world_rules_round_trip_through_a_world_meta() {
+        let rules = sample_accept().world_rules;
+        let mut meta = crate::save::WorldMeta::new("joined");
+        rules.apply_to_meta(&mut meta);
+        assert_eq!(WorldRules::from_meta(&meta), rules);
     }
 
     #[test]
@@ -1691,6 +1903,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -1753,6 +1966,7 @@ mod tests {
             handle_credential: Some(cred.clone()),
             skin_key: 0x0123_4567_89AB_CDEF,
             client_nonce_hex: "abc123".to_string(),
+            worldgen_version: crate::world::WORLDGEN_VERSION,
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (_ptype, payload) = deserialize_header(&bytes).unwrap();

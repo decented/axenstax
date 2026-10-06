@@ -12,6 +12,32 @@ use crate::chunk::{Chunk, CHUNK_SIZE};
 /// Maximum chunk Y coordinate for terrain generation.
 pub const MAX_CHUNK_Y: i32 = 5;
 
+/// Version of the terrain generator's output (gap-audit T2-9, Spec 02 §5).
+///
+/// **Bump this whenever generation output for a given seed + world flags
+/// changes** — terrain shape, biomes, caves, ore, trees, vegetation, villages,
+/// hideouts, ravines, mineshafts, or the flat/void presets. Everything reached
+/// from [`World::generate_column`] counts. The golden test in
+/// `test_integration/worldgen_golden.rs` pins the output and fails until the
+/// bump (and its new hash) land together.
+///
+/// A joiner generates the host's terrain locally from the seed in
+/// `JoinAcceptPacket`, so the host sends this number there and the joiner
+/// sends its own in `JoinRequestPacket`. On a mismatch the joiner warns the
+/// player (terrain may differ) and the host records it on the player
+/// (`ServerPlayer::worldgen_mismatch`) for a later pass to push real chunks.
+///
+/// **Not yet a pure function of seed + flags; see Phase B0.** Known hidden
+/// inputs, so two machines on the same version can still differ:
+/// `BiomeGenerator::reserve_richness` (live server state from `StateUpdate`,
+/// picks deepslate variants; a joiner's first columns use the default before
+/// any update arrives), Brigand Hideouts reading `village_anchors` (so they
+/// depend on the ORDER columns were generated in), the bundled plan registry
+/// villages build from, and `sin`/`cos`/`powf` rounding across platforms
+/// (native vs WASM libm). The golden test generates in a fixed order, so it
+/// pins output but does not prove purity.
+pub const WORLDGEN_VERSION: u32 = 1;
+
 // `BlockPos`/`ChunkPos` (plain (x,y,z) wrapper structs) were removed here —
 // zero references anywhere; every call site in this codebase addresses
 // positions as raw `(i32, i32, i32)` tuples instead, so these predate that
@@ -946,6 +972,22 @@ impl World {
     /// here via a hand-written scenario def.
     pub fn has_flat_floor(&self) -> bool {
         self.world_type == "flat" || self.world_type == crate::save::RETIRED_GALLERY_WORLD_TYPE
+    }
+
+    /// Mirror a world meta's generation + rule flags onto this live `World`
+    /// (the runtime mirrors above). Every world-entry seam calls it BEFORE any
+    /// column is generated — a local load, the hosted server's `initial_load`,
+    /// and a joiner building the host's world from `JoinAccept` (T2-9) — so
+    /// they can't drift apart. Explosives and fire spread live on the game /
+    /// server state, not here.
+    pub fn apply_meta_rules(&mut self, meta: &crate::save::WorldMeta) {
+        self.is_workshop = meta.is_workshop;
+        self.world_type = meta.world_type.clone();
+        self.ground = meta.ground.clone();
+        self.water_depth = meta.water_depth;
+        self.time_lock = meta.time_lock.clone();
+        self.mobs_enabled = meta.mobs_enabled;
+        self.keep_inventory = meta.keep_inventory;
     }
 
     /// Spec 02 §7.5 — every chunk a save must write: the loaded chunks plus the

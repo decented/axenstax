@@ -182,7 +182,9 @@ fn protocol_version_is_the_pinned_value() {
     //   ONE reliable, ordered stream as `u32 LE length + payload` (client opens
     //   it with a zero-length hello); datagrams are gone. The server closes a
     //   client with more than 8 MiB queued. No packet shape changed.
-    assert_eq!(protocol::PROTOCOL_VERSION, 64);
+    // v65 (2026-10-06): JoinAccept gains `world_rules` + `worldgen_version`,
+    //   JoinRequest gains `worldgen_version` (gap-audit T2-9).
+    assert_eq!(protocol::PROTOCOL_VERSION, 65);
 }
 
 #[test]
@@ -194,6 +196,7 @@ fn join_request_round_trips_bincode() {
         handle_credential: None,
         skin_key: 0,
         client_nonce_hex: String::new(),
+        worldgen_version: crate::world::WORLDGEN_VERSION,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinRequest, &req);
     let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();
@@ -256,6 +259,8 @@ fn join_accept_carries_spawn_and_game_mode() {
             sku: None,
             price: None,
         }],
+        world_rules: protocol::WorldRules::default(),
+        worldgen_version: crate::world::WORLDGEN_VERSION,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

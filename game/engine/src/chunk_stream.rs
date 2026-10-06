@@ -534,10 +534,17 @@ impl super::GameState {
         // Rebuild the derived render registry (official + wardrobe + override).
         self.reapply_overrides();
 
+        let cs = CHUNK_SIZE as i32;
+        // A joined session starts where the HOST placed us (JoinAccept spawn,
+        // T2-9), not at this machine's own fresh-world spawn search.
+        if let Some(spawn) = self.pending_join_spawn.take() {
+            log::info!("Joined-world spawn from the host at {spawn:?}");
+            self.place_player0_and_pregen(spawn);
+        }
+
         // Apply a pending spawn-pref override (moved here from `stream_chunks`):
         // resolve the requested spawn, move the player, and pre-generate a small
         // area so they don't drop into void before the queue fills the rest in.
-        let cs = CHUNK_SIZE as i32;
         if !matches!(self.pending_spawn_pref, crate::spawn_pref::SpawnPref::Default) {
             let saved = self.players[0].player.pos;
             let new_pos = crate::spawn_pref::resolve_spawn(
@@ -551,22 +558,7 @@ impl super::GameState {
                     "Spawn override ({:?}): teleporting from {:?} to {:?}",
                     self.pending_spawn_pref, saved, new_pos,
                 );
-                self.players[0].player.pos = new_pos;
-                self.players[0].player.velocity = glam::Vec3::ZERO;
-                self.players[0].player.reset_fall();
-                let np_cx = (new_pos.x.floor() as i32).div_euclid(cs);
-                let np_cz = (new_pos.z.floor() as i32).div_euclid(cs);
-                for dx in -2..=2 {
-                    for dz in -2..=2 {
-                        let cx = np_cx + dx;
-                        let cz = np_cz + dz;
-                        if !self.loaded_columns.contains(&(cx, cz)) {
-                            load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, true);
-                            crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
-                            self.loaded_columns.insert((cx, cz));
-                        }
-                    }
-                }
+                self.place_player0_and_pregen(new_pos);
             }
             self.pending_spawn_pref = crate::spawn_pref::SpawnPref::Default;
         }
@@ -589,6 +581,30 @@ impl super::GameState {
             dx * dx + dz * dz
         });
         self.load_queue = cols.into();
+    }
+
+    /// Move player 0 to `pos` (at rest) and pre-generate + light the 5×5
+    /// columns around it, so they don't drop into void before the load queue
+    /// fills the rest in. Shared by the joined-world spawn and the spawn-pref
+    /// override in `begin_load`.
+    fn place_player0_and_pregen(&mut self, pos: glam::Vec3) {
+        let cs = CHUNK_SIZE as i32;
+        self.players[0].player.pos = pos;
+        self.players[0].player.velocity = glam::Vec3::ZERO;
+        self.players[0].player.reset_fall();
+        let np_cx = (pos.x.floor() as i32).div_euclid(cs);
+        let np_cz = (pos.z.floor() as i32).div_euclid(cs);
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                let cx = np_cx + dx;
+                let cz = np_cz + dz;
+                if !self.loaded_columns.contains(&(cx, cz)) {
+                    load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, true);
+                    crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
+                    self.loaded_columns.insert((cx, cz));
+                }
+            }
+        }
     }
 
     /// Drain up to `budget` columns from `load_queue`: generate (if missing),

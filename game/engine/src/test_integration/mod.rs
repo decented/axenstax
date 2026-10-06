@@ -42,6 +42,10 @@ pub mod chat;
 pub mod block_machines; // T1-3 — dedicated server ticks the block machines.
 // W2 survival basics — server-side fall damage + drowning for remote players.
 pub mod survival;
+// T2-9 — worldgen golden hash + determinism (WORLDGEN_VERSION).
+pub mod worldgen_golden;
+// T2-9 — a joiner builds the host's world (seed + rules + spawn) from JoinAccept.
+pub mod join_world;
 
 // Online play by contact — the rendezvous end to end over an in-memory relay.
 #[cfg(not(target_arch = "wasm32"))]

@@ -2491,6 +2491,14 @@ impl super::GameState {
     fn step_or_begin_load(&mut self) -> usize {
         let need_begin = matches!(&self.mode, GameMode::Loading(st) if !st.setup_done);
         if need_begin {
+            // A joined session generates nothing until the host's JoinAccept
+            // says which world this is (T2-9). Keep the screen up meanwhile.
+            if !self.await_joined_world() {
+                if let GameMode::Loading(ref mut st) = self.mode {
+                    st.total = st.total.max(1);
+                }
+                return 1;
+            }
             self.begin_load();
             let total = self.load_queue.len();
             if let GameMode::Loading(ref mut st) = self.mode {
@@ -2849,6 +2857,7 @@ impl super::GameState {
         self.minimap = crate::minimap::MinimapView::default();
         self.map_screen = crate::minimap::MapScreen::default();
         self.loaded_columns.clear();
+        self.pending_join_spawn = None;
         self.mission_idx = 0;
         self.mission_note.clear();
         self.mission_registry.clear();
@@ -2964,6 +2973,74 @@ impl super::GameState {
         // #44 — apply the persisted debug-overlay default on world entry. F3
         // still toggles it live within the session.
         self.show_debug = self.graphics.show_debug_hud;
+    }
+
+    /// Mirror a world meta's generation + rule flags onto the live world and
+    /// the game state's own rule caches. Every world entry runs this BEFORE any
+    /// column is generated; a joined session runs it with the meta built from
+    /// the host's `JoinAccept` (T2-9).
+    fn apply_world_rules(&mut self, meta: &crate::save::WorldMeta) {
+        self.world.apply_meta_rules(meta);
+        self.explosives_enabled = meta.explosives_enabled;
+        self.fire_spread_enabled = meta.fire_spread_enabled;
+    }
+
+    /// The loading-screen gate for a joined session (gap-audit T2-9). Drives
+    /// the join handshake (`poll` also runs the signed-join challenge flow) and
+    /// answers whether `begin_load` may run: `true` when this isn't a joined
+    /// session or the host's world has been applied, `false` while waiting —
+    /// or after the join ended, in which case the player is already back in
+    /// the lobby with the reason.
+    fn await_joined_world(&mut self) -> bool {
+        let waited = match &self.mode {
+            GameMode::Loading(st) => st.elapsed_secs(),
+            _ => 0.0,
+        };
+        let Some(client) = self.remote_client.as_mut() else {
+            return true;
+        };
+        client.poll();
+        let accepted = client.pending_joined_world.take();
+        match crate::remote_client::join_gate(&client.state, accepted, waited) {
+            crate::remote_client::JoinGate::Ready(world) => {
+                self.enter_joined_world(world);
+                true
+            }
+            crate::remote_client::JoinGate::Waiting => false,
+            crate::remote_client::JoinGate::Ended(reason) => {
+                log::warn!("Join ended before the world loaded: {reason}");
+                self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, reason);
+                false
+            }
+        }
+    }
+
+    /// Build the joined world from the host's `JoinAccept`: its seed and rules
+    /// become this session's world meta (never saved — the world is the
+    /// host's), and its spawn is where `begin_load` places player 0.
+    fn enter_joined_world(&mut self, joined: crate::remote_client::JoinedWorld) {
+        let mut meta = joined.to_meta();
+        self.apply_world_seed(crate::remote_client::JOINED_WORLD_FOLDER, &mut meta);
+        self.apply_world_rules(&meta);
+        self.pending_join_spawn = joined.spawn;
+        log::info!(
+            "Joined world: seed {}, type '{}', worldgen v{} (ours v{})",
+            joined.seed,
+            joined.rules.world_type,
+            joined.worldgen_version,
+            crate::world::WORLDGEN_VERSION
+        );
+        if let Some(notice) = joined.worldgen_mismatch_notice() {
+            log::warn!(
+                "Host worldgen v{} differs from ours (v{}): terrain may differ",
+                joined.worldgen_version,
+                crate::world::WORLDGEN_VERSION
+            );
+            self.toast = Some((
+                notice.to_string(),
+                Instant::now() + Duration::from_secs(15),
+            ));
+        }
     }
 
     /// Rebuild the world generator + Proof-of-Play secret from a world's
@@ -8497,29 +8574,21 @@ impl super::GameState {
                 // scenario from the persisted meta. Shared with the WASM async
                 // load branch (below) so the two paths can't drift.
                 self.restore_world_stats_and_scenario(&meta);
-                // Spec 40 — mirror the Workshop flag onto the live World BEFORE any
-                // column is streamed, so `generate_column` uses the void preset.
-                self.world.is_workshop = meta.is_workshop;
                 // Satoshi gate — mirror onto the live World so the onboarding
                 // guide spawns in new normal worlds. `world.clear()` reset it to
                 // false on entry; the WASM branches already do this (a fresh
                 // native world has no save blob to restore it from, so without
                 // this line Satoshi never appears on native).
                 self.world.satoshi.enabled = meta.satoshi_enabled;
-                // B1 — mirror flat-world config onto the live World at the
-                // same moment so world-gen reads the correct values.
-                self.world.world_type = meta.world_type.clone();
-                self.world.ground = meta.ground.clone();
-                self.world.water_depth = meta.water_depth;
-                self.world.time_lock = meta.time_lock.clone();
-                self.world.mobs_enabled = meta.mobs_enabled;
-                self.world.keep_inventory = meta.keep_inventory;
+                // Spec 40 + B1 — mirror the Workshop void preset, flat-world
+                // config and rule flags onto the live World BEFORE any column
+                // is streamed, so world-gen reads the correct values. (A joined
+                // session redoes this from the host's JoinAccept, T2-9.)
+                self.apply_world_rules(&meta);
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
                     self.is_commands_enabled = meta.commands_enabled;
-                    self.explosives_enabled = meta.explosives_enabled;
-                                self.fire_spread_enabled = meta.fire_spread_enabled;
                     self.has_seen_license_onboarding = meta.has_seen_license_onboarding || self.graphics.has_seen_license_onboarding;
                     self.difficulty = meta.difficulty.clone();
                     // Phase 1c — native wardrobe restore (per-identity). The wasm

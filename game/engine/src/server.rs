@@ -128,6 +128,12 @@ pub struct ServerPlayer {
     /// World chat (Phase 2) — this player's per-minute chat token bucket.
     /// See `crate::comms::RateLimiter`.
     pub chat_rate: crate::comms::RateLimiter,
+    /// The `WORLDGEN_VERSION` this player's client announced in its
+    /// `JoinRequest` (gap-audit T2-9). A joiner regenerates terrain locally,
+    /// so a different version means its terrain may differ from the host's.
+    /// Local players run this build, so they start at ours. Read through
+    /// [`ServerPlayer::worldgen_mismatch`].
+    pub client_worldgen_version: u32,
 }
 
 /// Resolve the [`ItemRef`] a player is currently holding from the item in
@@ -265,7 +271,15 @@ impl ServerPlayer {
             // Phase 4 fills this in from Signet/Kenspeckle contacts.
             contacts: std::collections::HashMap::new(),
             chat_rate: crate::comms::RateLimiter::new(),
+            client_worldgen_version: crate::world::WORLDGEN_VERSION,
         }
+    }
+
+    /// Does this player's client generate terrain differently from this
+    /// server (another `WORLDGEN_VERSION`)? Such a client needs real chunks
+    /// pushed rather than regenerating them from the seed (Phase B).
+    pub fn worldgen_mismatch(&self) -> bool {
+        self.client_worldgen_version != crate::world::WORLDGEN_VERSION
     }
 }
 
@@ -552,6 +566,23 @@ impl GameServer {
         self.players.len()
     }
 
+    /// This world's rule + generation flags as a joiner needs them, read from
+    /// the live state `initial_load` loaded from the meta (v65 `JoinAccept`,
+    /// gap-audit T2-9).
+    pub fn world_rules(&self) -> crate::protocol::WorldRules {
+        crate::protocol::WorldRules {
+            world_type: self.world.world_type.clone(),
+            ground: self.world.ground.clone(),
+            water_depth: self.world.water_depth,
+            is_workshop: self.world.is_workshop,
+            time_lock: self.world.time_lock.clone(),
+            mobs_enabled: self.world.mobs_enabled,
+            explosives_enabled: self.explosives_enabled,
+            fire_spread_enabled: self.fire_spread_enabled,
+            keep_inventory: self.world.keep_inventory,
+        }
+    }
+
     /// Run initial world load around the first player's position.
     pub fn initial_load(&mut self) {
         // Dedicated server runs with 0 local players — fall back to the world
@@ -574,13 +605,7 @@ impl GameServer {
         let meta = crate::save::load_world_meta(&self.world_name);
         self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
         self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
-        self.world.is_workshop = meta.is_workshop;
-        self.world.world_type = meta.world_type;
-        self.world.ground = meta.ground;
-        self.world.water_depth = meta.water_depth;
-        self.world.time_lock = meta.time_lock;
-        self.world.mobs_enabled = meta.mobs_enabled;
-        self.world.keep_inventory = meta.keep_inventory;
+        self.world.apply_meta_rules(&meta);
         self.fire_spread_enabled = meta.fire_spread_enabled;
         self.explosives_enabled = meta.explosives_enabled;
 
@@ -1816,6 +1841,36 @@ mod tests {
         }
         assert!(planks_burned, "server fire consumed the adjacent planks");
         assert!(saw_fire_delta, "fire spread broadcast as BlockChange");
+    }
+
+    /// T2-9 — the rules a joiner is sent are the ones the server runs, and
+    /// they round-trip through a world meta unchanged.
+    #[test]
+    fn world_rules_mirror_the_live_server_state() {
+        let mut server = GameServer::new(1, "rules_mirror".to_string(), 42);
+        let mut meta = crate::save::WorldMeta::new("rules_mirror");
+        meta.world_type = "flat".into();
+        meta.ground = "water".into();
+        meta.water_depth = 6;
+        meta.time_lock = "night".into();
+        meta.mobs_enabled = false;
+        meta.keep_inventory = true;
+        server.world.apply_meta_rules(&meta);
+        server.fire_spread_enabled = false;
+        server.explosives_enabled = false;
+        meta.fire_spread_enabled = false;
+        meta.explosives_enabled = false;
+        assert_eq!(server.world_rules(), crate::protocol::WorldRules::from_meta(&meta));
+    }
+
+    /// T2-9 — a local player runs this build; a joiner's announced version is
+    /// what decides a mismatch.
+    #[test]
+    fn worldgen_mismatch_reads_the_announced_version() {
+        let mut sp = ServerPlayer::new(Vec3::ZERO);
+        assert!(!sp.worldgen_mismatch());
+        sp.client_worldgen_version = crate::world::WORLDGEN_VERSION + 1;
+        assert!(sp.worldgen_mismatch());
     }
 
     /// `fire_spread_enabled = false` must protect blocks on the server too.
