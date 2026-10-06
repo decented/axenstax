@@ -123,6 +123,14 @@ pub fn tick_entities(ecs: &mut hecs::World, world: &World, registry: &BlockRegis
             Option<&Flying>,
         )>()
     {
+        // Phase B1 review — an entity whose column is not present (never
+        // loaded, dropped or evicted) is frozen where it stands until the
+        // column streams back in: it used to fall through the missing terrain
+        // and be put back at y=80 in a loop. Pets keep their saved position.
+        if !world.is_column_present_at(pos.0.x.floor() as i32, pos.0.z.floor() as i32) {
+            vel.0 = Vec3::ZERO;
+            continue;
+        }
         // Flyers (bees) are gravity-exempt — their species dispatcher owns the
         // full velocity vector (incl. the vertical hover-bob). Block collision
         // below still applies, so they don't pass through walls. Everything
@@ -463,6 +471,14 @@ pub fn spawn_mob(ecs: &mut hecs::World, kind: MobType, position: Vec3) -> hecs::
 /// bound (engine audit 2026-06-04, B: the hostile 80-cap is hostile-only).
 pub struct Scattered;
 
+/// Marks a hostile spawned by the night spawner (`spawning::tick_mob_spawning`).
+/// Night spawns are never saved, so — like `Scattered` wildlife — they are
+/// reclaimed when their column unloads (`despawn_mobs_in_column`). Frozen in an
+/// unloaded column they used to hold a slot of the hostile cap forever (Phase
+/// B1 review). Hideout brigands (`HomeHideout`, counted by their hideout),
+/// raid/quest spawns and pets carry no marker and stay, frozen.
+pub struct NightSpawn;
+
 /// #129 — marks a world-author **placed** wild mob (e.g. a donkey pinned by its
 /// statue, via `/place`). Like a tamed pet it is NOT `Scattered`, so it survives
 /// chunk unload; unlike a tamed pet it has no owner. Persisted through the
@@ -499,21 +515,28 @@ pub fn scattered_mob_count(ecs: &hecs::World) -> usize {
     ecs.query::<&Scattered>().iter().count()
 }
 
-/// Despawn every [`Scattered`] mob whose position lies in column `(cx, cz)`.
-/// Called when a column unloads. Villagers, golems, tamed pets and other
-/// non-scattered mobs are left untouched (they aren't tagged `Scattered`).
+/// Despawn every [`Scattered`] mob and every [`NightSpawn`] hostile whose
+/// position lies in column `(cx, cz)`. Called when a column unloads.
+/// Villagers, golems, tamed pets, hideout brigands and other unmarked mobs are
+/// left untouched (frozen until the column returns — `tick_entities`).
 /// Returns the number despawned.
 pub fn despawn_mobs_in_column(ecs: &mut hecs::World, cx: i32, cz: i32) -> usize {
     let cs = crate::chunk::CHUNK_SIZE as i32;
-    let ids: Vec<hecs::Entity> = ecs
+    let in_column = |pos: &Position| {
+        (pos.0.x.floor() as i32).div_euclid(cs) == cx && (pos.0.z.floor() as i32).div_euclid(cs) == cz
+    };
+    let mut ids: Vec<hecs::Entity> = ecs
         .query::<(&Position, &Scattered)>()
         .iter()
-        .filter(|(_, (pos, _))| {
-            (pos.0.x.floor() as i32).div_euclid(cs) == cx
-                && (pos.0.z.floor() as i32).div_euclid(cs) == cz
-        })
+        .filter(|(_, (pos, _))| in_column(pos))
         .map(|(id, _)| id)
         .collect();
+    ids.extend(
+        ecs.query::<(&Position, &NightSpawn)>()
+            .iter()
+            .filter(|(_, (pos, _))| in_column(pos))
+            .map(|(id, _)| id),
+    );
     for id in &ids {
         let _ = ecs.despawn(*id);
     }
@@ -1904,7 +1927,9 @@ mod tests {
     #[test]
     fn flying_mob_is_gravity_exempt_grounded_mob_is_not() {
         let mut ecs = hecs::World::new();
-        let world = crate::world::World::new();
+        let mut world = crate::world::World::new();
+        // Column (0, 0) must be present, or both are frozen (Phase B1 review).
+        world.set_block(0, 0, 0, crate::block::STONE);
         let registry = crate::block::BlockRegistry::new();
         // A flyer (bee) and a grounded mob, both starting at rest in open air.
         let flyer = ecs.spawn((
@@ -1925,6 +1950,29 @@ mod tests {
         let grounded_vy = ecs.get::<&Velocity>(grounded).unwrap().0.y;
         assert_eq!(flyer_vy, 0.0, "a Flying mob must not accumulate gravity");
         assert!(grounded_vy < 0.0, "a grounded mob must fall, got vy={grounded_vy}");
+    }
+
+    /// Phase B1 review (LOW) — an entity whose column is not present (never
+    /// loaded, dropped or evicted) is frozen where it stands: before, it fell
+    /// through the missing terrain and was put back at y=80 in a loop, ticked
+    /// and broadcast forever. One in a present column still falls.
+    #[test]
+    fn an_entity_in_a_column_that_is_not_loaded_is_frozen() {
+        let mut ecs = hecs::World::new();
+        let mut world = crate::world::World::new();
+        let registry = crate::block::BlockRegistry::new();
+        world.set_block(8, 0, 8, crate::block::STONE); // column (0, 0) is present
+        let live = spawn_mob(&mut ecs, MobType::Cow, Vec3::new(8.5, 60.0, 8.5));
+        let far_at = Vec3::new(40.5, 60.0, 8.5); // column (2, 0): nothing there
+        let far = spawn_mob(&mut ecs, MobType::Cow, far_at);
+        ecs.get::<&mut Velocity>(far).unwrap().0 = Vec3::new(0.2, -0.5, 0.0);
+        for _ in 0..400 {
+            tick_entities(&mut ecs, &world, &registry);
+        }
+        assert_eq!(ecs.get::<&Position>(far).unwrap().0, far_at, "frozen in place");
+        assert_eq!(ecs.get::<&Velocity>(far).unwrap().0, Vec3::ZERO, "and at rest");
+        let landed = ecs.get::<&Position>(live).unwrap().0.y;
+        assert!((landed - 1.0).abs() < 0.01, "a present column's mob falls and lands: y {landed}");
     }
 
     #[test]

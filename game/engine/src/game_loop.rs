@@ -21545,7 +21545,18 @@ impl super::GameState {
                             .filter(|p| p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
                             .collect();
                         for bc in &state.block_changes {
-                            if self.world.apply_remote_block_change(bc) {
+                            // Phase B1 review — a column this host client has
+                            // not loaded (a joiner's edit near spawn while the
+                            // host is away) is generated, changed and evicted,
+                            // never written as a stray chunk (a 16³ hole that
+                            // the host's save kept). Its world is the record.
+                            if !crate::chunk_stream::remote_change_is_loaded(
+                                &self.loaded_columns, &self.world, bc.x, bc.z,
+                            ) {
+                                crate::chunk_stream::apply_remote_change_to_unloaded_column(
+                                    &mut self.world, &self.biome_gen, bc,
+                                );
+                            } else if self.world.apply_remote_block_change(bc) {
                                 self.rebuild_chunk_at(bc.x, bc.y, bc.z);
                             }
                         }
@@ -21660,6 +21671,15 @@ impl super::GameState {
         // not latest_state — a batched packet loses nothing. Empty vecs on
         // the host/single-player path, so this is a no-op there.
         for bc in &pending_block_changes {
+            // Phase B1 review — drop a change for a column this joiner has not
+            // loaded: applying it conjured a stray chunk that its own
+            // generation later skipped (a 16³ hole). The server's chunk push
+            // (Phase B2) delivers such columns whole (Spec 04 §4.1).
+            if !crate::chunk_stream::remote_change_is_loaded(
+                &self.loaded_columns, &self.world, bc.x, bc.z,
+            ) {
+                continue;
+            }
             // Task 2b — a joiner asks the host to flip a lever and waits for
             // the broadcast, so the latch arrives as a metadata bit rather than
             // a local mutation. `apply_remote_block_change` folds that bit back

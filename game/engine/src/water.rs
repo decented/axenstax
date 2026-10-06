@@ -16,7 +16,7 @@ const MAX_SPREAD_DIST: u8 = 7;
 
 pub struct WaterSystem {
     /// All water source positions (world-gen + player-placed).
-    sources: AHashSet<(i32, i32, i32)>,
+    sources: crate::fluids::SourceSet,
     /// Pending spread: (x, y, z, distance_from_source).
     spread_queue: VecDeque<(i32, i32, i32, u8)>,
     /// Pending retraction checks after a source is removed.
@@ -26,7 +26,7 @@ pub struct WaterSystem {
 impl WaterSystem {
     pub fn new() -> Self {
         Self {
-            sources: AHashSet::new(),
+            sources: crate::fluids::SourceSet::default(),
             spread_queue: VecDeque::new(),
             retract_queue: VecDeque::new(),
         }
@@ -41,14 +41,14 @@ impl WaterSystem {
 
     /// Remove a water source and queue retraction.
     pub fn remove_source(&mut self, x: i32, y: i32, z: i32) {
-        if self.sources.remove(&(x, y, z)) {
+        if self.sources.remove((x, y, z)) {
             self.retract_queue.push_back((x, y, z));
         }
     }
 
     /// Returns true if the position is a registered source.
     pub fn is_source(&self, x: i32, y: i32, z: i32) -> bool {
-        self.sources.contains(&(x, y, z))
+        self.sources.contains((x, y, z))
     }
 
     /// Called when a non-water block is broken adjacent to water.
@@ -72,7 +72,7 @@ impl WaterSystem {
     fn freeze_adjacent_lava(world: &mut World, x: i32, y: i32, z: i32, dirty: &mut Vec<(i32, i32, i32)>) {
         for &(dx, dy, dz) in &[(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
             let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-            if world.get_block(nx, ny, nz) == block::LAVA && !world.is_evicted_at(nx, nz) {
+            if world.get_block(nx, ny, nz) == block::LAVA && world.is_column_present_at(nx, nz) {
                 world.set_block(nx, ny, nz, block::OBSIDIAN);
                 dirty.push((nx, ny, nz));
             }
@@ -90,10 +90,11 @@ impl WaterSystem {
             };
             processed += 1;
 
-            // Spec 02 §7.5 — an evicted column is a barrier (reads go through
-            // to its real blocks, so without this the flow would continue
-            // inside it). Drop the entry; restore re-registers its sources.
-            if world.is_evicted_at(x, z) || world.get_block(x, y, z) != block::WATER {
+            // Spec 02 §7.5 — a column that is not present (evicted, dropped or
+            // never loaded) is a barrier: an evicted one's reads go through to
+            // its real blocks, so without this the flow would continue inside
+            // it. Drop the entry; its stream-in re-registers its sources.
+            if !world.is_column_present_at(x, z) || world.get_block(x, y, z) != block::WATER {
                 continue;
             }
 
@@ -113,7 +114,9 @@ impl WaterSystem {
                 for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                     let nx = x + dx;
                     let nz = z + dz;
-                    if !world.is_evicted_at(nx, nz) && world.get_block(nx, y, nz) == block::AIR {
+                    // Never into a column that is not present: `set_block`
+                    // would conjure a chunk its generation then skips.
+                    if world.is_column_present_at(nx, nz) && world.get_block(nx, y, nz) == block::AIR {
                         world.set_block(nx, y, nz, block::WATER);
                         dirty.push((nx, y, nz));
                         Self::freeze_adjacent_lava(world, nx, y, nz, &mut dirty);
@@ -163,7 +166,7 @@ impl WaterSystem {
                 let ny = sy + dy;
                 let nz = sz + dz;
                 if world.get_block(nx, ny, nz) == block::WATER && !self.is_source(nx, ny, nz)
-                    && !world.is_evicted_at(nx, nz)
+                    && world.is_column_present_at(nx, nz)
                     && visited.insert((nx, ny, nz)) {
                         frontier.push_back((nx, ny, nz, 0));
                     }
@@ -183,7 +186,7 @@ impl WaterSystem {
                         let nz = z + dz;
                         if world.get_block(nx, ny, nz) == block::WATER
                             && !self.is_source(nx, ny, nz)
-                            && !world.is_evicted_at(nx, nz)
+                            && world.is_column_present_at(nx, nz)
                             && visited.insert((nx, ny, nz))
                         {
                             frontier.push_back((nx, ny, nz, dist + 1));
@@ -221,7 +224,11 @@ impl WaterSystem {
         frontier.push_back((x, y, z, 0));
 
         while let Some((cx, cy, cz, dist)) = frontier.pop_front() {
-            if self.is_source(cx, cy, cz) {
+            // A water cell in a column that is not present (read through an
+            // evicted one) may be fed by a source this system forgot when the
+            // column streamed out: assume it is, so no flow is drained on the
+            // word of a column the sim cannot see.
+            if self.is_source(cx, cy, cz) || !world.is_column_present_at(cx, cz) {
                 return true;
             }
             if dist >= MAX_SPREAD_DIST {
@@ -258,6 +265,14 @@ impl WaterSystem {
                 }
             }
         }
+    }
+
+    /// Forget the sources in chunk column `(cx, cz)` as it streams out (Phase
+    /// B1 review: the set otherwise grew with every column ever loaded). No
+    /// retraction — the blocks stay; `register_column_sources` re-adds them
+    /// on stream-in. Queued spread entries there are dropped when popped.
+    pub fn forget_column(&mut self, cx: i32, cz: i32) {
+        self.sources.forget_column(cx, cz);
     }
 }
 

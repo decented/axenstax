@@ -1002,9 +1002,9 @@ impl World {
     }
 
     /// Spec 02 §7.5 — is the column holding block `(x, z)` in the evicted
-    /// store? Block reads see its real blocks (read-through), so the fluid and
-    /// fire sims use this as a barrier: they neither spread into nor keep
-    /// ticking inside an unloaded column (restore re-registers its state).
+    /// store? Block reads see its real blocks (read-through); a block write
+    /// there goes through to the store, so a remote edit is kept. The sims use
+    /// the wider [`World::is_column_present_at`] as their barrier.
     #[inline]
     pub fn is_evicted_at(&self, x: i32, z: i32) -> bool {
         !self.evicted_columns.is_empty()
@@ -1012,6 +1012,26 @@ impl World {
                 x.div_euclid(CHUNK_SIZE as i32),
                 z.div_euclid(CHUNK_SIZE as i32),
             ))
+    }
+
+    /// Spec 02 §7.5 — is the column holding block `(x, z)` present: generated
+    /// or restored into the live chunks, so at least one of its chunks holds a
+    /// real block? False for a column never loaded, one dropped on stream-out,
+    /// and an evicted one (its chunks sit in the evicted store). An empty chunk
+    /// does not count: block-light BFS leaves light-only chunks in a
+    /// never-loaded neighbour, and `generate_column` refills those as absent.
+    ///
+    /// The world sims (water, lava, fire, sapling growth, entity physics and
+    /// mob AI) treat a column that is not present as a barrier: they neither
+    /// write into it nor tick inside it. A `set_block` into a never-loaded
+    /// column conjures a chunk (known debt), and `generate_column` skips a
+    /// non-empty chunk, so a stray lava cell there left the streamed-in column
+    /// without its bedrock and stone in that slice (Phase B1 review).
+    #[inline]
+    pub fn is_column_present_at(&self, x: i32, z: i32) -> bool {
+        let (cx, cz) = (x.div_euclid(CHUNK_SIZE as i32), z.div_euclid(CHUNK_SIZE as i32));
+        (0..=MAX_CHUNK_Y)
+            .any(|cy| self.chunks.get(&(cx, cy, cz)).is_some_and(|c| !c.is_empty()))
     }
 
     /// The chunk a block/placed-bit write at `(cx, cy, cz)` lands in: the

@@ -26,16 +26,30 @@ fn mob_cap_holds_across_many_tick_cycles() {
     // Pre-populate at cap. GameServer::tick runs the spawner every 400 ticks
     // only when world_time%400==0; run a few thousand ticks to cross several
     // cycles and confirm the cap isn't exceeded.
+    // All on the floor: a hostile in a column with no blocks is frozen and
+    // does not count toward the cap (Phase B1 review), so the old row out to
+    // x = 79 left 32 of them outside it.
     for i in 0..80 {
         entity::spawn_mob(&mut host.server.ecs, MobType::Brigand,
-            Vec3::new(i as f32, 12.0, 0.0));
+            Vec3::new((i % 40) as f32 - 20.0, 12.0, (i / 40) as f32 * 4.0));
     }
     assert_eq!(host.ecs().query::<&crate::entity::MobKind>().iter().count(), 80);
 
     host.tick(2000);
 
-    let count = host.ecs().query::<&crate::entity::MobKind>().iter().count();
-    assert!(count <= 80, "soft-cap breached: {count} > 80");
+    // The cap counts hostiles in present columns (Phase B1 review): a brigand
+    // that walks off this hand-built floor (most end up just past its z = -32
+    // edge) into a column with no blocks is frozen there and no longer counts.
+    let world = &host.server.world;
+    let (mut counted, mut frozen) = (0, 0);
+    for (_, (_, pos)) in host.ecs().query::<(&crate::entity::MobKind, &entity::Position)>().iter() {
+        if world.is_column_present_at(pos.0.x.floor() as i32, pos.0.z.floor() as i32) {
+            counted += 1;
+        } else {
+            frozen += 1;
+        }
+    }
+    assert!(counted <= 80, "soft-cap breached: {counted} > 80 ({frozen} frozen off the floor)");
 }
 
 #[test]

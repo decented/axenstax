@@ -767,8 +767,17 @@ entered is loaded and lit before it is used.
   pass (mob spawning reads block light and crop growth reads light, so a
   streamed column must be lit like a loaded one), water / lava / fire
   registration, wildlife scatter, mark loaded. `stream_out` = unmark, despawn
-  the column's `Scattered` wildlife, `evict_column`. The client adds meshing
-  and mesh drops around these.
+  the column's `Scattered` wildlife and `NightSpawn` hostiles, forget its water
+  and lava sources, `evict_column`. The client adds meshing and mesh drops
+  around these.
+- **The edge of the region (review fixes, 2026-10-06).** Every sim treats a
+  column that is not present (`World::is_column_present_at`: dropped, evicted
+  or never loaded) as a barrier. Water, lava and fire never spread into one and
+  a sapling's canopy never grows into one. Entities there are frozen, with no
+  physics or AI, and do not count toward the hostile cap (Spec 02 §7.5.1,
+  Spec 05 §9.4). Before this, cave lava at the edge flowed into the
+  never-loaded neighbour and its stray chunk cost that column its bedrock when
+  it streamed in.
 - **Settled skip.** When a pass leaves nothing waiting, the streamer records
   the anchor set and skips later passes until an anchor changes column (or the
   sim distance changes). A void column is therefore re-checked only when an
@@ -790,7 +799,7 @@ columns in the same tick (a mass teleport) leaves the extra ones over unloaded
 air for a tick or more; there is no physics hold for that case yet. The first
 tick after booting a large save evicts every saved column beyond
 `sim + UNLOAD_HYSTERESIS` at once (`despawn_mobs_in_column` scans the scattered
-mobs per column), a one-off spike with no I/O. `GameServer::try_save` skips an
+and night-spawned mobs per column), a one-off spike with no I/O. `GameServer::try_save` skips an
 all-air chunk without deleting its old file, so a chunk dug down to all air
 comes back from that file after a restart (the client's save deletes it).
 Tests:

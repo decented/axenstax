@@ -799,14 +799,51 @@ impl ColumnSims<'_> {
     /// Stream a column out: unmark it, reclaim its scattered wildlife so
     /// re-entry re-scatters a fresh set rather than piling onto the old
     /// (engine audit B — tamed pets / villagers / golems aren't `Scattered`, so
-    /// they survive), and evict its blocks: edited / saved columns go to the
-    /// evicted store (and are still written by every save path); pristine
-    /// world-gen is dropped (Spec 02 §7.5).
+    /// they survive, frozen) and its night-spawned hostiles (never saved),
+    /// forget its water and lava sources (stream-in re-registers them), and
+    /// evict its blocks: edited / saved columns go to the evicted store (and
+    /// are still written by every save path); pristine world-gen is dropped
+    /// (Spec 02 §7.5).
     pub(crate) fn stream_out(&mut self, cx: i32, cz: i32) {
         self.loaded.remove(&(cx, cz));
         crate::entity::despawn_mobs_in_column(self.ecs, cx, cz);
+        self.water.forget_column(cx, cz);
+        self.lava.forget_column(cx, cz);
         unload_column_blocks(self.world, cx, cz);
     }
+}
+
+/// Phase B1 review — does a server block change for block `(x, z)` land in a
+/// column this client holds? A loaded column, or an evicted one (the write goes
+/// through to the evicted store, so a later restore is current). Anywhere else
+/// `World::set_block` conjures a stray chunk that this client's own generation
+/// later skips, leaving a 16³ hole (and a LAN host's save keeps it).
+pub(crate) fn remote_change_is_loaded(
+    loaded: &ahash::AHashSet<(i32, i32)>,
+    world: &crate::world::World,
+    x: i32,
+    z: i32,
+) -> bool {
+    let cs = CHUNK_SIZE as i32;
+    loaded.contains(&(x.div_euclid(cs), z.div_euclid(cs))) || world.is_evicted_at(x, z)
+}
+
+/// Phase B1 review — keep a server block change for a column this client has
+/// not loaded: generate the column, apply the change, evict it (Spec 02 §7.5:
+/// an edited column is kept in the evicted store and written by every save; a
+/// change that matches world-gen keeps nothing). For the LAN host, whose world
+/// is the save of record: a joiner's edit near the spawn while the host is
+/// away must not be lost. Joiners drop such changes instead (Spec 04 §4.1).
+pub(crate) fn apply_remote_change_to_unloaded_column(
+    world: &mut crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+    bc: &crate::protocol::BlockChange,
+) {
+    let cs = CHUNK_SIZE as i32;
+    let (cx, cz) = (bc.x.div_euclid(cs), bc.z.div_euclid(cs));
+    load_column_blocks(world, cx, cz, biome_gen, true);
+    world.apply_remote_block_change(bc);
+    unload_column_blocks(world, cx, cz);
 }
 
 /// Columns in `loaded` that are more than `unload_dist` chunks (Chebyshev,
@@ -1135,6 +1172,221 @@ mod tests {
         sims.stream_in(0, 0);
         assert!(!sims.world.is_column_evicted(0, 0), "restored to the live chunks");
         assert_eq!(sims.world.get_block(3, 90, 3), block::GLASS, "the edit survives");
+    }
+
+    /// Owns everything a [`ColumnSims`] borrows, for the B1-review tests.
+    struct SimsFixture {
+        bg: BiomeGenerator,
+        registry: crate::block::BlockRegistry,
+        world: crate::world::World,
+        loaded: ahash::AHashSet<(i32, i32)>,
+        water: crate::water::WaterSystem,
+        lava: crate::lava::LavaSystem,
+        fire: crate::fire::FireSystem,
+        ecs: hecs::World,
+    }
+
+    impl SimsFixture {
+        fn new() -> Self {
+            Self {
+                bg: BiomeGenerator::new(42),
+                registry: crate::block::BlockRegistry::new(),
+                world: crate::world::World::new(),
+                loaded: ahash::AHashSet::new(),
+                water: crate::water::WaterSystem::new(),
+                lava: crate::lava::LavaSystem::new(),
+                fire: crate::fire::FireSystem::new(),
+                ecs: hecs::World::new(),
+            }
+        }
+
+        fn sims(&mut self) -> ColumnSims<'_> {
+            ColumnSims {
+                world: &mut self.world,
+                loaded: &mut self.loaded,
+                registry: &self.registry,
+                biome_gen: &self.bg,
+                water: &mut self.water,
+                lava: &mut self.lava,
+                fire: &mut self.fire,
+                ecs: &mut self.ecs,
+                tick: 0,
+            }
+        }
+    }
+
+    /// Phase B1 review (MED-HIGH) — a fluid on a loaded column's edge never
+    /// flows into a column that was never loaded. `set_block` there conjured a
+    /// chunk, `generate_column` skips a non-empty chunk, so when the column
+    /// streamed in that slice had no bedrock or stone (and a save kept it).
+    #[test]
+    fn fluids_never_flow_into_a_never_loaded_column() {
+        let mut fx = SimsFixture::new();
+        fx.sims().stream_in(0, 0);
+        // A lava and a water source on (0, 0)'s east edge, floored, beside
+        // the never-loaded column (1, 0).
+        let lava_at = (15, 6, 4);
+        let water_at = (15, 6, 12);
+        for (p, fluid) in [(lava_at, block::LAVA), (water_at, block::WATER)] {
+            fx.world.set_block(p.0, p.1 - 1, p.2, block::STONE);
+            fx.world.set_block(p.0, p.1, p.2, fluid);
+        }
+        fx.lava.add_source(lava_at.0, lava_at.1, lava_at.2);
+        fx.water.add_source(water_at.0, water_at.1, water_at.2);
+        for _ in 0..60 {
+            fx.water.tick_spread(&mut fx.world);
+            fx.lava.tick_spread(&mut fx.world);
+        }
+        // (Block light from cave lava may leave empty, light-only chunks
+        // there; `generate_column` refills those. No block was written.)
+        assert!(
+            (0..=MAX_CHUNK_Y).all(|cy| fx.world.get_chunk(1, cy, 0).is_none_or(|c| c.is_empty())),
+            "no block was written into the never-loaded column"
+        );
+
+        fx.sims().stream_in(1, 0);
+        for x in 16..32 {
+            for z in 0..16 {
+                assert_eq!(fx.world.get_block(x, 0, z), block::BEDROCK, "bedrock at ({x}, 0, {z})");
+            }
+        }
+    }
+
+    /// Phase B1 review (LOW-MED) — streaming a column out forgets its water
+    /// and lava sources (water registers every water block, so an ocean world
+    /// grew the sets without bound); streaming it back in re-registers them.
+    #[test]
+    fn stream_out_forgets_a_columns_fluid_sources_and_stream_in_restores_them() {
+        let mut fx = SimsFixture::new();
+        fx.sims().stream_in(0, 0);
+        fx.sims().stream_in(1, 0);
+        let water_at = (3, 90, 3);
+        let lava_at = (5, 90, 5);
+        let kept_at = (20, 90, 3); // column (1, 0) stays loaded
+        fx.world.place_player_block(water_at.0, water_at.1, water_at.2, block::WATER);
+        fx.world.place_player_block(lava_at.0, lava_at.1, lava_at.2, block::LAVA);
+        fx.world.place_player_block(kept_at.0, kept_at.1, kept_at.2, block::WATER);
+        fx.water.add_source(water_at.0, water_at.1, water_at.2);
+        fx.lava.add_source(lava_at.0, lava_at.1, lava_at.2);
+        fx.water.add_source(kept_at.0, kept_at.1, kept_at.2);
+
+        fx.sims().stream_out(0, 0);
+        assert!(!fx.water.is_source(water_at.0, water_at.1, water_at.2), "water source forgotten");
+        assert!(!fx.lava.is_source(lava_at.0, lava_at.1, lava_at.2), "lava source forgotten");
+        assert!(fx.water.is_source(kept_at.0, kept_at.1, kept_at.2), "a loaded column's source stays");
+
+        fx.sims().stream_in(0, 0);
+        assert!(fx.water.is_source(water_at.0, water_at.1, water_at.2), "re-registered on stream-in");
+        assert!(fx.lava.is_source(lava_at.0, lava_at.1, lava_at.2), "re-registered on stream-in");
+    }
+
+    /// Forgetting an unloaded column's sources must not drain the flow they
+    /// feed across the border: a retract next door that walks into the
+    /// unloaded column assumes the flow there is fed (it cannot see).
+    #[test]
+    fn a_retract_does_not_drain_flow_fed_from_an_unloaded_column() {
+        let mut fx = SimsFixture::new();
+        fx.sims().stream_in(0, 0);
+        fx.sims().stream_in(1, 0);
+        for x in 10..=17 {
+            for z in 2..=7 {
+                fx.world.place_player_block(x, 89, z, block::STONE);
+            }
+        }
+        let fed_from = (16, 90, 4); // column (1, 0)
+        let local = (14, 90, 6); // column (0, 0)
+        for p in [fed_from, local] {
+            fx.world.place_player_block(p.0, p.1, p.2, block::WATER);
+            fx.water.add_source(p.0, p.1, p.2);
+        }
+        for _ in 0..80 {
+            fx.water.tick_spread(&mut fx.world);
+        }
+        assert_eq!(fx.world.get_block(14, 90, 5), block::WATER, "fixture: the floor is flooded");
+
+        fx.sims().stream_out(1, 0); // edited: evicted, its source forgotten
+        fx.world.set_block(local.0, local.1, local.2, block::AIR);
+        fx.water.remove_source(local.0, local.1, local.2);
+        for _ in 0..10 {
+            fx.water.tick_retract(&mut fx.world);
+        }
+        assert_eq!(
+            fx.world.get_block(14, 90, 5),
+            block::WATER,
+            "flow within reach of the unloaded column's source is kept"
+        );
+    }
+
+    /// Phase B1 review (LOW) — a night-spawned hostile in a column that
+    /// streams out is despawned (it is never saved, and frozen there it held a
+    /// slot of the hostile cap forever); a hideout's brigand (its hideout
+    /// counts it) and a tamed pet stay, frozen until the column returns.
+    #[test]
+    fn stream_out_reclaims_night_spawns_but_keeps_hideout_brigands_and_pets() {
+        use crate::entity::{spawn_mob, NightSpawn, Position};
+        use crate::mob::MobType;
+        let mut fx = SimsFixture::new();
+        fx.sims().stream_in(0, 0);
+        let at = glam::Vec3::new(8.5, 90.0, 8.5);
+        let night = spawn_mob(&mut fx.ecs, MobType::Brigand, at);
+        fx.ecs.insert_one(night, NightSpawn).unwrap();
+        let guard = spawn_mob(&mut fx.ecs, MobType::Brigand, at);
+        fx.ecs
+            .insert_one(guard, crate::brigand::HomeHideout { anchor: [8, 80, 8] })
+            .unwrap();
+        let wolf = spawn_mob(&mut fx.ecs, MobType::Wolf, at);
+
+        fx.sims().stream_out(0, 0);
+        assert!(!fx.ecs.contains(night), "the night spawn is reclaimed");
+        assert!(fx.ecs.contains(guard), "the hideout brigand stays");
+        assert!(fx.ecs.contains(wolf), "a non-scattered mob stays");
+        assert_eq!(fx.ecs.get::<&Position>(guard).unwrap().0, at, "untouched");
+    }
+
+    /// Phase B1 review (MED) — a client applies a server block change only to
+    /// a column it holds: a loaded one, or an evicted one (the write goes
+    /// through to the store). Anywhere else `set_block` would conjure a stray
+    /// chunk that the client's own generation later skips (a 16³ hole).
+    #[test]
+    fn a_remote_change_lands_only_in_a_loaded_or_evicted_column() {
+        let mut fx = SimsFixture::new();
+        fx.sims().stream_in(0, 0);
+        fx.sims().stream_in(2, 0);
+        fx.world.place_player_block(40, 90, 4, block::GLASS);
+        fx.sims().stream_out(2, 0); // edited: kept in the evicted store
+        assert!(remote_change_is_loaded(&fx.loaded, &fx.world, 3, 4), "loaded");
+        assert!(remote_change_is_loaded(&fx.loaded, &fx.world, 40, 4), "evicted: write-through");
+        assert!(!remote_change_is_loaded(&fx.loaded, &fx.world, 20, 4), "never loaded");
+        assert!(!remote_change_is_loaded(&fx.loaded, &fx.world, -1, 4), "never loaded (west)");
+    }
+
+    /// The LAN host's world is the save of record, so a server change for a
+    /// column its client has not loaded (a joiner's edit near spawn while the
+    /// host is away) is kept, not dropped: the column is generated, the change
+    /// applied, and the column evicted. It streams back in whole — bedrock
+    /// and the edit.
+    #[test]
+    fn a_hosts_remote_change_in_an_unloaded_column_is_kept_whole() {
+        let mut fx = SimsFixture::new();
+        let bc = crate::protocol::BlockChange::with_meta(20, 90, 4, block::GLASS, 0);
+        apply_remote_change_to_unloaded_column(&mut fx.world, &fx.bg, &bc);
+        assert!(fx.world.is_column_evicted(1, 0), "kept in the evicted store");
+        assert!(!(0..=MAX_CHUNK_Y).any(|cy| fx.world.has_chunk(1, cy, 0)), "no stray live chunk");
+
+        fx.sims().stream_in(1, 0);
+        assert_eq!(fx.world.get_block(20, 90, 4), block::GLASS, "the change is there");
+        for x in 16..32 {
+            for z in 0..16 {
+                assert_eq!(fx.world.get_block(x, 0, z), block::BEDROCK, "bedrock at ({x}, 0, {z})");
+            }
+        }
+
+        // A change that matches world-gen keeps nothing.
+        let mut fx = SimsFixture::new();
+        let same = crate::protocol::BlockChange::with_meta(40, 0, 4, block::BEDROCK, 0);
+        apply_remote_change_to_unloaded_column(&mut fx.world, &fx.bg, &same);
+        assert!(!fx.world.is_column_evicted(2, 0), "a pristine column is dropped again");
+        assert!(!(0..=MAX_CHUNK_Y).any(|cy| fx.world.has_chunk(2, cy, 0)));
     }
 
     #[test]

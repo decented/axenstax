@@ -20,13 +20,15 @@ use crate::world::World;
 /// Gated upstream on `world_time % 400 == 0`; this function runs the full cycle
 /// unconditionally when called. `player_positions` is the set of player foot
 /// positions the spawner scans around (24-64 blocks out). Soft-capped at 80
-/// total mobs.
+/// hostiles in present columns. First reclaims night spawns stranded in a
+/// column that is not present (Phase B1 review).
 pub fn tick_mob_spawning(
     ecs: &mut hecs::World,
     world: &World,
     world_time: u32,
     player_positions: &[Vec3],
 ) {
+    reclaim_stranded_night_spawns(ecs, world);
     // No mobs in the Workshop — it's a creative authoring room, and mobs make
     // the space unusable (owner report 2026-06-18). The guard is on
     // `is_workshop`, not a saved meta flag, so existing Workshop saves are fixed
@@ -44,10 +46,16 @@ pub fn tick_mob_spawning(
         // all mobs let dense passive wildlife (cows, sheep, etc.) fill the cap
         // and silently suppress every night hostile spawn ("no monsters at
         // night" once you have a farm). Count only hostiles against the cap.
+        // Only hostiles in a present column count (Phase B1 review): one
+        // frozen in a column that is not loaded (a hideout brigand, a raid
+        // mob) must not hold the players' own area's spawns hostage.
         let hostile_count: usize = ecs
-            .query::<&MobKind>()
+            .query::<(&MobKind, &entity::Position)>()
             .iter()
-            .filter(|(_, k)| crate::mob::mob_def(k.0).category == crate::mob::MobCategory::Hostile)
+            .filter(|(_, (k, p))| {
+                crate::mob::mob_def(k.0).category == crate::mob::MobCategory::Hostile
+                    && world.is_column_present_at(p.0.x.floor() as i32, p.0.z.floor() as i32)
+            })
             .count();
         if hostile_count < 80 {
             for (p_idx, p_pos) in player_positions.iter().enumerate() {
@@ -123,16 +131,39 @@ pub fn tick_mob_spawning(
                                     spawn_pos.y,
                                     spawn_pos.z + dz as f32,
                                 );
-                                entity::spawn_mob(ecs, MobType::Hyena, p);
+                                spawn_night_mob(ecs, MobType::Hyena, p);
                             }
                         } else {
-                            entity::spawn_mob(ecs, kind, spawn_pos);
+                            spawn_night_mob(ecs, kind, spawn_pos);
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// Phase B1 review — despawn every night spawn standing in a column that is not
+/// present. It is frozen there (`entity::tick_entities`) and never saved; one
+/// that walked out of the loaded area into a column that was never loaded would
+/// otherwise wait there for ever, since no stream-out comes for that column.
+fn reclaim_stranded_night_spawns(ecs: &mut hecs::World, world: &World) {
+    let stranded: Vec<hecs::Entity> = ecs
+        .query::<(&entity::Position, &entity::NightSpawn)>()
+        .iter()
+        .filter(|(_, (p, _))| !world.is_column_present_at(p.0.x.floor() as i32, p.0.z.floor() as i32))
+        .map(|(id, _)| id)
+        .collect();
+    for id in stranded {
+        let _ = ecs.despawn(id);
+    }
+}
+
+/// Spawn a night hostile tagged [`entity::NightSpawn`], so its column's unload
+/// reclaims it (it is never saved).
+fn spawn_night_mob(ecs: &mut hecs::World, kind: MobType, pos: Vec3) {
+    let id = entity::spawn_mob(ecs, kind, pos);
+    let _ = ecs.insert_one(id, entity::NightSpawn);
 }
 
 // Hotbar icon rendering moved to hud_ui.rs (egui-based).
@@ -213,6 +244,44 @@ mod tests {
         }
         let after = ecs.query::<&MobKind>().iter().count();
         assert_eq!(after, 80, "soft-cap must prevent overshoot");
+    }
+
+    /// Phase B1 review (LOW) — hostiles frozen in a column that is not loaded
+    /// (here: 80 of them far outside the fixture) no longer fill the cap, so
+    /// the players' own area still gets its night spawns; and every night
+    /// spawn is tagged `NightSpawn`, so the column unload can reclaim it.
+    #[test]
+    fn hostiles_in_unloaded_columns_do_not_fill_the_cap_and_night_spawns_are_tagged() {
+        let world = fixture_floor(10);
+        let mut ecs = hecs::World::new();
+        for i in 0..80 {
+            entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(1000.0 + i as f32, 12.0, 0.0));
+        }
+        for t in 0..20 {
+            tick_mob_spawning(&mut ecs, &world, NIGHT + t, &[Vec3::new(0.0, 12.0, 0.0)]);
+        }
+        let spawned = ecs.query::<&MobKind>().iter().count() - 80;
+        assert!(spawned > 0, "the far frozen hostiles must not suppress local spawns");
+        let tagged = ecs.query::<(&MobKind, &entity::NightSpawn)>().iter().count();
+        assert_eq!(tagged, spawned, "every night spawn carries NightSpawn");
+    }
+
+    /// A night spawn that walked out of the loaded area into a column that
+    /// was never loaded is frozen there, and no stream-out will ever reclaim
+    /// it: the spawn cycle does (by day too). An untagged hostile stays.
+    #[test]
+    fn the_spawn_cycle_reclaims_night_spawns_stranded_in_unloaded_columns() {
+        let world = fixture_floor(10);
+        let mut ecs = hecs::World::new();
+        let stranded = entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(500.0, 12.0, 0.0));
+        ecs.insert_one(stranded, entity::NightSpawn).unwrap();
+        let on_floor = entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(5.0, 12.0, 0.0));
+        ecs.insert_one(on_floor, entity::NightSpawn).unwrap();
+        let guard = entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(500.0, 12.0, 0.0));
+        tick_mob_spawning(&mut ecs, &world, DAY, &[Vec3::new(0.0, 12.0, 0.0)]);
+        assert!(!ecs.contains(stranded), "the stranded night spawn is reclaimed");
+        assert!(ecs.contains(on_floor), "one in a loaded column stays");
+        assert!(ecs.contains(guard), "an untagged hostile stays, frozen");
     }
 
     #[test]

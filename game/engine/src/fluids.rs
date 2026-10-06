@@ -7,6 +7,8 @@
 //! existed, `GameServer` didn't simulate lava at all and the water-freeze path
 //! leaked stale lava sources.
 
+use ahash::{AHashMap, AHashSet};
+
 use crate::block::{AIR, LAVA, OBSIDIAN, WATER};
 use crate::lava::LavaSystem;
 use crate::water::WaterSystem;
@@ -67,6 +69,58 @@ pub fn reconcile_frozen_lava_sources(
         if world.get_block(x, y, z) == OBSIDIAN {
             lava.remove_source(x, y, z);
         }
+    }
+}
+
+/// A fluid system's source cells, indexed by chunk column so a column that
+/// streams out can be forgotten in one step (Phase B1 review). Water registers
+/// every water block of a streamed-in column as a source, so a flat set grew
+/// without bound as players roamed an ocean world, and pruning it by scan was
+/// O(every source) per unload.
+#[derive(Default)]
+pub struct SourceSet {
+    by_column: AHashMap<(i32, i32), AHashSet<(i32, i32, i32)>>,
+}
+
+impl SourceSet {
+    fn column(x: i32, z: i32) -> (i32, i32) {
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        (x.div_euclid(cs), z.div_euclid(cs))
+    }
+
+    /// Add a source; true if it was new.
+    pub fn insert(&mut self, (x, y, z): (i32, i32, i32)) -> bool {
+        self.by_column.entry(Self::column(x, z)).or_default().insert((x, y, z))
+    }
+
+    /// Remove a source; true if it was there.
+    pub fn remove(&mut self, (x, y, z): (i32, i32, i32)) -> bool {
+        let col = Self::column(x, z);
+        let Some(set) = self.by_column.get_mut(&col) else {
+            return false;
+        };
+        let removed = set.remove(&(x, y, z));
+        if set.is_empty() {
+            self.by_column.remove(&col);
+        }
+        removed
+    }
+
+    pub fn contains(&self, (x, y, z): (i32, i32, i32)) -> bool {
+        self.by_column.get(&Self::column(x, z)).is_some_and(|s| s.contains(&(x, y, z)))
+    }
+
+    /// Forget every source in chunk column `(cx, cz)` — no retraction: the
+    /// blocks stay where they are, and the column's stream-in re-registers
+    /// them. Returns how many were forgotten.
+    pub fn forget_column(&mut self, cx: i32, cz: i32) -> usize {
+        self.by_column.remove(&(cx, cz)).map_or(0, |s| s.len())
+    }
+
+    /// How many sources are held, across every column.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.by_column.values().map(|s| s.len()).sum()
     }
 }
 
@@ -149,5 +203,23 @@ mod tests {
         world.set_block(0, 61, 0, LAVA);
         notify_block_edit(&mut water, &mut lava, &world, 0, 61, 0, AIR, LAVA);
         assert!(lava.is_source(0, 61, 0), "re-placed lava registers as a live source");
+    }
+
+    /// Phase B1 review — the column index: forgetting a column drops exactly
+    /// its sources (negative coordinates included), in one step.
+    #[test]
+    fn source_set_forgets_exactly_one_column() {
+        let mut set = SourceSet::default();
+        for p in [(0, 60, 0), (15, 60, 15), (16, 60, 0), (-1, 60, -1), (-16, 60, -16)] {
+            assert!(set.insert(p));
+        }
+        assert!(!set.insert((0, 60, 0)), "no duplicates");
+        assert_eq!(set.forget_column(0, 0), 2);
+        assert!(!set.contains((0, 60, 0)) && !set.contains((15, 60, 15)));
+        assert!(set.contains((16, 60, 0)) && set.contains((-1, 60, -1)));
+        assert_eq!(set.forget_column(-1, -1), 2, "(-1, -1) and (-16, -16) share column (-1, -1)");
+        assert!(set.remove((16, 60, 0)));
+        assert!(!set.remove((16, 60, 0)));
+        assert_eq!(set.len(), 0);
     }
 }

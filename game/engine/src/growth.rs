@@ -453,7 +453,9 @@ pub fn advance_saplings(
         dirty.push((x, y, z));
         for tb in crate::tree_shapes::place_tree(species, x, z, seed) {
             let (bx, by, bz) = (x + tb.dx, y + tb.dy, z + tb.dz);
-            if world.get_block(bx, by, bz) == crate::block::AIR {
+            // Never into a column that is not present (Phase B1 review): a
+            // canopy block there conjured a chunk its generation then skipped.
+            if world.is_column_present_at(bx, bz) && world.get_block(bx, by, bz) == crate::block::AIR {
                 world.set_block(bx, by, bz, tb.id);
                 dirty.push((bx, by, bz));
             }
@@ -538,6 +540,40 @@ mod tests {
         );
         // A birch trunk grew on the sapling column.
         assert_eq!(w.get_block(0, 21, 0), crate::block::BIRCH_LOG, "birch trunk base");
+    }
+
+    /// Phase B1 review — a sapling on a loaded column's edge grows its tree
+    /// only inside present columns: a canopy block written into a column that
+    /// was never loaded conjured a non-empty chunk there, which that column's
+    /// own generation then skipped (a slice of missing terrain).
+    #[test]
+    fn a_tree_never_grows_into_a_column_that_is_not_loaded() {
+        let mut w = World::new();
+        for x in 0..16 {
+            for z in 0..16 {
+                w.set_block(x, 20, z, crate::block::GRASS);
+            }
+        }
+        let at = (15, 21, 8); // east edge of column (0, 0); (1, 0) never loaded
+        w.set_block(at.0, at.1, at.2, crate::block::SAPLING_OAK);
+        w.set_block_light_at(at.0, at.1, at.2, 15);
+        let mut grown = Vec::new();
+        for k in 1..400u64 {
+            grown = advance_saplings(&mut w, k * CROP_GROWTH_TICKS_PER_STAGE, 7, vec![at]);
+            if !grown.is_empty() {
+                break;
+            }
+        }
+        assert!(!grown.is_empty(), "the roll must land within 400 scans");
+        assert_eq!(w.get_block(at.0, at.1, at.2), crate::block::OAK_LOG, "the trunk grew");
+        assert!(
+            grown.iter().all(|&(x, _, _)| x < 16),
+            "every grown cell is inside the present column: {grown:?}"
+        );
+        assert!(
+            !(0..=crate::world::MAX_CHUNK_Y).any(|cy| w.has_chunk(1, cy, 0)),
+            "nothing was written into the never-loaded column"
+        );
     }
 
     #[test]

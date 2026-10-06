@@ -1493,23 +1493,61 @@ applying a joiner's edit more than rd+2 chunks from every host player. Light
 writes to an evicted column are dropped. A column with no loaded or evicted
 chunks keeps the old behaviour: it reads as air, and a write creates a chunk.
 
-**Sims stop at an evicted column.** Because reads now see real blocks, water,
-lava and fire check `World::is_evicted_at(x, z)` and treat an evicted column as
-a barrier: they don't spread, ignite or retract into it. Queue entries and fire
-cells inside it are dropped when next processed, and the FIRE and fluid blocks
-stay in the chunk. On restore, `register_column_sources` and
-`register_column_fires` re-adopt them. Other writers (tree growth, explosions)
-write through.
+**Sims stop at a column that is not present (widened 2026-10-06, Phase B1
+review).** Water, lava, fire, sapling growth, entity physics and mob AI check
+`World::is_column_present_at(x, z)`: true only if one of the column's chunks
+in `World::chunks` holds a real block. That excludes an evicted column (its
+chunks sit in the store; reads go through to its real blocks), a dropped one,
+and one never loaded. An empty chunk does not count, because block-light BFS
+leaves light-only chunks in a never-loaded neighbour and `generate_column`
+refills those. They treat such a column as a barrier: they don't spread,
+ignite, grow a canopy or retract into it. Queue entries and fire cells inside
+it are dropped when next processed, and the FIRE and fluid blocks stay in the
+chunk. Entities there are frozen (Spec 05 §9.4).
+
+*Bug this fixes.* The barrier used to be `is_evicted_at` only. Cave lava
+(y 2-10) at the edge of the loaded area flowed into a never-loaded neighbour,
+whose reads are air; `set_block` created a cy 0 chunk there; when that column
+streamed in, `generate_column` skipped the non-empty cy 0 (no bedrock or stone
+in y 0-15), the void self-heal could not repair it (the same skip), and saves
+kept it. A sapling growing at the edge did the same at canopy height. Tests:
+`chunk_stream::tests::fluids_never_flow_into_a_never_loaded_column`,
+`growth::tests::a_tree_never_grows_into_a_column_that_is_not_loaded`.
+
+*Sources follow the column.* `ColumnSims::stream_out` forgets the column's
+water and lava sources (`WaterSystem` / `LavaSystem::forget_column`; sources
+are indexed by column in `fluids::SourceSet`). Water registers every water block
+of a streamed-in column as a source, so the sets used to grow with every column
+ever loaded. `stream_in`'s `register_column_sources` re-adds them. Retraction's
+`can_reach_source` treats a fluid cell in a column that is not present as fed,
+so forgetting a column's sources never drains the flow they feed across the
+border. On restore, `register_column_sources` and `register_column_fires`
+re-adopt the column's fluids and fires.
 
 **Testing.** The world side of streaming is split into renderer-free helpers in
 `chunk_stream.rs`: `columns_to_unload`, `unload_column_blocks` and
 `load_column_blocks`. `stream_chunks`, `step_load`, the spawn-pref path and the
 void repair all call them, and unit tests cover them.
 
+**Remote changes for columns a client does not hold (2026-10-06).** A server
+block change lands in a client's world only if the column is loaded or evicted
+(`chunk_stream::remote_change_is_loaded`; an evicted one takes it by
+write-through). A joiner drops the rest (Spec 04 §4.1). A LAN host keeps them,
+because its world is the save of record: `apply_remote_change_to_unloaded_column`
+generates the column, applies the change and evicts it, so it streams back in
+whole. Before, both wrote the change into a stray chunk that their own
+generation later skipped, leaving a 16³ hole.
+
 **Known gaps.** Joined clients still regenerate columns locally instead of
-streaming them from the host (separate issue). A sim write into a *dropped*
-(pristine) column still creates a stray chunk, which `generate_column` then
-skips on re-entry. This is older than the evicted store.
+streaming them from the host (separate issue). The writers that still do not
+check `is_column_present_at` can create a stray chunk in a dropped or
+never-loaded column at the loaded edge: pistons, dispensers (placed fluid or
+fire), `FireSystem::ignite` (flint and steel) and keg blasts. A blast writes
+air, which leaves an empty chunk that `generate_column` refills. A save that
+already holds a stray chunk keeps its hole: restore never regenerates an evicted
+column. Block light from an emitter in a loaded column is not re-propagated into
+a neighbour that streams in later, so a torch at a column border leaves a dark
+seam on the newcomer's side (a generated column and a restored one alike).
 
 ---
 

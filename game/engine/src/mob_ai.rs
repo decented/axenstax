@@ -166,6 +166,11 @@ pub fn tick_mob_ai(
         if ridden.is_some() {
             continue;
         }
+        // Phase B1 review — a mob whose column is not present (never loaded,
+        // dropped or evicted) is frozen (`entity::tick_entities`): no AI tick.
+        if !world.is_column_present_at(pos.0.x.floor() as i32, pos.0.z.floor() as i32) {
+            continue;
+        }
         ai.ticks = ai.ticks.wrapping_add(1);
         let def = mob::mob_def(kind.0);
         let speed_per_tick = def.speed / 20.0;
@@ -930,6 +935,29 @@ mod tests {
         let state = ecs.get::<&MobAi>(mob_id).unwrap();
         assert!(matches!(state.state, AiState::Chase),
             "expected Chase, got {:?}", state.state);
+    }
+
+    /// Phase B1 review (LOW) — a mob whose column is not present (never
+    /// loaded, dropped or evicted) is not ticked: no state change, no
+    /// velocity, even with a player in detect range.
+    #[test]
+    fn a_mob_in_a_column_that_is_not_loaded_gets_no_ai_tick() {
+        let mut world = World::new();
+        stone_floor(&mut world, 4); // columns (-2..=1, -2..=1)
+        let reg = BlockRegistry::new();
+        let mut ecs = hecs::World::new();
+        let near = entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(0.0, 5.0, 0.0));
+        let far = entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(40.0, 5.0, 0.0));
+        for id in [near, far] {
+            ecs.get::<&mut MobAi>(id).unwrap().state = AiState::Idle { timer: 0 };
+        }
+        let far_ticks = ecs.get::<&MobAi>(far).unwrap().ticks;
+        tick_mob_ai(&mut ecs, &world, &reg, &[Vec3::new(5.0, 5.0, 0.0), Vec3::new(45.0, 5.0, 0.0)]);
+        assert!(matches!(ecs.get::<&MobAi>(near).unwrap().state, AiState::Chase), "near mob chases");
+        let ai = ecs.get::<&MobAi>(far).unwrap();
+        assert!(matches!(ai.state, AiState::Idle { timer: 0 }), "far mob untouched: {:?}", ai.state);
+        assert_eq!(ai.ticks, far_ticks);
+        assert_eq!(ecs.get::<&crate::entity::Velocity>(far).unwrap().0, Vec3::ZERO);
     }
 
     #[test]

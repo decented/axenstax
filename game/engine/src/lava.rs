@@ -26,7 +26,7 @@ const MAX_SPREAD_DIST: u8 = 3;
 const SLOW_FACTOR: u8 = 3;
 
 pub struct LavaSystem {
-    sources: AHashSet<(i32, i32, i32)>,
+    sources: crate::fluids::SourceSet,
     spread_queue: VecDeque<(i32, i32, i32, u8)>,
     retract_queue: VecDeque<(i32, i32, i32)>,
     slow: u8,
@@ -35,7 +35,7 @@ pub struct LavaSystem {
 impl LavaSystem {
     pub fn new() -> Self {
         Self {
-            sources: AHashSet::new(),
+            sources: crate::fluids::SourceSet::default(),
             spread_queue: VecDeque::new(),
             retract_queue: VecDeque::new(),
             slow: 0,
@@ -49,13 +49,13 @@ impl LavaSystem {
     }
 
     pub fn remove_source(&mut self, x: i32, y: i32, z: i32) {
-        if self.sources.remove(&(x, y, z)) {
+        if self.sources.remove((x, y, z)) {
             self.retract_queue.push_back((x, y, z));
         }
     }
 
     pub fn is_source(&self, x: i32, y: i32, z: i32) -> bool {
-        self.sources.contains(&(x, y, z))
+        self.sources.contains((x, y, z))
     }
 
     /// A non-lava block was broken next to lava — re-wake the neighbouring lava
@@ -111,9 +111,10 @@ impl LavaSystem {
             };
             processed += 1;
 
-            // Spec 02 §7.5 — an evicted column is a barrier; drop the entry
-            // (restore re-registers the column's sources).
-            if world.is_evicted_at(x, z) || world.get_block(x, y, z) != LAVA {
+            // Spec 02 §7.5 — a column that is not present (evicted, dropped or
+            // never loaded) is a barrier; drop the entry (its stream-in
+            // re-registers the column's sources).
+            if !world.is_column_present_at(x, z) || world.get_block(x, y, z) != LAVA {
                 continue; // it solidified, was removed, or its column unloaded
             }
 
@@ -143,7 +144,11 @@ impl LavaSystem {
             if dist < MAX_SPREAD_DIST {
                 for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                     let (nx, nz) = (x + dx, z + dz);
-                    if !world.is_evicted_at(nx, nz)
+                    // Never into a column that is not present: `set_block`
+                    // would conjure a chunk its generation then skips (Phase
+                    // B1 review — cave lava at a loaded edge left the next
+                    // column without bedrock).
+                    if world.is_column_present_at(nx, nz)
                         && world.get_block(nx, y, nz) == AIR
                         && Self::place_flow(world, nx, y, nz, &mut dirty) {
                             self.spread_queue.push_back((nx, y, nz, dist + 1));
@@ -175,7 +180,7 @@ impl LavaSystem {
 
             for &(dx, dy, dz) in &[(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
                 let (nx, ny, nz) = (sx + dx, sy + dy, sz + dz);
-                if world.get_block(nx, ny, nz) == LAVA && !self.is_source(nx, ny, nz) && !world.is_evicted_at(nx, nz) && visited.insert((nx, ny, nz)) {
+                if world.get_block(nx, ny, nz) == LAVA && !self.is_source(nx, ny, nz) && world.is_column_present_at(nx, nz) && visited.insert((nx, ny, nz)) {
                     frontier.push_back((nx, ny, nz, 0));
                 }
             }
@@ -188,7 +193,7 @@ impl LavaSystem {
                 if dist < MAX_SPREAD_DIST {
                     for &(dx, dy, dz) in &[(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
                         let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                        if world.get_block(nx, ny, nz) == LAVA && !self.is_source(nx, ny, nz) && !world.is_evicted_at(nx, nz) && visited.insert((nx, ny, nz)) {
+                        if world.get_block(nx, ny, nz) == LAVA && !self.is_source(nx, ny, nz) && world.is_column_present_at(nx, nz) && visited.insert((nx, ny, nz)) {
                             frontier.push_back((nx, ny, nz, dist + 1));
                         }
                     }
@@ -209,7 +214,10 @@ impl LavaSystem {
         visited.insert((x, y, z));
         frontier.push_back((x, y, z, 0));
         while let Some((cx, cy, cz, dist)) = frontier.pop_front() {
-            if self.is_source(cx, cy, cz) {
+            // Lava read through a column that is not present may be fed by a
+            // source forgotten when it streamed out: assume it is (water does
+            // the same).
+            if self.is_source(cx, cy, cz) || !world.is_column_present_at(cx, cz) {
                 return true;
             }
             if dist >= MAX_SPREAD_DIST {
@@ -244,6 +252,13 @@ impl LavaSystem {
                 }
             }
         }
+    }
+
+    /// Forget the sources in chunk column `(cx, cz)` as it streams out (Phase
+    /// B1 review — see `WaterSystem::forget_column`). No retraction;
+    /// `register_column_sources` re-adds (and re-wakes) them on stream-in.
+    pub fn forget_column(&mut self, cx: i32, cz: i32) {
+        self.sources.forget_column(cx, cz);
     }
 }
 

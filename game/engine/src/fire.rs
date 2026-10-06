@@ -144,8 +144,9 @@ impl FireSystem {
             }
             'cell: for &(dx, dy, dz) in &NEIGHBOURS {
                 let (ax, ay, az) = (x + dx, y + dy, z + dz);
-                // Spec 02 §7.5 — never light a fire inside an evicted column.
-                if world.is_evicted_at(ax, az) || world.get_block(ax, ay, az) != block::AIR {
+                // Spec 02 §7.5 — never light a fire inside a column that is not
+                // present (evicted, dropped or never loaded).
+                if !world.is_column_present_at(ax, az) || world.get_block(ax, ay, az) != block::AIR {
                     continue;
                 }
                 for &(ex, ey, ez) in &NEIGHBOURS {
@@ -186,7 +187,7 @@ impl FireSystem {
             // column was unloaded (Spec 02 §7.5 — reads go through to evicted
             // chunks, so without this it would keep burning there; the FIRE
             // block stays and `register_column_fires` re-adopts it on restore).
-            if world.is_evicted_at(x, z) || world.get_block(x, y, z) != block::FIRE {
+            if !world.is_column_present_at(x, z) || world.get_block(x, y, z) != block::FIRE {
                 self.cells.remove(&pos);
                 continue;
             }
@@ -217,7 +218,7 @@ impl FireSystem {
             let mut fuel: Vec<(i32, i32, i32)> = Vec::new();
             for &(dx, dy, dz) in &NEIGHBOURS {
                 let np = (x + dx, y + dy, z + dz);
-                if !world.is_evicted_at(np.0, np.2)
+                if world.is_column_present_at(np.0, np.2)
                     && block::flammable(world.get_block(np.0, np.1, np.2))
                 {
                     fuel.push(np);

@@ -2805,6 +2805,24 @@ Pathfinding uses **A\* on the voxel grid** with modifications for the 3D block w
 
 **Spawn cycle**: Every 400 ticks (20 seconds), the server performs a spawn cycle for each loaded chunk within player range. It selects random positions, checks spawn conditions, and spawns mobs up to the cap.
 
+> **As built (Phase B1 review, 2026-10-06).** The night spawner
+> (`spawning::tick_mob_spawning`) caps hostiles at 80 world-wide and counts only
+> hostiles in a *present* column (`World::is_column_present_at`: generated or
+> restored, not dropped, evicted or never loaded). Each night spawn carries
+> `entity::NightSpawn`, and when its column streams out (`ColumnSims::stream_out`,
+> on the client and the dedicated server) it is despawned along with the
+> column's `Scattered` wildlife. Each spawn cycle also despawns any night spawn
+> standing in a column that is not present, because one that walked out of the
+> loaded area into a never-loaded column gets no stream-out. Night spawns are
+> never saved, so this is the as-built despawn radius: the streaming radius
+> plus `UNLOAD_HYSTERESIS`. Every
+> other entity in a column that is not present (pets, villagers, hideout
+> brigands, whose hideout counts them) is frozen: no physics
+> (`entity::tick_entities` zeroes its velocity) and no AI (`mob_ai::tick_mob_ai`)
+> until the column streams back in. Before this, such entities fell through the
+> missing terrain and were put back at y=80 in a loop, still ticked and
+> broadcast, and far hostiles filled the cap.
+
 ### 9.5 Loot Tables
 
 Mob drops are defined by **loot tables** — data-driven JSON structures that specify what items a mob drops on death and with what probability.
