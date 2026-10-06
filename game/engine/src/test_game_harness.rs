@@ -432,4 +432,57 @@ mod tests {
         let hs = hg.state.hosted_server.as_ref().unwrap();
         assert_eq!(hs.server.ecs.len(), 0, "the server keeps no population of its own");
     }
+
+    /// D1 review fix 1 through the real `GameState::stream_chunks`: on a
+    /// lending host whose player walks far from a joiner, the host client's
+    /// streamer keeps the joiner's column (and its neighbours) loaded — the
+    /// GPU-free half lives in `lent_world` / `chunk_stream`'s tests.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_lending_hosts_streamer_keeps_a_joiners_columns() {
+        use crate::chunk_stream::{column_of, UNLOAD_HYSTERESIS};
+        use crate::transport::ClientTransport;
+        isolate_saves();
+        let name = "harness-lend-anchors";
+        let mut hg = HeadlessGame::boot_into_world(name);
+        let seed = hg.state.biome_gen.seed;
+        let hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            name.to_string(),
+            seed,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Lent,
+        )
+        .expect("lending host starts");
+        hg.state.hosted_server = Some(hs);
+        let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Visitor", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(
+            crate::protocol::PacketType::JoinRequest,
+            &req,
+        ));
+        hg.hosted_ticks(2);
+        let joiners = hg.state.hosted_server.as_ref().unwrap().lent_joiner_columns();
+        assert_eq!(joiners.len(), 1, "the guest is seated");
+        let joiner_col = joiners[0];
+        assert!(hg.state.loaded_columns.contains(&joiner_col));
+
+        // The host walks off well past its render distance + hysteresis.
+        let rd = hg.state.graphics.render_distance;
+        let away = (rd + UNLOAD_HYSTERESIS + 3) as f32 * crate::chunk::CHUNK_SIZE as f32;
+        hg.state.players[0].player.pos.x += away;
+        assert!(column_of(hg.state.players[0].player.pos).0 - joiner_col.0 > rd + UNLOAD_HYSTERESIS);
+        for _ in 0..4 {
+            hg.state.stream_chunks();
+        }
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let col = (joiner_col.0 + dx, joiner_col.1 + dz);
+                assert!(hg.state.loaded_columns.contains(&col), "joiner's column {col:?} unloaded");
+            }
+        }
+        let reports = hg.hosted_ticks(4);
+        assert!(reports.iter().all(|r| r.faults.is_empty()));
+    }
 }
