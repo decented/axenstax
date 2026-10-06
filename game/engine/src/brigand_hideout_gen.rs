@@ -16,7 +16,6 @@
 //!
 //! See spec `docs/foundations/2026-05-23-historical-pivot-brigand-hideouts.md`.
 
-use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::biome::{Biome, BiomeGenerator};
@@ -190,18 +189,16 @@ pub struct HideoutLayout {
     pub has_berserker: bool,
 }
 
-/// Compute the layout for a cell, or None if the cell has no hideout,
-/// the biome is unsupported, or the anchor is too close to a village.
-///
-/// `village_anchors` is a snapshot of `World::village_anchors` taken
-/// before the call. Pure — no world reads beyond `biome_gen`.
-pub fn layout_for_hideout_cell(
+/// The candidate hideout site of a cell — its anchor `[x, surface_y, z]` —
+/// after every gate EXCEPT the village-distance one: the cell roll, the
+/// temperate-biome gate and the sea-level gate. `None` = no hideout here
+/// whatever the villages. Pure.
+pub fn hideout_site(
     world_seed: u32,
     gx: i32,
     gz: i32,
     biome_gen: &BiomeGenerator,
-    village_anchors: &AHashMap<(i32, i32), [i32; 3]>,
-) -> Option<HideoutLayout> {
+) -> Option<[i32; 3]> {
     if !cell_has_hideout(world_seed, gx, gz) {
         return None;
     }
@@ -222,15 +219,38 @@ pub fn layout_for_hideout_cell(
     if anchor_surface < crate::biome::SEA_LEVEL + 2 {
         return None;
     }
+    Some([ax, anchor_surface, az])
+}
+
+/// Compute the layout for a cell, or None if the cell has no hideout,
+/// the biome is unsupported, or the anchor is too close to a village.
+///
+/// Pure — seed + `biome_gen` only. The village-distance gate asks
+/// `village_gen::village_site_within` (the same site function villages are
+/// placed from), never `World::village_anchors`: that table only fills as
+/// village columns generate, so reading it made a hideout appear or not
+/// depending on the ORDER columns were generated in (Phase B0).
+///
+/// Hut ring positions use `libm::cosf`/`sinf` (not the platform `f32`
+/// methods) so every platform rounds the same cells.
+pub fn layout_for_hideout_cell(
+    world_seed: u32,
+    gx: i32,
+    gz: i32,
+    biome_gen: &BiomeGenerator,
+) -> Option<HideoutLayout> {
+    let [ax, anchor_surface, az] = hideout_site(world_seed, gx, gz, biome_gen)?;
 
     // Village-distance gate — reject if any village anchor sits within
     // MIN_DISTANCE_FROM_VILLAGE_BLOCKS (Chebyshev) of the hideout anchor.
-    for &[vx, _vy, vz] in village_anchors.values() {
-        let dx = (vx - ax).abs();
-        let dz = (vz - az).abs();
-        if dx.max(dz) < MIN_DISTANCE_FROM_VILLAGE_BLOCKS {
-            return None;
-        }
+    if crate::village_gen::village_site_within(
+        world_seed,
+        ax,
+        az,
+        MIN_DISTANCE_FROM_VILLAGE_BLOCKS,
+        biome_gen,
+    ) {
+        return None;
     }
 
     let h = hideout_hash(world_seed, gx, gz);
@@ -246,8 +266,8 @@ pub fn layout_for_hideout_cell(
         // Huts on a tight inner ring (radius 3-4) so they sit inside
         // the palisade.
         let radius = 3.5 + (h_i.rotate_left(5) % 2) as f32;
-        let dx = (radius * angle.cos()).round() as i32;
-        let dz = (radius * angle.sin()).round() as i32;
+        let dx = (radius * libm::cosf(angle)).round() as i32;
+        let dz = (radius * libm::sinf(angle)).round() as i32;
         let hx = ax + dx;
         let hz = az + dz;
         let h_surface = biome_gen.terrain_height(hx, hz);
@@ -286,16 +306,11 @@ pub fn place_hideouts_for_column(
     let gx_centre = cx.div_euclid(HIDEOUT_GRID);
     let gz_centre = cz.div_euclid(HIDEOUT_GRID);
 
-    // Snapshot village anchors once — the layout call needs read-only
-    // access and we're about to mutate `world` for block placement.
-    let village_snapshot: AHashMap<(i32, i32), [i32; 3]> =
-        world.village_anchors.iter().map(|(&k, &v)| (k, v)).collect();
-
     for dgz in -1..=1 {
         for dgx in -1..=1 {
             let gx = gx_centre + dgx;
             let gz = gz_centre + dgz;
-            let Some(layout) = layout_for_hideout_cell(world_seed, gx, gz, biome_gen, &village_snapshot) else {
+            let Some(layout) = layout_for_hideout_cell(world_seed, gx, gz, biome_gen) else {
                 continue;
             };
             let [ax, _ay, az] = layout.anchor_world;
@@ -732,50 +747,91 @@ mod tests {
         }
     }
 
-    #[test]
-    fn layout_rejects_near_village() {
-        let bg = bg(123);
-        // Force a cell to have a hideout we can find.
-        let mut found: Option<(i32, i32)> = None;
-        for gx in 0..50 {
-            for gz in 0..50 {
-                if let Some(layout) = layout_for_hideout_cell(123, gx, gz, &bg, &AHashMap::new()) {
-                    found = Some((gx, gz));
-                    let _ = layout; // just need any cell that places
-                    break;
+    /// Brute-force nearest village anchor (Chebyshev) to `(x, z)` over a wide
+    /// block of village cells — an independent check on `village_site_within`.
+    fn nearest_village(seed: u32, x: i32, z: i32, bg: &BiomeGenerator) -> Option<i32> {
+        let cell = crate::village_gen::VILLAGE_GRID * CHUNK_SIZE as i32;
+        let (cgx, cgz) = (x.div_euclid(cell), z.div_euclid(cell));
+        let mut best: Option<i32> = None;
+        for gx in cgx - 2..=cgx + 2 {
+            for gz in cgz - 2..=cgz + 2 {
+                if let Some([vx, _, vz]) = crate::village_gen::village_site(seed, gx, gz, bg) {
+                    let d = (vx - x).abs().max((vz - z).abs());
+                    best = Some(best.map_or(d, |b| b.min(d)));
                 }
             }
-            if found.is_some() { break; }
         }
-        let (gx, gz) = found.expect("expected a hideout-bearing cell in the search range");
+        best
+    }
 
-        // Pretend a village sits right on top of the hideout anchor.
-        let (ax, az) = anchor_world_xz(123, gx, gz);
-        let mut villages = AHashMap::new();
-        villages.insert((0, 0), [ax, 70, az]);
-        let layout = layout_for_hideout_cell(123, gx, gz, &bg, &villages);
-        assert!(layout.is_none(), "layout must reject when a village sits at the anchor");
+    /// First (seed, cell) whose hideout site passes every gate but has a
+    /// village site closer than the minimum distance.
+    fn site_near_a_village() -> (u32, i32, i32, BiomeGenerator) {
+        for seed in 0..3000u32 {
+            let bg = bg(seed);
+            for gx in -1..=1 {
+                for gz in -1..=1 {
+                    let Some([ax, _, az]) = hideout_site(seed, gx, gz, &bg) else { continue };
+                    if nearest_village(seed, ax, az, &bg)
+                        .is_some_and(|d| d < MIN_DISTANCE_FROM_VILLAGE_BLOCKS)
+                    {
+                        return (seed, gx, gz, bg);
+                    }
+                }
+            }
+        }
+        panic!("no hideout site near a village in the search range");
+    }
+
+    #[test]
+    fn layout_rejects_near_village() {
+        let (seed, gx, gz, bg) = site_near_a_village();
+        assert!(
+            layout_for_hideout_cell(seed, gx, gz, &bg).is_none(),
+            "layout must reject a site within {MIN_DISTANCE_FROM_VILLAGE_BLOCKS} blocks of a village"
+        );
+    }
+
+    #[test]
+    fn hideout_near_a_village_is_rejected_even_before_the_village_generates() {
+        // Phase B0: the gate reads village SITES (pure), not the generated
+        // `village_anchors` table. Generate only the hideout's columns in a
+        // fresh world — the village's columns never generate — and the hideout
+        // must still be absent.
+        let (seed, gx, gz, bg) = site_near_a_village();
+        let [ax, _, az] = hideout_site(seed, gx, gz, &bg).unwrap();
+        let mut world = World::new();
+        let (cx, cz) = (ax.div_euclid(CHUNK_SIZE as i32), az.div_euclid(CHUNK_SIZE as i32));
+        for dcx in -1..=1 {
+            for dcz in -1..=1 {
+                world.generate_column(cx + dcx, cz + dcz, &bg);
+            }
+        }
+        assert!(world.village_anchors.is_empty(), "test premise: no village columns generated");
+        assert!(
+            !world.brigand_hideouts.contains_key(&(gx, gz)),
+            "a hideout near an ungenerated village must not place"
+        );
     }
 
     #[test]
     fn layout_accepts_when_village_far_away() {
         let bg = bg(123);
-        let mut found: Option<(i32, i32)> = None;
-        for gx in 0..50 {
+        let mut found = None;
+        'search: for gx in 0..50 {
             for gz in 0..50 {
-                if layout_for_hideout_cell(123, gx, gz, &bg, &AHashMap::new()).is_some() {
-                    found = Some((gx, gz));
-                    break;
+                if let Some(layout) = layout_for_hideout_cell(123, gx, gz, &bg) {
+                    found = Some(layout);
+                    break 'search;
                 }
             }
-            if found.is_some() { break; }
         }
-        let (gx, gz) = found.expect("expected a hideout-bearing cell");
-        let mut villages = AHashMap::new();
-        // Place a village 2000 blocks away — well outside the 128-block gate.
-        villages.insert((0, 0), [9999, 70, 9999]);
-        assert!(layout_for_hideout_cell(123, gx, gz, &bg, &villages).is_some(),
-            "layout must accept when villages are far away");
+        let layout = found.expect("expected a hideout-bearing cell");
+        let [ax, _, az] = layout.anchor_world;
+        assert!(
+            nearest_village(123, ax, az, &bg).is_none_or(|d| d >= MIN_DISTANCE_FROM_VILLAGE_BLOCKS),
+            "a placed hideout must have no village site within {MIN_DISTANCE_FROM_VILLAGE_BLOCKS} blocks"
+        );
     }
 
     #[test]

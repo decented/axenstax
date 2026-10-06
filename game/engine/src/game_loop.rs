@@ -3045,17 +3045,17 @@ impl super::GameState {
         self.apply_world_rules(&meta);
         self.pending_join_spawn = joined.spawn;
         log::info!(
-            "Joined world: seed {}, type '{}', worldgen v{} (ours v{})",
+            "Joined world: seed {}, type '{}', worldgen {:#010x} (ours {:#010x})",
             joined.seed,
             joined.rules.world_type,
             joined.worldgen_version,
-            crate::world::WORLDGEN_VERSION
+            crate::world::worldgen_fingerprint()
         );
         if let Some(notice) = joined.worldgen_mismatch_notice() {
             log::warn!(
-                "Host worldgen v{} differs from ours (v{}): terrain may differ",
+                "Host worldgen {:#010x} differs from ours ({:#010x}): terrain may differ",
                 joined.worldgen_version,
-                crate::world::WORLDGEN_VERSION
+                crate::world::worldgen_fingerprint()
             );
             self.toast = Some((
                 notice.to_string(),
@@ -4278,14 +4278,13 @@ impl super::GameState {
         // `world_time_step`'s default — flip the default to 1 pre-release.
         self.world_time = (self.world_time + self.world_time_step) % 24000;
 
-        // Spec 16 Phase 3b — keep the BiomeGenerator's reserve_richness
-        // snapshot in sync with runtime. Chunk-gen reads it from
-        // `base_rock_at` via `pick_deepslate_variant` to choose the
-        // visual variant for each pure-deepslate position. Variants
-        // bake in at chunk-gen time, so this sync only affects chunks
-        // generated AFTER the richness changes — already-loaded chunks
-        // keep their variants until eviction + reload.
-        self.biome_gen.reserve_richness = self.reserve.richness;
+        // BRIDGE: live Reserve richness (`self.reserve.richness`) no longer
+        // feeds chunk generation. Worldgen bakes the fixed
+        // `biome::WORLDGEN_RESERVE_RICHNESS` so host, dedicated server and
+        // joiner generate identical deepslate (Phase B0 worldgen purity).
+        // Richness-driven deepslate visuals should become a render-time tint
+        // keyed on this live value — replace when the reward layer lands
+        // (docs/foundations/2026-05-17-deepslate-reserve.md).
 
         // P8 — weather. While the sky is clear, once an in-game minute (1200
         // ticks) there's a ~22% chance of rain lasting 1–2.5 minutes. Derived

@@ -123,10 +123,13 @@ pub fn layout_for_ravine_cell(
 /// Project world `(wx, wz)` into ravine-local `(along, perp)` coordinates,
 /// where `along` runs down the ravine's long axis and `perp` is the sideways
 /// offset. Block centres are used.
+///
+/// Trig is `libm` (pure Rust), not the platform `f32` methods, so a host and a
+/// joiner on different OSes or WASM carve exactly the same cells (Phase B0).
 pub fn project(layout: &RavineLayout, wx: i32, wz: i32) -> (f32, f32) {
     let dx = wx as f32 + 0.5 - layout.anchor_x as f32;
     let dz = wz as f32 + 0.5 - layout.anchor_z as f32;
-    let (s, c) = layout.angle.sin_cos();
+    let (s, c) = libm::sincosf(layout.angle);
     let along = dx * c + dz * s;
     let perp = -dx * s + dz * c;
     (along, perp)
@@ -141,14 +144,16 @@ pub fn half_width_at(layout: &RavineLayout, along: f32, y: i32) -> f32 {
     if a > layout.half_len {
         return 0.0;
     }
-    // End taper — quadratic falloff to a point at each tip.
-    let end = (1.0 - (a / layout.half_len).powi(2)).max(0.0);
+    // End taper — quadratic falloff to a point at each tip. (`t * t`, not
+    // `powi(2)`, whose rounding Rust does not pin across platforms.)
+    let t = a / layout.half_len;
+    let end = (1.0 - t * t).max(0.0);
     // Vertical taper — wide at the rim, ~⅓ width at the floor.
     let span = (layout.top_y - layout.floor_y).max(1) as f32;
     let frac = ((y - layout.floor_y) as f32 / span).clamp(0.0, 1.0);
     let vert = 0.35 + 0.65 * frac.sqrt();
     // Wobble — breaks up the straight walls.
-    let wobble = 1.0 + 0.22 * (along * 0.17).sin();
+    let wobble = 1.0 + 0.22 * libm::sinf(along * 0.17);
     layout.max_half_width * end * vert * wobble
 }
 

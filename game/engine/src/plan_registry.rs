@@ -201,6 +201,43 @@ impl PlanRegistry {
         self.entries.push(RegistryEntry { plan, category });
     }
 
+    /// The engine-bundled registry, parsed once per process. This is the ONLY
+    /// plan source world generation reads (`village_gen`), so a world's
+    /// generated villages are a pure function of seed + flags + engine build,
+    /// never of runtime additions to `World::plan_registry` such as
+    /// `/importschem` (Phase B0 worldgen purity). Its
+    /// [`content_hash`](Self::content_hash) is folded into
+    /// `world::worldgen_fingerprint`, so two builds whose bundled plans differ
+    /// announce different fingerprints to each other.
+    pub fn bundled() -> &'static PlanRegistry {
+        static BUNDLED: std::sync::LazyLock<PlanRegistry> =
+            std::sync::LazyLock::new(PlanRegistry::load_bundled);
+        &BUNDLED
+    }
+
+    /// Stable SHA-256 of this registry as world generation sees it: every
+    /// entry in registry order, as its full parsed `PlanData` (bincode — fixed
+    /// little-endian, no maps) plus its category. Hashing parsed content, not
+    /// the `include_str!` bytes, keeps it independent of line endings (a
+    /// Windows checkout with autocrlf has different JSON bytes, same plans).
+    pub fn content_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"axenstax-plan-registry\0");
+        h.update((self.entries.len() as u64).to_le_bytes());
+        for e in &self.entries {
+            let plan = bincode::serialize(&e.plan).expect("PlanData bincode");
+            h.update((plan.len() as u64).to_le_bytes());
+            h.update(&plan);
+            // Debug name, not the serde variant index, so reordering the
+            // `PlanCategory`/`Profession` enums doesn't change the hash.
+            let category = format!("{:?}", e.category);
+            h.update((category.len() as u64).to_le_bytes());
+            h.update(category.as_bytes());
+        }
+        h.finalize().into()
+    }
+
     /// Spec 27 Phase 5 — load every engine-bundled `.plan.json` file
     /// shipped under `game/engine/assets/registered_plans/`. JSON is
     /// `include_str!`'d at compile time so the binary stays self-
@@ -325,6 +362,28 @@ mod tests {
             develop_state: crate::plan::DevelopState::Developed,
             kind: crate::plan::PlanKind::Building,
         }
+    }
+
+    #[test]
+    fn bundled_is_the_parsed_bundle_and_hashes_stably() {
+        let bundled = PlanRegistry::bundled();
+        assert!(!bundled.is_empty(), "the engine bundle must parse");
+        assert_eq!(bundled.content_hash(), PlanRegistry::load_bundled().content_hash());
+    }
+
+    #[test]
+    fn content_hash_changes_with_any_plan_content_or_category() {
+        let cell = CapturedCell { rx: 0, ry: 0, rz: 0, block_id: block::STONE };
+        let base = || plan("p", PlanLicense::CC0, vec![cell], 3, 3);
+        let reg = |p: PlanData, c| PlanRegistry::from_entries(vec![(p, Some(c))]);
+        let a = reg(base(), PlanCategory::SmallHouse).content_hash();
+        assert_eq!(a, reg(base(), PlanCategory::SmallHouse).content_hash());
+
+        let mut moved = base();
+        moved.cells[0].rx = 1;
+        assert_ne!(a, reg(moved, PlanCategory::SmallHouse).content_hash(), "cell change");
+        assert_ne!(a, reg(base(), PlanCategory::LargeHouse).content_hash(), "category change");
+        assert_ne!(a, PlanRegistry::new().content_hash(), "entry removed");
     }
 
     #[test]

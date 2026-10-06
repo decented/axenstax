@@ -112,7 +112,7 @@ pub const JOINED_WORLD_FOLDER: &str = "remote_game";
 pub struct JoinedWorld {
     pub seed: u32,
     pub rules: protocol::WorldRules,
-    /// The host's `WORLDGEN_VERSION`.
+    /// The host's `worldgen_fingerprint()`.
     pub worldgen_version: u32,
     /// Where the host placed us. `None` when the host sent a non-finite
     /// position (NaN/inf would poison every f32→i32 cast downstream).
@@ -141,7 +141,7 @@ impl JoinedWorld {
 
     /// The toast to show when the host's generator differs from ours.
     pub fn worldgen_mismatch_notice(&self) -> Option<&'static str> {
-        (self.worldgen_version != crate::world::WORLDGEN_VERSION)
+        (self.worldgen_version != crate::world::worldgen_fingerprint())
             .then_some(WORLDGEN_MISMATCH_NOTICE)
     }
 }
@@ -328,7 +328,7 @@ pub fn build_join_request_guest(player_name: &str, skin_key: u64) -> protocol::J
         handle_credential: None,
         skin_key,
         client_nonce_hex: random_nonce_hex(),
-        worldgen_version: crate::world::WORLDGEN_VERSION,
+        worldgen_version: crate::world::worldgen_fingerprint(),
     }
 }
 
@@ -374,7 +374,7 @@ pub fn build_join_request(
         handle_credential,
         skin_key,
         client_nonce_hex: random_nonce_hex(),
-        worldgen_version: crate::world::WORLDGEN_VERSION,
+        worldgen_version: crate::world::worldgen_fingerprint(),
     }
 }
 
@@ -1549,7 +1549,7 @@ mod tests {
             server_identity: None,
             exhibits: Vec::new(),
             world_rules: protocol::WorldRules::default(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         }
     }
 
@@ -1584,7 +1584,7 @@ mod tests {
             Some(JoinedWorld {
                 seed: 4242,
                 rules: flat_sand_rules(),
-                worldgen_version: crate::world::WORLDGEN_VERSION,
+                worldgen_version: crate::world::worldgen_fingerprint(),
                 spawn: Some(glam::Vec3::new(100.5, 41.0, -7.5)),
             })
         );
@@ -1691,7 +1691,7 @@ mod tests {
     fn worldgen_mismatch_notice_only_for_another_version() {
         let mut acc = proofless_accept();
         assert_eq!(JoinedWorld::from_accept(&acc).worldgen_mismatch_notice(), None);
-        acc.worldgen_version = crate::world::WORLDGEN_VERSION + 1;
+        acc.worldgen_version = crate::world::worldgen_fingerprint() ^ 1;
         assert_eq!(
             JoinedWorld::from_accept(&acc).worldgen_mismatch_notice(),
             Some(WORLDGEN_MISMATCH_NOTICE)

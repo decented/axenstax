@@ -196,7 +196,7 @@ fn join_request_round_trips_bincode() {
         handle_credential: None,
         skin_key: 0,
         client_nonce_hex: String::new(),
-        worldgen_version: crate::world::WORLDGEN_VERSION,
+        worldgen_version: crate::world::worldgen_fingerprint(),
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinRequest, &req);
     let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();
@@ -260,7 +260,7 @@ fn join_accept_carries_spawn_and_game_mode() {
             price: None,
         }],
         world_rules: protocol::WorldRules::default(),
-        worldgen_version: crate::world::WORLDGEN_VERSION,
+        worldgen_version: crate::world::worldgen_fingerprint(),
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

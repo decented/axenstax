@@ -120,7 +120,7 @@ pub struct JoinRequestPacket {
     /// client that pinned an operator npub verify the server. Empty string = the
     /// client doesn't request server-identity proof (anonymous join, unchanged).
     pub client_nonce_hex: String,
-    /// The joiner's own [`crate::world::WORLDGEN_VERSION`] (v65, gap-audit
+    /// The joiner's own [`crate::world::worldgen_fingerprint`] (v65, gap-audit
     /// T2-9). A joiner regenerates the host's terrain locally, so the host
     /// records this on the player (`ServerPlayer::worldgen_mismatch`) to know
     /// whose terrain may differ from its own. APPEND-ONLY: stays last.
@@ -169,7 +169,7 @@ pub struct JoinAcceptPacket {
     /// keep-inventory / the day lock behave as on the host.
     #[serde(default)]
     pub world_rules: WorldRules,
-    /// The host's [`crate::world::WORLDGEN_VERSION`] (v65). A joiner on a
+    /// The host's [`crate::world::worldgen_fingerprint`] (v65). A joiner on a
     /// different version warns its player that terrain may look different.
     #[serde(default)]
     pub worldgen_version: u32,
@@ -1831,7 +1831,7 @@ mod tests {
         let mut req = crate::remote_client::build_join_request_guest("Stax", 0);
         assert_eq!(
             req.worldgen_version,
-            crate::world::WORLDGEN_VERSION,
+            crate::world::worldgen_fingerprint(),
             "a joiner announces its own generator version"
         );
         req.worldgen_version = 41;
@@ -1903,7 +1903,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -1966,7 +1966,7 @@ mod tests {
             handle_credential: Some(cred.clone()),
             skin_key: 0x0123_4567_89AB_CDEF,
             client_nonce_hex: "abc123".to_string(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (_ptype, payload) = deserialize_header(&bytes).unwrap();

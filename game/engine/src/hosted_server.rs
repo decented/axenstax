@@ -1562,9 +1562,9 @@ impl HostedServer {
                             sp.client_worldgen_version = req.worldgen_version;
                             if sp.worldgen_mismatch() {
                                 log::warn!(
-                                    "Slot {i} generates terrain with worldgen v{} (host v{}): its terrain may differ",
+                                    "Slot {i} generates terrain with worldgen {:#010x} (host {:#010x}): its terrain may differ",
                                     req.worldgen_version,
-                                    crate::world::WORLDGEN_VERSION
+                                    crate::world::worldgen_fingerprint()
                                 );
                             }
                         }
@@ -1619,7 +1619,7 @@ impl HostedServer {
                             // T2-9 — the flags + generator version a joiner
                             // needs to build the same world before any terrain.
                             world_rules: self.server.world_rules(),
-                            worldgen_version: crate::world::WORLDGEN_VERSION,
+                            worldgen_version: crate::world::worldgen_fingerprint(),
                         };
                         let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &accept);
                         self.transports[i].send_to_client(&pkt);
@@ -4113,7 +4113,7 @@ mod tests {
             handle_credential: cred.as_ref().map(SignetCredentialWire::from),
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         }
     }
 
@@ -4170,7 +4170,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("missing auth_event"));
@@ -4276,7 +4276,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("signature length invalid"));
@@ -4391,7 +4391,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
@@ -4407,7 +4407,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4461,7 +4461,7 @@ mod tests {
             handle_credential: None,
             skin_key: 0,
             client_nonce_hex: String::new(),
-            worldgen_version: crate::world::WORLDGEN_VERSION,
+            worldgen_version: crate::world::worldgen_fingerprint(),
         };
         // require_signin=false, but a non-empty whitelist forces sign-in.
         let allow = vec![xonly_of([0x42; 32])];

@@ -33,6 +33,11 @@ lz4_flex = "0.14"
 ahash = "0.8"
 image = "0.25"
 noise = "0.9"
+# Worldgen purity (Phase B0): structure layouts (villages, hideouts, ravines)
+# use libm's pure-Rust sinf/cosf so a joiner on another OS or on WASM rounds
+# the same cells as the host (platform libm may differ by an ULP). MIT; already
+# in the tree via naga/num-traits.
+libm = "0.2"
 hecs = "0.10"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"

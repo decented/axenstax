@@ -797,37 +797,77 @@ fn stage_seed(world_seed: u64, stage_salt: u64, cx: i32, cz: i32) -> u64 {
 }
 ```
 
-**As built (2026-10-06, gap-audit T2-9) — `WORLDGEN_VERSION`.** The shipped seed is a
-`u32` (`WorldMeta.seed`; text seeds hash via FNV-1a, `save::seed_from_text`). A
-multiplayer joiner regenerates the host's terrain locally from the seed plus the world
-flags in `JoinAcceptPacket.world_rules` (Spec 04 v65), so generator output is a wire
-contract: `world::WORLDGEN_VERSION` (currently **1**) names it. **Bump it whenever
-generation output for a given seed + flags changes** — anything reached from
+**As built (2026-10-06, gap-audit T2-9 + Phase B0) — `WORLDGEN_VERSION` and the worldgen
+fingerprint.** The shipped seed is a `u32` (`WorldMeta.seed`; text seeds hash via FNV-1a,
+`save::seed_from_text`). A multiplayer joiner regenerates the host's untouched terrain locally
+from the seed plus the world flags in `JoinAcceptPacket.world_rules` (Spec 04 v65), so generator
+output is a wire contract. `world::WORLDGEN_VERSION` (currently **2**) names the generator code.
+**Bump it whenever generation output for a given seed + flags changes** — anything reached from
 `World::generate_column`: terrain shape, biomes, caves, ore, trees, vegetation, villages,
-hideouts, ravines, mineshafts, or the flat / water / Workshop-void presets. Host and
-joiner exchange it in `JoinAccept` / `JoinRequest`; a joiner on another version gets a
-toast ("Some terrain may look different until you update") and the host flags the player
+hideouts, ravines, mineshafts, or the flat / water / Workshop-void presets.
+
+What host and joiner actually exchange (`JoinAccept.worldgen_version` /
+`JoinRequest.worldgen_version`, still a `u32`) is `world::worldgen_fingerprint()`: the first four
+bytes of SHA-256 over `WORLDGEN_VERSION` and the content hash of the bundled plan registry villages
+are built from (`PlanRegistry::bundled().content_hash()` — every entry's parsed `PlanData` via
+bincode plus its category, in registry order; parsed content, so a CRLF checkout hashes the same).
+So a bundled-plan edit changes the fingerprint with no version bump. 0 maps to 1, because a peer
+that sent no value decodes as 0 and must read as a mismatch. On a mismatch the joiner gets a toast
+("Some terrain may look different until you update") and the host flags the player
 (`ServerPlayer::worldgen_mismatch`) so a later pass can push real chunks instead.
 
-The golden test `test_integration/worldgen_golden.rs` hashes every cell (block id + meta,
-in coordinate order, never chunk-map order) of a fixed column set for seed `20261006` —
-normal terrain with caves and ore, plus flat grass, flat water and the Workshop void —
-and fails with "worldgen output changed: bump WORLDGEN_VERSION and update this hash"
-until both land together. It also checks the output is identical when generated twice
-and when generated in reverse column order. Verified 2026-10-06: deterministic within
-and across processes (`AHashMap` random state does not leak into block output) and
-column-order-independent for that set.
+**Generation is a pure function of (seed, world flags, fingerprint)** (Phase B0, 2026-10-06):
+independent of the order columns are generated in and of platform float maths. The rules that
+keep it so (break one and joiners desync silently):
 
-**Not yet pure (Phase B0).** The claim above ("always the exact same result regardless of
-what other chunks exist") does not fully hold as built. Known hidden inputs:
-`BiomeGenerator::reserve_richness` (live server state from `StateUpdate`; picks deepslate
-variants, and a joiner's first columns use the default before an update arrives), Brigand
-Hideouts reading `village_anchors` (order-dependent), the bundled plan registry villages
-build from, and `sin`/`cos`/`powf` rounding differences between native and WASM libm.
+- **Deepslate variants bake a constant.** `base_rock_at` picks the deepslate visual variant with
+  `biome::WORLDGEN_RESERVE_RICHNESS = 0.75` (what single-player always baked), never the live
+  Reserve richness. *Bug fixed:* the client used to copy `reserve.richness` into
+  `BiomeGenerator` every tick while `GameServer.biome_gen` kept 0.5, so the same seed baked
+  different deepslate block ids on the host client, the server and a joiner. Richness-driven
+  visuals move to render time when the reward layer lands (`game_loop.rs` BRIDGE;
+  `docs/foundations/2026-05-17-deepslate-reserve.md`).
+- **Decoration passes write only inside the column being generated, and read neighbour columns
+  only through pure functions of `biome_gen`** — `tree_at_column_cell`, `terrain_block_at`,
+  `village_gen::village_site` — never `World::get_block` on a column that may not exist yet (it
+  reads AIR). *Bug fixed:* papyrus checked `is_water` on the neighbour cell, which at a column edge
+  is another column, so reeds depended on generation order; it now asks `terrain_block_at`.
+- **Structure gates use sites, not generated state.** The Brigand Hideout village-distance gate
+  (no hideout within 128 blocks of a village) asks `village_gen::village_site_within`, built on the
+  same `village_site` (cell roll, biome gate, sea-level gate) villages are placed from. *Bug fixed:*
+  it read `World::village_anchors`, which only fills as village columns generate, so a hideout
+  appeared or not depending on whether the nearby village's columns had generated first.
+- **Villages sample `PlanRegistry::bundled()`** (immutable, parsed once per process), never
+  `World::plan_registry`, which also holds runtime additions (`/importschem`; `add` bypasses the
+  licence filter and replaces a same-named bundled plan). A test world (`World::new()`) therefore
+  generates the same plan-built villages as production.
+- **No platform transcendental functions.** Layout trig (village and hideout rings, ravine
+  projection and wobble) is the pure-Rust `libm` crate (`sinf` / `cosf` / `sincosf`): platform
+  libms (glibc, Android bionic, macOS, the WASM build) may differ by an ULP, enough to flip a
+  `.round()`ed cell. Squares are `t * t`, not `powi`. Everything else is IEEE-exact
+  (`+ - * / sqrt floor round`, int↔float casts). The `noise` crate's OpenSimplex uses only those
+  plus `t.powi(4)`, which both LLVM's lowering and compiler-rt's `__powidf2` compute as `(t²)²` —
+  not patched, noted as the one unpinned dependency-internal.
+- **No hash-map iteration order reaches a block write.** The per-column village anchor set is a
+  `BTreeMap`; the hideout's `AHashMap` village snapshot is gone.
+
+The golden test `test_integration/worldgen_golden.rs` covers two column sets: terrain (seed
+`20261006`: caves, ore, trees, vegetation across two biomes, plus flat grass, flat water and the
+Workshop void) and structures (seed `2042`: village V, a hideout H that places, and a hideout
+candidate R 108 blocks from V that the gate must reject). Each set is generated in row-major,
+reversed and scattered column order into fresh `World`s and compared cell by cell (block id +
+meta) plus every side table generation writes (`block_meta`, `block_entities` incl. chest loot,
+`architect_plaques`, `procgen_plaque_sources`, `brigand_hideouts`, `village_anchors`). The golden
+hash (blocks + meta of every set, plus structure side-table positions) is pinned together with
+the bundled-plans hash: if only the plans changed the test says "update GOLDEN_PLANS and GOLDEN,
+no version bump"; if the output changed with the same plans it says "bump WORLDGEN_VERSION". The
+B0 order test failed on version-1 code with 183 cells differing (hideout R placed when its columns
+generated before V's).
 
 | Worldgen version | Date | Change |
 |---|---|---|
 | 1 | 2026-10-06 | Baseline: output as of protocol v65. |
+| 2 | 2026-10-06 | Phase B0 purity: deepslate baked at fixed richness 0.75 (server-generated worlds used 0.5); hideout village gate from pure village sites (some hideouts near villages no longer place); papyrus water check pure; villages always from the bundled plans; `libm` trig in village / hideout / ravine layouts (a few cells may shift). Wire value becomes `worldgen_fingerprint()`. |
 
 ### 5.3 Stage Details
 

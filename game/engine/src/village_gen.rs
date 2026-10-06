@@ -14,14 +14,14 @@
 //! **Density**: ~1 village per 32×32 chunks (`VILLAGE_GRID` below).
 //! Anchors live on a virtual grid; only one anchor per grid cell, deterministic.
 
-use ahash::AHashMap;
+use std::collections::BTreeMap;
 
 use crate::biome::{Biome, BiomeGenerator};
 use crate::block;
 use glam::Vec3;
 
 use crate::chunk::CHUNK_SIZE;
-use crate::plan_registry::{PlanCategory, SlotDims};
+use crate::plan_registry::{PlanCategory, PlanRegistry, SlotDims};
 use crate::villager::Profession;
 use crate::world::World;
 
@@ -101,14 +101,19 @@ fn anchor_world_xz(world_seed: u32, gx: i32, gz: i32) -> (i32, i32) {
     (cell_origin_x + off_x, cell_origin_z + off_z)
 }
 
-/// Compute the full village layout for a cell, or `None` if this cell has no
-/// village. Pure — no world reads, no allocation outside the returned `Vec`.
-pub fn layout_for_cell(
+/// The village site of a grid cell — its anchor `[x, surface_y, z]` — or
+/// `None` if the cell has no village. This is the whole "does a village exist
+/// here" decision (cell roll, biome gate, sea-level gate) and nothing else.
+/// Pure: seed + biome sampling only, never world state, so anything that must
+/// know where villages are (the Brigand Hideout village-distance gate) asks
+/// this instead of `World::village_anchors`, which only fills as village
+/// columns generate (Phase B0 worldgen purity).
+pub fn village_site(
     world_seed: u32,
     gx: i32,
     gz: i32,
     biome_gen: &BiomeGenerator,
-) -> Option<VillageLayout> {
+) -> Option<[i32; 3]> {
     if !cell_has_village(world_seed, gx, gz) {
         return None;
     }
@@ -124,12 +129,52 @@ pub fn layout_for_cell(
     // below sea level, otherwise the village renders as a flooded
     // pit when the player spawns one near a lake. The 4× lake-depth
     // boost shipped the same day made this case very visible.
-    let anchor_surface = biome_gen.terrain_height(ax, az);
-    if anchor_surface < crate::biome::SEA_LEVEL + 2 {
+    let surface = biome_gen.terrain_height(ax, az);
+    if surface < crate::biome::SEA_LEVEL + 2 {
         return None;
     }
+    Some([ax, surface, az])
+}
 
-    let surface = biome_gen.terrain_height(ax, az);
+/// Is there a village anchor strictly closer than `dist` blocks (Chebyshev,
+/// XZ) to `(x, z)`? Scans every village grid cell an anchor that close could
+/// sit in, via [`village_site`]. Pure, so the answer does not depend on which
+/// columns have been generated or in what order.
+pub fn village_site_within(
+    world_seed: u32,
+    x: i32,
+    z: i32,
+    dist: i32,
+    biome_gen: &BiomeGenerator,
+) -> bool {
+    let cell = VILLAGE_GRID * CHUNK_SIZE as i32;
+    let r = dist - 1;
+    for gx in (x - r).div_euclid(cell)..=(x + r).div_euclid(cell) {
+        for gz in (z - r).div_euclid(cell)..=(z + r).div_euclid(cell) {
+            if let Some([vx, _, vz]) = village_site(world_seed, gx, gz, biome_gen)
+                && (vx - x).abs().max((vz - z).abs()) < dist
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Compute the full village layout for a cell, or `None` if this cell has no
+/// village. Pure — no world reads, no allocation outside the returned `Vec`.
+///
+/// Ring positions use `libm::cosf`/`sinf`, not the platform `f32::cos`/`sin`:
+/// the result is `.round()`ed to a cell, and platform libms (glibc, Android,
+/// macOS, the WASM build) may differ by an ULP, enough to flip a cell between a
+/// host and a joiner (Phase B0).
+pub fn layout_for_cell(
+    world_seed: u32,
+    gx: i32,
+    gz: i32,
+    biome_gen: &BiomeGenerator,
+) -> Option<VillageLayout> {
+    let [ax, surface, az] = village_site(world_seed, gx, gz, biome_gen)?;
     let h = anchor_hash(world_seed, gx, gz);
 
     // House count: 3-6 inclusive.
@@ -147,8 +192,8 @@ pub fn layout_for_cell(
         let angle = angle_base + angle_jitter;
         // Radius: 8-14 blocks from the anchor.
         let radius = 8.0 + (h_i.rotate_left(5) % 7) as f32;
-        let dx = (radius * angle.cos()).round() as i32;
-        let dz = (radius * angle.sin()).round() as i32;
+        let dx = (radius * libm::cosf(angle)).round() as i32;
+        let dz = (radius * libm::sinf(angle)).round() as i32;
         let hx = ax + dx;
         let hz = az + dz;
         // House surface independently — terrain dips don't all match anchor.
@@ -192,8 +237,8 @@ pub fn layout_for_cell(
             + (h_i % 30) as f32 / 100.0;
         // Workshops sit ~18-22 blocks out — outside the house ring.
         let radius = 18.0 + (h_i.rotate_left(3) % 5) as f32;
-        let dx = (radius * angle.cos()).round() as i32;
-        let dz = (radius * angle.sin()).round() as i32;
+        let dx = (radius * libm::cosf(angle)).round() as i32;
+        let dz = (radius * libm::sinf(angle)).round() as i32;
         let wx = ax + dx;
         let wz = az + dz;
         let w_surface = biome_gen.terrain_height(wx, wz);
@@ -227,13 +272,35 @@ fn inward_facing(dx: i32, dz: i32) -> u8 {
 ///
 /// Returns the set of village anchors whose blocks were touched this call so
 /// the caller can register them in a side-table for later villager-spawning.
+///
+/// Houses and workshops sample [`PlanRegistry::bundled`], never
+/// `World::plan_registry`: the world's registry also holds runtime additions
+/// (`/importschem`), which must not change what a seed generates (Phase B0).
+/// The bundled registry's content is folded into `world::worldgen_fingerprint`.
 pub fn place_villages_for_column(
     world: &mut World,
     cx: i32,
     cz: i32,
     biome_gen: &BiomeGenerator,
     world_seed: u32,
-    placed: &mut AHashMap<(i32, i32), [i32; 3]>,
+    placed: &mut BTreeMap<(i32, i32), [i32; 3]>,
+) {
+    place_villages_for_column_with_plans(
+        world, cx, cz, biome_gen, world_seed, placed, PlanRegistry::bundled(),
+    );
+}
+
+/// [`place_villages_for_column`] with an explicit plan registry. Generation
+/// always passes the bundled one; tests pass an empty registry to exercise the
+/// hardcoded fallback shapes.
+pub(crate) fn place_villages_for_column_with_plans(
+    world: &mut World,
+    cx: i32,
+    cz: i32,
+    biome_gen: &BiomeGenerator,
+    world_seed: u32,
+    placed: &mut BTreeMap<(i32, i32), [i32; 3]>,
+    plans: &PlanRegistry,
 ) {
     let cs = CHUNK_SIZE as i32;
     let col_min_x = cx * cs;
@@ -271,6 +338,7 @@ pub fn place_villages_for_column(
                 &layout,
                 col_min_x, col_min_z, col_max_x, col_max_z,
                 village_seed,
+                plans,
             );
             placed.insert((gx, gz), layout.anchor_world);
         }
@@ -285,6 +353,7 @@ fn apply_layout_to_column(
     col_max_x: i32,
     col_max_z: i32,
     village_seed: u64,
+    plans: &PlanRegistry,
 ) {
     let bounds = ColumnBounds {
         min_x: col_min_x, min_z: col_min_z, max_x: col_max_x, max_z: col_max_z,
@@ -295,12 +364,12 @@ fn apply_layout_to_column(
     // other.
     for (idx, house) in layout.houses.iter().enumerate() {
         let seed = village_seed.wrapping_mul(31).wrapping_add(idx as u64);
-        build_house(world, house, &bounds, seed);
+        build_house(world, house, &bounds, seed, plans);
     }
     // Workshops — Spec 27 Phase 7.
     for (idx, ws) in layout.workshops.iter().enumerate() {
         let seed = village_seed.wrapping_mul(37).wrapping_add(idx as u64 + 1000);
-        build_workshop(world, ws, &bounds, seed);
+        build_workshop(world, ws, &bounds, seed, plans);
     }
     // Well.
     build_well(world, layout.well, &bounds);
@@ -335,15 +404,17 @@ fn try_set(world: &mut World, bounds: &ColumnBounds, x: i32, y: i32, z: i32, b: 
 /// the sampled plan + drop the procgen Plaque next to the building. On
 /// a miss (empty registry, no matching plan), fall back to the legacy
 /// hardcoded shape so worlds without bundled content still build.
-fn build_house(world: &mut World, house: &HouseSpec, bounds: &ColumnBounds, seed: u64) {
+fn build_house(
+    world: &mut World,
+    house: &HouseSpec,
+    bounds: &ColumnBounds,
+    seed: u64,
+    plans: &PlanRegistry,
+) {
     let [ox, oy, oz] = house.origin;
     let slot = SlotDims { width: 8, depth: 8 };
-    let sampled = world
-        .plan_registry
-        .sample_plan_for_slot(PlanCategory::SmallHouse, slot, seed)
-        .cloned();
-    if let Some(plan) = sampled {
-        place_plan_via_procgen(world, &plan, ox, oy, oz, bounds);
+    if let Some(plan) = plans.sample_plan_for_slot(PlanCategory::SmallHouse, slot, seed) {
+        place_plan_via_procgen(world, plan, ox, oy, oz, bounds);
         return;
     }
     build_hardcoded_house(world, house, bounds);
@@ -353,15 +424,17 @@ fn build_house(world: &mut World, house: &HouseSpec, bounds: &ColumnBounds, seed
 /// profession. Falls back to a small hardcoded shape (just the
 /// distinguishing workstation block on a floor patch) when the
 /// registry can't supply a fit.
-fn build_workshop(world: &mut World, ws: &WorkshopSpec, bounds: &ColumnBounds, seed: u64) {
+fn build_workshop(
+    world: &mut World,
+    ws: &WorkshopSpec,
+    bounds: &ColumnBounds,
+    seed: u64,
+    plans: &PlanRegistry,
+) {
     let [ox, oy, oz] = ws.origin;
     let slot = SlotDims { width: 10, depth: 10 };
-    let sampled = world
-        .plan_registry
-        .sample_plan_for_slot(PlanCategory::Workshop(ws.profession), slot, seed)
-        .cloned();
-    if let Some(plan) = sampled {
-        place_plan_via_procgen(world, &plan, ox, oy, oz, bounds);
+    if let Some(plan) = plans.sample_plan_for_slot(PlanCategory::Workshop(ws.profession), slot, seed) {
+        place_plan_via_procgen(world, plan, ox, oy, oz, bounds);
         return;
     }
     build_hardcoded_workshop(world, ws, bounds);
@@ -405,10 +478,10 @@ fn place_plan_via_procgen(
     world.procgen_plaque_sources.insert((plaque_x, plaque_y, plaque_z));
 }
 
-/// Legacy hardcoded house shape — kept as the no-registry fallback so
-/// villages still build on a fresh test world with an empty plan
-/// registry. Removed once Spec 27 Phase 11 playtest signs off on the
-/// registry-only path.
+/// Legacy hardcoded house shape — the fallback when the registry has no
+/// plan for the slot (generation passes the bundled registry, so in
+/// practice only tests passing an empty one reach it). Removed once Spec
+/// 27 Phase 11 playtest signs off on the registry-only path.
 fn build_hardcoded_house(world: &mut World, house: &HouseSpec, bounds: &ColumnBounds) {
     let [ox, oy, oz] = house.origin;
     let w: i32 = 3;
@@ -880,7 +953,7 @@ mod tests {
         }
 
         // Re-run the village pass via the standalone API too (idempotency check).
-        let mut placed: ahash::AHashMap<(i32, i32), [i32; 3]> = ahash::AHashMap::new();
+        let mut placed: BTreeMap<(i32, i32), [i32; 3]> = BTreeMap::new();
         for dcx in -3..=3 {
             for dcz in -3..=3 {
                 place_villages_for_column(

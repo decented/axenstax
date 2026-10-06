@@ -67,18 +67,24 @@ pub const Y_DP: i32 = 30;
 /// it is 1.0. Default 8 blocks of gradual mixing.
 pub const DEEPSLATE_TRANSITION_DEPTH: i32 = 8;
 
+/// The Reserve richness world generation bakes deepslate variants with
+/// (Spec 16 Phase 3b; Phase B0 worldgen purity).
+///
+/// Generation must be a pure function of seed + world flags + the worldgen
+/// fingerprint, so a joiner regenerates the host's untouched chunks
+/// bit-identically. Live Reserve state therefore never feeds it: the host
+/// client, a dedicated server and a joiner all bake this constant. 0.75 is
+/// what single-player always baked (`ReserveState::synthetic_default()`), so
+/// existing worlds show no seam. Richness-driven deepslate visuals move to
+/// render time when the reward layer lands
+/// (`docs/foundations/2026-05-17-deepslate-reserve.md`). Changing this value
+/// changes generation output: bump `world::WORLDGEN_VERSION`.
+pub const WORLDGEN_RESERVE_RICHNESS: f32 = 0.75;
+
 pub struct BiomeGenerator {
     /// The world seed this generator was initialised with. Surfaced for
     /// commands like `/seed` and for save migrations.
     pub seed: u32,
-    /// Spec 16 Phase 3b — current Reserve richness snapshot ∈ [0, 1].
-    /// Updated from `GameState.reserve.richness` before each chunk-gen
-    /// pass. Drives the deepslate visual-variant picker in
-    /// `base_rock_at`: higher richness → more THIN/HEALTHY/FAT tiles,
-    /// lower richness → mostly canonical PURE_DEEPSLATE. Bakes in at
-    /// chunk-gen time; already-loaded chunks keep their variants even
-    /// if richness later changes.
-    pub reserve_richness: f32,
     temp_noise: OpenSimplex,
     humidity_noise: OpenSimplex,
     height_noise: OpenSimplex,
@@ -90,10 +96,6 @@ impl BiomeGenerator {
     pub fn new(seed: u32) -> Self {
         Self {
             seed,
-            // Default to a "healthy" 0.5 so worlds generated before the
-            // Reserve is funded still show some variant variety. Updated
-            // each tick from the runtime reserve value.
-            reserve_richness: 0.5,
             temp_noise: OpenSimplex::new(seed),
             humidity_noise: OpenSimplex::new(seed.wrapping_add(1000)),
             height_noise: OpenSimplex::new(seed.wrapping_add(2000)),
@@ -302,8 +304,8 @@ impl BiomeGenerator {
 
     /// Resolve the base block at this position (no ore overlay applied).
     /// Returns a PURE_DEEPSLATE-family variant in the deepslate region
-    /// (per `is_deepslate_substrate`) — variant chosen from the current
-    /// `reserve_richness` snapshot via [`pick_deepslate_variant`] — and
+    /// (per `is_deepslate_substrate`) — variant chosen from the fixed
+    /// [`WORLDGEN_RESERVE_RICHNESS`] via [`pick_deepslate_variant`] — and
     /// STONE otherwise. Callers (chunk-gen) should call `ore_at` first
     /// and fall back to this if no ore is placed.
     ///
@@ -313,7 +315,7 @@ impl BiomeGenerator {
     /// the deepslate threshold.
     pub fn base_rock_at(&self, x: i32, y: i32, z: i32) -> crate::block::BlockId {
         if self.is_deepslate_substrate(x, y, z) {
-            return pick_deepslate_variant(x, y, z, self.seed, self.reserve_richness);
+            return pick_deepslate_variant(x, y, z, self.seed, WORLDGEN_RESERVE_RICHNESS);
         }
         if let Some(b) = self.try_rock_salt_vein(x, y, z) {
             return b;

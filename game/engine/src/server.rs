@@ -128,7 +128,7 @@ pub struct ServerPlayer {
     /// World chat (Phase 2) — this player's per-minute chat token bucket.
     /// See `crate::comms::RateLimiter`.
     pub chat_rate: crate::comms::RateLimiter,
-    /// The `WORLDGEN_VERSION` this player's client announced in its
+    /// The `worldgen_fingerprint()` this player's client announced in its
     /// `JoinRequest` (gap-audit T2-9). A joiner regenerates terrain locally,
     /// so a different version means its terrain may differ from the host's.
     /// Local players run this build, so they start at ours. Read through
@@ -271,15 +271,15 @@ impl ServerPlayer {
             // Phase 4 fills this in from Signet/Kenspeckle contacts.
             contacts: std::collections::HashMap::new(),
             chat_rate: crate::comms::RateLimiter::new(),
-            client_worldgen_version: crate::world::WORLDGEN_VERSION,
+            client_worldgen_version: crate::world::worldgen_fingerprint(),
         }
     }
 
     /// Does this player's client generate terrain differently from this
-    /// server (another `WORLDGEN_VERSION`)? Such a client needs real chunks
+    /// server (another `worldgen_fingerprint()`)? Such a client needs real chunks
     /// pushed rather than regenerating them from the seed (Phase B).
     pub fn worldgen_mismatch(&self) -> bool {
-        self.client_worldgen_version != crate::world::WORLDGEN_VERSION
+        self.client_worldgen_version != crate::world::worldgen_fingerprint()
     }
 }
 
@@ -1869,7 +1869,7 @@ mod tests {
     fn worldgen_mismatch_reads_the_announced_version() {
         let mut sp = ServerPlayer::new(Vec3::ZERO);
         assert!(!sp.worldgen_mismatch());
-        sp.client_worldgen_version = crate::world::WORLDGEN_VERSION + 1;
+        sp.client_worldgen_version = crate::world::worldgen_fingerprint() ^ 1;
         assert!(sp.worldgen_mismatch());
     }
 

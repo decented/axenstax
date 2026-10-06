@@ -22,21 +22,64 @@ pub const MAX_CHUNK_Y: i32 = 5;
 /// bump (and its new hash) land together.
 ///
 /// A joiner generates the host's terrain locally from the seed in
-/// `JoinAcceptPacket`, so the host sends this number there and the joiner
-/// sends its own in `JoinRequestPacket`. On a mismatch the joiner warns the
-/// player (terrain may differ) and the host records it on the player
+/// `JoinAcceptPacket`, so the host sends [`worldgen_fingerprint`] (this
+/// version folded with the bundled plan registry's content hash) there and the
+/// joiner sends its own in `JoinRequestPacket`. On a mismatch the joiner warns
+/// the player (terrain may differ) and the host records it on the player
 /// (`ServerPlayer::worldgen_mismatch`) for a later pass to push real chunks.
 ///
-/// **Not yet a pure function of seed + flags; see Phase B0.** Known hidden
-/// inputs, so two machines on the same version can still differ:
-/// `BiomeGenerator::reserve_richness` (live server state from `StateUpdate`,
-/// picks deepslate variants; a joiner's first columns use the default before
-/// any update arrives), Brigand Hideouts reading `village_anchors` (so they
-/// depend on the ORDER columns were generated in), the bundled plan registry
-/// villages build from, and `sin`/`cos`/`powf` rounding across platforms
-/// (native vs WASM libm). The golden test generates in a fixed order, so it
-/// pins output but does not prove purity.
-pub const WORLDGEN_VERSION: u32 = 1;
+/// **Generation is a pure function of (seed, world flags, fingerprint)**
+/// (Phase B0): independent of the order columns are generated in and of
+/// platform float maths. What keeps it so — break one and joiners desync:
+/// - deepslate variants bake the fixed `biome::WORLDGEN_RESERVE_RICHNESS`,
+///   never live Reserve state;
+/// - every decoration pass writes only inside the column being generated and
+///   reads neighbour columns only through pure functions of `biome_gen`
+///   (`tree_at_column_cell`, `terrain_block_at`, `village_site`), never
+///   `get_block` on a column that may not exist yet;
+/// - the Brigand Hideout village gate asks `village_gen::village_site_within`,
+///   not `village_anchors` (which fills in generation order);
+/// - villages sample `PlanRegistry::bundled()`, not `World::plan_registry`
+///   (runtime `/importschem` additions);
+/// - layout trig is `libm` (`sinf`/`cosf`/`sincosf`), no `powi`/`powf`;
+///   only IEEE-exact `+ - * / sqrt floor round` otherwise;
+/// - no hash-map iteration order reaches a block write.
+///
+/// The golden test pins the output and generates a village + hideout area in
+/// two column orders; Spec 02 §5.2 has the version log.
+pub const WORLDGEN_VERSION: u32 = 2;
+
+/// The value host and joiner exchange as `worldgen_version` in `JoinAccept` /
+/// `JoinRequest`: [`WORLDGEN_VERSION`] folded with the content hash of the
+/// bundled plan registry villages are built from
+/// ([`crate::plan_registry::PlanRegistry::bundled`]). Two builds agree iff
+/// both their generator version and their bundled plans match, so a plan edit
+/// with no code change still reads as "terrain may differ". Never 0 (a peer
+/// that sent no value decodes as 0, which must read as a mismatch).
+pub fn worldgen_fingerprint() -> u32 {
+    static FINGERPRINT: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+        worldgen_fingerprint_of(
+            WORLDGEN_VERSION,
+            &crate::plan_registry::PlanRegistry::bundled().content_hash(),
+        )
+    });
+    *FINGERPRINT
+}
+
+/// Pure core of [`worldgen_fingerprint`]: the first four bytes (LE) of
+/// SHA-256(domain, version, plan-registry hash), with 0 mapped to 1.
+pub(crate) fn worldgen_fingerprint_of(version: u32, plans_hash: &[u8; 32]) -> u32 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"axenstax-worldgen-fingerprint\0");
+    h.update(version.to_le_bytes());
+    h.update(plans_hash);
+    let d = h.finalize();
+    match u32::from_le_bytes([d[0], d[1], d[2], d[3]]) {
+        0 => 1,
+        fp => fp,
+    }
+}
 
 // `BlockPos`/`ChunkPos` (plain (x,y,z) wrapper structs) were removed here —
 // zero references anywhere; every call site in this codebase addresses
@@ -460,12 +503,12 @@ pub struct World {
     /// Persisted on save with `#[serde(default)]` so older saves load
     /// with an empty leaderboard.
     pub raid_kills: AHashMap<(crate::reputation::VillageId, crate::raid::PlayerKey), u32>,
-    /// Spec 27 — registry of curated `.plan.json` files that village
-    /// procgen samples from. Empty by default (every test path stays
-    /// in the existing hardcoded village shape); production callers
-    /// populate via `World::load_bundled_plans()` at world init.
-    /// Persisted? No — derived from engine bundle + future server-
-    /// local additions, rebuilt on load.
+    /// Spec 27 — registry of `.plan.json` plans for `/buildguide` and
+    /// friends: the engine bundle (`World::load_bundled_plans()` at world
+    /// init) plus runtime additions (`/importschem`). **Not read by world
+    /// generation** — village procgen samples the immutable
+    /// `PlanRegistry::bundled()`, so an import never changes what a seed
+    /// generates (Phase B0). Persisted? No — rebuilt on load.
     pub plan_registry: crate::plan_registry::PlanRegistry,
     /// Owner-inbox #18 — `block_id → micro-model` render override table. A
     /// registered block draws its baked sub-voxel shell instead of its default
@@ -841,7 +884,7 @@ impl World {
     /// village procgen has content to sample from. Idempotent; safe
     /// to call multiple times (replaces the existing registry).
     pub fn load_bundled_plans(&mut self) {
-        self.plan_registry = crate::plan_registry::PlanRegistry::load_bundled();
+        self.plan_registry = crate::plan_registry::PlanRegistry::bundled().clone();
     }
 
     /// Owner-inbox #18 — register the engine's built-in micro-model overrides
@@ -2138,7 +2181,7 @@ impl World {
         // every cell within reach gets a partial structure-build for the
         // overlapping blocks here, so villages straddle chunk boundaries
         // correctly without a global pre-pass.
-        let mut placed = ahash::AHashMap::<(i32, i32), [i32; 3]>::new();
+        let mut placed = std::collections::BTreeMap::<(i32, i32), [i32; 3]>::new();
         crate::village_gen::place_villages_for_column(
             self, cx, cz, biome_gen, biome_gen.seed, &mut placed,
         );
@@ -2147,8 +2190,8 @@ impl World {
         }
 
         // HP-3 — Brigand Hideouts. Sparser than villages (1 per 64×64
-        // chunks). Run after villages so the layout's village-distance
-        // gate can read the freshly-placed anchors.
+        // chunks). The village-distance gate uses pure village sites, not
+        // the anchors registered above (Phase B0: order-independent).
         crate::brigand_hideout_gen::place_hideouts_for_column(
             self, cx, cz, biome_gen, biome_gen.seed,
         );
@@ -2298,10 +2341,13 @@ impl World {
                 if surface == SEA_LEVEL + 1
                     && matches!(surf_block, block::GRASS | block::DIRT | block::SAND)
                 {
-                    let water_near = self.is_water(wx + 1, SEA_LEVEL, wz)
-                        || self.is_water(wx - 1, SEA_LEVEL, wz)
-                        || self.is_water(wx, SEA_LEVEL, wz + 1)
-                        || self.is_water(wx, SEA_LEVEL, wz - 1);
+                    // Pure terrain, not `self.is_water`: at the column edge
+                    // the neighbour cell is in another column, which reads
+                    // AIR until it generates — so papyrus depended on
+                    // generation order (Phase B0).
+                    let water_near = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                        terrain_block_at(biome_gen, wx + dx, SEA_LEVEL, wz + dz) == block::WATER
+                    });
                     if water_near {
                         if h % 100 < 35 {
                             self.set_block(wx, above, wz, block::PAPYRUS_STAGE_3);
@@ -2343,6 +2389,15 @@ impl World {
             }
         }
     }
+}
+
+/// The block plain terrain generation puts at `(x, y, z)` — before trees,
+/// vegetation and structures. Pure (only `biome_gen`), so a decoration pass
+/// can ask about a neighbour column that has not been generated yet and get
+/// the same answer it would after (Phase B0 worldgen purity).
+pub(crate) fn terrain_block_at(biome_gen: &BiomeGenerator, x: i32, y: i32, z: i32) -> BlockId {
+    let surface = biome_gen.terrain_height(x, z);
+    biome_block_at(y, surface, biome_gen.biome_at(x, z), biome_gen, x, z)
 }
 
 /// Pure tree-eligibility for one column cell, plus the species + the y of

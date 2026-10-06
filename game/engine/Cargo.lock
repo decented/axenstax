@@ -473,6 +473,7 @@ dependencies = [
  "igd-next",
  "image",
  "js-sys",
+ "libm",
  "log",
  "lz4_flex",
  "naga",

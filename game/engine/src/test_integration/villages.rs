@@ -407,17 +407,21 @@ fn build_house_with_empty_registry_falls_back_to_hardcoded_shape() {
     }
     let layout = found.expect("expected at least one village in sample range");
 
+    // Generation always samples the bundled registry (Phase B0), so drive
+    // the village pass directly with an empty one to force the hardcoded
+    // fallback. No terrain is needed for the structure blocks to land.
     let mut world = World::new();
-    // Deliberately do NOT call `world.load_bundled_plans()` — empty
-    // registry forces the hardcoded fallback.
-    assert!(world.plan_registry.is_empty());
+    let empty = crate::plan_registry::PlanRegistry::new();
+    let mut placed = std::collections::BTreeMap::new();
 
     let [ax, _ay, az] = layout.anchor_world;
     let cx = ax.div_euclid(CHUNK_SIZE as i32);
     let cz = az.div_euclid(CHUNK_SIZE as i32);
     for dcx in -3..=3 {
         for dcz in -3..=3 {
-            world.generate_column(cx + dcx, cz + dcz, &bg);
+            crate::village_gen::place_villages_for_column_with_plans(
+                &mut world, cx + dcx, cz + dcz, &bg, 42, &mut placed, &empty,
+            );
         }
     }
     // No procgen plaque without the registry. Hardcoded shape still

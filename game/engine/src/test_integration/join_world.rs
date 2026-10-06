@@ -16,7 +16,7 @@ use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::protocol;
 use crate::remote_client::{build_join_request_guest, JoinedWorld, RemoteClient};
 use crate::transport::ClientTransport;
-use crate::world::{World, MAX_CHUNK_Y, WORLDGEN_VERSION};
+use crate::world::{worldgen_fingerprint, World, MAX_CHUNK_Y};
 
 /// WebSocket + 0 remote slots: no accept thread, no sockets, and the open
 /// join policy a guest JoinRequest needs. The world name must not exist on
@@ -76,7 +76,7 @@ fn joiner_generates_the_hosts_normal_terrain() {
     let joined = join(&mut hs);
     assert_eq!(joined.seed, 31_337, "the host's real seed");
     assert_eq!(joined.rules.world_type, "normal");
-    assert_eq!(joined.worldgen_version, WORLDGEN_VERSION);
+    assert_eq!(joined.worldgen_version, worldgen_fingerprint());
 
     let (mut jw, jbg) = joiner_world(&joined);
     // Columns far from both spawns, so neither side generated them yet.
@@ -142,11 +142,11 @@ fn host_records_a_joiners_worldgen_version() {
     let mut hs = start_open_server("t29-join-wgv", 7);
     let client = hs.attach_test_remote();
     let mut req = build_join_request_guest("Older", 0);
-    req.worldgen_version = WORLDGEN_VERSION + 1;
+    req.worldgen_version = worldgen_fingerprint() ^ 1;
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
     hs.tick();
     let slot = hs.server.players.len() - 1;
-    assert_eq!(hs.server.players[slot].client_worldgen_version, WORLDGEN_VERSION + 1);
+    assert_eq!(hs.server.players[slot].client_worldgen_version, worldgen_fingerprint() ^ 1);
     assert!(hs.server.players[slot].worldgen_mismatch());
 }
 
