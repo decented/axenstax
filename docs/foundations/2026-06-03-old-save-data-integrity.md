@@ -402,7 +402,8 @@ A second independent review of the follow-ups above found these, all fixed (Spec
   while either of the first two is set, and the pause menu says so — *"Quit — your
   autosave from <age> is kept"* — instead of promising a discard. A failed
   window-close save keeps the player in the world with a hint to close again, and
-  the second close quits without saving, keeping the autosave, so a save that keeps
+  the second close quits without saving (now: tries the save once more first — see the
+  third review, below), keeping the autosave, so a save that keeps
   failing never traps them. A save that lands resets it all.
 - **The "write `world.dat` first" rule still left holes.** Every loader treats a
   column with any saved chunk as loaded and never generates the rest, so a first save
