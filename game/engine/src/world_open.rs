@@ -762,44 +762,206 @@ mod tests {
         assert_eq!(snapshot(&d), before);
     }
 
-    /// A world's FIRST save writes `world.dat` before any chunk, so a first save
-    /// cut short (the dedicated server killed during its tick-0 save) leaves a
-    /// world that opens — not chunks without a `world.dat`, refused forever.
-    #[test]
-    fn a_first_save_cut_short_still_leaves_a_world_that_opens() {
-        let _g = WorldsRootGuard::new("open_first_save_cut");
-        // Every chunk write fails: a directory where each chunk's tmp file goes.
-        let fail_chunks = |name: &str| {
-            for f in ["0_4_0.chunk.tmp", "2_4_0.chunk.tmp"] {
-                fs::create_dir_all(world_dir(name).join("chunks").join(f)).unwrap();
-            }
-        };
+    /// A world with chunks in several columns, several chunks tall — every
+    /// non-empty chunk key it holds, so a reload can be checked for holes.
+    fn many_chunk_world() -> (World, std::collections::BTreeSet<(i32, i32, i32)>) {
         let mut w = World::new();
-        w.set_block(3, 64, 5, crate::block::BEDROCK);
-        w.set_block(40, 64, 5, crate::block::BEDROCK);
-        // The client's writer.
-        fail_chunks("client");
-        crate::save::save_world_meta("client", &WorldMeta::new("client")).unwrap();
-        assert!(crate::save::save_world("client", &w, std::slice::from_ref(&slot()), 5, &[], &[])
-            .is_err());
-        assert!(world_dir("client").join("world.dat").is_file(), "world.dat written first");
+        for (x, z) in [(3, 5), (40, 5), (90, 90)] {
+            for y in [20, 40, 64, 80] {
+                w.set_block(x, y, z, crate::block::BEDROCK);
+            }
+        }
+        let keys = solid_chunks(&w);
+        assert_eq!(keys.len(), 12);
+        (w, keys)
+    }
+
+    fn solid_chunks(w: &World) -> std::collections::BTreeSet<(i32, i32, i32)> {
+        w.persistable_chunks().filter(|(_, c)| !c.is_empty()).map(|(k, _)| k).collect()
+    }
+
+    /// What a reopened world holds: `None` when it is still new (nothing a loader
+    /// reads), else its solid chunks. Both openers must agree.
+    fn reopened(name: &str) -> Option<std::collections::BTreeSet<(i32, i32, i32)>> {
+        let mut client = World::new();
+        let got = match open_world(name, &mut client, AutosavePolicy::Ignore)
+            .unwrap_or_else(|e| panic!("{name}: a first save cut short is never refused: {e}"))
+        {
+            OpenedWorld::New => None,
+            OpenedWorld::Loaded { .. } => Some(solid_chunks(&client)),
+        };
+        assert_eq!(is_new_world(name).unwrap(), got.is_none(), "{name}");
+        got
+    }
+
+    /// Review 2026-10-06 — a world's FIRST save wrote its chunks one by one in
+    /// hash-map order, and every loader marks a column with ANY saved chunk as
+    /// loaded and never generates it: cut short part-way, it left permanent holes
+    /// (and a first save that wrote `world.dat` first left it beside some of the
+    /// chunks). Now a first save stages every chunk in `chunks.new/`, commits with
+    /// `world.dat`, then publishes `chunks.new/` as `chunks/`: cut short anywhere,
+    /// the world is still new or is whole — never holed — and the next save or
+    /// open recovers.
+    #[test]
+    fn a_first_save_cut_short_anywhere_leaves_a_new_or_whole_world_never_holes() {
+        use crate::save::{FirstSaveCut, FIRST_SAVE_CUT};
+        let _g = WorldsRootGuard::new("open_first_save_cut");
+        let all = many_chunk_world().1;
+        let cuts = (0..=all.len())
+            .map(FirstSaveCut::AfterChunks)
+            .chain([FirstSaveCut::BeforePublish]);
+        for (i, cut) in cuts.enumerate() {
+            for writer in ["client", "server"] {
+                let name = format!("{writer}-{i}");
+                // The client's writer, or the dedicated server's (its tick-0 save).
+                let w = many_chunk_world().0;
+                let mut server = crate::server::GameServer::new(0, name.clone(), 5);
+                server.world = many_chunk_world().0;
+                let save = |w: &World, server: &crate::server::GameServer| {
+                    if writer == "client" {
+                        crate::save::save_world(&name, w, std::slice::from_ref(&slot()), 5, &[], &[])
+                    } else {
+                        server.try_save()
+                    }
+                };
+                if writer == "client" {
+                    crate::save::save_world_meta(&name, &WorldMeta::new(&name)).unwrap();
+                }
+                FIRST_SAVE_CUT.with(|c| c.set(Some(cut)));
+                let err = save(&w, &server).expect_err("cut short");
+                FIRST_SAVE_CUT.with(|c| c.set(None));
+                assert!(err.contains("cut short"), "{name}: {err}");
+                match reopened(&name) {
+                    None => assert!(
+                        !matches!(cut, FirstSaveCut::BeforePublish),
+                        "{name}: a committed first save is never lost"
+                    ),
+                    Some(got) => assert_eq!(got, all, "{name} ({cut:?}): holes"),
+                }
+                // The next save — still a first save if nothing committed —
+                // leaves the whole world.
+                save(&w, &server).unwrap_or_else(|e| panic!("{name}: the next save: {e}"));
+                assert_eq!(reopened(&name), Some(all.clone()), "{name}: after the next save");
+                let left: Vec<_> = fs::read_dir(world_dir(&name))
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|f| f.starts_with("chunks.") || f.ends_with(".tmp"))
+                    .collect();
+                assert!(left.is_empty(), "{name}: staging left behind: {left:?}");
+            }
+        }
+    }
+
+    /// A committed first save cut short before its chunks were published is
+    /// finished by the next open (and by the next save), never read as an empty
+    /// world under `world.dat`'s block entities.
+    #[test]
+    fn a_committed_first_save_is_finished_by_the_next_open() {
+        use crate::save::{FirstSaveCut, FIRST_SAVE_CUT};
+        let _g = WorldsRootGuard::new("open_first_save_publish");
+        let (w, all) = many_chunk_world();
+        crate::save::save_world_meta("w", &WorldMeta::new("w")).unwrap();
+        FIRST_SAVE_CUT.with(|c| c.set(Some(FirstSaveCut::BeforePublish)));
+        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).is_err());
+        FIRST_SAVE_CUT.with(|c| c.set(None));
+        let dir = world_dir("w");
+        assert!(dir.join("world.dat").is_file(), "committed");
+        assert!(saved_chunk_file(&dir).unwrap().is_none(), "not yet published");
+        let mut back = World::new();
         assert!(matches!(
-            open_world("client", &mut World::new(), AutosavePolicy::Prefer),
-            Ok(OpenedWorld::Loaded { chunks: 0, .. })
+            open_world("w", &mut back, AutosavePolicy::Prefer),
+            Ok(OpenedWorld::Loaded { chunks: 12, .. })
         ));
-        // The dedicated server's writer.
-        fail_chunks("server");
-        crate::save::save_world_meta("server", &WorldMeta::new("server")).unwrap();
-        let mut server = crate::server::GameServer::new(0, "server".into(), 5);
+        assert_eq!(solid_chunks(&back), all);
+        assert!(!dir.join("chunks.new").exists());
+    }
+
+    /// A first save stages beside a `chunks/` folder holding no chunk (a stray
+    /// tmp left by a crash): that folder is kept aside, never lost, and the
+    /// staged chunks are published.
+    #[test]
+    fn a_first_save_keeps_a_stray_chunks_folder_aside() {
+        let _g = WorldsRootGuard::new("open_first_save_stray");
+        let (w, all) = many_chunk_world();
+        let dir = world_dir("w");
+        fs::create_dir_all(dir.join("chunks")).unwrap();
+        fs::write(dir.join("chunks/0_4_0.chunk.tmp"), b"half").unwrap();
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).unwrap();
+        assert_eq!(reopened("w"), Some(all));
+        let kept: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("chunks.corrupt-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs::read(kept[0].path().join("0_4_0.chunk.tmp")).unwrap(), b"half");
+    }
+
+    /// Review 2026-10-06 — setting a block to air where the streamer had dropped
+    /// the column conjures an EMPTY chunk (`World::set_block` creates one), which
+    /// the mined-out rule then took for a mined-out chunk and deleted the REAL
+    /// file: a hole after the restart. Only a chunk that came from disk or was
+    /// really edited (`persist`) loses its file.
+    #[test]
+    fn save_never_deletes_a_chunk_file_under_a_conjured_empty_chunk() {
+        let _g = WorldsRootGuard::new("save_conjured_empty");
+        // A world-gen (never edited) chunk at 0_4_0, written by a save.
+        let mut w = World::new();
+        let mut generated = crate::chunk::Chunk::new();
+        generated.set(3, 0, 5, crate::block::STONE);
+        assert!(!generated.persist());
+        w.insert_chunk(0, 4, 0, generated);
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        let dir = world_dir("w");
+        let before = fs::read(dir.join("chunks/0_4_0.chunk")).unwrap();
+        assert!(w.knows_disk_chunk((0, 4, 0)));
+        // The column streams out (pristine: dropped, not kept), then a block is
+        // set to air in it.
+        assert!(!w.evict_column(0, 0));
+        w.set_block(3, 64, 5, crate::block::AIR);
+        let (_, delete) = crate::save::partition_chunks_for_save(&w);
+        assert!(!delete.contains(&(0, 4, 0)), "a conjured empty chunk is not a mined-out one");
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 1, &[], &[]).unwrap();
+        assert_eq!(fs::read(dir.join("chunks/0_4_0.chunk")).unwrap(), before, "the real file stays");
+        // The dedicated server shares the rule.
+        let mut server = crate::server::GameServer::new(0, "w".into(), 1);
         server.world = w;
-        let err = server.try_save().expect_err("every chunk write failed");
-        assert!(!err.contains("not updated"), "{err}");
-        assert!(world_dir("server").join("world.dat").is_file(), "world.dat written first");
-        assert!(!is_new_world("server").unwrap());
+        server.try_save().unwrap();
+        assert_eq!(fs::read(dir.join("chunks/0_4_0.chunk")).unwrap(), before);
+    }
+
+    /// Review 2026-10-06 — every save of the live session drops the autosave it
+    /// superseded once it lands (the resumable-scenario start and replay
+    /// snapshot saves left it behind, so a crash before the next autosave rolled
+    /// the world back to it); a failed save keeps it.
+    #[test]
+    fn a_session_save_that_lands_drops_the_autosave_and_a_failed_one_keeps_it() {
+        let _g = WorldsRootGuard::new("save_supersedes_autosave");
+        let dir = saved_world("w");
+        let s = slot();
+        let mut w = World::new();
+        w.set_block(3, 64, 5, crate::block::STONE);
+        crate::save::autosave_world("w", &w, std::slice::from_ref(&s), 77, &[], &[]).unwrap();
+        assert!(crate::save::autosave_age("w").is_some());
+        let good_meta = fs::read(dir.join("world_meta.json")).unwrap();
+        fs::write(dir.join("world_meta.json"), b"{ torn").unwrap();
+        assert!(
+            crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[])
+                .is_err()
+        );
+        assert!(dir.join("autosave/world.dat").is_file(), "a failed save keeps the autosave");
+        fs::write(dir.join("world_meta.json"), good_meta).unwrap();
+        crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[])
+            .unwrap();
+        assert!(!dir.join("autosave").exists(), "a landed save drops it");
+        assert_eq!(crate::save::autosave_age("w"), None);
+        let mut back = World::new();
         assert!(matches!(
-            open_world("server", &mut World::new(), AutosavePolicy::Ignore),
-            Ok(OpenedWorld::Loaded { chunks: 0, .. })
+            open_world("w", &mut back, AutosavePolicy::Prefer),
+            Ok(OpenedWorld::Loaded { from: OpenedFrom::LastSave, .. })
         ));
+        assert_eq!(back.get_block(3, 64, 5), crate::block::STONE);
     }
 
     /// Only the FIRST save reorders: a later save still writes chunks first and

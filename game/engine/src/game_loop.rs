@@ -2916,6 +2916,9 @@ impl super::GameState {
         // Nothing is live until this load finishes (a close mid-load must not
         // save the half-built world over the real one).
         self.live_world = None;
+        // Nothing about the last world's saves carries over (`begin_load`
+        // records whether this one opened from its autosave).
+        self.session_saves = crate::world_exit::SessionSaves::default();
         self.world.clear();
         // …and the per-world fields `World::clear` keeps (meta bytes, hidden
         // cells, waypoints, Workshop projects, exhibits, scheduler, power…).
@@ -3232,14 +3235,10 @@ impl super::GameState {
                 meta.total_ticks = 0;
                 let _ = crate::save::save_world_meta(&self.world_name, &meta);
             }
-            if let Err(e) = crate::save::save_world(
-                &self.world_name,
-                &self.world,
-                &self.players,
-                self.biome_gen.seed,
-                &crate::save::carts_to_saved(&self.ecs),
-                &crate::save::tamed_mobs_to_saved(&self.ecs),
-            ) {
+            // Through the session's one save path: a save that lands drops the
+            // autosave it superseded (a crash before the next autosave used to
+            // roll the run back to it), a failure guards it (review 2026-10-06).
+            if let Err(e) = self.save_live_world() {
                 log::warn!("scenario-start save failed: {e}");
             }
         }
@@ -6638,14 +6637,10 @@ impl super::GameState {
         if !self.persists_locally() {
             return Err("recording isn't available in a shared world".to_string());
         }
-        crate::save::save_world(
-            &self.world_name,
-            &self.world,
-            &self.players,
-            self.biome_gen.seed,
-            &crate::save::carts_to_saved(&self.ecs),
-            &crate::save::tamed_mobs_to_saved(&self.ecs),
-        )?;
+        // The session's one save path: a save that lands drops the autosave it
+        // superseded, so a crash mid-recording can't roll the world back to it
+        // (review 2026-10-06).
+        self.save_live_world()?;
         let blob = crate::native_world_io::export_world_native(&self.world_name)?;
         let players: Vec<crate::protocol::PlayerState> = self
             .players
@@ -8858,7 +8853,14 @@ impl super::GameState {
             return;
         }
 
-        // Pause mode: render world + pause overlay
+        // Pause mode: render world + pause overlay. After a failed save, or in
+        // a session opened from the autosave, "Quit without saving" keeps the
+        // autosave — and says so.
+        let kept_autosave = if matches!(self.mode, GameMode::Paused { .. }) {
+            self.kept_autosave_age()
+        } else {
+            None
+        };
         if let GameMode::Paused { ref mut confirm_quit, ref mut confirm_creative } = self.mode {
             // Show display name in pause menu if available
             #[cfg(not(target_arch = "wasm32"))]
@@ -9229,7 +9231,7 @@ impl super::GameState {
                     .scenario
                     .as_ref()
                     .is_some_and(|s| s.def().kind == crate::scenario::ScenarioKind::Challenge);
-            let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut self.difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial);
+            let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut self.difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial, kept_autosave.as_deref());
             // T2-10: while this machine hosts a LAN game, show where friends connect.
             #[cfg(not(target_arch = "wasm32"))]
             if let (Some(access), Some(hs)) = (self.lan_host.as_ref(), self.hosted_server.as_ref()) {
@@ -9296,8 +9298,10 @@ impl super::GameState {
                     self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Quit);
                 }
                 crate::menu::PAUSE_QUIT_NO_SAVE => {
-                    // Discards WORLD changes (and the crash-recovery autosave);
-                    // the global wardrobe is still flushed inside `leave_world`.
+                    // Discards WORLD changes (and the crash-recovery autosave,
+                    // unless a failed save or an autosave open makes it worth
+                    // keeping — `SessionSaves`); the global wardrobe is still
+                    // flushed inside `leave_world`.
                     self.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Quit);
                 }
                 crate::menu::PAUSE_DIFFICULTY_CHANGED => {

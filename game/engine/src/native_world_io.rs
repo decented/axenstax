@@ -86,7 +86,16 @@ fn write_unpacked_world(
     if final_name != base_slug {
         meta2.display_name = final_name.to_string();
     }
-    write_world_folder(final_name, &meta2, save, world)?;
+    // The folder is this import's own (checked above): one that failed part-way
+    // is removed, never left in the lobby with chunks missing (review 2026-10-06).
+    if let Err(why) = write_world_folder(final_name, &meta2, save, world) {
+        if let Err(e) = std::fs::remove_dir_all(&dir)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::error!("a failed import's folder {} couldn't be removed: {e}", dir.display());
+        }
+        return Err(why);
+    }
 
     // Persist the exhibit images that travelled inside the archive into the new
     // world's `exhibits/` folder (the gallery fix, build spec §2.3).
@@ -588,6 +597,38 @@ mod tests {
             assert_eq!(found, files, "{dir} was written into");
         }
         assert_eq!(std::fs::read(root.join("stray")).unwrap(), b"a file");
+    }
+
+    /// Review 2026-10-06 — an import that failed part-way left its half-written
+    /// folder behind, which the lobby listed once `world.dat` was in it: a world
+    /// with chunks missing. A failed import removes the folder it created.
+    #[test]
+    fn a_failed_import_leaves_no_folder_behind() {
+        use crate::save::{FirstSaveCut, FIRST_SAVE_CUT};
+        let _g = crate::save::WorldsRootGuard::new("nwio_import_fails");
+        let mut world = World::new();
+        world.set_block(3, 64, 5, block::STONE);
+        world.set_block(40, 64, 5, block::STONE);
+        let save = crate::save::minimal_world_save_for_tests(9);
+        write_world_folder("src", &crate::save::WorldMeta::new("src"), &save, &world).unwrap();
+        let bytes = export_world_native("src").expect("export");
+        let folders = || {
+            let mut f = existing_world_folders().unwrap();
+            f.sort();
+            f
+        };
+        let before = folders();
+        for cut in [FirstSaveCut::AfterChunks(1), FirstSaveCut::BeforePublish] {
+            FIRST_SAVE_CUT.with(|c| c.set(Some(cut)));
+            let result = import_world_native(&bytes);
+            FIRST_SAVE_CUT.with(|c| c.set(None));
+            assert!(result.is_err(), "{cut:?}");
+            assert_eq!(folders(), before, "{cut:?}: the half-written folder is removed");
+        }
+        let name = import_world_native(&bytes).expect("imports once nothing fails");
+        let mut back = World::new();
+        load_world(&name, &mut back).expect("the import opens");
+        assert_eq!(back.get_block(40, 64, 5), block::STONE);
     }
 
     #[test]

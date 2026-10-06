@@ -84,34 +84,112 @@ pub(crate) fn should_save_on_close(in_world: bool, live: Option<WorldKind>) -> b
 
 /// What the window close hands to [`GameState::leave_world`]: a save when
 /// there is a world to save, otherwise [`SaveChoice::Abandon`] — a close
-/// never throws away the crash-recovery autosave.
-pub(crate) fn close_choice(in_world: bool, live: Option<WorldKind>) -> SaveChoice {
-    if should_save_on_close(in_world, live) {
+/// never throws away the crash-recovery autosave. Once a close's save has
+/// failed (`close_save_failed`), the NEXT close quits without saving and keeps
+/// the autosave: a save that keeps failing must never trap the player in the
+/// world with "Quit without saving" as the only way out (review 2026-10-06).
+pub(crate) fn close_choice(
+    in_world: bool,
+    live: Option<WorldKind>,
+    close_save_failed: bool,
+) -> SaveChoice {
+    if should_save_on_close(in_world, live) && !close_save_failed {
         SaveChoice::Save
     } else {
         SaveChoice::Abandon
     }
 }
 
+/// What this session's saves have left the crash-recovery autosave guarding.
+/// Cleared on every world entry and exit, and by any save that lands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionSaves {
+    /// The last save this session tried failed, so the autosave may be the
+    /// newest copy of the session there is.
+    pub(crate) save_failed: bool,
+    /// The world opened from its crash-recovery autosave and no save has
+    /// landed since: with a damaged `world.dat` it is the only good copy.
+    pub(crate) opened_from_autosave: bool,
+    /// A window close tried to save and failed: the next close quits, keeping
+    /// the autosave ([`close_choice`]).
+    pub(crate) close_save_failed: bool,
+}
+
+impl SessionSaves {
+    /// The state a world opens in.
+    pub(crate) fn opened(from_autosave: bool) -> Self {
+        Self { opened_from_autosave: from_autosave, ..Self::default() }
+    }
+
+    /// Record a save of the live world: one that landed supersedes the autosave
+    /// (and every reason to guard it); one that failed makes it precious.
+    pub(crate) fn note_save(&mut self, landed: bool) {
+        if landed {
+            *self = Self::default();
+        } else {
+            self.save_failed = true;
+        }
+    }
+
+    /// Must "Quit without saving" keep the autosave? Yes after a failed save
+    /// (it may hold the session's only copy) or an autosave open (it may be the
+    /// world's only good copy).
+    pub(crate) fn keeps_autosave(self) -> bool {
+        self.save_failed || self.opened_from_autosave
+    }
+}
+
 /// Is the crash-recovery autosave dropped on leave? Only when it is
 /// superseded or unwanted: after a save that actually landed (the loader
 /// prefers an autosave, so a stale one would roll the fresh save back), or
-/// when the player explicitly chose "Quit without saving". Never after a
-/// failed save, never on [`SaveChoice::Abandon`] (window close with nothing
-/// saved, a dropped connection), never for a joined session (it has none).
+/// when the player explicitly chose "Quit without saving" and nothing makes
+/// it precious (`keep_autosave`, [`SessionSaves::keeps_autosave`]): after a
+/// failed save, or in a session opened from the autosave, a discard keeps it
+/// like [`SaveChoice::Abandon`] does (review 2026-10-06 — a save that kept
+/// failing funnelled the player into deleting it). Never after a failed save,
+/// never on [`SaveChoice::Abandon`] (window close with nothing saved, a dropped
+/// connection), never for a joined session (it has none).
 pub(crate) fn should_clear_autosave(
     choice: SaveChoice,
     saved: bool,
     live: Option<WorldKind>,
     joined_now: bool,
+    keep_autosave: bool,
 ) -> bool {
     if joined_now || !matches!(live, Some(WorldKind::Local | WorldKind::Arena)) {
         return false;
     }
     match choice {
         SaveChoice::Save => saved,
-        SaveChoice::Discard => true,
+        SaveChoice::Discard => !keep_autosave,
         SaveChoice::Abandon => false,
+    }
+}
+
+/// The pause menu's "Quit without saving" button. When that quit keeps the
+/// autosave ([`SessionSaves::keeps_autosave`], and one is there — `kept` is its
+/// age, e.g. "2 minutes ago"), it says so instead of promising a discard.
+pub(crate) fn quit_no_save_label(kept: Option<&str>) -> String {
+    match kept {
+        Some(age) => format!("Quit — your autosave from {age} is kept"),
+        None => "Quit Without Saving".to_string(),
+    }
+}
+
+/// The "are you sure?" line under that button.
+pub(crate) fn quit_no_save_warning(kept: Option<&str>) -> String {
+    match kept {
+        Some(age) => format!("Anything since your autosave from {age} will be lost."),
+        None => "Unsaved progress will be lost!".to_string(),
+    }
+}
+
+/// Appended to the save-failed toast when a window close's save failed: what
+/// closing again does.
+pub(crate) fn close_again_hint(kept: Option<&str>) -> String {
+    match kept {
+        Some(age) => format!(" Close the window again to quit — your autosave from {age} is kept."),
+        None => " Close the window again to quit without saving.".to_string(),
     }
 }
 
@@ -324,10 +402,14 @@ pub(crate) fn kill_all_mobs(ecs: &mut hecs::World) {
 }
 
 impl crate::GameState {
-    /// Write the live world through the same `save_world` Save & Quit has
-    /// always used.
-    fn save_live_world(&self) -> Result<(), String> {
-        crate::save::save_world(
+    /// Write the live world — every save of the session goes through here:
+    /// Save, Save & Quit and every other exit that saves, a resumable
+    /// scenario's start, the replay snapshot. A save that lands drops the
+    /// crash-recovery autosave it superseded
+    /// (`save::save_world_superseding_autosave`); the outcome is recorded in
+    /// [`SessionSaves`].
+    pub(crate) fn save_live_world(&mut self) -> Result<(), String> {
+        let result = crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,
             &self.players,
@@ -335,7 +417,19 @@ impl crate::GameState {
             &crate::save::carts_to_saved(&self.ecs),
             &crate::save::tamed_mobs_to_saved(&self.ecs),
         )
-        .inspect_err(|e| log::error!("Save failed: {e}"))
+        .inspect_err(|e| log::error!("Save failed: {e}"));
+        self.session_saves.note_save(result.is_ok());
+        result
+    }
+
+    /// The age of the crash-recovery autosave a "Quit without saving" would
+    /// keep (`None` when that quit drops it, or there is none).
+    pub(crate) fn kept_autosave_age(&self) -> Option<String> {
+        if self.persists_locally() && self.session_saves.keeps_autosave() {
+            crate::save::autosave_age(&self.world_name)
+        } else {
+            None
+        }
     }
 
     /// Tell the player a save failed (see [`save_failed_toast`]).
@@ -352,11 +446,10 @@ impl crate::GameState {
     /// session); a failure says why. A joined session never writes a local save
     /// (no "remote_game" folder) — the host owns that world.
     pub(crate) fn pause_save(&mut self) {
-        if self.persists_locally() {
-            match self.save_live_world() {
-                Ok(()) => crate::save::clear_autosave(&self.world_name),
-                Err(why) => self.show_save_failed(&why),
-            }
+        if self.persists_locally()
+            && let Err(why) = self.save_live_world()
+        {
+            self.show_save_failed(&why);
         }
         // Spec 40 persistence — flush the player wardrobe so the latest pin/edit
         // is never lost (the debounce may not have fired yet). Best-effort;
@@ -386,14 +479,17 @@ impl crate::GameState {
     ///
     /// Returns whether the player left. A save that FAILS ends nothing: the
     /// player stays in the world — still live, nothing torn down — with a toast
-    /// saying why, so the session can be saved again or deliberately thrown
-    /// away with "Quit without saving" (review 2026-10-06: a failed Save & Quit
-    /// used to only log, then leave, losing the session in silence). Callers
-    /// that hop somewhere after leaving must not hop on `false`.
+    /// saying why, so the session can be saved again, or left with "Quit
+    /// without saving" or a second window close — both of which then KEEP the
+    /// crash-recovery autosave ([`SessionSaves`]; review 2026-10-06: a failed
+    /// Save & Quit used to only log, then leave, losing the session in
+    /// silence). Callers that hop somewhere after leaving must not hop on
+    /// `false`.
     pub(crate) fn leave_world(&mut self, save: SaveChoice, to: ExitTo) -> bool {
         let live = self.live_world.take();
         let joined = self.remote_client.is_some();
-        // Reaching the line after this means any save it asked for landed.
+        // Reaching the line after this means any save it asked for landed
+        // (and dropped the autosave it superseded).
         let saved = should_save_on_leave(save, live, joined);
         if saved && let Err(why) = self.save_live_world() {
             self.live_world = live;
@@ -401,10 +497,12 @@ impl crate::GameState {
             return false;
         }
         // The crash-recovery copy: dropped only once a save superseded it or
-        // the player chose to discard — never by a close or a lost connection.
-        if should_clear_autosave(save, saved, live, joined) {
+        // the player chose to discard a session whose autosave nothing guards —
+        // never by a close or a lost connection.
+        if should_clear_autosave(save, saved, live, joined, self.session_saves.keeps_autosave()) {
             crate::save::clear_autosave(&self.world_name);
         }
+        self.session_saves = SessionSaves::default();
         // Nothing queued by the session being left may fire later into an
         // unrelated lobby visit (callers that hop re-queue AFTER this).
         self.pending_menu_action = None;
@@ -532,32 +630,107 @@ mod tests {
         // Review W3 B1: closing mid-Satori-Rush discarded the run AND deleted
         // its 5-minute crash-recovery copy.
         assert!(should_save_on_close(true, Some(WorldKind::Arena)));
-        assert_eq!(close_choice(true, Some(WorldKind::Arena)), SaveChoice::Save);
-        assert_eq!(close_choice(true, Some(WorldKind::Local)), SaveChoice::Save);
+        assert_eq!(close_choice(true, Some(WorldKind::Arena), false), SaveChoice::Save);
+        assert_eq!(close_choice(true, Some(WorldKind::Local), false), SaveChoice::Save);
         // A save that failed leaves the crash copy for recovery.
-        assert!(!should_clear_autosave(SaveChoice::Save, false, Some(WorldKind::Arena), false));
+        assert!(!should_clear_autosave(SaveChoice::Save, false, Some(WorldKind::Arena), false, false));
         // A landed save supersedes it (the loader prefers an autosave, so a
         // stale one would roll the fresh save back).
-        assert!(should_clear_autosave(SaveChoice::Save, true, Some(WorldKind::Arena), false));
+        assert!(should_clear_autosave(SaveChoice::Save, true, Some(WorldKind::Arena), false, false));
     }
 
     #[test]
     fn a_close_never_clears_an_autosave_it_did_not_supersede() {
         for live in [None, Some(WorldKind::Local), Some(WorldKind::Arena), Some(WorldKind::Joined)] {
-            for in_world in [false, true] {
-                let choice = close_choice(in_world, live);
+            for (in_world, failed) in [(false, false), (true, false), (false, true), (true, true)] {
+                let choice = close_choice(in_world, live, failed);
                 assert_ne!(choice, SaveChoice::Discard, "a close is never a discard");
-                for joined in [false, true] {
+                for (joined, keep) in [(false, false), (true, false), (false, true), (true, true)] {
                     // Whatever happens, an unsaved close never clears it.
-                    assert!(!should_clear_autosave(choice, false, live, joined));
+                    assert!(!should_clear_autosave(choice, false, live, joined, keep));
                 }
             }
         }
         // Only the player's explicit "Quit without saving" discards it.
-        assert!(should_clear_autosave(SaveChoice::Discard, false, Some(WorldKind::Local), false));
-        assert!(should_clear_autosave(SaveChoice::Discard, false, Some(WorldKind::Arena), false));
+        assert!(should_clear_autosave(SaveChoice::Discard, false, Some(WorldKind::Local), false, false));
+        assert!(should_clear_autosave(SaveChoice::Discard, false, Some(WorldKind::Arena), false, false));
         // A joined session has none of its own to clear.
-        assert!(!should_clear_autosave(SaveChoice::Discard, false, Some(WorldKind::Joined), true));
+        assert!(!should_clear_autosave(SaveChoice::Discard, false, Some(WorldKind::Joined), true, false));
+    }
+
+    /// Review 2026-10-06 — a save that keeps failing left "Quit without saving"
+    /// (a Discard) as the only way out, and a Discard deleted the autosave: the
+    /// whole session lost, where a failed Save & Quit on main kept it. After a
+    /// failed save, or in a session opened FROM the autosave (with a damaged
+    /// world.dat, the only good copy), a Discard keeps it.
+    #[test]
+    fn a_discard_keeps_the_autosave_after_a_failed_save_or_an_autosave_open() {
+        let local = Some(WorldKind::Local);
+        for (save_failed, opened_from_autosave, keeps) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let s = SessionSaves { save_failed, opened_from_autosave, close_save_failed: false };
+            assert_eq!(s.keeps_autosave(), keeps, "{s:?}");
+            assert_eq!(
+                should_clear_autosave(SaveChoice::Discard, false, local, false, s.keeps_autosave()),
+                !keeps,
+                "{s:?}"
+            );
+            // A save that landed still supersedes it, whatever came before.
+            assert!(should_clear_autosave(SaveChoice::Save, true, local, false, s.keeps_autosave()));
+        }
+    }
+
+    #[test]
+    fn session_saves_follow_the_saves_that_land_and_fail() {
+        assert_eq!(SessionSaves::opened(false), SessionSaves::default());
+        let mut s = SessionSaves::opened(true);
+        assert!(s.keeps_autosave(), "opened from the autosave");
+        s.note_save(false);
+        assert!(s.save_failed && s.keeps_autosave());
+        s.close_save_failed = true;
+        // A save that lands writes world.dat and drops the autosave: nothing
+        // left to guard, and the next close saves again.
+        s.note_save(true);
+        assert_eq!(s, SessionSaves::default());
+        s.note_save(false);
+        assert!(s.keeps_autosave(), "a later failure guards it again");
+    }
+
+    /// A close whose save failed keeps the player in the world (to retry); the
+    /// SECOND close quits without saving and keeps the autosave, so a save that
+    /// keeps failing never traps the player.
+    #[test]
+    fn a_second_close_after_a_failed_close_save_quits_keeping_the_autosave() {
+        for live in [Some(WorldKind::Local), Some(WorldKind::Arena)] {
+            assert_eq!(close_choice(true, live, false), SaveChoice::Save);
+            let second = close_choice(true, live, true);
+            assert_eq!(second, SaveChoice::Abandon);
+            assert!(!should_save_on_leave(second, live, false), "no save to fail again");
+            assert!(!should_clear_autosave(second, false, live, false, true), "autosave kept");
+        }
+    }
+
+    #[test]
+    fn quit_without_saving_says_when_it_keeps_the_autosave() {
+        assert_eq!(quit_no_save_label(None), "Quit Without Saving");
+        assert_eq!(
+            quit_no_save_label(Some("3 minutes ago")),
+            "Quit — your autosave from 3 minutes ago is kept"
+        );
+        assert_eq!(quit_no_save_warning(None), "Unsaved progress will be lost!");
+        assert_eq!(
+            quit_no_save_warning(Some("3 minutes ago")),
+            "Anything since your autosave from 3 minutes ago will be lost."
+        );
+        assert_eq!(
+            close_again_hint(Some("just now")),
+            " Close the window again to quit — your autosave from just now is kept."
+        );
+        assert_eq!(close_again_hint(None), " Close the window again to quit without saving.");
     }
 
     #[test]
@@ -856,7 +1029,7 @@ mod tests {
         let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world("exit-arena-close");
         hg.state.live_world = Some(WorldKind::Arena);
         // The window-close path (main.rs `CloseRequested`).
-        let choice = close_choice(true, hg.state.live_world);
+        let choice = close_choice(true, hg.state.live_world, false);
         hg.state.leave_world(choice, ExitTo::Quit);
         assert!(crate::save::world_exists("exit-arena-close"), "the arena run was saved");
     }
@@ -911,9 +1084,16 @@ mod tests {
         assert!(!hg.state.leave_world(SaveChoice::Save, ExitTo::Lobby));
         assert_eq!(hg.state.live_world, Some(WorldKind::Local));
 
-        // "Quit without saving" still leaves.
+        // "Quit without saving" still leaves — and, after the failed save, says
+        // and does keep the autosave (review 2026-10-06).
+        let age = hg.state.kept_autosave_age().expect("the autosave is kept");
+        assert!(quit_no_save_label(Some(&age)).starts_with("Quit — your autosave from "));
         assert!(hg.state.leave_world(SaveChoice::Discard, ExitTo::Quit));
         assert!(hg.state.live_world.is_none());
+        assert!(
+            crate::save::world_dir(&name).join("autosave/world.dat").is_file(),
+            "a discard after a failed save keeps the autosave"
+        );
     }
 
     /// Review 2026-10-06 — the pause menu's Save cleared the crash-recovery

@@ -227,6 +227,11 @@ impl super::GameState {
                     // damaged world.dat it is the only good copy, and deleting it
                     // here lost the world to a crash before the next save
                     // (review 2026-10-06). The next autosave overwrites it anyway.
+                    // Until a save lands, "Quit without saving" keeps it too
+                    // (`world_exit::SessionSaves`).
+                    self.session_saves = crate::world_exit::SessionSaves::opened(
+                        from == crate::world_open::OpenedFrom::Autosave,
+                    );
                     if let Some(note) = from.player_note() {
                         self.toast = Some((
                             note,

@@ -1372,6 +1372,10 @@ pub(crate) struct GameState {
     /// mid-load, after a discard) — which is what stops the close button
     /// saving a phantom or discarded world. See `world_exit`.
     pub(crate) live_world: Option<crate::world_exit::WorldKind>,
+    /// What this session's saves have left the crash-recovery autosave
+    /// guarding — a failed save, an autosave open, a failed close-save — so a
+    /// "Quit without saving" or a second close keeps it (`world_exit`).
+    pub(crate) session_saves: crate::world_exit::SessionSaves,
     /// One-shot menu action fired on the lobby's next frame — an in-world
     /// arena launch (J board / `/scenario`) leaves the world and then runs the
     /// Trials menu's own `PlayScenario` path through this. Stamped with when
@@ -1835,6 +1839,7 @@ impl GameState {
             pending_workshop_reset: false,
             pending_scenario_launch: None,
             live_world: None,
+            session_saves: crate::world_exit::SessionSaves::default(),
             pending_menu_action: None,
             region_broadcast_queue: Default::default(),
             pending_skin_adopt: None,
@@ -2197,14 +2202,27 @@ impl ApplicationHandler for App {
                     let in_world = matches!(state.mode, GameMode::Playing | GameMode::Paused { .. });
                     // A close never throws away a crash-recovery autosave:
                     // it saves a live own world or arena, or leaves disk alone.
-                    let choice = crate::world_exit::close_choice(in_world, state.live_world);
+                    let choice = crate::world_exit::close_choice(
+                        in_world,
+                        state.live_world,
+                        state.session_saves.close_save_failed,
+                    );
                     // A close-save that FAILED keeps the window open in the
                     // world with the toast saying why (review 2026-10-06): the
-                    // player can retry, or "Quit without saving". (Online
+                    // player can retry, "Quit without saving", or close again —
+                    // which quits WITHOUT saving and keeps the autosave, so a
+                    // save that keeps failing never traps them. (Online
                     // hosting was already retired above.)
                     let stayed = state.live_world.is_some()
                         && !state.leave_world(choice, crate::world_exit::ExitTo::Quit);
                     if stayed {
+                        state.session_saves.close_save_failed = true;
+                        let hint = crate::world_exit::close_again_hint(
+                            state.kept_autosave_age().as_deref(),
+                        );
+                        if let Some((msg, _)) = state.toast.as_mut() {
+                            msg.push_str(&hint);
+                        }
                         state.window.request_redraw();
                     } else {
                         event_loop.exit();

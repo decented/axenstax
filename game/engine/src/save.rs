@@ -1389,6 +1389,34 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Test hook: where a world's first save stops, on this thread, as if the
+/// process were killed there (`write_first_save`).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FirstSaveCut {
+    /// Once this many chunk files are written.
+    AfterChunks(usize),
+    /// Once `world.dat` (the commit point) is written, before the chunks are
+    /// published.
+    BeforePublish,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    pub(crate) static FIRST_SAVE_CUT: std::cell::Cell<Option<FirstSaveCut>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `Err` when the test hook says a first save stops at `at`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn first_save_cut(at: FirstSaveCut) -> Result<(), String> {
+    if FIRST_SAVE_CUT.with(|c| c.get()) == Some(at) {
+        Err(format!("first save cut short at {at:?} (test)"))
+    } else {
+        Ok(())
+    }
+}
+
 /// Session latch for profile blobs whose load FAILED (audit 2026-09-27): once a
 /// blob at a path fails to load, every save to that path is refused for the rest
 /// of the process, so a fresh/empty in-memory value can never replace the
@@ -1519,7 +1547,11 @@ fn serialize_inventory(inventory: &Inventory) -> Vec<SavedSlot> {
 /// Only a file this session read in or wrote is ever deleted
 /// (`World::knows_disk_chunk`, Spec 02 §8.4): an all-air chunk at a coordinate
 /// whose file the session never read — data it knows nothing about — leaves that
-/// file alone.
+/// file alone. And only under a chunk that is `persist` — read from disk, or
+/// really edited: a block set to air where the streamer had dropped the column
+/// conjures an EMPTY chunk (`World::set_block` creates one, and air over air
+/// changes nothing, so it is never `persist`), which used to delete the real
+/// file under it — a hole after the restart (review 2026-10-06).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn partition_chunks_for_save(
     world: &World,
@@ -1530,7 +1562,7 @@ pub(crate) fn partition_chunks_for_save(
     for (key, chunk) in world.persistable_chunks() {
         if !chunk.is_empty() {
             write.push(key);
-        } else if world.knows_disk_chunk(key) {
+        } else if chunk.persist() && world.knows_disk_chunk(key) {
             delete.push(key);
         }
     }
@@ -1538,18 +1570,125 @@ pub(crate) fn partition_chunks_for_save(
 }
 
 /// True when `dir` holds nothing of a saved world yet — no `world.dat` and no
-/// `chunks/*.chunk` — so the save about to run is the world's FIRST. A first save
-/// writes `world.dat` BEFORE any chunk (`write_world_folder`,
-/// `GameServer::try_save`): cut short (the dedicated server killed during its
-/// tick-0 save), it leaves a world that opens, its unwritten chunks regenerating
-/// from the seed — not chunks without a `world.dat`, which `world_open` refuses
-/// for good (Spec 02 §8.4). Every later save keeps `world.dat` as its commit
-/// point, written after the chunks. When the folder can't be checked this is
-/// `false`: the usual order.
+/// `chunks/*.chunk` — so the save about to run is the world's FIRST, written by
+/// [`write_first_save`] (`write_world_folder`, `GameServer::try_save`). Every
+/// later save writes its chunks into `chunks/` and `world.dat` last, its commit
+/// point. When the folder can't be checked this is `false`: the usual order.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn is_first_save(dir: &std::path::Path) -> bool {
     matches!(dir.join("world.dat").try_exists(), Ok(false))
         && matches!(crate::world_open::saved_chunk_file(dir), Ok(None))
+}
+
+/// Where a world's FIRST save stages its chunks ([`write_first_save`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const STAGED_CHUNKS: &str = "chunks.new";
+
+/// Write a world's FIRST save (Spec 02 §8.4) so that, cut short anywhere, it
+/// leaves either nothing a loader reads — the world is still new — or the whole
+/// world. Never some of its chunks: every loader marks a column with ANY saved
+/// chunk as loaded and never generates the rest, so a first save that wrote
+/// chunks one by one (in hash-map order) into `chunks/` left permanent holes
+/// when cut short (review 2026-10-06).
+///
+/// 1. Every non-empty chunk into `chunks.new/` (one left by an earlier first save
+///    cut short — never committed, as there is no `world.dat` — is cleared
+///    first), then one directory fsync.
+/// 2. `world.dat` — the commit point.
+/// 3. `chunks.new/` renamed to `chunks/` ([`publish_staged_chunks`]).
+///
+/// Cut short before 2, there is no `world.dat` and no `chunks/*.chunk`: the world
+/// is still new (`world_open::is_new_world`), and the next save is a first save
+/// again. Cut short after 2, the next load or save finishes step 3
+/// ([`finish_staged_first_save`]). A chunk that can't be written fails the save
+/// before `world.dat`. `encoded` is the world's `world.dat`; the caller writes
+/// anything else (the meta) afterwards.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_first_save(
+    dir: &std::path::Path,
+    world: &World,
+    encoded: &[u8],
+) -> Result<(), String> {
+    let staging = dir.join(STAGED_CHUNKS);
+    match fs::remove_dir_all(&staging) {
+        Ok(()) => log::warn!("cleared {} left by a first save cut short", staging.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{STAGED_CHUNKS}/ left by an earlier save can't be cleared ({e})")),
+    }
+    fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
+    let mut staged = Vec::new();
+    for (key, chunk) in world.persistable_chunks() {
+        if chunk.is_empty() {
+            continue;
+        }
+        #[cfg(test)]
+        first_save_cut(FirstSaveCut::AfterChunks(staged.len()))?;
+        let (cx, cy, cz) = key;
+        let filename = format!("{cx}_{cy}_{cz}.chunk");
+        write_atomic_nosync(&staging.join(&filename), &chunk.as_bytes())
+            .map_err(|e| format!("write chunk {filename}: {e}"))?;
+        staged.push(key);
+    }
+    #[cfg(test)]
+    first_save_cut(FirstSaveCut::AfterChunks(staged.len()))?;
+    sync_dir(&staging);
+    write_atomic(&dir.join("world.dat"), encoded)?;
+    #[cfg(test)]
+    first_save_cut(FirstSaveCut::BeforePublish)?;
+    publish_staged_chunks(dir)?;
+    // Known on disk from here: a later save may delete one once mined out.
+    for key in staged {
+        world.note_disk_chunk(key);
+    }
+    Ok(())
+}
+
+/// Step 3 of [`write_first_save`]: `chunks.new/` becomes `chunks/`. Never over
+/// a saved chunk. An empty `chunks/` is removed first; one holding anything else
+/// (a stray `.tmp` from a crash) is kept aside whole as `chunks.corrupt-<ts>`,
+/// never lost.
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_staged_chunks(dir: &std::path::Path) -> Result<(), String> {
+    if let Some(file) = crate::world_open::saved_chunk_file(dir)? {
+        return Err(format!("{STAGED_CHUNKS}/ not published: {file} is already saved"));
+    }
+    let chunks = dir.join("chunks");
+    match fs::remove_dir(&chunks) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            quarantine_corrupt(&chunks)?;
+        }
+    }
+    fs::rename(dir.join(STAGED_CHUNKS), &chunks)
+        .map_err(|e| format!("publish {STAGED_CHUNKS}/ as chunks/: {e}"))?;
+    sync_dir(dir);
+    Ok(())
+}
+
+/// Finish a first save that committed (`world.dat` written) but was cut short
+/// before its chunks were published ([`write_first_save`] step 3). Runs before
+/// every native load of `world.dat` (`load_world`) and every save
+/// (`save_world`, `write_world_folder`, `GameServer::try_save`), so a committed
+/// first save is never read as an empty world under `world.dat`'s block
+/// entities, nor saved over. It only completes a save this build already
+/// committed — the one write a load makes before it knows the world opens. A
+/// `chunks.new/` without a `world.dat` was never committed and is left for the
+/// next first save to clear.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn finish_staged_first_save(dir: &std::path::Path) -> Result<(), String> {
+    let staged = dir
+        .join(STAGED_CHUNKS)
+        .try_exists()
+        .map_err(|e| format!("{STAGED_CHUNKS}/ can't be checked ({e})"))?;
+    if !staged || !dir.join("world.dat").is_file() {
+        return Ok(());
+    }
+    log::warn!(
+        "{}: finishing a first save cut short after world.dat ({STAGED_CHUNKS}/ -> chunks/)",
+        dir.display()
+    );
+    publish_staged_chunks(dir)
 }
 
 /// Every check a save runs before it touches `dir`: not a newer build's world nor
@@ -1581,8 +1720,9 @@ fn refuse_world_write(dir: &std::path::Path) -> Result<(), String> {
 ///   - Atomically writes `worlds/<name>/world.dat` (bincode of `save`).
 ///   - Writes `worlds/<name>/world_meta.json` (via `save_world_meta`).
 ///
-/// On a world's FIRST save (`is_first_save`) `world.dat` and the meta are
-/// written before the chunks, so a first save cut short still opens.
+/// A world's FIRST save (`is_first_save`) stages its chunks and publishes them
+/// only after `world.dat` ([`write_first_save`]), so one cut short leaves a new
+/// world or a whole one, never holes.
 ///
 /// It does NOT bump `meta.version` or update proof-of-play stats — callers that
 /// need those (i.e. the live-game `save_world`) do so themselves after the call.
@@ -1598,9 +1738,7 @@ pub fn write_world_folder(
 ) -> Result<(), String> {
     let dir = world_dir(name);
     refuse_world_write(&dir)?;
-    let first_save = is_first_save(&dir);
-    let chunks_dir = dir.join("chunks");
-    fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
+    finish_staged_first_save(&dir)?;
 
     // Seam A (offline-first login contract) — encryption-at-rest is NOT finalised
     // here; it is pinned by the owner's web-Stash blob format. This is the clean
@@ -1612,18 +1750,17 @@ pub fn write_world_folder(
     // until then `world.dat` stays plaintext bincode (+ the format-version footer).
     let encoded = crate::save_format::encode_world_save(save)?;
 
-    // A world's FIRST save writes world.dat and its meta before any chunk, so one
-    // cut short still opens (`is_first_save`); there is no older block data on
-    // disk for the new state to disagree with.
-    if first_save {
-        write_atomic(&dir.join("world.dat"), &encoded)?;
-        save_world_meta(name, meta)?;
+    if is_first_save(&dir) {
+        write_first_save(&dir, world, &encoded)?;
+        return save_world_meta(name, meta);
     }
 
-    // Spec 02 §7.5 — loaded + evicted chunks. Otherwise written FIRST (tmp +
-    // rename, one directory fsync at the end — review S2), so `world.dat` below is
-    // the commit point: a crash before it leaves the old world.dat with
-    // new-or-old chunks, never new block-entity state over old block data.
+    // Spec 02 §7.5 — loaded + evicted chunks. Written FIRST (tmp + rename, one
+    // directory fsync at the end — review S2), so `world.dat` below is the commit
+    // point: a crash before it leaves the old world.dat with new-or-old chunks,
+    // never new block-entity state over old block data.
+    let chunks_dir = dir.join("chunks");
+    fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
     for ((cx, cy, cz), chunk) in world.persistable_chunks() {
         if chunk.is_empty() {
             continue;
@@ -1636,10 +1773,8 @@ pub fn write_world_folder(
     }
     sync_dir(&chunks_dir);
 
-    if !first_save {
-        write_atomic(&dir.join("world.dat"), &encoded)?;
-        save_world_meta(name, meta)?;
-    }
+    write_atomic(&dir.join("world.dat"), &encoded)?;
+    save_world_meta(name, meta)?;
 
     Ok(())
 }
@@ -1660,8 +1795,10 @@ pub fn save_world(
     let dir = world_dir(name);
     // Before anything — including the stale-chunk deletes below — is touched.
     refuse_world_write(&dir)?;
+    // A committed first save cut short is published before any delete below,
+    // so a chunk mined out since can't come back with it.
+    finish_staged_first_save(&dir)?;
     let chunks_dir = dir.join("chunks");
-    fs::create_dir_all(&chunks_dir).map_err(|e| format!("mkdir: {e}"))?;
 
     // Build per-player save data
     let player_saves: Vec<PlayerSaveData> = players.iter().map(|slot| {
@@ -2436,6 +2573,10 @@ pub fn load_world(
     // LegacyWorldSave path (which would drop every block-entity).
     let (save, partial) = decode_world_dat(&data, "world.dat")?;
 
+    // A first save that committed this world.dat but was cut short before its
+    // chunks were published: publish them now, or the world would load empty
+    // under world.dat's block entities (Spec 02 §8.4).
+    finish_staged_first_save(&dir)?;
     let loaded = load_chunk_dir(&dir.join("chunks"), world)?;
     if partial {
         keep_damaged_copy_once(&dat_path);
@@ -4012,6 +4153,46 @@ pub fn autosave_world(
     // (tools/sites/game POST /worlds/upload) exists but is not wired into this
     // path — that's Phase 5 of docs/foundations/2026-05-26-cloud-save-blossom.md.
     save_world(name, world, players, seed, carts, saved_mobs)
+}
+
+/// Save the live session's world ([`save_world`]) and, once that save has
+/// landed, drop the crash-recovery autosave it superseded: the loader prefers
+/// an autosave, so one left behind would roll the fresh save back after a crash.
+/// A failed save keeps it. Every save of the live session goes through here
+/// (`GameState::save_live_world`): Save, Save & Quit and every other exit that
+/// saves, a resumable scenario's start and the replay snapshot — the last two
+/// used to leave it behind (review 2026-10-06).
+pub fn save_world_superseding_autosave(
+    name: &str,
+    world: &World,
+    players: &[crate::player_slot::PlayerSlot],
+    seed: u32,
+    carts: &[SavedCart],
+    saved_mobs: &[SavedTamedPet],
+) -> Result<(), String> {
+    save_world(name, world, players, seed, carts, saved_mobs)?;
+    clear_autosave(name);
+    Ok(())
+}
+
+/// How long ago this world's crash-recovery autosave was written ("2 minutes
+/// ago", "just now"), or `None` when there is none.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn autosave_age(name: &str) -> Option<String> {
+    let written = fs::metadata(world_dir(name).join("autosave").join("world.dat"))
+        .and_then(|m| m.modified())
+        .ok()?;
+    let mut age = format_relative_time(written);
+    if let Some(first) = age.get_mut(0..1) {
+        first.make_ascii_lowercase();
+    }
+    Some(age)
+}
+
+/// The web keeps no separate autosave (it writes the save itself).
+#[cfg(target_arch = "wasm32")]
+pub fn autosave_age(_name: &str) -> Option<String> {
+    None
 }
 
 /// Check if an autosave exists for this world.

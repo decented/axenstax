@@ -4554,8 +4554,11 @@ const PAUSE_COLORS: &[egui::Color32] = &[
 /// `confirm_quit` tracks whether the "are you sure?" prompt is showing.
 /// `is_trial` collapses the menu to just Resume / Try Again / Leave — a Trial
 /// (coverage Challenge or Race) is an ephemeral, retryable run, so Save,
-/// difficulty and creative-switch don't apply.
-pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut bool, confirm_creative: &mut bool, difficulty: &mut String, is_creative: bool, lock_creative: bool, num_players: usize, cloud_save: &mut bool, is_trial: bool) -> i32 {
+/// difficulty and creative-switch don't apply. `kept_autosave` is the age of
+/// the crash-recovery autosave "Quit Without Saving" would keep (after a failed
+/// save, or in a session opened from it — `world_exit::SessionSaves`); the
+/// button and its warning then say so rather than promise a discard.
+pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut bool, confirm_creative: &mut bool, difficulty: &mut String, is_creative: bool, lock_creative: bool, num_players: usize, cloud_save: &mut bool, is_trial: bool, kept_autosave: Option<&str>) -> i32 {
     let mut clicked = -1i32;
 
     // Semi-transparent overlay
@@ -4625,7 +4628,7 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                 if *confirm_quit {
                     // "Are you sure?" confirmation
                     ui.label(
-                        egui::RichText::new("Unsaved progress will be lost!")
+                        egui::RichText::new(crate::world_exit::quit_no_save_warning(kept_autosave))
                             .size(15.0)
                             .color(egui::Color32::from_rgb(220, 140, 140))
                             .strong(),
@@ -4782,12 +4785,14 @@ pub fn draw_pause_menu(ctx: &egui::Context, world_name: &str, confirm_quit: &mut
                     // Normal pause menu buttons. Save / Save and Quit reflect the
                     // Stash state so the player sees exactly what will happen.
                     for (i, (&base_label, &color)) in PAUSE_LABELS.iter().zip(PAUSE_COLORS.iter()).enumerate() {
-                        let label: &str = if i as i32 == PAUSE_SAVE {
-                            if *cloud_save { "Save & Stash" } else { "Save" }
+                        let label: String = if i as i32 == PAUSE_SAVE {
+                            if *cloud_save { "Save & Stash" } else { "Save" }.to_string()
                         } else if i as i32 == PAUSE_SAVE_QUIT {
-                            if *cloud_save { "Save, Stash & Quit" } else { "Save and Quit" }
+                            if *cloud_save { "Save, Stash & Quit" } else { "Save and Quit" }.to_string()
+                        } else if i as i32 == PAUSE_QUIT_NO_SAVE {
+                            crate::world_exit::quit_no_save_label(kept_autosave)
                         } else {
-                            base_label
+                            base_label.to_string()
                         };
                         let button = egui::Button::new(
                             egui::RichText::new(label)
