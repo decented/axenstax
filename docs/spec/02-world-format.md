@@ -1828,7 +1828,9 @@ format version in a trailing footer — see the bincode note under Migration str
     A world on disk that fails to load for ANY reason — an I/O error reading
     `world.dat`, meta or a chunk; an undecodable `world.dat`; a chunk file whose name
     isn't three integers; a damaged chunk or meta that can't be kept aside; saved
-    chunks with no `world.dat`; damaged world info — is refused: nothing generated,
+    chunks with no `world.dat` (the refusal says how to recover: move the chunks
+    folder aside and the world starts again from its seed, or restore `world.dat`
+    from a backup); damaged world info — is refused: nothing generated,
     the world never marked live, nothing written. The client returns to the lobby
     with *"This world couldn't be opened: <short reason naming the file>. Nothing was
     changed."* (`save_format::unopenable_message`, via `leave_world_with_notice`
@@ -1843,12 +1845,25 @@ format version in a trailing footer — see the bincode note under Migration str
     chunks loaded; the torn-meta recovery reads `world.dat` for the seed BEFORE it
     quarantines the meta. These keep-a-copy-aside recoveries still open the world
     when the rest loads — no data is lost, so they are not refusals.
+  - **Reading a world never writes (review 2026-10-06).** The torn-meta recovery
+    (quarantine + rebuilt meta) used to run whenever the meta was READ — the lobby
+    list, every `load_world_meta`, the dedicated server's boot, and the top of
+    `open_world` — so a world then refused for another reason had already been
+    changed. Now every reader uses `save::peek_world_meta`, which rebuilds the meta
+    in memory only (seed from `world.dat`, conservative flags, the PoP secret
+    salvaged or `None`, never a freshly minted one), and `open_world` runs the
+    repairing `try_load_world_meta` LAST, once the whole load has succeeded. If that
+    repair fails the world is refused; a damaged chunk or autosave the load had
+    already kept aside then stays aside (moved, never lost). The session adopts
+    the PoP secret the repair persisted (`persist_pop_secret_if_missing`).
   - **Autosave fallback.** The client prefers the crash-recovery autosave. If it
     fails to load (and is not a newer build's), the last manual save (`world.dat`)
     is opened instead and the damaged autosave folder is renamed to
     `autosave.corrupt-<ts>`, so neither the next autosave nor the leave-time
     `clear_autosave` can destroy it; a toast says which copy the player got (an
-    autosave recovery is announced too). If that rename fails, or `world.dat` also
+    autosave recovery is announced too). An autosave the world opened FROM is kept
+    until a save lands (review 2026-10-06): it used to be deleted as soon as the
+    world opened, and with a damaged `world.dat` it is the only good copy. If that rename fails, or `world.dat` also
     fails, the world is refused. The server never reads the autosave (it never
     clears one, so preferring it would shadow every later server save); a folder
     holding only an autosave is refused there ("open the world in the game once to
@@ -1859,17 +1874,46 @@ format version in a trailing footer — see the bincode note under Migration str
     queues an all-air chunk's file for deletion (the mined-out case, engine audit
     2026-06-04 A) only for those. A file the session never read is unknown data and
     is left alone. The set survives a Workshop reset (same folder) and is forgotten
-    on a world change.
+    on a world change. The dedicated server applies the same rule
+    (`GameServer::try_save`, review 2026-10-06): it never deleted any, so a
+    mined-out chunk came back after a restart.
   - **Every save checks before it touches anything**: `save_world` and
     `write_world_folder` run the newer/unreadable check AND the damaged-meta check
     (`meta_write_blocked`) first — before the stale-chunk deletes, chunk writes and
     `world.dat`.
+  - **A world's first save writes `world.dat` first** (`save::is_first_save`: no
+    `world.dat` and no `chunks/*.chunk` yet; `write_world_folder` and
+    `GameServer::try_save`). A first save cut short — the dedicated server killed
+    during its tick-0 save — leaves a world that opens, its unwritten chunks
+    regenerating from the seed, instead of chunks without a `world.dat`, refused at
+    every boot. Every later save still writes the chunks first and `world.dat` last
+    (its commit point).
+  - **A failed save is never silent (review 2026-10-06).** Pause → Save clears the
+    crash-recovery autosave only once the save landed (it was cleared after a
+    failed save too); any failed save shows *"Couldn't save: <reason>. Your last
+    save is safe."* (`world_exit::save_failed_toast`, drawn over the pause menu as
+    well). `leave_world` returns whether the player left: when its save fails —
+    Save & Quit, Trial Leave, the end cards, the J-board arena hop, the skin-paint
+    hop, the window close — the player stays in the world, still live and nothing
+    torn down, with that toast, to retry or deliberately "Quit without saving".
+  - **An import never writes into a taken name** (review 2026-10-06). `.axeworld`
+    and `.axeprofile` imports name against EVERY entry under the worlds root, not
+    the lobby list (which shows only folders with a `world.dat` and hides the
+    Workshop), so they can't write into the native Workshop, a chunks-only or
+    autosave-only folder, or over a stray file; `write_unpacked_world` also refuses
+    an existing folder outright.
   - **Proof-of-Play secret**: a legacy meta without `pop_secret` gets one in the
     lobby (`apply_world_seed`), but on native it is persisted only once the world
     has opened (`persist_pop_secret_if_missing` in `begin_load`), so a refused world
     is never written.
-  - **Trial Reuse arenas** are checked with `world_open_refusal` BEFORE the wipe
-    (`delete_world`); a refused arena is neither wiped, re-created nor entered.
+  - **Trial arenas** are planned from the disk BEFORE anything is wiped or written
+    (`world_open::plan_arena_folder`, native): `world_open_refusal` first, then
+    `is_new_world` — anything saved counts, not just a folder the lobby lists
+    (one with a `world.dat`). A refused arena is neither wiped, re-created nor
+    entered. A Resume arena holding chunks but no `world.dat` is resumed (and so
+    refused by the open, untouched) — it used to get a fresh meta written over its
+    real one first; a Reuse arena in that state is wiped and regenerated instead of
+    refused on every launch. The web still plans from its lobby list.
   - **Web**: the IndexedDB / cloud load already stayed in the lobby on failure (the
     fresh-world branch runs only when there is no record at all), but it now shows
     the notice for every failure, not just a newer build, and the play path unpacks

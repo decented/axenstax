@@ -347,7 +347,42 @@ Now (`world_open::open_world`, Spec 02 §8.4 "The load-failure rule"):
   instead of skipping it (the next save would have repacked the record without it), and
   every load failure shows the notice.
 
-Known, not fixed here: a successful autosave recovery clears the autosave at once (a
-second crash within five minutes loses the recovered progress); autosave recovery never
-reads the main `chunks/`, so a chunk mined to all-air before the autosave regenerates as
-terrain; a LAN host's server reads `world.dat` while its client prefers the autosave.
+Known, not fixed here: ~~a successful autosave recovery clears the autosave at once (a
+second crash within five minutes loses the recovered progress)~~ (fixed below); autosave
+recovery never reads the main `chunks/`, so a chunk mined to all-air before the autosave
+regenerates as terrain; a LAN host's server reads `world.dat` while its client prefers
+the autosave.
+
+## Update 2026-10-06: review follow-ups on the save, load and exit paths
+
+An independent review of the two changes above found these, all fixed (Spec 02 §8.4):
+
+- **A failed save was silent.** `save_world` now refuses a damaged meta or unreadable
+  `world.dat` up front, but Pause → Save then cleared the crash-recovery autosave anyway,
+  and a failed Save & Quit only logged and left — the session was lost with no word.
+  Now the autosave is cleared only once a save landed, every failure shows *"Couldn't
+  save: <reason>. Your last save is safe."*, and `leave_world` returns whether the
+  player left: a failed save on any exit that saves (Save & Quit, Trial Leave, end
+  cards, the arena and skin-paint hops, the window close) keeps the player in the world.
+- **Imports could write into a folder the lobby doesn't list.** The `.axeprofile`
+  import named against the lobby list (folders with a `world.dat`, minus the Workshop),
+  so it could write over the native Workshop or a chunks-only / autosave-only folder.
+  Imports now name against every entry under the worlds root and refuse an existing
+  folder outright.
+- **Trial arenas were planned from the lobby list.** A Resume arena with chunks but no
+  `world.dat` got a fresh meta written over its real one before the open refused it; a
+  Reuse arena in that state was refused on every launch. `world_open::plan_arena_folder`
+  now plans from the disk (`is_new_world`) before anything is written.
+- **Reading a world wrote it.** The torn-meta recovery ran on every read (lobby list,
+  `load_world_meta`, server boot, the top of `open_world`), so a world then refused for
+  another reason had already changed. Readers now use the read-only `peek_world_meta`;
+  the repair runs last, once the world has loaded.
+- **A first save cut short was refused forever.** Chunks were written before
+  `world.dat` even on a world's first save, so a dedicated server killed during its
+  tick-0 save left chunks without a `world.dat`. A first save now writes `world.dat`
+  first; the refusal message says how to recover a folder already in that state.
+- **The dedicated server never deleted a mined-out chunk's file**, so mined-out chunks
+  came back after a restart. It now applies the client's rule (read or written this
+  session, now all-air).
+- **Opening from the autosave deleted it at once.** With a damaged `world.dat` that was
+  the only good copy. It is now kept until a save lands.
