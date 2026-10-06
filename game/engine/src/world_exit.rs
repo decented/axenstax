@@ -364,6 +364,10 @@ impl crate::GameState {
             client.disconnect();
         }
         self.hosted_server = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.lan_host = None;
+        }
         // Online play by contact §5.1 step 6 — give the router its port back,
         // close the relay REQs, retire the bearer.
         #[cfg(not(target_arch = "wasm32"))]

@@ -364,6 +364,20 @@ impl HostedServer {
             RemoteTransport::Quic => protocol::SERVER_PORT,
             RemoteTransport::WebSocket { port } => port,
         };
+        // LAN "Host Game" (T2-10): bind the UDP port NOW, on this thread, and hand
+        // the socket to the accept thread. Binding inside that thread meant a
+        // taken port was only a log line while the caller carried on as if hosting
+        // had worked; this way it is an `Err` with a reason the player can read.
+        // `create_server_endpoint` binds the same way, so behaviour is otherwise
+        // unchanged. Skipped when the caller pre-bound (online) or no accept
+        // thread will run (no remote slots).
+        #[cfg(not(target_arch = "wasm32"))]
+        let prebound = match (prebound, remote_transport) {
+            (None, RemoteTransport::Quic) if max_remote_players > 0 => {
+                Some(crate::lan_host::bind_lan_socket(port)?)
+            }
+            (other, _) => other,
+        };
         let name_clone = server_name.clone();
 
         // Clamp max_remote_players to 0 on WASM — no network stack.
@@ -4547,6 +4561,28 @@ mod tests {
             .expect("open server allows guests");
         assert_eq!(id.display_name, "Player", "an unnamed guest is plain \"Player\"");
         assert!(!looks_like_old_hex_label(&id.display_name));
+    }
+
+    // ── T2-10: a taken LAN port is an error, not a log line ───────────────────
+
+    #[test]
+    fn lan_host_start_fails_with_a_readable_reason_when_the_port_is_taken() {
+        // Hold the LAN port ourselves. If something else already owns it the
+        // premise (a taken port) still holds, so the assertion stands either way.
+        let _holder = std::net::UdpSocket::bind(("0.0.0.0", protocol::SERVER_PORT));
+        match HostedServer::start(
+            1,
+            "lan-port-taken-test".to_string(),
+            42,
+            4,
+            RemoteTransport::Quic,
+        ) {
+            Err(e) => {
+                assert!(e.contains("already in use"), "got {e}");
+                assert!(e.contains(&protocol::SERVER_PORT.to_string()), "got {e}");
+            }
+            Ok(_) => panic!("start must fail while the LAN port is held"),
+        }
     }
 
     // ── World chat Phase 3: the join-time composition ──

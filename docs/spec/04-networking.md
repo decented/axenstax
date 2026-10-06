@@ -1467,8 +1467,19 @@ See `docs/research/2026-04-01-lan-co-op-research.md` for the full transport comp
 | `transport.rs` | `ServerTransport` and `ClientTransport` traits; `ChannelTransport` for in-process testing |
 | `network.rs` | `QuicServerTransport`, `QuicClientTransport`, self-signed certificate generation, QUIC endpoint setup |
 | `protocol.rs` | Packet type enum, serialization (bincode), LZ4 compression |
-| `discovery.rs` | UDP broadcast LAN server discovery on port 7705 |
+| `discovery.rs` | UDP broadcast LAN server discovery on port 7705: `ServerBroadcaster` (host) and `ServerListener` (joiner; feeds the Join dialog's "Games on this network" list) |
+| `lan_host.rs` | LAN-host helpers (native): the address a joiner types, the synchronous port bind, human wording for bind/join failures (T2-10) |
+| `lan_ui.rs` | LAN-play egui: the "Games on this network" list and the pause-menu hosting panel (T2-10) |
 | `hosted_server.rs` | Server thread combining `GameServer` + QUIC accept loop + LAN broadcast |
+
+### LAN hosting and discovery UX (as built 2026-10-06, gap-audit T2-10; native only)
+
+- **Bind first, fail loudly.** `HostedServer::start` on the QUIC LAN path now binds the UDP game port (`protocol::SERVER_PORT`, 7700) **synchronously** (`lan_host::bind_lan_socket`) and hands the socket to the accept thread (the same `prebound` path online play uses). Before this the bind happened inside the accept thread and a taken port was only a log line while the caller carried on as if hosting had worked. `start` now returns `Err` with a plain-English reason (port in use, permission denied, no network); the Host Game handler shows it as a toast and opens the world for solo play. Error mapping: `lan_host::describe_bind_error`.
+- **Where friends connect.** On a successful LAN host the toast names `ip:port` and the pause menu shows a **Hosting on your network** panel (`lan_ui::draw_host_panel`: address, Copy button, players present of capacity). The address comes from the kernel's routing table (`nat::candidates::local_outbound_v4`, a UDP `connect` that sends nothing), filtered and ordered private-first by `lan_host::lan_addresses_from`; **no external lookup**. Limit: that trick yields the one interface the OS would route LAN traffic from, so a multi-homed host shows one address; listing every interface needs an interface-enumeration dependency, not added. With no usable address the panel and toast say there is no network connection.
+- **Games on this network.** The Join Game dialog opens a `ServerListener` (UDP 7705) while it is showing and drops it on close. Each announcement is parsed by the pure `discovery::parse_announcement`: the host comes from the UDP source address, the port from the packet (so an announcement cannot point a joiner at a third machine), the name is stripped of control, bidi and zero-width characters and capped at 64 characters, port 0 is refused, and the list is capped at 100 entries and expires after 5 s of silence. Rows show world, players-of-capacity and mode; a game that is **full** or built on a **different `PROTOCOL_VERSION`** is shown but disabled with the reason. Clicking a row joins that address through the normal `MenuAction::JoinGame` path (unchanged handshake, sign-in rules and `#op=` handling). If the discovery port is already bound by another copy of the game on the machine the dialog says so instead of showing a blank list.
+- **Red line 1.** This is LAN broadcast only. There is no directory, relay, or internet discovery in this path and none may be added: a central browsable list of player-run games would make AxeNStax the platform. Anyone on the LAN can broadcast, so every announcement is untrusted text.
+- **Join failures** (bad address, refused, timed out) now surface as a lobby notice instead of a log line.
+- **Not covered:** the announced name is the world's folder name; the dedicated WebSocket server is reached by URL and is not announced; discovery uses broadcast (255.255.255.255) so a network that blocks it falls back to typing the address.
 
 ### Game-packet framing on QUIC (2026-09-28, audit fix, protocol v64)
 

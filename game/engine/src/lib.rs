@@ -339,6 +339,12 @@ mod hosted_server;
 mod network;
 #[cfg(not(target_arch = "wasm32"))]
 mod discovery;
+// LAN play UX (gap-audit T2-10): host address + bind errors, and the
+// "Games on this network" list. Native only — the web build has no multiplayer.
+#[cfg(not(target_arch = "wasm32"))]
+mod lan_host;
+#[cfg(not(target_arch = "wasm32"))]
+mod lan_ui;
 mod remote_client;
 mod remote_entities;
 // WebSocket transport — the dedicated-server pipe that BOTH the browser PWA and
@@ -1137,6 +1143,11 @@ pub(crate) struct GameState {
     /// always `None` on wasm (browsers can't host), but the field's presence lets
     /// the shared network methods reference it without per-line cfg gating.
     pub(crate) hosted_server: Option<crate::hosted_server::HostedServer>,
+    /// Where joiners reach this machine while it hosts a LAN game (gap-audit
+    /// T2-10): detected once when "Host Game" succeeds, shown in the pause menu,
+    /// cleared with `hosted_server`. `None` when not LAN-hosting.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) lan_host: Option<crate::lan_host::HostAccess>,
     /// Remote client (when this machine has JOINED a server). Cross-platform now
     /// — the browser joins the dedicated WebSocket server through this too.
     pub(crate) remote_client: Option<crate::remote_client::RemoteClient>,
@@ -1746,6 +1757,8 @@ impl GameState {
             net_send_seq: 0,
             net_local_intent: crate::player_intent::PlayerIntent::default(),
             hosted_server: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_host: None,
             remote_client: None,
             #[cfg(not(target_arch = "wasm32"))]
             online_host: None,

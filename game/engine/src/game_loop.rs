@@ -7939,14 +7939,28 @@ impl super::GameState {
                     ) {
                         Ok(server) => {
                             self.hosted_server = Some(server);
-                            log::info!("LAN server started on port {}", crate::protocol::SERVER_PORT);
+                            // T2-10: say where friends connect — the toast now, the
+                            // pause menu for as long as we host.
+                            let access = crate::lan_host::HostAccess::detect(crate::protocol::SERVER_PORT);
+                            log::info!(
+                                "LAN server started on port {} (joiners use {:?})",
+                                crate::protocol::SERVER_PORT,
+                                access.join_addresses()
+                            );
                             self.toast = Some((
-                                format!("Hosting on LAN (port {})", crate::protocol::SERVER_PORT),
-                                Instant::now() + std::time::Duration::from_secs(5),
+                                crate::lan_host::hosting_toast(&access),
+                                Instant::now() + std::time::Duration::from_secs(8),
                             ));
+                            self.lan_host = Some(access);
                         }
                         Err(e) => {
                             log::error!("Failed to start hosted server: {e}");
+                            // The world still opens (solo); tell the player why
+                            // nobody can join instead of failing silently.
+                            self.toast = Some((
+                                crate::lan_host::host_failure_toast(&e),
+                                Instant::now() + std::time::Duration::from_secs(12),
+                            ));
                         }
                     }
                     load_world = Some(folder_name);
@@ -8024,7 +8038,12 @@ impl super::GameState {
                             // (G3 — the server now sends its REAL seed).
                             load_world = Some("remote_game".to_string());
                         }
-                        Err(e) => log::error!("Failed to connect: {e}"),
+                        Err(e) => {
+                            log::error!("Failed to connect: {e}");
+                            // T2-10: back at the lobby, say why nothing happened.
+                            menu_state.notice =
+                                Some(crate::lan_host::join_failure_notice(&address, &e));
+                        }
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
@@ -8931,6 +8950,11 @@ impl super::GameState {
                     .as_ref()
                     .is_some_and(|s| s.def().kind == crate::scenario::ScenarioKind::Challenge);
             let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut self.difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial);
+            // T2-10: while this machine hosts a LAN game, show where friends connect.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let (Some(access), Some(hs)) = (self.lan_host.as_ref(), self.hosted_server.as_ref()) {
+                crate::lan_ui::draw_host_panel(&self.renderer.egui.ctx, access, hs.occupancy());
+            }
 
             match clicked {
                 crate::menu::PAUSE_STASH_TOGGLED => {

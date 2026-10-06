@@ -47,20 +47,31 @@ expect to see slightly worse perf than native at 4 players.
 
 1. Create a world (or open an existing one) in **Survival** or
    **Creative**.
-2. From the world menu, click **Host LAN**. You'll see your
-   machine's local IP + a port (default 7700).
-3. Tell your friends the IP.
+2. From the world menu, click **Host LAN**. A message tells you the
+   address friends should use (your machine's local IP + port 7700). If
+   hosting can't start — the port is already in use, or there's no network —
+   the message says why, and your world opens for solo play instead.
+3. While you host, open the **Pause menu**: the **Hosting on your network**
+   panel shows the address again (with a **Copy** button) and how many
+   players are in the world. Friends on the same network can pick your
+   world from their Join list, or type the address.
 
 ### Join
 
 1. From the lobby, click **Join LAN**.
-2. Type the host's `IP:7700` (or use the auto-discovery list if your
-   network supports UDP broadcast on port 7705).
+2. Pick the host's world from **Games on this network** (it appears when
+   your network supports UDP broadcast on port 7705; a game that is full or
+   on a different version is greyed out and says why), or type the host's
+   `IP:7700`. If the connection fails, you'll see the reason back at the
+   lobby.
 3. You must be **signed in with Signet** to join — the host requires a
    verified, signed identity and rejects a join attempt that doesn't have
    one. Your player name is just a display fallback; your real identity
-   comes from your Signet sign-in, and if your name collides with another
-   player's, the game appends a short suffix to keep them distinct.
+   comes from your Signet sign-in. The host sees you under the name they
+   have for you in their own contacts, otherwise the name on your Signet
+   handle, otherwise a short form of your npub (like `npub1abcd…wxyz`) —
+   never a string of hex. If your name collides with another player's, the
+   game appends a short suffix to keep them distinct.
 
 ### Network requirements
 

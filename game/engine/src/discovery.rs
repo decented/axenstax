@@ -3,13 +3,14 @@
 //! Server broadcasts a ServerAnnouncePacket on UDP port 7705 every second.
 //! Client listens on that port and collects discovered servers.
 //!
-//! The broadcaster (`ServerBroadcaster`) is live — `hosted_server.rs` runs one
-//! for every QUIC-hosted world. The listener (`ServerListener` + its
-//! `DiscoveredServer` results) has no live caller yet — no "servers on my
-//! LAN" browser panel exists in the menu to consume it. Untested (no
-//! `#[cfg(test)]` module here) — a real client-side gap, not a false positive.
+//! The broadcaster (`ServerBroadcaster`) runs for every QUIC-hosted world
+//! (`hosted_server.rs`). The listener (`ServerListener`) feeds the "Games on
+//! this network" list in the Join Game dialog (`lan_ui.rs`, gap-audit T2-10).
+//! This is LAN broadcast only: there is no directory, relay or internet
+//! discovery here, and there must never be one (red line 1). Anyone on the LAN
+//! can broadcast, so every announcement is treated as untrusted text.
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 /// Discovery broadcast port.
@@ -19,12 +20,16 @@ pub const DISCOVERY_PORT: u16 = crate::protocol::DISCOVERY_PORT;
 const BROADCAST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long before a discovered server is considered stale.
-#[allow(dead_code)]
 const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Most servers one listener will remember — a flooding LAN cannot grow it.
+const MAX_DISCOVERED: usize = 100;
+
+/// Longest server name (in characters) kept from an announcement.
+const MAX_SERVER_NAME_CHARS: usize = 64;
 
 /// Information about a discovered server.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct DiscoveredServer {
     /// Server address (IP from the broadcast source, port from the announce packet)
     pub addr: SocketAddr,
@@ -36,6 +41,9 @@ pub struct DiscoveredServer {
     pub max_players: u8,
     /// Whether the server is in creative mode
     pub is_creative: bool,
+    /// The announcing build's `PROTOCOL_VERSION`. A server on a different
+    /// version rejects our join, so the UI marks it rather than offering it.
+    pub protocol_version: u32,
     /// When we last heard from this server
     pub last_seen: Instant,
 }
@@ -116,16 +124,60 @@ impl ServerBroadcaster {
 
 // ─── Client-side listener ──────────────────────────────────────────────────────
 
+/// Strip what an announcement must not smuggle into a label: control
+/// characters, bidi overrides/isolates/marks and zero-width format characters
+/// (which can reorder or hide text to spoof another world's name).
+fn clean_server_name(raw: &str) -> String {
+    fn hidden(c: char) -> bool {
+        c.is_control()
+            || matches!(c,
+                '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{061C}'
+                | '\u{FEFF}')
+    }
+    let cleaned: String = raw.chars().filter(|c| !hidden(*c)).collect();
+    cleaned.trim().chars().take(MAX_SERVER_NAME_CHARS).collect::<String>().trim().to_string()
+}
+
+/// Turn one received UDP datagram into a [`DiscoveredServer`], or `None` if it
+/// is not a well-formed AXNS announcement. Pure: `src_ip` is the datagram's
+/// source address (the game port comes from the packet, the host from the UDP
+/// header, so a packet cannot point a joiner at a third machine's IP).
+fn parse_announcement(data: &[u8], src_ip: IpAddr) -> Option<DiscoveredServer> {
+    // minimum: 1 byte type tag + at least 4 bytes of payload
+    if data.len() < 5 {
+        return None;
+    }
+    let (packet_type, payload) = crate::protocol::deserialize_header(data)?;
+    if packet_type != crate::protocol::PacketType::ServerAnnounce {
+        return None;
+    }
+    let announce =
+        crate::protocol::safe_deserialize::<crate::protocol::ServerAnnouncePacket>(payload).ok()?;
+    if &announce.magic != b"AXNS" || announce.port == 0 {
+        return None;
+    }
+    Some(DiscoveredServer {
+        addr: SocketAddr::new(src_ip, announce.port),
+        server_name: clean_server_name(&announce.server_name),
+        player_count: announce.player_count,
+        max_players: announce.max_players,
+        is_creative: announce.is_creative,
+        protocol_version: announce.protocol_version,
+        last_seen: Instant::now(),
+    })
+}
+
 /// Listens for server broadcasts on the LAN.
 /// Call `poll()` frequently to check for new/updated servers.
-#[allow(dead_code)]
 pub struct ServerListener {
     socket: Option<UdpSocket>,
     /// Discovered servers, keyed by address
     servers: Vec<DiscoveredServer>,
 }
 
-#[allow(dead_code)]
 impl ServerListener {
     /// Create a new listener bound to the discovery port.
     pub fn new() -> Self {
@@ -149,90 +201,161 @@ impl ServerListener {
         }
     }
 
+    /// Whether the discovery port was bound. `false` means the list will stay
+    /// empty (another copy of the game on this machine already listens), which
+    /// the UI says rather than showing a silently blank list.
+    pub fn is_listening(&self) -> bool {
+        self.socket.is_some()
+    }
+
+    /// Fold one announcement into the list: refresh a known address, or add a
+    /// new one while under the cap (flood protection).
+    fn record(&mut self, found: DiscoveredServer) {
+        if let Some(existing) = self.servers.iter_mut().find(|s| s.addr == found.addr) {
+            *existing = found;
+        } else if self.servers.len() < MAX_DISCOVERED {
+            log::info!("Discovered server: {} at {}", found.server_name, found.addr);
+            self.servers.push(found);
+        }
+    }
+
+    /// Drop servers not heard from within [`SERVER_TIMEOUT`].
+    fn prune(&mut self) {
+        self.servers.retain(|s| s.last_seen.elapsed() < SERVER_TIMEOUT);
+    }
+
     /// Poll for new server announcements. Non-blocking.
     /// Call this every frame or every few frames.
     pub fn poll(&mut self) {
-        let Some(socket) = &self.socket else { return };
-
-        let mut buf = [0u8; 1024];
-        while let Ok((len, src_addr)) = socket.recv_from(&mut buf) {
-            // minimum: 1 byte type tag + at least 4 bytes of payload
-            if len < 5 {
-                continue;
+        if let Some(socket) = &self.socket {
+            let mut buf = [0u8; 1024];
+            let mut received: Vec<DiscoveredServer> = Vec::new();
+            while let Ok((len, src_addr)) = socket.recv_from(&mut buf) {
+                if let Some(found) = parse_announcement(&buf[..len], src_addr.ip()) {
+                    received.push(found);
+                }
             }
-
-            let Some((packet_type, payload)) =
-                crate::protocol::deserialize_header(&buf[..len])
-            else {
-                continue;
-            };
-
-            if packet_type != crate::protocol::PacketType::ServerAnnounce {
-                continue;
-            }
-
-            let Ok(announce) =
-                crate::protocol::safe_deserialize::<crate::protocol::ServerAnnouncePacket>(payload)
-            else {
-                continue;
-            };
-
-            if &announce.magic != b"AXNS" {
-                continue;
-            }
-
-            // Source IP comes from the UDP header; game port comes from the packet.
-            let server_addr = SocketAddr::new(src_addr.ip(), announce.port);
-
-            // Sanitise server name: truncate to 64 chars, strip control characters
-            let server_name: String = announce.server_name
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(64)
-                .collect();
-
-            if let Some(existing) = self.servers.iter_mut().find(|s| s.addr == server_addr) {
-                existing.server_name = server_name;
-                existing.player_count = announce.player_count;
-                existing.max_players = announce.max_players;
-                existing.is_creative = announce.is_creative;
-                existing.last_seen = Instant::now();
-            } else if self.servers.len() < 100 {
-                // Cap discovered servers list to prevent memory exhaustion
-                // from broadcast flooding on the LAN.
-                self.servers.push(DiscoveredServer {
-                    addr: server_addr,
-                    server_name: server_name.clone(),
-                    player_count: announce.player_count,
-                    max_players: announce.max_players,
-                    is_creative: announce.is_creative,
-                    last_seen: Instant::now(),
-                });
-                log::info!(
-                    "Discovered server: {} at {}",
-                    server_name,
-                    server_addr
-                );
+            for found in received {
+                self.record(found);
             }
         }
-
-        // Remove servers we haven't heard from recently
-        self.servers.retain(|s| s.last_seen.elapsed() < SERVER_TIMEOUT);
+        self.prune();
     }
 
     /// Get the list of currently discovered servers.
     pub fn servers(&self) -> &[DiscoveredServer] {
         &self.servers
     }
-
-    /// Clear the discovered server list.
-    pub fn clear(&mut self) {
-        self.servers.clear();
-    }
 }
 
 impl Default for ServerListener {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRC: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 23));
+
+    fn announce(name: &str, port: u16) -> crate::protocol::ServerAnnouncePacket {
+        crate::protocol::ServerAnnouncePacket {
+            magic: *b"AXNS",
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            port,
+            server_name: name.to_string(),
+            player_count: 2,
+            max_players: 5,
+            is_creative: true,
+            play_mode: crate::play_mode::PlayMode::Creative,
+        }
+    }
+
+    fn datagram(p: &crate::protocol::ServerAnnouncePacket) -> Vec<u8> {
+        crate::protocol::serialize_packet(crate::protocol::PacketType::ServerAnnounce, p)
+    }
+
+    fn listener() -> ServerListener {
+        ServerListener { socket: None, servers: Vec::new() }
+    }
+
+    #[test]
+    fn parses_a_well_formed_announcement_using_the_udp_source_ip() {
+        let found = parse_announcement(&datagram(&announce("Axo's World", 7700)), SRC)
+            .expect("well-formed announcement");
+        assert_eq!(found.addr, SocketAddr::new(SRC, 7700), "host from UDP header, port from packet");
+        assert_eq!(found.server_name, "Axo's World");
+        assert_eq!((found.player_count, found.max_players), (2, 5));
+        assert!(found.is_creative);
+        assert_eq!(found.protocol_version, crate::protocol::PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn rejects_bad_magic_short_wrong_type_and_port_zero() {
+        let mut bad = announce("x", 7700);
+        bad.magic = *b"NOPE";
+        assert!(parse_announcement(&datagram(&bad), SRC).is_none(), "bad magic");
+        assert!(parse_announcement(&[1, 2, 3], SRC).is_none(), "too short");
+        assert!(parse_announcement(&[], SRC).is_none(), "empty");
+        let mut wrong_type = datagram(&announce("x", 7700));
+        wrong_type[0] = crate::protocol::PacketType::StateUpdate as u8;
+        assert!(parse_announcement(&wrong_type, SRC).is_none(), "wrong packet type");
+        assert!(parse_announcement(&datagram(&announce("x", 0)), SRC).is_none(), "port 0 is undialable");
+        assert!(parse_announcement(&[10u8; 40], SRC).is_none(), "garbage payload");
+    }
+
+    #[test]
+    fn server_name_is_cleaned_and_bounded() {
+        let nasty = format!("  Evil\u{202E}\u{200B}World\n{}", "z".repeat(200));
+        let found = parse_announcement(&datagram(&announce(&nasty, 7700)), SRC).unwrap();
+        assert!(!found.server_name.chars().any(|c| c.is_control()));
+        assert!(!found.server_name.contains('\u{202E}') && !found.server_name.contains('\u{200B}'));
+        assert!(found.server_name.starts_with("EvilWorld"));
+        assert_eq!(found.server_name.chars().count(), MAX_SERVER_NAME_CHARS);
+    }
+
+    #[test]
+    fn a_repeat_announcement_refreshes_rather_than_duplicates() {
+        let mut l = listener();
+        l.record(parse_announcement(&datagram(&announce("Old", 7700)), SRC).unwrap());
+        let mut newer = announce("New", 7700);
+        newer.player_count = 4;
+        l.record(parse_announcement(&datagram(&newer), SRC).unwrap());
+        assert_eq!(l.servers().len(), 1);
+        assert_eq!(l.servers()[0].server_name, "New");
+        assert_eq!(l.servers()[0].player_count, 4);
+        // Same IP, different port is a different server.
+        l.record(parse_announcement(&datagram(&announce("Other", 7701)), SRC).unwrap());
+        assert_eq!(l.servers().len(), 2);
+    }
+
+    #[test]
+    fn the_list_is_capped_against_a_broadcast_flood() {
+        let mut l = listener();
+        for port in 1..=(MAX_DISCOVERED as u16 + 50) {
+            l.record(parse_announcement(&datagram(&announce("flood", port)), SRC).unwrap());
+        }
+        assert_eq!(l.servers().len(), MAX_DISCOVERED);
+    }
+
+    #[test]
+    fn silent_servers_expire() {
+        let mut l = listener();
+        let mut stale = parse_announcement(&datagram(&announce("Gone", 7700)), SRC).unwrap();
+        if let Some(t) = Instant::now().checked_sub(SERVER_TIMEOUT + Duration::from_secs(1)) {
+            stale.last_seen = t;
+        }
+        l.record(stale);
+        l.record(parse_announcement(&datagram(&announce("Here", 7701)), SRC).unwrap());
+        l.prune();
+        let names: Vec<&str> = l.servers().iter().map(|s| s.server_name.as_str()).collect();
+        assert_eq!(names, ["Here"]);
+    }
+
+    #[test]
+    fn a_listener_without_a_socket_reports_it() {
+        assert!(!listener().is_listening());
     }
 }

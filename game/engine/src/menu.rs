@@ -312,6 +312,11 @@ pub struct MenuState {
     /// reason it couldn't be. Shares the `import_status` line.
     #[cfg(target_arch = "wasm32")]
     pub profile_export: Option<std::rc::Rc<std::cell::RefCell<Option<Result<String, String>>>>>,
+    /// Native: the LAN discovery listener behind the Join dialog's "Games on
+    /// this network" list (gap-audit T2-10). Opened when that dialog first draws
+    /// and dropped when it closes, so UDP 7705 is not held for the whole session.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub lan: Option<crate::discovery::ServerListener>,
     /// Native: status line shown after the Export/Import buttons (last
     /// operation result — success or error). Cleared on the next export/import.
     #[cfg(not(target_arch = "wasm32"))]
@@ -434,6 +439,8 @@ impl MenuState {
             import_status: None,
             #[cfg(target_arch = "wasm32")]
             profile_export: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan: None,
             #[cfg(not(target_arch = "wasm32"))]
             transfer_status: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -2196,6 +2203,12 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
         return action;
     }
 
+    // The LAN listener only lives while the Join dialog is up (frees UDP 7705).
+    #[cfg(not(target_arch = "wasm32"))]
+    if !matches!(state.dialog, MenuDialog::JoinDirect { .. }) {
+        state.lan = None;
+    }
+
     // Draw any active dialog on top
     match state.dialog.clone() {
         MenuDialog::Create { name, seed, creative, commands_enabled, cloud_save,
@@ -2395,13 +2408,26 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
             return action;
         }
         MenuDialog::JoinDirect { address } => {
-            let result = draw_join_dialog(ctx, &address);
+            // Native: poll LAN announcements for the "Games on this network" list.
+            #[cfg(not(target_arch = "wasm32"))]
+            let lan_games = crate::lan_ui::poll_games(&mut state.lan);
+            let result = draw_join_dialog(
+                ctx,
+                &address,
+                #[cfg(not(target_arch = "wasm32"))]
+                &lan_games,
+            );
             match result {
                 DialogResult::Update(new_addr, _) => {
                     state.dialog = MenuDialog::JoinDirect { address: new_addr };
                 }
                 DialogResult::Confirm(addr, _) => {
                     state.dialog = MenuDialog::None;
+                    // Free UDP 7705 now: the menu is not drawn again once a join starts.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        state.lan = None;
+                    }
                     action = MenuAction::JoinGame(addr);
                 }
                 DialogResult::Cancel => {
@@ -4409,12 +4435,24 @@ fn draw_delete_dialog(ctx: &egui::Context, world_name: &str, confirm_text: &str)
     }
 }
 
-fn draw_join_dialog(ctx: &egui::Context, address: &str) -> DialogResult {
+fn draw_join_dialog(
+    ctx: &egui::Context,
+    address: &str,
+    #[cfg(not(target_arch = "wasm32"))] lan_games: &crate::lan_ui::LanGames,
+) -> DialogResult {
     let mut addr_buf = address.to_string();
     let mut confirmed = false;
     let mut cancelled = false;
+    // A click on a discovered LAN game joins its address straight away.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut picked: Option<String> = None;
 
     let _result = draw_dialog_frame(ctx, "Join Game", ACTION_BLUE, CARD_BORDER, |ui| {
+        // LAN games first: the common case is a friend on the same network.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            picked = crate::lan_ui::draw_lan_games(ui, lan_games);
+        }
         // Address field
         ui.label(egui::RichText::new("SERVER ADDRESS").size(11.0).color(egui::Color32::from_rgb(136, 136, 153)).strong());
         ui.add_space(4.0);
@@ -4454,6 +4492,10 @@ fn draw_join_dialog(ctx: &egui::Context, address: &str) -> DialogResult {
         DialogResult::Update(addr_buf.clone(), String::new())
     });
 
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(addr) = picked {
+        return DialogResult::Confirm(addr, String::new());
+    }
     if confirmed {
         DialogResult::Confirm(addr_buf, String::new())
     } else if cancelled {
