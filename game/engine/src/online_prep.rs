@@ -637,10 +637,12 @@ mod tests {
             let lower = line.to_lowercase();
             for banned in [
                 "browse", "discover", "directory", "server list", "public",
-                "earn", "sats", "bitcoin", "money", "social network", "chat platform",
+                "social network", "chat platform",
             ] {
                 assert!(!lower.contains(banned), "copy must not say {banned:?}: {line}");
             }
+            let money = crate::copy_lint::banned_in(line, crate::copy_lint::BANNED_MONEY_WORDS);
+            assert!(money.is_empty(), "copy must not say {money:?}: {line}");
         }
     }
 }

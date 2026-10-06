@@ -3001,12 +3001,8 @@ mod tests {
         // frame play as money/earning. Mirrors satoshi.rs's corpus guard, over
         // the Trials corpus. "Trade/barter/swap" is fine; "buy/sell/earn/sats"
         // is not.
-        // Whole-WORD banned terms (so "learn" doesn't trip "earn", etc.).
-        const BANNED: &[&str] = &[
-            "sats", "bitcoin", "btc", "earn", "earning", "earned", "payout", "payouts",
-            "wallet", "money", "cash", "cashback", "prize", "prizes", "sell", "buy",
-            "lightning", "wages", "salary",
-        ];
+        // Whole-WORD banned terms (so "learn" doesn't trip "earn", etc.) — the
+        // shared `copy_lint::BANNED_MONEY_WORDS`, the single source of truth.
         let mut corpus = String::new();
         for (name, _d) in challenge_listing() {
             let (t, h) = challenge_help(name);
@@ -3018,16 +3014,7 @@ mod tests {
             let (i, hi) = trial_satoshi(race.id);
             corpus.push_str(&format!(" {i} {hi} "));
         }
-        // Tokenise into lowercase words (letters + apostrophe) and check membership,
-        // so banned terms only match as whole words.
-        let words: std::collections::HashSet<String> = corpus
-            .to_lowercase()
-            .split(|c: char| !(c.is_ascii_alphabetic() || c == '\''))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        for w in BANNED {
-            assert!(!words.contains(*w), "trial text contains banned money/earning word: {w:?}");
-        }
+        let hits = crate::copy_lint::banned_in(&corpus, crate::copy_lint::BANNED_MONEY_WORDS);
+        assert!(hits.is_empty(), "trial text contains banned money/earning word(s): {hits:?}");
     }
 }

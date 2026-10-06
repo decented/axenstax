@@ -145,13 +145,16 @@ mod tests {
     fn the_copy_carries_no_social_discovery_or_money_words() {
         let banned = [
             "social", "network", "follow", "discover", "browse", "find friends", "meet", "chat",
-            "public", "earn", "bitcoin", "sats", "money", "stranger",
+            "public", "stranger",
         ];
         for s in ALL {
             let l = s.to_lowercase();
             for b in banned {
                 assert!(!l.contains(b), "{s:?} contains {b:?}");
             }
+            // Money words: the shared `copy_lint::BANNED_MONEY_WORDS`.
+            let money = crate::copy_lint::banned_in(s, crate::copy_lint::BANNED_MONEY_WORDS);
+            assert!(money.is_empty(), "{s:?} contains {money:?}");
         }
     }
 

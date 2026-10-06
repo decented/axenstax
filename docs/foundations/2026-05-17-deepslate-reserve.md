@@ -248,7 +248,7 @@ When the player clicks "Fund the Reserve" in the Bitcoin menu:
    ```
    With sats values below each segment. Hover/tap shows the recipient's Lightning Address + Nostr identity (per §5.4 amended).
 3. **Confirmation copy** — text block, kid-readable:
-   > "You're sponsoring this world. Your contribution makes mining more rewarding for **every** player here. You don't get sats back to your own wallet — you earn yours by playing, the same as everyone else. Your sponsorship is public (unless you opt out). Thank you."
+   > "You're sponsoring this world. Your contribution tops up the shared pool for **every** player. It is a gift to the world and is never returned to you. Your sponsorship is public (unless you opt out). Thank you." *(Copy revised 2026-10-06: the original — "…you earn yours by playing…" — framed play as earning, which `copy_lint` bans on every in-game surface; the shipped dialog carries the revised line.)*
 4. **Opt-out checkbox** — "Show my contribution anonymously" (defaults off; sponsorship is public by default).
 5. **Confirm + pay** — generates a BOLT11 invoice, displays QR + LNURL, player pays from their Lightning wallet.
 6. **On settlement** — show a celebration moment ("You sponsored [server] with 1000 sats! The Reserve just got fatter — every player will mine a bit more this hour."), update the gauge in real-time, log the Nostr-signed "Sponsor of [server]" credential to the player's identity.

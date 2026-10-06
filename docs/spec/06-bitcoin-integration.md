@@ -1156,7 +1156,7 @@ Players who are already in-game can add more sats to the **server's pool**. The 
 1. Player opens the Bitcoin menu (keybind: `B` by default).
 2. Selects "Fund the Reserve" (formerly "Add Funds").
 3. Enters amount or selects a preset (100, 500, 1000, 5000 sats).
-4. Server displays the split breakdown — *"50% to the mining pool (everyone benefits), 30% to the server operator, 15% to the platform, 5% to reserve"* — and the message: *"You're sponsoring the world. Your contribution makes mining more rewarding for every player. You don't get sats credited to your own balance — you earn yours by mining, the same as everyone else."*
+4. Server displays the split breakdown — *"50% to the mining pool (everyone benefits), 30% to the server operator, 15% to the platform, 5% to reserve"* — and the message: *"You're sponsoring this world. Your contribution tops up the shared pool for every player. It is a gift to the world and is never returned to you."* (Revised 2026-10-06: the original wording — "you earn yours by mining, the same as everyone else" — framed play as earning; `copy_lint` now bans that on every in-game surface.)
 5. Player confirms and pays the generated BOLT11 invoice from their Lightning wallet.
 6. On confirmation, the payment is split per §5. The pool share lifts the per-strike mining payout rate for all players. The player receives no direct in-world balance credit.
 

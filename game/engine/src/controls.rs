@@ -307,7 +307,6 @@ mod tests {
         // tester unlock; gamepad is parked; the play surface never says money.
         let banned = [
             "feedback", "/bug", "/idea", "tell us", "report", "gamepad", "controller",
-            "bitcoin", "sats", "earn",
         ];
         let mut texts: Vec<String> = Vec::new();
         for layout in [ControlsLayout::Keyboard, ControlsLayout::Touch] {
@@ -321,6 +320,9 @@ mod tests {
             for b in banned {
                 assert!(!t.contains(b), "controls text '{t}' contains '{b}'");
             }
+            // Money words: the shared `copy_lint::BANNED_MONEY_WORDS`.
+            let money = crate::copy_lint::banned_in(t, crate::copy_lint::BANNED_MONEY_WORDS);
+            assert!(money.is_empty(), "controls text '{t}' contains {money:?}");
         }
     }
 

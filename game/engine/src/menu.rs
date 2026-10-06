@@ -6130,7 +6130,7 @@ mod tests {
     fn app_feature_copy_is_capability_framed() {
         const BANNED: &[&str] = &[
             "bypass", "circumvent", "evade", "unrestricted", "no limit",
-            "no restriction", "no sign-in needed", "earn", "bitcoin", "sats",
+            "no restriction", "no sign-in needed",
             "stranger", "no rules", "around the",
         ];
         for f in [AppFeature::Stash, AppFeature::Join, AppFeature::Host] {
@@ -6146,6 +6146,9 @@ mod tests {
                     "feature copy for {f:?} must not contain '{banned}': {text}"
                 );
             }
+            // Money words: the shared `copy_lint::BANNED_MONEY_WORDS`.
+            let money = crate::copy_lint::banned_in(&text, crate::copy_lint::BANNED_MONEY_WORDS);
+            assert!(money.is_empty(), "feature copy for {f:?} must not say {money:?}: {text}");
             assert!(
                 text.contains("desktop app"),
                 "feature copy for {f:?} must point at the desktop app: {text}"

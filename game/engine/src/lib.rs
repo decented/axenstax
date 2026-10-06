@@ -422,6 +422,9 @@ mod replay_player;
 // under `#[cfg(test)]` and run as LIBRARY tests (`cargo test --lib`) since the
 // lib/bin split; they reach `pub(crate)` internals, which is why they stay here
 // rather than under `tests/`.
+// The money-word lint's single word list + shared scanner (see `copy_lint.rs`).
+#[cfg(test)]
+mod copy_lint;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod test_harness;

@@ -1891,18 +1891,12 @@ impl HostedServer {
                             }
                             continue;
                         };
-                        const MAX_PLAYER_NAME_LEN: usize = 32;
-                        if req.player_name.len() > MAX_PLAYER_NAME_LEN
-                            || req.player_name.chars().any(|c| c.is_control())
-                        {
+                        if !protocol::player_name_is_valid(&req.player_name) {
                             log::warn!(
                                 "Rejecting JoinRequest on slot {i}: invalid name ({} bytes)",
                                 req.player_name.len()
                             );
-                            let _ = self.release_slot(
-                                i,
-                                Some("Invalid player name (max 32 chars, no control chars)"),
-                            );
+                            let _ = self.release_slot(i, Some(&protocol::player_name_reject_reason()));
                             break;
                         }
                         if req.protocol_version != protocol::PROTOCOL_VERSION {

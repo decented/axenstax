@@ -236,27 +236,11 @@ fn check_leaves_are_actions_bites_on_a_timed_checklist_item() {
 // Check 3 — compliance banlist over EVERY trial text surface
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Duplicated from `scenario.rs`'s `trial_text_has_no_money_or_earning_words`
-/// (that test is the source of truth for the word list; keep the two in
-/// sync by hand — factoring into one shared const wasn't worth the extra
-/// cross-module plumbing for a 16-entry list). This check covers the text
-/// surfaces that test does NOT: `display_name`, the authored task labels,
-/// and kit item names.
-const BANNED_MONEY_WORDS: &[&str] = &[
-    "sats", "bitcoin", "btc", "earn", "earning", "earned", "payout", "payouts",
-    "wallet", "money", "cash", "cashback", "prize", "prizes", "sell", "buy",
-    "lightning", "wages", "salary",
-];
-
-fn tokenize_words(corpus: &str) -> HashSet<String> {
-    corpus
-        .to_lowercase()
-        .split(|c: char| !(c.is_ascii_alphabetic() || c == '\''))
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
-}
-
+/// The banned-word list is the shared `copy_lint::BANNED_MONEY_WORDS` (the
+/// single source of truth — `scenario.rs`'s trial-text test, packaging, Satoshi,
+/// quests and the rest import the same list). This check covers the text
+/// surfaces that `scenario.rs` test does NOT: `display_name`, the authored task
+/// labels, and kit item names.
 fn check_banlist_covers_all_text_surfaces(defs: &[(&str, ScenarioDef)]) -> Result<(), String> {
     for (token, def) in defs {
         let mut corpus = def.display_name.clone();
@@ -269,17 +253,16 @@ fn check_banlist_covers_all_text_surfaces(defs: &[(&str, ScenarioDef)]) -> Resul
             corpus.push_str(&kit.name);
             corpus.push(' ');
         }
-        let words = tokenize_words(&corpus);
-        for banned in BANNED_MONEY_WORDS {
-            if words.contains(*banned) {
-                return Err(format!(
-                    "{token} (\"{}\"): display_name/task-label/kit-name text contains banned \
-                     money/earning word {banned:?}. Trials must never frame play as money/earning \
-                     (compliance red line — see CLAUDE.md \"Regulatory Red Lines\"). Reword the \
-                     offending text; \"trade/barter/swap\" is fine, \"buy/sell/earn/sats\" is not.",
-                    def.display_name,
-                ));
-            }
+        if let Some(banned) =
+            crate::copy_lint::banned_in(&corpus, crate::copy_lint::BANNED_MONEY_WORDS).first()
+        {
+            return Err(format!(
+                "{token} (\"{}\"): display_name/task-label/kit-name text contains banned \
+                 money/earning word {banned:?}. Trials must never frame play as money/earning \
+                 (compliance red line — see CLAUDE.md \"Regulatory Red Lines\"). Reword the \
+                 offending text; \"trade/barter/swap\" is fine, \"buy/sell/earn/sats\" is not.",
+                def.display_name,
+            ));
         }
     }
     Ok(())

@@ -339,17 +339,19 @@ mod tests {
     fn loading_cards_never_carry_money_or_bitcoin_words() {
         // Moonshot guardrail (north-star §1/§9): the play surface never says
         // "Bitcoin"/"crypto"/"sats"/"earn" — money in-world is just money.
-        // Whole-word match so e.g. "learn" doesn't trip "earn".
+        // Whole-word match against the shared `copy_lint::BANNED_MONEY_WORDS`
+        // so e.g. "learn" doesn't trip "earn".
         let cards = parse_cards(CARDS_JSON).expect("bundled cards parse");
-        for c in &cards {
-            let text = format!("{} {}", c.title, c.body).to_lowercase();
-            for banned in ["bitcoin", "crypto", "sats", "earn", "earning", "earned"] {
-                let hit = text
-                    .split(|ch: char| !ch.is_alphanumeric())
-                    .any(|word| word == banned);
-                assert!(!hit, "loading card '{}' contains banned word '{banned}'", c.title);
-            }
-        }
+        let items: Vec<crate::copy_lint::Item> = cards
+            .iter()
+            .map(|c| crate::copy_lint::Item {
+                at: format!("loading card '{}'", c.title),
+                text: format!("{} {}", c.title, c.body),
+            })
+            .collect();
+        assert!(items.len() > 10, "the card scan must cover the real deck");
+        crate::copy_lint::scan("loading cards", &items, crate::copy_lint::BANNED_MONEY_WORDS)
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[test]

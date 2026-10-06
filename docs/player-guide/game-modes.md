@@ -11,7 +11,7 @@ The full game. Recommended for everyone the first few times.
 - **Tools have durability.** They break after enough uses.
 - **Blocks take time to mine.** A wooden pickaxe on stone is several seconds; a diamond pickaxe is fast.
 - **Hostile mobs** appear at night and in dark places. Bandits (Brigands, Marauders, Berserkers) raid; Bears and Hyenas hunt — and Hyenas come in packs.
-- **Inventory starts empty.** You start with nothing — every item you have, you earned.
+- **Inventory starts empty.** You start with nothing — every item you have, you found, mined or crafted.
 - **No fall damage yet.** Fall damage is a planned feature but there's no code for it in the engine today — drop from any height and you'll land fine.
 
 ## Creative

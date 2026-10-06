@@ -685,7 +685,8 @@ mod tests {
     #[test]
     fn gossip_pools_never_carry_money_or_bitcoin_words() {
         // Moonshot guardrail (north-star §1/§9): villager speech never says
-        // "Bitcoin"/"crypto"/"sats"/"earn". Whole-word match ("learn" is fine).
+        // "Bitcoin"/"crypto"/"sats"/"earn". Whole-word match against the shared
+        // `copy_lint::BANNED_MONEY_WORDS` ("learn" is fine).
         let mut all: Vec<&str> = GENERIC_GOSSIP.to_vec();
         all.extend_from_slice(RAID_WARNING_GOSSIP);
         for prof in [
@@ -695,15 +696,15 @@ mod tests {
         ] {
             all.extend_from_slice(profession_gossip(prof));
         }
-        for line in all {
-            let lower = line.to_lowercase();
-            for banned in ["bitcoin", "crypto", "sats", "earn", "earning", "earned"] {
-                let hit = lower
-                    .split(|ch: char| !ch.is_alphanumeric())
-                    .any(|word| word == banned);
-                assert!(!hit, "gossip line '{line}' contains banned word '{banned}'");
-            }
-        }
+        let items: Vec<crate::copy_lint::Item> = all
+            .iter()
+            .map(|line| crate::copy_lint::Item {
+                at: format!("gossip line '{line}'"),
+                text: (*line).to_string(),
+            })
+            .collect();
+        crate::copy_lint::scan("villager gossip", &items, crate::copy_lint::BANNED_MONEY_WORDS)
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[test]

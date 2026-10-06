@@ -9,7 +9,7 @@ flagged as "this player used cheats."
 ## Why the Ledger?
 
 So players can prove their accomplishments. A diamond pickaxe in a
-ledger-clean world is **earned**; the same pickaxe in a ledger-
+ledger-clean world was **mined and crafted**; the same pickaxe in a ledger-
 flagged world might be a `/give`. The flag doesn't disable any
 gameplay — it's signal, not punishment.
 

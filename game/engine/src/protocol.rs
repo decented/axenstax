@@ -93,6 +93,25 @@ pub enum PacketType {
 
 // ─── Handshake ───────────────────────────────────────────────
 
+/// Longest `JoinRequestPacket::player_name` a host accepts, in BYTES (the host
+/// compares `str::len`). The single source of truth: the host's join gate
+/// ([`player_name_is_valid`]), its rejection text and the handshake test all
+/// read this one constant.
+pub const MAX_PLAYER_NAME_LEN: usize = 32;
+
+/// Is `name` an acceptable `JoinRequestPacket::player_name`? At most
+/// [`MAX_PLAYER_NAME_LEN`] bytes and no control characters (a terminal-escape
+/// name must never reach a host's log or another player's screen). The name is
+/// a display fallback only, so this is hygiene, not identity.
+pub fn player_name_is_valid(name: &str) -> bool {
+    name.len() <= MAX_PLAYER_NAME_LEN && !name.chars().any(|c| c.is_control())
+}
+
+/// What the host tells a joiner whose name failed [`player_name_is_valid`].
+pub fn player_name_reject_reason() -> String {
+    format!("Invalid player name (max {MAX_PLAYER_NAME_LEN} chars, no control chars)")
+}
+
 /// Client requests to join a server.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinRequestPacket {

@@ -191,7 +191,7 @@ The Nostr mascot: a fast purple ostrich. It's the **fastest mob in the game**, l
 
 You tame a **Nostrich** by feeding it **Berries** (1-in-3 chance per feed). Once tamed it lays eggs near you, sheds feathers passively, and **sits or stands on command** (right-click with an empty hand). Tamed and wild ones both lay 1 **Nostrich Egg** every in-game day; tamed ones also shed 1 **Nostrich Feather** every 2 days. The lore is a Bitcoin nod: 1 Nostrich Egg is worth about **21** chicken eggs.
 
-Don't pick a fight with it lightly. When hit, a **Nostrich** **kicks for 6 damage** and then flees. And there's **The Nostrich's Vow**: killing one, or eating its meat, triggers a roughly **20-minute curse** that blocks vendor trade, zeroes your village reputation, and suppresses sats payouts — you have to purify at a **Nostrich Memorial**. It still drops 1–3 **Feather** and 0–1 **Raw Nostrich Meat** on death, but the Vow penalty is rarely worth it.
+Don't pick a fight with it lightly. When hit, a **Nostrich** **kicks for 6 damage** and then flees. And there's **The Nostrich's Vow**: killing one, or eating its meat, triggers a roughly **20-minute curse** that blocks vendor trade, zeroes your village reputation, and pauses your sats score — you have to purify at a **Nostrich Memorial**. It still drops 1–3 **Feather** and 0–1 **Raw Nostrich Meat** on death, but the Vow penalty is rarely worth it.
 
 Taming, the **Sit / Stand** toggle, eggs, feathers, and the walk-and-follow trail (a Follow-mode Nostrich physically pads after you across the map) are all live.
 

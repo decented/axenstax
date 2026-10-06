@@ -435,12 +435,13 @@ mod tests {
     #[test]
     fn the_lead_line_carries_no_discovery_or_money_words() {
         let lead = your_address_lead().to_lowercase();
-        for banned in [
-            "browse", "discover", "find players", "directory", "public",
-            "earn", "sats", "bitcoin", "money", "social network",
-        ] {
+        // Discovery / social-network words (red lines 1 + 4) are this lint's own;
+        // the money words are the shared `copy_lint::BANNED_MONEY_WORDS`.
+        for banned in ["browse", "discover", "find players", "directory", "public", "social network"] {
             assert!(!lead.contains(banned), "lead copy must not say {banned:?}");
         }
+        let money = crate::copy_lint::banned_in(&lead, crate::copy_lint::BANNED_MONEY_WORDS);
+        assert!(money.is_empty(), "lead copy must not say {money:?}");
     }
 
     #[test]
@@ -697,10 +698,12 @@ mod tests {
             let lower = line.to_lowercase();
             for banned in [
                 "browse", "discover", "directory", "server list", "public",
-                "earn", "sats", "bitcoin", "money", "social network", "chat platform",
+                "social network", "chat platform",
             ] {
                 assert!(!lower.contains(banned), "copy must not say {banned:?}: {line}");
             }
+            let money = crate::copy_lint::banned_in(line, crate::copy_lint::BANNED_MONEY_WORDS);
+            assert!(money.is_empty(), "copy must not say {money:?}: {line}");
         }
     }
 }

@@ -573,22 +573,20 @@ mod tests {
     /// "sats"/"earn"/… are caught.
     #[test]
     fn corpus_has_no_money_or_earning_words() {
-        let banned: &[&str] = &[
-            "sat", "sats", "bitcoin", "bitcoins", "earn", "earns", "earned",
-            "earning", "earnings", "payout", "payouts", "wallet", "wallets",
-            "money", "reward", "rewards", "rewarded",
-        ];
+        // The shared list (`copy_lint::BANNED_MONEY_WORDS`) plus Satoshi's own
+        // stricter extension: his currency is fun and care, so "reward" is out
+        // of his mouth too (quest UI legitimately says "Reward:", so the
+        // extension lives here, not in the shared list).
+        let banned = crate::copy_lint::words_of(&[
+            crate::copy_lint::BANNED_MONEY_WORDS,
+            &["reward", "rewards", "rewarded"],
+        ]);
         for s in authored_strings() {
-            for word in s.split(|c: char| !c.is_alphanumeric()) {
-                if word.is_empty() {
-                    continue;
-                }
-                let w = word.to_ascii_lowercase();
-                assert!(
-                    !banned.contains(&w.as_str()),
-                    "Satoshi corpus must never use a money/earning word — found {w:?} in {s:?}",
-                );
-            }
+            let hits = crate::copy_lint::banned_in(&s, &banned);
+            assert!(
+                hits.is_empty(),
+                "Satoshi corpus must never use a money/earning word — found {hits:?} in {s:?}",
+            );
         }
     }
 

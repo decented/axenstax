@@ -225,19 +225,38 @@ fn join_reject_round_trips_bincode() {
 
 #[test]
 fn player_name_length_rule() {
-    // hosted_server.rs caps player_name at 32 bytes and rejects control chars.
-    // Reproducing the same predicate here so a change on either side fires.
-    const MAX_PLAYER_NAME_LEN: usize = 32;
+    // The host's join gate IS `protocol::player_name_is_valid` (one predicate,
+    // one `MAX_PLAYER_NAME_LEN`), so this test exercises the real rule. It used
+    // to re-declare the constant locally and could never fail.
+    let max = protocol::MAX_PLAYER_NAME_LEN;
 
-    let ok = "Axo";
-    assert!(ok.len() <= MAX_PLAYER_NAME_LEN);
-    assert!(!ok.chars().any(|c| c.is_control()));
+    assert!(protocol::player_name_is_valid("Axo"));
+    assert!(protocol::player_name_is_valid(&"x".repeat(max)), "exactly the limit is accepted");
+    assert!(
+        !protocol::player_name_is_valid(&"x".repeat(max + 1)),
+        "one byte over the limit is rejected"
+    );
+    assert!(!protocol::player_name_is_valid("Axo\x1b[31m"), "control characters are rejected");
+    // The limit is in bytes: a 4-byte emoji x 9 is 36 bytes but 9 chars.
+    assert!(!protocol::player_name_is_valid(&"\u{1F980}".repeat(9)), "the cap counts bytes");
+    // The text the joiner sees must quote the real limit, not a stale literal.
+    assert!(protocol::player_name_reject_reason().contains(&format!("max {max} chars")));
+}
 
-    let too_long = "x".repeat(33);
-    assert!(too_long.len() > MAX_PLAYER_NAME_LEN);
-
-    let with_control = "Axo\x1b[31m";
-    assert!(with_control.chars().any(|c| c.is_control()));
+#[test]
+fn the_host_join_gate_uses_the_shared_name_rule() {
+    // `player_name_length_rule` proves the shared predicate; this pins that the
+    // host's join gate actually calls it (and has not grown a private copy of
+    // the cap again — the audit's "test can never fail" defect).
+    let host = include_str!("../hosted_server.rs");
+    assert!(
+        host.contains("protocol::player_name_is_valid(&req.player_name)"),
+        "hosted_server's JoinRequest gate must call protocol::player_name_is_valid"
+    );
+    assert!(
+        !host.contains("const MAX_PLAYER_NAME_LEN"),
+        "MAX_PLAYER_NAME_LEN lives in protocol.rs only — no local copy in hosted_server.rs"
+    );
 }
 
 #[test]

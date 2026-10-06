@@ -132,5 +132,5 @@ Either way the **items + reputation always pay out**. Even a Barter-mode kid get
 - **The Carpenter's stick quest is the easiest first quest.** 16 sticks for 10 sats + 5 rep. You'll have sticks coming out of your ears anyway.
 - **Don't accept three Fetch quests for the same item from three villagers** — the quest consumes the items at Turn In, so the third villager will be left short. Stagger them.
 - **Building reputation pays compound interest.** Friendly → +10 %. Beloved → +25 %. A few extra quests to get there pays for itself.
-- **Don't kill villagers.** 25 rep takes a handful of quests to earn back, and you've wasted an NPC who would've given you quests.
+- **Don't kill villagers.** 25 rep takes a handful of quests to win back, and you've wasted an NPC who would've given you quests.
 - **Check the HUD tier colour** before quest-grinding a village. If you're Wary or below, your rewards are reduced.

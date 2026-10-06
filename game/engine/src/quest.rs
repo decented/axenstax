@@ -434,10 +434,6 @@ mod tests {
     /// quest offer in any profession's pool may render a money/earning word.
     #[test]
     fn summarise_never_shows_money_words_when_sats_hidden() {
-        const BANNED: &[&str] = &[
-            "sat", "sats", "bitcoin", "btc", "earn", "earned", "earning", "payout",
-            "wallet", "money", "cash", "lightning",
-        ];
         let profs = [
             Profession::Farmer, Profession::Cook, Profession::Carpenter,
             Profession::Blacksmith, Profession::Scribe, Profession::Miller,
@@ -447,10 +443,8 @@ mod tests {
         for prof in profs {
             for q in pool_for(prof).unwrap_or(&[]) {
                 let s = summarise(q, false);
-                for w in s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
-                    let w = w.to_ascii_lowercase();
-                    assert!(!BANNED.contains(&w.as_str()), "{prof:?}: {w:?} in {s:?}");
-                }
+                let hits = crate::copy_lint::banned_in(&s, crate::copy_lint::BANNED_MONEY_WORDS);
+                assert!(hits.is_empty(), "{prof:?}: {hits:?} in {s:?}");
                 checked += 1;
             }
         }

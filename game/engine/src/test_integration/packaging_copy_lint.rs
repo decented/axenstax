@@ -16,15 +16,7 @@
 
 #![cfg(test)]
 
-use std::collections::HashSet;
-
-/// Same list as `trials_lint::BANNED_MONEY_WORDS` / `scenario.rs` (source of
-/// truth). Kept in sync by hand, matching the existing duplication note there.
-const BANNED_MONEY_WORDS: &[&str] = &[
-    "sats", "bitcoin", "btc", "earn", "earning", "earned", "payout", "payouts",
-    "wallet", "money", "cash", "cashback", "prize", "prizes", "sell", "buy",
-    "lightning", "wages", "salary",
-];
+use crate::copy_lint::{BANNED_MONEY_WORDS, banned_in, tokenize_words};
 
 /// Quoted string VALUES from a TOML-ish file, with full-line comments
 /// stripped first (so dev commentary about the rule itself can't trip it).
@@ -47,15 +39,6 @@ fn quoted_values_sans_comments(raw: &str) -> String {
     out
 }
 
-fn tokenize_words(corpus: &str) -> HashSet<String> {
-    corpus
-        .to_lowercase()
-        .split(|c: char| !(c.is_ascii_alphabetic() || c == '\''))
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
-}
-
 #[test]
 fn packager_metadata_has_no_money_or_earning_words() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,10 +51,8 @@ fn packager_metadata_has_no_money_or_earning_words() {
             path.display()
         )
     });
-    let words = tokenize_words(&quoted_values_sans_comments(&raw));
-    for banned in BANNED_MONEY_WORDS {
-        assert!(
-            !words.contains(*banned),
+    for banned in banned_in(&quoted_values_sans_comments(&raw), BANNED_MONEY_WORDS) {
+        panic!(
             "tools/packaging/packager.toml contains banned money/earning word {banned:?} \
              in a string value. This copy ships inside every installer (software-centre \
              metadata) — it must never frame play as money/earning (compliance red line, \

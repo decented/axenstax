@@ -2837,10 +2837,9 @@ pub fn draw_fund_dialog(
                     // Confirmation copy — sponsorship messaging
                     ui.label(
                         egui::RichText::new(
-                            "You're sponsoring this world. Your contribution makes \
-                             mining more rewarding for every player. You don't get \
-                             sats back to your own wallet — you earn yours by \
-                             playing, the same as everyone else.",
+                            "You're sponsoring this world. Your contribution tops up \
+                             the shared pool for every player. It is a gift to the \
+                             world and is never returned to you.",
                         )
                         .size(11.0)
                         .color(egui::Color32::from_rgb(200, 200, 200)),
