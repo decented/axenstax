@@ -1312,8 +1312,11 @@ impl GameServer {
     /// A server-simulated player's client reports it died (MP-A3): its input
     /// carries zero health — a mob, lava, anything its own sim ran. The server
     /// takes the death (only ever downward: a report of health coming BACK is
-    /// never believed — only `respawn_player` revives). Returns whether this
-    /// was a new death.
+    /// never believed — only `respawn_player` revives). The `just_died`
+    /// one-shot is consumed here: the reporting client already knows, so no
+    /// `PlayerEventType::Died` is echoed to it — an echo landing after a quick
+    /// Respawn click would kill it a second time. Returns whether this was a
+    /// new death.
     pub fn report_player_death(&mut self, idx: usize) -> bool {
         let Some(sp) = self.players.get_mut(idx) else {
             return false;
@@ -1322,6 +1325,7 @@ impl GameServer {
             return false;
         }
         sp.combat.die(crate::survival::DamageCause::Generic);
+        sp.combat.just_died = false;
         sp.pending_intent = None;
         sp.intent_queue.clear();
         true

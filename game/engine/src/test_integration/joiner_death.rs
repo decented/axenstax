@@ -227,6 +227,32 @@ fn a_joiner_reporting_zero_health_is_dead_on_the_server_and_its_input_is_ignored
     send_input(&client, 50, at, 20.0, 0.0, &[]);
     tick_n(&mut hs, &client, &mut inbox, 5);
     assert!(hs.server.players[slot].combat.dead);
+    assert_eq!(
+        inbox.died(slot),
+        0,
+        "a reported death is not echoed: an echo after a quick Respawn would kill the joiner again"
+    );
+}
+
+#[test]
+fn edits_made_in_the_tick_a_joiner_dies_still_land() {
+    // The packet that reports the death also carries what the player did while
+    // still alive that tick; only LATER packets are refused.
+    let mut hs = start_dedicated_server("last-edit");
+    let (client, slot) = join_guest(&mut hs, "LastBreath");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    let first = (at.x.floor() as i32 + 1, at.y as i32, at.z.floor() as i32);
+    let second = (first.0, first.1 + 1, first.2);
+
+    send_input(&client, 1, at, 0.0, 0.0, &[(first, block::STONE)]);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(hs.server.players[slot].combat.dead);
+    assert_eq!(hs.server.world.get_block(first.0, first.1, first.2), block::STONE, "it landed");
+
+    send_input(&client, 2, at, 0.0, 0.0, &[(second, block::STONE)]);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert_eq!(hs.server.world.get_block(second.0, second.1, second.2), block::AIR, "refused");
 }
 
 #[test]

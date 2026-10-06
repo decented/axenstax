@@ -917,10 +917,15 @@ the server holds, entered two ways: its copy of the player dies (fall or
 drowning in `tick_player_survival`), or the joiner's `InputPacket.health` is
 `<= 0` (its own sim's death — mobs and lava run there). The health report is
 believed **only downward** (`GameServer::report_player_death`): a report of
-health coming back never revives anyone. On the transition the server sends
-`PlayerEvent { player_index, Died }` to every joined client, the player
+health coming back never revives anyone. It is taken at the end of the packet
+that carries it, so the edits riding in that packet — made while the player was
+still alive — are applied first. When the server's OWN sim kills the body it
+sends `PlayerEvent { player_index, Died }` to every joined client, the player
 included — that is how a joiner whose server copy died unseen reaches its death
-screen (`OwnLifeEvent::Died` → `PlayerCombat::die`). While dead the body runs
+screen (`OwnLifeEvent::Died` → `PlayerCombat::die`). A reported death is not
+echoed: the reporting client already knows, and an echo landing after a quick
+Respawn click (the pointer is freed on the button) would kill it a second time
+while the server held it alive. While dead the body runs
 no physics, keeps no queued moves, picks nothing up (its death drops stay on
 the ground for others), is excluded from mob targeting and from pressure-plate
 positions, and its moves, look, block edits and `DeviceInteract`s are ignored —

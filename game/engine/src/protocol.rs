@@ -801,12 +801,12 @@ pub enum PlayerEventType {
     /// collision suffix (Phase 4).
     Joined { name: String, npub: String },
     Left,
-    /// MP-A3 (v67) — the server now holds this player dead: no physics, no
-    /// pickups, no edits, no mob targeting, until they send
-    /// `PacketType::Respawn`. Sent to every joined client, the player included,
-    /// on the death transition — whether the server copy died (a fall, drowning)
-    /// or the joiner's own input reported zero health. The player's own client
-    /// enters its death screen if it is not already on it.
+    /// MP-A3 (v67) — the server's own sim killed this player's body (a fall,
+    /// drowning): it now holds them dead — no physics, no pickups, no edits, no
+    /// mob targeting — until they send `PacketType::Respawn`. Sent to every
+    /// joined client, the player included; their own client enters its death
+    /// screen. NOT sent for a death the joiner's input reported (its client
+    /// already knows; an echo after a quick Respawn would kill it again).
     Died,
     /// MP-A3 (v67) — the server respawned this player at the spawn point it
     /// holds for them. The player's own client moves there.

@@ -1181,12 +1181,14 @@ impl HostedServer {
         self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.combat.dead)
     }
 
-    /// MP-A3 — turn this tick's joiner deaths (the `just_died` one-shot: a
-    /// server-side fall or drowning in `GameServer::tick`, or a death the
-    /// joiner's own input reported) into `PlayerEventType::Died`, sent to every
-    /// joined client, the dead player included. That is how a joiner whose
-    /// server copy died — when its own sim didn't see it — reaches its death
-    /// screen, and with it the Respawn button the server is waiting on.
+    /// MP-A3 — turn this tick's server-originated joiner deaths (the
+    /// `just_died` one-shot: a fall or drowning in `GameServer::tick`) into
+    /// `PlayerEventType::Died`, sent to every joined client, the dead player
+    /// included. That is how a joiner whose server copy died — when its own sim
+    /// didn't see it — reaches its death screen, and with it the Respawn button
+    /// the server is waiting on. A death the joiner's input REPORTED sets no
+    /// one-shot (`GameServer::report_player_death`): its client already knows,
+    /// and an echo arriving after a quick Respawn would kill it a second time.
     fn announce_joiner_deaths(&mut self) {
         for i in 0..self.server.players.len() {
             let sp = &mut self.server.players[i];
@@ -1820,23 +1822,21 @@ impl HostedServer {
                             continue;
                         }
                         sp.last_input_tick = input.tick;
-                        // MP-A3 — death is server-held for a joiner. Zero
-                        // health in its input is its own sim reporting a death
-                        // (only ever believed downward; health coming back is
-                        // never taken — only a `Respawn` revives). While dead
-                        // its input is ignored: no moves, no look, no edits —
-                        // each edit is sent back so the ghost block un-places.
+                        // MP-A3 — death is server-held for a joiner. While
+                        // dead its input is ignored: no moves, no look, no
+                        // edits — each edit is sent back so the ghost block
+                        // un-places. Zero health in its input is its own sim
+                        // reporting a death; that is taken at the END of this
+                        // packet, because the edits riding with it were made
+                        // while the player was still alive.
                         let simulated = sp.server_simulated;
-                        if simulated && input.health <= 0.0 {
-                            self.server.report_player_death(i);
-                        }
-                        if simulated && self.server.players[i].combat.dead {
+                        if simulated && sp.combat.dead {
                             for bc in &input.block_changes {
                                 self.send_back_authoritative_block(bc);
                             }
                             continue;
                         }
-                        let sp = &mut self.server.players[i];
+                        let reports_death = simulated && input.health <= 0.0;
                         sp.yaw = input.yaw;
                         sp.pitch = input.pitch;
                         sp.held_item = input.held_item;
@@ -2010,6 +2010,12 @@ impl HostedServer {
                             }
                             self.server.world.notify_neighbours(cell);
                             self.pending_block_changes.push(bc.clone());
+                        }
+                        // MP-A3 — a reported death (only ever believed
+                        // downward: health coming back is never taken — only
+                        // a `Respawn` revives). Drops this packet's move too.
+                        if reports_death {
+                            self.server.report_player_death(i);
                         }
                     }
                     protocol::PacketType::DeviceInteract => {
