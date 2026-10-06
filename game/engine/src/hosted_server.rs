@@ -792,6 +792,36 @@ impl HostedServer {
         cols
     }
 
+    /// Final review fix 1 — the spawn column of every DEAD joiner, on a world
+    /// this host lends (empty otherwise; sorted, deduplicated). A respawn
+    /// stands the body on the first solid block of its spawn point's column
+    /// (`GameServer::standing_spot`), which reads only air while that column is
+    /// unloaded — and after a long trip with the host that column is: the
+    /// streamer kept it for the host's own players and the joiner's body, both
+    /// far away by now. The host client's streamer anchors each at a ring of
+    /// one column (`chunk_stream::client_stream_anchors`), and
+    /// [`Self::handle_respawn`] waits until it is loaded.
+    pub fn lent_respawn_columns(&self) -> Vec<(i32, i32)> {
+        if !self.lends_host_world() {
+            return Vec::new();
+        }
+        let mut cols: Vec<(i32, i32)> = self
+            .server
+            .players
+            .iter()
+            .filter(|sp| {
+                sp.server_simulated
+                    && sp.connected
+                    && sp.combat.dead
+                    && sp.spawn_pos.is_finite()
+            })
+            .map(|sp| crate::chunk_stream::column_of(sp.spawn_pos))
+            .collect();
+        cols.sort_unstable();
+        cols.dedup();
+        cols
+    }
+
     /// D1 review fix 3 — the host client's local players as it simulated them
     /// this tick, `(position, yaw, pitch, health)` per seat in order. Only
     /// seat 0 sends input over the loopback (its edits and intent ride it),
@@ -1505,11 +1535,25 @@ impl HostedServer {
     /// (`GameServer::respawn_player`); anything else is ignored (a living
     /// player's Respawn would be a free teleport). Answers `Respawned` to that
     /// player alone.
+    ///
+    /// Final review fix 1 — also ignored until the column of their spawn point
+    /// is loaded: the respawn stands the body on that column's ground
+    /// (`GameServer::standing_spot`), which reads only air from an unloaded
+    /// one (a lent world after a long trip: the host's streamer has dropped
+    /// it), and the body would be put in the air above ground that arrives a
+    /// frame later. The host's streamer anchors the spawn column of every dead
+    /// joiner (`lent_respawn_columns`), and the joiner's client re-sends
+    /// `Respawn` every ~20 ticks until `Respawned` arrives, so the wait is a
+    /// few frames. Where the server owns its world the column is already
+    /// loaded (the 3x3 at `join_spawn`; the dedicated streamer's spawn anchor).
     fn handle_respawn(&mut self, i: usize) {
         if !self.handshake_done[i] || self.disconnected[i] {
             return;
         }
-        if !self.server.players.get(i).is_some_and(|sp| sp.server_simulated) {
+        let Some(sp) = self.server.players.get(i).filter(|sp| sp.server_simulated) else {
+            return;
+        };
+        if !self.server.loaded_columns.contains(&crate::chunk_stream::column_of(sp.spawn_pos)) {
             return;
         }
         if let Some(at) = self.server.respawn_player(i) {

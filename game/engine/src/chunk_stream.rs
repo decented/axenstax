@@ -53,9 +53,15 @@ impl super::GameState {
             .as_ref()
             .map(|hs| hs.lent_joiner_columns())
             .unwrap_or_default();
-        let anchors = client_stream_anchors(&player_cols, rd, &joiner_cols);
+        let respawn_cols = self
+            .hosted_server
+            .as_ref()
+            .map(|hs| hs.lent_respawn_columns())
+            .unwrap_or_default();
+        let anchors = client_stream_anchors(&player_cols, rd, &joiner_cols, &respawn_cols);
         let mut nearest_to = vec![(pcx0, pcz0)];
         nearest_to.extend_from_slice(&joiner_cols);
+        nearest_to.extend_from_slice(&respawn_cols);
         let world = &self.world;
         let step = plan_stream_step_for(
             &anchors,
@@ -739,10 +745,18 @@ pub(crate) struct StreamAnchor {
 /// hold them is gone.
 pub(crate) const LENT_JOINER_SIM_DISTANCE: i32 = crate::server_stream::DEFAULT_SIM_DISTANCE;
 
+/// Final review fix 1 — the ring a dead joiner's spawn column is kept loaded
+/// at: its 3x3. A respawn stands the body on the spawn column's ground and
+/// the body then steps on the columns about it; once alive, the joiner's own
+/// body anchors the full [`LENT_JOINER_SIM_DISTANCE`] block.
+pub(crate) const RESPAWN_ANCHOR_RADIUS: i32 = 1;
+
 /// The anchors a client's streamer keeps loaded round: every local player's
 /// column at the render distance and — on a world it lends its server (D1;
 /// `joiner_cols` is empty otherwise, see `HostedServer::lent_joiner_columns`)
-/// — every joiner's server-body column at [`LENT_JOINER_SIM_DISTANCE`]. The
+/// — every joiner's server-body column at [`LENT_JOINER_SIM_DISTANCE`], and
+/// every dead joiner's spawn column (`respawn_cols`, see
+/// `HostedServer::lent_respawn_columns`) at [`RESPAWN_ANCHOR_RADIUS`]. The
 /// lent world IS the server's, so a column only the host's players were
 /// keeping would otherwise unload under a joiner the moment the host walked
 /// away: the body falls through, its edits are refused as Unloaded.
@@ -750,6 +764,7 @@ pub(crate) fn client_stream_anchors(
     local_cols: &[(i32, i32)],
     render_distance: i32,
     joiner_cols: &[(i32, i32)],
+    respawn_cols: &[(i32, i32)],
 ) -> Vec<StreamAnchor> {
     local_cols
         .iter()
@@ -758,6 +773,11 @@ pub(crate) fn client_stream_anchors(
             joiner_cols
                 .iter()
                 .map(|&col| StreamAnchor { col, radius: LENT_JOINER_SIM_DISTANCE }),
+        )
+        .chain(
+            respawn_cols
+                .iter()
+                .map(|&col| StreamAnchor { col, radius: RESPAWN_ANCHOR_RADIUS }),
         )
         .collect()
 }
@@ -1241,11 +1261,11 @@ mod tests {
         let host = (rd + UNLOAD_HYSTERESIS + 1, 0);
         let loaded = set_of(&[joiner, (1, 0), host]);
         // Negative control: the host's own anchors alone drop the joiner's column.
-        let host_only = client_stream_anchors(&[host], rd, &[]);
+        let host_only = client_stream_anchors(&[host], rd, &[], &[]);
         let step = plan_stream_step_for(&host_only, &[host], 0, &loaded, |_, _| false);
         assert!(step.unload.contains(&joiner), "pre-fix: the joiner's column unloads");
 
-        let anchors = client_stream_anchors(&[host], rd, &[joiner]);
+        let anchors = client_stream_anchors(&[host], rd, &[joiner], &[]);
         assert!(anchors.contains(&StreamAnchor { col: host, radius: rd }));
         assert!(anchors.contains(&StreamAnchor { col: joiner, radius: LENT_JOINER_SIM_DISTANCE }));
         let step = plan_stream_step_for(&anchors, &[host, joiner], 0, &loaded, |_, _| false);
@@ -1253,6 +1273,32 @@ mod tests {
         // And a joiner standing in an unloaded column has it loaded first.
         let step = plan_stream_step_for(&anchors, &[host, joiner], 1, &set_of(&[host]), |_, _| false);
         assert_eq!(step.load, vec![joiner]);
+    }
+
+    /// Final review fix 1 — a dead joiner's spawn column is an anchor of ONE
+    /// column's ring (its respawn needs only that ground to stand on), not the
+    /// 17x17 sim-distance block a living joiner's body gets: so it loads, and
+    /// stays, while host and body are both far from home.
+    #[test]
+    fn a_dead_joiners_spawn_column_anchors_at_a_one_column_ring() {
+        let rd = 4;
+        let (host, body, spawn) = ((100, 0), (60, 0), (0, 0));
+        let anchors = client_stream_anchors(&[host], rd, &[body], &[spawn]);
+        assert!(anchors.contains(&StreamAnchor { col: spawn, radius: 1 }), "{anchors:?}");
+        assert!(anchors.contains(&StreamAnchor { col: body, radius: LENT_JOINER_SIM_DISTANCE }));
+
+        let loaded = set_of(&[host, body]);
+        let step = plan_stream_step_for(&anchors, &[host, body, spawn], 64, &loaded, |_, _| false);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                assert!(step.load.contains(&(dx, dz)), "spawn 3x3 wanted: {:?}", step.load);
+            }
+        }
+        assert!(!step.load.contains(&(2, 0)), "and no further: a ring of one");
+        // Without it (no dead joiner) the spawn area is not wanted at all.
+        let none = client_stream_anchors(&[host], rd, &[body], &[]);
+        let step = plan_stream_step_for(&none, &[host, body], 64, &loaded, |_, _| false);
+        assert!(!step.load.contains(&spawn));
     }
 
     /// `ColumnSims::stream_in` restores an evicted column (never generating

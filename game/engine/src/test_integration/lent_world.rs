@@ -294,13 +294,13 @@ fn a_joiners_columns_stay_loaded_when_the_host_walks_away() {
     // The host walks off, beyond its render distance + hysteresis.
     let rd = 4;
     let host_col = (joiner_col.0 + rd + UNLOAD_HYSTERESIS + 1, joiner_col.1);
-    let host_only = client_stream_anchors(&[host_col], rd, &[]);
+    let host_only = client_stream_anchors(&[host_col], rd, &[], &[]);
     let pre_fix = plan_stream_step_for(&host_only, &[host_col], 0, &host.loaded_columns, |_, _| false);
     assert!(pre_fix.unload.contains(&joiner_col), "control: host anchors alone drop it");
     for _ in 0..3 {
         // Frames of the host's streamer, as `stream_chunks` runs it.
         let joiners = hs.lent_joiner_columns();
-        let anchors = client_stream_anchors(&[host_col], rd, &joiners);
+        let anchors = client_stream_anchors(&[host_col], rd, &joiners, &[]);
         let mut nearest = vec![host_col];
         nearest.extend_from_slice(&joiners);
         let step = plan_stream_step_for(&anchors, &nearest, 2, &host.loaded_columns, |_, _| false);
@@ -334,6 +334,141 @@ fn a_joiners_columns_stay_loaded_when_the_host_walks_away() {
     send_edits(&hs, &client, slot, seq, &[(cell, block::GLASS)]);
     host.lend_tick(&mut hs);
     assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::GLASS);
+}
+
+/// One frame of the host client's streamer over `host`'s lent world, as
+/// `GameState::stream_chunks` runs it: the host at `host_col` (render distance
+/// `rd`), anchors on every joiner's body and every dead joiner's spawn column,
+/// `budget` loads a frame (`None` loads nothing — an unload-only frame).
+fn stream_frame(
+    hs: &HostedServer,
+    host: &mut OwnedSimParts,
+    host_col: (i32, i32),
+    rd: i32,
+    budget: usize,
+    load: bool,
+) {
+    use crate::chunk_stream::{client_stream_anchors, plan_stream_step_for};
+    let joiners = hs.lent_joiner_columns();
+    let respawns = hs.lent_respawn_columns();
+    let anchors = client_stream_anchors(&[host_col], rd, &joiners, &respawns);
+    let mut nearest = vec![host_col];
+    nearest.extend_from_slice(&joiners);
+    nearest.extend_from_slice(&respawns);
+    let step = plan_stream_step_for(&anchors, &nearest, budget, &host.loaded_columns, |_, _| false);
+    let mut sims = host.column_sims(&hs.server);
+    for &(cx, cz) in &step.unload {
+        sims.stream_out(cx, cz);
+    }
+    if load {
+        for &(cx, cz) in &step.load {
+            sims.stream_in(cx, cz);
+        }
+    }
+}
+
+/// Where the joiner has been told it respawned (`Respawned` events seen).
+fn respawns_seen(client: &ChannelClientTransport) -> Vec<glam::Vec3> {
+    use crate::transport::ClientTransport;
+    let mut out = Vec::new();
+    while let Some(pkt) = client.try_recv_from_server() {
+        if let Some((ptype, payload)) = protocol::deserialize_header(&pkt)
+            && ptype == protocol::PacketType::PlayerEvent
+            && let Ok(e) = protocol::safe_deserialize::<protocol::PlayerEventPacket>(payload)
+            && let protocol::PlayerEventType::Respawned { x, y, z } = e.event
+        {
+            out.push(glam::Vec3::new(x, y, z));
+        }
+    }
+    out
+}
+
+/// Final review fix 1 (MEDIUM) — a joiner on a lent host dies a long way from
+/// where it joined, the host having walked there with it. Its spawn column was
+/// kept by nobody (the host's anchors and the joiner's body are both far off),
+/// so it is unloaded — and a respawn would stand the body in air above the raw
+/// spawn point (`GameServer::standing_spot` reads only what is loaded), the
+/// streamer loading the ground a frame too late: buried, stuck, or falling
+/// with damage. A dead joiner's spawn column now anchors the host's streamer,
+/// and the server ignores the Respawn (the client re-sends it until
+/// `Respawned` arrives) until that column is loaded.
+#[test]
+fn a_joiner_who_dies_far_from_home_respawns_only_once_its_spawn_column_loads() {
+    use crate::chunk_stream::column_of;
+    use crate::transport::ClientTransport;
+    let (mut hs, mut host) = start_lent("far-death");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Traveller");
+    let mut seq = 1;
+    for _ in 0..30 {
+        send_idle(&hs, &client, slot, seq);
+        seq += 1;
+        host.lend_tick(&mut hs);
+    }
+    let spawn = hs.server.players[slot].spawn_pos;
+    let spawn_col = column_of(spawn);
+    let ring = |c: (i32, i32)| (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| (c.0 + dx, c.1 + dz)));
+    assert!(ring(spawn_col).all(|c| host.loaded_columns.contains(&c)), "control: home is loaded");
+
+    // The host and the joiner travel 30 columns off (the joiner's body is
+    // placed in the far terrain, as a long walk would leave it) and the host's
+    // streamer drops the ground they left behind.
+    let rd = 4;
+    let host_col = (spawn_col.0 - 30, spawn_col.1);
+    hs.server.players[slot].player.pos.x += 30.0 * 16.0;
+    stream_frame(&hs, &mut host, host_col, rd, 0, false);
+    assert!(
+        ring(spawn_col).all(|c| !host.loaded_columns.contains(&c)),
+        "control: the far trip left the spawn columns unloaded"
+    );
+
+    // The joiner dies there.
+    assert!(hs.server.players[slot].combat.take_damage(1000.0));
+    for _ in 0..25 {
+        host.lend_tick(&mut hs);
+    }
+    assert!(hs.server.players[slot].combat.dead);
+    assert_eq!(hs.lent_respawn_columns(), vec![spawn_col], "a dead joiner's spawn is an anchor");
+    while client.try_recv_from_server().is_some() {}
+
+    // Asked at once — before the streamer has loaded it — the Respawn is
+    // ignored: no body in air above ground that is not there yet.
+    let respawn = || {
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Respawn, &()));
+    };
+    respawn();
+    host.lend_tick(&mut hs);
+    assert!(respawns_seen(&client).is_empty(), "ignored while its column is unloaded");
+    assert!(hs.server.players[slot].combat.dead, "still dead");
+
+    // The host's streamer frames load it (nothing else wanted nearer first).
+    for _ in 0..30 {
+        stream_frame(&hs, &mut host, host_col, rd, 2, true);
+        if ring(spawn_col).all(|c| host.loaded_columns.contains(&c)) {
+            break;
+        }
+    }
+    assert!(host.loaded_columns.contains(&spawn_col), "the streamer loaded the spawn column");
+
+    // The client re-sends; now it lands on the ground, whole.
+    respawn();
+    host.lend_tick(&mut hs);
+    let at = respawns_seen(&client);
+    assert_eq!(at.len(), 1, "respawned once the column loaded: {at:?}");
+    let at = at[0];
+    let (bx, by, bz) = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+    assert_eq!(host.world.get_block(bx, by, bz), block::AIR, "feet in the open");
+    assert_ne!(host.world.get_block(bx, by - 1, bz), block::AIR, "on solid ground, not in air ({at:?})");
+    assert!(!hs.server.players[slot].combat.dead);
+    let health = hs.server.players[slot].combat.health;
+    for _ in 0..20 {
+        send_idle(&hs, &client, slot, seq);
+        seq += 1;
+        host.lend_tick(&mut hs);
+    }
+    let now = hs.server.players[slot].player.pos;
+    assert!((now.y - at.y).abs() < 0.5, "the body stays where it was put: {at} -> {now}");
+    assert_eq!(hs.server.players[slot].combat.health, health, "no fall damage");
+    assert_eq!(hs.server.players[slot].combat.health, hs.server.players[slot].combat.max_health);
 }
 
 /// D1 review fix 3 (LOW) — a split-screen world hosted: hosting starts the
