@@ -1,0 +1,108 @@
+name: Check
+
+# Runs `./check.sh` (the repo's single regression gate: version parity, docs +
+# site tests, clippy -D warnings, native build, licence audit, `cargo test --lib`,
+# trunk WASM build, forbidden-symbol gate, bundle-size gate) on a hosted runner.
+#
+# MANUAL ONLY for now: Actions tab -> Check -> Run workflow. The owner decides
+# when to spend Actions minutes on pushes/PRs; until then green on your own
+# machine (`./check.sh`) remains the bar. To gate pushes/PRs, uncomment below.
+on:
+  workflow_dispatch:
+  # Owner: uncomment to gate pushes/PRs (public repo: standard runners are free)
+  # push:
+  #   branches: [main]
+  # pull_request:
+
+permissions:
+  contents: read
+
+# One run per ref; a newer run on the same ref cancels the older one.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Cold cache: clippy + dev build + test build + wasm build of a large wgpu
+    # engine, then ~4,900 tests. deploy.yml's 30 minutes is for a release wasm
+    # build alone; this is the whole gate, so allow double.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain (clippy + wasm32)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (pinned 2026-09-28)
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: game/engine
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Native build deps
+        # libudev-dev: gilrs (gamepad). libasound2-dev: alsa-sys via rodio (audio).
+        # pkg-config is already on ubuntu-latest, listed to be explicit.
+        # automake + libtool + build-essential: only if pip has to compile the
+        # secp256k1 C extension for the console/game site venvs (it normally
+        # installs a prebuilt wheel); same toolchain as tools/sites/console/Dockerfile.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libasound2-dev pkg-config \
+            build-essential automake libtool
+
+      - name: Install trunk
+        # sha256-verified before extraction — same pin as deploy.yml (see its
+        # pin-bump note). check.sh runs a plain `trunk build` for the wasm gate.
+        run: |
+          TRUNK_SHA256=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz -o trunk.tar.gz
+          echo "${TRUNK_SHA256}  trunk.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.cargo/bin"
+          tar -xzf trunk.tar.gz -C "$HOME/.cargo/bin" trunk
+          rm -f trunk.tar.gz
+          trunk --version
+
+      - name: Install cargo-deny
+        # check.sh's licence gate demands exactly 0.20.2 (its own install hint pins
+        # it). Prebuilt musl binary, sha256-verified, rather than a ~5 minute
+        # `cargo install` on every cold run. Pin bumps: change the version here AND
+        # in check.sh's hint, and take the new hash from the release's .sha256 asset.
+        run: |
+          DENY_SHA256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+          DENY_DIR=cargo-deny-0.20.2-x86_64-unknown-linux-musl
+          curl -fsSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/${DENY_DIR}.tar.gz" -o cargo-deny.tar.gz
+          echo "${DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.cargo/bin"
+          tar -xzf cargo-deny.tar.gz --strip-components=1 -C "$HOME/.cargo/bin" "${DENY_DIR}/cargo-deny"
+          rm -f cargo-deny.tar.gz
+          cargo deny --version
+
+      - name: Site venvs (console, game, marketing)
+        # The exact fix lines check.sh prints when a venv is missing. The runner's
+        # system python3 (3.12) is used on purpose: no other workflow adds a
+        # setup-python action. docs needs no venv — its tests run on bare python3.
+        run: |
+          for site in console game marketing; do
+            (
+              cd "tools/sites/$site"
+              python3 -m venv .venv
+              if [ -f requirements-dev.txt ]; then
+                .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+              else
+                .venv/bin/pip install -r requirements.txt
+              fi
+            )
+          done
+
+      - name: ./check.sh
+        run: ./check.sh

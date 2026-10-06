@@ -109,7 +109,7 @@ copy one working site venv into the others (e.g.
 ## Verification
 
 `./check.sh` at repo root is the single regression gate. It runs (in order):
-0. Version parity — `game/engine/Cargo.toml` and `tools/packaging/packager.toml` must carry the same `version` (cargo-packager names artefacts from the latter, and `/download/latest.json` reads the version off those names). Then the docs-site unit tests (`tools/sites/docs/test_*.py`, via the site venv) — the `/download/latest.json` contract.
+0. Version parity — `game/engine/Cargo.toml` and `tools/packaging/packager.toml` must carry the same `version` (cargo-packager names artefacts from the latter, and `/download/latest.json` reads the version off those names). Then the docs-site unit tests (`tools/sites/docs/test_*.py`, bare `python3`, no venv) — the `/download/latest.json` contract. Then **every other site's tests**, each in that site's own `tools/sites/<site>/.venv`: `game` and `marketing` under pytest, `console` as plain scripts (its `check()` helpers set the exit status; pytest would pass them blindly). A missing venv or test dependency is a FAILURE that prints the exact fix (`(cd tools/sites/<site> && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt [-r requirements-dev.txt])`), and a site that gains a `test_*.py` without being registered in `check.sh`'s `site_tests` list fails the gate. In a linked worktree (venvs are gitignored) it falls back to the main checkout's venv.
 1. `cargo clippy` on the engine, gated `-D warnings` (Phase 4b, 2026-07-06) — any warning or error fails the run.
 2. `cargo build` on the engine.
 3. `cargo test --lib` — runs every `#[cfg(test)]` module in the engine library (currently about 4,700 tests, counted by `#[test]` attributes, across pure-function units + `TestHost`-driven integration tests under `src/test_integration/`). Never `--bin`: the bin is a thin shim, so it runs zero tests and still passes.
@@ -118,6 +118,8 @@ copy one working site venv into the others (e.g.
 6. With `--smoke`: Playwright smoke test against a running website. Confirms `/`, `/game`, WASM asset, JS loader all serve correctly. Saves a screenshot to `tools/smoke/out/play-landing.png`.
 
 Flags: `--release` uses the release profile (slower, matches CI). `--smoke` requires the website running on `:8094`.
+
+**CI (manual only).** `.github/workflows/check.yml` runs `./check.sh` on an `ubuntu-latest` runner (system `python3` venvs for the sites, trunk and cargo-deny as sha256-verified prebuilt binaries, same action pins as the other workflows). It is `workflow_dispatch` only (Actions -> Check -> Run workflow): the owner decides when to spend Actions minutes on pushes/PRs, and a commented-out `push`/`pull_request` block in the file is the one-line switch. Until then, green `./check.sh` on your machine is still the bar. Bumping the trunk or cargo-deny pin means updating the workflow AND (for cargo-deny) the hint in `check.sh`.
 
 First-time setup: `(cd tools/smoke && npm install && npx playwright install chromium)`.
 

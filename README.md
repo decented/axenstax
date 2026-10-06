@@ -85,13 +85,14 @@ forge a release signature.
 
 ```bash
 ./check.sh            # clippy (-D warnings), build, full test suite, WASM
-                       # bundle build + size gate, docs-site unit tests
+                       # bundle build + size gate, every site's Python tests
 ./check.sh --smoke     # + a Playwright smoke test against a running site
 ```
 
 `check.sh` is the single regression gate. Run it locally before you open a PR;
-it is not yet run automatically in CI, so green on your machine is the bar for a
-change being done.
+the same script can be run on a hosted runner on demand (Actions -> Check -> Run
+workflow), but it is not yet triggered automatically on pushes or PRs, so green
+on your machine is the bar for a change being done.
 
 ## Licence
 

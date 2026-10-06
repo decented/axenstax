@@ -9,8 +9,9 @@ so the process is deliberately light:
    fine.
 2. **Run `./check.sh` locally before you open a PR.** It's the single
    regression gate (clippy `-D warnings`, build, full test suite, WASM bundle
-   build + size gate) and has to pass green. It does not run in CI yet, so
-   nobody else will run it for you.
+   build + size gate, the sites' Python tests) and has to pass green. It can be
+   run in CI on demand (Actions -> Check -> Run workflow) but does not run
+   automatically on pushes or PRs yet, so nobody else will run it for you.
 3. **Keep PRs focused.** One change, one PR — easier to review, easier to
    revert if something's wrong.
 4. **Follow the existing code style and patterns** rather than introducing

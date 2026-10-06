@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Axe'n'Stax verification harness. One command, green or red.
 #
-# Default: clippy + build + test + trunk build + forbidden-symbol + bundle-size gates.
+# Default: version parity, site Python tests, clippy + build + licence audit + test +
+# trunk build + forbidden-symbol + bundle-size gates.
 # With --smoke: also runs Playwright smoke against a running site.
 # With --release: uses --release profile for cargo (slower, matches CI).
 #
@@ -87,6 +88,101 @@ else
     fail "python3 not found — docs-site tests could NOT run"
     failures=$((failures + 1))
 fi
+
+section "site unit tests (console, game, marketing)"
+# Every site's own tests, each in that site's own venv (tools/sites/<site>/.venv,
+# the one start.sh builds): the sites pin different FastAPI/Starlette versions, so
+# one shared venv would test a combination nobody deploys. docs is NOT here — its
+# gate above is deliberately venv-free and runs on a bare python3.
+#
+# Same rule as every other gate in this file: a missing prerequisite is a FAILURE
+# with the exact fix printed, never a quiet skip. Venvs are not auto-created (a
+# surprise pip install over the network); run the printed line once.
+#
+# Two runner styles, and they are NOT interchangeable:
+#   pytest  — game, marketing: plain `assert` tests.
+#   script  — console: stdlib scripts whose check() counts failures and sets the
+#             exit status from main(). Under pytest every function would "pass"
+#             whatever it found, so they are run as scripts and the exit code
+#             is what counts.
+SITES_DIR="tools/sites"
+
+# Registered sites: "<site>|<runner>|<modules the venv must import>|<pip args>"
+site_tests=(
+    "console|script|secp256k1|-r requirements.txt"
+    "game|pytest|pytest respx httpx fastapi|-r requirements.txt -r requirements-dev.txt"
+    "marketing|pytest|pytest httpx fastapi|-r requirements.txt -r requirements-dev.txt"
+)
+
+# A linked git worktree has no .venv of its own (they are gitignored), so fall
+# back to the main checkout's venv for the same site rather than failing every
+# fresh worktree. Not a skip — the tests still run, in a venv with the right deps.
+main_checkout="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"
+
+site_venv_python() {
+    local site="$1"
+    if [ -x "$ROOT/$SITES_DIR/$site/.venv/bin/python" ]; then
+        echo "$ROOT/$SITES_DIR/$site/.venv/bin/python"
+    elif [ -n "$main_checkout" ] && [ "$main_checkout" != "$ROOT" ] \
+            && [ -x "$main_checkout/$SITES_DIR/$site/.venv/bin/python" ]; then
+        echo "$main_checkout/$SITES_DIR/$site/.venv/bin/python"
+    fi
+}
+
+# Guard against the quietest failure: a site gains a test_*.py but nothing here
+# (or in the docs gate) runs it. Any site with tests must be registered above.
+for tf in "$SITES_DIR"/*/test_*.py; do
+    [ -e "$tf" ] || continue
+    s="${tf#"$SITES_DIR"/}"; s="${s%%/*}"
+    [ "$s" = "docs" ] && continue
+    registered=0
+    for spec in "${site_tests[@]}"; do [ "${spec%%|*}" = "$s" ] && registered=1; done
+    if [ "$registered" -eq 0 ]; then
+        fail "$SITES_DIR/$s has tests ($tf) that nothing runs — register '$s' in check.sh's site_tests list"
+        failures=$((failures + 1))
+        break
+    fi
+done
+
+for spec in "${site_tests[@]}"; do
+    IFS='|' read -r site runner modules pipargs <<<"$spec"
+    py="$(site_venv_python "$site")"
+    if [ -z "$py" ]; then
+        fail "$SITES_DIR/$site/.venv missing — site tests could NOT run. Fix: (cd $SITES_DIR/$site && python3 -m venv .venv && .venv/bin/pip install $pipargs)"
+        failures=$((failures + 1))
+        continue
+    fi
+    if ! "$py" -c "import ${modules// /, }" 2>/dev/null; then
+        fail "$site venv ($py) is missing a test dependency (need: $modules). Fix: (cd $SITES_DIR/$site && $py -m pip install $pipargs)"
+        failures=$((failures + 1))
+        continue
+    fi
+    site_ok=1
+    if [ "$runner" = "pytest" ]; then
+        # -p no:cacheprovider keeps .pytest_cache out of the tree. Exit 5 (no
+        # tests collected) is a failure by pytest's own rules — kept that way.
+        (cd "$SITES_DIR/$site" && PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest -q -p no:cacheprovider) || site_ok=0
+    else
+        ran=0
+        for tf in "$SITES_DIR/$site"/test_*.py; do
+            [ -e "$tf" ] || continue
+            ran=$((ran + 1))
+            if ! out="$(cd "$SITES_DIR/$site" && PYTHONDONTWRITEBYTECODE=1 "$py" "$(basename "$tf")" 2>&1)"; then
+                printf '%s\n' "$out" | tail -25
+                echo "  failing script: $tf (re-run: cd $SITES_DIR/$site && $py $(basename "$tf"))" >&2
+                site_ok=0
+            fi
+        done
+        [ "$ran" -gt 0 ] || { echo "  no test_*.py found for $site" >&2; site_ok=0; }
+    fi
+    if [ "$site_ok" -eq 1 ]; then
+        ok "$site site tests pass"
+        verified+=("site tests: $site ($runner)")
+    else
+        fail "$site site tests failed"
+        failures=$((failures + 1))
+    fi
+done
 
 section "cargo clippy ($PROFILE_LABEL)"
 if (cd game/engine && cargo clippy $PROFILE_FLAG -- -D warnings); then

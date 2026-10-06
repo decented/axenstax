@@ -89,3 +89,12 @@ done
 
 The `pyvenv.cfg` paths resolve via `home = /usr/bin`, so a copied venv runs fine
 on the same host.
+
+## Tests
+
+`./check.sh` at the repo root runs every site's Python tests: `docs` on a bare
+`python3`, and `console` (plain scripts), `game` and `marketing` (pytest) each in
+their own `.venv`. `game` and `marketing` keep their test-only dependencies in
+`requirements-dev.txt` (never installed on the deploy box). A missing venv fails
+the gate and prints the install line; a new site with a `test_*.py` must be
+registered in `check.sh`'s `site_tests` list.
