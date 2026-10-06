@@ -119,8 +119,15 @@ pub struct HostedServer {
     /// clock (`PRE_AUTH_TIMEOUT_TICKS`). Local slots: 0 (no handshake).
     attached_tick: Vec<u64>,
     /// Block changes the server produced (falling blocks, remote edits)
-    /// that haven't been broadcast yet. Drained into the next StateUpdate.
+    /// that haven't been broadcast yet. Drained into the per-client
+    /// `outboxes` on the next broadcast.
     pending_block_changes: Vec<protocol::BlockChange>,
+    /// Per-slot outbound StateUpdate queue (gap-audit T1-5), indexed like
+    /// `transports`: splits a tick under the packet cap, holds a remote
+    /// client to its per-tick byte budget, coalesces a backlog, and turns an
+    /// overflow into chunk-resync requests (`take_chunk_resync_requests`).
+    /// Reset whenever a slot is attached or released.
+    outboxes: Vec<crate::state_outbox::ClientOutbox>,
     /// Monotonic server tick counter sent with every StateUpdate.
     server_tick: u64,
     /// Next protocol id to hand out to a newly-broadcast entity. Monotonic
@@ -133,11 +140,11 @@ pub struct HostedServer {
     /// backfill of this set via `pending_entity_backfill`.
     known_entity_ids: HashSet<u32>,
     /// Late-joiner backfill queue: `(slot, spawns)` for clients whose
-    /// handshake completed this tick. Merged into that slot's next
-    /// StateUpdate (one packet per tick per client, so the client's
-    /// latest-state handling can never drop the backfill on the floor) and
-    /// cleared. The spawns are the known-set entities at join time; anything
-    /// newer rides the regular diff, which the joiner now receives too.
+    /// handshake completed this tick. Pushed into that slot's outbox ahead of
+    /// the tick's diff by `broadcast_state` (so the spawns reach the client
+    /// before anything that refers to them) and cleared. The spawns are the
+    /// known-set entities at join time; anything newer rides the regular
+    /// diff, which the joiner now receives too.
     pending_entity_backfill: Vec<(usize, Vec<protocol::EntitySpawn>)>,
     /// How many of the front slots are local players. Remote slot count =
     /// `server.players.len() - num_local_players`.
@@ -526,6 +533,10 @@ impl HostedServer {
             disconnected,
             attached_tick: vec![0; num_local_players],
             pending_block_changes: Vec::new(),
+            // Local slots ride an in-process channel: unbudgeted outboxes.
+            outboxes: (0..num_local_players)
+                .map(|_| crate::state_outbox::ClientOutbox::new(false))
+                .collect(),
             server_tick: 0,
             next_entity_id: 1,
             known_entity_ids: HashSet::new(),
@@ -1107,6 +1118,8 @@ impl HostedServer {
             }
             self.transports[i] = Box::new(transport::ClosedTransport);
             self.pending_entity_backfill.retain(|(slot, _)| *slot != i);
+            // Nothing queued for the old connection reaches the next one.
+            self.outboxes[i] = crate::state_outbox::ClientOutbox::new(true);
         }
         log::info!("Slot {i} released");
         was_joined.then(|| {
@@ -1250,6 +1263,7 @@ impl HostedServer {
                 self.handshake_done[j] = false;
                 self.disconnected[j] = false;
                 self.attached_tick[j] = self.server_tick;
+                self.outboxes[j] = crate::state_outbox::ClientOutbox::new(true);
                 j
             }
             None => {
@@ -1258,6 +1272,7 @@ impl HostedServer {
                 self.handshake_done.push(false);
                 self.disconnected.push(false);
                 self.attached_tick.push(self.server_tick);
+                self.outboxes.push(crate::state_outbox::ClientOutbox::new(true));
                 self.transports.len() - 1
             }
         };
@@ -2220,50 +2235,75 @@ impl HostedServer {
         let (rain_ticks_left, storm_ticks_left) =
             self.server.weather.ticks_left(self.server.tick_counter);
 
-        let state_update = protocol::StateUpdatePacket {
+        // The tick's snapshot fields, repeated on every StateUpdate a client
+        // gets this tick. The deltas (block changes, entity events) go through
+        // each client's outbox instead (gap-audit T1-5): one tick's worth no
+        // longer has to fit in one packet.
+        let template = protocol::StateUpdatePacket {
             tick: self.server_tick,
             players: player_states,
-            block_changes: std::mem::take(&mut self.pending_block_changes),
+            block_changes: Vec::new(),
             world_time: self.server.world_time,
             last_acked_input: 0,
-            entity_spawns,
-            entity_updates,
-            entity_despawns,
+            entity_spawns: Vec::new(),
+            entity_updates: Vec::new(),
+            entity_despawns: Vec::new(),
             reserve_richness: reserve.richness,
             reserve_target_sats: reserve.target_sats,
             reserve_current_sats: reserve.current_sats,
             rain_ticks_left,
             storm_ticks_left,
         };
+        let block_changes = std::mem::take(&mut self.pending_block_changes);
 
-        let state_pkt = protocol::serialize_packet(protocol::PacketType::StateUpdate, &state_update);
-        // Late-joiner backfill (one-shot per join): a slot with queued
-        // backfill gets its own packet with the backfilled spawns PREPENDED
-        // to this tick's diff — one StateUpdate per tick per client, never a
-        // separate packet a lossy consumer could drop. An entity that died
-        // during this very tick nets out client-side: its backfilled spawn
-        // and its despawn ride the same packet, and despawns apply last.
+        // Late-joiner backfill (one-shot per join): the slot's backfilled
+        // spawns go into its outbox AHEAD of this tick's diff, so they reach
+        // the client first, in order. An entity that died during this very
+        // tick nets out client-side: its backfilled spawn is queued before
+        // its despawn.
         let backfills = std::mem::take(&mut self.pending_entity_backfill);
-        for (i, transport) in self.transports.iter().enumerate() {
-            if self.handshake_done[i] && !self.disconnected[i] {
-                let backfill: Vec<protocol::EntitySpawn> = backfills
-                    .iter()
-                    .filter(|(slot, _)| *slot == i)
-                    .flat_map(|(_, spawns)| spawns.iter().cloned())
-                    .collect();
-                if backfill.is_empty() {
-                    transport.send_to_client(&state_pkt);
-                } else {
-                    let mut merged = state_update.clone();
-                    let mut spawns = backfill;
-                    spawns.append(&mut merged.entity_spawns);
-                    merged.entity_spawns = spawns;
-                    let pkt =
-                        protocol::serialize_packet(protocol::PacketType::StateUpdate, &merged);
-                    transport.send_to_client(&pkt);
-                }
+        for i in 0..self.transports.len() {
+            if !self.handshake_done[i] || self.disconnected[i] {
+                continue;
+            }
+            let outbox = &mut self.outboxes[i];
+            for (_, spawns) in backfills.iter().filter(|(slot, _)| *slot == i) {
+                outbox.push_spawns(spawns);
+            }
+            outbox.push_tick(
+                self.server_tick,
+                &entity_spawns,
+                &entity_despawns,
+                &block_changes,
+                &entity_updates,
+            );
+            for pkt in outbox.drain_packets(&template) {
+                self.transports[i].send_to_client(&pkt);
             }
         }
+    }
+
+    /// Chunks whose block changes slot `slot` will never receive as deltas:
+    /// its outbound queue passed `state_outbox::CLIENT_QUEUE_MAX_BYTES` and
+    /// the queued changes were dropped. Sorted `(cx, cy, cz)`; cleared by the
+    /// call. Empty for an unknown or local slot.
+    ///
+    /// **The Phase B seam** (late-joiner chunk push): that push sends each
+    /// listed chunk whole, queued on the same outbox so later changes still
+    /// apply on top. Until it lands nothing consumes this and an overflow is
+    /// only logged (rate-limited) — see `state_outbox::ClientOutbox`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_chunk_resync_requests(&mut self, slot: usize) -> Vec<(i32, i32, i32)> {
+        self.outboxes
+            .get_mut(slot)
+            .map(crate::state_outbox::ClientOutbox::take_chunk_resync_requests)
+            .unwrap_or_default()
+    }
+
+    /// Test-only: serialized bytes still queued for slot `slot`.
+    #[cfg(test)]
+    pub(crate) fn queued_state_bytes(&self, slot: usize) -> usize {
+        self.outboxes.get(slot).map_or(0, crate::state_outbox::ClientOutbox::queued_bytes)
     }
 
     /// World chat (Phase 2) — `ChatSay` dispatch. Runs the whole pipeline via

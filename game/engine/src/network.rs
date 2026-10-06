@@ -57,11 +57,15 @@ pub fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
 
 // --- Stream framing ---
 
-/// Largest game packet either end will put on (or accept from) the wire. A
-/// `JoinAccept` carrying a world's exhibits or a busy `StateUpdate` is tens of
-/// KiB at most; 16 MiB is a generous ceiling that still stops a peer from
-/// making us allocate without bound off a forged length prefix.
-pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+/// Largest game packet either end will put on (or accept from) the wire:
+/// [`crate::protocol::MAX_WIRE_PACKET_LEN`], the 1-byte type tag plus the
+/// `safe_deserialize` payload limit. It used to be 16 MiB, so a receiver
+/// would buffer up to 16 MiB of a frame it could never decode (gap-audit
+/// T2-12). Senders stay under it: `StateUpdate`s are split by `state_outbox`
+/// and an input packet's block changes are trimmed by
+/// `RemoteClient::send_input`. A packet that is still too big closes the
+/// connection rather than vanishing (see the bridge's writer).
+pub const MAX_FRAME_LEN: usize = crate::protocol::MAX_WIRE_PACKET_LEN;
 
 /// How long a freshly-accepted connection has to open its game stream before
 /// the server gives up on it (matches `HostedServer`'s pre-auth timeout).
@@ -86,6 +90,17 @@ fn encode_frame(payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Validate a frame header: the payload length it announces, or `Err` if that
+/// is over [`MAX_FRAME_LEN`]. Checked BEFORE a single body byte is read or
+/// buffered, so a forged length costs the receiver nothing.
+fn frame_len(header: [u8; 4]) -> Result<usize, String> {
+    let len = u32::from_le_bytes(header) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(format!("frame of {len} bytes exceeds the {MAX_FRAME_LEN}-byte cap"));
+    }
+    Ok(len)
+}
+
 /// Read one frame. `Ok(None)` is a clean end of stream between frames; a stream
 /// that ends mid-frame, an oversized length, or a read error is `Err`.
 async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Option<Packet>, String> {
@@ -95,12 +110,9 @@ async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Option<Packet>, Stri
         Err(quinn::ReadExactError::FinishedEarly(0)) => return Ok(None),
         Err(e) => return Err(format!("frame header: {e}")),
     }
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_LEN {
-        return Err(format!("frame of {len} bytes exceeds the {MAX_FRAME_LEN}-byte cap"));
-    }
+    let len = frame_len(len_buf)?;
     // Grow as bytes arrive rather than allocating `len` up front, so a bare
-    // header can't pin 16 MiB per connection.
+    // header can't pin a whole frame's worth per connection.
     let mut buf = Vec::with_capacity(len.min(64 * 1024));
     let mut chunk = [0u8; 8 * 1024];
     while buf.len() < len {
@@ -805,6 +817,59 @@ mod tests {
         assert!(encode_frame(&vec![0u8; MAX_FRAME_LEN + 1]).is_none());
     }
 
+    /// Gap-audit T2-12: the frame cap is the decode cap — tag + the
+    /// `safe_deserialize` payload limit — on BOTH sides, not 16 MiB.
+    #[test]
+    fn the_frame_cap_is_the_packet_decode_cap() {
+        assert_eq!(MAX_FRAME_LEN, 1 + crate::protocol::MAX_PACKET_SIZE as usize);
+        assert_eq!(frame_len((MAX_FRAME_LEN as u32).to_le_bytes()), Ok(MAX_FRAME_LEN));
+        assert!(frame_len((MAX_FRAME_LEN as u32 + 1).to_le_bytes()).is_err());
+        assert!(frame_len(u32::MAX.to_le_bytes()).is_err());
+    }
+
+    /// A peer that announces an oversized frame is cut off on the HEADER:
+    /// over a real loopback stream, a client writes its hello and then a
+    /// 4-byte length of `MAX_FRAME_LEN + 1` — and no body at all. The server
+    /// closes the connection anyway, so it never waited for (or buffered) the
+    /// body it was promised.
+    #[test]
+    fn an_oversized_frame_header_closes_the_connection_without_its_body() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = rt
+            .block_on(async { create_server_endpoint("127.0.0.1:0".parse().unwrap()) })
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = rt.block_on(async { create_client_endpoint() }).unwrap();
+        let (conn, client_conn) = rt.block_on(async {
+            let connecting = client.connect(addr, "axenstax-server").unwrap();
+            let s = server.accept().await.unwrap().await.unwrap();
+            (s, connecting.await.unwrap())
+        });
+        let server_side = bridge_server_connection(conn);
+        let (mut send, _recv) = rt.block_on(open_game_stream(&client_conn)).unwrap();
+        rt.block_on(async {
+            send.write_all(&(MAX_FRAME_LEN as u32 + 1).to_le_bytes()).await.unwrap();
+        });
+        assert!(
+            wait_for(|| server_side.is_closed().then_some(())).is_some(),
+            "an oversized length prefix closes the connection before any body arrives"
+        );
+        let dc = wait_for(|| server_side.try_recv_from_client()).expect("synthetic Disconnect");
+        let (ptype, _) = crate::protocol::deserialize_header(&dc).unwrap();
+        assert_eq!(ptype, crate::protocol::PacketType::Disconnect);
+        rt.block_on(async move {
+            drop(send);
+            drop(server_side);
+            drop(client_conn);
+            drop(client);
+            drop(server);
+        });
+    }
+
     /// Audit 2026-09-27: every game packet used to be one QUIC datagram, so
     /// anything over ~1200 bytes (a `JoinAccept` with exhibits, a busy
     /// `StateUpdate`) was dropped. Over a REAL loopback quinn connection, a
@@ -827,15 +892,16 @@ mod tests {
         let conn = rt.block_on(async { server.accept().await.unwrap().await.unwrap() });
         let server_side = bridge_server_connection(conn);
 
-        let big: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+        // The largest packet the frame cap allows — far over a datagram.
+        let big: Vec<u8> = (0..MAX_FRAME_LEN).map(|i| (i % 251) as u8).collect();
         server_side.send_to_client(&big);
         let got = wait_for(|| client.try_recv_from_server()).expect("client got the frame");
-        assert_eq!(got, big, "a 100 KiB server packet arrives whole");
+        assert_eq!(got, big, "a frame-cap-sized server packet arrives whole");
 
         let up: Vec<u8> = big.iter().rev().copied().collect();
         client.send_to_server(&up);
         let got = wait_for(|| server_side.try_recv_from_client()).expect("server got the frame");
-        assert_eq!(got, up, "a 100 KiB client packet arrives whole");
+        assert_eq!(got, up, "a frame-cap-sized client packet arrives whole");
         assert!(!server_side.is_closed());
 
         drop(client);
@@ -870,9 +936,14 @@ mod tests {
         // Open the stream (hello frame) and then never read it.
         let _streams = rt.block_on(open_game_stream(&client_conn)).unwrap();
 
-        let mib = vec![0u8; 1024 * 1024];
-        for _ in 0..(MAX_OUTBOUND_QUEUE_BYTES / mib.len() + 4) {
-            server_side.send_to_client(&mib);
+        // Frame-cap-sized packets, so the writer never closes on an
+        // oversized one — the queue bound is the only thing that can. Twice
+        // the bound in total: the writer hands the stream up to a flow-control
+        // window's worth (~1.25 MB) before it blocks, and that part never
+        // counts as queued.
+        let big = vec![0u8; MAX_FRAME_LEN];
+        for _ in 0..(2 * MAX_OUTBOUND_QUEUE_BYTES / big.len()) {
+            server_side.send_to_client(&big);
         }
         assert!(
             wait_for(|| server_side.is_closed().then_some(())).is_some(),

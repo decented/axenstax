@@ -1046,6 +1046,13 @@ pub struct ServerAnnouncePacket {
 ///   closes a client with more than 8 MiB queued ("connection too slow").
 ///   No packet shape changed; the transport framing did, so a v63 peer can't
 ///   talk to a v64 one.
+/// - (2026-10-06, NO bump — still v64) bounded StateUpdates (gap-audit T1-5,
+///   T2-12): a tick's deltas may now span several `StateUpdate`s (each
+///   repeats the snapshot fields; a remote client gets at most 48 KiB a tick,
+///   the rest on later ticks), and the frame cap drops from 16 MiB to
+///   `MAX_WIRE_PACKET_LEN` (tag + 64 KiB). No packet shape changed, and a v64
+///   client already accumulated deltas across StateUpdates; frames between
+///   the two caps could never decode anyway. See `state_outbox`.
 pub const PROTOCOL_VERSION: u32 = 64;
 
 /// Magic bytes for LAN discovery packets. `discovery.rs` hardcodes the same
@@ -1102,6 +1109,16 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
 /// untrusted data is capped at this limit to prevent OOM from crafted length
 /// prefixes on Vec/String fields.
 pub const MAX_PACKET_SIZE: u64 = 65_536;
+
+/// Largest whole game packet on the wire: the 1-byte type tag plus a payload
+/// of at most [`MAX_PACKET_SIZE`]. Anything bigger can never decode (the
+/// payload trips `safe_deserialize`'s limit), so it is also the transport
+/// frame cap on both ends (`network::MAX_FRAME_LEN`, the WebSocket accept
+/// config) — one number, so a receiver never buffers a frame it is bound to
+/// throw away. Senders stay under it: `StateUpdate`s are split by
+/// `state_outbox` (with headroom), and `RemoteClient::send_input` trims an
+/// input packet's block changes to fit.
+pub const MAX_WIRE_PACKET_LEN: usize = 1 + MAX_PACKET_SIZE as usize;
 
 /// Safely deserialize a network packet payload with a size limit.
 /// Prevents OOM attacks from malicious bincode length prefixes.

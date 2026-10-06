@@ -335,6 +335,8 @@ mod transport;
 mod server;
 mod block_machines; // T1-3 — GameServer's block-machine pass + the shared MachineCtx.
 mod hosted_server;
+// T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
+mod state_outbox;
 #[cfg(not(target_arch = "wasm32"))]
 mod network;
 #[cfg(not(target_arch = "wasm32"))]

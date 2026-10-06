@@ -32,6 +32,7 @@ pub mod electricity_sources;
 pub mod explosives;
 pub mod death_drops;
 pub mod late_join;
+pub mod state_budget; // T1-5 — bounded server→client StateUpdates.
 pub mod joiner_authority;
 pub mod audit_cross_wave;
 pub mod trials_lint;

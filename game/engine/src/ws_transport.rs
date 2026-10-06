@@ -11,9 +11,8 @@
 //! `Box<dyn ServerTransport>` over the same mpsc channel the QUIC accept thread
 //! uses. The hosted server never learns which transport a client arrived on.
 //!
-//! WebSocket is reliable + ordered + unbounded-per-message, which is strictly
-//! better than the QUIC *datagram* path for `ChunkData` delivery (the datagram
-//! path silently caps payloads at the QUIC MTU, ~1200 bytes).
+//! WebSocket is reliable + ordered; the server accepts messages up to
+//! `protocol::MAX_WIRE_PACKET_LEN`, the same cap as the QUIC stream framing.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -139,6 +138,18 @@ where
     WebSocketServerTransport { outbound: out_tx, inbound: in_rx, closed }
 }
 
+/// The accept-side WebSocket limits: one message (and one frame) is at most
+/// [`crate::protocol::MAX_WIRE_PACKET_LEN`] — the same cap the QUIC framing
+/// uses (gap-audit T2-12). tungstenite's defaults (64 MiB messages, 16 MiB
+/// frames) would buffer a message the engine can never decode; past this cap
+/// tungstenite refuses it on the frame header and the reader drops the
+/// connection.
+fn server_ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(crate::protocol::MAX_WIRE_PACKET_LEN))
+        .max_frame_size(Some(crate::protocol::MAX_WIRE_PACKET_LEN))
+}
+
 /// Spawn the WebSocket accept thread. Mirrors
 /// `hosted_server::spawn_quic_accept_thread`: a tokio runtime accepts
 /// connections up to `max_remote_players` and pushes each as a
@@ -198,7 +209,10 @@ pub fn spawn_ws_accept_thread(
                             tokio::spawn(async move {
                                 let upgraded = tokio::time::timeout(
                                     WS_HANDSHAKE_TIMEOUT,
-                                    tokio_tungstenite::accept_async(stream),
+                                    tokio_tungstenite::accept_async_with_config(
+                                        stream,
+                                        Some(server_ws_config()),
+                                    ),
                                 )
                                 .await;
                                 let handed_over = match upgraded {
@@ -289,6 +303,16 @@ mod tests {
     use crate::hosted_server::{HostedServer, RemoteTransport};
     use crate::remote_client::{ConnectionState, RemoteClient};
     use std::time::Duration;
+
+    /// Gap-audit T2-12: the WebSocket accept side refuses a message (or
+    /// frame) bigger than the engine could ever decode — the same cap as the
+    /// QUIC framing — instead of tungstenite's 64 MiB default.
+    #[test]
+    fn the_websocket_accept_cap_is_the_packet_decode_cap() {
+        let cfg = super::server_ws_config();
+        assert_eq!(cfg.max_message_size, Some(crate::protocol::MAX_WIRE_PACKET_LEN));
+        assert_eq!(cfg.max_frame_size, Some(crate::protocol::MAX_WIRE_PACKET_LEN));
+    }
 
     /// End-to-end native WebSocket join: a dedicated server (0 local players)
     /// accepts a WebSocket client, completes the handshake, and hands back the

@@ -715,7 +715,7 @@ impl RemoteClient {
         input.tick = self.tick;
         self.tick += 1;
 
-        let packet = protocol::serialize_packet(PacketType::ClientInput, &input);
+        let packet = serialize_input_within_cap(&mut input);
         self.transport.send_to_server(&packet);
     }
 
@@ -806,6 +806,33 @@ impl Drop for RemoteClient {
             self.disconnect();
         }
     }
+}
+
+/// Serialize a `ClientInput`, trimming its block changes (newest first) until
+/// the packet fits [`protocol::MAX_WIRE_PACKET_LEN`] — the frame cap, which a
+/// bigger packet would trip, closing the connection (gap-audit T2-12). Before
+/// the cap was aligned such a packet still went out, and the host dropped the
+/// whole of it (position included) at `safe_deserialize`; the host honours at
+/// most a handful of edits a tick anyway, so the trimmed tail was never going
+/// to land.
+fn serialize_input_within_cap(input: &mut protocol::InputPacket) -> Vec<u8> {
+    let packet = protocol::serialize_packet(PacketType::ClientInput, &*input);
+    let Some(first) = input.block_changes.first() else {
+        return packet;
+    };
+    if packet.len() <= protocol::MAX_WIRE_PACKET_LEN {
+        return packet;
+    }
+    let per_change = bincode::serialized_size(first).expect("a block change sizes") as usize;
+    let excess = packet.len() - protocol::MAX_WIRE_PACKET_LEN;
+    let keep = input.block_changes.len().saturating_sub(excess.div_ceil(per_change));
+    log::warn!(
+        "input packet over the {}-byte cap: sending {keep} of {} block changes",
+        protocol::MAX_WIRE_PACKET_LEN,
+        input.block_changes.len()
+    );
+    input.block_changes.truncate(keep);
+    protocol::serialize_packet(PacketType::ClientInput, &*input)
 }
 
 #[cfg(test)]
@@ -1074,6 +1101,33 @@ mod tests {
         assert_eq!(change_xs, vec![1, 2], "BOTH ticks' block changes, in order");
         // Snapshot data stays last-write-wins.
         assert_eq!(rc.latest_state.as_ref().map(|s| s.tick), Some(2));
+    }
+
+    /// Gap-audit T2-12: with the frame cap aligned to the decode cap, an
+    /// input packet carrying a client sim's burst would close the connection.
+    /// It is trimmed to fit instead — oldest changes kept — and still decodes.
+    #[test]
+    fn an_oversized_input_packet_is_trimmed_to_the_frame_cap() {
+        let mut small = protocol::InputPacket {
+            block_changes: vec![protocol::BlockChange::with_meta(1, 2, 3, 4, 0)],
+            ..Default::default()
+        };
+        let pkt = serialize_input_within_cap(&mut small);
+        assert_eq!(small.block_changes.len(), 1, "a packet under the cap is untouched");
+        assert_eq!(pkt, protocol::serialize_packet(PacketType::ClientInput, &small));
+
+        let mut big = protocol::InputPacket {
+            block_changes: (0..10_000)
+                .map(|i| protocol::BlockChange::with_meta(i, 64, 0, 1, 0))
+                .collect(),
+            ..Default::default()
+        };
+        let pkt = serialize_input_within_cap(&mut big);
+        assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
+        let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
+        let back: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
+        assert!(back.block_changes.len() > 4_000, "only the overflow is trimmed");
+        assert_eq!(back.block_changes[0].x, 0, "the oldest changes are the ones kept");
     }
 
     #[test]

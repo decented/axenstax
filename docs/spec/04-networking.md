@@ -11,13 +11,14 @@
 - **v38** (2026-05-24): Player avatars + first-person viewmodel. `PlayerState`'s block-only `held_item: u16` is replaced by a tool-capable `held_kind: u8` + `held_id: u16` pair (an `ItemRef` via `item_kind::{EMPTY,BLOCK,TOOL,MATERIAL}`), and gains `anim_state: u8` (locomotion: 0 idle / 1 walk / 2 jump) + `flags: u8` (`player_flags`: SWINGING=1, CROUCHING=2, ON_GROUND=4) so remote players render as animated humanoid avatars. `InputPacket` also gains `held_kind`/`held_id` so the client reports its own (client-authoritative) held item. See §4.2a.
 - **v39** (2026-05-24): **Fantasy roster excised — breaking, pre-launch.** The hostile fantasy mob roster was removed from the engine entirely for open-source IP cleanliness. **7 `EntityKind` variants removed** (`Zombie`, `Skeleton`, `Spider`, `Creeper`, `Slime`, `WitherSkeleton`, `IronGolem`) — these are on the wire in `StateUpdatePacket.entity_spawns`, so dropping them shifts the serde/bincode ordinals of every later `EntityKind` variant → a breaking wire change, not an append. **5 `MaterialId` drop variants removed** (`RottenFlesh`, `SpiderEye`, `Slimeball`, `WitherSkull`, `Gunpowder`) — `MaterialId` is on the wire (and persisted in inventories), so this is also breaking and invalidates any old alpha save carrying those items. Kept on the roster: `Villager`, `Knight` (sole village defender), the `Brigand`/`Marauder`/`Berserker` bandit family, all animals, and `Arrow`/`Bone`/`Bonemeal`. Bones are re-sourced from livestock (Cow/Sheep/Pig). Entities are not persisted (alpha mob state is per-session), so the `EntityKind` removal causes no save loss. Accepted pre-launch (`project_alpha_launch_posture`). This **reverses** the HP-6 "keep retired variants forever for wire stability" decision (`docs/foundations/2026-05-23-historical-pivot-migration-cutover.md`). Design: `docs/foundations/2026-05-24-fantasy-roster-excision.md`.
 - **v40–v51** (2026-05-24…2026-06-17): a further run of content/feature appends + the dedicated-server identity work — the authoritative per-version log is the `PROTOCOL_VERSION` history comment in `game/engine/src/protocol.rs`. Notable: **v51** (2026-06-17, Spec 48 Electricity) adds **`BlockChange.meta: u8`** — the per-block meta byte (facing / lit-state / powered-rail bit) now rides alongside `new_block` on the existing `StateUpdatePacket.block_changes` visual path, so power-state flips (lamp lit, cable energised, rail powered) reuse that channel. The `WorldSave` `block_meta`/`power_devices` shape change rides the same bump (Rail precedent). Design: `docs/foundations/2026-06-17-electricity-power-logic.md`.
-- **Entity-sync semantics note (2026-07-12, NO wire change — still v58).** Two delivery guarantees were added on top of the v2 entity-sync channel. (1) **Late-joiner backfill**: `EntitySpawn` broadcasts once per entity (the server diff set is global), so at join-accept the server snapshots every already-broadcast entity (mobs, carts, items with stack payload) and prepends those spawns to *that client's* next `StateUpdatePacket` — merged, never a separate packet, preserving one-StateUpdate-per-tick-per-client. (2) **Client-side delta accumulation**: `RemoteClient` accumulates `entity_spawns`/`entity_updates`/`entity_despawns` and `block_changes` across StateUpdates between frames instead of keeping only the newest packet — deltas are never last-write-wins (snapshot fields — player states, `world_time`, reserve — still are). Spec 05 §9.5 has the implementation note.
+- **Entity-sync semantics note (2026-07-12, NO wire change — still v58).** Two delivery guarantees were added on top of the v2 entity-sync channel. (1) **Late-joiner backfill**: `EntitySpawn` broadcasts once per entity (the server diff set is global), so at join-accept the server snapshots every already-broadcast entity (mobs, carts, items with stack payload) and prepends those spawns to *that client's* next `StateUpdatePacket` — merged, never a separate packet, preserving one-StateUpdate-per-tick-per-client. *(Superseded 2026-10-06, bounded StateUpdates below: the backfill now goes into that client's outbox ahead of the tick's diff, and a tick may span several StateUpdates — safe because of guarantee (2).)* (2) **Client-side delta accumulation**: `RemoteClient` accumulates `entity_spawns`/`entity_updates`/`entity_despawns` and `block_changes` across StateUpdates between frames instead of keeping only the newest packet — deltas are never last-write-wins (snapshot fields — player states, `world_time`, reserve — still are). Spec 05 §9.5 has the implementation note.
 - **v59** (2026-09-03): **Weather sync (P9).** `StateUpdatePacket` gains a trailing `rain_ticks_left: u32` + `storm_ticks_left: u32` (the spec body below still describes pre-v2 packet shapes, per the note on v2 above — the authoritative field list is `StateUpdatePacket` in `game/engine/src/protocol.rs`). Fixes the pre-existing bug where a hosted/dedicated server rolled its own private weather formula (`weather::server_raining`, now deleted) that never matched what any client showed, and nothing about weather crossed the wire at all. `GameServer` now owns a `weather: Weather` field, advanced once per tick with the SAME `weather::advance` formula the client uses; the two new fields are `Weather::ticks_left(tick_counter)` — a *duration*, not the server's absolute `rain_until`/`storm_until`, so the sync is correct regardless of any tick-counter offset between server and client. Append-only, `#[serde(default)]`. **Wire-compat caveat (found while implementing this bump, applies retroactively to every prior append-only field in this file):** `#[serde(default)]` is well-known to work for a self-describing format (JSON — a missing key is just absent) but is **inert** against bincode 1's positional decode of a genuinely shorter stream: the derived `Deserialize`'s `SeqAccess` always attempts to read every field the CURRENT struct declares and propagates the inner decode's EOF the moment bytes run out, rather than reporting "no more elements" so the default can kick in (`game/engine/src/save.rs`'s `read_tail`/`deserialize_world_save_tolerant` documents and works around the identical gotcha for `WorldSave`). In practice this has never mattered for `StateUpdatePacket` (or any prior append) because `hosted_server.rs`'s `protocol_version` check rejects a version-mismatched `JoinRequest` before any `StateUpdatePacket` is ever exchanged — so a v58-shaped packet reaching a v59 decoder is unreachable in production. `#[serde(default)]` is kept for documentation/consistency and as a ready foundation for a real `read_tail`-style tolerant decode, should the version gate ever be relaxed to allow forward/backward-compatible peers.
 - **v60** (2026-09-05): **World chat.** Two new `PacketType` variants, appended (never renumbered — discriminants are a wire-stable promise): `ChatSay = 54` (C→S, `{ text: String }`) and `ChatDeliver = 55` (S→C, `{ from_pubkey: Option<[u8; 32]>, from_name: String, text: String, kind: ChatWireKind }`, `ChatWireKind = Player | Room | System`). Two asymmetric packets rather than one symmetric one: `ChatSay` carries only what the client is entitled to assert — the text it typed — never who it is speaking as. `ChatDeliver` carries what the server has decided: attribution (`from_pubkey`/`from_name`, server-chosen, never client-asserted) and the line's kind. A single symmetric packet would invite a client to assert its own `from` field, which is exactly the hole this design closes. `ChatDeliver` is also never broadcast: the tier/level permission rule (`docs/foundations/2026-09-05-world-chat.md` §2.3) is evaluated **per recipient**, because the permission decision itself is per-recipient — a stranger and a kin standing next to each other can receive different deliveries of the same spoken line, or none. This is why chat does not join the existing "same bytes to everyone" broadcast queue (§4.2, `hosted_server.rs`'s `broadcasts` queue) — it is a loop over connected slots evaluating the rule and calling `send_to_client` only where it passes. Native only; `check.sh`'s forbidden-symbol gate fails the build if either symbol reaches the WASM bundle. Design: `docs/foundations/2026-09-05-world-chat.md`.
 - **v61** (2026-09-06): **Full-fidelity item wire (death-drops phase 3, solo-queue wave).** A new `WireItem` enum rides as a trailing `full_item` field on `EntitySpawn` and on `InventoryGrantPacket`, carrying a tool's type/material/durability and an armour piece's slot/material/durability alongside the existing block/material id. Both packet shapes CHANGED (two structs widened), hence the bump rather than a pure append. Before it, a server-simulated player's tool and armour drops could not be described on the wire and sat on the floor until lifetime expiry; they are now granted to — and rendered for — that player like any other drop. Plans stay floor-bound by design. See `docs/foundations/2026-07-12-full-fidelity-item-wire.md`.
 - **v62** (2026-09-07): **Device interactions on the wire (Wind/Copper/Electricity wave).** One new `PacketType` variant, appended: `DeviceInteract = 56` (C→S, `{ pos: (i32, i32, i32) }`). Until now nothing on the wire carried a *device interaction* at all: block placements and breaks travelled as `BlockChange`, and autonomous power sources (Windmill, Water Wheel, pressure plates, sensors, a generator burning fuel) reached the host through the server's own sim — but a **switch** had no carrier, so a joiner's lever/button/crank/mirror flipped only their own copy of the world while the host, which owns the authoritative power sim, never heard about it. See §2.3 for the packet row and the authority model. Append-only; no existing packet shape changed.
 - **v63** (2026-09-27): **Join channel binding (audit fix B).** `ChallengePacket` **loses** its `origin` field (packet shape CHANGED, v48 had added it). The joiner signs an origin it builds from its OWN transport (`signet::join_origin`: `axenstax-join:tls-exporter:<hex>` over the QUIC TLS exporter, or `axenstax-join:unbound`), and the host recomputes it from its own transport and requires an exact match. Closes the join-relay and web-login-oracle attacks. See §1.8.1 and Spec 08 §9.0.1.
-- **v64** (2026-09-28): **QUIC game-packet framing (audit wave 1).** Every game packet, both ways, now rides ONE reliable, ordered QUIC bidirectional stream per connection, framed as `u32 LE length + payload` (max 16 MiB); the client opens it with a zero-length hello frame and the server accepts it within 10 s. QUIC datagrams are no longer used (they were MTU-capped and never retransmitted, so busy `StateUpdate`s and large `JoinAccept`s were silently lost). The server closes a QUIC client with more than `MAX_OUTBOUND_QUEUE_BYTES = 8 MiB` queued ("connection too slow"). No packet shape changed; the framing did, so v63 and v64 peers are incompatible. See "Game-packet framing" in the Phase 1 implementation notes.
+- **v64** (2026-09-28): **QUIC game-packet framing (audit wave 1).** Every game packet, both ways, now rides ONE reliable, ordered QUIC bidirectional stream per connection, framed as `u32 LE length + payload` (max 16 MiB — lowered to `MAX_WIRE_PACKET_LEN` on 2026-10-06, see the next entry); the client opens it with a zero-length hello frame and the server accepts it within 10 s. QUIC datagrams are no longer used (they were MTU-capped and never retransmitted, so busy `StateUpdate`s and large `JoinAccept`s were silently lost). The server closes a QUIC client with more than `MAX_OUTBOUND_QUEUE_BYTES = 8 MiB` queued ("connection too slow"). No packet shape changed; the framing did, so v63 and v64 peers are incompatible. See "Game-packet framing" in the Phase 1 implementation notes.
+- **Bounded StateUpdates (2026-10-06, gap-audit T1-5 + T2-12, NO wire change — still v64).** A tick's block changes and entity events no longer have to fit in one `StateUpdatePacket`: each joined client has an outbox (`state_outbox.rs`) that splits them across as many StateUpdates as needed, each at most `STATE_UPDATE_MAX_BYTES = 56 KiB` (measured, 8 KiB under the decode cap), and holds a remote client to `CLIENT_TICK_BUDGET_BYTES = 48 KiB` a tick (~1 MB/s), the rest following on later ticks in order. Every StateUpdate repeats the tick's snapshot fields. A backlog coalesces repeated edits to one cell (latest wins); past `CLIENT_QUEUE_MAX_BYTES = 2 MiB` the queued block changes are dropped and their chunks recorded for resync (`HostedServer::take_chunk_resync_requests`, the Phase B seam). The transport frame cap drops from 16 MiB to `protocol::MAX_WIRE_PACKET_LEN` (1-byte tag + `MAX_PACKET_SIZE` 64 KiB) on QUIC and on the WebSocket accept side. Why no bump: no packet shape changed; a v64 client already accumulates deltas across StateUpdates (2026-07-12 note above), so several per tick decode and apply correctly; and a frame between the two caps could never pass `safe_deserialize`, so refusing it at the header only changes *when* it fails. See "Bounded StateUpdates" in the Phase 1 implementation notes.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -1279,7 +1280,7 @@ The engine client leaves a world through exactly one function, `GameState::leave
 - **Joiner privilege.** Commands typed on a joined client dispatch at `OpLevel::None` (`/help` and other non-op commands work; `/give`, `/gamemode`, `/scenario`, `/trial` … are refused — `/trial` is op-only because a Race teleports and places beacons locally and a Challenge can grant a kit). The pause menu's Switch to Creative is hidden and refused in a joined world, and never writes a `remote_game` meta.
 - **Session end.** `ClientTransport::is_closed` reports a link gone for good (QUIC/native WS: the bridge thread has returned; browser WS: `onclose`). `RemoteClient::poll` reads it before draining, so a host's last packet (a kick's `JoinReject` reason) wins; otherwise the session fails as "Disconnected from host" (or "Couldn't reach the host" before the join completed). The game loop then runs `leave_world(Discard, Lobby)` and shows the reason as a lobby banner (`MenuState.notice`). Server-side validation of joiner edits is separate.
 - **Clock.** The host pushes its clock into its hosted server every tick (`hs.server.world_time = self.world_time`, like weather), so `/time`, `/time speed` and sleeping reach the server's mob spawning; joiners adopt `StateUpdate.world_time` every update, giving one shared day/night cycle.
-- **Host-side region edits.** `/we` returns every changed cell; the host applies them to `hs.server.world` via `apply_remote_block_change` and queues the cells on `GameState.region_broadcast_queue` (not on `pending_block_changes`, whose per-tick budget of 4 and reach gate would drop a region). Each host tick drains at most `worldedit::REGION_BROADCAST_BATCH` (1024) of them, in order, into the server's broadcast list, valued from the server's world at send time — a single StateUpdate over `MAX_PACKET_SIZE` (64 KiB, ~4,300 cells) was silently dropped whole by every joiner, and reading the current value means a later edit to a queued cell is never undone. `/killall` also clears the server's mob sim.
+- **Host-side region edits.** `/we` returns every changed cell; the host applies them to `hs.server.world` via `apply_remote_block_change` and queues the cells on `GameState.region_broadcast_queue` (not on `pending_block_changes`, whose per-tick budget of 4 and reach gate would drop a region). Each host tick drains at most `worldedit::REGION_BROADCAST_BATCH` (1024) of them, in order, into the server's broadcast list, valued from the server's world at send time — a single StateUpdate over `MAX_PACKET_SIZE` (64 KiB, ~4,300 cells) was silently dropped whole by every joiner, and reading the current value means a later edit to a queued cell is never undone. (Since 2026-10-06 every client's outbox splits and paces StateUpdates itself — "Bounded StateUpdates" below — so the batch is pacing, no longer the only protection.) `/killall` also clears the server's mob sim.
 - **Split-screen.** A second local seat is refused while hosting or joined (only slot 0 is networked).
 - **Skin-paint hop.** The hop to the Workshop now does a full `save_world` (it was `autosave_world`), so after it "Quit without saving" can no longer revert changes made before the hop.
 - **JoinAccept clock.** A joiner adopts `JoinAccept.world_time` at once, so the sky doesn't jump on the first StateUpdate.
@@ -1494,8 +1495,9 @@ silently. The WebSocket dedicated server was unaffected, which is why live tests
 - All game packets ride **one reliable, ordered, bidirectional QUIC stream per connection**.
   Head-of-line blocking is accepted at co-op scale. The datagram path is gone.
 - **Framing:** `u32` little-endian payload length, then the payload (the usual 1-byte type tag +
-  bincode). Maximum frame `MAX_FRAME_LEN = 16 MiB`; a sender drops anything bigger, a receiver
-  closes the connection on a bigger length prefix.
+  bincode). Maximum frame `MAX_FRAME_LEN` — 16 MiB as shipped in v64, **since 2026-10-06
+  `protocol::MAX_WIRE_PACKET_LEN` = 1 + 65,536 bytes** (see "Bounded StateUpdates"); a sender
+  refuses anything bigger and closes, a receiver closes the connection on a bigger length prefix.
 - **The client opens the stream** (`open_bi`) and immediately writes a **zero-length hello frame**
   (a QUIC stream is invisible to the peer until something is written). Both sides skip empty
   frames. The server `accept_bi`s with a 10 s budget; packets it queues before that (the join
@@ -1535,13 +1537,98 @@ connection ever made appended a permanent `ServerPlayer` + transport. A server f
 - **Outbound bound:** at most `MAX_OUTBOUND_QUEUE_BYTES = 8 MiB` queued per QUIC client. A joiner
   that stops reading its stream still ACKs, so it is never idle-closed; past the bound the server
   closes it ("connection too slow") and the reaper frees the slot. Frame bodies are read in chunks
-  (no up-front 16 MiB allocation off a bare header); a packet over the frame cap closes the
+  (no up-front whole-frame allocation off a bare header); a packet over the frame cap closes the
   connection rather than vanishing.
 - **Kick** resolves the npub to every LIVE remote slot at the moment it lands
   (`kick::live_slots_for_pubkey`) and releases each through `release_slot`.
 - **Accept loops never block on one peer:** the QUIC accept loop and the WebSocket accept loop both
   reserve the seat, then run each handshake / WebSocket upgrade in its own task with a 10 s
   timeout, handing the seat back on failure.
+
+### Bounded StateUpdates (2026-10-06, gap-audit T1-5 + T2-12, no wire change)
+
+**Bug:** `HostedServer::broadcast_state` put every block change and entity event of a tick into
+ONE `StateUpdatePacket`. A `BlockChange` is 15 bytes, so anything over ~4,300 changes in a tick —
+a crop field, a piston array, a `/we` edit, the server re-sending refused edits, a late-join
+backfill on a busy world — made a packet over `MAX_PACKET_SIZE` (64 KiB), and every client's
+`safe_deserialize` dropped it whole: the blocks, the spawns and despawns (permanently invisible or
+ghost entities), and the player positions. Separately (T2-12) the transport accepted frames up to
+16 MiB although nothing over 64 KiB + 1 could ever decode.
+
+**Correct approach (`state_outbox.rs`, `hosted_server.rs`):**
+- **One outbox per slot** (`HostedServer.outboxes`, parallel to `transports`; replaced on attach and
+  on release, so nothing queued for one connection reaches the next). `broadcast_state` builds the
+  tick's snapshot fields once (tick, players, world time, reserve, weather) and, per joined client,
+  pushes the backfill spawns (late joiners) then the tick's diff into its outbox and sends whatever
+  `drain_packets` returns.
+- **Reliable deltas** — block changes, entity spawns, entity despawns — sit in one FIFO in server
+  order, each with its exact bincode size. Within a tick, spawns go in before despawns, block
+  changes after.
+- **Entity updates are not queued.** They fold into a latest-per-id map (every tick overwrites), and
+  an update is only sent for an entity whose spawn this client has already been sent (or is sent
+  earlier in the same packet — the client applies spawns → updates → despawns): the client ignores
+  updates for ids it doesn't know, so an update overtaking a queued spawn would be lost. The
+  pending update is dropped when the despawn goes out. When updates alone exceed the budget, ids
+  take turns (a rotating cursor), so every entity moves within a few ticks.
+- **Measured, not estimated.** A packet's size is the measured size of the snapshot template plus
+  each item's `bincode::serialized_size` (exact: bincode 1's fixed-int encoding is positional);
+  debug builds assert it equals the serialized length. No StateUpdate exceeds
+  `STATE_UPDATE_MAX_BYTES = 56 KiB` — 8 KiB under `MAX_WIRE_PACKET_LEN`.
+- **Per-client budget.** A remote client is sent at most `CLIENT_TICK_BUDGET_BYTES = 48 KiB` a tick
+  (whole packets, snapshot included — about 1 MB/s at 20 TPS, a burst ceiling well above §6.1's
+  steady-state target), so normally ONE StateUpdate a tick; the excess waits. The first packet of
+  a tick always goes (it carries player positions). `ENTITY_UPDATE_RESERVE_BYTES = 8 KiB` of the
+  budget is offered to entity updates *before* the queue, so mobs keep moving on the joiner's
+  screen while a block backlog drains.
+- **Coalescing only under backlog.** Once a remote client's queued block changes exceed
+  `COALESCE_BACKLOG_BYTES` (one tick's budget), a further change to a cell that already has a
+  queued change overwrites it in place: latest value wins, the cell keeps its place in line, so a
+  flickering cell can't starve behind the backlog. Entering backlog mode folds already-queued
+  repeats the same way. Below the threshold the produced sequence is delivered exactly — the
+  client's apply depends on the block it replaces (`World::apply_remote_block_change` re-registers
+  a power device when the kind changes, resetting its state), so a same-cell sequence is not always
+  equivalent to its last value; under backlog that fidelity is traded for staying deliverable.
+- **Overflow → resync.** Past `CLIENT_QUEUE_MAX_BYTES = 2 MiB` (~140,000 changes, ~43 ticks of
+  budget) the queued block changes are dropped and their chunks (`(cx, cy, cz)`, `ChunkDataPacket`
+  addressing) recorded in the client's resync set. Spawns and despawns are kept (bounded by the
+  entity population, and the client needs them in order). **Phase B seam:**
+  `HostedServer::take_chunk_resync_requests(slot)` returns and clears that set; the late-joiner
+  chunk push should send each listed chunk whole, queued on the same outbox so changes queued after
+  the overflow still apply on top of it. Until then the overflow is only logged (at most once per
+  client per 5 s).
+- **Local slots are unbudgeted.** The host's own loopback is an in-process channel — no wire to
+  protect — so its outbox drains in full every tick (split under the cap; the host client decodes
+  with `safe_deserialize` too), never coalesces and never overflows, and never produces resync
+  requests nobody would serve.
+- **Two queue bounds, two layers.** The outbox's 2 MiB bound is game-level: unsent *deltas*, which
+  can be coalesced or turned into a chunk resync. `network::MAX_OUTBOUND_QUEUE_BYTES = 8 MiB` is
+  transport-level: *serialized frames* the QUIC writer hasn't taken. With the budget the transport
+  queue only grows when a client stops reading, and then it disconnects the client ("connection too
+  slow") — still right, because a client that has stopped reading can't be helped by a resync.
+
+**Frame cap (T2-12):** `protocol::MAX_WIRE_PACKET_LEN = 1 + MAX_PACKET_SIZE` is the one number:
+`network::MAX_FRAME_LEN` on both QUIC ends, and the WebSocket server's `max_message_size` /
+`max_frame_size` (tungstenite defaults were 64 MiB / 16 MiB). A receiver rejects an oversized
+length prefix on the header (`network::frame_len`), before reading or buffering any body; the
+connection closes. Because an over-cap packet now closes the connection instead of being sent and
+silently undecodable, `RemoteClient::send_input` trims an input packet's block changes (oldest kept)
+to fit — the host honours at most `MAX_BLOCK_CHANGES_PER_TICK` edits a tick, and before this the
+host dropped the whole oversized input, position included.
+
+**Tests:** `state_outbox` unit tests (budget, order, coalescing, update gating and fairness,
+overflow) and `test_integration/state_budget.rs`, which drives a real join through
+`HostedServer::tick`: a 10,000-change tick reaches a joiner whole over several ticks with every
+packet under the cap and every tick under the budget; the host loopback gets it in one tick in
+several capped packets; repeated edits to one cell arrive exactly when nothing is backlogged and
+coalesce (latest wins) when it is; 2,000 drops behind a block backlog arrive spawn-before-update-
+before-despawn; an overflow empties the queue and every undelivered change's chunk is in the resync
+set. `network` tests cover the forged-header rejection over real quinn.
+
+**Still open:** `JoinAccept` is not bounded — a world whose exhibits serialize past 64 KiB now
+closes the joiner's connection (before: a hang on an undecodable packet). The LAN host's own
+client-side sim output (crops, pistons) reaches the server through the host's `InputPacket`, which
+passes the same `MAX_BLOCK_CHANGES_PER_TICK` gate as a joiner's (unverified whether a big host-side
+burst is refused there).
 
 ### Host authority over joiner block edits (2026-09-28, audit fix)
 

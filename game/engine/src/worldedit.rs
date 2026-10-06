@@ -239,10 +239,13 @@ pub fn region_stack(
     (total, min, new_max)
 }
 
-/// Most `/we` cells one host StateUpdate carries. A `BlockChange` is 15 bytes
-/// on the wire, and a joiner silently drops any StateUpdate over
-/// `protocol::MAX_PACKET_SIZE` (64 KiB) — with everything else that tick
-/// carried. 1024 cells ≈ 15 KiB leaves ample room (review W3 B2).
+/// Most `/we` cells fed into one host tick's broadcast. A `BlockChange` is 15
+/// bytes on the wire. This batch was first the only thing keeping a region
+/// edit's StateUpdate under `protocol::MAX_PACKET_SIZE` (review W3 B2); since
+/// gap-audit T1-5 every client's `state_outbox` splits and paces StateUpdates
+/// itself, so the batch is now pacing, not protection: it keeps a huge region
+/// from landing in one tick, and each batch is valued from the server's world
+/// when it is taken, so a later edit to a queued cell is never undone.
 pub const REGION_BROADCAST_BATCH: usize = 1024;
 
 /// Host-side `/we` cells waiting to be broadcast, oldest first. The region
