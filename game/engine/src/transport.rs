@@ -147,6 +147,20 @@ impl ServerTransport for ClosedTransport {
     }
 }
 
+/// The server end of a host client's split-screen seat 2.. (D1 review fix 3,
+/// `HostedServer::sync_local_slots`): the host client feeds that slot
+/// directly and never reads it, so sends go nowhere (nothing piles up in an
+/// unread channel) and nothing ever arrives. Unlike [`ClosedTransport`] it is
+/// not closed: the seat is live.
+pub struct NullServerTransport;
+
+impl ServerTransport for NullServerTransport {
+    fn send_to_client(&self, _data: &[u8]) {}
+    fn try_recv_from_client(&self) -> Option<Packet> {
+        None
+    }
+}
+
 pub struct ChannelClientTransport {
     tx: mpsc::Sender<Packet>,
     rx: mpsc::Receiver<Packet>,

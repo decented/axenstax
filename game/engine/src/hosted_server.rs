@@ -150,7 +150,9 @@ const MAX_BLOCK_CHANGES_PER_TICK: usize = 4;
 pub struct HostedServer {
     /// Channel transports for local players (host + split-screen partner).
     /// Held separately from the boxed `transports` so callers can read
-    /// state-update packets back without going through a `dyn` call.
+    /// state-update packets back without going through a `dyn` call. A seat
+    /// added after start (`sync_local_slots`) has no loopback, so this may be
+    /// shorter than `num_local_players`.
     pub local_transports: Vec<ChannelClientTransport>,
     /// Server simulation. Owned here so `tick()` can advance it inline
     /// from the main loop.
@@ -789,18 +791,51 @@ impl HostedServer {
     }
 
     /// D1 review fix 3 — the host client's local players as it simulated them
-    /// this tick, `(position, yaw, pitch, health)` per local slot in order.
-    /// Only slot 0 sends input over the loopback (its edits and intent ride
-    /// it), so a split-screen player 2.. would otherwise stand on the server
-    /// wherever the server put them — and on a lent world the server runs
-    /// power (pressure plates), mob spawning (its anchors) and the joiners'
-    /// view of them from these slots. Position-trusted, as every local slot is
-    /// by design. Slot 0, any slot past the local ones (a joiner's) and a
-    /// non-finite position are left alone.
+    /// this tick, `(position, yaw, pitch, health)` per seat in order. Only
+    /// seat 0 sends input over the loopback (its edits and intent ride it),
+    /// and hosting starts with ONE local slot, while a split-screen save
+    /// loaded for hosting gives the host client more seats. On a lent world
+    /// the server runs power (pressure plates), falling blocks and mob
+    /// spawning (its anchors) on the host's world from its slots, and joiners
+    /// see the local players through them — so every seat needs a slot that
+    /// follows it:
+    /// - missing slots are added (position-trusted, no input, no sign-in of
+    ///   their own — split-screen seats share seat 0's), but only while no
+    ///   joiner holds a slot: slot indices are the wire's `player_index` and
+    ///   remote slots come after the local ones. The first hosted tick runs
+    ///   before any accept, so that is when a multi-seat world grows them;
+    /// - a slot whose seat has left (the pause menu's leave) is out of the
+    ///   world (`connected` off, not broadcast) until a seat fills it again;
+    /// - slot 0 (its input carries it), a joiner's slot and a non-finite
+    ///   position are never written.
     pub fn sync_local_slots(&mut self, slots: &[(glam::Vec3, f32, f32, f32)]) {
-        let locals = self.num_local_players.min(self.server.players.len());
-        for (i, &(pos, yaw, pitch, health)) in slots.iter().enumerate().take(locals).skip(1) {
+        if slots.len() > self.num_local_players {
+            if self.transports.len() == self.num_local_players {
+                while self.num_local_players < slots.len() {
+                    let pos = slots[self.num_local_players].0;
+                    self.add_local_slot(if pos.is_finite() { pos } else { glam::Vec3::ZERO });
+                }
+            } else {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!(
+                        "hosting: {} local seats but {} local slots and joiners already \
+                         seated; the extra seats are not on the server",
+                        slots.len(),
+                        self.num_local_players
+                    );
+                }
+            }
+        }
+        for i in 1..self.num_local_players {
+            let seat = slots.get(i);
+            self.disconnected[i] = seat.is_none();
             let sp = &mut self.server.players[i];
+            sp.connected = seat.is_some();
+            let Some(&(pos, yaw, pitch, health)) = seat else {
+                continue;
+            };
             if sp.server_simulated || !pos.is_finite() {
                 continue;
             }
@@ -809,6 +844,23 @@ impl HostedServer {
             sp.pitch = pitch;
             sp.combat.health = health.clamp(0.0, 20.0);
         }
+    }
+
+    /// One more local slot, set up as `start_inner` sets up its local slots
+    /// (handshake done, unbudgeted outbox), behind a [`transport::NullServerTransport`]:
+    /// the host client feeds it through [`Self::sync_local_slots`] and never
+    /// reads it, so `local_transports` (seats with a loopback) may be shorter
+    /// than `num_local_players`. Only while no remote slot exists.
+    fn add_local_slot(&mut self, pos: glam::Vec3) {
+        debug_assert_eq!(self.transports.len(), self.num_local_players, "a joiner holds a slot");
+        debug_assert_eq!(self.server.players.len(), self.transports.len());
+        self.server.players.push(crate::server::ServerPlayer::new(pos));
+        self.transports.push(Box::new(transport::NullServerTransport));
+        self.handshake_done.push(true);
+        self.disconnected.push(false);
+        self.attached_tick.push(self.server_tick);
+        self.outboxes.push(crate::state_outbox::ClientOutbox::new(false));
+        self.num_local_players += 1;
     }
 
     /// Test-only: switch how this server holds its world after it started
