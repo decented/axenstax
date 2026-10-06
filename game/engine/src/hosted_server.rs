@@ -1337,10 +1337,11 @@ impl HostedServer {
     ///
     /// A server with a host client (LAN / online host: `num_local_players > 0`)
     /// puts the joiner beside the host's own body, as it always has. Otherwise
-    /// it is the world's spawn point — never another joiner's position: slot 0
-    /// is a stranger on a dedicated server, and a respawn point taken from
-    /// wherever they happened to stand (a trap) would be everyone's.
-    fn join_spawn(&self) -> glam::Vec3 {
+    /// it is the world's spawn point (`GameServer::world_spawn`, the computed
+    /// surface spawn) — never another joiner's position: slot 0 is a stranger
+    /// on a dedicated server, and a respawn point taken from wherever they
+    /// happened to stand (a trap) would be everyone's.
+    fn join_spawn(&mut self) -> glam::Vec3 {
         if self.num_local_players > 0
             && let Some(host) = self.server.players.first()
         {
@@ -1928,16 +1929,16 @@ impl HostedServer {
                             // Queued, not overwritten: two inputs bunched into
                             // one tick by jitter are both simulated (one per
                             // tick), instead of one step silently vanishing.
-                            sp.queue_intent(
-                                crate::player_intent::PlayerIntent::from_input_packet(&input),
-                            );
+                            sp.queue_input(crate::server::QueuedInput::from_packet(&input));
                         } else {
-                            // Local / position-trusted path. BRIDGE: once
-                            // single-player routes through HostedServer and
-                            // flips local slots to server-simulated, this
-                            // branch deletes.
+                            // Local / position-trusted path — by design, not
+                            // debt: a local slot is a player on the host's own
+                            // machine, and the host is the authority's own
+                            // machine (Spec 04 §5.3). Its position is applied
+                            // as sent, so the input is applied now.
                             sp.player.pos = glam::Vec3::new(input.x, input.y, input.z);
                             sp.combat.health = input.health.clamp(0.0, 20.0);
+                            sp.last_applied_input = input.tick;
                         }
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick.
@@ -2459,11 +2460,12 @@ impl HostedServer {
         // gets this tick. The deltas (block changes, entity events) go through
         // each client's outbox instead (gap-audit T1-5): one tick's worth no
         // longer has to fit in one packet.
-        let template = protocol::StateUpdatePacket {
+        let mut template = protocol::StateUpdatePacket {
             tick: self.server_tick,
             players: player_states,
             block_changes: Vec::new(),
             world_time: self.server.world_time,
+            // Per client — set in the loop below.
             last_acked_input: 0,
             entity_spawns: Vec::new(),
             entity_updates: Vec::new(),
@@ -2497,6 +2499,13 @@ impl HostedServer {
                 &block_changes,
                 &entity_updates,
             );
+            // The last input of THIS client's that its server state includes
+            // — its prediction drops those and replays the rest (§5.3).
+            template.last_acked_input = self
+                .server
+                .players
+                .get(i)
+                .map_or(0, |sp| sp.last_applied_input);
             for pkt in outbox.drain_packets(&template) {
                 self.transports[i].send_to_client(&pkt);
             }

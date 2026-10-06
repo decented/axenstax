@@ -50,7 +50,7 @@ fn server_simulated_player_honours_speed_cap() {
         sprint: true,
         ..PlayerIntent::default()
     };
-    host.server.players[0].pending_intent = Some(intent);
+    host.server.players[0].queue_intent(intent);
 
     let before = host.player_pos(0);
     host.tick(1);
@@ -71,7 +71,7 @@ fn pending_intent_consumed_after_tick() {
     stone_floor(&mut host, 4);
     host.teleport_player(0, Vec3::new(0.0, 5.0, 0.0));
     host.server.players[0].server_simulated = true;
-    host.server.players[0].pending_intent = Some(PlayerIntent::default());
+    host.server.players[0].queue_intent(PlayerIntent::default());
 
     host.tick(1);
     assert!(host.server.players[0].pending_intent.is_none(),

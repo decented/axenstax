@@ -406,13 +406,17 @@ pub struct ChallengePacket {
 /// Player input sent from client to server each tick.
 /// This is the network-serialized version of PlayerIntent.
 ///
-/// Phase D: client-authoritative — client sends its position directly.
-/// The server relays positions to all clients without running physics.
+/// A joiner's position is the server's: the server simulates it from the
+/// movement fields below, and the client predicts the same and reconciles
+/// against `StateUpdatePacket.last_acked_input` (Spec 04 §5.3). Only a host's
+/// own local (position-trusted) slots have `x/y/z` applied as sent.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct InputPacket {
-    /// Client tick number (for ordering and prediction reconciliation)
+    /// Client input sequence number: strictly increasing per session (the
+    /// server drops replays), and what `last_acked_input` echoes back.
     pub tick: u64,
-    /// Client-authoritative position (server relays, doesn't simulate)
+    /// The client's predicted position after this input. Applied only for
+    /// position-trusted local slots; a joiner's is ignored (server-simulated).
     pub x: f32,
     pub y: f32,
     pub z: f32,

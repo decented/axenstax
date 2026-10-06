@@ -198,6 +198,7 @@ mod entity_model;
 mod viewmodel;
 mod game_loop;
 mod chunk_stream;
+mod prediction; // Spec 04 §5.3 — a joiner's prediction + reconciliation of its own body.
 mod block_interact;
 mod falling_blocks;
 mod growth;
@@ -1137,6 +1138,10 @@ pub(crate) struct GameState {
     /// input. Must NOT be world_time (which is cyclic 0..23999 and would stall
     /// input for ~20 min after each day-cycle wrap).
     pub(crate) net_send_seq: u64,
+    /// A joiner's prediction of its own body against the server's (Spec 04
+    /// §5.3): the inputs sent and not yet applied by the server, and the
+    /// camera glide of a small correction. Inert unless `remote_client` is set.
+    pub(crate) own_prediction: crate::prediction::OwnPrediction,
     /// Player 0's final (post-gate) intent this tick, stashed by `tick()` for
     /// `network_send_input` to read after the tick completes — so the intent the
     /// client SENDS matches the intent it SIMULATED locally this tick.
@@ -1772,6 +1777,7 @@ impl GameState {
             local_swing: std::collections::HashMap::new(),
             local_sneak: std::collections::HashMap::new(),
             net_send_seq: 0,
+            own_prediction: crate::prediction::OwnPrediction::new(),
             net_local_intent: crate::player_intent::PlayerIntent::default(),
             hosted_server: None,
             #[cfg(not(target_arch = "wasm32"))]

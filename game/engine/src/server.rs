@@ -58,16 +58,25 @@ pub struct ServerPlayer {
     /// are not kept live server-side. EMPTY/0 until the first input arrives.
     pub held_kind: u8,
     pub held_id: u16,
-    /// Latest intent received from this player (remote clients only; local
+    /// The next input to simulate for this player (remote clients only; local
     /// players are position-authoritative). Consumed by
     /// `GameServer::tick_player_physics` when present.
-    pub pending_intent: Option<crate::player_intent::PlayerIntent>,
-    /// Intents that arrived while one was already pending (network jitter
+    pub pending_intent: Option<QueuedInput>,
+    /// Inputs that arrived while one was already pending (network jitter
     /// bunching two inputs into one tick). Consumed one per tick after
     /// `pending_intent`, so no movement step is dropped — and a client
     /// flooding inputs still only moves one step a tick. Bounded by
-    /// [`MAX_QUEUED_INTENTS`] (oldest dropped). See [`ServerPlayer::queue_intent`].
-    pub intent_queue: std::collections::VecDeque<crate::player_intent::PlayerIntent>,
+    /// [`MAX_QUEUED_INTENTS`] (oldest dropped). See [`ServerPlayer::queue_input`].
+    pub intent_queue: std::collections::VecDeque<QueuedInput>,
+    /// Sequence number (`InputPacket.tick`) of the last input whose effect is
+    /// in this player's server state: simulated by `tick_player_physics`,
+    /// applied directly (position-trusted local slots), or deliberately
+    /// ignored (a dead joiner's input). Sent back to that client as
+    /// `StateUpdatePacket.last_acked_input` so its prediction drops the
+    /// inputs the server has already applied and replays the rest
+    /// (Spec 04 §5.3). Monotonic; zero until the first input. Differs from
+    /// `last_input_tick` (highest RECEIVED) while inputs wait in the queue.
+    pub last_applied_input: u64,
     /// Whether this player is server-simulated (true for remote clients) vs
     /// client-position-trusted (true for local players). Set at connect time.
     pub server_simulated: bool,
@@ -155,8 +164,10 @@ pub struct ServerPlayer {
     pub awaiting_join: bool,
 }
 
-/// See [`GameServer::world_spawn`].
-const WORLD_SPAWN: Vec3 = Vec3::new(0.5, 80.0, 0.5);
+/// Where `initial_load` centres a world with no player to centre it on (a
+/// dedicated server): the chunk round the origin. Only a place to START
+/// loading — never a spawn point; that is [`GameServer::world_spawn`].
+const INITIAL_LOAD_CENTRE: Vec3 = Vec3::new(0.5, 80.0, 0.5);
 
 /// Ticks a server-simulated player's copy must have been dead before a
 /// `Respawn` request is honoured (MP-A3). One second at 20 TPS — about the
@@ -283,6 +294,7 @@ impl ServerPlayer {
             held_id: 0,
             pending_intent: None,
             intent_queue: std::collections::VecDeque::new(),
+            last_applied_input: 0,
             // Default: position-trusted. Caller flips to true for remote players.
             server_simulated: false,
             connected: true,
@@ -345,20 +357,63 @@ impl ServerPlayer {
 /// ticks of latency.
 pub const MAX_QUEUED_INTENTS: usize = 3;
 
+/// One client input waiting for the server's physics tick: the movement
+/// intent plus what the server needs to simulate it exactly as the client's
+/// prediction did (Spec 04 §5.3).
+#[derive(Clone, Default)]
+pub struct QueuedInput {
+    /// The client's `InputPacket.tick` — acknowledged back to it once applied.
+    pub seq: u64,
+    /// The look direction this input was simulated with on the client. Each
+    /// input carries its own: two inputs bunched into one tick must not both
+    /// move along the later one's heading.
+    pub yaw: f32,
+    pub pitch: f32,
+    pub intent: crate::player_intent::PlayerIntent,
+}
+
+impl QueuedInput {
+    /// The server's form of a client's `InputPacket`.
+    pub fn from_packet(pkt: &crate::protocol::InputPacket) -> Self {
+        Self {
+            seq: pkt.tick,
+            yaw: pkt.yaw,
+            pitch: pkt.pitch,
+            intent: crate::player_intent::PlayerIntent::from_input_packet(pkt),
+        }
+    }
+}
+
 impl ServerPlayer {
-    /// Take one client input's movement intent. The first waits in
-    /// `pending_intent`; more arriving before the next tick queue behind it
-    /// (bounded, oldest dropped). `GameServer::tick_player_physics` consumes
-    /// exactly one per tick.
-    pub fn queue_intent(&mut self, intent: crate::player_intent::PlayerIntent) {
+    /// Take one client input. The first waits in `pending_intent`; more
+    /// arriving before the next tick queue behind it (bounded, oldest
+    /// dropped). `GameServer::tick_player_physics` consumes exactly one per
+    /// tick. A dropped input's flight toggle is carried into the next one, so
+    /// the server's flight state can't silently part from the client's (it
+    /// is not on the wire for the client to learn back).
+    pub fn queue_input(&mut self, mut input: QueuedInput) {
         if self.pending_intent.is_none() && self.intent_queue.is_empty() {
-            self.pending_intent = Some(intent);
+            self.pending_intent = Some(input);
             return;
         }
-        if self.intent_queue.len() >= MAX_QUEUED_INTENTS {
-            self.intent_queue.pop_front();
+        if self.intent_queue.len() >= MAX_QUEUED_INTENTS
+            && let Some(dropped) = self.intent_queue.pop_front()
+            && dropped.intent.toggle_flight
+        {
+            match self.intent_queue.front_mut() {
+                Some(next) => next.intent.toggle_flight ^= true,
+                None => input.intent.toggle_flight ^= true,
+            }
         }
-        self.intent_queue.push_back(intent);
+        self.intent_queue.push_back(input);
+    }
+
+    /// Test convenience: queue a bare intent with this player's current look
+    /// and no sequence number.
+    #[cfg(test)]
+    pub fn queue_intent(&mut self, intent: crate::player_intent::PlayerIntent) {
+        let (yaw, pitch) = (self.yaw, self.pitch);
+        self.queue_input(QueuedInput { seq: 0, yaw, pitch, intent });
     }
 
     /// This player's own classification of `other`, from their own address
@@ -480,6 +535,17 @@ pub fn handle_chat_say(
 // references anywhere. `ServerPlayer.pending_intent: Option<PlayerIntent>`
 // (player_intent.rs) is the actual, live input mechanism; this predates it
 // and was never wired in.
+
+/// Has this server generated (or loaded) the column under `pos`? The same
+/// set `HostedServer::validate_block_edit` refuses edits outside. Not "has a
+/// chunk": generating a column writes into its neighbours (tree crowns,
+/// structures, light), leaving sparse chunks in columns with no ground.
+fn column_loaded(loaded: &ahash::AHashSet<(i32, i32)>, pos: Vec3) -> bool {
+    let cs = CHUNK_SIZE as i32;
+    let cx = (pos.x.floor() as i32).div_euclid(cs);
+    let cz = (pos.z.floor() as i32).div_euclid(cs);
+    loaded.contains(&(cx, cz))
+}
 
 /// The authoritative game server.
 pub struct GameServer {
@@ -642,14 +708,20 @@ impl GameServer {
 
     /// The world's spawn point: where a joiner to a server with no host client
     /// (a dedicated server) is placed, and so where they respawn
-    /// (`ServerPlayer::spawn_pos`).
+    /// (`ServerPlayer::spawn_pos`). The one place that decides it.
     ///
-    /// BRIDGE: a fixed point in the air above the origin, the same one
-    /// `initial_load` falls back to. Replace with the computed surface spawn
-    /// (`chunk_stream::find_surface_spawn` over the generated world, never a
-    /// buried or in-air cell) — this is the single place to change it.
-    pub fn world_spawn(&self) -> Vec3 {
-        WORLD_SPAWN
+    /// Computed on this server's world by the rule a fresh single-player world
+    /// places its player by (`chunk_stream::world_spawn_point`: the fixed floor
+    /// on flat/Workshop worlds, else the nearest clear ground to the origin —
+    /// never a buried or in-air cell), after generating the 3x3 columns it
+    /// searches if they are not loaded yet (hence `&mut self`).
+    pub fn world_spawn(&mut self) -> Vec3 {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                self.ensure_column_loaded(dx, dz);
+            }
+        }
+        crate::chunk_stream::world_spawn_point(&self.world, &self.biome_gen)
     }
 
     /// Run initial world load around the first player's position.
@@ -666,7 +738,7 @@ impl GameServer {
             .players
             .first()
             .map(|p| p.player.pos)
-            .unwrap_or_else(|| self.world_spawn());
+            .unwrap_or(INITIAL_LOAD_CENTRE);
         let cs = CHUNK_SIZE as i32;
         let pcx = (spawn.x.floor() as i32).div_euclid(cs);
         let pcz = (spawn.z.floor() as i32).div_euclid(cs);
@@ -856,8 +928,9 @@ impl GameServer {
     /// cleanup — and, when [`Self::simulates_block_machines`] is set (dedicated
     /// server only), the block machines in `block_machines.rs`.
     ///
-    /// BRIDGE: HostedServer input still trusts the client's position
-    /// (hosted_server.rs:345). Single-player bypasses GameServer entirely;
+    /// A host's own local slots are position-trusted by design (the host is
+    /// the authority's own machine); every joiner is simulated here from its
+    /// inputs (Spec 04 §5.3). BRIDGE: single-player bypasses GameServer entirely;
     /// mob spawning + falling blocks + player sim all run a parallel copy on
     /// the client side in that case (see game_loop.rs). Task 1d routes
     /// single-player through HostedServer so GameServer is the single
@@ -1294,16 +1367,21 @@ impl GameServer {
                 sp.intent_queue.clear();
                 continue;
             }
-            let Some(intent) = sp.pending_intent.take().or_else(|| sp.intent_queue.pop_front())
+            let Some(input) = sp.pending_intent.take().or_else(|| sp.intent_queue.pop_front())
             else {
                 continue;
             };
+            // Whatever the step below does, this input's effect is now in the
+            // server's state — acknowledge it (Spec 04 §5.3).
+            sp.last_applied_input = sp.last_applied_input.max(input.seq);
             let pre = sp.player.pos;
-            // Server has no GPU camera; construct a throwaway one from yaw/pitch.
-            // Aspect/FOV only matter for matrices we don't build.
+            // Server has no GPU camera; construct a throwaway one from the
+            // look this input was simulated with on the client. Aspect/FOV
+            // only matter for matrices we don't build.
             let mut cam = crate::camera::Camera::new(sp.player.pos, 1.0);
-            cam.yaw = sp.yaw;
-            cam.pitch = sp.pitch;
+            cam.yaw = input.yaw;
+            cam.pitch = input.pitch;
+            let intent = input.intent;
 
             // Task 15 — `sp.player.sprint_boots_mult` stays at its default
             // (1.0, no bonus) here: `ServerPlayer` doesn't track armour at
@@ -1325,6 +1403,18 @@ impl GameServer {
                 log::warn!(
                     "speed cap: clamped {horizontal:.3}→{MAX_HORIZONTAL_PER_TICK:.3} b/tick"
                 );
+            }
+
+            // No terrain, no step. Beyond the columns this server has
+            // generated its world is empty air: a body stepping there would
+            // fall out of the world — and the joiner's client, which follows
+            // the server's position (Spec 04 §5.3), with it. The edge of the
+            // server's terrain stops the body like a wall instead.
+            // BRIDGE: replaced when the server streams terrain around every
+            // player (Phase B1) — then the edge is never reached.
+            if !column_loaded(&self.loaded_columns, sp.player.pos) {
+                sp.player.pos = pre;
+                sp.player.velocity = Vec3::ZERO;
             }
         }
 
@@ -1449,6 +1539,21 @@ impl GameServer {
             return spawn;
         }
         Vec3::new(spawn.x, y as f32 + 1.0, spawn.z)
+    }
+
+    /// Generate the column `(cx, cz)` — terrain, light, its fluid sources and
+    /// fires — unless it is already loaded: `initial_load`'s generate-missing
+    /// step, for a column needed after load (a joiner's spawn).
+    pub(crate) fn ensure_column_loaded(&mut self, cx: i32, cz: i32) {
+        if self.loaded_columns.contains(&(cx, cz)) {
+            return;
+        }
+        self.world.generate_column(cx, cz, &self.biome_gen);
+        crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
+        self.loaded_columns.insert((cx, cz));
+        self.water.register_column_sources(cx, cz, &self.world);
+        self.lava.register_column_sources(cx, cz, &self.world);
+        self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
     }
 
     /// Save the world (all players' state).
@@ -2299,14 +2404,14 @@ mod tests {
         let b = crate::player_intent::PlayerIntent { move_forward: -1.0, ..Default::default() };
         sp.queue_intent(a.clone());
         sp.queue_intent(b.clone());
-        assert_eq!(sp.pending_intent.as_ref().map(|i| i.move_forward), Some(1.0));
+        assert_eq!(sp.pending_intent.as_ref().map(|i| i.intent.move_forward), Some(1.0));
         assert_eq!(sp.intent_queue.len(), 1);
         // A flood is bounded: oldest queued intents drop, the pending one stays.
         for _ in 0..10 {
             sp.queue_intent(b.clone());
         }
         assert_eq!(sp.intent_queue.len(), MAX_QUEUED_INTENTS);
-        assert_eq!(sp.pending_intent.as_ref().map(|i| i.move_forward), Some(1.0));
+        assert_eq!(sp.pending_intent.as_ref().map(|i| i.intent.move_forward), Some(1.0));
 
         let mut server = GameServer::new(1, "intent-queue-test".into(), 42);
         server.players[0] = sp;

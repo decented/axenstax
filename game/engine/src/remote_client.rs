@@ -1057,6 +1057,12 @@ impl RemoteClient {
         matches!(self.state, ConnectionState::Connecting)
     }
 
+    /// Is a signed join waiting on the player's signer (a phone approving the
+    /// join) right now? The loading screen says so instead of sitting silent.
+    pub fn awaiting_signer(&self) -> bool {
+        matches!(self.join, JoinFlow::Signing { .. })
+    }
+
     /// Get the assigned player index (if connected).
     pub fn player_index(&self) -> Option<u32> {
         match &self.state {
@@ -1206,6 +1212,39 @@ mod tests {
         );
         let req = read_join_request(&srv).expect("guest JoinRequest sent on connect");
         assert!(req.auth_event.is_none(), "guest carries no auth");
+    }
+
+    /// The loading screen's "Waiting for your signer" line reads this: true
+    /// exactly while the signer holds the join, not before the challenge and
+    /// not once the signed request is on its way.
+    #[test]
+    fn awaiting_signer_while_the_signer_holds_the_join() {
+        let (srv, client) = channel_pair();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let driver: SignDriverFn = Box::new(move |_nonce, _origin| rx);
+        let mut rc = RemoteClient::from_transport_authed(
+            Box::new(client),
+            build_join_request_guest("Axo", 0),
+            driver,
+            None,
+        );
+        assert!(!rc.awaiting_signer(), "no challenge yet: not the signer's turn");
+
+        let chal = protocol::ChallengePacket { nonce_hex: "b".repeat(64) };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Challenge, &chal));
+        rc.poll();
+        assert!(rc.awaiting_signer(), "challenge handed to the signer");
+        rc.poll();
+        assert!(rc.awaiting_signer(), "still waiting while the phone is unanswered");
+
+        tx.send(Ok(SignedJoin {
+            auth_event: wire_signed_over(&"b".repeat(64), &crate::signet::join_origin(None)),
+            credential: None,
+        }))
+        .unwrap();
+        rc.poll();
+        assert!(!rc.awaiting_signer(), "signed: the request is sent");
+        assert!(read_join_request(&srv).is_some());
     }
 
     #[test]

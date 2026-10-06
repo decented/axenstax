@@ -71,6 +71,15 @@ pub fn shuffle_no_repeat(len: usize, seed: u64, prev_last: Option<usize>) -> Vec
     (0..len).collect()
 }
 
+/// Shown under the bar while a signed join waits for the player's signer.
+pub const SIGNER_WAIT_STATUS: &str = "Waiting for your signer to approve\u{2026}";
+
+/// The status line under the progress bar, if any: while a signed join waits
+/// on the signer the bar sits at 0 and would otherwise say nothing at all.
+pub fn load_status(awaiting_signer: bool) -> Option<&'static str> {
+    awaiting_signer.then_some(SIGNER_WAIT_STATUS)
+}
+
 /// Fraction of the load done, in `[0, 1]`. `total == 0` → `1.0` (nothing to do).
 pub fn load_progress(total: usize, remaining: usize) -> f32 {
     if total == 0 {
@@ -167,8 +176,14 @@ const BG: egui::Color32 = brand::DEEP_FRONTIER;
 /// Width of the mark, px.
 const MARK_WIDTH: f32 = 150.0;
 
-/// Draw the full-screen world-load screen. `progress` is `[0,1]`.
-pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: f32) {
+/// Draw the full-screen world-load screen. `progress` is `[0,1]`; `status`,
+/// when set, is a line under the bar saying what the load is waiting on.
+pub fn draw_loading_screen(
+    ctx: &egui::Context,
+    state: &LoadingState,
+    progress: f32,
+    status: Option<&str>,
+) {
     ctx.request_repaint(); // animate continuously
     let t = ctx.input(|i| i.time) as f32;
     let bob = (t * 1.8).sin() * 6.0;
@@ -227,6 +242,14 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
                 ui.painter()
                     .rect_filled(fill_rect, 4.0, brand::COPPER);
                 ui.add_space(28.0);
+                if let Some(status) = status {
+                    ui.label(
+                        egui::RichText::new(status)
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(176, 186, 205)),
+                    );
+                    ui.add_space(14.0);
+                }
 
                 // Rotating content card.
                 if let Some(card) = state.current_card() {
@@ -280,6 +303,12 @@ pub fn draw_loading_screen(ctx: &egui::Context, state: &LoadingState, progress: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_signed_join_waiting_on_the_signer_says_so() {
+        assert_eq!(load_status(true), Some("Waiting for your signer to approve\u{2026}"));
+        assert_eq!(load_status(false), None, "an ordinary load shows no status line");
+    }
 
     #[test]
     fn cards_parse_and_are_valid() {

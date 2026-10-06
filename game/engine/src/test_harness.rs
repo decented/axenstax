@@ -69,6 +69,16 @@ impl TestHost {
         let mut server = GameServer::new(num_players, config.world_name.clone(), 42);
         if config.do_initial_load {
             server.initial_load().expect("TestHost initial load");
+        } else {
+            // The blocks a test sets ARE this world's terrain: count the test
+            // area (±64 blocks) as loaded, as `initial_load` would, so a
+            // server-simulated body may move in it (`tick_player_physics`
+            // stops a body at the edge of the loaded columns).
+            for cx in -4..4 {
+                for cz in -4..4 {
+                    server.loaded_columns.insert((cx, cz));
+                }
+            }
         }
         server.set_play_mode(config.play_mode);
         server.difficulty = crate::survival::Difficulty::from_meta_str(&config.difficulty);

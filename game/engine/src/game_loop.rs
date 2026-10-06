@@ -2887,6 +2887,7 @@ impl super::GameState {
         self.map_screen = crate::minimap::MapScreen::default();
         self.loaded_columns.clear();
         self.pending_join_spawn = None;
+        self.own_prediction.reset();
         self.mission_idx = 0;
         self.mission_note.clear();
         self.mission_registry.clear();
@@ -4976,6 +4977,7 @@ impl super::GameState {
         // ── Part B: Per-player physics tick ───────────────────────────────────
         // Fixed 20 TPS step — the same dt the camera-collision smoothing assumes.
         let tick_dt = 1.0 / 20.0;
+        let joined = self.remote_client.is_some();
         for (i, intent) in intents.iter().enumerate() {
             if i >= self.players.len() { break; }
             let slot = &mut self.players[i];
@@ -4996,8 +4998,18 @@ impl super::GameState {
             // equip/unequip or durability breaking) before the physics tick
             // reads it.
             slot.refresh_sprint_boots_mult();
+            if joined {
+                // BRIDGE: the server keeps no armour for a joiner, so it
+                // simulates them without the Rubber Boots bonus; predicting
+                // with it would pull the body back on every sprint (Spec 04
+                // §5.3). Replace when armour is server-side (Phase C).
+                slot.player.sprint_boots_mult = 1.0;
+            }
             slot.player.tick(intent, &slot.camera, &self.world, &self.registry, self.play_mode);
-            slot.camera.position = slot.player.eye_pos();
+            // A joiner's small corrections glide (the body is already
+            // corrected; only the camera eases over) — zero otherwise.
+            let glide = if i == 0 { self.own_prediction.visual_offset() } else { glam::Vec3::ZERO };
+            slot.camera.position = slot.player.eye_pos() + glide;
             // Phase 2 — no-snap third-person camera collision (render-only; aim
             // stays eye-anchored). Raycast the desired pull-back against SOLID
             // blocks and ease the render eye toward the clear fraction: retract
@@ -7469,11 +7481,17 @@ impl super::GameState {
 
             let raw_input = self.renderer.egui.begin_frame(self.window.winit());
             self.renderer.egui.ctx.begin_pass(raw_input);
+            let status = crate::loading_screen::load_status(
+                self.remote_client
+                    .as_ref()
+                    .is_some_and(crate::remote_client::RemoteClient::awaiting_signer),
+            );
             if let GameMode::Loading(ref st) = self.mode {
                 crate::loading_screen::draw_loading_screen(
                     &self.renderer.egui.ctx,
                     st,
                     progress,
+                    status,
                 );
             }
             if let Some(win) = self.window.winit_arc() {
@@ -21552,6 +21570,15 @@ impl super::GameState {
                 target_sats: state.reserve_target_sats,
                 current_sats: state.reserve_current_sats,
             };
+            // Our own body as the server holds it (Spec 04 §5.3) — position
+            // only; health stays this client's for now.
+            let own_server_pos = state
+                .players
+                .iter()
+                .find(|p| p.player_index == my_idx)
+                .map(|p| glam::Vec3::new(p.x, p.y, p.z))
+                .filter(|p| p.is_finite());
+            let acked = state.last_acked_input;
             self.remote_players = state.players.into_iter()
                 .filter(|p| p.player_index != my_idx)
                 // Discard players with non-finite positions (NaN/inf from
@@ -21559,6 +21586,22 @@ impl super::GameState {
                 // f32-to-i32 casts during rendering). Mirrors the host path.
                 .filter(|p| p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
                 .collect();
+            if let Some(server_pos) = own_server_pos
+                && let Some(slot) = self.players.first_mut()
+                && slot.riding.is_none()
+            {
+                let outcome = self.own_prediction.reconcile(
+                    acked,
+                    server_pos,
+                    &mut slot.player,
+                    &self.world,
+                    &self.registry,
+                    self.play_mode,
+                );
+                if let crate::prediction::Reconciled::Snapped { error } = outcome {
+                    log::debug!("Own position corrected by the server: snapped {error}");
+                }
+            }
             // P9 weather sync — same source field as reserve above. The
             // server sent a DURATION (ticks remaining as of ITS tick), so
             // reconstruct the absolute window relative to OUR tick_counter,
@@ -21788,6 +21831,17 @@ impl super::GameState {
 
         if let Some(ref mut client) = self.remote_client {
             client.send_input(&input);
+            // Spec 04 §5.3 — keep what we predicted from this input until the
+            // server says it has applied it. A cart ride is this client's own
+            // sim (the server walks the body instead): nothing to reconcile
+            // against while mounted; the server's position wins on dismount.
+            let slot = &self.players[0];
+            if slot.riding.is_some() {
+                self.own_prediction.reset();
+            } else {
+                self.own_prediction.record(&input, &slot.player);
+            }
+            self.own_prediction.decay();
         }
 
         // Cinematic replay (Phase 2c) — tee one frame per sim tick into the

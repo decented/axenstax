@@ -491,15 +491,11 @@ impl super::GameState {
             // Place the player on solid ground — never on tree canopy (#9) or in
             // water. Flat/Workshop worlds use the known fixed floor (avoids the
             // biome-height scan starting below y=79 and missing the flat floor).
-            let (sx, spawn_y, sz) = if self.world.is_workshop || self.world.has_flat_floor() {
-                (8i32, crate::workshop::WORKSHOP_FLOOR_Y + 1, 8i32)
-            } else {
-                find_surface_spawn(&self.world, &self.biome_gen, 0, 0)
-            };
-            self.players[0].player.pos = glam::Vec3::new(sx as f32 + 0.5, spawn_y as f32, sz as f32 + 0.5);
+            let spawn = world_spawn_point(&self.world, &self.biome_gen);
+            self.players[0].player.pos = spawn;
             self.players[0].player.velocity = glam::Vec3::ZERO;
             self.players[0].player.reset_fall();
-            log::info!("Fresh world spawn at ({sx}, {spawn_y}, {sz}).");
+            log::info!("Fresh world spawn at {spawn}.");
 
             // New creative world starts with an EMPTY hotbar (owner 2026-07-02).
             // A creative builder picks their own blocks from the B search /
@@ -571,6 +567,9 @@ impl super::GameState {
         if let Some(spawn) = self.pending_join_spawn.take() {
             log::info!("Joined-world spawn from the host at {spawn:?}");
             self.place_player0_and_pregen(spawn);
+            // The server's body starts exactly there (Spec 04 §5.3): no local
+            // spawn preference may move ours away from it.
+            self.pending_spawn_pref = crate::spawn_pref::SpawnPref::Default;
         }
 
         // Apply a pending spawn-pref override (moved here from `stream_chunks`):
@@ -737,6 +736,24 @@ pub(crate) fn load_column_blocks(
 /// Spec: docs/superpowers/specs/2026-06-22-begin-load-wasm-resume-position-fix-spec.md
 pub(crate) fn fresh_setup_wanted(load_succeeded: bool, world_preloaded: bool) -> bool {
     !load_succeeded && !world_preloaded
+}
+
+/// A world's spawn point: where a fresh world places its player, and where a
+/// dedicated server starts a joiner (`GameServer::world_spawn`) — one
+/// rule, so both agree. Flat/Workshop worlds use the known fixed floor (the
+/// biome-height scan would start below y=79 and miss it); every other world
+/// the nearest clear ground to the origin. The columns around the origin must
+/// be generated first.
+pub(crate) fn world_spawn_point(
+    world: &crate::world::World,
+    biome_gen: &crate::biome::BiomeGenerator,
+) -> glam::Vec3 {
+    let (sx, sy, sz) = if world.is_workshop || world.has_flat_floor() {
+        (8, crate::workshop::WORKSHOP_FLOOR_Y + 1, 8)
+    } else {
+        find_surface_spawn(world, biome_gen, 0, 0)
+    };
+    glam::Vec3::new(sx as f32 + 0.5, sy as f32, sz as f32 + 0.5)
 }
 
 /// Find a safe standing position near `(ox, oz)`: solid, walkable ground with
