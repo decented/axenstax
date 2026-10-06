@@ -84,7 +84,7 @@ chacha20poly1305 = { version = "0.11", default-features = false, features = ["al
 egui-winit = { version = "0.34", default-features = false, features = ["links", "clipboard", "wayland", "x11"] }
 pollster = "0.4"
 env_logger = "0.11"
-rodio = { version = "0.20", default-features = false, features = ["vorbis"] }
+rodio = { version = "0.22", default-features = false, features = ["vorbis"] }
 gilrs = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 quinn = "0.11"
