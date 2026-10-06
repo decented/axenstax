@@ -4150,9 +4150,10 @@ mod tests {
 
     #[test]
     fn column_presence_does_no_full_chunk_scans() {
-        // Deterministic bound on the per-call work: 1,000 calls on a flat world
-        // (present and absent columns) never fall back to counting a chunk's
-        // cells. The counter bumps only in the test-only full recount.
+        // Pins that the presence path never calls the test-only full recount
+        // (`Chunk::recount_non_air`). It cannot see a production `is_empty` that
+        // regresses to scanning cells; that is covered by the oracle tests above
+        // (maintained count == full recount) and the timing benchmark.
         let w = flat_world_with_one_column();
         let before = crate::chunk::full_scans_on_this_thread();
         for i in 0..1_000 {

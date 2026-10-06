@@ -128,7 +128,7 @@ impl Chunk {
 
     /// Full recount of the non-air cells — the oracle the maintained count is
     /// tested against. Test-only; it bumps [`full_scans_on_this_thread`] so a
-    /// test can prove a code path never fell back to counting cells.
+    /// test can pin that a code path never calls it.
     #[cfg(test)]
     pub(crate) fn recount_non_air(&self) -> usize {
         FULL_SCANS.with(|c| c.set(c.get() + 1));
