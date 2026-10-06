@@ -15,6 +15,11 @@
 //!   not generate, not mark the world live and not write anything. Every loader
 //!   it calls is all or nothing, so on `Err` the folder is byte-for-byte as it was.
 //!
+//! The client opens the crash-recovery autosave first only when it is newer than
+//! `world.dat` (by modification time, [`autosave_is_newer`]); the other copy is
+//! the fallback either way, and an older autosave is cleared once `world.dat`
+//! has opened.
+//!
 //! The existing keep-a-damaged-copy-aside recoveries still run when the rest of
 //! the load succeeds (a torn chunk, a torn `world_meta.json` rebuilt from
 //! `world.dat`, a partly decoded `world.dat`): no data is lost, so the world opens.
@@ -49,6 +54,12 @@ pub(crate) enum OpenedFrom {
     /// The damaged autosave folder was renamed to `kept_as` (relative to the world
     /// folder), so neither the next autosave nor the leave-time clear can destroy it.
     LastSaveAfterAutosaveFailed { why: String, kept_as: String },
+    /// `world.dat` — newer than the autosave — failed to load (`why`), so the
+    /// older crash-recovery autosave was opened. The damaged `world.dat` was
+    /// COPIED to `kept_as` (relative to the world folder) and left in place (the
+    /// lobby lists only folders with one), so the session's next save can't
+    /// destroy the only copy.
+    AutosaveAfterLastSaveFailed { why: String, kept_as: String },
 }
 
 /// What [`open_world`] found.
@@ -87,7 +98,18 @@ impl OpenedFrom {
                 "The crash-recovery autosave couldn't be opened ({why}), so this is your last \
                  save. The autosave is kept as {kept_as}."
             )),
+            Self::AutosaveAfterLastSaveFailed { why, kept_as } => Some(format!(
+                "Your last save couldn't be opened ({why}), so this is your older \
+                 crash-recovery autosave. A copy of that save is kept as {kept_as}."
+            )),
         }
+    }
+
+    /// Did the world open FROM the crash-recovery autosave? Then it is kept until
+    /// a save lands (`world_exit::SessionSaves::opened`): `world.dat` may be
+    /// damaged, leaving it the only good copy.
+    pub(crate) fn opened_from_autosave(&self) -> bool {
+        matches!(self, Self::Autosave | Self::AutosaveAfterLastSaveFailed { .. })
     }
 }
 
@@ -125,7 +147,12 @@ pub(crate) fn open_world(
         Ok(opened)
     };
 
-    if has_autosave && autosave == AutosavePolicy::Prefer {
+    // The client opens the autosave first only when it was written after
+    // world.dat (third review, 2026-10-06): one older than world.dat is stale —
+    // a save that committed but failed later, before this build dropped it at
+    // the commit — and opening it rolled the newer save back.
+    let use_autosave = has_autosave && autosave == AutosavePolicy::Prefer;
+    if use_autosave && (!has_dat || autosave_is_newer(&dir)) {
         let autosave_err = match crate::save::load_autosave(name, world) {
             Ok((save, chunks)) => {
                 return repaired(OpenedWorld::Loaded {
@@ -158,11 +185,45 @@ pub(crate) fn open_world(
     }
 
     if has_dat {
-        let (save, chunks) = crate::save::load_world(name, world)?;
+        let world_dat_err = match crate::save::load_world(name, world) {
+            Ok((save, chunks)) => {
+                let opened = repaired(OpenedWorld::Loaded {
+                    save: Box::new(save),
+                    chunks,
+                    from: OpenedFrom::LastSave,
+                })?;
+                if use_autosave {
+                    // Older than the world.dat that just opened: superseded, and
+                    // left here it would mix its stale chunk files into the next
+                    // autosave.
+                    log::warn!("world '{name}': clearing a crash-recovery autosave older than world.dat");
+                    crate::save::clear_autosave_in(&dir);
+                }
+                return Ok(opened);
+            }
+            Err(e) => e,
+        };
+        if !use_autosave {
+            return Err(world_dat_err);
+        }
+        // world.dat is newer but won't load: the older autosave is the newest
+        // copy that opens. The damaged world.dat is copied aside first — the
+        // session's next save overwrites it.
+        log::error!("world '{name}': world.dat failed to load ({world_dat_err}); opening the older autosave");
+        let (save, chunks) = crate::save::load_autosave(name, world).map_err(|e| {
+            format!("{world_dat_err}; its older crash-recovery autosave failed too ({e})")
+        })?;
+        let kept = crate::save::copy_damaged_aside(&dir.join("world.dat")).map_err(|e| {
+            format!("world.dat couldn't be opened ({world_dat_err}) or kept aside ({e})")
+        })?;
+        let kept_as = kept
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| kept.display().to_string());
         return repaired(OpenedWorld::Loaded {
             save: Box::new(save),
             chunks,
-            from: OpenedFrom::LastSave,
+            from: OpenedFrom::AutosaveAfterLastSaveFailed { why: world_dat_err, kept_as },
         });
     }
 
@@ -182,6 +243,28 @@ pub(crate) fn open_world(
         );
     }
     Ok(OpenedWorld::New)
+}
+
+/// Was `autosave/world.dat` written after `world.dat`? Neither file records when
+/// it was saved, and each is written whole by tmp + rename, so its modification
+/// time is its save time. Strictly later: a tie goes to `world.dat`. When either
+/// time can't be read the autosave counts as newer — the old rule (it is crash
+/// recovery), and `world.dat` is still the fallback if it fails to load.
+#[cfg(not(target_arch = "wasm32"))]
+fn autosave_is_newer(dir: &std::path::Path) -> bool {
+    let written = |rel: &str| std::fs::metadata(dir.join(rel)).and_then(|m| m.modified());
+    match (written("autosave/world.dat"), written("world.dat")) {
+        (Ok(autosave), Ok(world_dat)) => autosave > world_dat,
+        (autosave, world_dat) => {
+            log::warn!(
+                "{}: can't tell which save is newer (autosave {:?}, world.dat {:?}); trying the autosave first",
+                dir.display(),
+                autosave.err(),
+                world_dat.err()
+            );
+            true
+        }
+    }
 }
 
 /// Web: the async IndexedDB / cloud load in `game_loop` reads the world before
@@ -520,6 +603,8 @@ mod tests {
         fs::create_dir_all(dir.join("autosave/chunks")).unwrap();
         fs::write(dir.join("autosave/world.dat"), b"\x01torn autosave").unwrap();
         fs::write(dir.join("autosave/chunks/9_4_9.chunk"), b"kept").unwrap();
+        // Written after world.dat (an autosave the next open tries first).
+        written_ago(&dir.join("world.dat"), 120);
         let mut before = snapshot(&dir);
 
         let mut world = World::new();
@@ -573,6 +658,7 @@ mod tests {
         let dir = saved_world("w");
         fs::create_dir_all(dir.join("autosave")).unwrap();
         fs::write(dir.join("autosave/world.dat"), b"\x01torn autosave").unwrap();
+        written_ago(&dir.join("world.dat"), 120);
         let before = snapshot(&dir);
         QUARANTINE_FAILS_FOR.with(|f| *f.borrow_mut() = Some("autosave".to_string()));
         let err = open_world("w", &mut World::new(), AutosavePolicy::Prefer).unwrap_err();
@@ -982,5 +1068,233 @@ mod tests {
         assert!(crate::save::save_world("w", &world, std::slice::from_ref(&slot()), 1, &[], &[])
             .is_err());
         assert_eq!(fs::read(dir.join("world.dat")).unwrap(), before, "world.dat untouched");
+    }
+
+    // ── Third review (2026-10-06): an autosave never rolls a newer world.dat back ──
+
+    /// Set `path`'s modification time `secs_ago` seconds back, so a test states
+    /// which copy is newer instead of relying on write order.
+    fn written_ago(path: &Path, secs_ago: u64) {
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    /// The block at (3, 64, 5) in the copy `open_world` (client policy) opens.
+    fn opened_block(name: &str) -> (OpenedFrom, crate::block::BlockId) {
+        let mut world = World::new();
+        match open_world(name, &mut world, AutosavePolicy::Prefer).unwrap() {
+            OpenedWorld::Loaded { from, .. } => (from, world.get_block(3, 64, 5)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A later save that fails AFTER `world.dat` committed (here its meta write)
+    /// kept the older crash-recovery autosave, and the next open preferred it over
+    /// the newer `world.dat`: the save rolled back. The autosave now goes the
+    /// moment `world.dat` commits.
+    #[test]
+    fn a_save_that_fails_after_world_dat_commits_still_drops_the_older_autosave() {
+        let _g = WorldsRootGuard::new("save_post_commit_fail");
+        let dir = saved_world("w");
+        let s = slot();
+        let mut w = World::new();
+        w.set_block(3, 64, 5, crate::block::STONE);
+        crate::save::autosave_world("w", &w, std::slice::from_ref(&s), 77, &[], &[]).unwrap();
+        // The session goes on, then saves; the meta write fails after world.dat.
+        w.set_block(3, 64, 5, crate::block::DIRT);
+        fs::create_dir_all(dir.join("world_meta.json.tmp")).unwrap();
+        let err = crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&s), 77, &[], &[])
+            .unwrap_err();
+        assert!(err.contains("world_meta.json"), "{err}");
+        assert!(!dir.join("autosave").exists(), "world.dat committed: the older autosave is superseded");
+        fs::remove_dir(dir.join("world_meta.json.tmp")).unwrap();
+        assert_eq!(opened_block("w"), (OpenedFrom::LastSave, crate::block::DIRT));
+    }
+
+    /// The same for a world's FIRST save cut short after its commit (the publish
+    /// rename failed): the older autosave is dropped at the commit.
+    #[test]
+    fn a_first_save_that_fails_after_its_commit_still_drops_the_older_autosave() {
+        use crate::save::{FirstSaveCut, FIRST_SAVE_CUT};
+        let _g = WorldsRootGuard::new("first_save_post_commit_fail");
+        let (w, all) = many_chunk_world();
+        let dir = world_dir("w");
+        crate::save::save_world_meta("w", &WorldMeta::new("w")).unwrap();
+        // An autosave from before, holding a chunk the save no longer has.
+        let mut older = many_chunk_world().0;
+        older.set_block(200, 64, 200, crate::block::STONE);
+        crate::save::autosave_world("w", &older, std::slice::from_ref(&slot()), 5, &[], &[]).unwrap();
+        FIRST_SAVE_CUT.with(|c| c.set(Some(FirstSaveCut::BeforePublish)));
+        let err = crate::save::save_world_superseding_autosave("w", &w, std::slice::from_ref(&slot()), 5, &[], &[])
+            .unwrap_err();
+        FIRST_SAVE_CUT.with(|c| c.set(None));
+        assert!(err.contains("cut short"), "{err}");
+        assert!(dir.join("world.dat").is_file() && dir.join(crate::save::STAGED_CHUNKS).is_dir());
+        assert!(!dir.join("autosave").exists(), "world.dat committed: the older autosave is superseded");
+        let mut back = World::new();
+        assert!(matches!(
+            open_world("w", &mut back, AutosavePolicy::Prefer),
+            Ok(OpenedWorld::Loaded { from: OpenedFrom::LastSave, .. })
+        ));
+        assert_eq!(solid_chunks(&back), all);
+    }
+
+    /// The reviewer found every first-save test reopened the world before the
+    /// next save, so the SAVE path's publish never ran. And the staged chunks
+    /// were noted as on disk only after the publish: when that rename failed, the
+    /// next save published them but never deleted one mined out since — it came
+    /// back. They are now noted the moment `world.dat` commits.
+    #[test]
+    fn a_first_save_cut_after_its_commit_is_published_by_the_next_save() {
+        use crate::save::{FirstSaveCut, FIRST_SAVE_CUT};
+        let _g = WorldsRootGuard::new("first_save_published_by_save");
+        let (mut w, all) = many_chunk_world();
+        let dir = world_dir("w");
+        crate::save::save_world_meta("w", &WorldMeta::new("w")).unwrap();
+        FIRST_SAVE_CUT.with(|c| c.set(Some(FirstSaveCut::BeforePublish)));
+        assert!(crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).is_err());
+        FIRST_SAVE_CUT.with(|c| c.set(None));
+        assert!(dir.join(crate::save::STAGED_CHUNKS).join("5_5_5.chunk").is_file(), "staged");
+        // The session goes on: chunk (5, 5, 5)'s only solid block is mined out.
+        w.set_block(90, 80, 90, crate::block::AIR);
+        let mined = (5, 5, 5);
+        assert!(all.contains(&mined) && !solid_chunks(&w).contains(&mined));
+        // The next save — no open in between — publishes the staged chunks and
+        // deletes the mined-out one.
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 5, &[], &[]).unwrap();
+        assert!(!dir.join(crate::save::STAGED_CHUNKS).exists(), "published by the save");
+        assert!(dir.join("chunks/0_1_0.chunk").is_file(), "published as chunks/");
+        assert!(!dir.join("chunks/5_5_5.chunk").exists(), "the mined-out chunk stays gone");
+        let mut expected = all.clone();
+        expected.remove(&mined);
+        assert_eq!(reopened("w"), Some(expected));
+    }
+
+    /// The client preferred ANY autosave over `world.dat`. It now opens the
+    /// autosave first only when it was written after `world.dat` (a tie goes to
+    /// `world.dat`); an older one is stale and is cleared once `world.dat` has
+    /// loaded. The server never reads it either way.
+    #[test]
+    fn the_autosave_is_opened_first_only_when_it_is_newer_than_world_dat() {
+        let _g = WorldsRootGuard::new("open_autosave_newer_only");
+        let dir = saved_world("w");
+        let mut a = World::new();
+        a.set_block(3, 64, 5, crate::block::STONE);
+        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        let (dat, autosave) = (dir.join("world.dat"), dir.join("autosave/world.dat"));
+
+        // Written after world.dat (a crash since): crash recovery.
+        written_ago(&dat, 120);
+        written_ago(&autosave, 60);
+        assert_eq!(opened_block("w"), (OpenedFrom::Autosave, crate::block::STONE));
+        assert!(autosave.is_file(), "an autosave the world opened from is kept");
+
+        // A tie goes to world.dat, and so does an older autosave.
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+        for f in [&dat, &autosave] {
+            fs::File::options().write(true).open(f).unwrap().set_modified(at).unwrap();
+        }
+        let mut server = World::new();
+        assert!(matches!(
+            open_world("w", &mut server, AutosavePolicy::Ignore),
+            Ok(OpenedWorld::Loaded { from: OpenedFrom::LastSave, .. })
+        ));
+        assert!(autosave.is_file(), "the server never touches the autosave");
+        assert_eq!(opened_block("w"), (OpenedFrom::LastSave, crate::block::BEDROCK));
+        assert!(!dir.join("autosave").exists(), "a stale autosave is cleared once world.dat loaded");
+        assert_eq!(opened_block("w"), (OpenedFrom::LastSave, crate::block::BEDROCK));
+    }
+
+    /// A `world.dat` newer than the autosave that fails to load: the older
+    /// autosave is the newest copy that opens. The damaged `world.dat` is COPIED
+    /// aside (left in place, so the lobby still lists the world), the autosave is
+    /// kept until a save lands, and the player is told.
+    #[test]
+    fn a_newer_world_dat_that_fails_falls_back_to_the_older_autosave() {
+        let _g = WorldsRootGuard::new("open_newer_dat_fails");
+        let dir = saved_world("w");
+        let mut a = World::new();
+        a.set_block(3, 64, 5, crate::block::STONE);
+        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
+        written_ago(&dir.join("autosave/world.dat"), 120);
+        written_ago(&dir.join("world.dat"), 60);
+
+        let (from, block) = opened_block("w");
+        assert_eq!(block, crate::block::STONE, "opened from the autosave");
+        assert!(from.opened_from_autosave(), "a discard must keep the only good copy");
+        let OpenedFrom::AutosaveAfterLastSaveFailed { why, kept_as } = &from else {
+            panic!("{from:?}");
+        };
+        assert!(why.contains("world.dat is damaged"), "{why}");
+        assert!(kept_as.starts_with("world.dat.corrupt-"), "{kept_as}");
+        assert_eq!(fs::read(dir.join(kept_as)).unwrap(), b"\x01not a world save");
+        assert!(from.player_note().unwrap().contains(kept_as.as_str()));
+        assert_eq!(fs::read(dir.join("world.dat")).unwrap(), b"\x01not a world save", "left in place");
+        assert!(dir.join("autosave/world.dat").is_file(), "the autosave is kept");
+    }
+
+    /// ...and if that damaged `world.dat` can't be kept aside, or the older
+    /// autosave fails too, the world is refused untouched.
+    #[test]
+    fn a_newer_world_dat_that_fails_is_refused_when_it_cant_be_kept_or_the_autosave_fails() {
+        let _g = WorldsRootGuard::new("open_newer_dat_refused");
+        let dir = saved_world("w");
+        let mut a = World::new();
+        a.set_block(3, 64, 5, crate::block::STONE);
+        crate::save::autosave_world("w", &a, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        fs::write(dir.join("world.dat"), b"\x01not a world save").unwrap();
+        written_ago(&dir.join("autosave/world.dat"), 120);
+        written_ago(&dir.join("world.dat"), 60);
+        let before = snapshot(&dir);
+        QUARANTINE_FAILS_FOR.with(|f| *f.borrow_mut() = Some("world.dat".to_string()));
+        let err = open_world("w", &mut World::new(), AutosavePolicy::Prefer).unwrap_err();
+        QUARANTINE_FAILS_FOR.with(|f| *f.borrow_mut() = None);
+        assert!(err.contains("kept aside"), "{err}");
+        assert_eq!(snapshot(&dir), before);
+
+        fs::write(dir.join("autosave/world.dat"), b"\x01torn autosave").unwrap();
+        written_ago(&dir.join("autosave/world.dat"), 120);
+        let before = snapshot(&dir);
+        let err = open_world("w", &mut World::new(), AutosavePolicy::Prefer).unwrap_err();
+        assert!(err.contains("world.dat is damaged") && err.contains("autosave failed too"), "{err}");
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    /// After a downgrade a folder can hold `world.dat`, `chunks/*.chunk` AND a
+    /// `chunks.new/` (an older build saved over a committed first save it couldn't
+    /// see), and it was refused forever. That `chunks.new/` is stale — the
+    /// `chunks/` beside `world.dat` is newer — so it is set aside, never lost.
+    #[test]
+    fn a_stale_chunks_new_beside_saved_chunks_is_set_aside_not_refused() {
+        let _g = WorldsRootGuard::new("open_stale_chunks_new");
+        let dir = saved_world("w");
+        let stage = |dir: &Path| {
+            fs::create_dir_all(dir.join(crate::save::STAGED_CHUNKS)).unwrap();
+            fs::write(dir.join(crate::save::STAGED_CHUNKS).join("9_4_9.chunk"), b"stale").unwrap();
+        };
+        let kept = |dir: &Path| -> Vec<std::path::PathBuf> {
+            fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("chunks.new.stale-"))
+                .map(|e| e.path())
+                .collect()
+        };
+        stage(&dir);
+        assert_eq!(opened_block("w"), (OpenedFrom::LastSave, crate::block::BEDROCK));
+        assert!(!dir.join(crate::save::STAGED_CHUNKS).exists());
+        let aside = kept(&dir);
+        assert_eq!(aside.len(), 1);
+        assert_eq!(fs::read(aside[0].join("9_4_9.chunk")).unwrap(), b"stale");
+
+        // A save finds it the same way.
+        stage(&dir);
+        let mut w = World::new();
+        w.set_block(3, 64, 5, crate::block::DIRT);
+        crate::save::save_world("w", &w, std::slice::from_ref(&slot()), 77, &[], &[]).unwrap();
+        assert!(!dir.join(crate::save::STAGED_CHUNKS).exists());
+        assert_eq!(kept(&dir).len(), 2);
+        assert_eq!(opened_block("w"), (OpenedFrom::LastSave, crate::block::DIRT));
     }
 }

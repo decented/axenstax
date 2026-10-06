@@ -229,9 +229,8 @@ impl super::GameState {
                     // (review 2026-10-06). The next autosave overwrites it anyway.
                     // Until a save lands, "Quit without saving" keeps it too
                     // (`world_exit::SessionSaves`).
-                    self.session_saves = crate::world_exit::SessionSaves::opened(
-                        from == crate::world_open::OpenedFrom::Autosave,
-                    );
+                    self.session_saves =
+                        crate::world_exit::SessionSaves::opened(from.opened_from_autosave());
                     if let Some(note) = from.player_note() {
                         self.toast = Some((
                             note,

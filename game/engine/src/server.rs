@@ -1993,7 +1993,13 @@ impl GameServer {
             // never chunks without a world.dat (refused at every boot), nor some
             // of a column's chunks (holes no load ever fills). Any chunk that
             // can't be written fails it before world.dat.
-            crate::save::write_first_save(&dir, &self.world, &encoded)?;
+            crate::save::write_first_save(
+                &dir,
+                &self.world,
+                &encoded,
+                // The server never reads or clears the client's autosave.
+                crate::save::AtCommit::KeepAutosave,
+            )?;
         } else {
             // A mined-out chunk's file is deleted, by the client's rule
             // (`save::partition_chunks_for_save`): only for a chunk this session

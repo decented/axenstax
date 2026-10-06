@@ -84,19 +84,45 @@ pub(crate) fn should_save_on_close(in_world: bool, live: Option<WorldKind>) -> b
 
 /// What the window close hands to [`GameState::leave_world`]: a save when
 /// there is a world to save, otherwise [`SaveChoice::Abandon`] — a close
-/// never throws away the crash-recovery autosave. Once a close's save has
-/// failed (`close_save_failed`), the NEXT close quits without saving and keeps
-/// the autosave: a save that keeps failing must never trap the player in the
-/// world with "Quit without saving" as the only way out (review 2026-10-06).
-pub(crate) fn close_choice(
-    in_world: bool,
-    live: Option<WorldKind>,
-    close_save_failed: bool,
-) -> SaveChoice {
-    if should_save_on_close(in_world, live) && !close_save_failed {
+/// never throws away the crash-recovery autosave. Every close saves, the one
+/// after a failed close-save too: it retries once ([`after_close_save`]).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web has no close-save
+pub(crate) fn close_choice(in_world: bool, live: Option<WorldKind>) -> SaveChoice {
+    if should_save_on_close(in_world, live) {
         SaveChoice::Save
     } else {
         SaveChoice::Abandon
+    }
+}
+
+/// What a window close does once [`GameState::leave_world`] has run its
+/// [`close_choice`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web has no close-save
+pub(crate) enum CloseOutcome {
+    /// The player left (the save landed, or there was nothing to save): quit.
+    Quit,
+    /// The close's save failed: stay in the world, with the toast saying why and
+    /// what closing again does ([`close_again_hint`]).
+    StayToRetry,
+    /// The save failed on the close after a failed close too — it was retried
+    /// once: quit anyway, by a [`SaveChoice::Abandon`] that keeps the autosave.
+    QuitKeepingAutosave,
+}
+
+/// [`CloseOutcome`] for a close that left (`left`) or not, given whether the
+/// previous close's save had failed with no save landing since
+/// (`SessionSaves::close_save_failed`). A save that keeps failing never traps
+/// the player in the world with "Quit without saving" as the only way out
+/// (review 2026-10-06), and a close never quits without first trying to save
+/// (third review, 2026-10-06: the flag used to make every later close quit
+/// without even trying, however much was played since).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web has no close-save
+pub(crate) fn after_close_save(left: bool, close_save_failed: bool) -> CloseOutcome {
+    match (left, close_save_failed) {
+        (true, _) => CloseOutcome::Quit,
+        (false, false) => CloseOutcome::StayToRetry,
+        (false, true) => CloseOutcome::QuitKeepingAutosave,
     }
 }
 
@@ -110,8 +136,9 @@ pub(crate) struct SessionSaves {
     /// The world opened from its crash-recovery autosave and no save has
     /// landed since: with a damaged `world.dat` it is the only good copy.
     pub(crate) opened_from_autosave: bool,
-    /// A window close tried to save and failed: the next close quits, keeping
-    /// the autosave ([`close_choice`]).
+    /// A window close tried to save and failed: the next close tries once more
+    /// and quits either way, keeping the autosave if that fails too
+    /// ([`after_close_save`]). Cleared by any save that lands.
     pub(crate) close_save_failed: bool,
 }
 
@@ -185,12 +212,14 @@ pub(crate) fn quit_no_save_warning(kept: Option<&str>) -> String {
 }
 
 /// Appended to the save-failed toast when a window close's save failed: what
-/// closing again does.
+/// closing again does ([`after_close_save`]).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web has no close-save
 pub(crate) fn close_again_hint(kept: Option<&str>) -> String {
-    match kept {
-        Some(age) => format!(" Close the window again to quit — your autosave from {age} is kept."),
-        None => " Close the window again to quit without saving.".to_string(),
-    }
+    let then = match kept {
+        Some(age) => format!("your autosave from {age} is kept."),
+        None => "the game quits without saving.".to_string(),
+    };
+    format!(" Close the window again to try once more and quit — if the save fails again, {then}")
 }
 
 /// What the player is told when a save fails — Save, Save & Quit, or any exit
@@ -480,7 +509,8 @@ impl crate::GameState {
     /// Returns whether the player left. A save that FAILS ends nothing: the
     /// player stays in the world — still live, nothing torn down — with a toast
     /// saying why, so the session can be saved again, or left with "Quit
-    /// without saving" or a second window close — both of which then KEEP the
+    /// without saving" or a second window close (which retries the save once,
+    /// [`GameState::close_window`]) — both of which then KEEP the
     /// crash-recovery autosave ([`SessionSaves`]; review 2026-10-06: a failed
     /// Save & Quit used to only log, then leave, losing the session in
     /// silence). Callers that hop somewhere after leaving must not hop on
@@ -560,6 +590,39 @@ impl crate::GameState {
         true
     }
 
+    /// The window's close button (native — the browser has no close-save; its
+    /// autosave rides IndexedDB). Closing is one more way out of a world, so it
+    /// goes through `leave_world` like Save & Quit, and SAVES while the player
+    /// is in a loaded world this machine owns — their own or a Trial arena
+    /// (never from the lobby, mid-load, after "Quit without saving", or a joined
+    /// session). A close-save that FAILS keeps the window open in the world, the
+    /// toast saying why (review 2026-10-06), to retry, "Quit without saving", or
+    /// close again — which tries the save once more and quits either way,
+    /// keeping the autosave if it fails again ([`after_close_save`]). Returns
+    /// whether the app should exit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn close_window(&mut self) -> bool {
+        let in_world = matches!(self.mode, crate::GameMode::Playing | crate::GameMode::Paused { .. });
+        let choice = close_choice(in_world, self.live_world);
+        let left = self.live_world.is_none() || self.leave_world(choice, ExitTo::Quit);
+        match after_close_save(left, self.session_saves.close_save_failed) {
+            CloseOutcome::Quit => true,
+            CloseOutcome::StayToRetry => {
+                self.session_saves.close_save_failed = true;
+                let hint = close_again_hint(self.kept_autosave_age().as_deref());
+                if let Some((msg, _)) = self.toast.as_mut() {
+                    msg.push_str(&hint);
+                }
+                false
+            }
+            CloseOutcome::QuitKeepingAutosave => {
+                // Never saves, never clears the autosave, always leaves.
+                self.leave_world(SaveChoice::Abandon, ExitTo::Quit);
+                true
+            }
+        }
+    }
+
     /// Leave a world whose session ended under the player (host quit or
     /// crashed, the connection dropped, a kick), then say why in the lobby.
     pub(crate) fn leave_world_with_notice(&mut self, save: SaveChoice, notice: String) {
@@ -630,20 +693,20 @@ mod tests {
         // Review W3 B1: closing mid-Satori-Rush discarded the run AND deleted
         // its 5-minute crash-recovery copy.
         assert!(should_save_on_close(true, Some(WorldKind::Arena)));
-        assert_eq!(close_choice(true, Some(WorldKind::Arena), false), SaveChoice::Save);
-        assert_eq!(close_choice(true, Some(WorldKind::Local), false), SaveChoice::Save);
+        assert_eq!(close_choice(true, Some(WorldKind::Arena)), SaveChoice::Save);
+        assert_eq!(close_choice(true, Some(WorldKind::Local)), SaveChoice::Save);
         // A save that failed leaves the crash copy for recovery.
         assert!(!should_clear_autosave(SaveChoice::Save, false, Some(WorldKind::Arena), false, false));
-        // A landed save supersedes it (the loader prefers an autosave, so a
-        // stale one would roll the fresh save back).
+        // A landed save supersedes it (left beside the fresh save, a stale
+        // autosave could roll it back).
         assert!(should_clear_autosave(SaveChoice::Save, true, Some(WorldKind::Arena), false, false));
     }
 
     #[test]
     fn a_close_never_clears_an_autosave_it_did_not_supersede() {
         for live in [None, Some(WorldKind::Local), Some(WorldKind::Arena), Some(WorldKind::Joined)] {
-            for (in_world, failed) in [(false, false), (true, false), (false, true), (true, true)] {
-                let choice = close_choice(in_world, live, failed);
+            for in_world in [false, true] {
+                let choice = close_choice(in_world, live);
                 assert_ne!(choice, SaveChoice::Discard, "a close is never a discard");
                 for (joined, keep) in [(false, false), (true, false), (false, true), (true, true)] {
                     // Whatever happens, an unsaved close never clears it.
@@ -700,18 +763,34 @@ mod tests {
         assert!(s.keeps_autosave(), "a later failure guards it again");
     }
 
-    /// A close whose save failed keeps the player in the world (to retry); the
-    /// SECOND close quits without saving and keeps the autosave, so a save that
-    /// keeps failing never traps the player.
+    /// A close whose save failed keeps the player in the world (to retry). The
+    /// SECOND close tries the save once more and quits either way — keeping the
+    /// autosave when it fails again — so a save that keeps failing never traps
+    /// the player. Third review (2026-10-06): the flag used to make EVERY later
+    /// close quit without even trying to save, however much was played since.
     #[test]
-    fn a_second_close_after_a_failed_close_save_quits_keeping_the_autosave() {
+    fn a_second_close_retries_the_save_once_then_quits_keeping_the_autosave() {
         for live in [Some(WorldKind::Local), Some(WorldKind::Arena)] {
-            assert_eq!(close_choice(true, live, false), SaveChoice::Save);
-            let second = close_choice(true, live, true);
-            assert_eq!(second, SaveChoice::Abandon);
-            assert!(!should_save_on_leave(second, live, false), "no save to fail again");
-            assert!(!should_clear_autosave(second, false, live, false, true), "autosave kept");
+            // Every close of a live own world saves — after a failed one too.
+            assert_eq!(close_choice(true, live), SaveChoice::Save);
+            assert!(should_save_on_leave(close_choice(true, live), live, false));
         }
+        // The save landed (or there was nothing to save): quit.
+        assert_eq!(after_close_save(true, false), CloseOutcome::Quit);
+        assert_eq!(after_close_save(true, true), CloseOutcome::Quit);
+        // The first failure stays in the world, to retry.
+        assert_eq!(after_close_save(false, false), CloseOutcome::StayToRetry);
+        // The retry failed too: quit anyway, by a close that keeps the autosave.
+        assert_eq!(after_close_save(false, true), CloseOutcome::QuitKeepingAutosave);
+        for live in [Some(WorldKind::Local), Some(WorldKind::Arena)] {
+            assert!(!should_save_on_leave(SaveChoice::Abandon, live, false), "no third try");
+            assert!(!should_clear_autosave(SaveChoice::Abandon, false, live, false, true), "kept");
+        }
+        // Any save that lands clears the flag: the next close is a first close.
+        let mut s = SessionSaves { close_save_failed: true, save_failed: true, ..SessionSaves::default() };
+        s.note_save(true);
+        assert!(!s.close_save_failed);
+        assert_eq!(after_close_save(false, s.close_save_failed), CloseOutcome::StayToRetry);
     }
 
     #[test]
@@ -728,9 +807,14 @@ mod tests {
         );
         assert_eq!(
             close_again_hint(Some("just now")),
-            " Close the window again to quit — your autosave from just now is kept."
+            " Close the window again to try once more and quit — if the save fails again, \
+             your autosave from just now is kept."
         );
-        assert_eq!(close_again_hint(None), " Close the window again to quit without saving.");
+        assert_eq!(
+            close_again_hint(None),
+            " Close the window again to try once more and quit — if the save fails again, \
+             the game quits without saving."
+        );
     }
 
     #[test]
@@ -1029,8 +1113,7 @@ mod tests {
         let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world("exit-arena-close");
         hg.state.live_world = Some(WorldKind::Arena);
         // The window-close path (main.rs `CloseRequested`).
-        let choice = close_choice(true, hg.state.live_world, false);
-        hg.state.leave_world(choice, ExitTo::Quit);
+        assert!(hg.state.close_window(), "the window closes");
         assert!(crate::save::world_exists("exit-arena-close"), "the arena run was saved");
     }
 
@@ -1094,6 +1177,45 @@ mod tests {
             crate::save::world_dir(&name).join("autosave/world.dat").is_file(),
             "a discard after a failed save keeps the autosave"
         );
+    }
+
+    /// Third review (2026-10-06) — a failed window-close save keeps the player in
+    /// the world; the next close tries the save once more and quits either way,
+    /// keeping the autosave when that fails too. A save that lands in between
+    /// makes the next close a first close again.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_second_close_retries_the_save_then_quits_keeping_the_autosave() {
+        isolate_saves();
+        let name = harness_world("exit-close-retry");
+        let mut hg = crate::test_game_harness::HeadlessGame::boot_into_world(&name);
+        let dir = crate::save::world_dir(&name);
+        let autosave = |hg: &crate::test_game_harness::HeadlessGame| {
+            let s = &hg.state;
+            crate::save::autosave_world(&name, &s.world, &s.players, s.biome_gen.seed, &[], &[]).unwrap();
+        };
+        autosave(&hg);
+        let good_meta = std::fs::read(dir.join("world_meta.json")).ok();
+        make_saves_fail(&name);
+
+        assert!(!hg.state.close_window(), "a failed close stays in the world");
+        let (toast, _) = hg.state.toast.clone().expect("the player is told");
+        assert!(toast.contains("Close the window again to try once more and quit"), "{toast}");
+        // A save that lands in between: the next close is a first close again.
+        match &good_meta {
+            Some(bytes) => std::fs::write(dir.join("world_meta.json"), bytes).unwrap(),
+            None => std::fs::remove_file(dir.join("world_meta.json")).unwrap(),
+        }
+        hg.state.pause_save();
+        assert!(!hg.state.session_saves.close_save_failed, "a landed save clears it");
+        autosave(&hg);
+        make_saves_fail(&name);
+        assert!(!hg.state.close_window(), "a first close again: stays");
+        // The second close retries, fails, and quits keeping the autosave.
+        assert!(hg.state.close_window(), "the second close quits");
+        assert!(hg.state.live_world.is_none());
+        assert!(dir.join("autosave/world.dat").is_file(), "the autosave is kept");
     }
 
     /// Review 2026-10-06 — the pause menu's Save cleared the crash-recovery

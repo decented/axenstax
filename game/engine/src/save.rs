@@ -1308,13 +1308,20 @@ pub(crate) fn sync_dir(dir: &std::path::Path) {
 /// existing file.
 #[cfg(not(target_arch = "wasm32"))]
 fn corrupt_sibling_path(path: &std::path::Path) -> PathBuf {
+    aside_sibling_path(path, "corrupt")
+}
+
+/// `<path>.<why>-<unix secs>`, with a `-<n>` suffix if taken — never an
+/// existing file.
+#[cfg(not(target_arch = "wasm32"))]
+fn aside_sibling_path(path: &std::path::Path, why: &str) -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let base = {
         let mut t = path.as_os_str().to_owned();
-        t.push(format!(".corrupt-{ts}"));
+        t.push(format!(".{why}-{ts}"));
         PathBuf::from(t)
     };
     let mut dest = base.clone();
@@ -1378,6 +1385,27 @@ pub(crate) fn quarantine_corrupt(path: &std::path::Path) -> Result<PathBuf, Stri
         path.display(),
         dest.display()
     );
+    Ok(dest)
+}
+
+/// COPY a file that failed to load to `<path>.corrupt-<unix secs>`, leaving it in
+/// place — for a `world.dat` that must stay where it is (the lobby lists only
+/// folders with one) but that the session's next save will overwrite
+/// (`world_open::open_world` opening an older autosave over it). Unlike
+/// [`keep_damaged_copy_once`] it reports a failure, so the caller can refuse
+/// rather than let the only copy be overwritten. Returns the copy's path.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn copy_damaged_aside(path: &std::path::Path) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if QUARANTINE_FAILS_FOR.with(|f| {
+        f.borrow().as_deref().is_some_and(|n| path.file_name().is_some_and(|f| f == n))
+    }) {
+        return Err(format!("copy {}: injected failure", path.display()));
+    }
+    let dest = corrupt_sibling_path(path);
+    fs::copy(path, &dest)
+        .map_err(|e| format!("copy {} -> {}: {e}", path.display(), dest.display()))?;
+    log::error!("{} failed to load; a copy is kept as {}", path.display(), dest.display());
     Ok(dest)
 }
 
@@ -1594,7 +1622,11 @@ pub(crate) const STAGED_CHUNKS: &str = "chunks.new";
 /// 1. Every non-empty chunk into `chunks.new/` (one left by an earlier first save
 ///    cut short — never committed, as there is no `world.dat` — is cleared
 ///    first), then one directory fsync.
-/// 2. `world.dat` — the commit point.
+/// 2. `world.dat` — the commit point — then [`world_dat_committed`]: a directory
+///    fsync (so the rename below can never be durable without it), the
+///    autosave dropped (`at_commit`), and the staged chunks noted as on disk, so
+///    a later save can delete one once mined out even if step 3 fails here and
+///    is finished by that save.
 /// 3. `chunks.new/` renamed to `chunks/` ([`publish_staged_chunks`]).
 ///
 /// Cut short before 2, there is no `world.dat` and no `chunks/*.chunk`: the world
@@ -1608,6 +1640,7 @@ pub(crate) fn write_first_save(
     dir: &std::path::Path,
     world: &World,
     encoded: &[u8],
+    at_commit: AtCommit,
 ) -> Result<(), String> {
     let staging = dir.join(STAGED_CHUNKS);
     match fs::remove_dir_all(&staging) {
@@ -1633,14 +1666,47 @@ pub(crate) fn write_first_save(
     first_save_cut(FirstSaveCut::AfterChunks(staged.len()))?;
     sync_dir(&staging);
     write_atomic(&dir.join("world.dat"), encoded)?;
-    #[cfg(test)]
-    first_save_cut(FirstSaveCut::BeforePublish)?;
-    publish_staged_chunks(dir)?;
-    // Known on disk from here: a later save may delete one once mined out.
+    world_dat_committed(dir, at_commit);
+    // Committed: known on disk from here, whether the publish below or the next
+    // load or save ([`finish_staged_first_save`]) moves them to `chunks/` — a
+    // later save may delete one once mined out (third review, 2026-10-06: noted
+    // only after the publish, a publish that failed here left a chunk mined out
+    // since to come back).
     for key in staged {
         world.note_disk_chunk(key);
     }
+    #[cfg(test)]
+    first_save_cut(FirstSaveCut::BeforePublish)?;
+    publish_staged_chunks(dir)?;
     Ok(())
+}
+
+/// What a save does to the crash-recovery autosave once its `world.dat` has
+/// committed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AtCommit {
+    /// Leave it: an import (a new folder), the dedicated server (which never
+    /// reads or clears one), a plain [`save_world`].
+    KeepAutosave,
+    /// Drop it: the live session's save ([`save_world_superseding_autosave`]).
+    /// The new `world.dat` is the newest copy of the world there is.
+    DropAutosave,
+}
+
+/// `world.dat` has just been renamed into place. Make that rename durable (one
+/// directory fsync — before a first save's publish, so `chunks/` can never be
+/// durable without the `world.dat` it belongs to), then drop the autosave it
+/// supersedes when `at_commit` says so. Runs BEFORE anything after the commit
+/// that can still fail (the publish, the meta write): a save that failed there
+/// kept an OLDER autosave, which the next open preferred over the newer
+/// `world.dat` — the save rolled back (third review, 2026-10-06).
+#[cfg(not(target_arch = "wasm32"))]
+fn world_dat_committed(dir: &std::path::Path, at_commit: AtCommit) {
+    sync_dir(dir);
+    if at_commit == AtCommit::DropAutosave {
+        clear_autosave_in(dir);
+    }
 }
 
 /// Step 3 of [`write_first_save`]: `chunks.new/` becomes `chunks/`. Never over
@@ -1675,6 +1741,12 @@ fn publish_staged_chunks(dir: &std::path::Path) -> Result<(), String> {
 /// committed — the one write a load makes before it knows the world opens. A
 /// `chunks.new/` without a `world.dat` was never committed and is left for the
 /// next first save to clear.
+///
+/// A `chunks.new/` beside a `world.dat` AND saved `chunks/*.chunk` is stale: an
+/// older build (one without staging) saved over a committed first save it could
+/// not see, so the `chunks/` beside `world.dat` is newer. It is set aside whole as
+/// `chunks.new.stale-<ts>`, never lost (third review, 2026-10-06: such a folder
+/// was refused at every load and save, forever).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn finish_staged_first_save(dir: &std::path::Path) -> Result<(), String> {
     let staged = dir
@@ -1682,6 +1754,20 @@ pub(crate) fn finish_staged_first_save(dir: &std::path::Path) -> Result<(), Stri
         .try_exists()
         .map_err(|e| format!("{STAGED_CHUNKS}/ can't be checked ({e})"))?;
     if !staged || !dir.join("world.dat").is_file() {
+        return Ok(());
+    }
+    if let Some(file) = crate::world_open::saved_chunk_file(dir)? {
+        let from = dir.join(STAGED_CHUNKS);
+        let to = aside_sibling_path(&from, "stale");
+        fs::rename(&from, &to).map_err(|e| {
+            format!("stale {STAGED_CHUNKS}/ (beside {file}) can't be set aside ({e})")
+        })?;
+        log::warn!(
+            "{}: {STAGED_CHUNKS}/ is older than the saved chunks beside world.dat ({file}); \
+             kept aside as {}",
+            dir.display(),
+            to.display()
+        );
         return Ok(());
     }
     log::warn!(
@@ -1736,6 +1822,19 @@ pub fn write_world_folder(
     save: &WorldSave,
     world: &World,
 ) -> Result<(), String> {
+    write_world_folder_at(name, meta, save, world, AtCommit::KeepAutosave)
+}
+
+/// [`write_world_folder`], doing `at_commit` to the autosave the moment
+/// `world.dat` commits ([`world_dat_committed`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn write_world_folder_at(
+    name: &str,
+    meta: &WorldMeta,
+    save: &WorldSave,
+    world: &World,
+    at_commit: AtCommit,
+) -> Result<(), String> {
     let dir = world_dir(name);
     refuse_world_write(&dir)?;
     finish_staged_first_save(&dir)?;
@@ -1751,7 +1850,7 @@ pub fn write_world_folder(
     let encoded = crate::save_format::encode_world_save(save)?;
 
     if is_first_save(&dir) {
-        write_first_save(&dir, world, &encoded)?;
+        write_first_save(&dir, world, &encoded, at_commit)?;
         return save_world_meta(name, meta);
     }
 
@@ -1774,13 +1873,17 @@ pub fn write_world_folder(
     sync_dir(&chunks_dir);
 
     write_atomic(&dir.join("world.dat"), &encoded)?;
+    world_dat_committed(&dir, at_commit);
     save_world_meta(name, meta)?;
 
     Ok(())
 }
 
-/// Save the world to disk.
+/// Save the world to disk. Leaves any crash-recovery autosave alone; the live
+/// session saves through [`save_world_superseding_autosave`] (so on native only
+/// the tests call this directly).
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_world(
     name: &str,
     world: &World,
@@ -1788,6 +1891,21 @@ pub fn save_world(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
+) -> Result<(), String> {
+    save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave)
+}
+
+/// [`save_world`], doing `at_commit` to the autosave the moment `world.dat`
+/// commits.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_world_at(
+    name: &str,
+    world: &World,
+    players: &[crate::player_slot::PlayerSlot],
+    seed: u32,
+    carts: &[SavedCart],
+    saved_mobs: &[SavedTamedPet],
+    at_commit: AtCommit,
 ) -> Result<(), String> {
     if players.is_empty() {
         return Err("save_world: no players to save".to_string());
@@ -2001,7 +2119,7 @@ pub fn save_world(
 
     // Delegate the actual file writes (world.dat, world_meta.json, chunks/)
     // to the shared helper so import uses the same code path.
-    write_world_folder(name, &meta, &save, world)?;
+    write_world_folder_at(name, &meta, &save, world, at_commit)?;
 
     // Log after the write so we can report the final version and chunk count.
     let saved = world.persistable_chunks()
@@ -4155,10 +4273,14 @@ pub fn autosave_world(
     save_world(name, world, players, seed, carts, saved_mobs)
 }
 
-/// Save the live session's world ([`save_world`]) and, once that save has
-/// landed, drop the crash-recovery autosave it superseded: the loader prefers
-/// an autosave, so one left behind would roll the fresh save back after a crash.
-/// A failed save keeps it. Every save of the live session goes through here
+/// Save the live session's world ([`save_world`]) and drop the crash-recovery
+/// autosave it supersedes the moment its `world.dat` commits
+/// ([`AtCommit::DropAutosave`]) — even if something after the commit then fails
+/// (a first save's publish, the meta write): the new `world.dat` is the newest
+/// copy, and an older autosave left beside it rolled the save back at the next
+/// open (third review, 2026-10-06; `world_open::open_world` also opens an
+/// autosave first only when it is newer than `world.dat`). A save that fails
+/// BEFORE its commit keeps it. Every save of the live session goes through here
 /// (`GameState::save_live_world`): Save, Save & Quit and every other exit that
 /// saves, a resumable scenario's start and the replay snapshot — the last two
 /// used to leave it behind (review 2026-10-06).
@@ -4170,9 +4292,15 @@ pub fn save_world_superseding_autosave(
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
 ) -> Result<(), String> {
-    save_world(name, world, players, seed, carts, saved_mobs)?;
-    clear_autosave(name);
-    Ok(())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::DropAutosave)
+    }
+    // The web keeps no separate autosave (it writes the save itself).
+    #[cfg(target_arch = "wasm32")]
+    {
+        save_world(name, world, players, seed, carts, saved_mobs)
+    }
 }
 
 /// How long ago this world's crash-recovery autosave was written ("2 minutes
@@ -4238,12 +4366,28 @@ pub fn load_autosave(
 /// Delete the autosave directory for a world.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn clear_autosave(name: &str) {
-    let dir = world_dir(name).join("autosave");
+    clear_autosave_in(&world_dir(name));
+}
+
+/// Delete `<folder>/autosave/`: its `world.dat` (the autosave's commit point)
+/// FIRST, so a clear that fails part-way never leaves an autosave that loads with
+/// some of its chunks gone; the rest only once that is gone.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn clear_autosave_in(folder: &std::path::Path) {
+    let dir = folder.join("autosave");
+    match fs::remove_file(dir.join("world.dat")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!("Failed to clear autosave ({}): {e}", dir.display());
+            return;
+        }
+    }
     if dir.exists() {
         if let Err(e) = fs::remove_dir_all(&dir) {
             log::warn!("Failed to clear autosave: {e}");
         } else {
-            log::info!("Cleared autosave for '{name}'");
+            log::info!("Cleared autosave in {}", folder.display());
         }
     }
 }

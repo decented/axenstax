@@ -1856,13 +1856,25 @@ format version in a trailing footer — see the bincode note under Migration str
     repair fails the world is refused; a damaged chunk or autosave the load had
     already kept aside then stays aside (moved, never lost). The session adopts
     the PoP secret the repair persisted (`persist_pop_secret_if_missing`).
-  - **Autosave fallback.** The client prefers the crash-recovery autosave. If it
-    fails to load (and is not a newer build's), the last manual save (`world.dat`)
-    is opened instead and the damaged autosave folder is renamed to
-    `autosave.corrupt-<ts>`, so neither the next autosave nor the leave-time
-    `clear_autosave` can destroy it; a toast says which copy the player got (an
-    autosave recovery is announced too). If that rename fails, or `world.dat` also
-    fails, the world is refused. An autosave the world opened FROM is kept until a
+  - **Autosave fallback.** The client opens the crash-recovery autosave FIRST only
+    when it was written after `world.dat` (third review, 2026-10-06 —
+    `world_open::autosave_is_newer`): neither file records when it was saved, and
+    each is written whole by tmp + rename, so their modification times are
+    compared — strictly later wins, a tie goes to `world.dat`, and when either time
+    can't be read the autosave goes first (the old rule). An autosave OLDER than
+    `world.dat` is stale (a save that committed but failed later, on a build that
+    didn't yet drop it at the commit; or a dedicated-server save, which never
+    clears one): it used to be preferred anyway, rolling the newer save back. It
+    is now cleared once `world.dat` has opened (left, its stale chunk files would
+    mix into the next autosave). If the copy opened first fails to load (and is
+    not a newer build's), the other is opened instead: a damaged autosave folder
+    is renamed to `autosave.corrupt-<ts>`, so neither the next autosave nor the
+    leave-time `clear_autosave` can destroy it; a damaged `world.dat` newer than
+    the autosave is COPIED to `world.dat.corrupt-<ts>` and left in place (the lobby
+    lists only folders with a `world.dat`), because the session's next save
+    overwrites it (`OpenedFrom::AutosaveAfterLastSaveFailed`). A toast says which
+    copy the player got (an autosave recovery is announced too). If that rename or
+    copy fails, or the other copy fails too, the world is refused. An autosave the world opened FROM is kept until a
     save lands (review 2026-10-06): it used to be deleted as soon as the world
     opened, and with a damaged `world.dat` it is the only good copy. "Quit without
     saving" keeps it too, for the whole session until a save lands
@@ -1899,7 +1911,14 @@ format version in a trailing footer — see the bincode note under Migration str
     1. every non-empty chunk is written into `chunks.new/` (one left by an earlier
        first save cut short is cleared first — it was never committed), then one
        directory fsync;
-    2. `world.dat` is written atomically — the commit point;
+    2. `world.dat` is written atomically — the commit point — then
+       `world_dat_committed`: one directory fsync of the world folder (so the
+       rename in step 3 can never be durable without `world.dat`), the live
+       session's save drops the autosave (below), and the staged chunks are noted
+       as on disk (`note_disk_chunk`) — all before anything that can still fail.
+       Noted only after step 3 (the previous rule), a publish that failed (a
+       Windows antivirus lock on the rename) left the next save to publish them
+       without knowing they were on disk, so a chunk mined out since came back;
     3. `chunks.new/` is renamed to `chunks/` (`publish_staged_chunks`): an empty
        `chunks/` is removed first, one holding anything else (a stray `.tmp`) is
        kept aside whole as `chunks.corrupt-<ts>`, and it never publishes over a
@@ -1912,10 +1931,16 @@ format version in a trailing footer — see the bincode note under Migration str
     (`load_world`, after the decode) or the next save (`save_world`,
     `write_world_folder`, `GameServer::try_save`) finishes step 3
     (`finish_staged_first_save`), before anything is read or deleted; a
-    `chunks.new/` without a `world.dat` is left alone. Every later save still
-    writes its chunks into `chunks/` first and `world.dat` last (its commit point).
-    Tests cut a first save short at every chunk boundary and just before the
-    publish (`save::FIRST_SAVE_CUT`) and check that the folder is new or whole.
+    `chunks.new/` without a `world.dat` is left alone. A `chunks.new/` beside a
+    `world.dat` AND saved `chunks/*.chunk` is stale — after a downgrade, an older
+    build without staging saved over a committed first save it couldn't see, so
+    the `chunks/` beside `world.dat` is newer — and is set aside whole as
+    `chunks.new.stale-<ts>` (third review, 2026-10-06: it was refused at every load
+    and save, forever). Every later save still writes its chunks into `chunks/`
+    first and `world.dat` last (its commit point). Tests cut a first save short at
+    every chunk boundary and just before the publish (`save::FIRST_SAVE_CUT`) and
+    check that the folder is new or whole — and one lets the next SAVE, with no
+    open in between, finish the publish and delete a chunk mined out since.
   - **A failed save is never silent (review 2026-10-06).** Pause → Save clears the
     crash-recovery autosave only once the save landed (it was cleared after a
     failed save too); any failed save shows *"Couldn't save: <reason>. Your last
@@ -1936,17 +1961,30 @@ format version in a trailing footer — see the bincode note under Migration str
     and the pause menu says so rather than promising a discard — the button reads
     *"Quit — your autosave from <age> is kept"* with *"Anything since your autosave
     from <age> will be lost."* under it (`save::autosave_age`). A failed
-    window-close save sets `close_save_failed`, appends *"Close the window again to
-    quit — your autosave from <age> is kept."* (or *"… to quit without saving."*
-    when none is kept) to the toast, and the NEXT close quits without saving
-    (`close_choice` returns `Abandon`), so a save that keeps failing never traps
-    the player in the world.
-  - **Every save of the live session supersedes the autosave once it lands**
-    (`save::save_world_superseding_autosave`, via `GameState::save_live_world`): the
-    pause-menu Save, Save & Quit and every other exit that saves, a resumable
-    scenario's start and the replay snapshot — the last two used to leave a stale
-    autosave behind, which the loader prefers and so would roll the fresh save back
-    after a crash. A failed save keeps the autosave.
+    window-close save (`GameState::close_window`) sets `close_save_failed` and
+    appends *"Close the window again to try once more and quit — if the save fails
+    again, your autosave from <age> is kept."* (or *"… the game quits without
+    saving."* when none is kept) to the toast. The NEXT close tries the save once
+    more and quits either way (`world_exit::after_close_save`): when it fails again,
+    by a `SaveChoice::Abandon` that keeps the autosave — so a save that keeps
+    failing never traps the player in the world, and a close never quits without
+    first trying to save (third review, 2026-10-06: the flag used to make every
+    later close quit unsaved, however much was played since). Any save that lands
+    clears the flag.
+  - **Every save of the live session supersedes the autosave the moment its
+    `world.dat` commits** (`save::save_world_superseding_autosave` →
+    `AtCommit::DropAutosave`, via `GameState::save_live_world`): the pause-menu
+    Save, Save & Quit and every other exit that saves, a resumable scenario's start
+    and the replay snapshot — the last two used to leave a stale autosave behind,
+    which the loader preferred and so rolled the fresh save back after a crash. It
+    is dropped at the commit, before the publish and the meta write (third review,
+    2026-10-06): a save that failed AFTER the commit kept the older autosave and
+    the next open preferred it over the newer `world.dat`. A save that fails
+    BEFORE its commit keeps the autosave. `clear_autosave` removes
+    `autosave/world.dat` (its commit point) first, so a clear that fails part-way
+    never leaves an autosave that loads with some of its chunks gone. Imports
+    (`write_world_folder`) and the dedicated server (`write_first_save` with
+    `AtCommit::KeepAutosave`) leave it alone.
   - **An import never writes into a taken name** (review 2026-10-06). `.axeworld`
     and `.axeprofile` imports name against EVERY entry under the worlds root, not
     the lobby list (which shows only folders with a `world.dat` and hides the

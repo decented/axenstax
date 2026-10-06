@@ -2188,44 +2188,21 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 // Native only — the browser has no close-save (its autosave
-                // rides IndexedDB). Closing is one more way out of a world, so
-                // it goes through the same `leave_world` Save & Quit uses; it
-                // SAVES while the player is in a loaded world this machine
-                // owns — their own or a Trial arena (never from the lobby,
-                // mid-load, after "Quit without saving", or a joined session).
+                // rides IndexedDB). `GameState::close_window` saves a live own
+                // world or arena like Save & Quit; a close-save that fails
+                // keeps the window open (to retry), and the next close tries
+                // once more and quits either way, keeping the autosave.
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     // Give the router its port back and retire the bearer with
                     // the bounded, on-thread variant first, so `leave_world`'s
-                    // own `stop_online` finds nothing left to wait on.
+                    // own `stop_online` finds nothing left to wait on. (Online
+                    // hosting is retired even when the close stays.)
                     state.stop_online_on_exit();
-                    let in_world = matches!(state.mode, GameMode::Playing | GameMode::Paused { .. });
-                    // A close never throws away a crash-recovery autosave:
-                    // it saves a live own world or arena, or leaves disk alone.
-                    let choice = crate::world_exit::close_choice(
-                        in_world,
-                        state.live_world,
-                        state.session_saves.close_save_failed,
-                    );
-                    // A close-save that FAILED keeps the window open in the
-                    // world with the toast saying why (review 2026-10-06): the
-                    // player can retry, "Quit without saving", or close again —
-                    // which quits WITHOUT saving and keeps the autosave, so a
-                    // save that keeps failing never traps them. (Online
-                    // hosting was already retired above.)
-                    let stayed = state.live_world.is_some()
-                        && !state.leave_world(choice, crate::world_exit::ExitTo::Quit);
-                    if stayed {
-                        state.session_saves.close_save_failed = true;
-                        let hint = crate::world_exit::close_again_hint(
-                            state.kept_autosave_age().as_deref(),
-                        );
-                        if let Some((msg, _)) = state.toast.as_mut() {
-                            msg.push_str(&hint);
-                        }
-                        state.window.request_redraw();
-                    } else {
+                    if state.close_window() {
                         event_loop.exit();
+                    } else {
+                        state.window.request_redraw();
                     }
                 }
                 #[cfg(target_arch = "wasm32")]

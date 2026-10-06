@@ -433,3 +433,33 @@ LATER save cut short can still leave a partial NEW column (the world-generation 
 of a column first saved in that save), the same hole class. And `World::set_block`
 still auto-creating a chunk means a non-air write into a column the streamer had
 dropped can overwrite the real file (known debt in the project notes).
+
+## Update 2026-10-06: third review of the save follow-ups
+
+A third review found these, all fixed (Spec 02 §8.4; the red run before the fix failed
+the seven new disk tests):
+
+- **A save that failed after its commit rolled itself back.** When a save failed AFTER
+  `world.dat` was renamed into place (the meta write, or a first save's publish), the
+  live session kept the older crash-recovery autosave — and the next open preferred any
+  autosave over `world.dat`, so the newer save was lost. Both halves are fixed: the
+  live session's save now drops the autosave the moment `world.dat` commits
+  (`AtCommit::DropAutosave`, after one directory fsync), and the client opens the
+  autosave first only when it is newer than `world.dat` (modification times — neither
+  file records its save time; a tie goes to `world.dat`). A stale, older autosave is
+  cleared once `world.dat` has opened. If a `world.dat` newer than the autosave fails to
+  load, the older autosave opens instead, with the damaged `world.dat` copied aside as
+  `world.dat.corrupt-<ts>` (left in place, so the lobby still lists the world).
+- **A failed window-close save made every later close quit unsaved.** The flag never
+  expired. Now the second close tries the save once more and quits either way, keeping
+  the autosave if it fails again; any save that lands clears the flag.
+- **Staged first-save chunks were noted as on disk only after the publish.** If the
+  rename failed, the next save published them without knowing they were on disk, so a
+  chunk mined out since came back. They are noted the moment `world.dat` commits, and a
+  test now lets the next SAVE — not an open — finish the publish.
+- **No directory fsync between `world.dat` and the publish**, so the `chunks/` rename
+  could be durable without `world.dat`. One is made at the commit (no in-process test
+  can observe it).
+- **After a downgrade a folder could hold `world.dat`, `chunks/*.chunk` and a
+  `chunks.new/`** and was refused forever. That `chunks.new/` is stale and is now set
+  aside as `chunks.new.stale-<ts>`.
