@@ -138,11 +138,13 @@ pub enum BlockEntityData {
     Composter(crate::workstation::WorkstationState),
 }
 
-/// The block-entity families whose state lives on the HOST's client world and
-/// is mirrored into its `HostedServer` (`HostedServer::mirror_host_world_state`):
-/// the containers a joiner's break spills, and the economy blocks whose owner
-/// the server checks. A lit/unlit furnace or a chest tier change stays in its
-/// family, so the entity survives it.
+/// The block-entity families a joiner's edit has to keep in step: the
+/// containers a joiner's break spills (`HostedServer::spill_container_on_change`),
+/// and the economy blocks whose owner the server checks. A lit/unlit furnace
+/// or a chest tier change stays in its family, so the entity survives it.
+/// (The name is historical: until D1 a LAN host mirrored these families into
+/// its server's second copy of the world. A host now lends the server its one
+/// world — `sim_lend` — so there is nothing to mirror.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MirroredFamily {
     Chest,
@@ -700,6 +702,11 @@ pub struct World {
     /// as world data (not ECS — no physics/AI), rendered by
     /// `entity_model::build_rigged_vertices`. Persisted via `WorldSave.rigs`.
     pub rigs: Vec<RigDisplay>,
+    /// D1 — how often each shared world-sim system has run on THIS world
+    /// (`sim_lend`). Travels with the world through a host's lend, so a system
+    /// that both the host client and the server ran in one tick shows up as a
+    /// double count. Diagnostic only; never persisted.
+    pub sim_tally: crate::sim_lend::SimTally,
 }
 
 /// #19 Rig Studio — one placed authored rig: where it stands, which way it
@@ -778,6 +785,7 @@ impl World {
             power: crate::power::PowerState::default(),
             hostile_acts: crate::hostile_acts::HostileActLedger::new(),
             rigs: Vec::new(),
+            sim_tally: crate::sim_lend::SimTally::default(),
         }
     }
 
@@ -1662,14 +1670,7 @@ impl World {
             // the server already spilled its live copy
             // (`HostedServer::spill_container_on_change`), so spilling again
             // would duplicate the contents (audit 2026-09-27, review B1).
-            let old_family = mirrored_family(old_block);
-            if old_family.is_some()
-                && old_family != mirrored_family(bc.new_block)
-                && self.block_entities.get(&pos).and_then(BlockEntityData::mirrored_family)
-                    == old_family
-            {
-                self.block_entities.remove(&pos);
-            }
+            self.drop_orphaned_family_entity(pos, old_block, bc.new_block);
             if old_block == block::PLOT_MARKER && bc.new_block != block::PLOT_MARKER {
                 self.release_plot(pos);
             }
@@ -1679,6 +1680,27 @@ impl World {
             crate::power::sync_device_from_meta(self, pos, bc.meta);
         }
         block_changed || meta_changed
+    }
+
+    /// When `old_block` → `new_block` leaves its [`MirroredFamily`] (a
+    /// container or economy block broken or replaced), drop the entity that
+    /// family left at `pos`, if it is still there — no spill. Shared by a
+    /// receiving client's [`Self::apply_remote_block_change`] and the server's
+    /// joiner-edit apply (which spills containers first).
+    pub fn drop_orphaned_family_entity(
+        &mut self,
+        pos: (i32, i32, i32),
+        old_block: BlockId,
+        new_block: BlockId,
+    ) {
+        let old_family = mirrored_family(old_block);
+        if old_family.is_some()
+            && old_family != mirrored_family(new_block)
+            && self.block_entities.get(&pos).and_then(BlockEntityData::mirrored_family)
+                == old_family
+        {
+            self.block_entities.remove(&pos);
+        }
     }
 
     /// Borrow the power device at `pos`, if a `PowerDevice` block-entity lives

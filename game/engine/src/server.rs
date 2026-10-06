@@ -608,6 +608,13 @@ pub struct GameServer {
     /// `0` — off — otherwise. The dedicated server streams instead
     /// ([`Self::column_streamer`], Phase B1): one column-loading story per mode.
     pub column_refill_per_tick: usize,
+    /// D1 — is the host client's world lent in right now (`sim_lend::LentSim`
+    /// sets it for the window and clears it on drop)? While set, `world`,
+    /// `ecs`, the fluid/fire/leaf systems and `loaded_columns` ARE the host's;
+    /// `tick` runs only the systems `SimSystem::lent_owner` gives the server
+    /// and never advances the host's clock or weather. Never set on a
+    /// dedicated server.
+    pub lent: bool,
     pub leaf_decay: LeafDecaySystem,
     pub world_time: u32,
     pub loaded_columns: ahash::AHashSet<(i32, i32)>,
@@ -700,6 +707,7 @@ impl GameServer {
             explosives_enabled: true,
             simulates_block_machines: false,
             column_refill_per_tick: 0,
+            lent: false,
             leaf_decay: LeafDecaySystem::new(),
             world_time: 6000,
             loaded_columns: ahash::AHashSet::new(),
@@ -790,16 +798,7 @@ impl GameServer {
         // Live server render distance (Spec 39 — was the `RENDER_DISTANCE` const).
         let rd = self.render_distance;
 
-        // Pull mode + flat-world config from world meta so the hosted-server
-        // sim matches the saved world: physics-flight gate (mode), terrain type
-        // (world_type/ground/water_depth), day/night lock, and mob gating.
-        // Falls back to defaults for a brand-new world with no meta yet.
-        let meta = crate::save::load_world_meta(&self.world_name);
-        self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
-        self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
-        self.world.apply_meta_rules(&meta);
-        self.fire_spread_enabled = meta.fire_spread_enabled;
-        self.explosives_enabled = meta.explosives_enabled;
+        self.load_meta_rules();
 
         // Check for saved world. The server reads `world.dat` only: it never
         // clears a crash-recovery autosave, so preferring one would shadow every
@@ -813,56 +812,12 @@ impl GameServer {
         .map_err(|why| crate::world_open::server_refusal_message(&wname, &why))?;
         if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
             log::info!("Loaded saved world '{wname}'.");
-            // Build per-player restore list: new saves have a `players` Vec;
-            // old saves have an empty Vec — fall back to legacy single-player fields.
-            let player_saves: Vec<crate::save::PlayerSaveData> = if save_data.players.is_empty() {
-                vec![crate::save::PlayerSaveData {
-                    x: save_data.player_x,
-                    y: save_data.player_y,
-                    z: save_data.player_z,
-                    yaw: 0.0,
-                    pitch: 0.0,
-                    health: save_data.player_health,
-                    hotbar_slot: save_data.hotbar_slot,
-                    inventory: save_data.inventory.clone(),
-                    spawn_pos: None, // legacy single-player save
-                    hunger: 20,
-                    reputation: vec![],
-                    tamed_pets: vec![],
-                    armour_slots: [None, None, None, None],
-                    kill_counter: vec![],
-                    bounties_claimed: vec![],
-                }]
-            } else {
-                save_data.players.clone()
-            };
-
-            // Restore each player from save
-            for (i, p_save) in player_saves.iter().enumerate() {
-                if let Some(slot) = self.players.get_mut(i) {
-                    slot.player.pos = Vec3::new(p_save.x, p_save.y, p_save.z);
-                    slot.player.velocity = Vec3::ZERO;
-                    slot.player.reset_fall();
-                    // Note: ServerPlayer has no camera — yaw/pitch are only
-                    // restored in PlayerSlot (game_loop.rs) for the local client.
-                    slot.combat.health = p_save.health;
-                    slot.combat.hunger = p_save.hunger;
-                    slot.hotbar_slot = p_save.hotbar_slot;
-                    crate::save::restore_inventory(&mut slot.inventory, &p_save.inventory);
-                }
-            }
-
-            // Position any extra players (beyond what's in the save) near player 0
+            self.restore_saved_players(&save_data);
             let p0_pos = self
                 .players
                 .first()
                 .map(|p| p.player.pos)
                 .unwrap_or(Vec3::new(0.5, 80.0, 0.5));
-            for i in player_saves.len()..self.players.len() {
-                self.players[i].player.pos = p0_pos + Vec3::new(i as f32 * 2.0, 0.0, 0.0);
-                self.players[i].player.velocity = Vec3::ZERO;
-                self.players[i].player.reset_fall();
-            }
 
             // Mark loaded columns
             for (cx, _cy, cz) in self.world.chunk_positions() {
@@ -965,6 +920,110 @@ impl GameServer {
         Ok(())
     }
 
+    /// D1 — the load for a server the host client will LEND its world to
+    /// (`sim_lend`): the world's meta rules and its saved players, nothing
+    /// else. No chunk, entity or fluid is read, generated or scattered — the
+    /// host client loads the one world, and refuses it if it can't be opened
+    /// (Spec 02 §8.4), so a damaged `world.dat` here only costs the players'
+    /// saved state (logged), never a fresh world.
+    pub fn initial_load_lent(&mut self) {
+        self.load_meta_rules();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let dat = crate::save::world_dir(&self.world_name).join("world.dat");
+            match std::fs::read(&dat) {
+                Ok(bytes) => match crate::save::read_world_save_reporting(&bytes) {
+                    Ok((save, _)) => self.restore_saved_players(&save),
+                    Err(e) => log::warn!(
+                        "world '{}': saved players not restored ({e}); the host's own load decides the world",
+                        self.world_name
+                    ),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!(
+                    "world '{}': world.dat unreadable ({e}); saved players not restored",
+                    self.world_name
+                ),
+            }
+        }
+    }
+
+    /// Pull mode + flat-world config from world meta so the server's sim
+    /// matches the saved world: physics-flight gate (mode), terrain type
+    /// (world_type/ground/water_depth), day/night lock, and mob gating.
+    /// Falls back to defaults for a brand-new world with no meta yet.
+    fn load_meta_rules(&mut self) {
+        let meta = crate::save::load_world_meta(&self.world_name);
+        self.set_play_mode(crate::play_mode::PlayMode::from_meta_str(&meta.game_mode));
+        self.difficulty = crate::survival::Difficulty::from_meta_str(&meta.difficulty);
+        self.world.apply_meta_rules(&meta);
+        self.fire_spread_enabled = meta.fire_spread_enabled;
+        self.explosives_enabled = meta.explosives_enabled;
+    }
+
+    /// Restore every slot from a save: new saves carry a `players` Vec; old
+    /// ones an empty Vec, so fall back to the legacy single-player fields.
+    /// Slots beyond the save stand beside player 0.
+    fn restore_saved_players(&mut self, save_data: &crate::save::WorldSave) {
+        let player_saves: Vec<crate::save::PlayerSaveData> = if save_data.players.is_empty() {
+            vec![crate::save::PlayerSaveData {
+                x: save_data.player_x,
+                y: save_data.player_y,
+                z: save_data.player_z,
+                yaw: 0.0,
+                pitch: 0.0,
+                health: save_data.player_health,
+                hotbar_slot: save_data.hotbar_slot,
+                inventory: save_data.inventory.clone(),
+                spawn_pos: None, // legacy single-player save
+                hunger: 20,
+                reputation: vec![],
+                tamed_pets: vec![],
+                armour_slots: [None, None, None, None],
+                kill_counter: vec![],
+                bounties_claimed: vec![],
+            }]
+        } else {
+            save_data.players.clone()
+        };
+
+        for (i, p_save) in player_saves.iter().enumerate() {
+            if let Some(slot) = self.players.get_mut(i) {
+                slot.player.pos = Vec3::new(p_save.x, p_save.y, p_save.z);
+                slot.player.velocity = Vec3::ZERO;
+                slot.player.reset_fall();
+                // Note: ServerPlayer has no camera — yaw/pitch are only
+                // restored in PlayerSlot (game_loop.rs) for the local client.
+                slot.combat.health = p_save.health;
+                slot.combat.hunger = p_save.hunger;
+                slot.hotbar_slot = p_save.hotbar_slot;
+                crate::save::restore_inventory(&mut slot.inventory, &p_save.inventory);
+            }
+        }
+
+        let p0_pos = self
+            .players
+            .first()
+            .map(|p| p.player.pos)
+            .unwrap_or(Vec3::new(0.5, 80.0, 0.5));
+        for i in player_saves.len()..self.players.len() {
+            self.players[i].player.pos = p0_pos + Vec3::new(i as f32 * 2.0, 0.0, 0.0);
+            self.players[i].player.velocity = Vec3::ZERO;
+            self.players[i].player.reset_fall();
+        }
+    }
+
+    /// D1 — does this tick run `system` here? Always on a server that owns its
+    /// world; on a lent one only the systems `SimSystem::lent_owner` gives the
+    /// server. A run is tallied on the world it runs on (`sim_lend::SimTally`).
+    fn runs(&mut self, system: crate::sim_lend::SimSystem) -> bool {
+        let run = system.runs_on(crate::sim_lend::SimSide::Server, self.lent);
+        if run {
+            self.world.sim_tally.bump(system);
+        }
+        run
+    }
+
     /// Run one server simulation tick (20 TPS).
     ///
     /// Covers: world time, mob spawn/sun-burn (400-tick cycle), falling
@@ -975,16 +1034,22 @@ impl GameServer {
     ///
     /// A host's own local slots are position-trusted by design (the host is
     /// the authority's own machine); every joiner is simulated here from its
-    /// inputs (Spec 04 §5.3). BRIDGE: single-player bypasses GameServer entirely;
-    /// mob spawning + falling blocks + player sim all run a parallel copy on
-    /// the client side in that case (see game_loop.rs). Task 1d routes
-    /// single-player through HostedServer so GameServer is the single
-    /// authority; then the dual-sim code paths delete.
+    /// inputs (Spec 04 §5.3).
+    ///
+    /// On a LENT world (D1, [`Self::lent`]) only the systems
+    /// `sim_lend::SimSystem::lent_owner` gives the server run here: the host
+    /// client keeps its clock and weather, the mob locomotion block (brigand
+    /// pre-pass, `mob_ai`, entity physics) and the death sweep, so nothing
+    /// ticks twice on the one world. Single-player runs no server at all; its
+    /// client still simulates everything (CLAUDE.md known debt).
     pub fn tick(&mut self) {
+        use crate::sim_lend::SimSystem;
         // Per-world active-tick clock (Goal 1) — mirrors GameState::tick so
         // hosted / headless (TestHost) worlds accrue the same world-clock stat
         // (total_ticks). Source of truth on disk is WorldMeta.
-        self.world.tick_world_clock();
+        if self.runs(SimSystem::WorldClock) {
+            self.world.tick_world_clock();
+        }
         // Spec 29 — drain legacy meat ejected from v1 furnaces during
         // load (mirror of GameState::tick). Empty after the first
         // post-load tick.
@@ -1002,11 +1067,14 @@ impl GameServer {
         }
         // Advance world time (24000 ticks per day cycle = 20 min @ 20 TPS).
         // Matches GameState::world_time_step's default of 1 (post-playtest
-        // rollback from the alpha-fast 4× BRIDGE).
-        self.world_time = (self.world_time + 1) % 24000;
-        // Monotonic counter — used by anything that needs an absolute
-        // age check (Rubber tap cooldown, future replenishers).
-        self.tick_counter = self.tick_counter.wrapping_add(1);
+        // rollback from the alpha-fast 4× BRIDGE). A lent world's clock is the
+        // host's: `LentSim` hands it in, already advanced for this tick.
+        if self.runs(SimSystem::Clock) {
+            self.world_time = (self.world_time + 1) % 24000;
+            // Monotonic counter — used by anything that needs an absolute
+            // age check (Rubber tap cooldown, future replenishers).
+            self.tick_counter = self.tick_counter.wrapping_add(1);
+        }
 
         // Phase B1 — the dedicated server streams columns around every
         // connected player before anything below reads the world, so a column
@@ -1020,27 +1088,39 @@ impl GameServer {
         // is derived from (see `weather` field doc + `hosted_server.rs`'s
         // `broadcast_state`, which puts `self.weather.ticks_left(tick)` on
         // every StateUpdate).
-        self.weather = crate::weather::advance(
-            self.weather,
-            self.tick_counter,
-            crate::weather::world_has_weather(self.world.is_workshop),
-        );
+        // A lent world's window is the host's (its client rolled it this
+        // tick, and a trial may pin it), handed in by `LentSim`.
+        if self.runs(SimSystem::Weather) {
+            self.weather = crate::weather::advance(
+                self.weather,
+                self.tick_counter,
+                crate::weather::world_has_weather(self.world.is_workshop),
+            );
+        }
 
         // Mob spawn + sun-burn cycle (every 400 ticks = 20 s). Shared free
         // function — the single-player client path calls the same function on
-        // its own ECS until the dual-ECS state is unified (Task 1d).
-        let player_positions: Vec<Vec3> = self.players.iter().map(|sp| sp.player.pos).collect();
+        // its own ECS. Anchored on present, living players only (D1): a slot
+        // a joiner has left keeps its last position, and on a lent world
+        // spawning there would put mobs where nobody is, in the host's world.
+        let spawn_anchors: Vec<Vec3> = self
+            .players
+            .iter()
+            .filter(|sp| sp.is_present_and_alive())
+            .map(|sp| sp.player.pos)
+            .collect();
         // Blank-canvas time-lock: use the effective time so locked-day worlds
         // never trigger night-mob spawns and locked-night worlds always do.
         let eff_world_time = self.world.effective_world_time(self.world_time);
-        if self.world_time.is_multiple_of(400) {
+        if self.world_time.is_multiple_of(400) && self.runs(SimSystem::MobSpawning) {
             crate::spawning::tick_mob_spawning(
                 &mut self.ecs,
                 &self.world,
                 eff_world_time,
-                &player_positions,
+                &spawn_anchors,
             );
         }
+        let player_positions: Vec<Vec3> = self.players.iter().map(|sp| sp.player.pos).collect();
 
         // Falling blocks + water/leaf decay (every 4th tick = 5 Hz).
         self.falling_tick_counter = self.falling_tick_counter.wrapping_add(1);
@@ -1048,71 +1128,75 @@ impl GameServer {
             // Falling blocks — shared pure function, same logic as client path.
             // Returned BlockChange records go into pending_block_changes so
             // hosted_server.rs's snapshot builder drains them to clients.
-            let falling_changes = crate::falling_blocks::tick_falling_blocks(
-                &mut self.world,
-                &self.registry,
-                &mut self.water,
-                &player_positions,
-                MAX_CHUNK_Y,
-            );
-            self.pending_block_changes.extend(falling_changes);
+            if self.runs(SimSystem::FallingBlocks) {
+                let falling_changes = crate::falling_blocks::tick_falling_blocks(
+                    &mut self.world,
+                    &self.registry,
+                    &mut self.water,
+                    &player_positions,
+                    MAX_CHUNK_Y,
+                );
+                self.pending_block_changes.extend(falling_changes);
+            }
 
-            let water_dirty = self.water.tick_spread(&mut self.world);
-            // A water spread that froze a lava source to obsidian must drop that
-            // source from the lava system, or a re-placed lava cell there is
-            // silently inert (phantom source). Mirror of the client tick.
-            crate::fluids::reconcile_frozen_lava_sources(
-                &mut self.lava,
-                &self.world,
-                &water_dirty,
-            );
-            let water_retract = self.water.tick_retract(&mut self.world);
-            // Campaign B — lava flow (slower + shorter range than water; freezes
-            // to obsidian on water contact). Runs on the same 4-tick cadence as
-            // water; its own SLOW_FACTOR gate crawls it slower still.
-            let lava_spread = self.lava.tick_spread(&mut self.world);
-            let lava_retract = self.lava.tick_retract(&mut self.world);
+            if self.runs(SimSystem::Fluids) {
+                let water_dirty = self.water.tick_spread(&mut self.world);
+                // A water spread that froze a lava source to obsidian must drop that
+                // source from the lava system, or a re-placed lava cell there is
+                // silently inert (phantom source). Mirror of the client tick.
+                crate::fluids::reconcile_frozen_lava_sources(
+                    &mut self.lava,
+                    &self.world,
+                    &water_dirty,
+                );
+                let water_retract = self.water.tick_retract(&mut self.world);
+                // Campaign B — lava flow (slower + shorter range than water; freezes
+                // to obsidian on water contact). Runs on the same 4-tick cadence as
+                // water; its own SLOW_FACTOR gate crawls it slower still.
+                let lava_spread = self.lava.tick_spread(&mut self.world);
+                let lava_retract = self.lava.tick_retract(&mut self.world);
 
-            // Fire (2026-07-04) — server-authoritative burn, gated on the
-            // server's OWN weather window (`self.weather`, advanced once per
-            // tick above) — not a private re-roll, so a hosted world's
-            // fire-dousing rain agrees with the rain every client is shown.
-            let raining_now = self.tick_counter < self.weather.rain_until;
-            let fire_lit =
-                self.fire
-                    .ignite_from_lava(&mut self.world, &lava_spread, self.tick_counter);
-            let fire_dirty = self.fire.tick(
-                &mut self.world,
-                self.tick_counter,
-                raining_now,
-                self.fire_spread_enabled,
-            );
+                // Fire (2026-07-04) — server-authoritative burn, gated on the
+                // server's OWN weather window (`self.weather`, advanced once per
+                // tick above) — not a private re-roll, so a hosted world's
+                // fire-dousing rain agrees with the rain every client is shown.
+                let raining_now = self.tick_counter < self.weather.rain_until;
+                let fire_lit =
+                    self.fire
+                        .ignite_from_lava(&mut self.world, &lava_spread, self.tick_counter);
+                let fire_dirty = self.fire.tick(
+                    &mut self.world,
+                    self.tick_counter,
+                    raining_now,
+                    self.fire_spread_enabled,
+                );
 
-            // Broadcast the fluid deltas. Each system reports the cells it
-            // touched; read the settled block there (WATER/LAVA/OBSIDIAN/AIR)
-            // and queue a BlockChange so remote clients SEE the fluid move —
-            // same pattern as falling blocks + power above. Without this the
-            // server advanced fluids invisibly until a full chunk resync. The
-            // per-tick budgets in water/lava cap this at a few hundred cells.
-            for &(x, y, z) in water_dirty
-                .iter()
-                .chain(water_retract.iter())
-                .chain(lava_spread.iter())
-                .chain(lava_retract.iter())
-                .chain(fire_lit.iter())
-                .chain(fire_dirty.iter())
-            {
-                let nb = self.world.get_block(x, y, z);
-                // Carry the meta byte: water depth levels (AUX field) ride the
-                // same delta so remote clients render the sloped surface and
-                // compute the same flow vector as the host.
-                self.pending_block_changes.push(crate::protocol::BlockChange::with_meta(
-                    x,
-                    y,
-                    z,
-                    nb,
-                    self.world.meta_at(x, y, z),
-                ));
+                // Broadcast the fluid deltas. Each system reports the cells it
+                // touched; read the settled block there (WATER/LAVA/OBSIDIAN/AIR)
+                // and queue a BlockChange so remote clients SEE the fluid move —
+                // same pattern as falling blocks + power above. Without this the
+                // server advanced fluids invisibly until a full chunk resync. The
+                // per-tick budgets in water/lava cap this at a few hundred cells.
+                for &(x, y, z) in water_dirty
+                    .iter()
+                    .chain(water_retract.iter())
+                    .chain(lava_spread.iter())
+                    .chain(lava_retract.iter())
+                    .chain(fire_lit.iter())
+                    .chain(fire_dirty.iter())
+                {
+                    let nb = self.world.get_block(x, y, z);
+                    // Carry the meta byte: water depth levels (AUX field) ride the
+                    // same delta so remote clients render the sloped surface and
+                    // compute the same flow vector as the host.
+                    self.pending_block_changes.push(crate::protocol::BlockChange::with_meta(
+                        x,
+                        y,
+                        z,
+                        nb,
+                        self.world.meta_at(x, y, z),
+                    ));
+                }
             }
 
             // Leaf decay — APPLY the result (T1-3): it used to be computed and
@@ -1122,17 +1206,20 @@ impl GameServer {
             // fed by `on_log_broken` from the block-edit apply in
             // `hosted_server.rs` for REMOTE players' log breaks only, on every
             // host kind (a joiner's client runs no decay; a LAN host's client
-            // keeps owning decay of its own breaks). Not flag-gated.
-            let leaf_dirty = self.leaf_decay.tick(&mut self.world);
-            for &(x, y, z) in &leaf_dirty {
-                let nb = self.world.get_block(x, y, z);
-                self.pending_block_changes
-                    .push(crate::game_loop::broadcast_change(&self.world, x, y, z, nb));
+            // keeps owning decay of its own breaks). Not flag-gated. On a lent
+            // world the queue is the host's own, fed by both kinds of break.
+            if self.runs(SimSystem::LeafDecay) {
+                let leaf_dirty = self.leaf_decay.tick(&mut self.world);
+                for &(x, y, z) in &leaf_dirty {
+                    let nb = self.world.get_block(x, y, z);
+                    self.pending_block_changes
+                        .push(crate::game_loop::broadcast_change(&self.world, x, y, z, nb));
+                }
+                crate::leaf_decay::spawn_sapling_drops(
+                    &mut self.ecs,
+                    self.leaf_decay.take_sapling_drops(),
+                );
             }
-            crate::leaf_decay::spawn_sapling_drops(
-                &mut self.ecs,
-                self.leaf_decay.take_sapling_drops(),
-            );
 
             // Block machines (T1-3) — only where no host client ticks them.
             if self.simulates_block_machines {
@@ -1162,18 +1249,21 @@ impl GameServer {
             .collect();
         // HP-3 — brigand AI pre-pass runs BEFORE the main dispatcher so
         // tier-specific detect-range + flee-gate + day/night chase-gate
-        // overrides land first.
-        crate::brigand::tick_brigand_overrides(
-            &mut self.ecs,
-            &player_positions,
-            eff_world_time,
-        );
-        crate::mob_ai::tick_mob_ai(
-            &mut self.ecs,
-            &self.world,
-            &self.registry,
-            &player_positions,
-        );
+        // overrides land first. A lent world's host client runs both (with
+        // the joiners' positions), around its own species AI.
+        if self.runs(SimSystem::MobAi) {
+            crate::brigand::tick_brigand_overrides(
+                &mut self.ecs,
+                &player_positions,
+                eff_world_time,
+            );
+            crate::mob_ai::tick_mob_ai(
+                &mut self.ecs,
+                &self.world,
+                &self.registry,
+                &player_positions,
+            );
+        }
         // HP-3 — Brigand Hideout replenisher. Throttled internally on
         // the per-hideout 24 000-tick cooldown; safe to call every tick
         // (the heavy lift only runs when a hideout needs topping up).
@@ -1181,42 +1271,54 @@ impl GameServer {
         // 0-23999): `REPLENISH_COOLDOWN_TICKS = 24 000` = day length,
         // so the subtract math wraps wrong every day and the cooldown
         // resets silently.
-        crate::brigand_hideout_gen::tick_hideout_spawning(
-            &mut self.world,
-            &mut self.ecs,
-            self.tick_counter,
-        );
+        if self.runs(SimSystem::Hideouts) {
+            crate::brigand_hideout_gen::tick_hideout_spawning(
+                &mut self.world,
+                &mut self.ecs,
+                self.tick_counter,
+            );
+        }
         // Salt feature — snowfall painter. Internally throttled on
         // SNOWFALL_PERIOD_TICKS (6 000 ticks); cheap to call every
         // tick because the body is a no-op on intermediate ticks.
         // MUST use `tick_counter` — pass_id = tick / 6 000 collapses
         // to {0,1,2,3} with a cyclic 24 000 clock, so the same four
         // cells get snow every day instead of drifting.
-        crate::snowfall::tick_snowfall(
-            &mut self.world,
-            &self.biome_gen,
-            self.biome_gen.seed,
-            self.tick_counter,
-        );
+        if self.runs(SimSystem::Snowfall) {
+            crate::snowfall::tick_snowfall(
+                &mut self.world,
+                &self.biome_gen,
+                self.biome_gen.seed,
+                self.tick_counter,
+            );
+        }
         // Rubber feature — restore tapped rubber logs whose cooldown
         // expired. O(N) scan of the tapped-logs index every tick; index
         // is bounded by player-tapped trees so stays tiny. MUST use
         // `tick_counter` (monotonic), not `world_time` (cyclic 0-23999):
         // a subtract-based age check on a 24 000-tick cooldown never
         // fires with a clock that wraps at 24 000.
-        crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter);
+        if self.runs(SimSystem::Rubber) {
+            crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter);
+        }
         // Salt feature — Salt Lick aura HP regen for livestock. Self-
         // throttled internally on SALT_LICK_REGEN_INTERVAL_TICKS; safe
         // to call every tick.
-        crate::salt_lick::tick_salt_lick_regen(&mut self.ecs, &self.world, self.tick_counter);
+        if self.runs(SimSystem::SaltLick) {
+            crate::salt_lick::tick_salt_lick_regen(&mut self.ecs, &self.world, self.tick_counter);
+        }
         // Spec 33 Mob Bounty Board — daily rotation refresh. Self-
         // throttled internally on BOUNTY_REFRESH_TICKS.
-        let _ = crate::bounty::tick_bounty_refresh(
-            &mut self.world, self.tick_counter, self.biome_gen.seed,
-        );
+        if self.runs(SimSystem::Bounties) {
+            let _ = crate::bounty::tick_bounty_refresh(
+                &mut self.world, self.tick_counter, self.biome_gen.seed,
+            );
+        }
 
-        // Entity physics
-        crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
+        // Entity physics (the host client's, on a lent world — see MobAi).
+        if self.runs(SimSystem::EntityPhysics) {
+            crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
+        }
 
         // Item-entity housekeeping (death-drops phase 2b) — mirror of the
         // client-sim pass in game_loop.rs: lifetime decay (5-min despawn +
@@ -1224,7 +1326,7 @@ impl GameServer {
         // unpickable and accumulate forever), then magnet/pickup for
         // server-simulated players. Local (position-trusted) players are
         // skipped — they pick up from their own client sim, and granting here
-        // too would double-count under the single-player parity flag. Only
+        // too would double-count on a lent (D1) world. Only
         // stacks that survive the `ItemRef` wire encoding are granted (a tool
         // collapses to a bare tier on the wire — fabricating a wrong-kind,
         // full-durability tool client-side is worse than leaving the drop).
@@ -1248,7 +1350,9 @@ impl GameServer {
                 &std::collections::HashMap::new(),
             );
         }
-        crate::entity::tick_item_lifetimes(&mut self.ecs);
+        if self.runs(SimSystem::ItemLifetimes) {
+            crate::entity::tick_item_lifetimes(&mut self.ecs);
+        }
         self.pending_item_grants.clear();
         {
             let mut eligible_players: Vec<(usize, Vec3, &mut Inventory)> = Vec::new();
@@ -1275,7 +1379,7 @@ impl GameServer {
         // (so pressure plates see settled positions) and BEFORE carts (so a
         // powered rail's speed-up is already computed when the cart steps).
         // Server-authoritative; visual flips ride pending_block_changes.
-        {
+        if self.runs(SimSystem::Power) {
             let mut power_positions: Vec<(f32, f32, f32)> = self
                 .players
                 .iter()
@@ -1318,7 +1422,9 @@ impl GameServer {
         // (mirrors the GameState::tick call so hosted / headless worlds advance
         // carts identically). Carts omit OnGround so the physics tick above
         // skips them; this drives their timed cell-to-cell travel instead.
-        crate::cart::tick_carts(&mut self.ecs, &mut self.world);
+        if self.runs(SimSystem::Carts) {
+            crate::cart::tick_carts(&mut self.ecs, &mut self.world);
+        }
 
         // Per-player entity collision + combat timers
         for i in 0..self.players.len() {
@@ -1335,10 +1441,23 @@ impl GameServer {
         }
 
         // Entity health timers
-        for (_id, health) in self.ecs.query_mut::<&mut crate::combat::Health>() {
-            health.tick();
+        if self.runs(SimSystem::EntityHealth) {
+            for (_id, health) in self.ecs.query_mut::<&mut crate::combat::Health>() {
+                health.tick();
+            }
         }
 
+        // The death sweep. A lent world's is the host client's: its single
+        // kill-attribution site (kill counters, the Vow, raids, challenges)
+        // needs the attacker this sweep would discard (Q1 trap 2).
+        if self.runs(SimSystem::DespawnDead) {
+            self.despawn_dead_with_drops();
+        }
+    }
+
+    /// `despawn_dead` with its drops and hideout bookkeeping — the server's
+    /// death sweep.
+    fn despawn_dead_with_drops(&mut self) {
         // HP-3 — snapshot HomeHideout anchors on dying brigands so the
         // post-despawn population decrement runs against the right
         // hideout.
@@ -2535,8 +2654,8 @@ mod tests {
     }
 
     /// Local (position-trusted) players pick up from their own client sim —
-    /// the server granting too would double-count under the single-player
-    /// parity flag. Their drops stay on the server floor.
+    /// the server granting too would double-count on a lent (D1) world.
+    /// Their drops stay on the server floor.
     #[test]
     fn server_pickup_skips_local_position_trusted_players() {
         let mut server = pickup_server_with_drop(crate::item::ItemStack::new_material(

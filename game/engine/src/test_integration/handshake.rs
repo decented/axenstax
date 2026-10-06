@@ -297,6 +297,7 @@ fn hosted_server_started_on_a_prebound_socket_keeps_its_port() {
         42,
         4,
         sock,
+        crate::hosted_server::HostWorld::Lent,
     )
     .expect("start_online");
     assert_eq!(server.port, port, "the accept thread must own the socket we bound");
@@ -364,6 +365,7 @@ fn start_online_refuses_a_host_with_no_remote_slots() {
         42,
         0,
         sock,
+        crate::hosted_server::HostWorld::Lent,
     ) else {
         panic!("a zero-slot online host must be rejected, not silently deaf");
     };
@@ -388,6 +390,7 @@ fn connect_to_server_on_socket_wins_against_a_prebound_host() {
         42,
         4,
         host_sock,
+        crate::hosted_server::HostWorld::Lent,
     )
     .expect("start_online");
 

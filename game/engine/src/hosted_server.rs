@@ -29,19 +29,41 @@ use crate::protocol;
 use crate::signet;
 use crate::transport::{self, ChannelClientTransport, ServerTransport};
 
-/// Phase 0 of `docs/foundations/2026-04-20-singleplayer-hostedserver-routing.md`.
-///
-/// When `true`, single-player paths (LoadWorld / NewWorld) start a
-/// `HostedServer` with `1 local + 0 remote` *alongside* the existing
-/// client-side simulation. Both sides tick the same world; `parity_check`
-/// runs each tick and logs any divergence. Today's RNG state isn't shared
-/// between the two sides, so divergence is expected and surfaces as the
-/// log signal Phase 1 will use to validate the cutover.
-///
-/// Shipped at `false` for the playtest boundary — flipping it on creates
-/// a second simulation per session, doubling the per-tick CPU cost. Phase
-/// 0b (the actual wiring exercise) flips this with Axolittle in the room.
-pub const ENABLE_SINGLEPLAYER_HOSTED_SERVER: bool = false;
+/// D1 — where a hosted server's world lives (`crate::sim_lend`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostWorld {
+    /// The server loads and simulates its own `World` + ECS. The dedicated
+    /// server (no host client), and a host started with `--no-lend`.
+    Owned,
+    /// A host client (LAN Host Game, online host) lends its own world to the
+    /// server for each tick (`sim_lend::LentSim`): one world, one simulation,
+    /// and joiners are diffed from the host's real world and entities.
+    Lent,
+}
+
+/// `--no-lend`: the one-release escape hatch back to a host whose embedded
+/// server owns a second copy of the world (the pre-D1 behaviour, minus the
+/// host→server block-entity mirror). Set once at startup.
+#[cfg(not(target_arch = "wasm32"))]
+static NO_LEND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the `--no-lend` command-line flag (`lib.rs::run`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_no_lend(no_lend: bool) {
+    NO_LEND.store(no_lend, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How a host client's embedded server holds its world: lent, unless the
+/// player started with `--no-lend`. Single-player runs no server at all, and
+/// the dedicated server always owns its world (`HostedServer::start`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn host_world_mode() -> HostWorld {
+    if NO_LEND.load(std::sync::atomic::Ordering::Relaxed) {
+        HostWorld::Owned
+    } else {
+        HostWorld::Lent
+    }
+}
 
 /// Which network transport accepts remote players.
 ///
@@ -122,6 +144,23 @@ pub struct HostedServer {
     /// that haven't been broadcast yet. Drained into the per-client
     /// `outboxes` on the next broadcast.
     pending_block_changes: Vec<protocol::BlockChange>,
+    /// D1 — whether this server owns its world or borrows the host client's
+    /// (`sim_lend`). Fixed at start.
+    host_world: HostWorld,
+    /// D1, lent only — the changes the server's own systems made to the
+    /// host's world this tick (fluids, falling blocks, leaf decay, power, …),
+    /// captured from `server.pending_block_changes` before the broadcast
+    /// drains them. The host client remeshes them and replays their
+    /// presentation (`take_lent_changes`).
+    lent_sim_changes: Vec<protocol::BlockChange>,
+    /// D1, lent only — cells a joiner's accepted edit or device flip changed
+    /// in the host's world this tick (the host's own edits are already
+    /// meshed by its client).
+    lent_edit_cells: Vec<(i32, i32, i32)>,
+    /// D1, lent only — set once the host's ECS has been cleared of
+    /// `ProtocolId`s from any earlier server (ids are per `HostedServer`, so
+    /// a stale one would collide with this server's fresh numbering).
+    lent_ids_reset: bool,
     /// Per-slot outbound StateUpdate queue (gap-audit T1-5), indexed like
     /// `transports`: splits a tick under the packet cap, holds a remote
     /// client to its per-tick byte budget, coalesces a backlog, and turns an
@@ -357,6 +396,9 @@ impl HostedServer {
     /// `prebound`: `Some(socket)` on the online path — quinn adopts it and the
     ///             listening port is that socket's port, because that is the
     ///             port already inside the candidates the peer was sent.
+    /// `host_world`: [`HostWorld::Lent`] when a host client will lend its
+    ///             world every tick (the server then loads no world of its
+    ///             own), [`HostWorld::Owned`] otherwise.
     fn start_inner(
         num_local_players: usize,
         server_name: String,
@@ -364,7 +406,12 @@ impl HostedServer {
         max_remote_players: usize,
         remote_transport: RemoteTransport,
         #[cfg(not(target_arch = "wasm32"))] prebound: Option<std::net::UdpSocket>,
+        host_world: HostWorld,
     ) -> Result<Self, String> {
+        // A lent world is a host CLIENT's: there must be one to lend it.
+        if host_world == HostWorld::Lent && num_local_players == 0 {
+            return Err("a lent-world server needs a host client (at least one local player)".to_string());
+        }
         // Effective listening port. An online host bound its own socket before
         // gathering candidates, so the port is whatever the OS gave it — and it
         // MUST be that one, because that is the port already inside the
@@ -424,29 +471,43 @@ impl HostedServer {
         // client uses (load_world_meta(folder).seed).
         let mut server = crate::server::GameServer::new(num_local_players, name_clone.clone(), seed);
         // T1-3 — the server ticks the block machines (pistons, furnaces,
-        // crops, hoppers, …; `block_machines.rs`) only when no local host
-        // client does. Invariant: 0 local players ⇔ no host client — every
-        // client host path (LAN Host Game, online host, the single-player
-        // parity path) starts with ≥ 1, and the dedicated server
-        // (`server_main`, the WebSocket dedicated path) starts with 0.
+        // crops, hoppers, …; `block_machines.rs`) and server projectiles only
+        // when no local host client does. Invariant: 0 local players ⇔ no
+        // host client — every client host path (LAN Host Game, online host)
+        // starts with ≥ 1, and the dedicated server (`server_main`, the
+        // WebSocket dedicated path) starts with 0. A lent world's machines
+        // are the host client's, so this is never set on a lending server.
         server.simulates_block_machines = num_local_players == 0;
-        // One column-loading story per mode, never both. A LAN / online host
-        // generates terrain ahead of its joiners' bodies (Spec 04 §5.3.1; its
-        // host client streams its own). The dedicated server, with no host
-        // client streaming for it, loads / unloads columns around every
-        // connected player + the spawn itself (Phase B1, `server_stream.rs`).
+        // One column-loading story per mode, never two generators on one world:
+        // - the dedicated server (0 local players, no host client streaming for
+        //   it) loads / unloads columns round every connected player + the
+        //   spawn itself (Phase B1, `server_stream.rs`);
+        // - a LAN / online host that keeps its own copy (`--no-lend`) generates
+        //   terrain ahead of its joiners' bodies (Spec 04 §5.3.1); its host
+        //   client streams its own;
+        // - a host that LENDS its world (D1) does neither: its host client's
+        //   streamer anchors on every joiner's server body too
+        //   (`chunk_stream::stream_anchors`), so it loads and keeps their
+        //   columns, and a second generator here would write the host's own
+        //   world behind that streamer's back.
         // The streamer is its own flag, not an alias of
-        // `simulates_block_machines`: a host lending its world (D1/D4) will
-        // tick machines but not stream.
-        if num_local_players > 0 {
-            server.column_refill_per_tick = crate::server::HOST_COLUMN_REFILL_PER_TICK;
-        } else {
+        // `simulates_block_machines`: a host lending its world (D4) will tick
+        // machines but not stream.
+        if num_local_players == 0 {
             server.column_streamer = Some(crate::server_stream::ColumnStreamer::default());
+        } else if host_world == HostWorld::Owned {
+            server.column_refill_per_tick = crate::server::HOST_COLUMN_REFILL_PER_TICK;
         }
-        // A world on disk that fails to load is refused here — before the accept
-        // thread starts or anything is saved — never replaced by a fresh world
-        // (Spec 02 §8.4). The error names the file and why.
-        server.initial_load()?;
+        match host_world {
+            // A world on disk that fails to load is refused here — before the
+            // accept thread starts or anything is saved — never replaced by a
+            // fresh world (Spec 02 §8.4). The error names the file and why.
+            HostWorld::Owned => server.initial_load()?,
+            // D1 — the host client loads the one world (and refuses a damaged
+            // one itself, leaving the world, which drops this server). Only
+            // the meta rules and the saved players are read here.
+            HostWorld::Lent => server.initial_load_lent(),
+        }
         // The dedicated streamer's spawn anchor follows the computed world
         // spawn (`world_spawn` records its column) from boot, not only from
         // the first join.
@@ -568,6 +629,10 @@ impl HostedServer {
             disconnected,
             attached_tick: vec![0; num_local_players],
             pending_block_changes: Vec::new(),
+            host_world,
+            lent_sim_changes: Vec::new(),
+            lent_edit_cells: Vec::new(),
+            lent_ids_reset: false,
             // Local slots ride an in-process channel: unbudgeted outboxes.
             outboxes: (0..num_local_players)
                 .map(|_| crate::state_outbox::ClientOutbox::new(false))
@@ -637,6 +702,9 @@ impl HostedServer {
     /// and the socket handed to the accept thread, so a taken port is an `Err`
     /// with a readable reason (T2-10); the WebSocket dedicated server binds in
     /// its own accept thread as before.
+    ///
+    /// The server owns (loads and simulates) its world: the dedicated server,
+    /// and the test rigs. A host client starts through [`Self::start_host`].
     pub fn start(
         num_local_players: usize,
         server_name: String,
@@ -652,7 +720,93 @@ impl HostedServer {
             remote_transport,
             #[cfg(not(target_arch = "wasm32"))]
             None,
+            HostWorld::Owned,
         )
+    }
+
+    /// Start the server a host client (LAN Host Game) embeds. `host_world` is
+    /// [`host_world_mode`] in the game: [`HostWorld::Lent`] unless the player
+    /// passed `--no-lend`.
+    pub fn start_host(
+        num_local_players: usize,
+        server_name: String,
+        seed: u32,
+        max_remote_players: usize,
+        remote_transport: RemoteTransport,
+        host_world: HostWorld,
+    ) -> Result<Self, String> {
+        Self::start_inner(
+            num_local_players,
+            server_name,
+            seed,
+            max_remote_players,
+            remote_transport,
+            #[cfg(not(target_arch = "wasm32"))]
+            None,
+            host_world,
+        )
+    }
+
+    /// D1 — does this server simulate the host client's lent world (rather
+    /// than a copy of its own)?
+    pub fn lends_host_world(&self) -> bool {
+        self.host_world == HostWorld::Lent
+    }
+
+    /// Test-only: switch how this server holds its world after it started
+    /// (`sim_lend::OwnedSimParts::take_from` takes an owning server's loaded
+    /// world out of it and makes it lend from then on).
+    #[cfg(test)]
+    pub(crate) fn set_host_world_for_test(&mut self, host_world: HostWorld) {
+        self.host_world = host_world;
+    }
+
+    /// D1 — called by `sim_lend::LentSim::lend` once the host's world is in.
+    /// The first time, clears every `ProtocolId` from the host's ECS: ids are
+    /// numbered per `HostedServer`, so an id left by an earlier server (the
+    /// host hosted, stopped, and hosted again on the same ECS) would collide
+    /// with this one's numbering and reach joiners as a duplicate spawn. A
+    /// safety net — every host path today loads the world after the server
+    /// starts, so the ECS is fresh.
+    pub(crate) fn on_lend(&mut self) {
+        if self.lent_ids_reset {
+            return;
+        }
+        self.lent_ids_reset = true;
+        let tagged: Vec<hecs::Entity> = self
+            .server
+            .ecs
+            .query::<&crate::entity::ProtocolId>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+        for e in tagged {
+            let _ = self.server.ecs.remove_one::<crate::entity::ProtocolId>(e);
+        }
+    }
+
+    /// D1, lent only — what this tick changed in the host's world that the
+    /// host client did not do itself: `(the server's own sim changes, cells a
+    /// joiner's edit or device flip changed)`. The host remeshes both and
+    /// replays the sim changes' presentation (power challenges). Cleared by
+    /// the call; always empty on an owning server.
+    pub fn take_lent_changes(&mut self) -> (Vec<protocol::BlockChange>, Vec<(i32, i32, i32)>) {
+        (
+            std::mem::take(&mut self.lent_sim_changes),
+            std::mem::take(&mut self.lent_edit_cells),
+        )
+    }
+
+    /// Queue block changes the host client made itself (a `/we` region batch)
+    /// for the next broadcast, without the host remeshing them again.
+    pub fn queue_host_broadcast(&mut self, changes: impl IntoIterator<Item = protocol::BlockChange>) {
+        self.pending_block_changes.extend(changes);
+    }
+
+    /// How many block changes are already queued for the next broadcast
+    /// (bounds a `/we` region batch).
+    pub fn queued_broadcasts(&self) -> usize {
+        self.pending_block_changes.len() + self.server.pending_block_changes.len()
     }
 
     /// Start a hosted server on an **already-bound** UDP socket (online play by
@@ -684,6 +838,7 @@ impl HostedServer {
         seed: u32,
         max_remote_players: usize,
         socket: std::net::UdpSocket,
+        host_world: HostWorld,
     ) -> Result<Self, String> {
         if max_remote_players == 0 {
             return Err(
@@ -699,6 +854,7 @@ impl HostedServer {
             max_remote_players,
             RemoteTransport::Quic,
             Some(socket),
+            host_world,
         )
     }
 
@@ -1300,7 +1456,16 @@ impl HostedServer {
     /// 3. Tick the simulation
     /// 4. Broadcast a StateUpdate to every completed-handshake client
     /// 5. Heartbeat LAN discovery (native + remote players enabled only)
+    ///
+    /// A lending server (D1) is ticked ONLY inside the lend window —
+    /// `sim_lend::LentSim::lend(hs, parts, clock).tick()` — so every step
+    /// above reads and writes the host client's own world.
     pub fn tick(&mut self) {
+        debug_assert_eq!(
+            self.lends_host_world(),
+            self.server.lent,
+            "a lending HostedServer ticks only inside a LentSim window (and an owning one never does)"
+        );
         self.accept_new_remote_connections();
         self.process_inbound_packets();
         self.reap_slots();
@@ -1963,13 +2128,26 @@ impl HostedServer {
                             sp.queue_input(crate::server::QueuedInput::from_packet(&input));
                         } else {
                             // Local / position-trusted path — by design, not
-                            // debt: a local slot is a player on the host's own
-                            // machine, and the host is the authority's own
-                            // machine (Spec 04 §5.3). Its position is applied
-                            // as sent, so the input is applied now.
+                            // debt: a local slot is the host's own player on
+                            // the host's own machine, and the host is the
+                            // authority's own machine (Spec 04 §5.3; D1, Q1
+                            // trap 9) — on a lent world the host client that
+                            // moves it also owns the world. Its position is
+                            // applied as sent, so the input is applied now.
                             sp.player.pos = glam::Vec3::new(input.x, input.y, input.z);
                             sp.combat.health = input.health.clamp(0.0, 20.0);
                             sp.last_applied_input = input.tick;
+                        }
+                        // D1 — on a lent world a local slot's edits are
+                        // already in the world (the host client made them,
+                        // with its own fluid, power, leaf and container
+                        // bookkeeping) and already meshed. No budget, reach,
+                        // validation or apply: only the broadcast to joiners,
+                        // and never a send-back (re-sending a cell the host
+                        // itself changed would only race its next edit).
+                        if !simulated && self.lends_host_world() {
+                            self.pending_block_changes.extend(input.block_changes.iter().cloned());
+                            continue;
                         }
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick.
@@ -2005,6 +2183,16 @@ impl HostedServer {
                                 old_block,
                                 bc.new_block,
                                 remote,
+                            );
+                            // …and an economy block (vendor, tip jar, auction)
+                            // broken out from under its entity leaves no
+                            // orphan either — what a receiving client's
+                            // `World::apply_remote_block_change` does. On a
+                            // lent world this IS the host's entity.
+                            self.server.world.drop_orphaned_family_entity(
+                                (bc.x, bc.y, bc.z),
+                                old_block,
+                                bc.new_block,
                             );
                             // The validator only lets a plot marker's owner
                             // break it — breaking it releases the claim.
@@ -2105,6 +2293,11 @@ impl HostedServer {
                             }
                             self.server.world.notify_neighbours(cell);
                             self.pending_block_changes.push(bc.clone());
+                            // D1 — a joiner's edit landed in the host's own
+                            // world: its client must remesh the cell.
+                            if self.lends_host_world() {
+                                self.lent_edit_cells.push(cell);
+                            }
                         }
                         // MP-A3 — a reported death (only ever believed
                         // downward: health coming back is never taken — only
@@ -2281,62 +2474,6 @@ impl HostedServer {
         Ok(())
     }
 
-    /// Mirror the host client's live block-entity state into the server world
-    /// (review B1/S1). The host's client is where chests are filled, furnaces
-    /// fed, vendors stocked and plots claimed; the server's copy used to be
-    /// frozen at world load, so a joiner's break spilled stale contents and
-    /// the plot / economy gates missed anything claimed or placed since.
-    /// Called once a tick, just before [`Self::tick`], from the one place the
-    /// host feeds its hosted server (`game_loop`).
-    ///
-    /// An entity is copied only where the server's block agrees on its family,
-    /// so a container a joiner just broke (block already gone here, entity not
-    /// yet cleared on the host) is never resurrected; entities the host no
-    /// longer has are dropped. Plots and market hubs are copied whole.
-    ///
-    /// BRIDGE: host-client → server mirroring stands in for server-authoritative
-    /// container / economy state — replace when single-player routes through
-    /// HostedServer (CLAUDE.md known debt) and the server owns these entities.
-    pub fn mirror_host_world_state(&mut self, host: &crate::world::World) {
-        // T1-3 — the mirror exists because a host CLIENT owns the machines;
-        // a server that ticks them itself (the dedicated server) has no host
-        // client to mirror, and mirroring would overwrite its own sim.
-        debug_assert!(
-            !self.server.simulates_block_machines,
-            "mirror_host_world_state on a server that ticks its own block machines"
-        );
-        use crate::world::BlockEntityData as E;
-        let server = &mut self.server.world;
-        for (&pos, data) in &host.block_entities {
-            let Some(family) = data.mirrored_family() else {
-                continue;
-            };
-            if crate::world::mirrored_family(server.get_block(pos.0, pos.1, pos.2)) != Some(family) {
-                continue;
-            }
-            match (server.block_entities.get_mut(&pos), data) {
-                // Cheap equality where the types have it (a chest is the
-                // common, big one); everything else is small, so copy.
-                (Some(E::Chest(a)), E::Chest(b)) if a == b => {}
-                (Some(E::TipJar(a)), E::TipJar(b)) if a == b => {}
-                (Some(existing), _) => existing.clone_from(data),
-                (None, _) => {
-                    server.block_entities.insert(pos, data.clone());
-                }
-            }
-        }
-        server.block_entities.retain(|pos, d| {
-            d.mirrored_family().is_none()
-                || host.block_entities.get(pos).and_then(E::mirrored_family) == d.mirrored_family()
-        });
-        if server.plots != host.plots {
-            server.plots.clone_from(&host.plots);
-        }
-        if server.market_hubs != host.market_hubs {
-            server.market_hubs.clone_from(&host.market_hubs);
-        }
-    }
-
     /// Queue the block that is REALLY at a refused edit's cell onto the next
     /// StateUpdate, so the sender's optimistic local edit is overwritten. Rides
     /// the ordinary block-change broadcast (idempotent for everyone else).
@@ -2369,11 +2506,14 @@ impl HostedServer {
     /// its contents.
     ///
     /// Exactly one spill per container break (review B1): only a REMOTE
-    /// joiner's break (`spill = true`) drops the contents here, from the live
-    /// copy [`Self::mirror_host_world_state`] keeps. The host's own breaks —
-    /// pickaxe or keg blast — already spilled on the host's client, so the
-    /// server discards its copy; and the host's client clears its entity for a
-    /// joiner's break without spilling (`World::apply_remote_block_change`).
+    /// joiner's break (`spill = true`) drops the contents here. On a lent
+    /// world (D1) that is the host's own, live container, spilled into the
+    /// host's own ECS; the host's own breaks never reach this (its client
+    /// already spilled them). On an owning server (`--no-lend`, dedicated)
+    /// the host's breaks discard the server's copy, and a host client clears
+    /// its entity for a joiner's break without spilling
+    /// (`World::apply_remote_block_change`). An owning LAN host's copy is the
+    /// state at load — the pre-D1 host→server mirror is gone.
     fn spill_container_on_change(
         &mut self,
         cell: (i32, i32, i32),
@@ -2452,11 +2592,24 @@ impl HostedServer {
         }
         let now = self.server.tick_counter;
         if let Some(outcome) = crate::power::interact_device(&mut self.server.world, pos, now) {
+            // D1 — on a lent world the flip happened in the host's own world.
+            if self.lends_host_world() {
+                self.lent_edit_cells
+                    .extend(outcome.changes.iter().map(|bc| (bc.x, bc.y, bc.z)));
+            }
             self.pending_block_changes.extend(outcome.changes);
         }
     }
 
     fn broadcast_state(&mut self) {
+        // D1 — on a lent world these are changes the server's systems made
+        // to the HOST's world: keep a copy for the host client to remesh
+        // (`take_lent_changes`) before the broadcast drains them. Under
+        // lending there is no loopback re-apply that could notice them.
+        if self.lends_host_world() {
+            self.lent_sim_changes
+                .extend_from_slice(&self.server.pending_block_changes);
+        }
         // Drain server-produced block changes (falling blocks, etc.) into
         // the outbound queue; they ride the same StateUpdate as block
         // changes we accepted from clients above.
@@ -2481,8 +2634,9 @@ impl HostedServer {
         // P9 weather sync (v59) — the server's OWN weather window (advanced
         // once per tick in `GameServer::tick`), as ticks-remaining so the
         // sync is correct regardless of any tick_counter offset between the
-        // server and this client. `game_loop.rs` pushes the host's local
-        // weather into `self.server.weather` before `HostedServer::tick()`
+        // server and this client. A host client hands its own window in
+        // (`sim_lend::HostClock` when lent; `game_loop::tick_hosted_server`
+        // translates it on an owning host) before `HostedServer::tick()`
         // runs, so a hosting player's own rain window IS this broadcast.
         let (rain_ticks_left, storm_ticks_left) =
             self.server.weather.ticks_left(self.server.tick_counter);

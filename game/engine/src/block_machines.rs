@@ -10,18 +10,18 @@
 //!
 //! - **The client loop** (`game_loop.rs`) — single-player and the LAN/online
 //!   host. On a host it pushes the results into `pending_block_changes` → the
-//!   server → joiners, and `HostedServer::mirror_host_world_state` copies the
-//!   host's machine block-entities (furnaces, dispensers, chests, …) INTO the
-//!   server world every tick.
+//!   server → joiners. A host lends the server its one world every tick (D1,
+//!   `sim_lend`), so the machines' block-entities the server reads ARE the
+//!   host's.
 //! - **`GameServer::tick`** — only when [`GameServer::simulates_block_machines`]
 //!   is set, i.e. when no local host client simulates them: the dedicated server
 //!   (`HostedServer::start` with 0 local players — `server_main` and the
 //!   WebSocket dedicated path).
 //!
 //! The flag is the no-double-tick rule: on a LAN host the server must NOT tick
-//! these, or every piston would fire twice (once in each world) and the server's
-//! copy would fight the mirror. `mirror_host_world_state` debug-asserts the flag
-//! is off. Changes the server makes land in `GameServer::pending_block_changes`,
+//! these, or every piston would fire twice on the one lent world (or, with
+//! `--no-lend`, once in each world). Changes the server makes land in
+//! `GameServer::pending_block_changes`,
 //! which `HostedServer` drains into every `StateUpdatePacket` — the same road
 //! leaf decay, falling blocks, fluids and power already take to joiners.
 //!

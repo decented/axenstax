@@ -1,0 +1,258 @@
+//! D1 — a host lends its world to its embedded server (`crate::sim_lend`).
+//!
+//! These drive a REAL `HostedServer` through the lend window the game loop
+//! opens every tick (`sim_lend::LentSim`), with an `OwnedSimParts` standing in
+//! for the host client's fields: the world a normal server loaded is taken out
+//! of it as the host's own, and from then on the server only ever sees it
+//! inside the window. Joins and edits ride the in-process channel transport.
+//!
+//! What they pin: each shared sim system runs on exactly one side (the
+//! server's rows here, the host client's never); the server reads the host's
+//! clock and never advances it; joiners are diffed from the host's real ECS;
+//! the host's own edits are broadcast, never re-validated or sent back; a
+//! joiner's edit or a server-made change comes back for the host to remesh;
+//! state the host made this session (a filled chest, a plot, a vendor) is
+//! what a joiner meets, with no mirror in between.
+
+use super::joiner_authority::{
+    accepted, block_changes_seen, bones_in_ecs, cell_beside, chest_of_bones, send_edits,
+    send_guest_join, send_host_edits, start_open_server,
+};
+use crate::block;
+use crate::hosted_server::HostedServer;
+use crate::protocol;
+use crate::sim_lend::{OwnedSimParts, SimSide, SimSystem};
+use crate::transport::ChannelClientTransport;
+
+/// A lending host: a normal server loads (generates) a world, which is then
+/// taken out of it as the host client's own. Nothing has been broadcast yet.
+pub(super) fn start_lent(tag: &str) -> (HostedServer, OwnedSimParts) {
+    let mut hs = start_open_server(&format!("lent-{tag}"));
+    let host = OwnedSimParts::take_from(&mut hs);
+    (hs, host)
+}
+
+/// Attach + join a guest through one lent tick; returns (client, slot).
+pub(super) fn join_guest_lent(
+    hs: &mut HostedServer,
+    host: &mut OwnedSimParts,
+    name: &str,
+) -> (ChannelClientTransport, usize) {
+    let client = hs.attach_test_remote();
+    send_guest_join(&client, name);
+    host.lend_tick(hs);
+    let slot = accepted(&client).expect("guest join accepted").player_index as usize;
+    (client, slot)
+}
+
+fn entity_spawns_seen(client: &ChannelClientTransport) -> Vec<protocol::EntitySpawn> {
+    use crate::transport::ClientTransport;
+    let mut out = Vec::new();
+    while let Some(pkt) = client.try_recv_from_server() {
+        if let Some((ptype, payload)) = protocol::deserialize_header(&pkt)
+            && ptype == protocol::PacketType::StateUpdate
+            && let Ok(s) = protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload)
+        {
+            out.extend(s.entity_spawns);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_lent_tick_runs_only_the_servers_systems_and_never_moves_the_hosts_clock() {
+    let (mut hs, mut host) = start_lent("tally");
+    for _ in 0..3 {
+        let before = host.world.sim_tally;
+        host.lend_tick(&mut hs);
+        let after = host.world.sim_tally;
+        for s in SimSystem::ALL {
+            let runs = after.get(s) - before.get(s);
+            match s.lent_owner() {
+                SimSide::HostClient => assert_eq!(runs, 0, "{s:?} is the host client's to run"),
+                SimSide::Server if s.every_tick() => assert_eq!(runs, 1, "{s:?} runs once a tick"),
+                SimSide::Server => assert!(runs <= 1, "{s:?} ran {runs} times"),
+            }
+        }
+        // The clock the host handed in, never +1: the host owns `/time`.
+        assert_eq!(hs.server.world_time, host.clock.world_time);
+        assert_eq!(hs.server.tick_counter, host.clock.tick_counter);
+        assert_eq!(hs.server.weather, host.clock.weather);
+    }
+    // Outside the window the server holds nothing of the host's.
+    assert!(!hs.server.lent);
+    assert!(hs.server.loaded_columns.is_empty());
+    assert_eq!(hs.server.ecs.len(), 0);
+}
+
+#[test]
+fn a_joiners_diff_carries_the_hosts_own_mobs() {
+    let (mut hs, mut host) = start_lent("mobs");
+    let at = hs.server.players[0].player.pos;
+    let cow = crate::entity::spawn_mob(
+        &mut host.ecs,
+        crate::mob::MobType::Cow,
+        at + glam::Vec3::new(2.0, 0.0, 0.0),
+    );
+    let client = hs.attach_test_remote();
+    send_guest_join(&client, "Visitor");
+    host.lend_tick(&mut hs);
+    host.lend_tick(&mut hs);
+
+    let spawns = entity_spawns_seen(&client);
+    let cow_id = host
+        .ecs
+        .get::<&crate::entity::ProtocolId>(cow)
+        .expect("the host's own cow is broadcast")
+        .0;
+    let cows: Vec<_> = spawns.iter().filter(|s| s.id == cow_id).collect();
+    assert_eq!(cows.len(), 1, "the host's cow reaches the joiner exactly once");
+    assert_eq!(cows[0].kind, protocol::EntityKind::Cow);
+    // Every mob in the host's world reached the joiner — the diff is the
+    // host's ECS, not a second population.
+    let mut host_mobs = 0;
+    for (_e, (pid, _kind)) in host
+        .ecs
+        .query::<(&crate::entity::ProtocolId, &crate::entity::MobKind)>()
+        .iter()
+    {
+        host_mobs += 1;
+        assert!(spawns.iter().any(|s| s.id == pid.0), "host mob {} not sent", pid.0);
+    }
+    assert!(host_mobs >= 1);
+    assert_eq!(hs.server.ecs.len(), 0, "the server keeps no population of its own");
+}
+
+#[test]
+fn every_host_edit_reaches_joiners_and_none_is_validated_or_sent_back() {
+    let (mut hs, mut host) = start_lent("host-edits");
+    let (client, _slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    let _ = block_changes_seen(&client);
+    // The host's client made these in its own world (as its break/place arms
+    // do), more than an owning server's budget of 4, one far out of reach.
+    let mut edits = Vec::new();
+    for dx in 1..=5 {
+        edits.push((cell_beside(&hs, 0, dx, 3, 0), block::GLASS));
+    }
+    edits.push((cell_beside(&hs, 0, 30, 3, 0), block::GLASS));
+    for &((x, y, z), b) in &edits {
+        host.world.set_block(x, y, z, b);
+    }
+    send_host_edits(&hs, 1, &edits);
+    host.lend_tick(&mut hs);
+
+    let seen = block_changes_seen(&client);
+    for &(c, b) in &edits {
+        assert!(
+            seen.iter().any(|bc| (bc.x, bc.y, bc.z) == c && bc.new_block == b),
+            "host edit at {c:?} broadcast"
+        );
+        assert!(
+            !seen.iter().any(|bc| (bc.x, bc.y, bc.z) == c && bc.new_block != b),
+            "host edit at {c:?} was sent back"
+        );
+    }
+    let (_, edit_cells) = hs.take_lent_changes();
+    assert!(edit_cells.is_empty(), "the host's own edits are meshed by its own client");
+}
+
+#[test]
+fn a_joiner_edit_lands_in_the_hosts_world_and_comes_back_to_remesh() {
+    let (mut hs, mut host) = start_lent("joiner-edit");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    let _ = hs.take_lent_changes();
+    let cell = cell_beside(&hs, slot, 1, 1, 0);
+    host.world.set_block(cell.0, cell.1, cell.2, block::AIR);
+    send_edits(&hs, &client, slot, 1, &[(cell, block::GLASS)]);
+    host.lend_tick(&mut hs);
+    assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::GLASS);
+    let (_, edit_cells) = hs.take_lent_changes();
+    assert!(edit_cells.contains(&cell), "the host remeshes a joiner's edit");
+}
+
+#[test]
+fn a_server_made_change_comes_back_for_the_host_to_remesh() {
+    let (mut hs, mut host) = start_lent("sand");
+    // Sand over air, well inside the falling-block scan around the host.
+    let sand = cell_beside(&hs, 0, 0, 8, 0);
+    let below = (sand.0, sand.1 - 1, sand.2);
+    host.world.set_block(sand.0, sand.1, sand.2, block::SAND);
+    host.world.set_block(below.0, below.1, below.2, block::AIR);
+    let mut sim = Vec::new();
+    for _ in 0..4 {
+        host.lend_tick(&mut hs);
+        sim.extend(hs.take_lent_changes().0);
+    }
+    assert_eq!(host.world.get_block(below.0, below.1, below.2), block::SAND, "fell in the host's world");
+    assert!(sim.iter().any(|bc| (bc.x, bc.y, bc.z) == sand && bc.new_block == block::AIR));
+    assert!(sim.iter().any(|bc| (bc.x, bc.y, bc.z) == below && bc.new_block == block::SAND));
+}
+
+#[test]
+fn a_joiner_break_spills_the_hosts_live_chest_once() {
+    let (mut hs, mut host) = start_lent("live-chest");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    // Filled this session in the host's chest UI — there is no other copy.
+    host.world.set_block(cell.0, cell.1, cell.2, block::CHEST);
+    host.world.insert_chest(cell, chest_of_bones(7));
+    send_edits(&hs, &client, slot, 1, &[(cell, block::AIR)]);
+    host.lend_tick(&mut hs);
+    assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::AIR);
+    assert!(host.world.chest_at(cell).is_none(), "no orphan in the host's world");
+    assert_eq!(bones_in_ecs(&host.ecs), 7, "the live contents spill into the host's world");
+    for _ in 0..3 {
+        host.lend_tick(&mut hs);
+    }
+    assert_eq!(bones_in_ecs(&host.ecs), 7, "exactly one spill");
+}
+
+#[test]
+fn a_plot_the_host_claimed_this_session_protects_against_a_joiner() {
+    let (mut hs, mut host) = start_lent("live-plot");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    host.world.set_block(cell.0, cell.1, cell.2, block::AIR);
+    host.world.plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::LocalPlayer(0),
+        cell.0,
+        cell.1 - 5,
+        cell.2,
+    ));
+    send_edits(&hs, &client, slot, 1, &[(cell, block::STONE)]);
+    host.lend_tick(&mut hs);
+    assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::AIR);
+}
+
+#[test]
+fn a_vendor_the_host_placed_this_session_is_protected_from_a_joiner() {
+    let (mut hs, mut host) = start_lent("live-vendor");
+    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Visitor");
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    host.world.set_block(cell.0, cell.1, cell.2, block::VENDOR_BLOCK);
+    host.world.insert_vendor(
+        cell,
+        crate::vendor::VendorData {
+            owner: Some(crate::vendor::VendorOwner::LocalPlayer(0)),
+            ..Default::default()
+        },
+    );
+    send_edits(&hs, &client, slot, 1, &[(cell, block::AIR)]);
+    host.lend_tick(&mut hs);
+    assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::VENDOR_BLOCK);
+}
+
+#[test]
+fn the_first_lend_clears_protocol_ids_an_earlier_server_left() {
+    let (mut hs, mut host) = start_lent("stale-ids");
+    let at = hs.server.players[0].player.pos;
+    let cow = crate::entity::spawn_mob(
+        &mut host.ecs,
+        crate::mob::MobType::Cow,
+        at + glam::Vec3::new(2.0, 0.0, 0.0),
+    );
+    host.ecs.insert_one(cow, crate::entity::ProtocolId(1_000_000)).unwrap();
+    host.lend_tick(&mut hs);
+    let id = host.ecs.get::<&crate::entity::ProtocolId>(cow).expect("re-numbered").0;
+    assert_ne!(id, 1_000_000, "a stale id from an earlier server never reaches joiners");
+}

@@ -61,6 +61,21 @@ impl HeadlessGame {
             self.state.tick();
         }
     }
+
+    /// Run `n` logical ticks the way the main loop does while HOSTING: the
+    /// client's tick, its input send, then the embedded server's tick (on the
+    /// host's lent world, D1). One report per tick.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn hosted_ticks(&mut self, n: u32) -> Vec<crate::game_loop::LentTickReport> {
+        (0..n)
+            .map(|_| {
+                let before = self.state.world.sim_tally;
+                self.state.tick();
+                self.state.network_send_input();
+                self.state.tick_hosted_server(before)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -328,5 +343,93 @@ mod tests {
         );
         assert_eq!(snapshot(), before, "the refused world's files must be untouched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D1 — a host lends its world to its embedded server, through the REAL
+    /// game-loop tick: every shared sim system runs once per logical tick
+    /// across the two halves (the tripwire), the clock advances once, a
+    /// server-made block change is remeshed on the host, and a joiner's diff
+    /// carries the host's own mobs.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_lending_host_runs_one_sim_that_joiners_see() {
+        use crate::transport::ClientTransport;
+        isolate_saves();
+        let name = "harness-lend";
+        let mut hg = HeadlessGame::boot_into_world(name);
+        let seed = hg.state.biome_gen.seed;
+        let hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            name.to_string(),
+            seed,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Lent,
+        )
+        .expect("lending host starts");
+        hg.state.hosted_server = Some(hs);
+        assert!(hg.state.sim_lent());
+
+        // A guest joins over the in-process transport.
+        let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Visitor", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(
+            crate::protocol::PacketType::JoinRequest,
+            &req,
+        ));
+
+        // Sand over air beside the host, in the host's world.
+        let p = hg.state.players[0].player.pos;
+        let sand = (p.x.floor() as i32, p.y.floor() as i32 + 8, p.z.floor() as i32);
+        hg.state.world.set_block(sand.0, sand.1, sand.2, crate::block::SAND);
+        hg.state.world.set_block(sand.0, sand.1 - 1, sand.2, crate::block::AIR);
+
+        let t0 = hg.state.world_time;
+        let reports = hg.hosted_ticks(8);
+        for r in &reports {
+            assert!(r.faults.is_empty(), "a shared system ran the wrong number of times: {:?}", r.faults);
+        }
+        assert_eq!(hg.state.world_time, (t0 + 8) % 24000, "the clock advances once a tick");
+        // Two 4-tick falling passes in 8 ticks: the sand left its cell and is
+        // one or two cells down, in the host's own world.
+        assert_eq!(
+            hg.state.world.get_block(sand.0, sand.1, sand.2),
+            crate::block::AIR,
+            "the server's falling-block pass ran on the host's world"
+        );
+        assert!(
+            (1..=2).any(|d| hg.state.world.get_block(sand.0, sand.1 - d, sand.2) == crate::block::SAND),
+            "the sand fell, once per pass"
+        );
+        let sand_chunk = crate::world::World::block_to_chunk(sand.0, sand.1, sand.2);
+        assert!(
+            reports.iter().any(|r| r.remeshed.contains(&sand_chunk)),
+            "the host remeshes the server's change"
+        );
+
+        // The joiner's diff is the host's own ECS.
+        let mut spawned = std::collections::HashSet::new();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((ptype, payload)) = crate::protocol::deserialize_header(&pkt)
+                && ptype == crate::protocol::PacketType::StateUpdate
+                && let Ok(s) =
+                    crate::protocol::safe_deserialize::<crate::protocol::StateUpdatePacket>(payload)
+            {
+                spawned.extend(s.entity_spawns.iter().map(|e| e.id));
+            }
+        }
+        let mut host_mobs = 0;
+        for (_e, (pid, _kind)) in hg
+            .state
+            .ecs
+            .query::<(&crate::entity::ProtocolId, &crate::entity::MobKind)>()
+            .iter()
+        {
+            host_mobs += 1;
+            assert!(spawned.contains(&pid.0), "host mob {} never reached the joiner", pid.0);
+        }
+        assert!(host_mobs > 0, "a fresh world has mobs around the host");
+        let hs = hg.state.hosted_server.as_ref().unwrap();
+        assert_eq!(hs.server.ecs.len(), 0, "the server keeps no population of its own");
     }
 }

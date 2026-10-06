@@ -52,7 +52,7 @@ pub(super) fn join_guest_accept(
     (client, slot, accept)
 }
 
-fn accepted(client: &ChannelClientTransport) -> Option<protocol::JoinAcceptPacket> {
+pub(super) fn accepted(client: &ChannelClientTransport) -> Option<protocol::JoinAcceptPacket> {
     while let Some(pkt) = client.try_recv_from_server() {
         if let Some((ptype, payload)) = protocol::deserialize_header(&pkt)
             && ptype == protocol::PacketType::JoinAccept
@@ -341,8 +341,12 @@ fn a_kick_after_a_rejoin_hits_the_live_player() {
 // ── Review round (REVIEW-W1): live host state, exactly-once spill ─────────
 
 pub(super) fn bones_on_server(hs: &HostedServer) -> u32 {
-    hs.server
-        .ecs
+    bones_in_ecs(&hs.server.ecs)
+}
+
+/// Bone items lying in `ecs` (a lent world's is the host's: `lent_world.rs`).
+pub(super) fn bones_in_ecs(ecs: &hecs::World) -> u32 {
+    ecs
         .query::<&crate::entity::ItemEntity>()
         .iter()
         .filter(|(_, it)| it.stack.item == crate::item::Item::Material(crate::item::MaterialId::Bone))
@@ -369,8 +373,10 @@ pub(super) fn send_host_edits(hs: &HostedServer, tick: u64, edits: &[((i32, i32,
         .send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
 }
 
-/// B1 scenario A: the host's own break already spilled on the host's client;
-/// the server must not spill its copy too.
+/// B1 scenario A, on an OWNING server (`--no-lend`): the host's own break
+/// already spilled on the host's client; the server must not spill its copy
+/// too. (A lending server never applies the host's edits at all —
+/// `lent_world.rs`.)
 #[test]
 fn the_hosts_own_chest_break_never_spills_on_the_server() {
     let mut hs = start_open_server("host-break");
@@ -387,87 +393,10 @@ fn the_hosts_own_chest_break_never_spills_on_the_server() {
     assert_eq!(bones_on_server(&hs), 0, "no second spill of the host's own break");
 }
 
-/// B1 scenarios B/C: the host fills a chest AFTER load (client-only state);
-/// a joiner breaks it. The server spills the LIVE contents exactly once, and
-/// the host's world is left with no orphan entity.
-#[test]
-fn a_joiner_break_spills_the_live_contents_once_and_leaves_no_host_orphan() {
-    let mut hs = start_open_server("live-chest");
-    let (client, slot) = join_guest(&mut hs, "Visitor");
-    let cell = cell_beside(&hs, slot, 1, 0, 0);
-    // The server knows the block (the host's place was broadcast) but, like a
-    // chest placed this session, holds no contents for it.
-    hs.server.world.set_block(cell.0, cell.1, cell.2, block::CHEST);
-    let mut host = crate::world::World::new();
-    host.set_block(cell.0, cell.1, cell.2, block::CHEST);
-    host.insert_chest(cell, chest_of_bones(7));
-
-    hs.mirror_host_world_state(&host);
-    send_edits(&hs, &client, slot, 1, &[(cell, block::AIR)]);
-    hs.tick();
-    assert_eq!(bones_on_server(&hs), 7, "the live contents spill");
-    assert!(hs.server.world.chest_at(cell).is_none());
-
-    // The host hasn't consumed the broadcast yet: mirroring must not
-    // resurrect the chest on the server, and nothing spills twice.
-    hs.mirror_host_world_state(&host);
-    hs.tick();
-    assert!(hs.server.world.chest_at(cell).is_none(), "not resurrected");
-    assert_eq!(bones_on_server(&hs), 7);
-
-    // The host applies the broadcast: entity cleared, no local spill.
-    for bc in block_changes_seen(&hs.local_transports[0]) {
-        host.apply_remote_block_change(&bc);
-    }
-    assert!(host.chest_at(cell).is_none(), "no orphan on the host");
-    hs.mirror_host_world_state(&host);
-    hs.tick();
-    assert_eq!(bones_on_server(&hs), 7, "exactly one spill");
-}
-
-/// S1: a plot claimed on the host after load protects against a joiner.
-#[test]
-fn a_plot_claimed_after_load_protects_against_a_joiner() {
-    let mut hs = start_open_server("live-plot");
-    let (client, slot) = join_guest(&mut hs, "Visitor");
-    let cell = cell_beside(&hs, slot, 1, 0, 0);
-    hs.server.world.set_block(cell.0, cell.1, cell.2, block::AIR);
-    let mut host = crate::world::World::new();
-    host.plots.push(crate::plot::PlotData::from_marker(
-        crate::plot::PlotOwner::LocalPlayer(0),
-        cell.0,
-        cell.1 - 5,
-        cell.2,
-    ));
-    hs.mirror_host_world_state(&host);
-
-    send_edits(&hs, &client, slot, 1, &[(cell, block::STONE)]);
-    hs.tick();
-    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::AIR);
-}
-
-/// S1: a vendor the host placed this session is protected too.
-#[test]
-fn a_vendor_placed_after_load_is_protected_from_a_joiner() {
-    let mut hs = start_open_server("live-vendor");
-    let (client, slot) = join_guest(&mut hs, "Visitor");
-    let cell = cell_beside(&hs, slot, 1, 0, 0);
-    hs.server.world.set_block(cell.0, cell.1, cell.2, block::VENDOR_BLOCK);
-    let mut host = crate::world::World::new();
-    host.set_block(cell.0, cell.1, cell.2, block::VENDOR_BLOCK);
-    host.insert_vendor(
-        cell,
-        crate::vendor::VendorData {
-            owner: Some(crate::vendor::VendorOwner::LocalPlayer(0)),
-            ..Default::default()
-        },
-    );
-    hs.mirror_host_world_state(&host);
-
-    send_edits(&hs, &client, slot, 1, &[(cell, block::AIR)]);
-    hs.tick();
-    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::VENDOR_BLOCK);
-}
+// The host-filled-chest, host-claimed-plot and host-placed-vendor cases (B1 /
+// S1) live in `lent_world.rs`: a LAN host now lends the server its own world
+// (D1), so there is no second copy to keep in step. An owning server
+// (`--no-lend`, the dedicated server) holds the state it loaded.
 
 /// S4: reach is measured from the eye. A block straight overhead whose bottom
 /// face is at the client's 5-block ray limit is in reach.

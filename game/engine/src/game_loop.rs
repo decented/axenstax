@@ -13,6 +13,7 @@ use super::{
 };
 
 use crate::player_intent::PlayerIntent;
+use crate::sim_lend::SimSystem;
 
 /// Exhibits — texture-id base. The Nth authored exhibit's image uploads under
 /// `EXHIBIT_TEX_BASE + N`.
@@ -35,6 +36,48 @@ fn renderable_exhibits(
 // Cross-platform now: the shared network_{receive,send_input} methods call
 // ClientTransport methods on the host's local_transports + the remote client.
 use crate::transport::ClientTransport;
+
+/// D1 — what one hosted-server tick did to the host's lent world
+/// (`GameState::tick_hosted_server`): the chunks it remeshed, and the shared
+/// sim systems that broke "once per logical tick" (a missed `sim_runs` gate).
+/// Both empty when not hosting or on an owning (`--no-lend`) host.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+pub(crate) struct LentTickReport {
+    pub(crate) remeshed: ahash::AHashSet<(i32, i32, i32)>,
+    pub(crate) faults: Vec<(SimSystem, u64)>,
+}
+
+/// D1 — the chunks to remesh for cells changed in the host's world by its
+/// lent server: `(each touched chunk, the seam neighbours of touched cells
+/// on a chunk face)` — the same pair `rebuild_chunk_at` rebuilds / queues for
+/// one cell, deduplicated across many (a flowing fluid reports hundreds).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn lent_remesh_chunks(
+    cells: impl IntoIterator<Item = (i32, i32, i32)>,
+) -> (ahash::AHashSet<(i32, i32, i32)>, ahash::AHashSet<(i32, i32, i32)>) {
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    let mut primary = ahash::AHashSet::new();
+    let mut seams = ahash::AHashSet::new();
+    for (x, y, z) in cells {
+        let (cx, cy, cz) = World::block_to_chunk(x, y, z);
+        primary.insert((cx, cy, cz));
+        let (lx, ly, lz) = (x.rem_euclid(cs), y.rem_euclid(cs), z.rem_euclid(cs));
+        for (on_face, n) in [
+            (lx == 0, (cx - 1, cy, cz)),
+            (lx == cs - 1, (cx + 1, cy, cz)),
+            (ly == 0, (cx, cy - 1, cz)),
+            (ly == cs - 1, (cx, cy + 1, cz)),
+            (lz == 0, (cx, cy, cz - 1)),
+            (lz == cs - 1, (cx, cy, cz + 1)),
+        ] {
+            if on_face {
+                seams.insert(n);
+            }
+        }
+    }
+    (primary, seams)
+}
 
 /// Max chunk meshes rebuilt per frame from the dirty queue (Spec 39 A4). A torch
 /// place queues up to 27 chunks; draining ~8/frame spreads that over ~3-4 frames
@@ -706,6 +749,7 @@ impl super::GameState {
             host_seed,
             4,
             prep.socket,
+            crate::hosted_server::host_world_mode(),
         )?;
         let (book, blocked) = crate::contacts::load_local_book_with_blocks();
         server.set_access_policy(
@@ -4124,6 +4168,211 @@ impl super::GameState {
         true
     }
 
+    /// D1 — is this host's world lent to its embedded server (a LAN / online
+    /// host not started with `--no-lend`)? Never on a joiner, in single-player
+    /// or on the web build, which run no lending server.
+    pub(crate) fn sim_lent(&self) -> bool {
+        self.hosted_server.as_ref().is_some_and(|hs| hs.lends_host_world())
+    }
+
+    /// D1 — does this client's tick run the shared world-sim `system`?
+    /// Always, unless the world is lent and `SimSystem::lent_owner` gives it
+    /// to the server. A run is tallied on the world (`World::sim_tally`) for
+    /// the tripwire in [`Self::tick_hosted_server`].
+    pub(crate) fn sim_runs(&mut self, system: SimSystem) -> bool {
+        let run = system.runs_on(crate::sim_lend::SimSide::HostClient, self.sim_lent());
+        if run {
+            self.world.sim_tally.bump(system);
+        }
+        run
+    }
+
+    /// D1 — where the joiners stand in a lent world: every server-simulated
+    /// slot present and alive. Read from the server's player slots, which are
+    /// never lent. Empty unless the world is lent. The host's mob AI chases
+    /// them (it stays client-side; see the brigand pre-pass in `tick`).
+    fn lent_joiner_positions(&self) -> Vec<glam::Vec3> {
+        match self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
+            Some(hs) => hs
+                .server
+                .players
+                .iter()
+                .filter(|sp| sp.server_simulated && sp.is_present_and_alive())
+                .map(|sp| sp.player.pos)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The scenario events a power-sim pass's block changes carry: a lamp
+    /// lighting, and a self-driving source going idle→turning (Wind, Copper &
+    /// Electricity wave §4). `power::apply_turn` is the ONLY producer of a
+    /// *_TURNING block change and it emits exactly one per transition, so
+    /// reading the transition off the changes is precise and free. Fed by
+    /// this client's own power pass, or — on a lent world — by the server's
+    /// (`tick_hosted_server`).
+    fn fire_power_challenges(&mut self, changes: &[crate::protocol::BlockChange]) {
+        if changes.iter().any(|bc| bc.new_block == crate::block::ELECTRIC_LAMP_LIT) {
+            self.fire_challenge(crate::scenario::ChallengeEvent::PowerDevice);
+        }
+        for bc in changes {
+            let kind = match bc.new_block {
+                crate::block::WATER_WHEEL_TURNING => {
+                    Some(crate::scenario::TurningSource::WaterWheel)
+                }
+                crate::block::WINDMILL_TURNING => Some(crate::scenario::TurningSource::Windmill),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                self.fire_challenge(crate::scenario::ChallengeEvent::SourceTurned { kind });
+            }
+        }
+    }
+
+    /// One tick of the embedded hosted server (LAN / online host), run right
+    /// after this client's own [`Self::tick`] and its input send. No-op when
+    /// not hosting.
+    ///
+    /// **Lent (D1, the default):** the host's `world`, `ecs`, fluid / fire /
+    /// leaf systems and `loaded_columns` are swapped into the server for its
+    /// one tick (`sim_lend::LentSim`, swapped back on drop — panic included),
+    /// so the server's systems, joiners' edits and every joiner's
+    /// `StateUpdate` act on and read the host's real world. Afterwards the
+    /// changes the server made are remeshed here and the server's power
+    /// changes replay their scenario events. `tally_before` is
+    /// `world.sim_tally` from just before `tick()`: across the client tick and
+    /// the lent server tick every shared system must have run once
+    /// (`SimTally::one_tick_faults`) — debug-asserted, logged once in release.
+    ///
+    /// Readers of the server's world / ECS that sat outside the old window
+    /// moved inside it or went: the `/we` region batch is valued from this
+    /// world, `/killall` and the `/we` apply no longer touch the server's
+    /// (empty) copy, and the host's loopback `StateUpdate` no longer re-applies
+    /// block changes the server already made here.
+    ///
+    /// **Owned (`--no-lend`, one release):** the server ticks its own copy of
+    /// the world, fed the host's clock and weather, as before D1.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn tick_hosted_server(
+        &mut self,
+        tally_before: crate::sim_lend::SimTally,
+    ) -> LentTickReport {
+        let mut report = LentTickReport::default();
+        let Some(hs) = self.hosted_server.as_mut() else {
+            return report;
+        };
+        if !hs.lends_host_world() {
+            // P9 weather sync — the host's window, translated into the
+            // SERVER's tick frame: its `tick_counter` need not equal ours (it
+            // starts at 0 when hosting starts), and `broadcast_state` measures
+            // ticks-left against the server's counter.
+            let host_window = crate::weather::Weather {
+                rain_until: self.weather_rain_until,
+                storm_until: self.weather_storm_until,
+            };
+            let (rain_left, storm_left) = host_window.ticks_left(self.tick_counter);
+            hs.server.weather = crate::weather::Weather::from_ticks_left(
+                hs.server.tick_counter,
+                rain_left,
+                storm_left,
+            );
+            // The host's clock is the world's clock: `/time set`, `/time
+            // speed` and sleeping all move `self.world_time`.
+            hs.server.world_time = self.world_time;
+            if !self.region_broadcast_queue.is_empty() {
+                let budget = crate::worldedit::REGION_BROADCAST_BATCH
+                    .saturating_sub(hs.queued_broadcasts());
+                let batch = self.region_broadcast_queue.next_batch(&hs.server.world, budget);
+                hs.queue_host_broadcast(batch);
+            }
+            hs.tick();
+            return report;
+        }
+
+        // Host `/we` regions reach joiners a bounded batch per StateUpdate, in
+        // order, valued from the one world — this one (the server's own is
+        // empty outside the window).
+        if !self.region_broadcast_queue.is_empty() {
+            let budget =
+                crate::worldedit::REGION_BROADCAST_BATCH.saturating_sub(hs.queued_broadcasts());
+            let batch = self.region_broadcast_queue.next_batch(&self.world, budget);
+            hs.queue_host_broadcast(batch);
+        }
+        let clock = crate::sim_lend::HostClock {
+            world_time: self.world_time,
+            tick_counter: self.tick_counter,
+            weather: crate::weather::Weather {
+                rain_until: self.weather_rain_until,
+                storm_until: self.weather_storm_until,
+            },
+        };
+        let parts = crate::sim_lend::SimParts {
+            world: &mut self.world,
+            ecs: &mut self.ecs,
+            water: &mut self.water,
+            lava: &mut self.lava,
+            fire: &mut self.fire,
+            leaf_decay: &mut self.leaf_decay,
+            loaded_columns: &mut self.loaded_columns,
+        };
+        crate::sim_lend::LentSim::lend(&mut *hs, parts, clock).tick();
+        let (sim_changes, edit_cells) = hs.take_lent_changes();
+
+        report.remeshed = self.remesh_lent_cells(
+            sim_changes
+                .iter()
+                .map(|bc| (bc.x, bc.y, bc.z))
+                .chain(edit_cells.iter().copied()),
+        );
+        self.fire_power_challenges(&sim_changes);
+        // Carts advanced inside the window: re-pin any rider to the seat.
+        self.apply_riding_follow();
+
+        report.faults = self.world.sim_tally.one_tick_faults(&tally_before);
+        if !report.faults.is_empty() {
+            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::error!(
+                    "D1 lent tick: a shared sim system ran the wrong number of times: {:?}",
+                    report.faults
+                );
+            }
+            debug_assert!(
+                report.faults.is_empty(),
+                "D1 lent tick: a shared sim system ran the wrong number of times (a missed \
+                 `sim_runs` gate?): {:?}",
+                report.faults
+            );
+        }
+        report
+    }
+
+    /// D1 — remesh the cells the lent server changed in this world (its own
+    /// systems, joiners' edits): each touched chunk once, now, as the client's
+    /// own 4-tick block pass does, and its seam neighbours through the
+    /// budgeted queue, as `rebuild_chunk_at` does. Returns the chunks rebuilt.
+    /// Lighting is not recomputed for these cells — the host loopback this
+    /// replaces never did either (the server's power pass relights its own
+    /// lamps).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remesh_lent_cells(
+        &mut self,
+        cells: impl IntoIterator<Item = (i32, i32, i32)>,
+    ) -> ahash::AHashSet<(i32, i32, i32)> {
+        let (primary, seams) = lent_remesh_chunks(cells);
+        for &(cx, cy, cz) in &primary {
+            let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
+            self.renderer.upload_chunk((cx, cy, cz), &meshes);
+            self.dirty_mesh_chunks.remove(&(cx, cy, cz));
+        }
+        for seam in seams {
+            if !primary.contains(&seam) {
+                self.mark_chunk_dirty(seam);
+            }
+        }
+        primary
+    }
+
     pub(crate) fn tick(&mut self) {
         // Spec 40 — apply a pending "Reset Workshop" wipe now that the Workshop
         // world is fully loaded and we're ticking in Playing. A single platform-
@@ -4255,7 +4504,13 @@ impl super::GameState {
         // Per-world active-tick clock (the world-clock; persisted to WorldMeta
         // as total_ticks). Advances only while playing — this method only runs
         // in GameMode::Playing. Basis for the Satori-Rush time-to-genesis.
-        self.world.tick_world_clock();
+        // D1 — this and every other shared world-sim system below asks
+        // `sim_runs`: while hosting, the embedded server ticks the same
+        // (lent) world, and `sim_lend::SimSystem::lent_owner` gives each
+        // system to exactly one side.
+        if self.sim_runs(SimSystem::WorldClock) {
+            self.world.tick_world_clock();
+        }
         // Spec 29 — drain any legacy meat ejected from v1 furnaces
         // during load. Normally empty; non-empty exactly once after
         // a v1 save loads with raw meat in a furnace input slot.
@@ -4366,7 +4621,11 @@ impl super::GameState {
         // Default step is set on world load (alpha=4, standard=1). Runtime
         // override via `/time speed <n>`. The old `+ 4` BRIDGE is folded into
         // `world_time_step`'s default — flip the default to 1 pre-release.
-        self.world_time = (self.world_time + self.world_time_step) % 24000;
+        // The host client always owns the clock (`/time`, sleeping); on a lent
+        // world the server reads it and never advances it (D1).
+        if self.sim_runs(SimSystem::Clock) {
+            self.world_time = (self.world_time + self.world_time_step) % 24000;
+        }
 
         // BRIDGE: live Reserve richness (`self.reserve.richness`) no longer
         // feeds chunk generation. Worldgen bakes the fixed
@@ -4399,7 +4658,9 @@ impl super::GameState {
                 rain_until: self.weather_rain_until,
                 storm_until: self.weather_storm_until,
             }
-        } else {
+        } else if self.sim_runs(SimSystem::Weather) {
+            // A host's own roll (D1: the host client keeps the weather; a
+            // lent server reads this window and never re-rolls it).
             crate::weather::advance(
                 crate::weather::Weather {
                     rain_until: self.weather_rain_until,
@@ -4408,6 +4669,11 @@ impl super::GameState {
                 self.tick_counter,
                 has_weather,
             )
+        } else {
+            crate::weather::Weather {
+                rain_until: self.weather_rain_until,
+                storm_until: self.weather_storm_until,
+            }
         };
         self.weather_rain_until = advanced.rain_until;
         self.weather_storm_until = advanced.storm_until;
@@ -4531,15 +4797,16 @@ impl super::GameState {
 
         // Mob spawning cycle (every 400 ticks = 20 seconds).
         //
-        // BRIDGE: single-player still runs spawning on the client because
-        // GameServer only exists when a HostedServer is active (Host Game
-        // menu). When single-player also routes through HostedServer (Task
-        // 1d), this call site goes away and server.rs is the only spawner.
+        // BRIDGE: single-player still runs spawning on the client because it
+        // runs no GameServer. A host lends its world to its server, which
+        // spawns around every present player, joiners included (D1); when
+        // single-player also lends (D3), this call site goes away and
+        // server.rs is the only spawner.
         //
         // Blank-canvas time-lock: use the effective time so locked-day worlds
         // never trigger night-mob spawns and locked-night worlds always do.
         let eff_world_time = self.world.effective_world_time(self.world_time);
-        if self.world_time.is_multiple_of(400) {
+        if self.world_time.is_multiple_of(400) && self.sim_runs(SimSystem::MobSpawning) {
             crate::spawning::tick_mob_spawning(
                 &mut self.ecs,
                 &self.world,
@@ -4580,11 +4847,13 @@ impl super::GameState {
             // HP-3 — Brigand Hideout replenisher. Same 20-tick cadence
             // as the village checks; respects the per-hideout 24 000-
             // tick cooldown internally.
-            crate::brigand_hideout_gen::tick_hideout_spawning(
-                &mut self.world,
-                &mut self.ecs,
-                self.tick_counter,
-            );
+            if self.sim_runs(SimSystem::Hideouts) {
+                crate::brigand_hideout_gen::tick_hideout_spawning(
+                    &mut self.world,
+                    &mut self.ecs,
+                    self.tick_counter,
+                );
+            }
         }
         // HP-3 — brigand AI pre-pass. Runs every tick BEFORE the main
         // mob_ai dispatch so tier-specific detect-range + flee-gate +
@@ -4592,38 +4861,60 @@ impl super::GameState {
         // executes. HP-polish (2026-05-23) added the world_time arg
         // for day/night gating. Uses eff_world_time so time-locked
         // worlds see the correct day/night state for AI.
-        crate::brigand::tick_brigand_overrides(
-            &mut self.ecs,
-            &player_positions,
-            eff_world_time,
-        );
+        //
+        // D1 — the mob-locomotion block (this pre-pass, `mob_ai` below, then
+        // entity physics) stays on the host client even on a lent world: its
+        // species AI, wolf follow, tethers, builders and Satoshi overwrite
+        // `mob_ai`'s velocities BETWEEN `mob_ai` and `tick_entities`, so
+        // splitting the block across the two ticks would erase every
+        // override. Its targets therefore include the joiners' server-held
+        // bodies (`lent_joiner_positions`). Moves server-side with D4.
+        let runs_mob_ai = self.sim_runs(SimSystem::MobAi);
+        let joiner_targets = self.lent_joiner_positions();
+        if runs_mob_ai {
+            let targets: Vec<glam::Vec3> =
+                player_positions.iter().chain(&joiner_targets).copied().collect();
+            crate::brigand::tick_brigand_overrides(
+                &mut self.ecs,
+                &targets,
+                eff_world_time,
+            );
+        }
         // Salt feature — snowfall painter. Self-throttled on
         // SNOWFALL_PERIOD_TICKS so cheap on intermediate ticks. Runs
-        // on the single-player game-loop tick alongside the hosted
-        // server tick so solo + LAN behave identically. MUST use
-        // `tick_counter` — pass_id = tick / 6 000 collapses to {0,1,2,3}
+        // on the single-player game-loop tick, and on a host's lent world
+        // inside its server's tick, so solo + LAN behave identically. MUST
+        // use `tick_counter` — pass_id = tick / 6 000 collapses to {0,1,2,3}
         // with a cyclic 24 000 clock and snow patterns repeat daily.
-        crate::snowfall::tick_snowfall(
-            &mut self.world,
-            &self.biome_gen,
-            self.biome_gen.seed,
-            self.tick_counter,
-        );
+        if self.sim_runs(SimSystem::Snowfall) {
+            crate::snowfall::tick_snowfall(
+                &mut self.world,
+                &self.biome_gen,
+                self.biome_gen.seed,
+                self.tick_counter,
+            );
+        }
         // Rubber feature — cooldown driver for tapped rubber logs.
         // MUST use `tick_counter` (monotonic), not `world_time` (cyclic
         // 0-23999): a subtract-based age check on a 24 000-tick cooldown
         // never fires with a clock that wraps at 24 000.
-        crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter);
+        if self.sim_runs(SimSystem::Rubber) {
+            crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter);
+        }
         // Salt feature — Salt Lick aura HP regen for livestock. Self-
         // throttled internally on SALT_LICK_REGEN_INTERVAL_TICKS.
-        crate::salt_lick::tick_salt_lick_regen(&mut self.ecs, &self.world, self.tick_counter);
+        if self.sim_runs(SimSystem::SaltLick) {
+            crate::salt_lick::tick_salt_lick_regen(&mut self.ecs, &self.world, self.tick_counter);
+        }
         // Spec 33 Mob Bounty Board — daily rotation refresh. Self-
         // throttled on BOUNTY_REFRESH_TICKS (24 000 = one in-game day).
         // MUST use `tick_counter` (monotonic) per the same-family
         // clock lesson as rubber/brigand/snowfall.
-        let _ = crate::bounty::tick_bounty_refresh(
-            &mut self.world, self.tick_counter, self.biome_gen.seed,
-        );
+        if self.sim_runs(SimSystem::Bounties) {
+            let _ = crate::bounty::tick_bounty_refresh(
+                &mut self.world, self.tick_counter, self.biome_gen.seed,
+            );
+        }
         // Spec 38 Auctions — deadline settlement sweep. Settles any
         // auction past its deadline (delivers lot via ItemEntity +
         // credits owner escrow). MUST use `tick_counter` (monotonic).
@@ -5116,43 +5407,68 @@ impl super::GameState {
 
             // Falling blocks — pure sim, decoupled from renderer (Task 1c).
             //
-            // BRIDGE: single-player runs sim on the client because GameServer
-            // only exists when HostedServer is active. When single-player also
-            // routes through HostedServer (Task 1d), this call goes away and
-            // dirty chunks arrive via StateUpdatePacket.block_changes.
-            let player_positions: Vec<glam::Vec3> =
-                self.players.iter().map(|s| s.player.pos).collect();
-            let falling_changes = crate::falling_blocks::tick_falling_blocks(
-                &mut self.world,
-                &self.registry,
-                &mut self.water,
-                &player_positions,
-                super::MAX_CHUNK_Y,
-            );
-            for bc in &falling_changes {
-                dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
+            // BRIDGE: single-player runs sim on the client because it runs no
+            // GameServer. On a host's lent world (D1) the server runs it — and
+            // fluids, fire and leaf decay below — on the one world, and the
+            // changes come back through `take_lent_changes` to be remeshed
+            // (`tick_hosted_server`). When single-player lends too (D3), these
+            // calls go away.
+            if self.sim_runs(SimSystem::FallingBlocks) {
+                let player_positions: Vec<glam::Vec3> =
+                    self.players.iter().map(|s| s.player.pos).collect();
+                let falling_changes = crate::falling_blocks::tick_falling_blocks(
+                    &mut self.world,
+                    &self.registry,
+                    &mut self.water,
+                    &player_positions,
+                    super::MAX_CHUNK_Y,
+                );
+                for bc in &falling_changes {
+                    dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
+                }
             }
 
-            // Water spread
-            let water_dirty = self.water.tick_spread(&mut self.world);
-            // Drop any lava source that water just froze to obsidian — else a
-            // re-placed lava cell there is silently inert (phantom source).
-            crate::fluids::reconcile_frozen_lava_sources(
-                &mut self.lava,
-                &self.world,
-                &water_dirty,
-            );
-            let retract_dirty = self.water.tick_retract(&mut self.world);
-            for &(x, y, z) in water_dirty.iter().chain(retract_dirty.iter()) {
-                dirty_chunks.insert(World::block_to_chunk(x, y, z));
-            }
+            if self.sim_runs(SimSystem::Fluids) {
+                // Water spread
+                let water_dirty = self.water.tick_spread(&mut self.world);
+                // Drop any lava source that water just froze to obsidian — else a
+                // re-placed lava cell there is silently inert (phantom source).
+                crate::fluids::reconcile_frozen_lava_sources(
+                    &mut self.lava,
+                    &self.world,
+                    &water_dirty,
+                );
+                let retract_dirty = self.water.tick_retract(&mut self.world);
+                for &(x, y, z) in water_dirty.iter().chain(retract_dirty.iter()) {
+                    dirty_chunks.insert(World::block_to_chunk(x, y, z));
+                }
 
-            // Campaign B — lava flow (slower + shorter range than water;
-            // freezes to obsidian on water contact).
-            let lava_dirty = self.lava.tick_spread(&mut self.world);
-            let lava_retract = self.lava.tick_retract(&mut self.world);
-            for &(x, y, z) in lava_dirty.iter().chain(lava_retract.iter()) {
-                dirty_chunks.insert(World::block_to_chunk(x, y, z));
+                // Campaign B — lava flow (slower + shorter range than water;
+                // freezes to obsidian on water contact).
+                let lava_dirty = self.lava.tick_spread(&mut self.world);
+                let lava_retract = self.lava.tick_retract(&mut self.world);
+                for &(x, y, z) in lava_dirty.iter().chain(lava_retract.iter()) {
+                    dirty_chunks.insert(World::block_to_chunk(x, y, z));
+                }
+
+                // Fire (2026-07-04 gap-fill wave) — lava starts fires on exposed
+                // wood, then every burning cell advances: rain douses, kegs light,
+                // fuel is consumed (gated by the world toggle), flames burn out.
+                let raining_now = self.tick_counter < self.weather_rain_until;
+                let fire_lit = self.fire.ignite_from_lava(
+                    &mut self.world,
+                    &lava_dirty,
+                    self.tick_counter,
+                );
+                let fire_dirty = self.fire.tick(
+                    &mut self.world,
+                    self.tick_counter,
+                    raining_now,
+                    self.fire_spread_enabled,
+                );
+                for &(x, y, z) in fire_lit.iter().chain(fire_dirty.iter()) {
+                    dirty_chunks.insert(World::block_to_chunk(x, y, z));
+                }
             }
 
             // Honey accumulation (2026-07-04) — every HONEY_ACCUM_INTERVAL
@@ -5160,35 +5476,18 @@ impl super::GameState {
             // Shared with the dedicated server (block_machines.rs, T1-3).
             crate::bee_hive::accumulate_honey(&mut self.world, &self.ecs, self.tick_counter);
 
-            // Fire (2026-07-04 gap-fill wave) — lava starts fires on exposed
-            // wood, then every burning cell advances: rain douses, kegs light,
-            // fuel is consumed (gated by the world toggle), flames burn out.
-            let raining_now = self.tick_counter < self.weather_rain_until;
-            let fire_lit = self.fire.ignite_from_lava(
-                &mut self.world,
-                &lava_dirty,
-                self.tick_counter,
-            );
-            let fire_dirty = self.fire.tick(
-                &mut self.world,
-                self.tick_counter,
-                raining_now,
-                self.fire_spread_enabled,
-            );
-            for &(x, y, z) in fire_lit.iter().chain(fire_dirty.iter()) {
-                dirty_chunks.insert(World::block_to_chunk(x, y, z));
+            if self.sim_runs(SimSystem::LeafDecay) {
+                // Leaf decay
+                let leaf_dirty = self.leaf_decay.tick(&mut self.world);
+                for &(x, y, z) in leaf_dirty.iter() {
+                    dirty_chunks.insert(World::block_to_chunk(x, y, z));
+                }
+                // Saplings (2026-07-04) — decayed leaves sometimes drop one.
+                crate::leaf_decay::spawn_sapling_drops(
+                    &mut self.ecs,
+                    self.leaf_decay.take_sapling_drops(),
+                );
             }
-
-            // Leaf decay
-            let leaf_dirty = self.leaf_decay.tick(&mut self.world);
-            for &(x, y, z) in leaf_dirty.iter() {
-                dirty_chunks.insert(World::block_to_chunk(x, y, z));
-            }
-            // Saplings (2026-07-04) — decayed leaves sometimes drop one.
-            crate::leaf_decay::spawn_sapling_drops(
-                &mut self.ecs,
-                self.leaf_decay.take_sapling_drops(),
-            );
 
             // Crop growth (Spec 16 farming Phase 6). 20-tick batch (4 *
             // falling_tick_counter = every 4 ticks ≈ 5 Hz) is fine because
@@ -5604,14 +5903,21 @@ impl super::GameState {
             }
         }
 
-        // Mob AI — targets nearest player
+        // Mob AI — targets nearest player (the joiners too, on a lent world:
+        // see the brigand pre-pass above for why this stays on the client).
+        // Re-snapshotted after this tick's player physics; the species
+        // dispatch below reads the LOCAL players' positions only.
         let player_positions: Vec<glam::Vec3> = self.players.iter().map(|s| s.player.pos).collect();
-        crate::mob_ai::tick_mob_ai(
-            &mut self.ecs,
-            &self.world,
-            &self.registry,
-            &player_positions,
-        );
+        if runs_mob_ai {
+            let targets: Vec<glam::Vec3> =
+                player_positions.iter().chain(&joiner_targets).copied().collect();
+            crate::mob_ai::tick_mob_ai(
+                &mut self.ecs,
+                &self.world,
+                &self.registry,
+                &targets,
+            );
+        }
 
         // P5 — animal breeding: pair in-love adults into babies + grow
         // juveniles. Returns baby (species, pos) to spawn; the spawn happens
@@ -5840,8 +6146,11 @@ impl super::GameState {
         // matches the local slots (always online in single-player).
         self.tick_builder_commissions();
 
-        // Entity physics (every tick, not just every 4th)
-        crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
+        // Entity physics (every tick, not just every 4th). The host client's
+        // on a lent world, with `mob_ai` (D1).
+        if self.sim_runs(SimSystem::EntityPhysics) {
+            crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
+        }
         // Satoshi co-presence — move him toward you (summoned via H) or back to
         // his hut, AFTER the AI + physics passes so this is the last word on his
         // position. No-op in worlds without Satoshi.
@@ -5850,7 +6159,24 @@ impl super::GameState {
         // Spec 48 (Electricity) — power & logic sim, beside the furnace sweep.
         // Same slot as GameServer::tick (after entity physics, before carts) so
         // single-player and hosted worlds advance power identically.
-        {
+        //
+        // Wind, Copper & Electricity wave §2.3 — one sea-level wind sample
+        // per tick, lifted per mill by `wind::with_altitude`. Same three
+        // inputs as the server path (tick + weather window + seed), so a
+        // single-player world and a hosted one blow identically. Sampled
+        // whoever runs the sim: the windmill renderer reads it too.
+        self.wind = crate::wind::sample(
+            self.tick_counter,
+            crate::weather::Weather {
+                rain_until: self.weather_rain_until,
+                storm_until: self.weather_storm_until,
+            },
+            self.biome_gen.seed,
+            crate::biome::SEA_LEVEL,
+        );
+        // On a lent world (D1) the server runs it, on this world, right after
+        // this tick; `tick_hosted_server` replays its challenges.
+        if self.sim_runs(SimSystem::Power) {
             let mut power_positions: Vec<(f32, f32, f32)> = self
                 .players
                 .iter()
@@ -5859,19 +6185,6 @@ impl super::GameState {
             for (_id, pos) in self.ecs.query::<&crate::entity::Position>().iter() {
                 power_positions.push((pos.0.x, pos.0.y, pos.0.z));
             }
-            // Wind, Copper & Electricity wave §2.3 — one sea-level wind sample
-            // per tick, lifted per mill by `wind::with_altitude`. Same three
-            // inputs as the server path (tick + weather window + seed), so a
-            // single-player world and a hosted one blow identically.
-            self.wind = crate::wind::sample(
-                self.tick_counter,
-                crate::weather::Weather {
-                    rain_until: self.weather_rain_until,
-                    storm_until: self.weather_storm_until,
-                },
-                self.biome_gen.seed,
-                crate::biome::SEA_LEVEL,
-            );
             let power_changes = crate::power::power_tick(
                 &mut self.world,
                 self.tick_counter,
@@ -5880,41 +6193,22 @@ impl super::GameState {
                 &self.registry,
             );
             // Spec 48 — relight any lamp/generator that flipped lit↔unlit so a lit
-            // lamp actually illuminates (power_tick uses bare set_block, which
-            // doesn't recompute light). Single-player runs power on this world.
+            // lamp actually illuminates (power_tick uses bare set_block, which doesn't
+            // recompute light). Single-player runs power on this world.
             for bc in &power_changes {
                 crate::power::relight_after_power_change(&mut self.world, bc, &self.registry);
             }
-            if power_changes.iter().any(|bc| bc.new_block == crate::block::ELECTRIC_LAMP_LIT) {
-                self.fire_challenge(crate::scenario::ChallengeEvent::PowerDevice);
-            }
-            // Wind, Copper & Electricity wave §4 — a self-driving source going
-            // idle→turning. `power::apply_turn` is the ONLY producer of a
-            // *_TURNING block change and it emits exactly one per transition (it
-            // returns early when nothing changed), so reading the transition off
-            // the changes it already returns is both precise and free — no extra
-            // channel through `power_tick`, which the server path shares.
-            for bc in &power_changes {
-                let kind = match bc.new_block {
-                    crate::block::WATER_WHEEL_TURNING => {
-                        Some(crate::scenario::TurningSource::WaterWheel)
-                    }
-                    crate::block::WINDMILL_TURNING => {
-                        Some(crate::scenario::TurningSource::Windmill)
-                    }
-                    _ => None,
-                };
-                if let Some(kind) = kind {
-                    self.fire_challenge(crate::scenario::ChallengeEvent::SourceTurned { kind });
-                }
-            }
+            self.fire_power_challenges(&power_changes);
             self.pending_block_changes.extend(power_changes);
         }
 
         // Rail freight (Phase 1) — roll carts along the track. Carts omit
         // OnGround so the physics tick above skips them; this drives their
-        // timed cell-to-cell travel + render position instead.
-        crate::cart::tick_carts(&mut self.ecs, &mut self.world);
+        // timed cell-to-cell travel + render position instead. The server's on
+        // a lent world (D1); `tick_hosted_server` re-runs the ride-along after.
+        if self.sim_runs(SimSystem::Carts) {
+            crate::cart::tick_carts(&mut self.ecs, &mut self.world);
+        }
 
         // Ride-along (Task 1.5) — for every player mounted on a cart, pin their
         // eye to the cart seat now that `tick_carts` has written the cart's
@@ -5989,9 +6283,12 @@ impl super::GameState {
             }
         }
 
-        // Tick entity health timers (once, not per-player)
-        for (_id, health) in self.ecs.query_mut::<&mut crate::combat::Health>() {
-            health.tick();
+        // Tick entity health timers (once, not per-player). The server's on a
+        // lent world (D1).
+        if self.sim_runs(SimSystem::EntityHealth) {
+            for (_id, health) in self.ecs.query_mut::<&mut crate::combat::Health>() {
+                health.tick();
+            }
         }
 
         // ── Part C: Per-player combat (mob attacks on each player) ────────────
@@ -6136,6 +6433,11 @@ impl super::GameState {
         // Despawn dead mobs and spawn drops at their last position. Use the
         // current world tick + each death's position bits as the seed so the
         // same kill in the same tick is deterministic across replays.
+        // Always this client's, lent world or not (D1, Q1 trap 2): this is the
+        // single kill-attribution site, and a lent server's sweep would drop
+        // the attacker. Tallied for the lent-tick tripwire.
+        let despawn_here = self.sim_runs(SimSystem::DespawnDead);
+        debug_assert!(despawn_here, "the death sweep is always the host client's");
         let deaths = crate::combat::despawn_dead(&mut self.ecs);
         // HP-3 — decrement hideout populations for each dying brigand.
         for home in &dying_brigand_homes {
@@ -6316,7 +6618,11 @@ impl super::GameState {
         );
 
         // Item entity housekeeping: lifetime decay (5-min despawn) + magnet/pickup.
-        crate::entity::tick_item_lifetimes(&mut self.ecs);
+        // The lifetimes are the server's on a lent world (D1); pickups stay
+        // split — local players here, joiners in the server's tick.
+        if self.sim_runs(SimSystem::ItemLifetimes) {
+            crate::entity::tick_item_lifetimes(&mut self.ecs);
+        }
         // Pick up items into living players' inventories.
         // Build the (real_idx, pos, &mut Inventory) slice from non-dead players
         // only. The real index is what `ItemEntity.dropper` is keyed on so the
@@ -8171,12 +8477,15 @@ impl super::GameState {
                     // Host with the world's persisted seed so the server
                     // generates the same terrain the client will (#8).
                     let host_seed = crate::save::load_world_meta(&folder_name).seed;
-                    match crate::hosted_server::HostedServer::start(
+                    // D1 — the host lends this client's world to the server
+                    // (one world, one sim) unless started with `--no-lend`.
+                    match crate::hosted_server::HostedServer::start_host(
                         1,  // 1 local player
                         folder_name.clone(),
                         host_seed,
                         4,  // max 4 remote players
                         crate::hosted_server::RemoteTransport::Quic,
+                        crate::hosted_server::host_world_mode(),
                     ) {
                         Ok(server) => {
                             self.hosted_server = Some(server);
@@ -8807,36 +9116,6 @@ impl super::GameState {
                 );
                 self.reset_tick_timing();
                 self.autosave_counter = 0;
-
-                // Phase 0 (foundations spec): if the single-player → HostedServer
-                // routing flag is on AND this isn't already a Host-Game session
-                // (which started its own server above), spin up a parallel
-                // HostedServer with 1 local + 0 remote so parity_check can sample
-                // both sides each tick. Default is off; the flag is the playtest
-                // boundary for Phase 0b.
-                #[cfg(not(target_arch = "wasm32"))]
-                if crate::hosted_server::ENABLE_SINGLEPLAYER_HOSTED_SERVER
-                    && self.hosted_server.is_none()
-                {
-                    log::info!(
-                        "Phase 0: starting parity-check HostedServer alongside single-player client sim"
-                    );
-                    match crate::hosted_server::HostedServer::start(
-                        1, // 1 local player
-                        folder_name.clone(),
-                        meta.seed, // world seed (matches the client biome_gen)
-                        0,  // no remote players — local parity check only
-                        crate::hosted_server::RemoteTransport::Quic,
-                    ) {
-                        Ok(server) => self.hosted_server = Some(server),
-                        Err(e) => {
-                            log::warn!(
-                                "Phase 0: failed to start parity-check HostedServer: {e}. \
-                                 Continuing with client-side sim only."
-                            );
-                        }
-                    }
-                }
 
                 // Rule 1: whoever pressed Play is Player 1.
                 // If gamepad A was pressed this frame, that controller is P1.
@@ -9605,6 +9884,10 @@ impl super::GameState {
         let mut ticks_run = 0;
         while self.tick_accumulator >= TICK_DURATION && ticks_run < 10 {
             let tick_start = Instant::now();
+            // D1 tripwire baseline: the world's sim tally before this logical
+            // tick (the client's half here, the lent server's half below).
+            #[cfg(not(target_arch = "wasm32"))]
+            let tally_before = self.world.sim_tally;
             self.tick();
             // Exhibits — hang a world's authored art once, and drain any
             // async-decoded images (WASM) onto the GPU. Guarded, so this is a
@@ -9663,72 +9946,10 @@ impl super::GameState {
             // own thread; it now ticks from the main loop (Phase 2).
             // Cross-platform: the browser sends its movement input to the server.
             self.network_send_input();
+            // …then advance the hosted server one tick (D1: on the host's lent
+            // world — `tick_hosted_server`). No-op when not hosting.
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(hs) = self.hosted_server.as_mut() {
-                // P9 weather sync — while hosting, THIS GameState is the sim
-                // owner for the host's own local player (self.tick() above
-                // already rolled this tick's window via `weather::advance`,
-                // since `remote_client` is None on the host). Push it into
-                // the GameServer BEFORE ticking so `broadcast_state` sends
-                // remote players exactly what the host sees, and the
-                // server's fire-dousing (`server.rs::tick`, gated on
-                // `self.weather`) agrees with the host's rain instead of
-                // rolling its own separate window.
-                // Translate the window into the SERVER's tick frame: its
-                // `tick_counter` need not equal ours (it starts at 0 when
-                // hosting starts, which can be later than the world did), and
-                // `broadcast_state` measures ticks-left against the server's
-                // counter. Pushing raw host-frame `*_until` values would make a
-                // remote player see rain for (host tick − server tick) extra
-                // ticks — hours, if hosting began late.
-                let host_window = crate::weather::Weather {
-                    rain_until: self.weather_rain_until,
-                    storm_until: self.weather_storm_until,
-                };
-                let (rain_left, storm_left) = host_window.ticks_left(self.tick_counter);
-                hs.server.weather = crate::weather::Weather::from_ticks_left(
-                    hs.server.tick_counter,
-                    rain_left,
-                    storm_left,
-                );
-                // The host's client owns chest / vendor / plot state; keep the
-                // server's copy live so joiner breaks and gates see it (B1).
-                hs.mirror_host_world_state(&self.world);
-                // The host's clock is the world's clock (same pattern as the
-                // weather above): `/time set`, `/time speed` and sleeping all
-                // move `self.world_time`, and the server's mob spawning and
-                // every joiner's sky follow it through StateUpdate.world_time.
-                hs.server.world_time = self.world_time;
-                // Host `/we` regions reach joiners a bounded batch per
-                // StateUpdate, in order, valued from the server's world.
-                if !self.region_broadcast_queue.is_empty() {
-                    let budget = crate::worldedit::REGION_BROADCAST_BATCH
-                        .saturating_sub(hs.server.pending_block_changes.len());
-                    let batch = self.region_broadcast_queue.next_batch(&hs.server.world, budget);
-                    hs.server.pending_block_changes.extend(batch);
-                }
-                hs.tick();
-
-                // Phase 0 parity check — only meaningful when the
-                // single-player flag is on (Host-Game sessions don't run
-                // a parallel client sim, so divergence is expected and
-                // uninformative there). Logs first divergence each tick.
-                if crate::hosted_server::ENABLE_SINGLEPLAYER_HOSTED_SERVER
-                    && self.remote_client.is_none()
-                {
-                    let client = crate::parity_check::WorldParityHash::sample_from_ecs(
-                        &self.ecs,
-                        self.world_time,
-                    );
-                    let server = crate::parity_check::WorldParityHash::sample_from_ecs(
-                        &hs.server.ecs,
-                        hs.server.world_time,
-                    );
-                    if let Some(d) = client.diff(&server) {
-                        log::warn!("[parity_check] {d}");
-                    }
-                }
-            }
+            self.tick_hosted_server(tally_before);
             // Saturating: a tick may RESET the timing mid-loop (e.g. a Stash
             // Column arena launch / `/scenario` calls `reset_tick_timing`, which
             // zeroes the accumulator). A plain `-= TICK_DURATION` then underflows
@@ -20607,9 +20828,12 @@ impl super::GameState {
                             // Zero Health on every mob; the next despawn_dead
                             // sweep will drop them + spawn drop entities normally.
                             crate::world_exit::kill_all_mobs(&mut self.ecs);
-                            // Hosting: the server's own mob sim is what joiners
-                            // see (dual-sim), so clear it too.
-                            if let Some(hs) = self.hosted_server.as_mut() {
+                            // Hosting with `--no-lend`: the server's own mob sim
+                            // is what joiners see (dual-sim), so clear it too. A
+                            // lent world (D1) has one ECS — this one.
+                            if let Some(hs) =
+                                self.hosted_server.as_mut().filter(|hs| !hs.lends_host_world())
+                            {
                                 crate::world_exit::kill_all_mobs(&mut hs.server.ecs);
                             }
                         }
@@ -20681,18 +20905,22 @@ impl super::GameState {
                             for cc in crate::worldedit::affected_chunks(min, max) {
                                 self.mark_chunk_dirty(cc);
                             }
-                            // Hosting: mirror the region into the server's world
-                            // and queue it for broadcast. Not via
-                            // `pending_block_changes` — that rides the input
-                            // packet, where the server's per-tick budget (4) and
-                            // reach gate would drop almost all of a region.
-                            // The broadcast is queued and drained a batch a
-                            // tick (one huge StateUpdate is dropped whole by
-                            // every joiner — review W3 B2).
+                            // Hosting: queue the region for broadcast (and, with
+                            // `--no-lend`, copy it into the server's own world —
+                            // a lent world (D1) already has it, being this one).
+                            // Not via `pending_block_changes` — that rides the
+                            // input packet, where an owning server's per-tick
+                            // budget (4) and reach gate would drop almost all of
+                            // a region. The broadcast is queued and drained a
+                            // batch a tick (one huge StateUpdate is dropped whole
+                            // by every joiner — review W3 B2).
                             if let Some(hs) = self.hosted_server.as_mut() {
-                                let edits = crate::world_exit::region_broadcast(&self.world, &changed);
-                                for bc in &edits {
-                                    hs.server.world.apply_remote_block_change(bc);
+                                if !hs.lends_host_world() {
+                                    let edits =
+                                        crate::world_exit::region_broadcast(&self.world, &changed);
+                                    for bc in &edits {
+                                        hs.server.world.apply_remote_block_change(bc);
+                                    }
                                 }
                                 self.region_broadcast_queue.push(&changed);
                             }
@@ -21526,6 +21754,7 @@ impl super::GameState {
         // Phase 2: Process collected data (borrows world, renderer, etc.)
 
         // Host: parse state updates from raw packets
+        let lent = self.sim_lent();
         for packet in &host_packets {
             if let Some((ptype, payload)) = crate::protocol::deserialize_header(packet)
                 && ptype == crate::protocol::PacketType::StateUpdate
@@ -21544,20 +21773,31 @@ impl super::GameState {
                             // behaviour in f32-to-i32 casts during rendering).
                             .filter(|p| p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
                             .collect();
-                        for bc in &state.block_changes {
-                            // Phase B1 review — a column this host client has
-                            // not loaded (a joiner's edit near spawn while the
-                            // host is away) is generated, changed and evicted,
-                            // never written as a stray chunk (a 16³ hole that
-                            // the host's save kept). Its world is the record.
-                            if !crate::chunk_stream::remote_change_is_loaded(
-                                &self.loaded_columns, &self.world, bc.x, bc.z,
-                            ) {
-                                crate::chunk_stream::apply_remote_change_to_unloaded_column(
-                                    &mut self.world, &self.biome_gen, bc,
-                                );
-                            } else if self.world.apply_remote_block_change(bc) {
-                                self.rebuild_chunk_at(bc.x, bc.y, bc.z);
+                        // D1 — a lending host's loopback carries changes the
+                        // server already made in THIS world (and this client's
+                        // own edits): re-applying would race a same-frame host
+                        // edit, and finds nothing to remesh. They were meshed
+                        // from `take_lent_changes` in `tick_hosted_server`.
+                        if !lent {
+                            for bc in &state.block_changes {
+                                // Phase B1 review (`--no-lend` only) — a column
+                                // this host client has not loaded (a joiner's
+                                // edit near spawn while the host is away) is
+                                // generated, changed and evicted, never written
+                                // as a stray chunk (a 16³ hole that the host's
+                                // save kept). Its world is the record. A lent
+                                // world needs none of this: the server's change
+                                // IS this world, and the joiner's column is
+                                // kept loaded by this client's streamer.
+                                if !crate::chunk_stream::remote_change_is_loaded(
+                                    &self.loaded_columns, &self.world, bc.x, bc.z,
+                                ) {
+                                    crate::chunk_stream::apply_remote_change_to_unloaded_column(
+                                        &mut self.world, &self.biome_gen, bc,
+                                    );
+                                } else if self.world.apply_remote_block_change(bc) {
+                                    self.rebuild_chunk_at(bc.x, bc.y, bc.z);
+                                }
                             }
                         }
                     }
@@ -21807,7 +22047,7 @@ impl super::GameState {
     /// Builds an InputPacket from the local player's position, camera, and
     /// any pending block changes, then sends it via the appropriate transport.
     /// Cross-platform: the browser sends its movement input to the server too.
-    fn network_send_input(&mut self) {
+    pub(crate) fn network_send_input(&mut self) {
         if self.players.is_empty() { return; }
         let has_server = self.hosted_server.is_some();
         let has_client = self.remote_client.is_some();

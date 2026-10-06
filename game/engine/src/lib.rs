@@ -297,7 +297,6 @@ mod reputation;
 mod economy;
 mod raid;
 mod spawn_pref;
-mod parity_check;
 mod spawning;
 mod screen;
 mod player_slot;
@@ -339,6 +338,7 @@ mod server;
 mod server_stream; // Phase B1 — the dedicated server's column streamer.
 mod block_machines; // T1-3 — GameServer's block-machine pass + the shared MachineCtx.
 mod hosted_server;
+mod sim_lend;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
 mod state_outbox;
 #[cfg(not(target_arch = "wasm32"))]
@@ -2721,6 +2721,14 @@ pub fn run() {
     native_boot_services();
 
     let args: Vec<String> = std::env::args().collect();
+
+    // D1 — `--no-lend`: a host's embedded server keeps its own copy of the
+    // world instead of borrowing the host's (`sim_lend`). The one-release
+    // escape hatch if lending misbehaves; the dedicated server is unaffected.
+    if args.iter().any(|a| a == "--no-lend") {
+        hosted_server::set_no_lend(true);
+        log::warn!("--no-lend: hosting keeps a second copy of the world (pre-D1 behaviour)");
+    }
 
     // Headless dedicated server (Docker). Runs the authoritative simulation +
     // WebSocket accept loop with NO window/renderer, then returns. Everything
