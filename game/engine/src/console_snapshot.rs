@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // consumed by the operator snapshot-stream (task 7)
 //! The Operator Console read-model (Spec B). A serde snapshot the server builds
 //! from its live state + settings + telemetry, streamed to the verified-operator
 //! player (task 7). Pure assembly; no I/O. npub fields are bech32 (`npub-only

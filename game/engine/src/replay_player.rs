@@ -8,15 +8,15 @@
 //! No UI drives playback yet (no replay browser/player screen — see the
 //! `main.rs::replay_player` field and `replay.rs`'s `list_replays`/
 //! `load_replay`, both also unwired), so this whole module is tested but
-//! otherwise unreferenced. Module-scoped allow rather than repeating
-//! `cfg_attr(not(test), allow(dead_code))` on every item.
-#![allow(dead_code)]
+//! otherwise unreferenced. The type, its `impl` and `sample_targets` carry
+//! item-level `allow(dead_code)`.
 
 use glam::Vec3;
 
 use crate::replay::{ReplayFile, ReplayFrame};
 use crate::world::World;
 
+#[allow(dead_code)] // no replay browser/player screen drives playback yet (see module doc); tested only
 pub struct ReplayPlayer {
     /// The tick-0 world archive, kept for rewind (backward scrub re-unpacks).
     base_blob: Vec<u8>,
@@ -32,6 +32,7 @@ pub struct ReplayPlayer {
     pub playing: bool,
 }
 
+#[allow(dead_code)] // no replay browser/player screen drives playback yet (see module doc); tested only
 impl ReplayPlayer {
     /// Reconstruct the playback world from the initial snapshot and load the
     /// timeline. Cursor starts at tick 0 (no frames applied yet).
@@ -128,6 +129,7 @@ impl ReplayPlayer {
 
 /// Pure: interpolated player targets at fractional tick `cursor` — `lerp`
 /// position, shortest-arc yaw/pitch (so 0.25× slow-mo is smooth, not stepped).
+#[allow(dead_code)] // no replay browser/player screen drives playback yet (see module doc); tested only
 pub fn sample_targets(frames: &[ReplayFrame], cursor: f32) -> Vec<crate::director::TargetSnapshot> {
     if frames.is_empty() {
         return Vec::new();

@@ -33,10 +33,8 @@
 // (`pair`, `complete_sign_in`, `sign_out`, `restore_signer`, …) are consumed by
 // the native sign-in UX + the Phase-4 authenticated-join path — both the
 // owner/device boundary this goal stops at — and its lower-level helpers are
-// exercised by the unit tests below. Allow `dead_code` so the non-test build
-// (where only `init_identity` + `current_owner_pubkey` are wired today) stays
-// warning-clean without dropping the ready API.
-#![allow(dead_code)]
+// exercised by the unit tests below. The few items nothing calls yet carry
+// item-level `allow(dead_code)`.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -81,6 +79,7 @@ pub enum NativeIdentity {
 }
 
 impl NativeIdentity {
+    #[allow(dead_code)] // convenience predicate; only the unit tests call it today
     pub fn is_signed_in(&self) -> bool {
         matches!(self, NativeIdentity::SignedIn { .. })
     }
@@ -306,6 +305,7 @@ pub fn sign_out() -> Result<(), String> {
 pub enum JoinAuthError {
     /// No paired session — the player is a guest. The join UI offers guest-join
     /// or a sign-in prompt; this is **not** an error shown as a failure.
+    #[allow(dead_code)] // the guest-join variant Phase 4's join UI will return; Display covers it, nothing constructs it yet
     NotPaired,
     /// The bunker didn't answer in time (offline, locked, or slow approval).
     Timeout,

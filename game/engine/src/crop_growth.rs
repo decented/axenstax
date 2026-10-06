@@ -22,27 +22,29 @@
 //!
 //! Spec: `docs/foundations/2026-05-14-farming-tier-1.5-processed-economy.md`.
 
-// Module-scoped (not crate-wide) — this file's own doc comment above already
-// establishes "zero live call sites, unit-tested substrate for a deferred
-// phase" as the intended state, so a per-item cfg_attr(not(test)) repeated
-// across every pub item here would just be noise saying the same thing.
-#![allow(dead_code)]
+// Every pub item below carries an item-level `allow(dead_code)`: the module doc
+// above is the reason (zero live call sites, kept as the tested substrate for
+// the deferred T1.5 crop family). Anything NEW added here that gets no allow
+// will warn — and should either be wired or deleted.
 
 use crate::block::{self, BlockId};
 
 /// Ticks between growth stages under nominal conditions (no water).
 /// Matches the existing T1 crop growth (10s @ 20 TPS = 200 ticks).
 /// Each crop family can override via `growth_period_ticks`.
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 pub const DEFAULT_GROWTH_PERIOD_TICKS: u64 = 200;
 
 /// Water-adjacency speed multiplier. Crops next to water grow 2× as
 /// fast — the period halves.
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 pub const WATER_BONUS_FACTOR: u64 = 2;
 
 /// Crop families. Each maps to its 4-stage block-id sequence (or
 /// 5-stage for Pumpkin Stem). The crop-block predicate `crop_family`
 /// classifies a BlockId into one of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 pub enum CropFamily {
     Wheat,
     Carrot,
@@ -54,6 +56,7 @@ pub enum CropFamily {
     BerryBush,
 }
 
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 impl CropFamily {
     /// Block ids for this family's growth stages, lowest-first.
     pub fn stages(&self) -> &'static [BlockId] {
@@ -143,6 +146,7 @@ impl CropFamily {
 
 /// Classify a BlockId into its crop family + current stage index, if
 /// any. Returns None for non-crop blocks.
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 pub fn crop_family(block_id: BlockId) -> Option<(CropFamily, usize)> {
     for family in [
         CropFamily::Wheat,
@@ -171,6 +175,7 @@ pub fn crop_family(block_id: BlockId) -> Option<(CropFamily, usize)> {
 /// Seed: per-position seed XORed with the tick count to add a small
 /// stochastic jitter — two crops planted on the same tick will advance
 /// on different ticks, so a row of wheat doesn't perfectly synchronise.
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 pub fn tick_crop(
     block_id: BlockId,
     water_adjacent: bool,
@@ -202,6 +207,7 @@ pub fn tick_crop(
 /// Berry bush harvest — when the mature stage is right-click harvested,
 /// it reverts to stage 2 (one-back-from-mature) so it regrows quickly.
 /// Pure helper; the world tick reads this on right-click.
+#[allow(dead_code)] // dead by design — NOT the live crop path (see module doc); substrate for the deferred T1.5 wiring
 pub fn berry_bush_after_harvest() -> BlockId {
     block::BERRY_BUSH_2
 }

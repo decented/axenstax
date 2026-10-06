@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // consumed by the join path (Spec A task 7)
 //! Native npub→address resolution: fetch the operator's attestation + the
 //! delegate's card from relays and feed the cross-platform selection core
 //! ([`crate::server_resolve`]).
@@ -24,6 +23,7 @@ use crate::server_resolve::{
 };
 
 /// The default relay set (operator-overridable via `--card-relays`).
+#[allow(dead_code)] // the discovery relay default; relay_defaults_lint pins it, no runtime caller yet (Spec A task 7)
 pub fn default_relays() -> Vec<String> {
     crate::server_resolve::public_default_relays()
 }

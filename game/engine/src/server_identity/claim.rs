@@ -1,8 +1,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 // Forward-API: the sign/verify primitive is fully tested; specific emitters
 // (leaderboard score, payout receipt, integrity event) are wired into the
-// economy/score paths as a per-claim product decision.
-#![allow(dead_code)]
+// economy/score paths as a per-claim product decision. Each item carries an
+// item-level `allow(dead_code)` until its first emitter lands.
 //! Signed authoritative claims (Track 6).
 //!
 //! A provisioned server can sign claims — scores, payouts, world-integrity
@@ -22,10 +22,12 @@ use crate::server_identity::store::ServerIdentity;
 
 /// Claim event kind (regular event; the `claims` kind reserved in the
 /// attestation's `allowed_kinds`). Provisional — register in `forgesworn/nips`.
+#[allow(dead_code)] // forward API — the sign/verify primitive is tested; per-claim emitters are a product decision (see module doc)
 pub const CLAIM_KIND: u16 = 27421;
 
 /// A verified server claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // forward API — the sign/verify primitive is tested; per-claim emitters are a product decision (see module doc)
 pub struct ClaimView {
     /// The server runtime key that signed the claim.
     pub server_pubkey: PublicKey,
@@ -38,6 +40,7 @@ pub struct ClaimView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // forward API — the sign/verify primitive is tested; per-claim emitters are a product decision (see module doc)
 pub enum ClaimError {
     Malformed,
     AttestationInvalid,
@@ -49,6 +52,7 @@ pub enum ClaimError {
 
 /// Sign an authoritative claim with the server runtime key. `None` if the server
 /// is unprovisioned (an unattested claim isn't verifiable, so we don't make one).
+#[allow(dead_code)] // forward API — the sign/verify primitive is tested; per-claim emitters are a product decision (see module doc)
 pub fn sign_claim(id: &ServerIdentity, claim_type: &str, payload: &str) -> Option<Event> {
     id.attestation()?; // only a provisioned (attested) server makes verifiable claims
     let tag = Tag::parse(["t", claim_type]).ok()?;
@@ -60,6 +64,7 @@ pub fn sign_claim(id: &ServerIdentity, claim_type: &str, payload: &str) -> Optio
 
 /// Verify a claim against the operator npub the consumer expects. Needs the
 /// server's attestation to chain `claim signer (runtime key) → operator`.
+#[allow(dead_code)] // forward API — the sign/verify primitive is tested; per-claim emitters are a product decision (see module doc)
 pub fn verify_claim(
     claim: &Event,
     attestation: &Event,

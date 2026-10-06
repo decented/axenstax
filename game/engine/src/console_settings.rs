@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // load() consumed by the publisher + snapshot in later tasks
 //! Operator console settings (Spec B §5) — the descriptor / capacity / announce /
 //! privacy fields an operator sets via admin commands, persisted to `console.json`
 //! in the identity dir. The running server reads these on its policy reload; the

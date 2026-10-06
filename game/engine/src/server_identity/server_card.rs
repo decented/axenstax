@@ -1,7 +1,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 // Forward-API: build/verify are consumed by the resolver + publisher (Spec A
-// tasks 4–9); fully tested here. Allow dead_code until those land.
-#![allow(dead_code)]
+// tasks 4–9); fully tested here. Unwired items carry item-level `allow(dead_code)`.
 //! Address Card (Spec A) — kind-30422.
 //!
 //! A runtime-signed, addressable Nostr event that carries a server's live
@@ -47,6 +46,7 @@ pub struct ServerCard {
 
 /// A verified Address Card with its proven operator + signer.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // forward API — build/verify are consumed by the resolver + publisher (Spec A tasks 4-9); tested only today
 pub struct CardView {
     /// The runtime key that signed the card.
     pub server_pubkey: PublicKey,
@@ -57,6 +57,7 @@ pub struct CardView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // forward API — build/verify are consumed by the resolver + publisher (Spec A tasks 4-9); tested only today
 pub enum CardError {
     Malformed,
     AttestationInvalid,
@@ -117,6 +118,7 @@ pub fn build_card_delete_event(id: &ServerIdentity) -> Option<Event> {
 /// tags ignored, missing fields default. Returns `None` only if the event isn't
 /// shaped like a card at all (no tags at all is still `Some` with defaults — the
 /// caller decides whether an empty card is useful).
+#[allow(dead_code)] // forward API — build/verify are consumed by the resolver + publisher (Spec A tasks 4-9); tested only today
 pub fn parse_card(event: &Event) -> Option<ServerCard> {
     let mut card = ServerCard::default();
     for t in event.tags.iter() {
@@ -146,6 +148,7 @@ pub fn parse_card(event: &Event) -> Option<ServerCard> {
 /// Note: like [`crate::server_identity::claim::verify_claim`], this does not
 /// enforce the attestation's `allowed_kinds`; the trust chain holds because the
 /// signer must be the attested runtime key and the operator is cross-checked.
+#[allow(dead_code)] // forward API — build/verify are consumed by the resolver + publisher (Spec A tasks 4-9); tested only today
 pub fn verify_card(
     card_evt: &Event,
     attestation: &Event,

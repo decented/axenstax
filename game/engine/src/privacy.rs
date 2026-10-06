@@ -1,6 +1,3 @@
-// Some helpers are server-side (gating), others client-side (badge) — allow
-// per-platform unused.
-#![allow(dead_code)]
 //! Privacy level taxonomy + encoding (Spec C). The single source of truth for
 //! the `none` / `sessions:<days>` levels and their encoding — bridging the Spec A
 //! Card `privacy` tag, the Spec B `ConsoleSettings`, and the player-facing badge.
@@ -25,6 +22,7 @@ pub fn encode(level: &PrivacyLevel) -> String {
 }
 
 /// Decode a Card `privacy` tag value. Unknown/malformed ⇒ `None` (safe default).
+#[allow(dead_code)] // Spec C client-side badge / notice — no UI shows it yet; tested only
 pub fn decode(s: &str) -> PrivacyLevel {
     if let Some(days) = s.strip_prefix("sessions:")
         && let Ok(d) = days.parse::<u32>()
@@ -43,6 +41,7 @@ pub fn from_settings(privacy_level: &str, retention_days: u32) -> PrivacyLevel {
 }
 
 /// The player-facing badge shown at server selection (Spec C §5).
+#[allow(dead_code)] // Spec C client-side badge / notice — no UI shows it yet; tested only
 pub fn badge(level: &PrivacyLevel) -> String {
     match level {
         PrivacyLevel::None => "🔒 No tracking".to_string(),
@@ -72,6 +71,7 @@ pub fn retention_cutoff(level: &PrivacyLevel, now_unix: u64) -> Option<u64> {
 /// Whether to show the player a pre-join privacy notice (Spec C §5). Never for
 /// `None` (nothing to consent to); for `Sessions`, only until the player has
 /// acknowledged THIS posture — re-prompts if the level/retention changed.
+#[allow(dead_code)] // Spec C client-side badge / notice — no UI shows it yet; tested only
 pub fn should_show_notice(level: &PrivacyLevel, acked: Option<&str>) -> bool {
     match level {
         PrivacyLevel::None => false,

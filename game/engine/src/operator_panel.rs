@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // rendered by the in-game HUD once the snapshot route lands (B-7a)
 //! In-game Operator panel (Spec B task 7) — renders a received `ConsoleSnapshot`.
 //!
 //! Native (the desktop operator connected to their own server); the web-operator

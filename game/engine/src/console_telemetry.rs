@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // consumed by the snapshot (task 5) + capture wiring (integration)
 //! Operator-private session telemetry (Spec B §6).
 //!
 //! The minimum useful: per-connection sessions (npub + connect/disconnect times)
@@ -125,6 +124,7 @@ impl SessionLog {
     }
 
     /// Erase the whole session log.
+    #[allow(dead_code)] // session-log reset for the console; only the tests call it today
     pub fn clear(&mut self) {
         self.sessions.clear();
     }

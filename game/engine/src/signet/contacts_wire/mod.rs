@@ -14,8 +14,9 @@
 //! rail → `open_vault_envelope_text` → `parse_projection` (+ check `grant_id`)
 //! → keep it only if `is_newer` than what is held.
 
-// No caller until step 2 (relay I/O, storage, Friends UI) lands.
-#![allow(dead_code, unused_imports)]
+// Step 1 of the contacts wire is the pure codec: the re-exports below are its
+// public surface, and the ones no caller uses yet (relay I/O, storage and the
+// Friends UI are step 2) carry `allow(unused_imports)` / `allow(dead_code)`.
 
 pub mod ack;
 pub mod code;
@@ -31,14 +32,20 @@ pub mod tags;
 #[cfg(test)]
 mod tests;
 
+#[allow(unused_imports)] // step-2 surface
 pub use ack::{ack_event_is_fresh, decrypt_ack_event, parse_ack, Ack};
 pub use code::{format_pairing_code, pairing_code};
+#[allow(unused_imports)] // step-2 surface
 pub use constants::{clamp_staleness, normalise_capabilities, Capability};
+#[allow(unused_imports)] // step-2 surface
 pub use envelope::{open_vault_envelope, open_vault_envelope_text};
 pub use pairing::{build_pairing_uri, web_carrier, Directory, PairingError};
+#[allow(unused_imports)] // step-2 surface
 pub use projection::{
     frontier_newer, is_newer, parse_projection, Frontier, Identity, ProjectedContact, Projection,
     Tier,
 };
+#[allow(unused_imports)] // step-2 surface
 pub use sanitise::sanitize_wire_text;
+#[allow(unused_imports)] // step-2 surface
 pub use tags::{ack_tag, projection_tag, proposal_tag, scoped_contact_id};

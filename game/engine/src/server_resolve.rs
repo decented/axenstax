@@ -1,6 +1,3 @@
-// Consumed by the native + web relay fetch wiring (Spec A tasks 5/6) and the
-// join path (task 7).
-#![allow(dead_code)]
 //! npub→address resolution — the cross-platform selection core (Spec A task 4).
 //!
 //! Operates on lightweight [`RawEvent`]s parsed with `serde_json`, which is
@@ -17,12 +14,6 @@
 //! key, cross-checks the card's `op` tag, and extracts the endpoint + descriptor.
 
 use serde::Deserialize;
-
-/// Nostr kinds, re-declared here as the cross-platform home (the canonical native
-/// `attestation::ATTESTATION_KIND` / `server_card::CARD_KIND` live in the
-/// native-only `server_identity` module, so the wasm resolver can't import them).
-pub const ATTESTATION_KIND: u16 = 30420;
-pub const CARD_KIND: u16 = 30422;
 
 /// Default public relays — the shipped "Your relays" list
 /// (`GraphicsSettings.online_relays`) that the native app uses for sign-in,
@@ -57,6 +48,7 @@ pub struct RawEvent {
     #[serde(default)]
     pub tags: Vec<Vec<String>>,
     #[serde(default)]
+    #[allow(dead_code)] // parsed for completeness; the resolver reads tags only
     pub content: String,
 }
 

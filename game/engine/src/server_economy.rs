@@ -16,10 +16,7 @@
 //! No operator config surface exists yet to populate/read this (the Vendor
 //! Block pricing path + Bitcoin economy the doc above describes as future
 //! readers haven't adopted it), so the whole module is tested but otherwise
-//! unreferenced. Module-scoped allow rather than repeating
-//! `cfg_attr(not(test), allow(dead_code))` on every item.
-
-#![allow(dead_code)]
+//! unreferenced. The struct and its `impl` carry item-level `allow(dead_code)`.
 
 use std::collections::HashMap;
 
@@ -28,6 +25,7 @@ use crate::block::BlockId;
 
 /// Server-side economy configuration. Pure data; no engine state.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // no operator config surface populates/reads this yet (Spec 6 §13); tested only
 pub struct ServerEconomyConfig {
     /// Per-MaterialId overrides on default `trade_value`. `None` here
     /// means "non-tradeable on this server" (operator can explicitly
@@ -43,6 +41,7 @@ pub struct ServerEconomyConfig {
     pub sats_per_unit: u64,
 }
 
+#[allow(dead_code)] // no operator config surface populates/reads this yet (Spec 6 §13); tested only
 impl ServerEconomyConfig {
     /// New config with no overrides + sats off.
     pub fn new() -> Self {

@@ -28,12 +28,9 @@
 //! tris). Baking culls the interior and merges the shell ONCE per asset type;
 //! the render path (Phase B) only ever *instances* the pre-baked mesh.
 
-// BRIDGE: Phase A ships the pure data + bake layer; nothing renders it yet, so
-// the whole public surface reads as dead code until Phase B wires the override
-// table + render path (and a later authoring trigger calls `from_plan`). The
-// scoped allow keeps the Phase-4b `-D warnings` cutover clean. Remove/narrow it
-// once Phase B/C consume every item.
-#![allow(dead_code)]
+// BRIDGE: Phase A ships the pure data + bake layer; most of the surface is live
+// (the registry, mesher and renderer consume it). The few items Phase B/C will
+// call carry item-level `allow(dead_code)` — delete each as it gets a caller.
 
 use crate::block::{BlockId, BlockRegistry, AIR};
 use crate::mesh::{ChunkMesh, Vertex};
@@ -136,6 +133,7 @@ impl MicroModelData {
     /// the hash is stable across reorderings. NOTE: provided for a FUTURE
     /// content-hash dedup / Stash cache — the current `MicroModelRegistry` keys by
     /// `block_id` and bakes per block, so nothing keys on this hash in production yet.
+    #[allow(dead_code)] // provided for a future content-hash dedup / Stash cache; tested only
     pub fn content_hash(&self) -> [u8; 32] {
         // Canonicalise to the SAME grid `bake_micro_model` builds: collapse
         // duplicate-coordinate voxels (last-write-wins, matching the bake's grid
@@ -165,11 +163,13 @@ impl MicroModelData {
 /// the `plan_registry::BundledPlan` wrapper convention: the on-disk shape is
 /// `{ "micro_model": { <MicroModelData fields> } }`, not a bare struct.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(dead_code)] // Phase B/C micro-model render path is not wired; tested only (see the BRIDGE note)
 pub struct BundledMicroModel {
     pub micro_model: MicroModelData,
 }
 
 /// Parse one `assets/micro_models/*.json` source string into [`MicroModelData`].
+#[allow(dead_code)] // Phase B/C micro-model render path is not wired; tested only (see the BRIDGE note)
 pub fn parse_micro_model_json(source: &str) -> Result<MicroModelData, serde_json::Error> {
     Ok(serde_json::from_str::<BundledMicroModel>(source)?.micro_model)
 }
@@ -181,6 +181,7 @@ pub fn parse_micro_model_json(source: &str) -> Result<MicroModelData, serde_json
 /// explicit hand-maintained list (not a build-script scan) so the bundle surface
 /// is auditable and the binary stays self-contained on WASM. `example_cube` is a
 /// format reference + loader canary; the real flower assets land in Phase C.
+#[allow(dead_code)] // Phase B/C micro-model render path is not wired; tested only (see the BRIDGE note)
 fn bundled_micro_model_sources() -> &'static [(&'static str, &'static str)] {
     &[(
         "example_cube",
@@ -191,6 +192,7 @@ fn bundled_micro_model_sources() -> &'static [(&'static str, &'static str)] {
 /// Parse every engine-bundled micro-model. Parse failures are non-fatal
 /// (warn-and-skip), mirroring `plan_registry::load_bundled`. The Phase-B
 /// `MicroModelRegistry` builds its `block_id → baked mesh` table on top of this.
+#[allow(dead_code)] // only the Phase B registry loader will call it (tests exercise it today)
 pub fn load_bundled_micro_models() -> Vec<MicroModelData> {
     let mut out = Vec::new();
     for (name, source) in bundled_micro_model_sources() {

@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // wired from server_main on the announce path
 //! Native opt-in Server Card publisher (Spec A task 9).
 //!
 //! Builds the Address Card from server config and publishes it to relays,

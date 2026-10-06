@@ -16,13 +16,9 @@
 //! Node, no relays and no network. Spec:
 //! `docs/foundations/2026-09-05-world-chat.md` §4 and §8.2.
 
-// BRIDGE: blanket module allow until `KithMootKeeper` lands and becomes the
-// production caller for this seam. Everything here is compiled and tested now —
-// the relay lint, the link policy gate and the NDJSON codec are the parts that
-// DECIDE things, and they are worth having under test before the subprocess
-// that uses them exists. Remove this blanket allow when the keeper is wired;
-// leaving it after that would hide genuinely dead code.
-#![allow(dead_code)]
+// BRIDGE: `KithMootKeeper` is now the production caller for this seam, so only
+// the items it does not call yet (`KeeperCommand::Roster`, `is_retryable`) carry
+// item-level `allow(dead_code)` — delete each when the keeper uses it.
 
 use serde::{Deserialize, Serialize};
 
@@ -270,6 +266,7 @@ pub struct RosterMember {
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum KeeperCommand {
     Say { text: String },
+    #[allow(dead_code)] // built by the keeper bridge once KithMootKeeper asks for a roster; tested only today
     Roster,
     Leave,
 }
@@ -392,6 +389,7 @@ pub enum RoomError {
 impl RoomError {
     /// Whether retrying could ever help. `Closed` is terminal upstream; retrying
     /// it forever would be a busy loop against a decision somebody made.
+    #[allow(dead_code)] // the retry policy for the keeper bridge; tested only today
     pub fn is_retryable(&self) -> bool {
         match self {
             RoomError::Closed | RoomError::Relays(_) | RoomError::Link(_) => false,

@@ -1,5 +1,3 @@
-// Used by the native hosted_server kick path; unused on the wasm build.
-#![allow(dead_code)]
 //! Kick — find the connected slot for a target npub (Spec B §5). Pure; the
 //! actual mid-session disconnect (mark the slot + drop it from broadcasts) lives
 //! in `hosted_server` and is verified live (owner boundary).
@@ -10,6 +8,7 @@
 /// freed slots from an earlier session are skipped (audit 2026-09-27: the old
 /// first-match picked a dead slot after a rejoin, and the player played on),
 /// and every live match is returned so no second connection survives.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // used by the native hosted_server kick path; dead on the wasm build
 pub fn live_slots_for_pubkey(players: &[(Option<[u8; 32]>, bool)], target: &[u8; 32]) -> Vec<usize> {
     players
         .iter()

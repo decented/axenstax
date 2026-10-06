@@ -16,12 +16,6 @@
 //! (`Renderer::sync_micro_models` uploads one shared geometry per type), keeping
 //! this struct platform-agnostic.
 
-// Some of the registry surface (BakedMicroModel.data, get/is_empty/len) is
-// future-facing API exercised only by tests today — `data` carries the source
-// model for the deferred Stash/re-bake layer; the lookups round out the type.
-// Allow it rather than churn the API, mirroring micro_model.rs's bridge allow.
-#![allow(dead_code)]
-
 use crate::block::{BlockId, BlockRegistry};
 use crate::mesh::ChunkMesh;
 use crate::micro_model::{bake_micro_model, MicroModelData};
@@ -31,6 +25,7 @@ use ahash::AHashMap;
 /// mesh (CPU). One per registered `BlockId`.
 #[derive(Clone, Debug)]
 pub struct BakedMicroModel {
+    #[allow(dead_code)] // carries the source model for the deferred Stash/re-bake layer; read only by tests today
     pub data: MicroModelData,
     pub mesh: ChunkMesh,
 }
@@ -66,10 +61,12 @@ impl MicroModelRegistry {
         self.models.contains_key(&block_id)
     }
 
+    #[allow(dead_code)] // rounds out the type (clippy len_without_is_empty); tested only
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
 
+    #[allow(dead_code)] // rounds out the type; tested only
     pub fn len(&self) -> usize {
         self.models.len()
     }

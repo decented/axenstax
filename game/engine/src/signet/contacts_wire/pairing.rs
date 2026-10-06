@@ -14,6 +14,7 @@ use super::sanitise::sanitize_wire_text;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Directory {
     Owner,
+    #[allow(dead_code)] // the dependant directory — the kids/dependant gap is not built yet (tests construct it)
     Dependant,
 }
 

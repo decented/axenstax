@@ -22,15 +22,14 @@
 //! a tokio runtime). Everything here that shapes a payload is pure and compiled
 //! everywhere, so it is tested on both targets.
 
-// BRIDGE: blanket module allow — the payload shaping and batching are written
-// and tested, but the send path (NIP-17 via native_mailbox::wire::wrap_report)
-// and the HUD indicator are NOT wired up in this build. Nothing calls this yet.
-// Remove the blanket allow when Phase 5 wires it; leaving it after that would
-// hide genuinely dead code.
-#![allow(dead_code)]
+// BRIDGE: the payload shaping and batching are written and tested, but the send
+// path (NIP-17 via native_mailbox::wire::wrap_report) and the HUD indicator are
+// NOT wired up in this build — nothing calls this yet. Each item carries its own
+// `allow(dead_code)`; delete them as Phase 5 wires the item up.
 
 /// Which way a copied line went, from the child's point of view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 pub enum Direction {
     /// The child said it.
     Said,
@@ -39,6 +38,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    #[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
     fn as_str(self) -> &'static str {
         match self {
             Direction::Said => "said",
@@ -49,6 +49,7 @@ impl Direction {
 
 /// One line of the child's conversation, as it will be copied.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 pub struct CopiedLine {
     pub direction: Direction,
     /// The other party's npub-able pubkey, hex. For `Said`, who it went to; for
@@ -68,15 +69,18 @@ pub struct CopiedLine {
 /// line would make a child's typing rhythm visible to anyone watching relay
 /// traffic, and would put a burst of events on somebody else's relay every time
 /// a ten-year-old gets excited.
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 pub const BATCH_LINES: usize = 20;
 
 /// A pending batch. Flushed when it fills, and on leaving the world — a copy
 /// that only arrives when the buffer happens to fill is a copy with gaps.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 pub struct CopyBuffer {
     lines: Vec<CopiedLine>,
 }
 
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 impl CopyBuffer {
     pub fn new() -> Self {
         CopyBuffer { lines: Vec::new() }
@@ -108,6 +112,7 @@ impl CopyBuffer {
 /// Deliberately not JSON. A parent opening this in whatever NIP-17 client they
 /// use should be able to read it directly; a machine-readable format would
 /// serve us and not them.
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 pub fn build_copy_body(world: &str, lines: &[CopiedLine]) -> String {
     let mut out = String::new();
     out.push_str(&format!("World chat copy — {world}\n\n"));
@@ -127,6 +132,7 @@ pub fn build_copy_body(world: &str, lines: &[CopiedLine]) -> String {
 ///
 /// Worded to a child, not to a lawyer: it says what happens and who sees it, in
 /// words a ten-year-old reads without help, and it does not apologise for it.
+#[allow(dead_code)] // Phase 5 (the NIP-17 send path + HUD indicator) is not wired — see the BRIDGE note
 pub const COPY_INDICATOR: &str = "Your grown-up sees this chat";
 
 #[cfg(test)]

@@ -128,8 +128,6 @@ mod my_servers;
 mod server_resolve;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_resolve_native;
-#[cfg(target_arch = "wasm32")]
-mod server_resolve_web;
 mod admission;
 // Online play by contact — WHO may join (identity), as distinct from `admission`
 // above, which is WHETHER there is room (capacity). Native only.
@@ -257,7 +255,6 @@ mod squid_ai;
 mod bee_hive;
 mod species_ai;
 mod pure_helpers;
-mod worldgen_helpers;
 mod armour;
 mod tree_shapes;
 mod crop_growth;

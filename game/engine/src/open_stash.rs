@@ -16,15 +16,14 @@
 //! manifest SHAPE / parse / followed-store that used to live here moved into
 //! Beacon; the engine no longer builds Nostr events itself.
 
-// The kept native symbols (official-pubkey seam, kind constant, normalize) read
-// as unused in plain (non-test) native builds — they are consumed by the WASM
-// transport + later browse/override wiring. Allow it.
-#![allow(dead_code)]
+// Items that only the WASM Stash column consumes carry a target-scoped
+// `cfg_attr(not(wasm32), allow(dead_code))`; the kind constant is a kept reference.
 
 /// Parameterised-replaceable Nostr event kind for an open-stash index (public,
 /// cleartext manifest). Distinct from the private Stash's kind-30819 so a
 /// cleartext index is never confused with an encrypted one. Beacon owns the
 /// event build/parse now; this is kept as the canonical kind reference.
+#[allow(dead_code)] // canonical reference only — Beacon owns the event build/parse (see doc)
 pub const OPEN_STASH_MANIFEST_KIND: u32 = 30820;
 
 /// The AxeNStax official pubkey (hex), followed by default so official content
@@ -44,7 +43,9 @@ pub const OFFICIAL_AXENSTAX_PUBKEY: &str =
 /// appearance override-set (a skin); tag #2 is a scenario/challenge def. Kept as
 /// named constants so the publish call site, the browse filter, and the column
 /// classifier can't drift apart on a string literal.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // consumed by the web Stash column only (dead on native)
 pub const CONTENT_TYPE_OVERRIDE_SET: &str = "override-set";
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // consumed by the web Stash column only (dead on native)
 pub const CONTENT_TYPE_SCENARIO: &str = "scenario";
 
 /// The kind of content a Beacon item carries, decoded from its content-type tag.
@@ -53,6 +54,7 @@ pub const CONTENT_TYPE_SCENARIO: &str = "scenario";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StashItemKind {
     /// A Workshop appearance override-set (skin).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // consumed by the web Stash column only (dead on native)
     Skin,
     /// A scenario / challenge def.
     Scenario,
@@ -62,6 +64,7 @@ pub enum StashItemKind {
 /// Unknown / future tags return `None` (forward-compat: a newer publisher may
 /// carry a type this build can't render — the column simply skips it rather than
 /// crashing or mis-actioning it).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // consumed by the web Stash column only (dead on native)
 pub fn classify_content_type(content_type: &str) -> Option<StashItemKind> {
     match content_type {
         CONTENT_TYPE_OVERRIDE_SET => Some(StashItemKind::Skin),

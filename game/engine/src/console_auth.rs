@@ -1,5 +1,4 @@
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(dead_code)] // consumed by a future web/HTTP console or sidecar (amendment B-0)
 //! Operator console login auth (Spec B). A pure verify primitive: the operator
 //! signs a Nostr event over a server-issued nonce; this checks the signature,
 //! that it is THE operator, that the nonce matches, and that it is fresh.
@@ -12,6 +11,7 @@ use nostr::{Event, EventBuilder, JsonUtil, Kind, NostrSigner, Tag, Timestamp};
 
 /// Console-login event kind (provisional — register with the other
 /// server-identity kinds in `forgesworn/nips`).
+#[allow(dead_code)] // operator-console login primitive; its caller (the console/sidecar) is not built — specs 2026-06-17/18-operator-console
 pub const CONSOLE_LOGIN_KIND: u16 = 27423;
 
 /// Sign a console-login proof over `nonce` (the operator's bunker, or a local
@@ -20,6 +20,7 @@ pub const CONSOLE_LOGIN_KIND: u16 = 27423;
 /// WARNING (audit review B, N4): the event names no audience/host/channel, so a
 /// relaying host could harvest a console login for another server. Before this
 /// gets a live caller, bind it like the join event (`signet::join_origin`).
+#[allow(dead_code)] // operator-console login primitive; its caller (the console/sidecar) is not built — specs 2026-06-17/18-operator-console
 pub async fn sign_console_login<S: NostrSigner>(signer: &S, nonce: &str) -> Result<Event, String> {
     let tag = Tag::parse(["nonce", nonce]).map_err(|e| e.to_string())?;
     EventBuilder::new(Kind::Custom(CONSOLE_LOGIN_KIND), "")
@@ -32,6 +33,7 @@ pub async fn sign_console_login<S: NostrSigner>(signer: &S, nonce: &str) -> Resu
 /// Verify a console-login proof: a valid signature by `expected_operator_hex`,
 /// the right kind, a `nonce` tag matching the server-issued nonce, and a
 /// `created_at` fresh within `max_skew_secs`.
+#[allow(dead_code)] // operator-console login primitive; its caller (the console/sidecar) is not built — specs 2026-06-17/18-operator-console
 pub fn verify_console_login(
     signed_event_json: &str,
     expected_operator_hex: &str,

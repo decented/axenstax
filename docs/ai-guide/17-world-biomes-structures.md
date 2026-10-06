@@ -1,4 +1,4 @@
-<!-- SOURCE: game/engine/src/biome.rs, world.rs, worldgen_helpers.rs, village_gen.rs, mineshaft_gen.rs, ravine_gen.rs, brigand_hideout_gen.rs, snowfall.rs, save.rs, menu.rs, game_loop.rs, main.rs, commands/builtins/seed.rs | Verified against code 2026-06-22 -->
+<!-- SOURCE: game/engine/src/biome.rs, world.rs, village_gen.rs, mineshaft_gen.rs, ravine_gen.rs, brigand_hideout_gen.rs, snowfall.rs, save.rs, menu.rs, game_loop.rs, main.rs, commands/builtins/seed.rs | Verified against code 2026-06-22 -->
 
 # 17 — World, Biomes & Structures
 

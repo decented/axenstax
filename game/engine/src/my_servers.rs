@@ -1,5 +1,3 @@
-// Consumed by the join path (Task 7) + the My Servers UI (Task 10).
-#![allow(dead_code)]
 //! "My Servers" — the player's local list of servers they've joined (Spec A).
 //!
 //! Directed resolution + local memory, **no public directory**. The operator
@@ -76,6 +74,7 @@ impl MyServers {
     }
 
     /// Toggle the favourite flag (no-op if the npub isn't present).
+    #[allow(dead_code)] // My Servers UI (Spec A task 10) is not built; tested only
     pub fn set_favourite(&mut self, operator_npub: &str, favourite: bool) {
         if let Some(e) = self
             .entries
@@ -88,6 +87,7 @@ impl MyServers {
 
     /// Record the player's acknowledgement of a server's privacy posture
     /// (the Card `privacy` tag value); no-op if the npub isn't present.
+    #[allow(dead_code)] // My Servers UI (Spec A task 10) is not built; tested only
     pub fn set_privacy_ack(&mut self, operator_npub: &str, tag_value: &str) {
         if let Some(e) = self
             .entries
@@ -99,6 +99,7 @@ impl MyServers {
     }
 
     /// The privacy tag value the player acknowledged for this server, if any.
+    #[allow(dead_code)] // My Servers UI (Spec A task 10) is not built; tested only
     pub fn acked(&self, operator_npub: &str) -> Option<&str> {
         self.entries
             .iter()
@@ -118,6 +119,7 @@ impl MyServers {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // the web localStorage backend is dead — the web build is a login-free taster with no My Servers
 const STORAGE_KEY: &str = "axenstax_servers";
 
 #[cfg(not(target_arch = "wasm32"))]

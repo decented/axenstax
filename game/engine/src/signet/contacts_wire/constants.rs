@@ -22,6 +22,7 @@ pub const DEFAULT_STALENESS_SECONDS: u64 = 21_600;
 pub const MIN_STALENESS_SECONDS: u64 = 3_600;
 pub const MAX_STALENESS_SECONDS: u64 = 604_800;
 
+#[allow(dead_code)] // wire-constants port of upstream — kept whole so the conformance suite stays a 1:1 mirror
 pub const MAX_WIRE_BYTES: usize = 65_532;
 pub const MAX_APP_NAME: usize = 64;
 pub const MAX_CAPABILITIES: usize = 16;
@@ -35,6 +36,7 @@ pub const MAX_ROLE_LEN: usize = 40;
 pub const MAX_METHOD_VALUE: usize = 320;
 pub const MAX_RELAY_LEN: usize = 256;
 pub const CHALLENGE_HEX_CHARS: usize = 32;
+#[allow(dead_code)] // wire-constants port of upstream — kept whole so the conformance suite stays a 1:1 mirror
 pub const MAX_PAIRING_URI_CHARS: usize = 2048;
 /// Hard cap on an envelope `content` string before it is parsed (envelope.ts).
 pub const MAX_ENVELOPE_CHARS: usize = 100_000;

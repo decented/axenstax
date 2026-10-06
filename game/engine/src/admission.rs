@@ -1,7 +1,7 @@
 // The seam's only consumer today is the native `ws_transport` accept loop, so
-// these are "unused" on the wasm build — allow it (future policies + the
-// Operator Console in Spec B consume them too).
-#![allow(dead_code)]
+// its items are dead on the wasm build — each carries a target-scoped
+// `cfg_attr(wasm32, allow(dead_code))` (future policies + the Operator Console
+// in Spec B consume them too).
 //! Admission control seam (Spec A §6).
 //!
 //! Today the only policy is a hard player cap. The seam exists so future
@@ -12,6 +12,8 @@
 
 /// How the server decides whether to admit a new connection at capacity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // native-only consumer (ws_transport)
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // native-only consumer (ws_transport)
 pub enum AdmissionPolicy {
     /// Reject once the cap is reached — today's behaviour.
     #[default]
@@ -33,6 +35,7 @@ pub enum Admission {
 
 /// Decide whether to admit a connection. `current` = remote players already
 /// connected; `max` = the configured cap.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // native-only consumer (ws_transport)
 pub fn decide(policy: AdmissionPolicy, current: usize, max: usize) -> Admission {
     match policy {
         AdmissionPolicy::HardCap => {

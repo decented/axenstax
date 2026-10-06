@@ -179,23 +179,6 @@ fn parse_signed_event_json(
     })
 }
 
-/// Call `window.axenstax_switch_user()` — JS clears localStorage + reloads.
-pub fn switch_user() {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return,
-    };
-    let Ok(fn_val) = Reflect::get(&window, &JsValue::from_str("axenstax_switch_user")) else {
-        log::warn!("switch_user: window.axenstax_switch_user missing");
-        return;
-    };
-    let Ok(f) = fn_val.dyn_into::<js_sys::Function>() else {
-        log::warn!("switch_user: axenstax_switch_user is not a function");
-        return;
-    };
-    let _ = f.call0(&JsValue::NULL);
-}
-
 /// Call `window.axenstax_exit_to_lobby()` — JS navigates back to the entrance
 /// WITHOUT clearing the session cookie / cached pubkey, so the still-valid
 /// Signet session is reused on return (no QR re-login). #5.
