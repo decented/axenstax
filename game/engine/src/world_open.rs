@@ -78,9 +78,7 @@ impl OpenedFrom {
     pub(crate) fn player_note(&self) -> Option<String> {
         match self {
             Self::LastSave => None,
-            Self::Autosave => Some(
-                "Recovered from the crash-recovery autosave (newer than the last save).".to_string(),
-            ),
+            Self::Autosave => Some("Recovered from the crash-recovery autosave.".to_string()),
             Self::LastSaveAfterAutosaveFailed { why, kept_as } => Some(format!(
                 "The crash-recovery autosave couldn't be opened ({why}), so this is your last \
                  save. The autosave is kept as {kept_as}."
