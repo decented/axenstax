@@ -35,6 +35,7 @@ pub(crate) enum AutosavePolicy {
 
 /// Which copy of the world was opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web opens nothing here
 pub(crate) enum OpenedFrom {
     /// The last manual save (`world.dat` + `chunks/`).
     LastSave,
@@ -47,6 +48,7 @@ pub(crate) enum OpenedFrom {
 }
 
 /// What [`open_world`] found.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web opens nothing here
 pub(crate) enum OpenedWorld {
     /// Nothing saved here yet: generate a fresh world.
     New,
@@ -177,6 +179,17 @@ pub(crate) fn open_world(
     _autosave: AutosavePolicy,
 ) -> Result<OpenedWorld, String> {
     Ok(OpenedWorld::New)
+}
+
+/// The operator-facing refusal for a server log: the world, its folder, why, and
+/// that nothing was changed.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    let place = format!(" ({})", crate::save::world_dir(name).display());
+    #[cfg(target_arch = "wasm32")]
+    let place = String::new();
+    format!("world '{name}'{place} couldn't be opened: {why}. Nothing was changed.")
 }
 
 /// True when nothing of a saved world is in `worlds/<name>/` — no `world.dat`, no

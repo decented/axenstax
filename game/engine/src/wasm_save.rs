@@ -13,11 +13,13 @@
 //! them so existing WASM call sites are unchanged.
 
 // Re-export cross-platform archive helpers so call sites in this file don't need
-// to change (they reference `pack_world`, `unpack_world`, `dedupe_world_name`
-// directly). Only the WASM-gated functions below actually call them, so the
-// re-export is gated the same way (else it's unused on the native build).
+// to change (they reference `pack_world`, `dedupe_world_name` directly). Only the
+// WASM-gated functions below actually call them, so the re-export is gated the
+// same way (else it's unused on the native build). The play path unpacks with
+// `world_archive::unpack_world_to_play` (Spec 02 §8.4), so `unpack_world` is not
+// re-exported here.
 #[cfg(target_arch = "wasm32")]
-pub use crate::world_archive::{dedupe_world_name, pack_world, unpack_world};
+pub use crate::world_archive::{dedupe_world_name, pack_world};
 
 #[cfg(target_arch = "wasm32")]
 use crate::save::{WorldMeta, WorldSave};

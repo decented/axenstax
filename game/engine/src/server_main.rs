@@ -726,11 +726,7 @@ pub fn run(args: &[String]) {
     // that lost its world.dat but holds chunks must not get a new meta written
     // over its real one before the load refuses it (Spec 02 §8.4).
     let is_new = crate::world_open::is_new_world(&cfg.world).unwrap_or_else(|why| {
-        log::error!(
-            "world '{}' ({}) couldn't be opened: {why}. Nothing was changed.",
-            cfg.world,
-            crate::save::world_dir(&cfg.world).display()
-        );
+        log::error!("{}", crate::world_open::server_refusal_message(&cfg.world, &why));
         std::process::exit(1);
     });
     if is_new {

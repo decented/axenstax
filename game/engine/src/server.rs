@@ -624,12 +624,7 @@ impl GameServer {
             &mut self.world,
             crate::world_open::AutosavePolicy::Ignore,
         )
-        .map_err(|why| {
-            format!(
-                "world '{wname}' ({}) couldn't be opened: {why}. Nothing was changed.",
-                crate::save::world_dir(&wname).display()
-            )
-        })?;
+        .map_err(|why| crate::world_open::server_refusal_message(&wname, &why))?;
         if let crate::world_open::OpenedWorld::Loaded { save: save_data, chunks: chunk_count, .. } = opened {
             log::info!("Loaded saved world '{wname}'.");
             // Build per-player restore list: new saves have a `players` Vec;
