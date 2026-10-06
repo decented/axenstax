@@ -432,46 +432,93 @@ mod tests {
         }
     }
 
-    /// D1 review fix 4 — every shared sim system has exactly one owner per
-    /// world in every mode, asked through the one predicate both sides use
-    /// (`runs_on`: `GameState::sim_runs` as `HostClient`, `GameServer::runs`
-    /// as `Server`, each with its own lent flag):
-    /// - lent host — ONE world, ticked by the host client and the server, so
-    ///   exactly one of them runs each system;
-    /// - owning host (`--no-lend`) — TWO worlds, each side runs every system
-    ///   on its own (the documented dual sim): one owner per world;
-    /// - dedicated server — the server alone, owning its world;
-    /// - single-player — the client alone (no server).
-    /// The GPU-free half of the tripwire `GameState::tick_hosted_server`
-    /// debug-asserts over a real combined tick.
+    /// D1 review fix 4, final review nit — every shared sim system runs
+    /// exactly once per logical tick on each world, in every mode a server
+    /// runs in. Nothing here is a literal: each row ticks a REAL
+    /// `HostedServer` (`GameServer::runs` tallies what it ran on its world),
+    /// and the host client's side is asked through the one predicate
+    /// `GameState::sim_runs` uses — `runs_on(HostClient, hs.lends_host_world())`
+    /// — fed by the real server's own lend flag. The faults are found by the
+    /// very tripwire `GameState::tick_hosted_server` debug-asserts
+    /// (`SimTally::one_tick_faults`):
+    /// - lent host — ONE world, ticked by the server (inside the lend window)
+    ///   and by the host client, so between them exactly once each;
+    /// - owning host (`--no-lend`) — TWO worlds, the server's and the host
+    ///   client's, each ticked once by its own side (the documented dual sim);
+    /// - dedicated server — the server alone, on its own world.
+    /// The single-player row is gone: with no server it reduces to
+    /// `runs_on(HostClient, false)`, which is `true` by construction — a
+    /// tautology; `test_game_harness` boots a real single-player `GameState`
+    /// and ticks it under the same tripwire.
     #[test]
-    fn every_shared_system_has_exactly_one_owner_per_world_in_every_mode() {
-        use SimSide::{HostClient, Server};
-        let modes: [(&str, bool, &[&[SimSide]]); 4] = [
-            ("lent host", true, &[&[HostClient, Server]]),
-            ("owning host (--no-lend)", false, &[&[HostClient], &[Server]]),
-            ("dedicated server", false, &[&[Server]]),
-            ("single-player", false, &[&[HostClient]]),
-        ];
-        for (mode, lent, worlds) in modes {
-            for (w, sides) in worlds.iter().enumerate() {
-                for s in SimSystem::ALL {
-                    let owners = sides.iter().filter(|&&side| s.runs_on(side, lent)).count();
-                    assert_eq!(owners, 1, "{mode}, world {w}: {s:?} has {owners} owners");
+    fn every_shared_system_runs_once_per_tick_on_each_world_in_every_mode() {
+        use SimSide::HostClient;
+        // The host client's tally for one tick, as `sim_runs` would leave it.
+        let client_tick = |hs: &HostedServer, mut tally: SimTally| {
+            for s in SimSystem::ALL {
+                if s.runs_on(HostClient, hs.lends_host_world()) {
+                    tally.bump(s);
                 }
             }
-        }
-        // `ALL` is every variant once, in index order (the tally indexes by it).
-        for (i, s) in SimSystem::ALL.iter().enumerate() {
-            assert_eq!(s.index(), i, "{s:?}");
-        }
-        // Only a lending server's flag is ever set, and only inside the window.
+            tally
+        };
+        // A world ticked once between `before` and `after` has no faults, and
+        // ticked at all (the check is not vacuously empty).
+        let assert_clean = |mode: &str, before: &SimTally, after: &SimTally| {
+            let faults = after.one_tick_faults(before);
+            assert!(faults.is_empty(), "{mode}: {faults:?}");
+            assert!(
+                SimSystem::ALL.iter().any(|&s| s.every_tick() && after.get(s) > before.get(s)),
+                "{mode}: nothing ran"
+            );
+        };
+
+        // Lent host: the server's tick inside the window, the client's gates.
         let mut hs = lent_server("modes");
         assert!(hs.lends_host_world() && !hs.server.lent);
         let mut host = host_parts();
         let clock = host.clock;
+        let before = host.world.sim_tally;
         LentSim::lend(&mut hs, host.parts(), clock).tick();
         assert!(!hs.server.lent, "cleared when the window closes");
+        let server_only = host.world.sim_tally;
+        assert!(
+            SimSystem::ALL.iter().any(|&s| s.every_tick() && server_only.get(s) == before.get(s)),
+            "the server alone leaves the host client's systems to the client"
+        );
+        assert_clean("lent host", &before, &client_tick(&hs, server_only));
+
+        // Owning host: each side's own world sees every system once.
+        let mut hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            format!("sim-lend-owning-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Owned,
+        )
+        .expect("owning host starts");
+        assert!(!hs.lends_host_world() && !hs.server.lent);
+        let server_before = hs.server.world.sim_tally;
+        hs.tick();
+        assert!(!hs.server.lent, "an owning server is never lent");
+        assert_clean("owning host, server world", &server_before, &hs.server.world.sim_tally);
+        let client_before = SimTally::default();
+        assert_clean("owning host, client world", &client_before, &client_tick(&hs, client_before));
+
+        // Dedicated server: no host client; the server owns its world.
+        let mut hs = crate::hosted_server::HostedServer::start(
+            0,
+            format!("sim-lend-dedicated-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        assert!(!hs.lends_host_world() && !hs.server.lent);
+        let before = hs.server.world.sim_tally;
+        hs.tick();
+        assert_clean("dedicated server", &before, &hs.server.world.sim_tally);
         assert!(
             crate::hosted_server::HostedServer::start_host(
                 0,
@@ -484,6 +531,10 @@ mod tests {
             .is_err(),
             "a dedicated server has no host client to lend it a world"
         );
+        // `ALL` is every variant once, in index order (the tally indexes by it).
+        for (i, s) in SimSystem::ALL.iter().enumerate() {
+            assert_eq!(s.index(), i, "{s:?}");
+        }
     }
 
     #[test]
