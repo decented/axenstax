@@ -1549,8 +1549,21 @@ generates the column, applies the change and evicts it, so it streams back in
 whole. Before, both wrote the change into a stray chunk that their own
 generation later skipped, leaving a 16³ hole.
 
-**Known gaps.** Joined clients still regenerate columns locally instead of
-streaming them from the host (separate issue). The writers that still do not
+**Pushed columns are never evicted (Phase B2a, 2026-10-07).** A joined client
+generates columns locally, but the server pushes the real chunks round it
+(Spec 04 §4.1 "As built"), and a pushed chunk replaces the local one. Pushed
+chunks come through `Chunk::from_bytes`, so they carry `persist`; left to the
+streamer they would sit in the evicted store and a later restore would bring
+back a stale copy. So a joiner never evicts a pushed column: when it unloads
+one it drops it outright (`World::discard_column`, its side data too) and tells
+the server, which pushes it afresh when it is back in range. A push into a
+column the joiner had evicted (its own edits, kept while away) restores the
+column first, so no block write lands in the stored copy. A pushed column is
+never void-healed or regenerated (its all-air chunks stay air), and is exempt
+from `repair_void_columns_after_load`.
+
+**Known gaps.** A joined client still generates the columns beyond the server's
+push radius itself (and briefly the ones the push has not reached). The writers that still do not
 check `is_column_present_at` can create a stray chunk in a dropped or
 never-loaded column at the loaded edge: pistons, dispensers (placed fluid or
 fire), `FireSystem::ignite` (flint and steel) and keg blasts. A blast writes

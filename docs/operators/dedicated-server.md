@@ -214,6 +214,7 @@ Set these as environment variables in `docker-compose.yml`:
 | `AXENSTAX_SERVER_NAME` | `Axe'n'Stax Server` | Display name |
 | `AXENSTAX_AUTOSAVE_SECS` | `60` | Autosave interval |
 | `AXENSTAX_SIM_DISTANCE` (or `--sim-distance`) | `8` | Radius, in 16-block columns, the server keeps loaded and simulated around each connected player and the world spawn (2–16). Higher = more RAM and CPU per player |
+| `AXENSTAX_CHUNK_SYNC` (or `--chunk-sync`) | `all` | Which chunks the server sends each player: `all` = every chunk out to the player's render distance (at most the sim distance), so everyone stands on the server's real world. The only mode this build has |
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
 
 Worlds persist on the `axenstax-worlds` volume and are saved on autosave and on a
@@ -226,6 +227,14 @@ areas are never lost when they unload: they stay in memory and are written on
 the next autosave. The default radius of 8 columns (128 blocks) suits a small
 server; each extra column of radius costs memory and generation time per player
 who wanders off alone.
+
+**Sending the world to players.** A joining player is sent the real world around
+them, chunk by chunk, nearest first — out to their own render distance or the
+sim distance, whichever is smaller — so everything built or dug there is what
+they see. It travels straight from your server to the player on the game
+connection, paced so play stays smooth: a fresh join at the default distance is
+about 4 MB, and the ground under the player arrives first (their loading screen
+waits for it). As they move, new chunks follow them.
 
 ---
 
