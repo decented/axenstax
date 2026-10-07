@@ -22,6 +22,13 @@ For feature *requests / ideas* that aren't yet ready-to-build specs (GitHub feat
 
 ## ▶ ACTIVE — ready to build now
 
+- **C3: the server owns a joiner's inventory (real-multiplayer epic)** →
+  [`2026-10-07-c3-server-owned-inventory.md`](2026-10-07-c3-server-owned-inventory.md)
+  — DESIGN DECIDED 2026-10-07. The server holds each joiner's inventory window
+  slot for slot and mirrors every click with the client's own rules. Phases:
+  C3a (window mirror), death server-side, the per-npub sidecar, C3b (shared
+  containers), C3c (local uses), C3d (enforcement). Built by the epic's lanes.
+
 - **Full-fidelity item wire encoding (death-drops phase 3)** →
   [`2026-07-12-full-fidelity-item-wire.md`](2026-07-12-full-fidelity-item-wire.md)
   — ✅ **DELIVERED 2026-09-06**. `protocol::WireItem` (tool type + material +
