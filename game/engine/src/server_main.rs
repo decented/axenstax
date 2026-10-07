@@ -863,6 +863,17 @@ pub fn run(args: &[String]) {
     hs.server.set_sim_distance(cfg.sim_distance);
     // Phase B2a — which chunks joiners are pushed (out to the sim distance).
     hs.set_chunk_sync(cfg.chunk_sync);
+    // C1 — this server rolls its joiners' Satori drops on the world's secret.
+    // A world saved before per-world secrets has none in its meta: write back
+    // the one the server generated for this run, so its veins stay put across
+    // restarts. Reached only once the world opened (Spec 02 §8.4).
+    let mut meta = crate::save::load_world_meta(&cfg.world);
+    if meta.pop_secret.is_none() {
+        meta.pop_secret = Some(hs.server.pop_secret);
+        if let Err(e) = crate::save::save_world_meta(&cfg.world, &meta) {
+            log::error!("saving the world's new Proof-of-Play secret failed: {e}");
+        }
+    }
 
     // Persist the freshly-generated world immediately so `world.dat` exists from
     // tick 0 (a crash before the first autosave doesn't lose the generation).

@@ -32,6 +32,14 @@ const REACH_DISTANCE: f32 = 5.0;
 /// Per-player server-side state.
 pub struct ServerPlayer {
     pub player: Player,
+    /// A local slot: the host's own player's inventory as saved/restored.
+    /// A server-simulated player (joiner or guest): the SHADOW the server
+    /// keeps of its inventory (C1, `joiner_inventory`) — empty at attach, fed
+    /// every gain the server decides (pickups, the drops of the joiner's
+    /// breaks, interaction products) and every consume it accepts (plain
+    /// block placements, interaction outcomes). It doesn't see what the client
+    /// does alone (the inventory it joined with, crafting, chests, slot moves,
+    /// eating, wear), so it drifts and checks nothing yet (log-only).
     pub inventory: Inventory,
     pub combat: PlayerCombat,
     pub hotbar_slot: usize,
@@ -49,8 +57,9 @@ pub struct ServerPlayer {
     pub held_item: u16,
     /// Tool-capable held-item wire ref relayed from the client's InputPacket
     /// (`item_kind::*` + id). Authoritative source of the broadcast held item
-    /// for server-simulated (remote) players, whose `inventory`/`hotbar_slot`
-    /// are not kept live server-side. EMPTY/0 until the first input arrives.
+    /// for server-simulated (remote) players, whose `inventory` is only the
+    /// server's shadow of theirs (C1) and may not hold what is in their hand.
+    /// EMPTY/0 until the first input arrives.
     pub held_kind: u8,
     pub held_id: u16,
     /// The next input to simulate for this player (remote clients only; local
@@ -189,6 +198,10 @@ pub struct ServerPlayer {
     /// `ATTACK_COOLDOWN_JITTER_TICKS` early. Swings may bunch with network
     /// jitter, but never beat the client's own rate on average.
     pub next_swing_tick: u64,
+    /// C1 — this connection's log-only possession-check counters
+    /// (`joiner_inventory::PossessionTally`), summarised in the log when it
+    /// leaves.
+    pub possession: crate::joiner_inventory::PossessionTally,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -272,7 +285,8 @@ pub const MIN_DEAD_TICKS_BEFORE_RESPAWN: u32 = 20;
 /// Correct only when the player's `inventory`/`hotbar_slot` are kept live
 /// server-side — i.e. local (position-trusted) players. Remote players read
 /// `held_kind`/`held_id` (client-authoritative) instead, since their
-/// server-side inventory only reflects save-time state.
+/// server-side inventory is the server's shadow of theirs (C1,
+/// `joiner_inventory`), which drifts from the client's.
 pub fn server_player_item_ref(sp: &ServerPlayer) -> crate::protocol::ItemRef {
     match sp.inventory.hotbar_slot(sp.hotbar_slot) {
         Some(stack) => crate::inventory::item_to_ref(&stack.item),
@@ -283,9 +297,9 @@ pub fn server_player_item_ref(sp: &ServerPlayer) -> crate::protocol::ItemRef {
 /// Resolve the wire `(held_kind, held_id)` pair to broadcast for a player,
 /// picking the correct source for the player type:
 ///   - server-simulated (remote) players → the client-sent `held_kind`/
-///     `held_id` relayed each tick (their server-side inventory only reflects
-///     save-time state, so resolving from it would broadcast a stale item —
-///     the Phase 2 regression this fixes).
+///     `held_id` relayed each tick (their server-side inventory is only the
+///     server's shadow of theirs — C1 — so resolving from it could broadcast
+///     a wrong item; the Phase 2 regression this fixes).
 ///   - local (position-trusted) players → resolve from the host's own live
 ///     inventory via `server_player_item_ref`.
 pub fn broadcast_held_ref(sp: &ServerPlayer) -> (u8, u16) {
@@ -413,6 +427,7 @@ impl ServerPlayer {
             interact_cooldown: 0,
             attach_gen: 0,
             next_swing_tick: 0,
+            possession: crate::joiner_inventory::PossessionTally::default(),
         }
     }
 
@@ -831,6 +846,15 @@ pub struct GameServer {
     /// Server-side it sets the starvation floor of server-simulated players
     /// (bridged non-lethal, see `tick_player_physics`).
     pub difficulty: crate::survival::Difficulty,
+    /// C1 — the world's Proof-of-Play secret (`WorldMeta.pop_secret`, Spec 06
+    /// §1.3), which rolls a joiner's Satori drops (`break_drops`). Read from
+    /// the meta on load; a dedicated server persists the one generated here
+    /// for a world saved without one (`server_main`). A host's server is
+    /// handed its host client's every tick (`GameState::tick_hosted_server`),
+    /// so a lent world rolls on the one secret. Never leaves the server.
+    pub pop_secret: [u8; 32],
+    /// The Proof-of-Play epoch (always 0 in alpha; Spec 06 §2.6).
+    pub pop_epoch: u32,
 }
 
 impl GameServer {
@@ -885,6 +909,19 @@ impl GameServer {
             animal_life_simulated: false,
             render_distance: crate::graphics_settings::DEFAULT_RENDER_DISTANCE,
             difficulty: crate::survival::Difficulty::Normal,
+            // Random until the meta's is read: never a guessable default.
+            pop_secret: crate::proof_of_play::gen_world_secret(),
+            pop_epoch: 0,
+        }
+    }
+
+    /// C1 — the keys a joiner's break is rolled with (`break_drops`): this
+    /// world's secret and seed.
+    pub fn pop_keys(&self) -> crate::break_drops::PopKeys<'_> {
+        crate::break_drops::PopKeys {
+            secret: &self.pop_secret,
+            world_seed: self.biome_gen.seed as u64,
+            epoch: self.pop_epoch,
         }
     }
 
@@ -1122,6 +1159,12 @@ impl GameServer {
         self.world.apply_meta_rules(&meta);
         self.fire_spread_enabled = meta.fire_spread_enabled;
         self.explosives_enabled = meta.explosives_enabled;
+        // C1 — the world's own secret rolls its joiners' Satori drops. A meta
+        // without one (saved before per-world secrets) keeps this run's random
+        // one; `server_main` writes it back for a dedicated server.
+        if let Some(secret) = meta.pop_secret {
+            self.pop_secret = secret;
+        }
     }
 
     /// Restore every slot from a save: new saves carry a `players` Vec; old

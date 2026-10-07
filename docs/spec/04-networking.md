@@ -28,10 +28,11 @@
 - **v69** (2026-10-07, Phase B2a): **Chunk push.** The server sends joiners the world itself: `ChunkDataPacket` (tag 3 — decoded by clients since the first wire, never sent until now) gains its side data (`meta: Vec<(u16, u8)>`, render-visible `entities: Vec<PushedBlockEntity>`, face `attachments: Vec<PushedFaceAttachment>`) and continuation packets (empty `compressed_blocks`); `JoinRequestPacket` gains trailing `render_distance: u8`; `InputPacket` gains trailing `chunk_ack: u32` (cumulative chunk packets taken in — the push's credit window), `chunk_drops: Vec<ChunkDrop { cx, cz, as_of }>` (columns the client let go of) and `render_distance: u8` (its current render distance; `0` = unchanged). Server block changes now reach a joiner only for chunks it has been sent (its sent-set). Bumped because three packet shapes changed. See §4.1 "As built".
 - **v70** (2026-10-07, MP-D2b): **Joiners act on the server's mobs.** Appended, no existing shape changed: `PacketType::EntityAttack = 58` and `EntityInteract = 59` (C→S: a swing, or a one-shot right-click — `InteractKind` feed, tame, shear, milk, Lead on, Lead off, sit toggle — on the entity named by its `ProtocolId`, or `LeadToPost { post }`, a Lead on a fence post; the held item is the client's word), `InteractOutcome = 60` (S→C, to the asker: accepted, items to take from the hand, a note code — 17 `NotOnThisServer` where the server doesn't simulate breeding, Leads or pets) and `KillEvent = 61` (S→C, to the killer alone: species, why it was credited — `kill_reason::LAST_HIT` / `NEAREST` — position, flags); `PlayerEventType::DiedOf { cause: WireDamageCause }` (sent instead of `Died`: the death screen's real cause), `ArmourWorn { hits }` (server-landed hits, keg blasts included, wear the joiner's armour) and `Bred { offspring }` (a baby born to an animal this joiner fed); `entity_flags::TETHERED = 16`. A joiner's kill or breed credits that joiner and never a host's player, nor a later joiner given its slot. Bumped because a v69 peer can't decode the new variants. See §4.2d.
 - **v71** (2026-10-07, Phase B2b): **Touched columns.** A joiner whose terrain generator matches the host's is pushed only the columns that differ from generation; for every other column within its push radius the server sends `PacketType::ColumnLocal = 4` (`ColumnLocalPacket { cx, cz, hash }`, 13 bytes; `hash` = `chunk_verdict::column_hash` of the column as generation makes it, cached with its `Untouched` verdict, so also the server's live column) in the same ordered, numbered chunk stream (it counts towards `chunk_ack`), and the joiner generates that column itself and checks the hash. `JoinAcceptPacket` gains trailing `chunk_note_radius: u8`: the server's push limit when it sends notes, `0` when it pushes everything (`--chunk-sync all`, another generator, an owning `--no-lend` host). `InputPacket` gains trailing `column_mismatch: Option<ColumnMismatch { cx, cz, server_hash, client_hash }>`, a sticky "push me everything" switch (ignored from a joiner the server never sent a note). `--chunk-sync touched` is now the default. Bumped because packet shapes and a packet type were added. See §4.1 "Touched columns".
+- **v72** (2026-10-07, C1): **The server yields a joiner's breaks.** `InputPacket` gains trailing `mined: Vec<MinedBlock>` (`MinedBlock { x, y, z: i32, tool: WireItem }`, at most `MAX_MINED_PER_INPUT = 16` read; appended after B2b's `column_mismatch`): the cells the client's survival break arm mined since its previous input, each with the tool it mined with. The server computes the drop by the client's own rules (`break_drops`: crop harvest, tool-tier mine drop + bonus, Satori on the world's Proof-of-Play secret) and grants it by `InventoryGrant`; a joined client no longer grants itself break drops. The server also keeps a shadow of each joiner's inventory with a log-only possession check on placements. Packet shape CHANGED, hence the bump. See §4.2e.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
-> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 71), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
+> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 72), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
 
 > **Server-side column streaming is built (Phase B1, 2026-10-06); the chunk push is built too (Phase B2a, 2026-10-07; only touched columns since Phase B2b, §4.1 "As built").** A dedicated server loads and unloads world columns around every connected player itself, within `--sim-distance` (default 8) — its own *simulation region*, so a server-simulated joiner stands on server terrain and edits are accepted anywhere a player goes (Spec 01 §4.1.2). The chunk push sends joiners what that region holds (§4.1 "As built"). LAN / online hosts do not stream server-side; their server keeps the `initial_load` region and generates the 3×3 round each joiner as it moves (§5.3.1) — never both in one mode.
 >
@@ -540,7 +541,8 @@ nothing locally, so the interaction is never double-applied; the host and
 single-player take the local branch and never send the packet to themselves.
 Fuelling a Steam Generator is deliberately **not** on this packet: taking the
 unit would have to come out of the server's copy of that player's inventory,
-and remote inventories are still client-authoritative (CLAUDE.md known debt).
+and remote inventories are still client-authoritative — the server's copy is
+a log-only shadow (§4.2e; CLAUDE.md known debt).
 
 **What the broadcast does carry.** `World::apply_remote_block_change` is the one
 place a client applies a broadcast block change — the joiner's loop and the
@@ -1261,8 +1263,9 @@ a local key by its slot number, a joiner's npub through the lending host's
 npub → server-slot table, to that joiner's server body.
 
 **The held item is the client's word** (`// BRIDGE: possession check`, beside
-the block-placement one): the server holds no joiner inventory until phase C,
-so a modified client can claim a sword or a bone it doesn't hold. Everything
+the block-placement one): the server's copy of a joiner's inventory is only a
+log-only shadow (§4.2e, C1), so a modified client can claim a sword or a bone
+it doesn't hold. Everything
 else — the target, its liveness, reach, facing, cooldowns, the outcome — is
 the server's. The client owns its inventory too (`joiner_actions`; requests
 are kept by `seq`, at most 64 outstanding):
@@ -1283,6 +1286,9 @@ are kept by `seq`, at most 64 outstanding):
   each at once on the same ordered stream, so it never will be
   (`JoinerActions::take` forgets every earlier entry still waiting).
 Products ride `InventoryGrant`; a bucket → milk swap is "consume 1 + grant 1".
+Since C1 the server's shadow of the joiner's inventory follows the same
+accepted outcome: `consume_held` taken by the client's own owed rule
+(`joiner_actions::take_owed`), then the products (§4.2e).
 The note code (`mob_interact::InteractNote`, 17 = `NotOnThisServer` since the
 review fixes) is shown with single-player's wording; the client fires the
 challenge event single-player fires for the same interaction (`ShearOrMilk`,
@@ -1380,6 +1386,94 @@ Not closed (open): a joiner's bow or slingshot shot still flies only in its
 own world and hits nothing of the server's; a dedicated server runs no species
 AI, breeding or Leads, so feeding, taming, Leads and pet commands are refused
 there (above) until D4 moves those systems into `GameServer::tick`.
+
+
+### 4.2e A joiner's inventory: what the server computes (as built, protocol v72, C1)
+
+Inventory authority, merge 1 of 3 (owner O-7 #2: per-npub persistence saves
+the SERVER's copy of a joiner's inventory, never a client-asserted snapshot,
+so the server learns every gain and consume, smallest first). Applies to every
+server-simulated player (joiners and guests); a host's own local slots are
+unchanged (their client decides, as in single-player).
+
+**Break drops are the server's.** A joined client's survival break arm still
+breaks the block in its own world and sends the `BlockChange`, and now tags
+the cell in `InputPacket.mined` with the tool it mined with (`WireItem`,
+sampled before the strike wore it — the strike that breaks a pickaxe still
+yields). It takes nothing itself (`break_drops::take_yield`). When the server
+accepts that edit it yields the break with the same functions the
+single-player break arm runs (`break_drops::break_yield`), on its own world
+as it stood before the edit:
+
+- a harvested crop (`growth::crop_break`): its drops, the cell left as its
+  replacement (tilled soil, a papyrus root);
+- otherwise, when the tool's tier allows (`crafting::can_harvest`), the mine
+  drop (`BlockRegistry::mine_drop_with_seed`) plus any bonus stack;
+- a Satori (Spec 06 §2.2c), rolled on the WORLD's Proof-of-Play secret
+  (`GameServer::pop_secret`: a dedicated server's from the world meta; a
+  host's handed in from its client every tick) and the world's exposure map
+  (`World::pop_exposure`, which travels with a host's lend); never from a
+  player-placed block.
+
+Seeded by the server's tick and the cell (`break_drops::drop_seed`). The
+stacks go into the server's shadow of the joiner's inventory and to the
+joiner by `InventoryGrant`, per connection, at once (not via
+`pending_item_grants`, which `GameServer::tick` clears). The cell is then
+natural again and its pure-deepslate neighbours start their exposure clock,
+as after a client's own break.
+
+Only a tagged cell is yielded: an edit that empties a cell untagged — a
+bucket scoop, an Eraser on blueprint paper, a lifted Latent Print, a cell the
+joiner's own pistons or kegs cleared — yields nothing (that is why the tag is
+on the wire: the server can't tell them apart from a mined block, and the
+`held_kind`/`held_id` pair carries no tool type). A tag needs its edit in the
+same packet; the client carries a trimmed edit's tag with it
+(`RemoteClient::mined_carry_over`). A tagged edit that doesn't leave what the
+server's yield would (the joiner's copy of the cell disagreed) yields nothing
+and is counted unchecked. Creative yields nothing. Tool durability stays the
+client's. Inventory full: the client spills what doesn't fit at its feet, as
+for every grant (a ground item only it sees); the shadow drops it.
+
+**The shadow** (`ServerPlayer.inventory`, `joiner_inventory`). Empty at attach
+(the inventory the joiner arrived with is not on the wire), then fed:
+
+| Change | Source | Shadow |
+|---|---|---|
+| Server-side pickup (mob loot, spilled containers, dispenser drops) | `entity::tick_item_pickups` | gains (as before) |
+| A break the joiner mined | `break_drops`, above | gains the yield |
+| An accepted interaction's products (wool, a milk bucket, a Lead back) | D2b, §4.2d | gains |
+| An accepted interaction's `consume_held` | D2b | takes, owed from wherever the item is (`joiner_actions::take_owed`, the client's own rule) |
+| A plain block placement | the edit, classified below | takes one from the held hotbar slot on a match |
+
+Still the client's alone (the shadow does not see them): crafting, chests,
+furnaces and other containers, Q-drops, eating, tool and armour wear, armour
+equip, client-side pickups, face-attachment and drying-rack recovery on a
+break, bucket / seed / hoe / flint / bone-meal effects, and moving stacks
+between slots. So the shadow drifts from the client's inventory.
+
+**Possession check — LOG-ONLY for one release.** An accepted edit that fills
+an empty (or water) cell is a *plain placement* when the hand (the input's
+`held_kind`/`held_id`) holds a block-item, or nothing (the last of a stack);
+a block no item places (fluids, fire, smoke, crops, a piston arm) needs the
+hand to hold exactly it. The server checks the shadow's held slot
+(`hotbar_placeable_id`) places that block: a match consumes one
+(`take_placeable_from_hotbar`, auto-refill included); a mismatch is counted
+and logged (rate-limited, one line per 5 s per player: name, placed block,
+slot, what the shadow holds there) and **never refused or corrected** — the
+shadow takes nothing. A non-block placement (bucket, seeds, flint, bone meal,
+a hoe's tilling, a tool in hand), a meta-only toggle and anything in creative
+is counted unchecked. An interaction outcome the shadow can't pay is also a
+counted, logged mismatch. A plain placement is flagged player-placed
+(`World::place_player_block`), as the client's own is, so re-mining it yields
+no Satori (Spec 06 §2.2). Counters per connection
+(`ServerPlayer.possession`: breaks, matched, mismatched, unchecked); one
+summary line in the server log when the player leaves.
+
+Why log-only: until crafting, containers and the arrival inventory reach the
+server (merges 2 and 3), refusing would refuse legitimate placements. The
+`// BRIDGE: possession check` markers (block placement in
+`validate_block_edit`, `EntityAttack`, `EntityInteract`, `LeadToPost`) stay
+until enforcement.
 
 ### 4.3 Block Mutations
 
@@ -2325,7 +2419,8 @@ spill per container break:** a validated REMOTE break spills the live container 
 own ECS and drops any orphaned economy entity (`World::drop_orphaned_family_entity`); the host's
 own break (pickaxe or keg blast) already spilled on its client and is only broadcast by a lending
 server (an owning `--no-lend` server discards its copy). **Remaining gap (BRIDGE):** a place of an item the joiner doesn't hold is not
-refused — the server keeps no authoritative remote inventory.
+refused — since C1 the server checks it against its shadow of the joiner's
+inventory, but log-only (§4.2e).
 
 ### Hosted mode — the host lends its world (D1, as built 2026-10-06; no wire change, v67)
 

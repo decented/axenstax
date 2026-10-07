@@ -573,6 +573,19 @@ pub struct InputPacket {
     /// client every column it had noted local and notes no more.
     #[serde(default)]
     pub column_mismatch: Option<ColumnMismatch>,
+    /// v72 (C1) — the blocks this client MINED (its survival break arm)
+    /// since its previous input, each with the tool it mined with. The
+    /// server yields a joiner's break itself (`break_drops`,
+    /// granted by `InventoryGrant`), and needs to tell a mined cell from the
+    /// other edits that empty a cell (a bucket scoop, an Eraser, a Latent
+    /// Print lifted, a piston or keg the client's own machines ran) and to
+    /// know the tool: the `held_kind`/`held_id` pair carries no tool type,
+    /// and is sampled after the strike wore the tool (the strike that breaks
+    /// a pickaxe still yields). The tool is the client's word, like every held
+    /// item (BRIDGE: possession check). Only for an edit in `block_changes`;
+    /// the server reads at most [`MAX_MINED_PER_INPUT`].
+    #[serde(default)]
+    pub mined: Vec<MinedBlock>,
 }
 
 /// A local column whose generation differed from the server's (v71, Phase
@@ -586,6 +599,21 @@ pub struct ColumnMismatch {
     pub server_hash: u32,
     /// The same hash over the client's own scratch generation of the column.
     pub client_hash: u32,
+}
+
+/// Most [`MinedBlock`]s the server reads from one `InputPacket` (a survival
+/// break takes at least a tick, so one is the norm).
+pub const MAX_MINED_PER_INPUT: usize = 16;
+
+/// A block a joiner mined (v72, C1): its cell and the tool in hand for the
+/// strike (`WireItem::Tool`, or `WireItem::None` for a bare hand or a
+/// non-tool).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinedBlock {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub tool: WireItem,
 }
 
 /// Most [`ChunkDrop`]s one `InputPacket` carries (12 bytes each).
@@ -1662,7 +1690,14 @@ pub struct ServerAnnouncePacket {
 ///   a local column's generation did not hash as the note said).
 ///   `--chunk-sync touched` is the default. See `chunk_verdict`, `chunk_push`
 ///   and Spec 04 §4.1.
-pub const PROTOCOL_VERSION: u32 = 71;
+/// - v72 (2026-10-07, C1): the server yields a joiner's breaks.
+///   `InputPacket` gains trailing `mined: Vec<MinedBlock>` (after B2b's
+///   `column_mismatch`: the cells its survival break arm mined, each with the
+///   tool it mined with). The server computes the drop — crop, tool-tier mine
+///   drop + bonus, Satori on the world's secret — and grants it by
+///   `InventoryGrant`; a joined client no longer grants itself break drops.
+///   Packet shape CHANGED, hence the bump.
+pub const PROTOCOL_VERSION: u32 = 72;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1829,7 +1864,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 71);
+        assert_eq!(super::PROTOCOL_VERSION, 72);
     }
 
     #[test]
@@ -2022,10 +2057,18 @@ mod tests {
             chunk_drops: vec![ChunkDrop { cx: -3, cz: 9, as_of: 70 }],
             render_distance: 6,
             column_mismatch: Some(ColumnMismatch { cx: 1, cz: 2, server_hash: 3, client_hash: 4 }),
+            mined: vec![MinedBlock {
+                x: 0,
+                y: 64,
+                z: 0,
+                tool: WireItem::Tool { tool_type: 0, material: 3, durability: 100 },
+            }],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.column_mismatch, pkt.column_mismatch);
+        // C1 (v72) — the mined cells and their tools survive the round-trip.
+        assert_eq!(back.mined, pkt.mined);
         assert_eq!(back.chunk_ack, 77);
         assert_eq!(back.render_distance, 6);
         assert_eq!(back.chunk_drops, pkt.chunk_drops);
@@ -2046,8 +2089,8 @@ mod tests {
     /// bincode 1 is positional, so `InputPacket`'s trailing fields must sit in
     /// the order each protocol bump appended them: D2a's vitals (v68), then
     /// B2a's chunk-push feedback (v69), then B2b's column-mismatch switch
-    /// (v71). Pinned on the wire bytes, so a merge that reorders them fails
-    /// here rather than on a live join.
+    /// (v71), then C1's mined cells (v72). Pinned on the wire bytes, so a
+    /// merge that reorders them fails here rather than on a live join.
     #[test]
     fn input_packet_trailing_fields_are_in_append_order() {
         let head = InputPacket { block_changes: Vec::new(), ..Default::default() };
@@ -2063,6 +2106,7 @@ mod tests {
                 server_hash: 0x1122_3344,
                 client_hash: 0x5566_7788,
             }),
+            mined: vec![MinedBlock { x: 3, y: -4, z: 5, tool: WireItem::None }],
             ..head.clone()
         };
         let base = bincode::serialize(&head).unwrap();
@@ -2087,12 +2131,19 @@ mod tests {
         }
         tail.extend_from_slice(&0x1122_3344u32.to_le_bytes());
         tail.extend_from_slice(&0x5566_7788u32.to_le_bytes());
+        // v72 (C1): mined (u64 length + entries: x, y, z i32, then the
+        // WireItem's u32 variant tag — None = 0).
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        for v in [3i32, -4, 5] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.extend_from_slice(&0u32.to_le_bytes());
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8)]);
     }
 
     #[test]
@@ -2416,7 +2467,9 @@ mod tests {
         // v71 (2026-10-07, B2b): touched columns — PacketType::ColumnLocal
         //   (tag 4, with the column's hash), JoinAccept.chunk_note_radius,
         //   InputPacket.column_mismatch.
-        assert_eq!(PROTOCOL_VERSION, 71);
+        // v72 (2026-10-07, C1): `InputPacket.mined` — the server yields a
+        //   joiner's breaks.
+        assert_eq!(PROTOCOL_VERSION, 72);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

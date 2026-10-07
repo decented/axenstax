@@ -153,15 +153,35 @@ fn count_of(inv: &crate::inventory::Inventory, item: &Item) -> u32 {
         .sum()
 }
 
-/// Where the item a request was made with is now: the slot it was made from
-/// if that still holds it, else the first slot (of all 36) that does.
-fn where_now(inv: &crate::inventory::Inventory, request: &Pending) -> Option<usize> {
-    let held = request.held.as_ref()?;
+/// Where `held` is now: the slot `slot` it was used from if that still holds
+/// it, else the first slot (of all 36) that does.
+fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Option<usize> {
     let holds = |i: usize| inv.slot(i).is_some_and(|s| same_item(&s.item, held));
-    if holds(request.hotbar_slot) {
-        return Some(request.hotbar_slot);
+    if holds(slot) {
+        return Some(slot);
     }
     (0..36).find(|&i| holds(i))
+}
+
+/// Take what an accepted interaction OWES (review D2b LOW-1): `n` of `held`,
+/// each from `slot` if it still holds one, else from wherever one now is.
+/// Returns how many were taken (fewer only when the inventory runs out).
+///
+/// One rule for both copies of a joiner's inventory: the client runs it on
+/// its own ([`apply_outcome`]) and the server on its shadow of it (C1,
+/// `joiner_inventory`), for the same accepted outcome.
+pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item, n: u8) -> u8 {
+    let mut taken = 0;
+    for _ in 0..n {
+        let Some(at) = where_now(inv, slot, held) else { break };
+        let Some(mut stack) = inv.take_slot(at) else { break };
+        stack.count = stack.count.saturating_sub(1);
+        if stack.count > 0 {
+            inv.set_slot(at, Some(stack));
+        }
+        taken += 1;
+    }
+    taken
 }
 
 /// Apply an outcome to the joiner's inventory: an accepted swing wears the
@@ -180,23 +200,16 @@ pub fn apply_outcome(
     if !outcome.accepted {
         return applied;
     }
+    let Some(held) = request.held.as_ref() else {
+        return applied;
+    };
     match request.kind {
         None => {
-            if let Some(at) = where_now(inv, request) {
+            if let Some(at) = where_now(inv, request.hotbar_slot, held) {
                 applied.wear = inv.use_tool_at(at);
             }
         }
-        Some(_) => {
-            for _ in 0..outcome.consume_held {
-                let Some(at) = where_now(inv, request) else { break };
-                let Some(mut stack) = inv.take_slot(at) else { break };
-                stack.count = stack.count.saturating_sub(1);
-                if stack.count > 0 {
-                    inv.set_slot(at, Some(stack));
-                }
-                applied.consumed += 1;
-            }
-        }
+        Some(_) => applied.consumed = take_owed(inv, request.hotbar_slot, held, outcome.consume_held),
     }
     applied
 }

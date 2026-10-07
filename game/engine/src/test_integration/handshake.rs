@@ -203,7 +203,9 @@ fn protocol_version_is_the_pinned_value() {
     //   `entity_flags::TETHERED`, all appended.
     // v71 (2026-10-07, B2b): touched columns — PacketType::ColumnLocal (tag
     //   4), JoinAccept.chunk_note_radius.
-    assert_eq!(protocol::PROTOCOL_VERSION, 71);
+    // v72 (2026-10-07, C1): `InputPacket.mined` — the server yields a
+    //   joiner's breaks and grants the drops.
+    assert_eq!(protocol::PROTOCOL_VERSION, 72);
 }
 
 #[test]

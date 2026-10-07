@@ -306,6 +306,8 @@ If the tool is the wrong type for the block (e.g., pickaxe vs dirt), `tool_speed
 
 **Harvest rules**: Certain blocks require a minimum tool tier to drop items. Mining stone without a pickaxe breaks the block but drops nothing. Mining iron ore without at least a stone pickaxe drops nothing. These rules are defined in the block registry and are plugin-extensible.
 
+**Drops — one set of rules, two places they run (as built, C1 2026-10-07).** What a survival break yields lives in one module, `break_drops` (`break_yield`), read from the world *before* the block leaves it: a harvested crop's drops and replacement (`growth::crop_break`); otherwise, when `crafting::can_harvest` allows the held tool, the mine drop (`BlockRegistry::mine_drop_with_seed`) plus any bonus stack (`bonus_mine_drop`); and a Satori alongside when §3.8's conditions pass, never from a player-placed block. Chance rolls are seeded by tick and cell (`drop_seed`). Single-player and a host's own players run it in the client's break arm and take the yield straight into the breaker's inventory (`take_yield`; what doesn't fit is lost silently, except a crop harvest, which says "Inventory full — harvest lost"). **A joiner's break is the server's to yield:** the joined client still breaks the block in its own world, tells the server it mined it (and with which tool) and takes nothing itself; the server runs the same `break_yield` on its world and Proof-of-Play secret and grants the stacks by `InventoryGrant` (Spec 04 §4.2e). The joiner gets each drop exactly once; a stack that doesn't fit spills at its feet (the grant rule). Face attachments and a drying rack's logs recovered on a break are still granted by the breaker's own client, and tool wear stays client-side.
+
 ### 2.2 Break Animation
 
 Breaking is displayed as a 10-stage crack overlay on the target block:
@@ -621,6 +623,8 @@ The inventory system is a dedicated ECS system that:
 - Sends delta updates to the client (only changed slots, not the full inventory).
 
 ### 3.5 Inventory Synchronisation
+
+> **As built (C1, 2026-10-07).** None of the design below exists yet: there is no join-time inventory send, `SlotUpdate` or resync. A joined client's inventory is its own; the server learns only the changes it decides itself and grants them by `InventoryGrant` (pickups, the joiner's break drops, interaction products), and keeps a drifting **shadow** of each joiner's inventory from those plus the consumes it accepts (plain placements, interaction outcomes), with a log-only possession check on placements. What is server-computed and what is still client-trusted: Spec 04 §4.2e.
 
 - On join, the server sends the full inventory state to the client.
 - During gameplay, only **delta updates** are sent: `SlotUpdate { slot_id, new_contents }`.

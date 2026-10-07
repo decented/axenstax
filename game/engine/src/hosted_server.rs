@@ -433,9 +433,9 @@ pub struct RoomStatus {
 /// BRIDGE: Anti-cheat regression fix. `held_kind`/`held_id` for a
 /// server-simulated (remote) player are relayed straight from that client's
 /// `InputPacket` with no possession check — the server keeps no
-/// authoritative inventory for remote players at all (see
-/// `server_player_item_ref`'s doc comment: their server-side `inventory` only
-/// reflects save-time state). A modified remote client could claim
+/// authoritative inventory for remote players (see
+/// `server_player_item_ref`'s doc comment: their server-side `inventory` is
+/// only the server's drifting shadow of theirs, C1). A modified remote client could claim
 /// `MaterialId::ReachClaw` every tick and get the full `REACH_CLAW_BONUS` on
 /// every block edit with nothing backing the claim. `server_simulated` gates
 /// the bonus: `false` (local/position-trusted, same process as the host) is
@@ -1518,6 +1518,12 @@ impl HostedServer {
             sp.connected = false;
             sp.pending_intent = None;
             sp.intent_queue.clear();
+            // C1 — one line on what the log-only possession check saw.
+            if sp.server_simulated
+                && let Some(line) = sp.possession.summary(&sp.display_name)
+            {
+                log::info!("{line}");
+            }
             // Review D2b MEDIUM-1 — what this connection stamped on the
             // world's mobs (its hits, its feeds, a Bear's grudge) is forgotten
             // at the top of the next server tick, before the slot's next
@@ -1787,13 +1793,46 @@ impl HostedServer {
         self.send_outcome(i, req.seq, req.entity, Some(req.kind), accepted, consume, note);
         if let Some(r) = result
             && r.done
-            && !r.give.is_empty()
         {
-            let grants: Vec<(usize, crate::item::ItemStack)> =
-                r.give.into_iter().map(|stack| (i, stack)).collect();
-            for (slot, pkt) in build_grant_packets(&grants) {
-                self.send_to_joined_slot(slot, &pkt);
+            // C1 — the server's shadow of the joiner's inventory follows the
+            // outcome as its client does: what it used, owed from wherever
+            // the item is now (`joiner_actions::take_owed`, the client's own
+            // rule), then the products (`InventoryGrant`), in the order the
+            // client applies them.
+            if consume > 0 {
+                self.shadow_take_owed(i, req, consume);
             }
+            self.grant_to_joiner(i, r.give);
+        }
+    }
+
+    /// C1 — joiner `i`'s accepted interaction used `n` of the item it named
+    /// (`req`'s held item, from `req.hotbar_slot`): take them from the
+    /// server's shadow of its inventory. What the shadow can't pay is a
+    /// possession mismatch — counted and logged (rate-limited), never refused.
+    fn shadow_take_owed(&mut self, i: usize, req: &protocol::EntityInteractPacket, n: u8) {
+        let Some(held) =
+            held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry)
+        else {
+            return;
+        };
+        let tick = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let taken =
+            crate::joiner_actions::take_owed(&mut sp.inventory, usize::from(req.hotbar_slot), &held, n);
+        if taken < n
+            && let Some(skipped) = sp.possession.note_mismatch(tick)
+        {
+            let more = if skipped > 0 {
+                format!(" (+{skipped} more since the last report)")
+            } else {
+                String::new()
+            };
+            log::warn!(
+                "possession check (log-only): {} used {n} × {held:?} in an interaction; the \
+                 server's copy of their inventory held {taken}{more} — accepted",
+                sp.display_name,
+            );
         }
     }
 
@@ -2663,7 +2702,7 @@ impl HostedServer {
                         // Tool-capable held ref, client-authoritative. The
                         // only live source of the broadcast held item for
                         // server-simulated players (their server-side
-                        // inventory/hotbar_slot are not kept live).
+                        // inventory is only the server's shadow, C1).
                         sp.held_kind = input.held_kind;
                         sp.held_id = input.held_id;
                         // MP-D2a — what its client says it wears; soaks the
@@ -2742,6 +2781,19 @@ impl HostedServer {
                             // spills its contents instead of stranding them
                             // as an orphan block entity (audit 2026-09-27).
                             let remote = self.server.players[i].server_simulated;
+                            // C1 — what a server-simulated player's edit is to
+                            // its inventory (`joiner_inventory`): a break it
+                            // mined, a plain placement, or neither. A break's
+                            // yield is read now, before the block leaves the
+                            // world (`break_drops`).
+                            let joiner_edit = remote
+                                .then(|| self.classify_joiner_edit(i, bc, old_block, &input.mined));
+                            let break_yield = match joiner_edit {
+                                Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
+                                    self.joiner_break_yield(bc, old_block, tool)
+                                }
+                                _ => None,
+                            };
                             self.spill_container_on_change(
                                 (bc.x, bc.y, bc.z),
                                 old_block,
@@ -2765,7 +2817,18 @@ impl HostedServer {
                             {
                                 self.server.world.release_plot((bc.x, bc.y, bc.z));
                             }
-                            self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+                            if joiner_edit == Some(crate::joiner_inventory::JoinerEdit::Place) {
+                                // C1 — flagged player-placed, as the client's own
+                                // placement is: re-mining it yields no Satori
+                                // (Spec 06 §2.2), now that the server rolls a
+                                // joiner's breaks.
+                                self.server.world.place_player_block(bc.x, bc.y, bc.z, bc.new_block);
+                            } else {
+                                self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+                            }
+                            if let Some(edit) = joiner_edit {
+                                self.settle_joiner_edit(i, bc, edit, break_yield);
+                            }
                             // T1-3 — a log broken by a REMOTE player queues its
                             // leaves for the server's leaf-decay pass (the
                             // client break arms' `on_log_broken`, server side),
@@ -2961,6 +3024,127 @@ impl HostedServer {
         }
     }
 
+    /// C1 — what slot `i`'s accepted edit `old → bc.new_block` is to its
+    /// inventory (`joiner_inventory::classify`): a break if its input tagged
+    /// the cell as mined (`InputPacket.mined`, first [`protocol::MAX_MINED_PER_INPUT`]),
+    /// a plain placement by what its input says is in hand, else unchecked.
+    fn classify_joiner_edit(
+        &self,
+        i: usize,
+        bc: &protocol::BlockChange,
+        old: crate::block::BlockId,
+        mined: &[protocol::MinedBlock],
+    ) -> crate::joiner_inventory::JoinerEdit {
+        let sp = &self.server.players[i];
+        let mined = mined
+            .iter()
+            .take(protocol::MAX_MINED_PER_INPUT)
+            .find(|m| (m.x, m.y, m.z) == (bc.x, bc.y, bc.z));
+        // BRIDGE: possession check — the hand (and a break's tool) is the
+        // client's word until the shadow can be enforced (see
+        // `validate_block_edit`).
+        let hand = crate::joiner_inventory::Hand::from_wire(sp.held_kind, sp.held_id, &self.server.registry);
+        crate::joiner_inventory::classify(old, bc.new_block, mined, hand, self.server.play_mode.is_creative())
+    }
+
+    /// C1 — the yield of a joiner's break of `old` at `bc` with `tool`: the
+    /// rules single-player's break arm runs (`break_drops::break_yield`), on
+    /// this server's world, clock and Proof-of-Play secret — so a rare drop is
+    /// the WORLD's roll, never the joiner's. `None` when the edit doesn't
+    /// leave what that break would (the joiner's copy of the cell disagreed
+    /// with the server's: no yield, counted unchecked).
+    fn joiner_break_yield(
+        &self,
+        bc: &protocol::BlockChange,
+        old: crate::block::BlockId,
+        tool: Option<crate::crafting::Tool>,
+    ) -> Option<crate::break_drops::BreakYield> {
+        let y = crate::break_drops::break_yield(
+            &self.server.world,
+            &self.server.registry,
+            old,
+            (bc.x, bc.y, bc.z),
+            tool.as_ref(),
+            self.server.tick_counter,
+            &self.server.pop_keys(),
+        );
+        (bc.new_block == crate::block::AIR || bc.new_block == y.replacement).then_some(y)
+    }
+
+    /// C1 — slot `i`'s accepted edit is in the world; settle it with the
+    /// server's shadow of its inventory (`joiner_inventory`). A break: the
+    /// cell is natural again and exposes its deepslate neighbours (what the
+    /// client's break arm does), and the yield goes to the shadow and to the
+    /// client by `InventoryGrant`. A plain placement: the log-only possession
+    /// check, consuming one from the shadow's held slot on a match. Anything
+    /// else is counted unchecked.
+    fn settle_joiner_edit(
+        &mut self,
+        i: usize,
+        bc: &protocol::BlockChange,
+        edit: crate::joiner_inventory::JoinerEdit,
+        break_yield: Option<crate::break_drops::BreakYield>,
+    ) {
+        use crate::joiner_inventory::{JoinerEdit, PlaceCheck};
+        let tick = self.server.tick_counter;
+        match (edit, break_yield) {
+            (JoinerEdit::Break { .. }, Some(y)) => {
+                let world = &mut self.server.world;
+                world.set_placed(bc.x, bc.y, bc.z, false);
+                crate::break_drops::mark_exposed_neighbours(world, bc.x, bc.y, bc.z, tick);
+                self.server.players[i].possession.breaks += 1;
+                self.grant_to_joiner(i, y.drops.into_iter().chain(y.gem));
+            }
+            (JoinerEdit::Place, _) => {
+                let sp = &mut self.server.players[i];
+                let slot = sp.hotbar_slot;
+                match crate::joiner_inventory::check_placement(&mut sp.inventory, slot, bc.new_block) {
+                    PlaceCheck::Matched => sp.possession.matched += 1,
+                    PlaceCheck::Mismatched { held } => {
+                        if let Some(skipped) = sp.possession.note_mismatch(tick) {
+                            let registry = &self.server.registry;
+                            let held = held.map_or("nothing placeable", |b| registry.get(b).name);
+                            let more = if skipped > 0 {
+                                format!(" (+{skipped} more since the last report)")
+                            } else {
+                                String::new()
+                            };
+                            log::warn!(
+                                "possession check (log-only): {} placed {} from hotbar slot {slot}; \
+                                 the server's copy of that slot holds {held}{more} — accepted",
+                                sp.display_name,
+                                registry.get(bc.new_block).name,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => self.server.players[i].possession.unchecked += 1,
+        }
+    }
+
+    /// C1 — what the server gives joiner `i` (a break's yield, an
+    /// interaction's products): into its shadow of the joiner's inventory, and
+    /// to the joiner by `InventoryGrant`. A stack that doesn't fit the shadow
+    /// is dropped from it; the client spills what doesn't fit at its feet (as
+    /// for every grant), a ground item only it can see. Plans have no wire
+    /// form and are never granted.
+    fn grant_to_joiner(&mut self, i: usize, stacks: impl IntoIterator<Item = crate::item::ItemStack>) {
+        let grants: Vec<(usize, crate::item::ItemStack)> = stacks
+            .into_iter()
+            .filter(|s| s.count > 0 && !matches!(s.item, crate::item::Item::Plan(_)))
+            .map(|s| (i, s))
+            .collect();
+        if let Some(sp) = self.server.players.get_mut(i) {
+            for (_, stack) in &grants {
+                let _ = sp.inventory.add_item(stack.clone());
+            }
+        }
+        for (slot, pkt) in build_grant_packets(&grants) {
+            self.send_to_joined_slot(slot, &pkt);
+        }
+    }
+
     /// The host's authority over a block edit from slot `i` (audit 2026-09-27,
     /// "Host applies joiner-supplied block edits … with no mode, inventory,
     /// ownership or play-mode check"). Every client edit passes here before it
@@ -2982,13 +3166,15 @@ impl HostedServer {
     ///   creative bypasses — with a remote joiner owning a plot only through a
     ///   matching `PlotOwner::Npub`).
     ///
-    /// BRIDGE: a place of an item the joiner doesn't hold is NOT refused. The
-    /// server keeps no authoritative inventory for a remote player (their
-    /// `ServerPlayer.inventory` is save-time state; pickups ride
-    /// `InventoryGrant` one way), so there is nothing to check possession
-    /// against. Replace with a possession check (and consume on place) when
-    /// remote inventories become server-authoritative — the `ServerPlayer` vs
-    /// `PlayerSlot` debt in CLAUDE.md.
+    /// BRIDGE: possession check — a place of an item the joiner doesn't hold
+    /// is NOT refused. Since C1 the server keeps a SHADOW of a remote
+    /// player's inventory (`ServerPlayer.inventory`, `joiner_inventory`) and
+    /// checks each plain block placement against its held slot, but LOG-ONLY
+    /// (`PossessionTally`): the shadow doesn't yet see crafting, chests, slot
+    /// moves or what the joiner arrived with, so refusing would refuse
+    /// legitimate placements. Make it refuse (and send the block back) when
+    /// the remaining gains reach the server (inventory authority merges 2-3,
+    /// the `ServerPlayer` vs `PlayerSlot` debt in CLAUDE.md).
     fn validate_block_edit(
         &self,
         i: usize,

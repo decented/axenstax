@@ -642,6 +642,95 @@ mod tests {
         );
     }
 
+    /// C1 — a joiner's break through its REAL client: the survival break arm
+    /// mines the block under its feet, tags it (`InputPacket.mined`) and takes
+    /// nothing itself (`break_drops::take_yield`); the server yields the break
+    /// and grants it (`InventoryGrant`). The client ends with exactly one
+    /// stack of the drop — two if it still granted itself, none if the server
+    /// didn't.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_break_is_granted_once_by_the_server() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-break");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-break-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Miner", 0),
+            None,
+        ));
+        for _ in 0..5 {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        }
+        assert!(hg.state.joined());
+
+        // Dirt under the joiner's feet in both worlds, its server body where
+        // its client stands, an empty hand, looking straight down.
+        let p = hg.state.players[0].player.pos;
+        let cell = (p.x.floor() as i32, (p.y - 0.5).floor() as i32, p.z.floor() as i32);
+        hg.state.world.set_block(cell.0, cell.1, cell.2, crate::block::DIRT);
+        server.server.world.set_block(cell.0, cell.1, cell.2, crate::block::DIRT);
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        server.server.loaded_columns.insert((cell.0.div_euclid(cs), cell.2.div_euclid(cs)));
+        let slot = server.server.players.len() - 1;
+        hg.state.players[0].inventory = crate::inventory::Inventory::new();
+        hg.state.players[0].camera.pitch = -std::f32::consts::FRAC_PI_2 + 0.01;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.left_held = true;
+        let dirt = crate::item::Item::Block(crate::block::DIRT);
+        let held = |hg: &HeadlessGame| -> u32 {
+            hg.state.players[0]
+                .inventory
+                .slots_iter()
+                .flatten()
+                .filter(|s| s.item == dirt)
+                .map(|s| u32::from(s.count))
+                .sum()
+        };
+
+        let mut broke = false;
+        for _ in 0..400 {
+            let body = &mut server.server.players[slot].player;
+            body.pos = p;
+            body.velocity = glam::Vec3::ZERO;
+            // One tick per frame, whatever the wall clock did.
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+            if hg.state.world.get_block(cell.0, cell.1, cell.2) != crate::block::DIRT {
+                broke = true;
+                break;
+            }
+        }
+        assert!(broke, "the joiner's client mined the dirt");
+        hg.state.input.left_held = false;
+        for _ in 0..10 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+        }
+        assert_eq!(
+            server.server.world.get_block(cell.0, cell.1, cell.2),
+            crate::block::AIR,
+            "the server took the break"
+        );
+        assert_eq!(held(&hg), 1, "exactly one dirt: the server's grant, not the client's own");
+        assert_eq!(server.server.players[slot].possession.breaks, 1);
+    }
+
     /// Review D2b LOW-8 — the lending host's REAL death sweep, breeding step
     /// and species dispatch (`GameState::tick`, where they run while the host
     /// lends): a mob a joiner hit dies beside the host's own player and the

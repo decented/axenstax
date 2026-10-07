@@ -587,6 +587,7 @@ impl crate::GameState {
         self.remote_players.clear();
         self.remote_swing.clear();
         self.pending_block_changes.clear();
+        self.pending_mined.clear();
 
         // Session overlays that belong to the world being left.
         self.scenario = None;

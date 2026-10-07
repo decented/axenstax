@@ -396,6 +396,10 @@ pub struct RemoteClient {
     /// could never refuse and un-ghost it on this client). At most
     /// [`INPUT_CARRY_OVER_MAX_CHANGES`].
     input_carry_over: Vec<protocol::BlockChange>,
+    /// C1 — the `mined` tags of edits still in [`Self::input_carry_over`]:
+    /// the server yields a mined cell only when the tag rides with its edit,
+    /// so a trimmed edit's tag rides again with it in the next packet.
+    mined_carry_over: Vec<protocol::MinedBlock>,
     /// World chat (Phase 2) — lines the server delivered to us this poll,
     /// drained by the game loop each frame into `ChatState`. Bounded like
     /// `pending_grants`: a hostile server can't grow this without limit
@@ -672,6 +676,7 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
+            mined_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -717,6 +722,7 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
+            mined_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -1170,6 +1176,11 @@ impl RemoteClient {
             edits.append(&mut input.block_changes);
             input.block_changes = edits;
         }
+        if !self.mined_carry_over.is_empty() {
+            let mut mined = std::mem::take(&mut self.mined_carry_over);
+            mined.append(&mut input.mined);
+            input.mined = mined;
+        }
         let (packet, mut trimmed) = serialize_input_within_cap(&mut input);
         if trimmed.len() > INPUT_CARRY_OVER_MAX_CHANGES {
             let drop = trimmed.len() - INPUT_CARRY_OVER_MAX_CHANGES;
@@ -1179,6 +1190,14 @@ impl RemoteClient {
             );
             trimmed.drain(..drop);
         }
+        // C1 — a mined cell whose edit was trimmed is tagged again with it.
+        self.mined_carry_over = input
+            .mined
+            .iter()
+            .filter(|m| trimmed.iter().any(|bc| (bc.x, bc.y, bc.z) == (m.x, m.y, m.z)))
+            .copied()
+            .take(protocol::MAX_MINED_PER_INPUT)
+            .collect();
         self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
         Some(seq)
@@ -1893,6 +1912,32 @@ mod tests {
         // Nothing left over: the carry-over queue drained.
         assert!(rc.input_carry_over.is_empty());
         assert!(next_input_xs(&*srv).is_empty(), "an idle tick carries no edits");
+    }
+
+    /// C1 — the server yields a mined cell only when its `mined` tag rides
+    /// with its edit: an edit trimmed onto a later packet takes its tag along.
+    #[test]
+    fn a_trimmed_edits_mined_tag_rides_with_it() {
+        let (srv, mut rc) = connected_client();
+        let tag = protocol::MinedBlock { x: 9_999, y: 64, z: 0, tool: protocol::WireItem::None };
+        let mut input = input_with(0..10_000);
+        input.mined = vec![tag];
+        rc.send_input(&input);
+        let mut tagged_with_edit = false;
+        for _ in 0..12 {
+            let Some(pkt) = srv.try_recv_from_client() else {
+                rc.send_input(&protocol::InputPacket::default());
+                continue;
+            };
+            let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
+            let sent: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
+            if sent.block_changes.iter().any(|b| b.x == 9_999) {
+                tagged_with_edit = sent.mined.contains(&tag);
+            }
+            rc.send_input(&protocol::InputPacket::default());
+        }
+        assert!(tagged_with_edit, "the tag went out in the packet carrying its edit");
+        assert!(rc.mined_carry_over.is_empty(), "and stopped riding once the edit went");
     }
 
     #[test]

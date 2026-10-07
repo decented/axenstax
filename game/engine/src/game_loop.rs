@@ -2980,6 +2980,7 @@ impl super::GameState {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.pending_block_changes.clear();
+            self.pending_mined.clear();
             self.remote_players.clear();
             // NOTE: hosted_server + remote_client are NOT cleared here.
             // The HostWorld path starts the hosted_server BEFORE the
@@ -4278,6 +4279,11 @@ impl super::GameState {
             .map(|p| (p.player.pos, p.camera.yaw, p.camera.pitch, p.combat.health))
             .collect();
         hs.sync_local_slots(&local_slots);
+        // C1 — the server rolls joiners' Satori drops with this world's
+        // Proof-of-Play secret: the host client's, which it adopts from the
+        // world's meta on load (`persist_pop_secret_if_missing`).
+        hs.server.pop_secret = self.pop_server_secret;
+        hs.server.pop_epoch = self.pop_epoch_id;
         if !hs.lends_host_world() {
             // P9 weather sync — the host's window, translated into the
             // SERVER's tick frame: its `tick_counter` need not equal ours (it
@@ -11902,6 +11908,20 @@ impl super::GameState {
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
                                         self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], replacement));
+                                        // C1 — and tell the server it was MINED,
+                                        // with what: it yields a joiner's break.
+                                        if self.joined() {
+                                            self.pending_mined.push(crate::protocol::MinedBlock {
+                                                x: pos[0],
+                                                y: pos[1],
+                                                z: pos[2],
+                                                tool: tool.map_or(crate::protocol::WireItem::None, |t| {
+                                                    crate::inventory::item_to_wire_full(
+                                                        &crate::item::Item::Tool(t),
+                                                    )
+                                                }),
+                                            });
+                                        }
                                         for (sx, sy, sz) in &cleared_smoke {
                                             self.pending_block_changes.push(broadcast_change(&self.world, *sx, *sy, *sz, block::AIR));
                                         }
@@ -21630,6 +21650,21 @@ impl super::GameState {
                     &self.registry,
                 );
             }
+            // C1 — a joiner's Satori is the server's roll, granted like any
+            // break drop: the routine pickup celebration plays here. (The
+            // Genesis Block is the host's world's to claim — not wired for a
+            // joiner's find.)
+            let satori = crate::inventory::item_to_ref(&crate::item::Item::Material(
+                crate::item::MaterialId::Satori,
+            ))
+            .to_wire();
+            if self.joined() && pending_grants.iter().any(|g| (g.item_kind, g.item_id) == satori) {
+                self.audio.play_gem_pickup();
+                self.toast = Some((
+                    "+1 Satori".to_string(),
+                    Instant::now() + std::time::Duration::from_secs(3),
+                ));
+            }
         }
 
         // World chat (Phase 2) — push every line delivered this poll (host
@@ -22002,6 +22037,8 @@ impl super::GameState {
             chunk_drops: Vec::new(),
             render_distance: 0,
             column_mismatch: None,
+            // The joined client's mined cells (empty on a host's loopback).
+            mined: std::mem::take(&mut self.pending_mined),
         };
 
         // Serialize once, send to whichever transport is active

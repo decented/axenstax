@@ -153,7 +153,7 @@ impl Joiner {
 /// ground (no critical hits), at rest, and looking along +z (yaw π), where
 /// these tests put the mobs it acts on (a joiner's target must be ahead of
 /// its server body, review D2b LOW-2).
-fn floor_and_stand(world: &mut crate::world::World, hs: &mut HostedServer, slot: usize) -> Vec3 {
+pub(super) fn floor_and_stand(world: &mut crate::world::World, hs: &mut HostedServer, slot: usize) -> Vec3 {
     let (fx, fy, fz) = (40, 80, 40);
     for x in fx - 8..=fx + 8 {
         for z in fz - 8..=fz + 8 {
@@ -729,6 +729,12 @@ fn shearing_drops_wool_the_joiner_picks_up_and_takes_nothing_from_the_hand() {
 #[test]
 fn milking_swaps_the_bucket_for_a_milk_bucket() {
     let mut rig = Rig::new("milk", 1);
+    // C1 — the server's shadow of the joiner's inventory holds the bucket in
+    // another slot than the one the request names: owed, it goes from there.
+    let slot = rig.joiners[0].slot;
+    rig.hs.server.players[slot]
+        .inventory
+        .set_slot(20, Some(crate::item::ItemStack::new_material(MaterialId::Bucket, 1)));
     let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 1.5));
     rig.place(cow, Vec3::new(0.0, 0.0, 1.5));
     let seq = rig.joiners[0].interact(id, InteractKind::Milk, Some(&mat(MaterialId::Bucket)));
@@ -737,6 +743,25 @@ fn milking_swaps_the_bucket_for_a_milk_bucket() {
     assert!(out.accepted);
     assert_eq!(out.consume_held, 1, "the bucket is used");
     assert_eq!(rig.joiners[0].inbox.granted(MaterialId::MilkBucket), 1, "a milk bucket is granted");
+    // C1 — and the shadow follows: the bucket out, the milk bucket in.
+    let shadow = &rig.hs.server.players[slot].inventory;
+    let count = |m: MaterialId| -> u32 {
+        shadow.slots_iter().flatten().filter(|s| s.item == mat(m)).map(|s| u32::from(s.count)).sum()
+    };
+    assert_eq!(count(MaterialId::Bucket), 0, "the shadow paid the bucket, from wherever it was");
+    assert_eq!(count(MaterialId::MilkBucket), 1, "and holds the product");
+    assert_eq!(rig.hs.server.players[slot].possession.mismatched, 0);
+
+    // C1 — an outcome the shadow can't pay (no bucket left in it) is a
+    // possession mismatch: counted, never refused. (Another cow: this one
+    // needs time before it can be milked again.)
+    let (cow2, id2) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 1.5));
+    rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
+    rig.place(cow2, Vec3::new(0.0, 0.0, 1.5));
+    let again = rig.joiners[0].interact(id2, InteractKind::Milk, Some(&mat(MaterialId::Bucket)));
+    rig.tick(1);
+    assert!(rig.joiners[0].inbox.outcome(again).accepted);
+    assert_eq!(rig.hs.server.players[slot].possession.mismatched, 1);
 }
 
 #[test]

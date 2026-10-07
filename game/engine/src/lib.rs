@@ -360,6 +360,7 @@ mod entity_broadcast;
 mod remote_mobs;
 mod health_sync;
 mod joiner_actions;
+mod joiner_inventory;
 mod mob_interact;
 mod local_mob_click;
 // WebSocket transport — the dedicated-server pipe that BOTH the browser PWA and
@@ -1286,6 +1287,10 @@ pub(crate) struct GameState {
     /// sites stay native-gated for now, so a browser joiner does not yet
     /// propagate its OWN edits to the server (v1 limitation L-web-edit).
     pub(crate) pending_block_changes: Vec<crate::protocol::BlockChange>,
+    /// C1 — the cells this JOINED client's survival break arm mined since its
+    /// last input, with the tool each was mined with (`InputPacket.mined`):
+    /// the server yields a joiner's breaks and grants the drops.
+    pub(crate) pending_mined: Vec<crate::protocol::MinedBlock>,
     /// Touch input — virtual joystick + action buttons (web AND Android).
     ///
     /// Unconditional rather than `cfg`-gated: every call site branches on the
@@ -1862,6 +1867,7 @@ impl GameState {
             own_health: crate::health_sync::OwnHealth::new(),
             joiner_actions: crate::joiner_actions::JoinerActions::default(),
             pending_block_changes: Vec::new(),
+            pending_mined: Vec::new(),
             touch: crate::touch_input::TouchInput::new(),
             #[cfg(target_arch = "wasm32")]
             dedicated_autojoin_done: false,
