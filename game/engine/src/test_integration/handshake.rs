@@ -197,7 +197,11 @@ fn protocol_version_is_the_pinned_value() {
     // v69 (2026-10-07, B2a): the chunk push — ChunkData side data and
     //   continuations, JoinRequest.render_distance, InputPacket.chunk_ack +
     //   chunk_drops.
-    assert_eq!(protocol::PROTOCOL_VERSION, 69);
+    // v70 (2026-10-07, MP-D2b): joiners act on the server's mobs —
+    //   `EntityAttack = 58`, `EntityInteract = 59`, `InteractOutcome = 60`,
+    //   `KillEvent = 61`, `PlayerEventType::{DiedOf, ArmourWorn}` and
+    //   `entity_flags::TETHERED`, all appended.
+    assert_eq!(protocol::PROTOCOL_VERSION, 70);
 }
 
 #[test]
