@@ -26,8 +26,10 @@
 //!
 //! **Interactions** (attack, tame, feed, breed, ride, trade) need the server
 //! to act on its own entity: until D2b they are refused on the joiner with a
-//! toast. [`RemoteMobs::attack_target`] and [`RemoteMobs::ray_target`] tell
-//! the caller a click landed on a mirrored mob.
+//! toast. [`RemoteMobs::ray_target`] tells the caller a click landed on a
+//! mirrored mob (the crosshair ray, clamped to the first block), and
+//! [`MirrorTarget::right_click_interacts`] whether a right-click with what is
+//! in hand would have done something to it.
 //!
 //! **No private mobs.** [`purge_private_mobs`] removes any mob that appeared
 //! in a joiner's own sim ECS (chunk scatter, a spawn egg, a command): the
@@ -81,6 +83,49 @@ pub struct MirrorTarget {
     pub id: u32,
     pub kind: MobType,
     pub tamed: bool,
+    pub baby: bool,
+}
+
+impl MirrorTarget {
+    /// Would a right-click holding `held` (`None` = empty hand) on this mob
+    /// do something TO the mob in single-player — so on a mirrored mob it is
+    /// an interaction the server has to perform, refused until D2b (review
+    /// D2a LOW-2)? The same predicates `game_loop`'s right-click branches
+    /// apply, in their order: talk to a villager and mount a steed with
+    /// anything in hand; a Lead on a passive mob; breeding food (horse
+    /// family only while sneaking, never a baby); a bucket on a cow, shears
+    /// on a sheep; taming food (companion food, a Cat Treat on a cat, a
+    /// Bone on a wolf, Berries on a Nostrich); and an empty hand on a tamed
+    /// pet (sit / follow — the mirror doesn't know whose). Everything else —
+    /// eating, a bow, a bucket at water, a block beside a cow — is the
+    /// item's own use and goes ahead.
+    pub fn right_click_interacts(&self, held: Option<&crate::item::Item>, sneak: bool) -> bool {
+        use crate::item::{Item, MaterialId};
+        let kind = self.kind;
+        if matches!(kind, MobType::Villager | MobType::Peddler) || crate::mob::is_rideable(kind) {
+            return true;
+        }
+        match held {
+            None => self.tamed,
+            Some(Item::Material(m)) => {
+                let m = *m;
+                (m == MaterialId::Lead
+                    && crate::mob::mob_def(kind).category == crate::mob::MobCategory::Passive)
+                    || (!self.baby
+                        && crate::breeding::breeding_food(kind) == Some(m)
+                        && crate::breeding::breeding_feed_allowed(kind, sneak))
+                    || (kind == MobType::Cow && m == MaterialId::Bucket)
+                    || crate::companion::tame_food(kind) == Some(m)
+                    || (kind == MobType::Cat && m == MaterialId::CatTreat)
+                    || (kind == MobType::Wolf && m == MaterialId::Bone)
+                    || (kind == MobType::Nostrich && m == MaterialId::Berries)
+            }
+            Some(Item::Tool(t)) => {
+                kind == MobType::Sheep && t.tool_type == crate::crafting::ToolType::Shears
+            }
+            Some(_) => false,
+        }
+    }
 }
 
 /// The joiner's mirror of the server's mobs and carts. Empty unless joined.
@@ -222,18 +267,14 @@ impl RemoteMobs {
         }
     }
 
-    /// The mirrored mob a melee swing from `eye` along `look` would hit —
-    /// the same cone and reach the client's own attack picks with
-    /// (`combat::find_attack_target`).
-    pub fn attack_target(&self, eye: Vec3, look: Vec3) -> Option<MirrorTarget> {
-        let (e, kind) = crate::combat::find_attack_target(&self.ecs, eye, look)?;
-        self.target(e, kind?)
-    }
-
     /// The mirrored mob under the crosshair: the nearest whose hitbox the
-    /// ray from `eye` along `look` enters within `reach` blocks. Narrower
-    /// than [`Self::attack_target`]'s cone, so building beside a cow still
-    /// places blocks.
+    /// ray from `eye` along `look` enters within `reach` blocks. Callers clamp
+    /// `reach` to the first solid block on the ray, so a block in front of
+    /// the mob wins. A crosshair ray, not the melee swing's wide cone
+    /// (`combat::find_attack_target`): the cone would catch a chicken at
+    /// your feet or a cow beside the wall you're mining, and a joiner's
+    /// break would stall on every swing it refuses (review D2a MEDIUM-3);
+    /// building beside a cow still places blocks.
     pub fn ray_target(&self, eye: Vec3, look: Vec3, reach: f32) -> Option<MirrorTarget> {
         let mut best: Option<(hecs::Entity, MobType, f32)> = None;
         for (e, (pos, hb, kind)) in self.ecs.query::<(&Position, &Hitbox, &MobKind)>().iter() {
@@ -253,7 +294,12 @@ impl RemoteMobs {
 
     fn target(&self, e: hecs::Entity, kind: MobType) -> Option<MirrorTarget> {
         let m = *self.ecs.get::<&Mirrored>(e).ok()?;
-        Some(MirrorTarget { id: m.id, kind, tamed: m.flags & entity_flags::TAMED != 0 })
+        Some(MirrorTarget {
+            id: m.id,
+            kind,
+            tamed: m.flags & entity_flags::TAMED != 0,
+            baby: m.flags & entity_flags::BABY != 0,
+        })
     }
 
     /// The mirror entity for wire id `id` (test hook).
@@ -562,11 +608,61 @@ mod tests {
         m.advance(1.0);
         let eye = Vec3::new(0.0, 64.5, 0.0);
         let look = Vec3::new(0.0, 0.0, -1.0);
-        let hit = m.attack_target(eye, look).expect("swing hits the wolf");
-        assert_eq!(hit, MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true });
-        assert_eq!(m.ray_target(eye, look, 5.0).map(|t| t.id), Some(11));
+        let hit = m.ray_target(eye, look, 5.0).expect("the crosshair is on the wolf");
+        assert_eq!(hit, MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, baby: false });
         assert_eq!(m.ray_target(eye, Vec3::new(1.0, 0.0, 0.0), 5.0), None, "looking away misses");
-        assert_eq!(m.ray_target(eye, look, 1.0), None, "out of reach");
+        assert_eq!(m.ray_target(eye, look, 1.0), None, "out of reach (or behind a block)");
+    }
+
+    /// Review D2a MEDIUM-3 — a chicken at your feet while you dig down, or a
+    /// cow beside the wall you mine, is inside the melee swing's 60° cone
+    /// but not under the crosshair: it must not be the target of a break.
+    #[test]
+    fn a_mob_beside_the_crosshair_is_not_the_target() {
+        let mut m = RemoteMobs::default();
+        let at = Vec3::new(1.2, 63.0, -1.0);
+        m.apply(&[spawn(3, EntityKind::Chicken, at)], &[update(3, at, 0)], &[]);
+        m.advance(1.0);
+        let eye = Vec3::new(0.0, 64.6, 0.0);
+        let digging_down = Vec3::new(0.0, -1.0, -0.3).normalize();
+        let (cone, _) =
+            crate::combat::find_attack_target(m.ecs(), eye, digging_down).expect("in the cone");
+        assert!(m.ecs().get::<&Mirrored>(cone).is_ok(), "the wide cone would pick it");
+        assert_eq!(m.ray_target(eye, digging_down, crate::combat::ATTACK_REACH), None);
+    }
+
+    fn target(kind: MobType) -> MirrorTarget {
+        MirrorTarget { id: 1, kind, tamed: false, baby: false }
+    }
+
+    /// Review D2a LOW-2 — only what would do something to the mob is
+    /// refused on a mirror; the item's own use goes ahead.
+    #[test]
+    fn only_a_real_mob_interaction_is_refused() {
+        use crate::crafting::{ToolMaterial, ToolType};
+        use crate::item::{Item, MaterialId};
+        let mat = |m| Item::Material(m);
+        let cow = target(MobType::Cow);
+        assert!(cow.right_click_interacts(Some(&mat(MaterialId::Wheat)), false), "breed");
+        assert!(cow.right_click_interacts(Some(&mat(MaterialId::Bucket)), false), "milk");
+        assert!(cow.right_click_interacts(Some(&mat(MaterialId::Lead)), false), "leash");
+        assert!(!cow.right_click_interacts(Some(&mat(MaterialId::Bread)), false), "eat");
+        assert!(!cow.right_click_interacts(Some(&Item::Block(crate::block::STONE)), false), "build");
+        assert!(!cow.right_click_interacts(None, false), "an empty hand on a wild cow");
+        let calf = MirrorTarget { baby: true, ..cow };
+        assert!(!calf.right_click_interacts(Some(&mat(MaterialId::Wheat)), false));
+        let shears = Item::Tool(crate::crafting::Tool::new(ToolType::Shears, ToolMaterial::Iron));
+        assert!(target(MobType::Sheep).right_click_interacts(Some(&shears), false));
+        assert!(!target(MobType::Chicken).right_click_interacts(Some(&shears), false));
+        assert!(target(MobType::Wolf).right_click_interacts(Some(&mat(MaterialId::Bone)), false));
+        let pet = MirrorTarget { tamed: true, ..target(MobType::Wolf) };
+        assert!(pet.right_click_interacts(None, false), "sit / follow");
+        // Talking and riding take anything in hand.
+        let stone = Item::Block(crate::block::STONE);
+        assert!(target(MobType::Villager).right_click_interacts(Some(&stone), false));
+        assert!(target(MobType::Horse).right_click_interacts(None, false));
+        // A bucket aimed past a fish scoops water, as in single-player.
+        assert!(!target(MobType::Fish).right_click_interacts(Some(&mat(MaterialId::Bucket)), false));
     }
 
     #[test]

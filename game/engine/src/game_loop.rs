@@ -10888,21 +10888,27 @@ impl super::GameState {
 
                 // MP-D2a — a joiner's mobs are the server's mirror: a swing
                 // at one can't land until the server takes attacks (D2b).
-                // It is still a swing at a mob, not a block behind it.
+                // Only the mob under the crosshair, in front of the first
+                // block, is swung at, and only a swing that could land (off
+                // cooldown) is refused: that tick is a swing, not a break;
+                // between swings the break goes on, as single-player mining
+                // beside a mob does (review D2a MEDIUM-3). A refused swing
+                // hits nothing, so it wears no tool.
                 let joined_target = if self.joined() {
-                    self.remote_mobs.attack_target(p_eye, look_dir)
+                    self.joined_mob_under_crosshair(pidx)
                 } else {
                     None
                 };
+                let refused_swing = joined_target.is_some() && self.players[pidx].combat.can_attack();
                 let attacked = if joined_target.is_some() {
-                    if self.players[pidx].combat.can_attack() {
+                    if refused_swing {
                         self.players[pidx].combat.attack_cooldown = crate::combat::ATTACK_COOLDOWN;
                         self.toast = Some((
                             crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
                             Instant::now() + Duration::from_secs(3),
                         ));
                     }
-                    true
+                    refused_swing
                 } else if villager_grace {
                     // Consume the attack cooldown so the player feels the
                     // swing, but skip damage. Set the warn timer; the next
@@ -11026,7 +11032,7 @@ impl super::GameState {
                     hit
                 };
 
-                if attacked {
+                if attacked && !refused_swing {
                     let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                     self.handle_tool_use(info);
                 }
@@ -12505,32 +12511,29 @@ impl super::GameState {
             // villager-dialogue branch so the Lead wins over the
             // talk-to-villager interaction when held.
             // MP-D2a — a right-click ON a mirrored mob (the crosshair is on
-            // it) while holding anything but a block would be an interaction
-            // (tame, feed, breed, ride, lead, shear, milk, trade) the server
-            // has to perform: refused with a toast until D2b. Holding a
-            // block falls through, so building beside a cow still places.
+            // it) that would do something to the mob (talk, ride, tame, feed,
+            // breed, lead, shear, milk, a pet command) is an interaction the
+            // server has to perform: refused with a toast until D2b. Anything
+            // else in hand goes ahead with its own use — eating, a bow, a
+            // bucket, building beside a cow (review D2a LOW-2).
             if intent.place_block
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
                 && self.joined()
+                && self.joined_mob_under_crosshair(pidx).is_some_and(|mob| {
+                    let held = self.players[pidx]
+                        .inventory
+                        .hotbar_slot(self.players[pidx].hotbar_slot)
+                        .map(|s| &s.item);
+                    mob.right_click_interacts(held, intent.sneak)
+                })
             {
-                let holding_block = self.players[pidx]
-                    .inventory
-                    .hotbar_block_id(self.players[pidx].hotbar_slot)
-                    .is_some();
-                let eye = self.players[pidx].player.eye_pos();
-                let look_dir = self.players[pidx].camera.forward();
-                // A block in front of the mob (a chest, a door) wins.
-                let reach = cast_ray(eye, look_dir, crate::combat::ATTACK_REACH, &self.world, &self.registry)
-                    .map_or(crate::combat::ATTACK_REACH, |hit| hit.distance);
-                if !holding_block && self.remote_mobs.ray_target(eye, look_dir, reach).is_some() {
-                    self.players[pidx].place_cooldown = 16;
-                    self.toast = Some((
-                        crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                    continue;
-                }
+                self.players[pidx].place_cooldown = 16;
+                self.toast = Some((
+                    crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                continue;
             }
 
             let mut lead_consumed = false;
@@ -22205,6 +22208,19 @@ impl super::GameState {
     /// Builds an InputPacket from the local player's position, camera, and
     /// any pending block changes, then sends it via the appropriate transport.
     /// Cross-platform: the browser sends its movement input to the server too.
+    /// MP-D2a — the mirrored mob under player `pidx`'s crosshair: the ray
+    /// from its eye, within melee reach and clamped to the first solid block
+    /// (a block in front of the mob — a chest, a door, the wall being mined
+    /// — wins). `None` unless joined (the mirror is empty otherwise).
+    fn joined_mob_under_crosshair(&self, pidx: usize) -> Option<crate::remote_mobs::MirrorTarget> {
+        let slot = self.players.get(pidx)?;
+        let eye = slot.player.eye_pos();
+        let look = slot.camera.forward();
+        let reach = cast_ray(eye, look, crate::combat::ATTACK_REACH, &self.world, &self.registry)
+            .map_or(crate::combat::ATTACK_REACH, |hit| hit.distance);
+        self.remote_mobs.ray_target(eye, look, reach)
+    }
+
     pub(crate) fn network_send_input(&mut self) {
         if self.players.is_empty() { return; }
         let has_server = self.hosted_server.is_some();

@@ -1065,13 +1065,28 @@ breeding, kill attribution and hostile damage have nothing to act on; the
 hostile-melee pass is also gated off. The joiner's own drops, carts and
 projectiles stay in its ECS.
 
-**Interactions refused until D2b.** A melee swing whose cone (the client's own
-`find_attack_target` rule) holds a mirrored mob, or a right-click whose
-crosshair ray hits one (nearer than any block, holding anything but a block),
-shows "Not available when you've joined someone else's world yet." and does
-nothing else — it neither mines the block behind nor places. Attack, tame,
-feed, breed, ride, lead, shear, milk and trade all need the server to act on
-its entity.
+**Interactions refused until D2b.** Attack, tame, feed, breed, ride, lead,
+shear, milk, trade and pet commands all need the server to act on its entity,
+so on a mirrored mob they show "Not available when you've joined someone
+else's world yet." and do nothing else. The target is the mob under the
+**crosshair** (`RemoteMobs::ray_target`, the ray from the eye within melee
+reach, clamped to the first solid block — a block in front of the mob wins),
+never the melee swing's wide 60° cone, which would catch a chicken at the
+player's feet or a cow beside the wall being mined.
+- **Left click (break).** Only a swing that could land (off its attack
+  cooldown) is refused: that tick is a swing, not a break, and it wears no
+  tool (it hit nothing). Between swings the held break goes on, as
+  single-player mining beside a mob does.
+- **Right click.** Refused only when what is in hand would do something to
+  that mob in single-player (`MirrorTarget::right_click_interacts`, the same
+  predicates as `game_loop`'s right-click branches): talking to a villager
+  and mounting a steed with anything in hand; a Lead on a passive mob;
+  breeding food (horse family only while sneaking, never a baby); a bucket on
+  a cow, shears on a sheep; taming food (companion food, a Cat Treat on a
+  cat, a Bone on a wolf, Berries on a Nostrich); an empty hand on a tamed pet
+  (sit / follow — the mirror doesn't know whose). Anything else goes ahead
+  with the item's own use: eating, a bow, a bucket at water, a block placed
+  beside a cow.
 
 **Server-side damage on joiners (`GameServer::tick_player_hazards`).** After
 the per-player combat timers, for every server-simulated body that is present,

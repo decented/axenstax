@@ -1577,9 +1577,14 @@ joiner any more (Spec 04 §4.2c).
   health are the server's, so the heal would be the only part that worked.
   `/kill` and `/heal` are op-only, never available to a joiner.
 - **Attacking and every other mob interaction (tame, feed, breed, ride, lead,
-  shear, milk, trade) is not available to a joiner yet** (D2b): a swing at a
-  mob or a right-click on one shows "Not available when you've joined someone
-  else's world yet." and does nothing else.
+  shear, milk, trade, pet commands) is not available to a joiner yet** (D2b):
+  it shows "Not available when you've joined someone else's world yet." and
+  does nothing else. The target is the mob under the crosshair (in front of the
+  first block), not the swing's wide cone. A swing is refused only when it could
+  land (off cooldown) — between swings a held break goes on, so a chicken at
+  your feet doesn't stop you digging; a right-click is refused only when what
+  is in hand would do something to that mob (Spec 04 §4.2c) — eating, a bow or
+  a block placed beside a cow go ahead.
 - **Not yet on a joiner:** armour durability does not wear from server-landed
   hits (the server holds no armour; Phase C); the death screen's cause line is
   generic for a server-side death (`Died` carries no cause); species-AI attacks
