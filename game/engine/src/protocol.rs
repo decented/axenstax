@@ -1770,6 +1770,42 @@ mod tests {
         assert_eq!(back.block_changes[0].new_block, 3);
     }
 
+    /// bincode 1 is positional, so `InputPacket`'s trailing fields must sit in
+    /// the order each protocol bump appended them: D2a's vitals (v68), then
+    /// B2a's chunk-push feedback (v69). Pinned on the wire bytes, so a merge
+    /// that reorders them fails here rather than on a live join.
+    #[test]
+    fn input_packet_trailing_fields_are_in_append_order() {
+        let head = InputPacket { block_changes: Vec::new(), ..Default::default() };
+        let pkt = InputPacket {
+            armour_points: 0xA5,
+            health_delta: 2.5,
+            chunk_ack: 0x0102_0304,
+            chunk_drops: vec![ChunkDrop { cx: -1, cz: 7, as_of: 9 }],
+            render_distance: 0x5C,
+            ..head.clone()
+        };
+        let base = bincode::serialize(&head).unwrap();
+        let bytes = bincode::serialize(&pkt).unwrap();
+        // v68 (MP-D2a): armour_points u8, health_delta f32.
+        let mut tail = vec![0xA5];
+        tail.extend_from_slice(&2.5f32.to_le_bytes());
+        // v69 (B2a): chunk_ack u32, chunk_drops (u64 length + entries),
+        // render_distance u8.
+        tail.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        for v in [-1i32, 7] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.extend_from_slice(&9u32.to_le_bytes());
+        tail.push(0x5C);
+        // Everything before the appended fields is unchanged, and the
+        // appended fields close the packet in append order.
+        let prefix = bytes.len() - tail.len();
+        assert_eq!(&bytes[prefix..], &tail[..]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1)]);
+    }
+
     #[test]
     fn state_update_roundtrip_with_v2_fields() {
         let pkt = StateUpdatePacket {

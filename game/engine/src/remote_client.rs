@@ -998,17 +998,17 @@ impl RemoteClient {
         changed
     }
 
+    /// The sequence number the next [`Self::send_input`] stamps.
+    pub fn next_input_seq(&self) -> u64 {
+        self.tick
+    }
+
     /// Send player input to the server. Call each tick (20 TPS).
     ///
     /// Returns the sequence number the input went out with (its `tick` is
     /// overwritten with this connection's own counter, whatever the caller
     /// put there) — the number the server will acknowledge it by. `None`
     /// when nothing was sent (not connected).
-    /// The sequence number the next [`Self::send_input`] stamps.
-    pub fn next_input_seq(&self) -> u64 {
-        self.tick
-    }
-
     pub fn send_input(&mut self, input: &protocol::InputPacket) -> Option<u64> {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return None;

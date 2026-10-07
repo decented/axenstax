@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn entity_updates_never_crowd_out_a_chunk_next_in_line() {
         let mut ob = ClientOutbox::new(true);
-        let n = 3_000u32; // about 63 KB of updates a tick: more than the budget
+        let n = 3_000u32; // about 102 KB of updates a tick: more than the budget
         ob.push_tick(0, &(0..n).map(spawn).collect::<Vec<_>>(), &[], &[], &[]);
         for _ in 0..5 {
             let _ = drain_mixed(&mut ob);
