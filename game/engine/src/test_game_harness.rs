@@ -892,4 +892,101 @@ mod tests {
         assert_eq!(count(&hg, MaterialId::MilkBucket), 1, "the click milks it");
         assert_eq!(count(&hg, MaterialId::Bucket), 0);
     }
+
+    /// C2a — a joiner's hunger, eating and sleep through its REAL client: the
+    /// joined slot runs no metabolism of its own (its drain timer never
+    /// moves), it shows the hunger the server sends (`own_hunger`), and a
+    /// right-click with bread sends an `ItemAction::Eat` and eats, feeds and
+    /// heals nothing locally — the bread goes and the hunger rises only when
+    /// the server's answer and state arrive. A sleep request the server
+    /// accepts sets the client's spawn point at the bed.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_hunger_is_the_servers_and_it_eats_and_sleeps_by_asking() {
+        use crate::item::{ItemStack, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-eat");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-eat-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Eater", 0),
+            None,
+        ));
+        let step = |server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame| {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        };
+        for _ in 0..5 {
+            step(&mut server, &mut hg);
+        }
+        assert!(hg.state.joined());
+
+        // No metabolism of its own.
+        hg.state.players[0].combat.hunger_drain_ticks = 0;
+        for _ in 0..30 {
+            step(&mut server, &mut hg);
+        }
+        assert_eq!(hg.state.players[0].combat.hunger_drain_ticks, 0, "a joined slot runs no hunger drain");
+
+        // Its hunger is the server's.
+        server.server.players.last_mut().unwrap().combat.hunger = 9;
+        for _ in 0..3 {
+            step(&mut server, &mut hg);
+        }
+        assert_eq!(hg.state.players[0].combat.hunger, 9, "own_hunger is applied");
+
+        // A right-click with bread: a request, nothing local.
+        let hot = hg.state.players[0].hotbar_slot;
+        hg.state.players[0].inventory.set_slot(hot, Some(ItemStack::new_material(MaterialId::Bread, 2)));
+        let health = hg.state.players[0].combat.health;
+        hg.state.players[0].place_cooldown = 0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.right_held = true;
+        hg.frames(1);
+        hg.ticks(1);
+        hg.state.input.right_held = false;
+        let bread = |hg: &HeadlessGame| hg.state.players[0].inventory.count_material(MaterialId::Bread);
+        assert_eq!(bread(&hg), 2, "nothing eaten before the server answers");
+        assert_eq!(hg.state.players[0].combat.hunger, 9, "no local feed");
+        assert_eq!(hg.state.players[0].combat.health, health, "no local heal");
+        for _ in 0..4 {
+            step(&mut server, &mut hg);
+        }
+        let fed = 9 + crate::item::Item::Material(MaterialId::Bread).food_value().unwrap() as u8;
+        assert_eq!(server.server.players.last().unwrap().combat.hunger, fed, "the server fed its body");
+        assert_eq!(bread(&hg), 1, "the accepted outcome took one bread");
+        assert_eq!(hg.state.players[0].combat.hunger, fed, "and the server's hunger arrived");
+
+        // A sleep the server accepts sets our spawn point at the bed.
+        server.server.world_time = 0;
+        let body = server.server.players.last().unwrap().player.pos;
+        let bed = [body.x.floor() as i32 + 1, body.y.floor() as i32, body.z.floor() as i32];
+        server.server.world.set_block(bed[0], bed[1], bed[2], crate::block::BED);
+        hg.state.send_sleep_request(0, bed);
+        for _ in 0..4 {
+            step(&mut server, &mut hg);
+        }
+        assert_eq!(
+            hg.state.players[0].spawn_pos,
+            crate::item_actions::bed_spawn(bed),
+            "the accepted sleep set our spawn"
+        );
+        assert_eq!(
+            server.server.players.last().unwrap().spawn_pos,
+            crate::item_actions::bed_spawn(bed),
+            "and the server's"
+        );
+    }
 }

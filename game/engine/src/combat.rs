@@ -311,25 +311,6 @@ pub const POISON_DAMAGE_PER_TICK: f32 = 1.0;
 /// Health floor under poison-only damage. Other sources can still kill.
 pub const POISON_HEALTH_FLOOR: f32 = 0.5;
 
-/// MP-D2a (review LOW-1) — the most one joiner input's reported change
-/// (`InputPacket.health_delta`) may RAISE its server-held health: the largest
-/// heal a client can legitimately make between two inputs. A client sends one
-/// input per tick, and in one tick it can eat once (eating sets the place
-/// cooldown) and take one regen pulse, so the cap is the best food in the
-/// food table (`Item::food_value` over every material) plus
-/// [`HEALTH_REGEN_AMOUNT`]. Derived, so a new, richer food raises it. No
-/// other heal reaches a joiner: there are no potions, `/heal` is op-only (a
-/// joiner is never op in someone else's world) and a joiner can't sleep
-/// there (`world_exit::JOINED_SLEEP_REFUSED`). A loss is never capped.
-pub static MAX_REPORTED_HEAL_PER_INPUT: std::sync::LazyLock<f32> =
-    std::sync::LazyLock::new(|| {
-        let best_food = crate::inventory_explorer::ALL_MATERIAL_IDS
-            .iter()
-            .filter_map(|&m| crate::item::Item::Material(m).food_value())
-            .fold(0.0, f32::max);
-        best_food + HEALTH_REGEN_AMOUNT
-    });
-
 impl PlayerCombat {
     pub fn new() -> Self {
         Self {
@@ -375,9 +356,10 @@ impl PlayerCombat {
         self.tick_metabolism();
     }
 
-    /// One tick of the hit and attack timers only — what a server runs for a
-    /// joiner's body (MP-D2a): its metabolism (hunger, regen, starvation,
-    /// poison) is its own client's, reported as `InputPacket.health_delta`.
+    /// One tick of the hit and attack timers only — what a joined client
+    /// runs for its own body (C2a: its metabolism is the server's, which
+    /// sends it the hunger) and what a server runs for a host's local slot
+    /// (its client runs that body's metabolism).
     pub fn tick_timers(&mut self) {
         if self.attack_cooldown > 0 {
             self.attack_cooldown -= 1;
@@ -486,9 +468,9 @@ impl PlayerCombat {
         true
     }
 
-    /// MP-D2a — apply a joiner's reported change to its own health (the
-    /// sources its client still owns: eating, regen, poison and starvation;
-    /// `InputPacket.health_delta`). A heal is clamped to max health. A loss
+    /// MP-D2a — apply a joiner's reported change to its own health
+    /// (`InputPacket.health_delta`; C2a: a loss only — the server's
+    /// sanitiser zeroes a reported heal). A heal is clamped to max health. A loss
     /// takes no hit-invulnerability window and records no cause (it is not a
     /// hit). Nothing for the dead: only a Respawn revives, and a report never
     /// kills twice. Returns whether this report killed the player.
@@ -564,6 +546,16 @@ impl PlayerCombat {
         self.starvation_ticks = 0;
         self.breath = crate::survival::Breath::FULL;
         // just_died stays false — only the death transition sets it.
+    }
+
+    /// The creative exemption (Spec 05 §8.2): a creative body is never hurt
+    /// and never dead — full health, no death pending, every tick. The one
+    /// rule: the client's death loop applies it to its players, a server
+    /// (C2a) to every joiner's body in a creative world.
+    pub fn keep_creative_whole(&mut self) {
+        self.health = self.max_health;
+        self.dead = false;
+        self.just_died = false;
     }
 
     /// The player chose Respawn on the death screen. No-op unless dead (a stale

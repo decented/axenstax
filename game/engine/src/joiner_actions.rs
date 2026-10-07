@@ -1,13 +1,16 @@
-//! A joiner's swings and right-clicks on the server's mobs, awaiting the
-//! server's word (MP-D2b, Spec 04 §4.2d).
+//! A joiner's swings and right-clicks on the server's mobs (MP-D2b, Spec 04
+//! §4.2d), and its item actions (C2a, §4.2f: eating, sleeping), awaiting the
+//! server's word.
 //!
 //! A joiner's inventory is its own until phase C, but the server decides
-//! whether a swing or an interaction happened. So the client sends the
-//! request (`EntityAttack` / `EntityInteract`) and remembers what it was
-//! made with; when the `InteractOutcome` comes back accepted it takes the
-//! consumed items (or wears the weapon). A refused outcome changes nothing.
-//! Products (milk, the Lead back, wool and loot picked up) arrive as
-//! `InventoryGrant`s, never through here.
+//! whether a swing, an interaction or an item action happened. So the client
+//! sends the request (`EntityAttack` / `EntityInteract` / `ItemAction`) and
+//! remembers what it was made with; when the outcome (`InteractOutcome` /
+//! `ItemActionOutcome`) comes back accepted it takes the consumed items (or
+//! wears the weapon). A refused outcome changes nothing. Products (milk, the
+//! Lead back, wool and loot picked up) arrive as `InventoryGrant`s, never
+//! through here. All three requests share one sequence: the server reads and
+//! answers them in the order sent, on one ordered stream.
 //!
 //! Review D2b LOW-1 — an accepted outcome is OWED. What it used comes out of
 //! the slot the request was made from if that slot still holds it, and
@@ -18,19 +21,23 @@
 //! already claim ([`JoinerActions::can_afford`]), so one bucket can't milk
 //! two cows on a slow link.
 //!
-//! FU1 — a claim never outlives its request: one unanswered for
-//! [`CLAIM_TIMEOUT`] stops claiming (a request the server never got, lost to a
-//! stall), and leaving the world forgets them all ([`JoinerActions::clear`],
-//! `world_exit`; a reconnect is always a leave and a new join).
+//! FU verify N4 — a claim ends on the server's liveness, never on a clock:
+//! each request remembers the sequence number of the input sent after it
+//! (`RemoteClient::next_input_seq`), and its claim ends once a `StateUpdate`
+//! acknowledges that input ([`JoinerActions::acknowledged`]). The server reads
+//! a client's packets in order and answers a request the moment it reads it,
+//! before that tick's broadcast, so by then the answer has arrived or never
+//! will (one skipped over a per-type budget). While the server is silent — a
+//! stalled host — the claim holds, however long: a wall-clock expiry (FU1's
+//! ten seconds) let one bucket milk two cows after a longer stall. Leaving
+//! the world forgets every request ([`JoinerActions::clear`], `world_exit`; a
+//! reconnect is always a leave and a new join).
 
 use std::collections::VecDeque;
-use std::time::Duration;
-
-use web_time::Instant;
 
 use crate::item::Item;
 use crate::mob::MobType;
-use crate::protocol::{InteractKind, InteractOutcomePacket};
+use crate::protocol::{InteractKind, InteractOutcomePacket, ItemActionOutcomePacket};
 
 /// Requests kept waiting for an answer. The server answers every request it
 /// reads, in the order sent (one past its per-tick budget waits for its next
@@ -40,23 +47,27 @@ use crate::protocol::{InteractKind, InteractOutcomePacket};
 /// forgotten once this many are outstanding.
 pub const MAX_PENDING: usize = 64;
 
-/// FU1 — how long a request waits for its answer before it stops claiming its
-/// item ([`JoinerActions::can_afford`]). Ten seconds: well above a slow round
-/// trip (a second or two) plus the longest an honest request can wait in the
-/// server's inbound queue (its hard bound, 1024 packets read ten a tick: about
-/// five seconds, Spec 04 §11.2a) — so a request still on its way never frees
-/// its item for a second one — and short enough that after a stall the item
-/// is usable again soon. The entry itself is kept: an answer that still comes
-/// is applied as usual.
-pub const CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
+/// What a request asked the server for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// A swing at a mob (`EntityAttack`).
+    Swing,
+    /// A one-shot interaction with a mob, or a Lead on a fence post
+    /// (`EntityInteract`).
+    Interact(InteractKind),
+    /// C2a — eat one of the food in hand (`ItemAction::Eat`).
+    Eat,
+    /// C2a — sleep in the bed at `bed` (`ItemAction::Sleep`).
+    Sleep { bed: [i32; 3] },
+}
 
 /// One request awaiting its outcome.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pending {
-    /// `None` = a swing; otherwise the interaction asked for.
-    pub kind: Option<InteractKind>,
+    /// What was asked for.
+    pub kind: Asked,
     /// The mob's species (the note's wording); `None` for a Lead on a fence
-    /// post, which names no mob.
+    /// post, which names no mob, and for an item action.
     pub mob: Option<MobType>,
     /// Where the held item was.
     pub hotbar_slot: usize,
@@ -64,26 +75,43 @@ pub struct Pending {
     pub held: Option<Item>,
 }
 
+/// One remembered request.
+#[derive(Debug)]
+struct Entry {
+    seq: u32,
+    /// The sequence number of the input sent after this request; its claim
+    /// ends once the server acknowledges that input (N4).
+    ends_at_input: u64,
+    /// Still claiming its item ([`JoinerActions::can_afford`]).
+    claims: bool,
+    request: Pending,
+}
+
 /// The joiner's outstanding requests. Empty unless joined.
 #[derive(Default)]
 pub struct JoinerActions {
     next_seq: u32,
-    /// `(seq, when it was sent, the request)`, oldest first.
-    pending: VecDeque<(u32, Instant, Pending)>,
+    /// Oldest first.
+    pending: VecDeque<Entry>,
 }
 
 impl JoinerActions {
     /// Remember a request; returns the `seq` to send it under.
-    pub fn record(&mut self, request: Pending) -> u32 {
-        self.record_at(request, Instant::now())
-    }
-
-    fn record_at(&mut self, request: Pending, now: Instant) -> u32 {
+    /// `next_input_seq` is the sequence number of the input this client
+    /// sends next (`RemoteClient::next_input_seq`): the request goes out
+    /// ahead of it, so once the server acknowledges that input it has read
+    /// (and answered, or skipped) the request.
+    pub fn record(&mut self, request: Pending, next_input_seq: u64) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
         if self.pending.len() >= MAX_PENDING {
             self.pending.pop_front();
         }
-        self.pending.push_back((self.next_seq, now, request));
+        self.pending.push_back(Entry {
+            seq: self.next_seq,
+            ends_at_input: next_input_seq,
+            claims: true,
+            request,
+        });
         self.next_seq
     }
 
@@ -94,9 +122,22 @@ impl JoinerActions {
     /// and must not keep claiming the item it would have used
     /// ([`Self::can_afford`]).
     pub fn take(&mut self, seq: u32) -> Option<Pending> {
-        let at = self.pending.iter().position(|(s, _, _)| *s == seq)?;
+        let at = self.pending.iter().position(|e| e.seq == seq)?;
         self.pending.drain(..at);
-        self.pending.pop_front().map(|(_, _, p)| p)
+        self.pending.pop_front().map(|e| e.request)
+    }
+
+    /// A `StateUpdate` says the server has applied every input up to
+    /// `last_acked_input` (N4): every request sent ahead of one of them has
+    /// been read — answered, or skipped for good — so it claims nothing any
+    /// more. The entry stays: its answer, already queued in the same poll,
+    /// is still applied.
+    pub fn acknowledged(&mut self, last_acked_input: u64) {
+        for e in &mut self.pending {
+            if e.ends_at_input <= last_acked_input {
+                e.claims = false;
+            }
+        }
     }
 
     /// Forget everything (the session ended: leaving the world, and so every
@@ -105,26 +146,11 @@ impl JoinerActions {
         self.pending.clear();
     }
 
-    /// May a request of `kind` made with `held` go out now (review D2b
-    /// LOW-1)? Yes when it uses nothing; otherwise only while `inv` holds
-    /// more of the item than the requests still in flight would use — those
-    /// sent within [`CLAIM_TIMEOUT`] (FU1: an older one has no claim left).
-    pub fn can_afford(
-        &self,
-        inv: &crate::inventory::Inventory,
-        kind: Option<InteractKind>,
-        held: Option<&Item>,
-    ) -> bool {
-        self.can_afford_at(inv, kind, held, Instant::now())
-    }
-
-    fn can_afford_at(
-        &self,
-        inv: &crate::inventory::Inventory,
-        kind: Option<InteractKind>,
-        held: Option<&Item>,
-        now: Instant,
-    ) -> bool {
+    /// May a request asking for `kind` made with `held` go out now (review
+    /// D2b LOW-1)? Yes when it uses nothing; otherwise only while `inv` holds
+    /// more of the item than the requests still claiming would use (N4: a
+    /// request claims until the server acknowledges the input sent after it).
+    pub fn can_afford(&self, inv: &crate::inventory::Inventory, kind: Asked, held: Option<&Item>) -> bool {
         let need = uses(kind);
         if need == 0 {
             return true;
@@ -133,9 +159,9 @@ impl JoinerActions {
         let claimed: u32 = self
             .pending
             .iter()
-            .filter(|(_, sent, _)| now.saturating_duration_since(*sent) < CLAIM_TIMEOUT)
-            .filter(|(_, _, p)| p.held.as_ref().is_some_and(|h| same_item(h, item)))
-            .map(|(_, _, p)| u32::from(uses(p.kind)))
+            .filter(|e| e.claims)
+            .filter(|e| e.request.held.as_ref().is_some_and(|h| same_item(h, item)))
+            .map(|e| u32::from(uses(e.request.kind)))
             .sum();
         count_of(inv, item) >= claimed + u32::from(need)
     }
@@ -156,20 +182,23 @@ pub struct Applied {
     pub consumed: u8,
 }
 
-/// How many of the held item an interaction of `kind` uses when accepted
-/// (the server's `InteractOutcome.consume_held` for it): breeding food, taming
-/// food, a bucket, a Lead on a mob or a post. Shearing, taking a Lead off, a
-/// pet command and a swing use none.
-pub fn uses(kind: Option<InteractKind>) -> u8 {
+/// How many of the held item a request asking for `kind` uses when accepted
+/// (the server's `consume_held` for it): breeding food, taming food, a
+/// bucket, a Lead on a mob or a post, an eaten food. Shearing, taking a Lead
+/// off, a pet command, a swing and a sleep use none.
+pub fn uses(kind: Asked) -> u8 {
     match kind {
-        Some(
+        Asked::Interact(
             InteractKind::Feed
             | InteractKind::Tame
             | InteractKind::Milk
             | InteractKind::LeadAttach
             | InteractKind::LeadToPost { .. },
-        ) => 1,
-        Some(InteractKind::Shear | InteractKind::LeadDetach | InteractKind::SitToggle) | None => 0,
+        )
+        | Asked::Eat => 1,
+        Asked::Interact(InteractKind::Shear | InteractKind::LeadDetach | InteractKind::SitToggle)
+        | Asked::Swing
+        | Asked::Sleep { .. } => 0,
     }
 }
 
@@ -206,8 +235,8 @@ fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Opt
 /// Returns how many were taken (fewer only when the inventory runs out).
 ///
 /// One rule for both copies of a joiner's inventory: the client runs it on
-/// its own ([`apply_outcome`]) and the server on its shadow of it (C1,
-/// `joiner_inventory`), for the same accepted outcome.
+/// its own ([`apply_outcome`], [`apply_item_outcome`]) and the server on its
+/// shadow of it (C1, `joiner_inventory`), for the same accepted outcome.
 pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item, n: u8) -> u8 {
     let mut taken = 0;
     for _ in 0..n {
@@ -242,14 +271,36 @@ pub fn apply_outcome(
         return applied;
     };
     match request.kind {
-        None => {
+        Asked::Swing => {
             if let Some(at) = where_now(inv, request.hotbar_slot, held) {
                 applied.wear = inv.use_tool_at(at);
             }
         }
-        Some(_) => applied.consumed = take_owed(inv, request.hotbar_slot, held, outcome.consume_held),
+        Asked::Interact(_) => {
+            applied.consumed = take_owed(inv, request.hotbar_slot, held, outcome.consume_held)
+        }
+        // Not an interaction's answer.
+        Asked::Eat | Asked::Sleep { .. } => {}
     }
     applied
+}
+
+/// C2a — apply an item action's outcome to the joiner's inventory: an
+/// accepted one takes `consume_held` of what it claimed (the eaten food),
+/// owed like an interaction's ([`take_owed`]). Nothing on a refusal. Returns
+/// how many were taken.
+pub fn apply_item_outcome(
+    inv: &mut crate::inventory::Inventory,
+    request: &Pending,
+    outcome: &ItemActionOutcomePacket,
+) -> u8 {
+    if !outcome.accepted || !matches!(request.kind, Asked::Eat | Asked::Sleep { .. }) {
+        return 0;
+    }
+    let Some(held) = request.held.as_ref() else {
+        return 0;
+    };
+    take_owed(inv, request.hotbar_slot, held, outcome.consume_held)
 }
 
 #[cfg(test)]
@@ -284,7 +335,7 @@ mod tests {
     fn the_weapon_wears_only_on_a_confirmed_swing() {
         let mut inv = inv_with(2, ItemStack { item: sword(), count: 1 });
         let before = durability(&inv, 2);
-        let swing = Pending { kind: None, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()) };
+        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()) };
         let refused = apply_outcome(&mut inv, &swing, &outcome(1, false, 0));
         assert!(refused.wear.is_none());
         assert_eq!(durability(&inv, 2), before, "a refused swing wears nothing");
@@ -298,7 +349,7 @@ mod tests {
         let wheat = Item::Material(MaterialId::Wheat);
         let mut inv = inv_with(0, ItemStack { item: wheat.clone(), count: 5 });
         let feed = Pending {
-            kind: Some(InteractKind::Feed),
+            kind: Asked::Interact(InteractKind::Feed),
             mob: Some(MobType::Cow),
             hotbar_slot: 0,
             held: Some(wheat),
@@ -319,7 +370,7 @@ mod tests {
         let mut inv = inv_with(3, ItemStack::new_material(MaterialId::Bone, 4));
         inv.set_slot(20, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         let milk = Pending {
-            kind: Some(InteractKind::Milk),
+            kind: Asked::Interact(InteractKind::Milk),
             mob: Some(MobType::Cow),
             hotbar_slot: 3,
             held: Some(bucket),
@@ -337,7 +388,7 @@ mod tests {
     fn a_confirmed_swing_wears_the_sword_where_it_went() {
         let mut inv = inv_with(2, ItemStack::new_material(MaterialId::Wheat, 3));
         inv.set_slot(30, Some(ItemStack { item: sword(), count: 1 }));
-        let swing = Pending { kind: None, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()) };
+        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 2, held: Some(sword()) };
         let durability_at = |inv: &Inventory| match &inv.slot(30).unwrap().item {
             Item::Tool(t) => t.durability,
             _ => unreachable!(),
@@ -356,16 +407,14 @@ mod tests {
         let bucket = Item::Material(MaterialId::Bucket);
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
         let mut a = JoinerActions::default();
-        let milk = Some(InteractKind::Milk);
+        let milk = Asked::Interact(InteractKind::Milk);
         assert!(a.can_afford(&inv, milk, Some(&bucket)));
-        let first = a.record(Pending {
-            kind: milk,
-            mob: Some(MobType::Cow),
-            hotbar_slot: 0,
-            held: Some(bucket.clone()),
-        });
+        let first = a.record(
+            Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()) },
+            1,
+        );
         assert!(!a.can_afford(&inv, milk, Some(&bucket)), "the only bucket is spoken for");
-        assert!(a.can_afford(&inv, Some(InteractKind::Shear), None), "shearing uses nothing");
+        assert!(a.can_afford(&inv, Asked::Interact(InteractKind::Shear), None), "shearing uses nothing");
         let two = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 2));
         assert!(a.can_afford(&two, milk, Some(&bucket)), "a second bucket is free");
         // Answered (refused or not): the claim is gone.
@@ -382,14 +431,13 @@ mod tests {
         let bucket = Item::Material(MaterialId::Bucket);
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
         let mut a = JoinerActions::default();
-        let milk = Some(InteractKind::Milk);
-        let dropped = a.record(Pending {
-            kind: milk,
-            mob: Some(MobType::Cow),
-            hotbar_slot: 0,
-            held: Some(bucket.clone()),
-        });
-        let swing = a.record(Pending { kind: None, mob: Some(MobType::Cow), hotbar_slot: 1, held: None });
+        let milk = Asked::Interact(InteractKind::Milk);
+        let dropped = a.record(
+            Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()) },
+            1,
+        );
+        let swing =
+            a.record(Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 1, held: None }, 1);
         assert!(!a.can_afford(&inv, milk, Some(&bucket)), "claimed while it might still be answered");
         assert!(a.take(swing).is_some());
         assert!(a.can_afford(&inv, milk, Some(&bucket)), "the server answered past it: it never will be");
@@ -397,66 +445,99 @@ mod tests {
         assert_eq!(a.len(), 0);
     }
 
-    /// FU1 (D2b verify N2) — after a stall, a request the server never got
-    /// (and so never answers) used to hold its item until some later request
-    /// was answered: the only bucket was "spoken for" and right-clicking a cow
-    /// did nothing. Its claim now ends after `CLAIM_TIMEOUT`; an answer that
-    /// still comes is applied.
+    /// FU verify N4 — a claim ends on the server's liveness, not a clock.
+    /// FU1's ten-second expiry let one bucket milk cow A, the host stall past
+    /// ten seconds, and the same bucket milk cow B; both were then accepted
+    /// (two milk buckets from one). Now: milk A with the only bucket, then
+    /// 300 ticks of inputs with no `StateUpdate` (the host stalled) — B is
+    /// still refused; once a `StateUpdate` acknowledges the input sent after
+    /// A, A has been read (answered or skipped for good) and the bucket is
+    /// free. An answer that still comes is applied, and leaving the world
+    /// forgets every claim.
     #[test]
-    fn an_unanswered_claim_expires_after_the_timeout_and_on_leaving() {
+    fn a_claim_holds_while_the_server_is_silent_and_ends_with_its_acknowledgement() {
         let bucket = Item::Material(MaterialId::Bucket);
         let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
-        let milk = Some(InteractKind::Milk);
-        let req = || Pending {
-            kind: milk,
-            mob: Some(MobType::Cow),
-            hotbar_slot: 0,
-            held: Some(bucket.clone()),
-        };
-        let t0 = Instant::now();
+        let milk = Asked::Interact(InteractKind::Milk);
+        let req = || Pending { kind: milk, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(bucket.clone()) };
         let mut a = JoinerActions::default();
-        let lost = a.record_at(req(), t0);
-        let later = |secs: f32| t0 + Duration::from_secs_f32(secs);
-        assert!(!a.can_afford_at(&inv, milk, Some(&bucket), t0));
+        // Milk A, sent ahead of input 7.
+        let cow_a = a.record(req(), 7);
+        assert!(!a.can_afford(&inv, milk, Some(&bucket)));
+        // 300 ticks: inputs 7..307 go out, the stalled host acknowledges
+        // nothing past input 6 (sent before the request).
+        for _ in 0..300 {
+            a.acknowledged(6);
+        }
         assert!(
-            !a.can_afford_at(&inv, milk, Some(&bucket), later(5.0)),
-            "still claimed while an answer may be on its way (a slow link, a queued request)"
+            !a.can_afford(&inv, milk, Some(&bucket)),
+            "however long the server is silent, the only bucket stays spoken for"
         );
-        assert!(
-            !a.can_afford_at(&inv, milk, Some(&bucket), t0 + CLAIM_TIMEOUT - Duration::from_millis(1)),
-            "claimed right up to the timeout"
-        );
-        assert!(
-            a.can_afford_at(&inv, milk, Some(&bucket), t0 + CLAIM_TIMEOUT),
-            "unanswered for the timeout: the bucket is free again"
-        );
-        // The one it frees is claimed afresh by the next request.
-        let next = a.record_at(req(), later(12.0));
-        assert!(!a.can_afford_at(&inv, milk, Some(&bucket), later(12.5)));
-        // A late answer to the expired request is still applied.
-        assert_eq!(a.take(lost).map(|p| p.kind), Some(milk));
-        assert!(a.take(next).is_some());
+        // The host resumes: its StateUpdate acknowledges input 7.
+        a.acknowledged(7);
+        assert!(a.can_afford(&inv, milk, Some(&bucket)), "read and answered: the bucket is free");
+        // The answer, queued in the same poll, is still applied.
+        assert_eq!(a.take(cow_a).map(|p| p.kind), Some(milk));
+
+        // A request skipped (never answered) stops claiming the same way.
+        let skipped = a.record(req(), 400);
+        a.acknowledged(450);
+        assert!(a.can_afford(&inv, milk, Some(&bucket)));
+        assert!(a.take(skipped).is_some(), "the entry stays for a late answer");
 
         // Leaving the world (and so every reconnect) forgets every claim.
         let mut a = JoinerActions::default();
-        a.record_at(req(), t0);
-        assert!(!a.can_afford_at(&inv, milk, Some(&bucket), t0));
+        a.record(req(), 1);
+        assert!(!a.can_afford(&inv, milk, Some(&bucket)));
         a.clear();
-        assert!(a.can_afford_at(&inv, milk, Some(&bucket), t0));
+        assert!(a.can_afford(&inv, milk, Some(&bucket)));
         assert_eq!(a.len(), 0);
+    }
+
+    /// C2a — eating claims the food like a Feed does (one carrot can't be
+    /// eaten and fed to a pig at once); a sleep claims nothing.
+    #[test]
+    fn eating_claims_its_food_alongside_interactions_and_a_sleep_claims_nothing() {
+        let carrot = Item::Material(MaterialId::Carrot);
+        let inv = inv_with(0, ItemStack::new_material(MaterialId::Carrot, 1));
+        let mut a = JoinerActions::default();
+        assert!(a.can_afford(&inv, Asked::Eat, Some(&carrot)));
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(carrot.clone()) }, 3);
+        assert!(!a.can_afford(&inv, Asked::Eat, Some(&carrot)), "the only carrot is being eaten");
+        assert!(!a.can_afford(&inv, Asked::Interact(InteractKind::Feed), Some(&carrot)));
+        assert!(a.can_afford(&inv, Asked::Sleep { bed: [0, 64, 0] }, None), "sleeping uses nothing");
+        assert_eq!(uses(Asked::Eat), 1);
+        assert_eq!(uses(Asked::Sleep { bed: [0, 0, 0] }), 0);
+        assert_eq!(uses(Asked::Swing), 0);
+        assert!(a.take(eat).is_some());
+    }
+
+    #[test]
+    fn an_accepted_eat_takes_the_food_and_a_refused_one_nothing() {
+        let bread = Item::Material(MaterialId::Bread);
+        let mut inv = inv_with(4, ItemStack::new_material(MaterialId::Bread, 3));
+        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
+        let out = |accepted, consume_held| ItemActionOutcomePacket { seq: 1, accepted, consume_held, note: 0 };
+        assert_eq!(apply_item_outcome(&mut inv, &eat, &out(false, 0)), 0);
+        assert_eq!(inv.hotbar_slot(4).unwrap().count, 3);
+        assert_eq!(apply_item_outcome(&mut inv, &eat, &out(true, 1)), 1);
+        assert_eq!(inv.hotbar_slot(4).unwrap().count, 2);
+        // An interaction's answer never pays an item action, nor the reverse.
+        assert_eq!(apply_outcome(&mut inv, &eat, &outcome(1, true, 1)).consumed, 0);
+        assert_eq!(inv.hotbar_slot(4).unwrap().count, 2);
     }
 
     #[test]
     fn pending_requests_are_matched_by_seq_and_bounded() {
         let mut a = JoinerActions::default();
-        let req = |slot| Pending { kind: None, mob: Some(MobType::Pig), hotbar_slot: slot, held: None };
-        let s1 = a.record(req(1));
-        let s2 = a.record(req(2));
+        let req = |slot| Pending { kind: Asked::Swing, mob: Some(MobType::Pig), hotbar_slot: slot, held: None };
+        let s1 = a.record(req(1), 1);
+        let s2 = a.record(req(2), 1);
         assert_ne!(s1, s2);
         assert_eq!(a.take(s2).unwrap().hotbar_slot, 2);
         assert!(a.take(s2).is_none(), "answered once");
         for _ in 0..MAX_PENDING + 5 {
-            a.record(req(0));
+            a.record(req(0), 1);
         }
         assert_eq!(a.len(), MAX_PENDING);
         assert!(a.take(s1).is_none(), "the oldest unanswered request was forgotten");

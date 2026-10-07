@@ -2,12 +2,15 @@
 //!
 //! The server lands the world's hits on a joiner's body — fall, drowning,
 //! hostile melee, lava and fire, keg blasts — on the body it simulates, and
-//! sends the result back in its `PlayerState.health`. The sources the
-//! joiner's client still owns (hunger stays client-side, so: natural regen,
-//! starvation, poison, eating) change the client's health locally and are
-//! reported as `InputPacket.health_delta`, applied by the server when it
-//! simulates that input. Spec 04 §5.3.2 has the full table (which sources
-//! reach a joiner at all).
+//! sends the result back in its `PlayerState.health`. Since C2a it also runs
+//! the joiner's metabolism (hunger, regen, starvation, poison) and its eating
+//! and sleeping (`item_actions`), so every heal is the server's too. What the
+//! client still changes itself is reported as `InputPacket.health_delta`,
+//! applied by the server when it simulates that input — a LOSS only: the
+//! server counts a reported heal as nothing, so one the client shows itself
+//! (an op's `/heal` on its own view) lasts only until the input carrying it
+//! is acknowledged. Spec 04 §5.3.2 has the full table (which sources reach a
+//! joiner at all).
 //!
 //! [`OwnHealth`] is the bookkeeping that keeps the bar steady across the
 //! round trip, the health-shaped twin of the position prediction in
@@ -15,7 +18,7 @@
 //! went out with, until a `StateUpdate` acknowledges that input
 //! (`last_acked_input`); the bar shows the server's value plus the changes
 //! not yet acknowledged, plus any change made since the last send.
-//! Without it, a heal would flicker back for a round trip, and a change made
+//! Without it, a loss would flicker back for a round trip, and a change made
 //! between a send and the next server apply would be lost.
 
 use std::collections::VecDeque;

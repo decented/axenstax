@@ -205,7 +205,10 @@ fn protocol_version_is_the_pinned_value() {
     //   4), JoinAccept.chunk_note_radius.
     // v72 (2026-10-07, C1): `InputPacket.mined` — the server yields a
     //   joiner's breaks and grants the drops.
-    assert_eq!(protocol::PROTOCOL_VERSION, 72);
+    // v73 (2026-10-07, C2a): `ItemAction = 62` (Eat, Sleep),
+    //   `ItemActionOutcome = 63`, `StateUpdatePacket.own_hunger` — the server
+    //   runs a joiner's hunger, eating and sleep.
+    assert_eq!(protocol::PROTOCOL_VERSION, 73);
 }
 
 #[test]

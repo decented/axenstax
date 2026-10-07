@@ -58,6 +58,19 @@ pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
 /// most two of each.
 const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
 
+/// C2a — `ItemAction` requests (eat, sleep) read per client per tick: their
+/// own budget, not [`MAX_ENTITY_REQUESTS_PER_TICK`]'s, whose excess is
+/// dropped. One past it WAITS for the next tick in the client's inbound
+/// queue (FU1), with everything sent after it: never dropped, never refused.
+/// No honest client reaches it (an eat every 16 ticks,
+/// `item_actions::EAT_COOLDOWN_TICKS`; a sleep once a night).
+const MAX_ITEM_ACTIONS_PER_TICK: usize = 4;
+
+/// C2a — is `packet` an `ItemAction` (budgeted by deferral, not dropping)?
+fn is_item_action(packet: &[u8]) -> bool {
+    matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::ItemAction, _)))
+}
+
 /// Review D2b LOW-2 — how far ahead of a joiner's server body a target must
 /// be for its swing or right-click: `dot(look, to-target) >= 0`, the half
 /// space ahead. Lenient on purpose (single-player's pick wants 0.5, 60°): the
@@ -480,7 +493,7 @@ pub struct RoomStatus {
 /// full tool-aware bonus for remote players once remote inventories become
 /// server-authoritative (tracked in the CLAUDE.md known-debt list alongside
 /// the rest of the server-side inventory/crafting bridge).
-fn block_change_within_reach(
+pub(crate) fn block_change_within_reach(
     dist_sq: f32,
     held_kind: u8,
     held_id: u16,
@@ -1838,33 +1851,78 @@ impl HostedServer {
             // the item is now (`joiner_actions::take_owed`, the client's own
             // rule), then the products (`InventoryGrant`), in the order the
             // client applies them.
-            if consume > 0 {
-                self.shadow_take_owed(i, req, consume);
+            if consume > 0
+                && let Some(held) =
+                    held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry)
+            {
+                self.shadow_take_owed(i, usize::from(req.hotbar_slot), &held, consume, "in an interaction");
             }
             self.grant_to_joiner(i, r.give);
         }
     }
 
-    /// C1 — joiner `i`'s accepted interaction used `n` of the item it named
-    /// (`req`'s held item, from `req.hotbar_slot`): take them from the
-    /// server's shadow of its inventory. What the shadow can't pay is a
-    /// possession mismatch — counted and logged (rate-limited), never refused.
-    fn shadow_take_owed(&mut self, i: usize, req: &protocol::EntityInteractPacket, n: u8) {
-        let Some(held) =
-            held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry)
-        else {
-            return;
+    /// C2a — slot `i`'s `ItemAction`, judged and applied by `item_actions`:
+    /// an eat feeds and heals the body and takes the food from the server's
+    /// shadow of the joiner's inventory (a shortfall is log-only); a sleep
+    /// sets the spawn point at the bed and heals the body. Always answered
+    /// with an `ItemActionOutcome` (the client's claim on the food waits for
+    /// it, `joiner_actions`).
+    fn handle_item_action(&mut self, i: usize, req: &protocol::ItemActionPacket) {
+        use crate::item_actions::{self, ItemNote};
+        let served: Result<u8, ItemNote> = match &req.action {
+            protocol::ItemAction::Eat { hotbar_slot, held_kind, held_id, held_full } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                let eaten = self
+                    .server
+                    .players
+                    .get_mut(i)
+                    .map_or(Err(ItemNote::NotNow), |sp| item_actions::serve_eat(sp, held.as_ref()));
+                if eaten.is_ok()
+                    && let Some(held) = &held
+                {
+                    self.shadow_take_owed(i, usize::from(*hotbar_slot), held, 1, "by eating");
+                }
+                eaten.map(|()| 1)
+            }
+            protocol::ItemAction::Sleep { bed } => {
+                let server = &mut self.server;
+                let (world, world_time, tonight) =
+                    (&server.world, server.world_time, server.night_calendar.tonight());
+                server
+                    .players
+                    .get_mut(i)
+                    .map_or(Err(ItemNote::NotNow), |sp| {
+                        item_actions::serve_sleep(sp, world, world_time, tonight, *bed)
+                    })
+                    .map(|()| 0)
+            }
         };
+        let (accepted, consume_held, note) = match served {
+            Ok(n) => (true, n, ItemNote::None.to_wire()),
+            Err(note) => (false, 0, note.to_wire()),
+        };
+        let pkt = protocol::serialize_packet(
+            protocol::PacketType::ItemActionOutcome,
+            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note },
+        );
+        self.send_to_joined_slot(i, &pkt);
+    }
+
+    /// C1 — joiner `i`'s accepted request (an interaction, C2a an eat) used
+    /// `n` of `held`, claimed from hotbar slot `slot`: take them from the
+    /// server's shadow of its inventory (`joiner_actions::take_owed`). What
+    /// the shadow can't pay is a possession mismatch — counted and logged
+    /// (rate-limited), never refused. `how` ends the log line's "used … ".
+    fn shadow_take_owed(&mut self, i: usize, slot: usize, held: &crate::item::Item, n: u8, how: &str) {
         let tick = self.server.tick_counter;
         let Some(sp) = self.server.players.get_mut(i) else { return };
-        let taken =
-            crate::joiner_actions::take_owed(&mut sp.inventory, usize::from(req.hotbar_slot), &held, n);
+        let taken = crate::joiner_actions::take_owed(&mut sp.inventory, slot, held, n);
         if taken < n {
             let due = sp.possession.note_mismatch(tick);
             log::log!(
                 crate::joiner_inventory::mismatch_log_level(due),
-                "possession check (log-only): {} used {n} × {held:?} in an interaction; the \
-                 server's copy of their inventory held {taken}{} — accepted",
+                "possession check (log-only): {} used {n} × {held:?} {how}; the server's copy \
+                 of their inventory held {taken}{} — accepted",
                 sp.display_name,
                 held_back_note(due),
             );
@@ -1992,8 +2050,9 @@ impl HostedServer {
     /// frame later. The host's streamer anchors the spawn column of every dead
     /// joiner (`lent_respawn_columns`), and the joiner's client re-sends
     /// `Respawn` every ~20 ticks until `Respawned` arrives, so the wait is a
-    /// few frames. Where the server owns its world the column is already
-    /// loaded (the 3x3 at `join_spawn`; the dedicated streamer's spawn anchor).
+    /// few frames. Where the server owns its world it loads the column itself
+    /// once the respawn is due (C2a: a joiner's bed spawn can be far from the
+    /// join spawn's 3x3 and the dedicated streamer's anchors).
     fn handle_respawn(&mut self, i: usize) {
         if !self.handshake_done[i] || self.disconnected[i] {
             return;
@@ -2001,7 +2060,18 @@ impl HostedServer {
         let Some(sp) = self.server.players.get(i).filter(|sp| sp.server_simulated) else {
             return;
         };
-        if !self.server.loaded_columns.contains(&crate::chunk_stream::column_of(sp.spawn_pos)) {
+        let column = crate::chunk_stream::column_of(sp.spawn_pos);
+        // C2a — a bed spawn can be anywhere, far from every column an owning
+        // server keeps loaded (its players' and the world spawn's): it loads
+        // that one column itself, once the respawn is due. A lent world's is
+        // the host client's to stream (`lent_respawn_columns`).
+        if !self.lends_host_world()
+            && sp.combat.dead
+            && sp.dead_ticks >= crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN
+        {
+            self.server.ensure_column_loaded(column.0, column.1);
+        }
+        if !self.server.loaded_columns.contains(&column) {
             return;
         }
         if let Some(at) = self.server.respawn_player(i) {
@@ -2323,6 +2393,7 @@ impl HostedServer {
             let mut packets_this_tick = 0usize;
             let mut interacts_this_tick = 0usize;
             let mut entity_requests_this_tick = 0usize;
+            let mut item_actions_this_tick = 0usize;
             // Per client per TICK, not per packet (audit 2026-09-27: the
             // budget reset for every packet, so 10 packets × 4 edits got in).
             let mut edits_this_tick = 0usize;
@@ -2342,6 +2413,13 @@ impl HostedServer {
                             self.inbound[i].len()
                         );
                     }
+                    break;
+                }
+                // C2a — an item action past its budget waits too, and so does
+                // everything behind it (one ordered stream).
+                if item_actions_this_tick >= MAX_ITEM_ACTIONS_PER_TICK
+                    && self.inbound[i].front().is_some_and(|p| is_item_action(p))
+                {
                     break;
                 }
                 let Some(packet) = self.inbound[i].pop() else {
@@ -3055,6 +3133,17 @@ impl HostedServer {
                             self.handle_entity_interact(i, &req);
                         }
                     }
+                    protocol::PacketType::ItemAction => {
+                        if !self.handshake_done[i] || self.disconnected[i] {
+                            continue;
+                        }
+                        item_actions_this_tick += 1;
+                        if let Ok(req) =
+                            protocol::safe_deserialize::<protocol::ItemActionPacket>(payload)
+                        {
+                            self.handle_item_action(i, &req);
+                        }
+                    }
                     // Native-only — the web build carries no chat surface at
                     // all (docs/foundations/2026-09-05-world-chat.md §6); on
                     // wasm this falls through to the wildcard arm below.
@@ -3617,6 +3706,8 @@ impl HostedServer {
             reserve_current_sats: reserve.current_sats,
             rain_ticks_left,
             storm_ticks_left,
+            // Per client — stamped in the loop below (C2a).
+            own_hunger: 0,
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
 
@@ -3694,6 +3785,14 @@ impl HostedServer {
                 .players
                 .get(i)
                 .map_or(0, |sp| sp.last_applied_input);
+            // C2a — and its own hunger, which the server runs for a joiner
+            // (a local slot's is its own client's: 0, never read).
+            template.own_hunger = self
+                .server
+                .players
+                .get(i)
+                .filter(|sp| sp.server_simulated)
+                .map_or(0, |sp| sp.combat.hunger);
             for pkt in outbox.drain_packets(&template) {
                 self.transports[i].send_to_client(&pkt);
             }

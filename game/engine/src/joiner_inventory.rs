@@ -12,10 +12,11 @@
 //! - consumes: a plain block placement takes one from the held hotbar slot
 //!   ([`check_placement`]), and an accepted interaction takes what its
 //!   `InteractOutcome.consume_held` says, owed from wherever the item is
-//!   (`joiner_actions::take_owed`, the same function the client runs).
+//!   (`joiner_actions::take_owed`, the same function the client runs); and,
+//!   C2a, the food of an accepted `ItemAction::Eat` (`item_actions`).
 //!
 //! Still the client's alone (the shadow does not see them): the inventory it
-//! joined with, crafting, chests and furnaces, Q-drops, eating, tool and
+//! joined with, crafting, chests and furnaces, Q-drops, tool and
 //! armour wear, armour equip, client-side pickups, face-attachment and
 //! drying-rack recovery, and moving stacks between slots (the full list of
 //! gaps, which must close before enforcement: Spec 04 §4.2e). So the shadow

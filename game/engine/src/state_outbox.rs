@@ -681,6 +681,7 @@ mod tests {
             reserve_current_sats: 0,
             rain_ticks_left: 0,
             storm_ticks_left: 0,
+            own_hunger: 0,
         }
     }
 

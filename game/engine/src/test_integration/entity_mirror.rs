@@ -326,21 +326,25 @@ fn a_lethal_hit_on_the_server_kills_the_joiner_through_the_died_event() {
     assert_eq!(rig.inbox.died, 1, "the joiner is told it died, once");
 }
 
+/// C2a — this test used to pin the opposite (the reported +3 landed, and the
+/// server ran no regen of its own). Now a joiner's heals are the server's:
+/// the reported heal is ignored, the input is still acknowledged, and the
+/// server's own metabolism regenerates the body (hunger 20 is well fed:
+/// +1 HP every 80 ticks, each pulse costing a hunger point).
 #[test]
-fn the_joiners_own_heal_is_applied_with_the_input_it_rode() {
+fn a_joiners_reported_heal_is_ignored_and_its_regen_is_the_servers() {
     let mut rig = Rig::new("heal");
-    // Nothing but the report may move the health here.
     rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
     rig.hs.server.players[rig.slot].combat.health = 12.0;
     rig.send_input(7, 3.0, 0);
     rig.tick(1);
-    assert_eq!(rig.server_health(), 15.0, "the reported heal lands on the server's copy");
+    assert_eq!(rig.server_health(), 12.0, "a reported heal is not believed");
     let (acked, hp) = *rig.inbox.own.last().unwrap();
-    assert_eq!((acked, hp), (7, 15.0), "acknowledged together with its input");
+    assert_eq!((acked, hp), (7, 12.0), "its input is acknowledged all the same");
 
-    // The server runs no metabolism of its own for a joiner: no regen.
     rig.tick(200);
-    assert_eq!(rig.server_health(), 15.0, "a joiner's regen is its client's to report");
+    assert_eq!(rig.server_health(), 14.0, "two regen pulses in 201 ticks, run by the server");
+    assert_eq!(rig.hs.server.players[rig.slot].combat.hunger, 18, "each cost a hunger point");
 }
 
 #[test]
@@ -437,24 +441,24 @@ fn a_client_whose_health_sums_to_zero_dies_and_can_respawn() {
     assert_eq!(rig.server_health(), MAX);
 }
 
-/// Review D2a LOW-1 — a reported heal is capped per input at the largest
-/// heal a client can make in one (the best food plus a regen pulse): a
-/// modified client reporting `+max` every input no longer shrugs off every
-/// hit short of a one-shot.
+/// C2a — a reported heal counts as nothing (it was capped per input at the
+/// best food plus a regen pulse, review D2a LOW-1: this test pinned that
+/// cap); a loss still lands in full, and a non-finite report is nothing.
 #[test]
-fn a_reported_heal_is_capped_at_the_largest_legitimate_one() {
-    let mut rig = Rig::new("heal-cap");
+fn a_reported_heal_counts_as_nothing_and_a_loss_still_lands() {
+    let mut rig = Rig::new("heal-ignored");
     rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
-    let cap = *crate::combat::MAX_REPORTED_HEAL_PER_INPUT;
-    assert!(cap > 1.0 && cap < 20.0, "cap {cap}: a meal and a pulse, not a full heal");
     rig.hs.server.players[rig.slot].combat.health = 1.0;
     rig.send_input(1, 19.0, 0);
     rig.tick(1);
-    assert_eq!(rig.server_health(), 1.0 + cap);
-    // A loss is never capped.
-    rig.send_input(2, -(cap - 0.5), 0);
+    assert_eq!(rig.server_health(), 1.0, "no heal from a report");
+    rig.send_input(2, f32::INFINITY, 0);
     rig.tick(1);
-    assert_eq!(rig.server_health(), 1.5);
+    assert_eq!(rig.server_health(), 1.0, "nor from a non-finite one");
+    // A loss is never capped.
+    rig.send_input(3, -0.5, 0);
+    rig.tick(1);
+    assert_eq!(rig.server_health(), 0.5);
 }
 
 /// Review D2a LOW-3 — a keg that goes off beside a joiner hurts its body on

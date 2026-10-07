@@ -37,9 +37,10 @@ pub struct ServerPlayer {
     /// keeps of its inventory (C1, `joiner_inventory`) — empty at attach, fed
     /// every gain the server decides (pickups, the drops of the joiner's
     /// breaks, interaction products) and every consume it accepts (plain
-    /// block placements, interaction outcomes). It doesn't see what the client
-    /// does alone (the inventory it joined with, crafting, chests, slot moves,
-    /// eating, wear), so it drifts and checks nothing yet (log-only).
+    /// block placements, interaction outcomes, C2a accepted eats). It doesn't
+    /// see what the client does alone (the inventory it joined with,
+    /// crafting, chests, slot moves, wear), so it drifts and checks nothing
+    /// yet (log-only).
     pub inventory: Inventory,
     pub combat: PlayerCombat,
     pub hotbar_slot: usize,
@@ -202,6 +203,13 @@ pub struct ServerPlayer {
     /// (`joiner_inventory::PossessionTally`), summarised in the log when it
     /// leaves.
     pub possession: crate::joiner_inventory::PossessionTally,
+    /// C2a — ticks until this joiner's next `Eat` is taken: the server's
+    /// copy of the client's cooldown after eating
+    /// (`item_actions::EAT_COOLDOWN_TICKS`), counted down every tick.
+    pub eat_cooldown: u32,
+    /// C2a — the night (`item_actions::NightCalendar`) this joiner last slept
+    /// in a bed; `None` until its first sleep. Once a night.
+    pub slept_night: Option<u32>,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -428,6 +436,8 @@ impl ServerPlayer {
             attach_gen: 0,
             next_swing_tick: 0,
             possession: crate::joiner_inventory::PossessionTally::default(),
+            eat_cooldown: 0,
+            slept_night: None,
         }
     }
 
@@ -508,15 +518,14 @@ pub struct QueuedInput {
     pub intent: crate::player_intent::PlayerIntent,
     /// MP-D2a — the client-owned health change this input reports
     /// (`InputPacket.health_delta`), applied when the input is simulated so
-    /// the `StateUpdate` acknowledging it carries it.
+    /// the `StateUpdate` acknowledging it carries it. A loss only (C2a).
     pub health_delta: f32,
 }
 
 impl QueuedInput {
     /// The server's form of a client's `InputPacket`. Its reported health
-    /// change is sanitised here, per input, before any merging: a non-finite
-    /// one is dropped, and a heal is capped at
-    /// [`crate::combat::MAX_REPORTED_HEAL_PER_INPUT`] (review D2a LOW-1).
+    /// change is sanitised here, per input, before any merging
+    /// ([`sanitise_reported_health_change`]: losses only, C2a).
     pub fn from_packet(pkt: &crate::protocol::InputPacket) -> Self {
         Self {
             seq: pkt.tick,
@@ -528,14 +537,17 @@ impl QueuedInput {
     }
 }
 
-/// A joiner's reported health change as the server takes it: zero if not
-/// finite, a heal capped at [`crate::combat::MAX_REPORTED_HEAL_PER_INPUT`],
-/// a loss as sent (only ever believed downward: the body takes it).
+/// A joiner's reported health change as the server takes it (C2a): a loss
+/// as sent (only ever believed downward: the body takes it); zero for a heal
+/// or a non-finite value. Every heal a joiner can make is the server's own
+/// now — eating and sleeping are requests (`item_actions`), regen runs in the
+/// server's metabolism, respawn is the server's — so a reported one is never
+/// believed (it was capped per input before, review D2a LOW-1).
 pub fn sanitise_reported_health_change(delta: f32) -> f32 {
     if !delta.is_finite() {
         return 0.0;
     }
-    delta.min(*crate::combat::MAX_REPORTED_HEAL_PER_INPUT)
+    delta.min(0.0)
 }
 
 impl ServerPlayer {
@@ -813,6 +825,10 @@ pub struct GameServer {
     /// sweep through [`Self::queue_kill_event`]. Drained by `HostedServer`
     /// after each tick.
     pub pending_kill_events: Vec<(usize, crate::protocol::KillEventPacket)>,
+    /// C2a — the count of nights, for a joiner's once-a-night sleep: shown
+    /// the raw clock every tick, after it advances (a lent world's: the
+    /// host's, handed in).
+    pub night_calendar: crate::item_actions::NightCalendar,
     /// Review D2b B2 — babies born to animals a joiner fed, by server player
     /// slot (the offspring's wire species), waiting to go out as
     /// `PlayerEventType::Bred` to that joiner alone. Queued by a lent
@@ -903,6 +919,7 @@ impl GameServer {
             pending_block_changes: Vec::new(),
             pending_item_grants: Vec::new(),
             pending_kill_events: Vec::new(),
+            night_calendar: crate::item_actions::NightCalendar::default(),
             pending_bred_events: Vec::new(),
             next_attach_gen: 0,
             released_joiners: Vec::new(),
@@ -1293,6 +1310,8 @@ impl GameServer {
             // age check (Rubber tap cooldown, future replenishers).
             self.tick_counter = self.tick_counter.wrapping_add(1);
         }
+        // C2a — a dusk starts the next night (once-a-night sleep).
+        self.night_calendar.observe(self.world_time);
 
         // Phase B1 — the dedicated server streams columns around every
         // connected player before anything below reads the world, so a column
@@ -1655,18 +1674,33 @@ impl GameServer {
                     &mut player.velocity,
                 );
             }
-            // MP-D2a — no body's metabolism (hunger, regen, starvation,
-            // poison) runs here. A joiner's is its client's and arrives as
-            // `health_delta` (running it here too would count regen and
-            // starvation twice). A host's local slot is health-trusted: its
-            // client writes the health every input, and its hunger is never
-            // sent, so a server-side drain would starve the copy and, on Hard,
-            // kill it for good (nothing revives a local slot's copy) — then
-            // spawning and plate power stop seeing that player (review D2a
-            // MEDIUM-1). Only the hit timers tick.
-            self.players[i].combat.tick_timers();
+            // C2a — a joiner's metabolism (hunger drain, regen, starvation,
+            // poison) is the server's: the same pure `tick_metabolism` the
+            // client runs, with the starvation floor from this server's
+            // difficulty (the client's table), on every server-simulated
+            // body that is in the world and alive. Its joined client runs
+            // none of its own and is sent its hunger (`own_hunger`). A
+            // starvation death on Hard is the server's, announced like its
+            // other hazard deaths (`DiedOf`). Creative bodies get the
+            // client's exemption (`keep_creative_whole`: never hurt, never
+            // dead). A host's local slot stays health-trusted and runs only
+            // the hit timers: its client runs its metabolism and writes its
+            // health every input, and its hunger is never sent, so a drain
+            // here would starve the copy and, on Hard, kill it for good
+            // (review D2a MEDIUM-1).
+            let floor = self.difficulty.rules().starvation_floor;
+            let creative = self.play_mode.is_creative();
             let sp = &mut self.players[i];
+            sp.combat.tick_timers();
+            if sp.server_simulated && sp.is_present_and_alive() {
+                sp.combat.starvation_floor = floor;
+                sp.combat.tick_metabolism();
+            }
+            if creative && sp.server_simulated && sp.is_in_world() {
+                sp.combat.keep_creative_whole();
+            }
             sp.interact_cooldown = sp.interact_cooldown.saturating_sub(1);
+            sp.eat_cooldown = sp.eat_cooldown.saturating_sub(1);
         }
 
         // MP-D2a — hostile melee and lava/fire contact on every joiner's
@@ -1803,8 +1837,8 @@ impl GameServer {
                 // Whatever the step below does, this input's effect is now in
                 // the server's state — acknowledge it (Spec 04 §5.3).
                 sp.last_applied_input = sp.last_applied_input.max(input.seq);
-                // MP-D2a — and the health change its client reported (eating,
-                // regen, poison, …), in the same acknowledged step. A loss
+                // MP-D2a — and the health change its client reported (C2a: a
+                // loss only), in the same acknowledged step. A loss
                 // that kills is NOT one its client knows about (it reports its
                 // own deaths as `health <= 0`): the body was lower than the
                 // client knew, a hit landed here still in flight to it. Its
@@ -1936,8 +1970,8 @@ impl GameServer {
     /// (`survival::tick_player_survival`). Its own pass, so a tick with no
     /// queued intent (a dropped packet) still advances breath.
     fn tick_player_survival(&mut self) {
-        // No starvation here: every body's metabolism is its client's (see
-        // the combat-timer pass in `tick`; MP-D2a).
+        // No starvation here: a joiner's metabolism runs in the combat pass
+        // in `tick` (C2a).
         for sp in &mut self.players {
             if !sp.server_simulated {
                 continue;

@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `64`** (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `73`** (C2a) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -30,6 +30,7 @@
 - **v71** (2026-10-07, Phase B2b): **Touched columns.** A joiner whose terrain generator matches the host's is pushed only the columns that differ from generation; for every other column within its push radius the server sends `PacketType::ColumnLocal = 4` (`ColumnLocalPacket { cx, cz, hash }`, 13 bytes; `hash` = `chunk_verdict::column_hash` of the column as generation makes it, cached with its `Untouched` verdict, so also the server's live column) in the same ordered, numbered chunk stream (it counts towards `chunk_ack`), and the joiner generates that column itself and checks the hash. `JoinAcceptPacket` gains trailing `chunk_note_radius: u8`: the server's push limit when it sends notes, `0` when it pushes everything (`--chunk-sync all`, another generator, an owning `--no-lend` host). `InputPacket` gains trailing `column_mismatch: Option<ColumnMismatch { cx, cz, server_hash, client_hash }>`, a sticky "push me everything" switch (ignored from a joiner the server never sent a note). `--chunk-sync touched` is now the default. Bumped because packet shapes and a packet type were added. See §4.1 "Touched columns".
 - **v72** (2026-10-07, C1): **The server yields a joiner's breaks.** `InputPacket` gains trailing `mined: Vec<MinedBlock>` (`MinedBlock { x, y, z: i32, tool: WireItem }`, at most `MAX_MINED_PER_INPUT = 16` read; appended after B2b's `column_mismatch`): the cells the client's survival break arm mined since its previous input, each with the tool it mined with. The server computes the drop by the client's own rules (`break_drops`: crop harvest, tool-tier mine drop + bonus, Satori on the world's Proof-of-Play secret) and grants it by `InventoryGrant`; a joined client no longer grants itself break drops. The server also keeps a shadow of each joiner's inventory with a log-only possession check on placements. Packet shape CHANGED, hence the bump. See §4.2e.
 - **A client's packets past the per-tick budget wait; they are never dropped (2026-10-07, FU1, NO wire change — still v72).** The server used to read 10 of a client's packets a tick and discard the rest, so the swing or right-click a client made while catching up after a frame hitch (ten inputs a frame, then the action) was lost unanswered. Packets past the budget now wait in a per-client inbound queue for the next tick, in arrival order; only a client past the queue's hard bound (1024 packets or 8 MiB) is disconnected, with a reason. See §11.2a.
+- **v73** (2026-10-07, C2a): **A joiner's hunger, eating and sleep are the server's.** Appended: `PacketType::ItemAction = 62` (C→S, `ItemActionPacket { seq, action: ItemAction }`, `ItemAction` = `Eat { hotbar_slot, held_kind, held_id, held_full }` | `Sleep { bed: [i32; 3] }`, append only — C2b adds `Craft` and `Drop`) and `ItemActionOutcome = 63` (S→C, to the asker: `{ seq, accepted, consume_held, note }`); `StateUpdatePacket` gains trailing `own_hunger: u8` (per client, like `last_acked_input`: the addressed joiner's hunger as the server holds it). The server runs every joiner's metabolism (the client's `PlayerCombat::tick_metabolism`, starvation floor from its own difficulty; Hard starvation is a server death, `DiedOf { Starvation }`); a joined client runs none of its own and eats and sleeps by request; `InputPacket.health_delta` counts **losses only** (a reported heal is zero; `MAX_REPORTED_HEAL_PER_INPUT` is gone). A joiner's sleep sets its server spawn point and heals it but never skips the night. Also (no wire change): a request's item claim ends when the server acknowledges the input sent after it, not after FU1's 10 s (FU verify N4). See §4.2f, §5.3.2.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -520,12 +521,15 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak }`. **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8 }`. **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` or `ItemAction::Sleep { bed: [i32; 3] }` (append only). Shares its `seq` with `EntityAttack`/`EntityInteract`. **Implemented tag** (`PacketType::ItemAction = 62`, protocol v73). See §4.2f. |
+| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8 }` (`item_actions::ItemNote`). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
 > discriminants live in `game/engine/src/protocol.rs` and are the wire-stable
-> ones. `DeviceInteract`, `Respawn` and the four MP-D2b packets
-> (`EntityAttack` … `KillEvent`) are listed at their **implemented** values
-> because they were added after the engine existed.
+> ones. `DeviceInteract`, `Respawn`, the four MP-D2b packets
+> (`EntityAttack` … `KillEvent`) and C2a's two (`ItemAction`,
+> `ItemActionOutcome`) are listed at their **implemented** values because
+> they were added after the engine existed.
 
 **Authority model for `DeviceInteract`.** The packet asserts a cell and nothing
 else. The host looks up the `PowerDevice` standing there, decides what a
@@ -957,9 +961,10 @@ filled in its own copy would fire in both sims.
 **Server-held death.** Death of a joined (server-simulated) player is a state
 the server holds, entered two ways: its copy of the player dies (fall or
 drowning in `tick_player_survival`; since v68 also mob melee and lava/fire
-contact, §4.2c), or the joiner's `InputPacket.health` is `<= 0` (a death its
-own client caused — since v68 only the sources it still owns, such as
-starvation on Hard, §5.3.2). The health report is
+contact, §4.2c; since C2a starvation on Hard, §5.3.2), or the joiner's
+`InputPacket.health` is `<= 0` (a death its own client caused — since C2a no
+source in normal play: the last of them, starvation, is the server's). The
+health report is
 believed **only downward** (`GameServer::report_player_death`): a report of
 health coming back never revives anyone. It is taken at the end of the packet
 that carries it, so the edits riding in that packet — made while the player was
@@ -1122,7 +1127,8 @@ cooldown): that tick is a swing, not a break; between swings the held break
 goes on, as single-player mining beside a mob does. A right-click is sent only
 when what is in hand would do something to that mob in single-player
 (`MirrorTarget::right_click_action`); anything else goes ahead with the item's
-own use: eating, a bow, a bucket at water, a block placed beside a cow.
+own use: eating (a server request since C2a, §4.2f), a bow, a bucket at
+water, a block placed beside a cow.
 
 **Server-side damage on joiners (`GameServer::tick_player_hazards`).** After
 the per-player combat timers, for every server-simulated body that is present,
@@ -1287,18 +1293,22 @@ are kept by `seq`, at most 64 outstanding):
   never answers stops claiming once a later one is answered: the server reads
   requests in the order sent and answers each at once on the same ordered
   stream, so it never will be (`JoinerActions::take` forgets every earlier
-  entry still waiting). **A claim never outlives its request (FU1, D2b verify
-  N2):** since FU1 the server defers rather than drops an honest client's
-  requests (§11.2a), but one can still go unanswered (lost to a stall, or a
-  connection that went), and it used to hold its item until some later request
-  was answered — right-clicking a cow with the only bucket silently did
-  nothing. A request unanswered for `joiner_actions::CLAIM_TIMEOUT` = 10 s
-  stops claiming: well above a slow round trip plus the longest an honest
-  request can wait in the server's inbound queue (about 5 s at its hard bound),
-  so a request still on its way never frees its item for a second one. The
-  entry stays, so an answer that does come is applied. Leaving the world
-  forgets every claim (`JoinerActions::clear`, `world_exit`); every reconnect is
-  a leave and a new join.
+  entry still waiting). **A claim ends on the server's liveness, never on a
+  clock (FU verify N4, C2a; supersedes FU1's 10 s `CLAIM_TIMEOUT`):** each
+  request remembers the sequence number of the input sent after it
+  (`RemoteClient::next_input_seq`), and its claim ends once a `StateUpdate`'s
+  `last_acked_input` reaches that number (`JoinerActions::acknowledged`). The
+  server reads a client's packets in order and answers a request the moment it
+  reads it, before that tick's broadcast, so by then the answer has arrived or
+  never will (one skipped over the entity-request budget) — the request no
+  longer holds its item until some later request is answered (FU1, D2b verify
+  N2). While the server is silent (a stalled host) the claim holds, however
+  long: FU1's wall-clock expiry let one bucket milk cow A, the host stall past
+  ten seconds, and the same bucket milk cow B, both then accepted — two milk
+  buckets from one (N4; Feed, Tame and Lead alike). The entry stays, so an
+  answer is still applied. Leaving the world forgets every claim
+  (`JoinerActions::clear`, `world_exit`); every reconnect is a leave and a new
+  join. Eating (§4.2f) claims its food the same way.
 Products ride `InventoryGrant`; a bucket → milk swap is "consume 1 + grant 1".
 Since C1 the server's shadow of the joiner's inventory follows the same
 accepted outcome: `consume_held` taken by the client's own owed rule
@@ -1561,13 +1571,15 @@ bought blocks):
   the shadow never sees the filled bucket.
 
 The other direction — the shadow holds MORE: crafting inputs, container
-deposits, Q-drops, eating, tool and armour wear, armour put on, and the
+deposits, Q-drops, tool and armour wear, armour put on, and the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
 cells; and **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow
-keeps everything — once C2 persists the shadow, a death and a grave retrieval
-would duplicate the whole inventory. No refusal comes of those, but once C2
-persists the shadow they would be duplication. (A fill carrying a `mined`
+keeps everything — once the per-npub sidecar step persists the shadow, a
+death and a grave retrieval would duplicate the whole inventory. No refusal
+comes of those, but once the per-npub sidecar step persists the shadow they
+would be duplication. (Eating left this list in C2a: an accepted `Eat` takes
+its food from the shadow by the owed rule, §4.2f.) (A fill carrying a `mined`
 tag, C1's MEDIUM-1 residual, is no longer one: since FU1 it is classified
 like any fill and a plain placement consumes.)
 
@@ -1585,13 +1597,13 @@ held back since (`MISMATCH_LOG_INTERVAL_TICKS`; review C1 LOW-6: the shadow
 starts empty, so a building joiner mismatches on almost every placement this
 release, and 20 builders made about four warnings a second). A non-block placement (bucket, seeds, flint, bone meal,
 a hoe's tilling, a tool in hand), a meta-only toggle and anything in creative
-is counted unchecked. An interaction outcome the shadow can't pay is also a
-counted, logged mismatch. Counters per connection
+is counted unchecked. An interaction outcome (or, C2a, an accepted eat) the
+shadow can't pay is also a counted, logged mismatch. Counters per connection
 (`ServerPlayer.possession`: breaks, matched, mismatched, unchecked); one
 summary line (`info`) in the server log when the player leaves.
 
 Why log-only: until crafting, containers and the arrival inventory reach the
-server (merges 2 and 3), refusing would refuse legitimate placements. The
+server (C2/C3), refusing would refuse legitimate placements. The
 `// BRIDGE: possession check` markers (block placement in
 `validate_block_edit`, the mined tool and the hand in
 `classify_joiner_edit`, `EntityAttack`, `EntityInteract`, `LeadToPost`) stay
@@ -1614,7 +1626,88 @@ until enforcement.
   every break drop and interaction product. A client that opens the world on
   its own restores the first joiner's shadow as its player 0, and a world
   export carries other people's inventories. Left until the per-npub sidecar
-  step (C2) replaces them.
+  step replaces them.
+
+### 4.2f Item actions (as built, protocol v73, C2a)
+
+A joiner's eating and sleeping are requests the server decides, because the
+server runs the joiner's hunger and owns its health (§5.3.2). C2b extends
+this section with `Craft` and `Drop`.
+
+**Wire.** `PacketType::ItemAction = 62` (C→S): `ItemActionPacket { seq: u32,
+action: ItemAction }`, with `ItemAction::Eat { hotbar_slot: u8, held_kind: u8,
+held_id: u16, held_full: WireItem }` (the held-food claim, mirroring
+`EntityInteractPacket`'s) or `ItemAction::Sleep { bed: [i32; 3] }`. The enum is
+append only. `ItemActionOutcome = 63` (S→C, to the asker alone):
+`{ seq, accepted, consume_held: u8, note: u8 }`. The `seq` is shared with
+`EntityAttack` / `EntityInteract` (one `JoinerActions` sequence), and the
+client queues both kinds of outcome in one list in arrival order
+(`remote_client::RequestOutcome`): answering a later request first would
+forget an earlier one still waiting. Web joiners send both requests too.
+
+**Budget.** Item actions have their own per-tick, per-client budget,
+`MAX_ITEM_ACTIONS_PER_TICK = 4` (not `MAX_ENTITY_REQUESTS_PER_TICK`, whose
+excess is dropped): one past it waits in the client's inbound queue for the
+next tick, with everything sent after it (§11.2a) — never dropped, never
+refused for budget. Every request read is answered.
+
+**Eat.** The client (its right-click with food in a hotbar slot) checks what
+single-player checks — food in hand, hunger below max or health below max,
+read from the server's copy (`own_hunger`, `health_sync`) — then claims the
+food through `JoinerActions` (`Asked::Eat` uses one; `can_afford`; the claim
+ends on the server's acknowledgement, §4.2d) and sends `Eat`. It eats, feeds
+and heals nothing itself, and sets its place cooldown to
+`item_actions::EAT_COOLDOWN_TICKS` (16). The server (`item_actions::serve_eat`)
+refuses unless the body is a joiner's, in the world and alive (`NotNow`), its
+eating cooldown is spent (`TooSoon`; `ServerPlayer.eat_cooldown`, the same
+constant, counted down each tick), the claim is food (`Item::food_value`,
+`NotFood`) and hunger or health is below max (`NotHungry`). Accepted: the
+food is taken from the shadow inventory by the owed rule
+(`joiner_actions::take_owed`; a shortfall is a counted, log-only possession
+mismatch), and `item_actions::eat` — the function single-player's right-click
+runs — heals and feeds the body by the food value and applies
+`eat_poison_ticks` (0 today); the outcome says `consume_held = 1`. The client
+then takes the food it claimed (owed, `joiner_actions::apply_item_outcome`)
+and fires `ChallengeEvent::EatFood`; the new hunger and health arrive with
+the next `StateUpdate`. Refused: nothing is taken, and the note's toast is
+shown ("You're not hungry.").
+
+**Sleep.** The client sends `Sleep { bed }` for a right-clicked bed (the old
+`world_exit::sleep_allowed` refusal is gone). The server
+(`item_actions::serve_sleep`) refuses unless the body is a joiner's, in the
+world and alive (`NotNow`), the cell holds a `BED` in the server's world
+(`NotABed`), within the block reach of the server body's eye
+(`hosted_server::block_change_within_reach`, no held-item bonus;
+`BedTooFar`), it is night by the server's clock (`NotNight`) and the joiner
+has not slept this night (`SleptTonight`). Night is ONE rule both sides call,
+`item_actions::is_night`: sky brightness below 0.3 from
+`camera::compute_sun(world.effective_world_time(world_time))` (day-locked
+worlds never sleep, night-locked always may). Once a night: the server counts
+nights at each dusk of its raw clock (`item_actions::NightCalendar`, observed
+every tick after the clock advances; a host's sleep jumping the clock to
+morning, or `/time`, just starts the next night at the next dusk; a
+night-locked world counts its raw cycles) and marks the night on the player
+(`ServerPlayer.slept_night`). Neither is saved: a restart starts at night 0,
+and the marks are per connection. Accepted: the server sets
+`ServerPlayer.spawn_pos` to the bed (`item_actions::bed_spawn`, on top of the
+bed, centred), so a later `Respawn` stands the body there (`standing_spot`),
+and heals the body to full, leaving hunger alone (as single-player does).
+The client sets its own spawn point to the same spot and toasts "You feel
+rested. Spawn point set."; a refusal toasts the note ("You can only sleep at
+night.", "You've already slept tonight.", "That bed is too far away.").
+**A joiner's sleep never skips the night**: the clock is the host client's
+until D4 (`SimSystem::Clock`); a host's own sleep is unchanged and skips it
+for everyone. The far-respawn column wait still holds: on a lent world the
+host's streamer anchors a dead joiner's spawn column
+(`lent_respawn_columns`); a server that owns its world loads that column
+itself once the respawn is due (`handle_respawn`), since a bed can be far
+from the join spawn's 3x3 and the dedicated streamer's anchors. The bed spawn
+is not persisted (the per-npub sidecar step).
+
+**Known limits.** The server's eating cooldown is the client's 16 ticks with
+no jitter allowance: an honest client whose packets bunch after a hitch can
+see a `TooSoon` refusal (a toast; nothing is taken, the food stays). The food
+an `Eat` claims is the client's word until the shadow is enforced (C3).
 
 ### 4.3 Block Mutations
 
@@ -1755,39 +1848,53 @@ Not reconciled / known divergence (each shows as a correction, which is the hone
 
 **Loading screen**: while a signed join waits for the player's signer (a phone approving), the Loading screen shows "Waiting for your signer to approve…" under the bar (A2's join timeout is unchanged).
 
-#### 5.3.2 As built: a joiner's own health (MP-D2a, protocol v68)
+#### 5.3.2 As built: a joiner's own health and hunger (MP-D2a, protocol v68; C2a, v73)
 
 A joiner's health is the server's, and every source that can change it is
-either landed on the server-held body or reported by the client — never both:
+either landed on the server-held body or reported by the client — never both.
+Since C2a its hunger is the server's too, and every heal:
 
 | Source | Who applies it to a joiner |
 |---|---|
 | Fall, drowning | Server (`tick_player_survival`, as before) |
 | Hostile melee (`Hostile` contact), lava / fire contact | Server (`tick_player_hazards`, §4.2c) |
 | Keg blast | Server (`explosion::apply_joiner_blast_damage`, §4.2c) |
-| Natural regen, starvation, poison, eating | Client, reported as `InputPacket.health_delta` |
+| Hunger drain, natural regen, starvation, poison | Server (C2a): the joiner's metabolism, `PlayerCombat::tick_metabolism` in `GameServer::tick`; its hunger reaches it as `StateUpdatePacket.own_hunger` |
+| Eating | Server (C2a): an `ItemAction::Eat` request, fed and healed on the server body (§4.2f) |
 | Bee sting, goat charge, shark bite (species AI) | Server body, through `GameServer::land_hit_on_joiner`, from a lending host's client species AI (§4.2c, v70); a dedicated server runs no species AI (D4) |
 | Nostrich kick-back | Server (`HostedServer::land_joiner_swing`, answering the joiner's own swing, §4.2d) |
-| Sleeping | Nobody: a joiner can't sleep (`world_exit::JOINED_SLEEP_REFUSED`) — the night, the respawn point and the health are the server's |
-| `/kill`, `/heal` | Nobody: op-only, and a joiner is never op in someone else's world (`local_command_op_level`) |
+| Sleeping | Server (C2a): an `ItemAction::Sleep` request — the server spawn point and a full heal, once a night; the night is not skipped (§4.2f) |
+| Respawn | Server (`respawn_player`, full health and hunger, MP-A3); the client's own respawn reset is overwritten by it |
+| `/kill`, `/heal` | Nobody: op-only, and a joiner is never op in someone else's world (`local_command_op_level`). Were one to run (command sync is not built), `/heal` heals only the joiner's own view: a reported heal counts as nothing (C2a), so it lasts until the input carrying it is acknowledged |
 
 The server sends the result in the joiner's own `PlayerState.health`. The
 joiner's client no longer applies the server's hits: it still runs
 `survival::survival_hits` on its predicted body (breath, for the bubbles) but
 drops the hits, and skips its own lava/fire, hostile and blast passes.
 
-Hunger stays client-side, so the joiner's client still owns **natural regen,
-starvation, poison and eating**. Their net change since the previous input
-rides `InputPacket.health_delta`; the server adds it to its copy (clamped to
-max health; a loss takes no i-frames and records no cause) when it
-**simulates** that input (`tick_player_physics`), so the `StateUpdate`
-acknowledging the input (`last_acked_input`) already contains it. A heal is
-capped per input, on receipt, at `combat::MAX_REPORTED_HEAL_PER_INPUT`: the
-best food's `food_value` plus one regen pulse (`HEALTH_REGEN_AMOUNT`) — a
-client sends one input a tick and can eat once and pulse once in a tick
-(15 HP today; derived, so a richer food raises it). A loss is never capped. A
-dropped input's delta is carried into the next queued one (like its flight
-toggle).
+Whatever the joiner's client still changes on its own health rides
+`InputPacket.health_delta` (its net change since the previous input); the
+server adds it to its copy (clamped to max health; a loss takes no i-frames
+and records no cause) when it **simulates** that input
+(`tick_player_physics`), so the `StateUpdate` acknowledging the input
+(`last_acked_input`) already contains it. **Since C2a the server takes a loss
+only** (`server::sanitise_reported_health_change`): a reported heal, or a
+non-finite value, counts as zero. Before C2a the client owned natural regen,
+starvation, poison and eating and a heal was capped per input at
+`MAX_REPORTED_HEAL_PER_INPUT` (the best food plus a regen pulse, 15 HP) —
+deleted with C2a: every heal a joiner can make is now the server's (table
+above), so none is believed. A loss is never capped. A dropped input's delta
+is carried into the next queued one (like its flight toggle).
+
+**Every client-side heal on a joined client, and where it lives now (C2a):**
+regen and poison (`tick_metabolism`) and starvation run on the server (the
+joined client runs only `tick_timers`); eating and the bed heal are requests
+(§4.2f); the creative reset is `PlayerCombat::keep_creative_whole`, which the
+server applies to a creative joiner's body too; the client's respawn reset is
+the server's `Respawned` (and is never reported: a death resets the
+bookkeeping); an op's `/heal` must not stick, and doesn't (above); a save's
+health restored at load is set before the first send, so it is never reported
+either.
 
 **A reported loss that kills sends `Died`.** A client that computes its own
 death reports it as `InputPacket.health <= 0` (below), never as a delta: its
@@ -1800,21 +1907,28 @@ on its own screen with every input dropped (review D2a HIGH-1). The same
 race can make a non-lethal source (Normal's starvation, poison) the last
 straw after a server hit — the death is the hit's and the report's together.
 
-**No body's metabolism runs on the server** (`PlayerCombat::tick_timers` only,
-for every slot): a joiner's is its client's (counting it here too would double
-regen and starvation), and a host's local slot is health-trusted — its client
-writes the health with every input, and its hunger is never sent, so a
-server-side drain would starve the copy within minutes and, on Hard, kill it
-for good (nothing revives a local slot's copy), after which mob spawning and
-plate power, which anchor on `is_present_and_alive`, stop seeing that player
-(review D2a MEDIUM-1). This retired the non-lethal starvation-floor BRIDGE.
+**The server runs every joiner's metabolism (C2a).** `GameServer::tick` runs
+`PlayerCombat::tick_metabolism` — the pure method the client runs — for every
+server-simulated body that is in the world and alive, with the starvation
+floor from the server's own difficulty (`Difficulty::rules`, the client's
+table: Easy 10 HP, Normal 1, Hard 0, Peaceful ½). Starvation on Hard kills the
+body; that death is the server's and goes out as `DiedOf { Starvation }`, like
+its other hazard deaths. In a creative world the body is kept whole every tick
+(`PlayerCombat::keep_creative_whole`, the client's own creative rule, shared).
+The joined client runs only `tick_timers` and writes `own_hunger` into its
+slot on every `StateUpdate`. A **host's local slot** still runs `tick_timers`
+only: it is health-trusted — its client runs its metabolism and writes the
+health with every input, and its hunger is never sent, so a server-side drain
+would starve the copy within minutes and, on Hard, kill it for good, after
+which mob spawning and plate power stop seeing that player (review D2a
+MEDIUM-1). Hunger is saved as before (`try_save` writes `combat.hunger`).
 
 **Client bookkeeping (`health_sync::OwnHealth`, `network_send_input` /
 `network_receive`):** each reported change is kept under the sequence number
 its input went out with until acknowledged; the bar shows the server's value
 plus the unacknowledged changes, plus anything changed since the last send
-(eating happens in frame-time input handling, between a tick's send and the
-next frame's apply). A server value below what the client showed flashes the
+(a change made in frame-time input handling lands between a tick's send and
+the next frame's apply). A server value below what the client showed flashes the
 hurt vignette. A server value of **zero is never applied** and nothing changes
 while the client is dead: the server's own deaths and revivals arrive as
 `Died` / `Respawned` (§4.2b) — after a local Respawn the server still reports
@@ -1841,19 +1955,19 @@ received, ahead of the inputs still queued; when the health changes queued
 behind it would themselves take the body to zero, the death is theirs — a
 body reported at zero by `health_delta` — and it keeps `just_died`, so it goes
 through the one death path that sends `Died`. Only a death the client's own
-sim computed (Hard starvation from a body the server holds above zero) is
-taken silently.
+sim computed is taken silently (before C2a, Hard starvation from a body the
+server held above zero; since C2a starvation is the server's).
 
 Closed in v70 (MP-D2b): a server-side death names its cause (`DiedOf`), and
 server-landed hits wear the joiner's armour (`ArmourWorn`, §4.2c). A death the
 server records from a reported change (`health_delta`) names the last hit the
 body took.
 
-Not closed: a modified client can still report heals it never earned, up to
-`MAX_REPORTED_HEAL_PER_INPUT` an input, and armour it doesn't wear (armour
-reduction is capped at 80%, `armour::damage_after_armour`) — no worse than
-before v68, when its health was wholly its own; closing it needs server-side
-hunger and inventory (Phase C).
+Closed in C2a (v73): a reported heal is no longer believed, and hunger is
+server-side. Not closed: a modified client can still report armour it doesn't
+wear (armour reduction is capped at 80%, `armour::damage_after_armour`), and
+the food an `Eat` claims is its word until the shadow inventory is enforced
+(C3; a shortfall is log-only) — closing those needs a server-side inventory.
 
 ### 5.4 Block Prediction
 
@@ -2279,7 +2393,8 @@ tick (`HostedServer::process_inbound_packets`, `transport::InboundQueue`):
   prediction holds up to 128 inputs and reconciles when the acknowledgement
   catches up), and a request is
   answered later — at the bound, about five seconds behind (1024 packets at ten
-  a tick), which the client's claim on a request's item outlasts (§4.2d).
+  a tick); the client's claim on a request's item lasts until the server
+  acknowledges the input sent after it, however late (§4.2d, N4).
   An input that waits still has its chunk acknowledgement and drop reports
   taken in the tick it arrives (B2a review HIGH-2: a backlog must not hold the
   push's window shut just after a hitch, when the joiner needs chunks most);

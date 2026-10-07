@@ -263,6 +263,17 @@ pub enum OwnLifeEvent {
     Bred(crate::mob::MobType),
 }
 
+/// The server's answer to one of our requests, in arrival order (MP-D2b,
+/// C2a): an `InteractOutcome` (a swing or a mob interaction) or an
+/// `ItemActionOutcome` (eating, sleeping). One queue for both: the requests
+/// share one sequence (`joiner_actions`), and an answer applied out of order
+/// would forget the earlier request still waiting (`JoinerActions::take`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum RequestOutcome {
+    Interact(protocol::InteractOutcomePacket),
+    Item(protocol::ItemActionOutcomePacket),
+}
+
 /// MP-D2b — the death cause a `DiedOf` names, as the death screen reads it.
 /// A species this build doesn't know reads as a generic death.
 pub fn damage_cause_from_wire(cause: protocol::WireDamageCause) -> crate::survival::DamageCause {
@@ -366,9 +377,10 @@ pub struct RemoteClient {
     /// players' events are not queued. Drained each frame by `network_receive`.
     pub pending_life_events: Vec<OwnLifeEvent>,
     /// MP-D2b — the server's answers to our `EntityAttack` / `EntityInteract`
-    /// requests, and the kills it credited to us. Drained each frame by
-    /// `network_receive`; bounded like `pending_grants`.
-    pub pending_outcomes: Vec<protocol::InteractOutcomePacket>,
+    /// requests (and, C2a, our `ItemAction`s, in the same arrival order), and
+    /// the kills it credited to us. Drained each frame by `network_receive`;
+    /// bounded like `pending_grants`.
+    pub pending_outcomes: Vec<RequestOutcome>,
     pub pending_kills: Vec<protocol::KillEventPacket>,
     /// MP-A3 — the tick (`self.tick`) our last `Respawn` request went out, while
     /// the server has not yet answered with `Respawned`. `send_input` re-sends
@@ -1024,7 +1036,17 @@ impl RemoteClient {
                         >(payload)
                             && self.pending_outcomes.len() < 256
                         {
-                            self.pending_outcomes.push(out);
+                            self.pending_outcomes.push(RequestOutcome::Interact(out));
+                            changed = true;
+                        }
+                    }
+                    PacketType::ItemActionOutcome => {
+                        if let Ok(out) = protocol::safe_deserialize::<
+                            protocol::ItemActionOutcomePacket,
+                        >(payload)
+                            && self.pending_outcomes.len() < 256
+                        {
+                            self.pending_outcomes.push(RequestOutcome::Item(out));
                             changed = true;
                         }
                     }
@@ -1230,6 +1252,17 @@ impl RemoteClient {
         }
         self.transport
             .send_to_server(&protocol::serialize_packet(PacketType::EntityInteract, pkt));
+    }
+
+    /// C2a — ask the server for an item action (eat, sleep). No-op before
+    /// the join completes. Not native-only: a web joiner eats and sleeps on
+    /// the server too.
+    pub fn send_item_action(&mut self, pkt: &protocol::ItemActionPacket) {
+        if !matches!(self.state, ConnectionState::Connected { .. }) {
+            return;
+        }
+        self.transport
+            .send_to_server(&protocol::serialize_packet(PacketType::ItemAction, pkt));
     }
 
     /// Send a chat line to the server (world chat, Phase 2). No-op before
@@ -1766,6 +1799,7 @@ mod tests {
                 reserve_current_sats: 0,
                 rain_ticks_left: 0,
                 storm_ticks_left: 0,
+                own_hunger: 0,
             };
             protocol::serialize_packet(PacketType::StateUpdate, &state)
         }
@@ -1863,6 +1897,7 @@ mod tests {
                     reserve_current_sats: 0,
                     rain_ticks_left: 0,
                     storm_ticks_left: 0,
+                    own_hunger: 0,
                 },
             )
         };
@@ -2696,8 +2731,14 @@ mod tests {
             victim_flags: 0,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::KillEvent, &kill));
+        // C2a — an item action's answer joins the same queue, in order.
+        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::ItemActionOutcome, &item));
         rc.poll();
-        assert_eq!(std::mem::take(&mut rc.pending_outcomes), vec![out]);
+        assert_eq!(
+            std::mem::take(&mut rc.pending_outcomes),
+            vec![RequestOutcome::Interact(out), RequestOutcome::Item(item)]
+        );
         assert_eq!(std::mem::take(&mut rc.pending_kills), vec![kill]);
     }
 
@@ -2858,6 +2899,7 @@ mod tests {
             reserve_current_sats: 0,
             rain_ticks_left: 0,
             storm_ticks_left: 0,
+            own_hunger: 0,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[1, 2])));
         // More than the old 256-packet cap, which dropped the rest silently.

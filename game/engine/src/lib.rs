@@ -361,6 +361,8 @@ mod remote_mobs;
 mod health_sync;
 mod joiner_actions;
 mod joiner_inventory;
+// C2a — a joiner's eating and sleeping, decided by the server.
+mod item_actions;
 mod mob_interact;
 mod local_mob_click;
 // WebSocket transport — the dedicated-server pipe that BOTH the browser PWA and

@@ -1577,11 +1577,10 @@ joiner any more (Spec 04 §4.2c).
   the same falloff and line-of-sight rule, wherever the keg goes off), and a
   blast that lands wears the joiner's armour, as it wears a local player's
   (review D2b LOW-4); a joined client lands no blast on itself.
-- **The joiner's health is the server's.** It shows the server's value plus the
-  changes its own sources made that the server has not applied yet (eating,
-  natural regen, starvation, poison — hunger stays client-side), reported per
-  input as `InputPacket.health_delta`, a heal capped at
-  `combat::MAX_REPORTED_HEAL_PER_INPUT` (Spec 04 §5.3.2, which tables every
+- **The joiner's health is the server's.** It shows the server's value plus
+  any loss its own client made that the server has not applied yet, reported
+  per input as `InputPacket.health_delta` — since C2a a loss only: the server
+  counts a reported heal as nothing (Spec 04 §5.3.2, which tables every
   source). A lethal server-side hit — or a reported loss that finishes off a
   body the server holds lower than the client knew — reaches the death screen
   through `PlayerEvent::DiedOf` (v70; `Died` before), which names the cause
@@ -1590,10 +1589,32 @@ joiner any more (Spec 04 §4.2c).
   death screen itself, and the server's `DiedOf` arriving a moment later still
   names the cause on it (review D2b LOW-7; a `Died` arriving after it has
   pressed Respawn is dropped as stale — Spec 04 §5.3.2).
-- **A joiner can't sleep in a bed** ("Sleeping isn't available when you've
-  joined someone else's world yet."): the night, the respawn point and the
-  health are the server's, so the heal would be the only part that worked.
-  `/kill` and `/heal` are op-only, never available to a joiner.
+- **A joiner's hunger is the server's (C2a, v73).** The server runs the
+  joiner's metabolism — the same `PlayerCombat::tick_metabolism` (drain every
+  600 ticks, +1 HP every 80 ticks at hunger ≥ 18 costing a point, starvation
+  every 80 ticks at 0 down to the difficulty's floor) — and sends the joiner
+  its hunger each update (`own_hunger`); the joined client runs none of its
+  own. Starvation on Hard kills the joiner on the server ("You starved",
+  `DiedOf`). A creative joiner's body is kept whole, the client's own creative
+  rule. A host's own players are unchanged: their client runs their hunger.
+- **A joiner eats by asking (C2a).** Right-clicking food (hungry or hurt, as
+  in single-player) sends an `ItemAction::Eat`; the server feeds and heals the
+  body by the food value and takes the food from its copy of the joiner's
+  inventory, and the client takes the food only when the server says yes. A
+  refusal says why ("You're not hungry."). The 16-tick eating cooldown is the
+  same on both sides.
+- **A joiner sleeps by asking (C2a).** Right-clicking a bed sends an
+  `ItemAction::Sleep`. The server checks the bed is real and in reach, that it
+  is night by its clock (the rule the single-player bed uses) and that the
+  joiner has not slept this night (once a night per player); then it sets the
+  joiner's spawn point to the bed — a later respawn lands there — and heals
+  the body to full, leaving hunger alone ("You feel rested. Spawn point
+  set."). Refusals: "You can only sleep at night.", "You've already slept
+  tonight.", "That bed is too far away.". **A joiner's sleep does not skip the
+  night**: the clock is the host's (until D4); the host's own sleep still
+  skips it for everyone. The bed spawn is not saved across a server restart.
+  `/kill` and `/heal` are op-only, never available to a joiner (were one run,
+  `/heal` would heal only its own view: the server ignores reported heals).
 - **A joiner fights and handles the server's mobs (MP-D2b, Spec 04 §4.2d).**
   Its swing at the mob under the crosshair (in front of the first block, not
   the swing's wide cone) goes to the server as `EntityAttack`; the server
@@ -2219,7 +2240,7 @@ ridden horse silently despawned on save/load.
 - **Crop growth**: Requires light level >= 9.
 - **Player visibility**: Affects render brightness (gamma). The client renders the day/night transition smoothly.
 
-**Sleeping**: If all players in a world (or a configurable percentage, e.g., 50%) sleep in beds, the night is skipped and time advances to dawn. Beds also set the player's spawn point. *(As built: a single player's night-time bed click skips to morning, sets their spawn and heals them to full; a joiner in someone else's world can't sleep yet — `world_exit::JOINED_SLEEP_REFUSED` — because the night, the respawn point and its health are the server's, MP-D2a.)* Sleeping in a dimension without a day/night cycle (any future AxeNStax-native dimension where day/night is suspended) causes the bed to explode — a classic loot-pinata gag carried forward for the amusement of veteran block-game players.
+**Sleeping**: If all players in a world (or a configurable percentage, e.g., 50%) sleep in beds, the night is skipped and time advances to dawn. Beds also set the player's spawn point. *(As built: a single player's night-time bed click skips to morning, sets their spawn and heals them to full. A joiner in someone else's world asks the server (C2a, Spec 04 §4.2f): at night, once a night, a bed in reach sets its server spawn point and heals it to full, but never skips the night — the clock is the host's until D4.)* Sleeping in a dimension without a day/night cycle (any future AxeNStax-native dimension where day/night is suspended) causes the bed to explode — a classic loot-pinata gag carried forward for the amusement of veteran block-game players.
 
 ### 7.6 Rail & Carts (Phase 1 — delivered 2026-06-10)
 

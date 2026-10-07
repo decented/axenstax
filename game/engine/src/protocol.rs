@@ -114,6 +114,17 @@ pub enum PacketType {
     /// the killer alone, so its client's kill attribution (kill counters,
     /// challenges, the Nostrich's Vow, village reputation) runs for the kill.
     KillEvent = 61,
+    /// Client → Server: an item action (C2a, [`ItemActionPacket`]) — eat the
+    /// food in hand, sleep in a bed. The server decides (`item_actions`): it
+    /// runs the joiner's hunger, so eating feeds and heals the body it holds,
+    /// and a sleep sets the spawn point it respawns the joiner at. Answered
+    /// with an `ItemActionOutcome`. Sent by a joiner only (web joiners
+    /// included); a host's own players eat and sleep in its client sim.
+    ItemAction = 62,
+    /// Server → Client: the decision on one `ItemAction` (C2a), sent to that
+    /// player alone. Like `InteractOutcome`, the client takes the food it
+    /// claimed only on an accepted outcome.
+    ItemActionOutcome = 63,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -531,14 +542,16 @@ pub struct InputPacket {
     #[serde(default)]
     pub armour_points: u8,
     /// MP-D2a (v68) — the change this client made to its own health since its
-    /// previous input from the sources it still owns: eating, natural regen
-    /// and starvation (hunger stays client-side), poison, sleeping, `/heal`.
-    /// A joiner's health is the server's; the server adds this to its copy
-    /// when it simulates the input, so the next `StateUpdate` acknowledging
-    /// the input (`last_acked_input`) carries it. Fall, drowning, mob and
-    /// lava/fire damage are NOT in it: the server applies those itself.
-    /// Zero from a local slot (its `health` is applied as sent). The server
-    /// caps a heal at `combat::MAX_REPORTED_HEAL_PER_INPUT`. `serde(default)`:
+    /// previous input. A joiner's health is the server's; the server adds this
+    /// to its copy when it simulates the input, so the next `StateUpdate`
+    /// acknowledging the input (`last_acked_input`) carries it. Fall,
+    /// drowning, mob and lava/fire damage are NOT in it: the server applies
+    /// those itself. C2a (v73) — and so are eating, regen, starvation, poison
+    /// and the sleep heal (the server runs a joiner's metabolism and its item
+    /// actions): the server takes a LOSS only, and a reported heal counts as
+    /// zero (`server::sanitise_reported_health_change`); a heal the client
+    /// shows itself (an op's `/heal` on its own view) does not stick. Zero
+    /// from a local slot (its `health` is applied as sent). `serde(default)`:
     /// see `armour_points`.
     #[serde(default)]
     pub health_delta: f32,
@@ -881,6 +894,45 @@ pub struct EntityInteractPacket {
     pub sneak: bool,
 }
 
+/// What an [`ItemActionPacket`] asks for (C2a). Wire-stable, APPEND ONLY:
+/// C2b appends `Craft` and `Drop`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ItemAction {
+    /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
+    /// mirrors [`EntityInteractPacket`]'s (`held_kind` / `held_id` pair plus
+    /// `held_full`): the food is the client's word until the shadow
+    /// inventory is enforced (C3); the server takes it from its shadow.
+    Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// Sleep in the bed at `bed`: the server checks the bed, its reach from
+    /// the server body, the night and once a night, then sets the spawn point
+    /// there and heals the body to full. It never skips the night.
+    Sleep { bed: [i32; 3] },
+}
+
+/// Client → Server: one item action (C2a, `PacketType::ItemAction`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ItemActionPacket {
+    /// The client's request number, echoed in the outcome. Shares its
+    /// sequence with `EntityAttack` / `EntityInteract` (`joiner_actions`).
+    pub seq: u32,
+    pub action: ItemAction,
+}
+
+/// Server → Client: the decision on one [`ItemActionPacket`] (C2a).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ItemActionOutcomePacket {
+    /// The request's `seq`.
+    pub seq: u32,
+    /// It happened. A refused request changes nothing.
+    pub accepted: bool,
+    /// Items the client takes from what it claimed (accepted only): 1 for an
+    /// eaten food, 0 for a sleep.
+    pub consume_held: u8,
+    /// Why it was refused (an `item_actions::ItemNote` code), 0 = nothing.
+    /// Unknown codes are shown as nothing.
+    pub note: u8,
+}
+
 /// Server → Client: the decision on one attack or interaction (MP-D2b).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractOutcomePacket {
@@ -1146,6 +1198,13 @@ pub struct StateUpdatePacket {
     /// `rain_ticks_left` for the wire-compat rationale.
     #[serde(default)]
     pub storm_ticks_left: u32,
+    /// C2a (v73) — the addressed client's OWN hunger as the server holds it:
+    /// the server runs every joiner's metabolism, and the joined client
+    /// writes this into its slot each update. Per client (the template is
+    /// re-stamped per recipient, like `last_acked_input`); `0` for a host's
+    /// local slot, whose hunger is its own client's. APPEND-ONLY: last.
+    #[serde(default)]
+    pub own_hunger: u8,
 }
 
 // ─── Chunk data (Server → Client, reliable stream) ───
@@ -1705,7 +1764,15 @@ pub struct ServerAnnouncePacket {
 ///   drop + bonus, Satori on the world's secret — and grants it by
 ///   `InventoryGrant`; a joined client no longer grants itself break drops.
 ///   Packet shape CHANGED, hence the bump.
-pub const PROTOCOL_VERSION: u32 = 72;
+/// - v73 (2026-10-07, C2a): a joiner's hunger, eating and sleep
+///   are the server's. Appended: `PacketType::ItemAction = 62` (C→S,
+///   [`ItemActionPacket`]: `Eat` with the held-food claim, or `Sleep` at a
+///   bed) and `ItemActionOutcome = 63` (S→C, to the asker: accepted / items
+///   consumed / a note code); `StateUpdatePacket` gains trailing
+///   `own_hunger: u8` (the addressed client's hunger as the server holds
+///   it). The server runs every joiner's metabolism and ignores a reported
+///   heal (`InputPacket.health_delta` counts losses only).
+pub const PROTOCOL_VERSION: u32 = 73;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1771,6 +1838,8 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         59 => PacketType::EntityInteract,
         60 => PacketType::InteractOutcome,
         61 => PacketType::KillEvent,
+        62 => PacketType::ItemAction,
+        63 => PacketType::ItemActionOutcome,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -1872,7 +1941,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 72);
+        assert_eq!(super::PROTOCOL_VERSION, 73);
     }
 
     #[test]
@@ -2177,6 +2246,7 @@ mod tests {
             reserve_current_sats: 45_230,
             rain_ticks_left: 900,
             storm_ticks_left: 300,
+            own_hunger: 0,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -2223,6 +2293,7 @@ mod tests {
             reserve_current_sats: 0,
             rain_ticks_left: 0,
             storm_ticks_left: 0,
+            own_hunger: 0,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -2278,6 +2349,7 @@ mod tests {
             reserve_current_sats: 0,
             rain_ticks_left: 1_800,
             storm_ticks_left: 600,
+            own_hunger: 0,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -2477,7 +2549,10 @@ mod tests {
         //   InputPacket.column_mismatch.
         // v72 (2026-10-07, C1): `InputPacket.mined` — the server yields a
         //   joiner's breaks.
-        assert_eq!(PROTOCOL_VERSION, 72);
+        // v73 (2026-10-07, C2a): `ItemAction = 62` (Eat, Sleep),
+        //   `ItemActionOutcome = 63`, `StateUpdatePacket.own_hunger` — a
+        //   joiner's hunger, eating and sleep are the server's.
+        assert_eq!(PROTOCOL_VERSION, 73);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2662,6 +2737,79 @@ mod tests {
         ] {
             assert_eq!(t as u8, tag, "wire-stable tag");
         }
+    }
+
+    /// C2a (v73) — the item-action request and its outcome keep their tags
+    /// and shapes, and the `ItemAction` variants their wire order (append
+    /// only: C2b adds `Craft` and `Drop` after `Sleep`).
+    #[test]
+    fn item_action_packets_round_trip() {
+        let eat = ItemActionPacket {
+            seq: 11,
+            action: ItemAction::Eat {
+                hotbar_slot: 3,
+                held_kind: item_kind::MATERIAL,
+                held_id: 17,
+                held_full: WireItem::None,
+            },
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &eat);
+        assert_eq!(bytes[0], 62, "wire-stable tag");
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::ItemAction);
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), eat);
+        // The enum's variant index leads the action: Eat = 0.
+        assert_eq!(&payload[4..8], &0u32.to_le_bytes());
+
+        let sleep = ItemActionPacket { seq: 12, action: ItemAction::Sleep { bed: [-5, 70, 1_000_000] } };
+        let bytes = serialize_packet(PacketType::ItemAction, &sleep);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), sleep);
+        assert_eq!(&payload[4..8], &1u32.to_le_bytes(), "Sleep = 1");
+
+        let outcome = ItemActionOutcomePacket { seq: 12, accepted: false, consume_held: 0, note: 5 };
+        let bytes = serialize_packet(PacketType::ItemActionOutcome, &outcome);
+        assert_eq!(bytes[0], 63, "wire-stable tag");
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::ItemActionOutcome);
+        assert_eq!(safe_deserialize::<ItemActionOutcomePacket>(payload).unwrap(), outcome);
+        for (tag, t) in [(62u8, PacketType::ItemAction), (63, PacketType::ItemActionOutcome)] {
+            assert_eq!(t as u8, tag, "wire-stable tag");
+            assert_eq!(deserialize_header(&[tag, 0]).map(|(p, _)| p), Some(t));
+        }
+    }
+
+    /// bincode 1 is positional, so `StateUpdatePacket`'s trailing fields must
+    /// sit in the order each bump appended them: P9's weather windows (v59),
+    /// then C2a's `own_hunger` (v73). Pinned on the wire bytes.
+    #[test]
+    fn state_update_trailing_fields_are_in_append_order() {
+        let pkt = StateUpdatePacket {
+            tick: 1,
+            players: vec![],
+            block_changes: vec![],
+            world_time: 2,
+            last_acked_input: 3,
+            entity_spawns: vec![],
+            entity_updates: vec![],
+            entity_despawns: vec![],
+            reserve_richness: 0.0,
+            reserve_target_sats: 0,
+            reserve_current_sats: 0,
+            rain_ticks_left: 0x0102_0304,
+            storm_ticks_left: 0x0506_0708,
+            own_hunger: 0x11,
+        };
+        let bytes = bincode::serialize(&pkt).unwrap();
+        let mut tail = Vec::new();
+        // v59 (P9): rain_ticks_left u32, storm_ticks_left u32.
+        tail.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+        tail.extend_from_slice(&0x0506_0708u32.to_le_bytes());
+        // v73 (C2a): own_hunger u8.
+        tail.push(0x11);
+        assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..]);
+        let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
+        assert_eq!(back.own_hunger, 0x11);
     }
 
     #[test]

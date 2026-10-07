@@ -6306,8 +6306,15 @@ impl super::GameState {
                     .rules()
                     .starvation_floor;
 
-            // Tick combat timers
-            self.players[i].combat.tick();
+            // Tick combat timers — and the metabolism (hunger, regen,
+            // starvation, poison), unless joined: a joiner's is the server's
+            // (C2a), which sends its hunger (`own_hunger`) and lands its heals
+            // and starvation on the body it holds.
+            if joined {
+                self.players[i].combat.tick_timers();
+            } else {
+                self.players[i].combat.tick();
+            }
 
             // W2 — fall damage (from this tick's physics landing) + drowning.
             // The same shared driver runs server-side for remote players
@@ -6679,10 +6686,9 @@ impl super::GameState {
         // ── Death + respawn loop ──────────────────────────────────────────────
         for i in 0..self.players.len() {
             if self.is_creative {
-                // Creative players are invulnerable + don't drop inventory.
-                self.players[i].combat.health = self.players[i].combat.max_health;
-                self.players[i].combat.dead = false;
-                self.players[i].combat.just_died = false;
+                // Creative players are invulnerable + don't drop inventory
+                // (the rule a server applies to joiners too, C2a).
+                self.players[i].combat.keep_creative_whole();
                 continue;
             }
 
@@ -13158,20 +13164,26 @@ impl super::GameState {
                     .hotbar_slot(hotbar)
                     .map(|s| s.item.is_food())
                     .unwrap_or(false);
+                // A joiner reads these from the server's copy: its hunger
+                // (`own_hunger`) and its health (`health_sync`).
                 let can_eat = is_food
                     && (self.players[pidx].combat.hunger < self.players[pidx].combat.max_hunger
                         || self.players[pidx].combat.health < self.players[pidx].combat.max_health);
-                if can_eat
+                if can_eat && self.joined() {
+                    // C2a — a joiner's hunger is the server's: ask it. Nothing
+                    // is eaten, fed or healed here; an accepted outcome takes
+                    // the food (`apply_item_action_outcome`) and the server's
+                    // heal and hunger arrive with its state.
+                    self.send_eat_request(pidx);
+                    self.players[pidx].place_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS;
+                    ate = true;
+                } else if can_eat
                     && let Some((value, poison)) = self.players[pidx].inventory.try_eat_hotbar(hotbar) {
-                        self.players[pidx].combat.heal(value);
-                        self.players[pidx].combat.feed(value as u8);
+                        crate::item_actions::eat(&mut self.players[pidx].combat, value, poison);
                         self.fire_challenge(crate::scenario::ChallengeEvent::EatFood);
-                        if poison > 0 {
-                            self.players[pidx].combat.apply_poison(poison);
-                        }
                         // Eating is a deliberate action — small cooldown so
                         // a single right-click doesn't burn a whole stack.
-                        self.players[pidx].place_cooldown = 16; // ~0.8s
+                        self.players[pidx].place_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS; // ~0.8s
                         ate = true;
                     }
                 // Bow firing (Wave 23): if the held tool is a Bow AND there's
@@ -15130,33 +15142,22 @@ impl super::GameState {
                         // Uses eff_world_time so time-locked worlds behave
                         // consistently (day-lock → can never sleep; night-lock
                         // → can always sleep).
-                        let (_, brightness) = crate::camera::compute_sun(
-                            self.world.effective_world_time(self.world_time),
-                        );
-                        if !crate::world_exit::sleep_allowed(self.joined()) {
-                            // In someone else's world the night, the respawn
-                            // point and the health are the server's: the skip
-                            // would snap back, the spawn would be ignored,
-                            // and the full heal would be the one thing that
-                            // "worked" — again each night click (review D2a
-                            // LOW-1).
-                            self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
-                            self.toast = Some((
-                                crate::world_exit::JOINED_SLEEP_REFUSED.to_string(),
-                                Instant::now() + Duration::from_secs(3),
-                            ));
-                        } else if brightness < 0.3 {
+                        if self.joined() {
+                            // C2a — in someone else's world the respawn point
+                            // and the health are the server's: ask it
+                            // (`ItemAction::Sleep`). It checks the bed, the
+                            // night by its clock and once a night; accepted,
+                            // it sets the spawn point and heals the body. The
+                            // night is not skipped — the clock is the host's.
+                            self.send_sleep_request(pidx, pos);
+                            self.players[pidx].place_cooldown = 16;
+                        } else if crate::item_actions::is_night(&self.world, self.world_time) {
                             // Per camera::compute_sun: world_time 0 = midnight,
                             // 12000 = noon. So 7000 lands shortly after sunrise
                             // — past the brightness > 0.3 daylight threshold,
                             // so right-clicking again can't re-trigger sleep.
                             self.world_time = 7000;
-                            let bed_spawn = glam::Vec3::new(
-                                pos[0] as f32 + 0.5,
-                                pos[1] as f32 + 1.0,
-                                pos[2] as f32 + 0.5,
-                            );
-                            self.players[pidx].spawn_pos = bed_spawn;
+                            self.players[pidx].spawn_pos = crate::item_actions::bed_spawn(pos);
                             let max = self.players[pidx].combat.max_health;
                             self.players[pidx].combat.heal(max);
                             self.players[pidx].place_cooldown = 16;
@@ -21525,6 +21526,15 @@ impl super::GameState {
             let acked = state.last_acked_input;
             // B2a — drop reports carried by inputs up to `acked` were read.
             self.chunk_intake.confirm_drops(acked);
+            // FU verify N4 — and so were the requests sent ahead of them:
+            // their claims end (their answers came first, on the same stream).
+            self.joiner_actions.acknowledged(acked);
+            // C2a — our hunger is the server's (it runs our metabolism).
+            if self.joined()
+                && let Some(slot) = self.players.first_mut()
+            {
+                slot.combat.hunger = state.own_hunger.min(slot.combat.max_hunger);
+            }
             // B2b — the server centres its push radius on our body as IT
             // holds it.
             if let Some(pos) = own_server_pos {
@@ -21674,8 +21684,12 @@ impl super::GameState {
 
         // MP-D2b — the server's word on our swings and right-clicks, then
         // the kills it credited to us.
+        // C2a — and on our item actions, in the one order they arrived.
         for out in &pending_outcomes {
-            self.apply_interact_outcome(out);
+            match out {
+                crate::remote_client::RequestOutcome::Interact(out) => self.apply_interact_outcome(out),
+                crate::remote_client::RequestOutcome::Item(out) => self.apply_item_action_outcome(out),
+            }
         }
         for kill in &pending_kills {
             self.apply_kill_event(kill);
@@ -21848,6 +21862,14 @@ impl super::GameState {
         }
     }
 
+    /// The sequence number of the input this joined client sends next
+    /// (`RemoteClient::next_input_seq`; 0 when not joined): a request
+    /// recorded now claims its item until the server acknowledges that input
+    /// (FU verify N4, `joiner_actions`).
+    fn next_input_seq(&self) -> u64 {
+        self.remote_client.as_ref().map_or(0, |c| c.next_input_seq())
+    }
+
     /// MP-D2b — the item in player `pidx`'s active hotbar slot, and the
     /// wire form a request claims it with (`ItemRef` pair + full fidelity).
     fn held_for_request(&self, pidx: usize) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
@@ -21866,12 +21888,16 @@ impl super::GameState {
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
     pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
-        let seq = self.joiner_actions.record(crate::joiner_actions::Pending {
-            kind: None,
-            mob: Some(target.kind),
-            hotbar_slot: hot,
-            held,
-        });
+        let next_input = self.next_input_seq();
+        let seq = self.joiner_actions.record(
+            crate::joiner_actions::Pending {
+                kind: crate::joiner_actions::Asked::Swing,
+                mob: Some(target.kind),
+                hotbar_slot: hot,
+                held,
+            },
+            next_input,
+        );
         if let Some(client) = self.remote_client.as_mut() {
             client.send_entity_attack(&crate::protocol::EntityAttackPacket {
                 seq,
@@ -21916,15 +21942,15 @@ impl super::GameState {
         sneak: bool,
     ) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
-        if !self.joiner_actions.can_afford(&self.players[pidx].inventory, Some(kind), held.as_ref()) {
+        let asked = crate::joiner_actions::Asked::Interact(kind);
+        if !self.joiner_actions.can_afford(&self.players[pidx].inventory, asked, held.as_ref()) {
             return;
         }
-        let seq = self.joiner_actions.record(crate::joiner_actions::Pending {
-            kind: Some(kind),
-            mob,
-            hotbar_slot: hot,
-            held,
-        });
+        let next_input = self.next_input_seq();
+        let seq = self.joiner_actions.record(
+            crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held },
+            next_input,
+        );
         if let Some(client) = self.remote_client.as_mut() {
             client.send_entity_interact(&crate::protocol::EntityInteractPacket {
                 seq,
@@ -21936,6 +21962,93 @@ impl super::GameState {
                 hotbar_slot: hot as u8,
                 sneak,
             });
+        }
+    }
+
+    /// C2a — ask the server to let player `pidx` (a joiner) eat the food in
+    /// its active hotbar slot. Claimed like an interaction's item (one food
+    /// can't be eaten twice on a slow link, `JoinerActions::can_afford`);
+    /// taken only on an accepted `ItemActionOutcome`. Nothing is sent while
+    /// every one in hand is already claimed.
+    pub(crate) fn send_eat_request(&mut self, pidx: usize) {
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let asked = crate::joiner_actions::Asked::Eat;
+        if !self.joiner_actions.can_afford(&self.players[pidx].inventory, asked, held.as_ref()) {
+            return;
+        }
+        let next_input = self.next_input_seq();
+        let seq = self.joiner_actions.record(
+            crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
+            next_input,
+        );
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_item_action(&crate::protocol::ItemActionPacket {
+                seq,
+                action: crate::protocol::ItemAction::Eat {
+                    hotbar_slot: hot as u8,
+                    held_kind,
+                    held_id,
+                    held_full,
+                },
+            });
+        }
+    }
+
+    /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed
+    /// at `bed`. Claims nothing; an accepted outcome sets our spawn point
+    /// there (the server set its own).
+    pub(crate) fn send_sleep_request(&mut self, pidx: usize, bed: [i32; 3]) {
+        let hot = self.players[pidx].hotbar_slot;
+        let next_input = self.next_input_seq();
+        let seq = self.joiner_actions.record(
+            crate::joiner_actions::Pending {
+                kind: crate::joiner_actions::Asked::Sleep { bed },
+                mob: None,
+                hotbar_slot: hot,
+                held: None,
+            },
+            next_input,
+        );
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_item_action(&crate::protocol::ItemActionPacket {
+                seq,
+                action: crate::protocol::ItemAction::Sleep { bed },
+            });
+        }
+    }
+
+    /// C2a — the server's decision on one of our item actions. An accepted
+    /// eat takes the food we claimed (owed, `joiner_actions::take_owed`) and
+    /// fires the challenge event single-player fires — the server already
+    /// fed and healed the body it holds, which reaches us as our hunger and
+    /// health. An accepted sleep sets our spawn point at the bed. A refusal
+    /// changes nothing and says why.
+    fn apply_item_action_outcome(&mut self, out: &crate::protocol::ItemActionOutcomePacket) {
+        let Some(request) = self.joiner_actions.take(out.seq) else {
+            return;
+        };
+        if self.players.is_empty() {
+            return;
+        }
+        crate::joiner_actions::apply_item_outcome(&mut self.players[0].inventory, &request, out);
+        if out.accepted {
+            match request.kind {
+                crate::joiner_actions::Asked::Eat => {
+                    self.fire_challenge(crate::scenario::ChallengeEvent::EatFood);
+                }
+                crate::joiner_actions::Asked::Sleep { bed } => {
+                    self.players[0].spawn_pos = crate::item_actions::bed_spawn(bed);
+                    self.toast = Some((
+                        crate::item_actions::RESTED_TOAST.to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(msg) = crate::item_actions::ItemNote::from_wire(out.note).toast() {
+            self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
         }
     }
 
@@ -21958,14 +22071,17 @@ impl super::GameState {
         let note = crate::mob_interact::InteractNote::from_wire(out.note);
         let tamed = out.accepted && note == crate::mob_interact::InteractNote::Tamed;
         if out.accepted {
+            use crate::joiner_actions::Asked;
             use crate::protocol::InteractKind;
             let challenge = match request.kind {
-                Some(InteractKind::Shear | InteractKind::Milk) => {
+                Asked::Interact(InteractKind::Shear | InteractKind::Milk) => {
                     Some(crate::scenario::ChallengeEvent::ShearOrMilk)
                 }
                 // Single-player fires TameMob for a wolf or a companion,
                 // not for a Nostrich.
-                Some(InteractKind::Tame) if tamed && request.mob != Some(crate::mob::MobType::Nostrich) => {
+                Asked::Interact(InteractKind::Tame)
+                    if tamed && request.mob != Some(crate::mob::MobType::Nostrich) =>
+                {
                     Some(crate::scenario::ChallengeEvent::TameMob)
                 }
                 _ => None,
@@ -21973,8 +22089,8 @@ impl super::GameState {
             if let Some(ev) = challenge {
                 self.fire_challenge(ev);
             }
-            if request.kind.is_some() {
-                if request.kind == Some(InteractKind::LeadDetach) {
+            if matches!(request.kind, Asked::Interact(_)) {
+                if request.kind == Asked::Interact(InteractKind::LeadDetach) {
                     self.audio.play_break();
                 } else {
                     self.audio.play_place();
