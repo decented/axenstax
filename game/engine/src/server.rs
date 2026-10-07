@@ -2367,9 +2367,10 @@ impl GameServer {
                 health: sp.combat.health,
                 hotbar_slot: sp.hotbar_slot,
                 inventory: crate::save::serialize_inventory_raw(&sp.inventory),
-                // Server-side ServerPlayer doesn't track bed-spawn yet —
-                // BRIDGE in CLAUDE.md (ServerPlayer / PlayerSlot duplication).
-                // Defer until that's collapsed; for now, no spawn_pos saved.
+                // The server now tracks a bed spawn (`ServerPlayer::spawn_pos`,
+                // set by `item_actions::serve_sleep`, C2a), but saving it
+                // waits for the per-npub sidecar (Spec 05 §6.4.1): it is
+                // per connection until then, so no spawn_pos is saved.
                 spawn_pos: None,
                 hunger: sp.combat.hunger,
                 // Server-side ServerPlayer doesn't carry reputation either

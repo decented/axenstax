@@ -7,7 +7,7 @@
 //! sleeping itself; the server judges it here and answers with an
 //! `ItemActionOutcome`:
 //! - **Eat**: the claimed food must be food, the body alive and hungry or
-//!   hurt, and the server's eating cooldown spent. Accepted, the food is taken
+//!   hurt, and the server's eating cooldown (nearly) spent. Accepted, the food is taken
 //!   from the server's shadow of the joiner's inventory (a shortfall is
 //!   log-only, as for D2b's interactions) and the body is fed and healed by
 //!   the single-player rule ([`eat`]); the client takes the food it claimed.
@@ -30,11 +30,26 @@ use crate::item::Item;
 use crate::server::ServerPlayer;
 use crate::world::World;
 
-/// The cooldown after eating: the client's `place_cooldown` once it eats
-/// (single-player) or asks to (joined), and the server's between two eats of
-/// one joiner. One constant for both sides, so an honest client spacing its
-/// requests by its own cooldown is never refused for eating too soon.
+/// The cooldown after eating, in fixed 20 Hz ticks (0.8 s). Every path counts
+/// it in ticks, never frames: single-player and a host's own slots arm
+/// `PlayerSlot::eat_cooldown` and decrement it in the fixed-tick `tick()`, a
+/// joined client does the same before it asks, and the server counts its own
+/// (`ServerPlayer::eat_cooldown`, once per `GameServer::tick`) between two
+/// eats of one joiner. C2a verify M1: the first cut counted the client's in
+/// frames (`place_cooldown`) and the server's in ticks, so an honest joiner
+/// at 60 fps was refused two bites in three.
 pub const EAT_COOLDOWN_TICKS: u32 = 16;
+
+/// How many ticks early the server accepts an eat: it takes one once its
+/// cooldown is down to this, so two accepted eats are at least
+/// `EAT_COOLDOWN_TICKS - EAT_JITTER_SLACK_TICKS` = 12 ticks apart. Why: a
+/// client spaces its requests 16 *client* ticks apart, but the server sees
+/// them with arrival skew (a hitch bunches packets; a stall delays one and
+/// not the next), so two requests sent 16 ticks apart can arrive 13 ticks
+/// apart. The cooldown is a rate limit only: an accepted eat takes its food
+/// from the server's shadow of the inventory either way, so the slack buys no
+/// free food, just a slightly faster bite than the client's own pace.
+pub const EAT_JITTER_SLACK_TICKS: u32 = 4;
 
 /// What the client is told about an item action (`ItemActionOutcome.note`).
 /// Wire-stable codes, append only.
@@ -45,7 +60,8 @@ pub enum ItemNote {
     NotHungry = 1,
     /// Eat refused: the claimed item isn't food.
     NotFood = 2,
-    /// Eat refused: inside the server's eating cooldown.
+    /// Eat refused: inside the server's eating cooldown. Silent (no toast):
+    /// the client paces itself, so this only follows arrival skew.
     TooSoon = 3,
     /// Refused: the body is dead or not in the world.
     NotNow = 4,
@@ -84,10 +100,9 @@ impl ItemNote {
     pub fn toast(self) -> Option<&'static str> {
         use ItemNote::*;
         match self {
-            None | NotNow => Option::None,
+            None | NotNow | TooSoon => Option::None,
             NotHungry => Some("You're not hungry."),
             NotFood => Some("You can't eat that."),
-            TooSoon => Some("You're still eating."),
             NotNight => Some("You can only sleep at night."),
             SleptTonight => Some("You've already slept tonight."),
             BedTooFar => Some("That bed is too far away."),
@@ -103,8 +118,9 @@ pub const RESTED_TOAST: &str = "You feel rested. Spawn point set.";
 // ─── Eating ─────────────────────────────────────────────────────────────────
 
 /// May a body eat `held` now? `alive` is whether it is in the world and
-/// alive; `cooldown_left` the ticks left of its eating cooldown. Returns the
-/// food's value (`Item::food_value`), or why not.
+/// alive; `cooldown_left` the ticks left of its eating cooldown, of which
+/// [`EAT_JITTER_SLACK_TICKS`] are forgiven. Returns the food's value
+/// (`Item::food_value`), or why not.
 pub fn judge_eat(
     alive: bool,
     held: Option<&Item>,
@@ -114,7 +130,7 @@ pub fn judge_eat(
     if !alive {
         return Err(ItemNote::NotNow);
     }
-    if cooldown_left > 0 {
+    if cooldown_left > EAT_JITTER_SLACK_TICKS {
         return Err(ItemNote::TooSoon);
     }
     let Some(value) = held.and_then(Item::food_value) else {
@@ -305,12 +321,29 @@ mod tests {
     fn eating_is_refused_full_dead_too_soon_or_not_food() {
         assert_eq!(judge_eat(true, Some(&bread()), &PlayerCombat::new(), 0), Err(ItemNote::NotHungry));
         assert_eq!(judge_eat(false, Some(&bread()), &hungry(), 0), Err(ItemNote::NotNow));
-        assert_eq!(judge_eat(true, Some(&bread()), &hungry(), 1), Err(ItemNote::TooSoon));
+        assert_eq!(
+            judge_eat(true, Some(&bread()), &hungry(), EAT_JITTER_SLACK_TICKS + 1),
+            Err(ItemNote::TooSoon)
+        );
         assert_eq!(
             judge_eat(true, Some(&Item::Material(MaterialId::Stick)), &hungry(), 0),
             Err(ItemNote::NotFood)
         );
         assert_eq!(judge_eat(true, None, &hungry(), 0), Err(ItemNote::NotFood));
+    }
+
+    #[test]
+    fn the_server_forgives_the_jitter_slack_of_the_cooldown() {
+        let ok = |left| judge_eat(true, Some(&bread()), &hungry(), left).is_ok();
+        assert!(ok(0));
+        assert!(ok(EAT_JITTER_SLACK_TICKS), "at the slack: accepted");
+        assert!(!ok(EAT_JITTER_SLACK_TICKS + 1), "one tick more: refused");
+        assert!(!ok(EAT_COOLDOWN_TICKS));
+    }
+
+    #[test]
+    fn a_too_soon_eat_shows_no_toast() {
+        assert_eq!(ItemNote::TooSoon.toast(), None);
     }
 
     #[test]

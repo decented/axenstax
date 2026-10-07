@@ -23,6 +23,8 @@
 
 use std::collections::VecDeque;
 
+use crate::combat::PlayerCombat;
+
 /// Changes smaller than this (HP) are noise, not a hit.
 const HURT_EPSILON: f32 = 0.01;
 
@@ -133,6 +135,37 @@ impl OwnHealth {
     fn in_flight(&self) -> usize {
         self.unacked.len()
     }
+}
+
+// ─── The joined slot's two C2a rules (pure, so non-GPU tests can pin them) ──
+
+/// One fixed tick of a slot's combat state. A JOINED slot runs the hit and
+/// attack timers only: its metabolism (hunger, regen, starvation, poison) is
+/// the server's (C2a), which sends the hunger back as `own_hunger`. Every
+/// other slot — single-player, a host's own — runs the whole of it.
+pub fn tick_slot_combat(combat: &mut PlayerCombat, joined: bool) {
+    if joined {
+        combat.tick_timers();
+    } else {
+        combat.tick();
+    }
+}
+
+/// A `StateUpdate`'s `own_hunger` lands on a joined slot's body (clamped to
+/// its maximum); on any other slot it is ignored (the host's and
+/// single-player's hunger is their own).
+pub fn apply_own_hunger(combat: &mut PlayerCombat, joined: bool, own_hunger: u8) {
+    if joined {
+        combat.hunger = own_hunger.min(combat.max_hunger);
+    }
+}
+
+/// May a slot take (or, joined, ask for) a bite now? Its eating cooldown
+/// (fixed ticks, `PlayerSlot::eat_cooldown`) must be spent, and a JOINED
+/// slot has one request in flight at a time: no new `Eat` while the last is
+/// unanswered (`JoinerActions::eat_in_flight`). C2a verify M1.
+pub fn may_eat_now(eat_cooldown: u32, joined: bool, eat_in_flight: bool) -> bool {
+    eat_cooldown == 0 && !(joined && eat_in_flight)
 }
 
 #[cfg(test)]
@@ -264,5 +297,72 @@ mod tests {
         let mut h = OwnHealth::new();
         h.sent(1, 0.0, 9.0, false);
         assert_eq!(h.apply_server(f32::NAN, 1, 9.0, MAX, false).health, 9.0);
+    }
+
+    /// A hungry body that has run for a long time, so the drain, regen and
+    /// starvation steps all have something to do if they run.
+    fn drained() -> PlayerCombat {
+        let mut c = PlayerCombat::new();
+        c.hunger = 5;
+        c.poison_ticks = 40;
+        c
+    }
+
+    #[test]
+    fn a_joined_slot_runs_its_timers_only() {
+        let mut c = drained();
+        c.attack_cooldown = 5;
+        for _ in 0..crate::combat::HUNGER_DRAIN_INTERVAL_TICKS * 2 {
+            tick_slot_combat(&mut c, true);
+        }
+        assert_eq!(c.hunger, 5, "no metabolism: the server's hunger is not drained here");
+        assert_eq!(c.poison_ticks, 40, "poison is the server's too");
+        assert_eq!(c.attack_cooldown, 0, "the timers still run");
+    }
+
+    #[test]
+    fn any_other_slot_runs_the_whole_tick() {
+        let mut c = drained();
+        for _ in 0..crate::combat::HUNGER_DRAIN_INTERVAL_TICKS * 2 {
+            tick_slot_combat(&mut c, false);
+        }
+        assert!(c.hunger < 5, "hunger drains");
+        assert!(c.poison_ticks < 40, "poison ticks down");
+    }
+
+    #[test]
+    fn a_joined_client_sends_no_second_eat_while_one_is_in_flight() {
+        use crate::joiner_actions::{Asked, JoinerActions, Pending};
+        let eat = || Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: None };
+        let mut ja = JoinerActions::default();
+        assert!(!ja.eat_in_flight());
+        assert!(may_eat_now(0, true, ja.eat_in_flight()));
+        // The first Eat goes out (input 5 is the next to be sent).
+        let seq = ja.record(eat(), 5);
+        assert!(ja.eat_in_flight());
+        assert!(!may_eat_now(0, true, ja.eat_in_flight()), "one in flight: no second");
+        assert!(may_eat_now(0, false, ja.eat_in_flight()), "a local slot has no server to wait on");
+        assert!(!may_eat_now(1, false, false), "the cooldown still gates every path");
+        // Answered: free again.
+        assert!(ja.take(seq).is_some());
+        assert!(may_eat_now(0, true, ja.eat_in_flight()));
+        // Skipped for good (the server acknowledged the input after it, its
+        // answer never came): it stops blocking, so a lost request can't stop
+        // eating for good.
+        ja.record(eat(), 9);
+        assert!(ja.eat_in_flight());
+        ja.acknowledged(9);
+        assert!(!ja.eat_in_flight());
+    }
+
+    #[test]
+    fn a_state_updates_own_hunger_lands_on_a_joined_slot_only() {
+        let mut c = PlayerCombat::new();
+        apply_own_hunger(&mut c, true, 7);
+        assert_eq!(c.hunger, 7);
+        apply_own_hunger(&mut c, false, 3);
+        assert_eq!(c.hunger, 7, "not joined: ignored");
+        apply_own_hunger(&mut c, true, 250);
+        assert_eq!(c.hunger, c.max_hunger, "clamped to the body's maximum");
     }
 }

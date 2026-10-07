@@ -1940,6 +1940,13 @@ impl HostedServer {
             }
             protocol::ItemAction::Sleep { bed } => {
                 let server = &mut self.server;
+                // C2a verify L1 — the clock can be ahead of the calendar here
+                // (a lending host sets it before the tick; a `/time` jump
+                // lands before inbound processing), and `GameServer::tick`
+                // only shows it the clock after this. Show it now: `observe`
+                // is idempotent for the same reading, so the tick's own call
+                // changes nothing, and `tonight()` is this tick's night.
+                server.night_calendar.observe(server.world_time);
                 let (world, world_time, tonight) =
                     (&server.world, server.world_time, server.night_calendar.tonight());
                 server

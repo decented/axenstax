@@ -1328,7 +1328,15 @@ are kept by `seq`, at most 64 outstanding):
   buckets from one (N4; Feed, Tame and Lead alike). The entry stays, so an
   answer is still applied. Leaving the world forgets every claim
   (`JoinerActions::clear`, `world_exit`); every reconnect is a leave and a new
-  join. Eating (§4.2f) claims its food the same way.
+  join. Eating (§4.2f) claims its food the same way. **The ordering this
+  relies on (C2a verify L4):** every server-to-client packet shares ONE
+  ordered stream (QUIC's single bi stream, a WebSocket, the channel
+  transport), and the server sends an outcome inline while it reads the
+  request, before the `StateUpdate` that acknowledges the input after it, so
+  the outcome always arrives first. A move of `StateUpdate` onto an unreliable
+  or separate channel would break it: the ack could overtake the outcome, the
+  claim would end early, and a second request could spend the same item.
+  Pinned by `joiner_hunger::an_outcome_arrives_before_the_state_update_…`.
 Products ride `InventoryGrant`; a bucket → milk swap is "consume 1 + grant 1".
 Since C1 the server's shadow of the joiner's inventory follows the same
 accepted outcome: `consume_held` taken by the client's own owed rule
@@ -1676,11 +1684,19 @@ single-player checks — food in hand, hunger below max or health below max,
 read from the server's copy (`own_hunger`, `health_sync`) — then claims the
 food through `JoinerActions` (`Asked::Eat` uses one; `can_afford`; the claim
 ends on the server's acknowledgement, §4.2d) and sends `Eat`. It eats, feeds
-and heals nothing itself, and sets its place cooldown to
-`item_actions::EAT_COOLDOWN_TICKS` (16). The server (`item_actions::serve_eat`)
+and heals nothing itself. **Eating is paced in ticks, one request at a time
+(C2a verify M1):** it needs `PlayerSlot.eat_cooldown` (fixed ticks, counted
+down in the fixed-tick `tick()`, never per frame) at zero, arms it to
+`item_actions::EAT_COOLDOWN_TICKS` (16, 0.8 s) when it asks (and keeps
+setting `place_cooldown` for the bite's length), and sends no new `Eat` while
+an earlier one is still in flight (`JoinerActions::eat_in_flight`: its entry
+still claims, so a request the server passed by does not block eating for
+good). The server (`item_actions::serve_eat`)
 refuses unless the body is a joiner's, in the world and alive (`NotNow`), its
-eating cooldown is spent (`TooSoon`; `ServerPlayer.eat_cooldown`, the same
-constant, counted down each tick), the claim is food (`Item::food_value`,
+eating cooldown is spent bar the jitter slack (`TooSoon`;
+`ServerPlayer.eat_cooldown`, counted down each server tick; it accepts once
+the cooldown is at most `EAT_JITTER_SLACK_TICKS` = 4, so two accepted eats
+are at least 12 ticks apart), the claim is food (`Item::food_value`,
 `NotFood`) and hunger or health is below max (`NotHungry`). Accepted: the
 food is taken from the shadow inventory by the owed rule
 (`joiner_actions::take_owed`; a shortfall is a counted, log-only possession
@@ -1690,7 +1706,8 @@ runs — heals and feeds the body by the food value and applies
 then takes the food it claimed (owed, `joiner_actions::apply_item_outcome`)
 and fires `ChallengeEvent::EatFood`; the new hunger and health arrive with
 the next `StateUpdate`. Refused: nothing is taken, and the note's toast is
-shown ("You're not hungry.").
+shown ("You're not hungry."), except `TooSoon`, which is silent (the client
+paces itself, so it only follows arrival skew).
 
 **Sleep.** The client sends `Sleep { bed }` for a right-clicked bed (the old
 `world_exit::sleep_allowed` refusal is gone). The server
@@ -1704,7 +1721,10 @@ has not slept this night (`SleptTonight`). Night is ONE rule both sides call,
 `camera::compute_sun(world.effective_world_time(world_time))` (day-locked
 worlds never sleep, night-locked always may). Once a night: the server counts
 nights at each dusk of its raw clock (`item_actions::NightCalendar`, observed
-every tick after the clock advances; a host's sleep jumping the clock to
+every tick after the clock advances, and again by the `Sleep` arm just before
+it reads `tonight()` — idempotent for the same reading — because a lending
+host sets the clock before inbound processing and a `/time` jump lands there
+too, so the calendar can be one tick behind the clock (C2a verify L1); a host's sleep jumping the clock to
 morning, or `/time`, just starts the next night at the next dusk; a
 night-locked world counts its raw cycles) and marks the night on the player
 (`ServerPlayer.slept_night`). Neither is saved: a restart starts at night 0,
@@ -1722,12 +1742,17 @@ host's streamer anchors a dead joiner's spawn column
 (`lent_respawn_columns`); a server that owns its world loads that column
 itself once the respawn is due (`handle_respawn`), since a bed can be far
 from the join spawn's 3x3 and the dedicated streamer's anchors. The bed spawn
-is not persisted (the per-npub sidecar step).
+is not persisted (the per-npub sidecar step): the bed spawn, health, hunger
+and the slept-tonight mark all reset when the joiner reconnects or the server
+restarts, until that step (C2a verify L2).
 
-**Known limits.** The server's eating cooldown is the client's 16 ticks with
-no jitter allowance: an honest client whose packets bunch after a hitch can
-see a `TooSoon` refusal (a toast; nothing is taken, the food stays). The food
-an `Eat` claims is the client's word until the shadow is enforced (C3).
+**Known limits.** The server's eating cooldown is the client's 16 ticks less
+a 4-tick jitter slack (arrival skew between two requests sent 16 ticks
+apart can bring them 13 apart); a client that paces itself in ticks and keeps
+one request in flight is never refused. A refusal that does happen is silent,
+and the cooldown is a rate limit only: the food comes off the shadow
+either way. The food an `Eat` claims is the client's word until the shadow is
+enforced (C3).
 
 ### 4.3 Block Mutations
 
@@ -1915,6 +1940,12 @@ the server's `Respawned` (and is never reported: a death resets the
 bookkeeping); an op's `/heal` must not stick, and doesn't (above); a save's
 health restored at load is set before the first send, so it is never reported
 either.
+
+**A reconnect resets all of it (C2a verify L2).** A joiner's health, hunger,
+bed spawn and slept-tonight mark live on its connection's `ServerPlayer`
+(`enter_world` respawns the body: full health and hunger), so reconnecting or
+a server restart is a full heal, a full meal, a fresh night and a lost bed
+spawn, until the per-npub sidecar persists them.
 
 **A reported loss that kills sends `Died`.** A client that computes its own
 death reports it as `InputPacket.health <= 0` (below), never as a delta: its

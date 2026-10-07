@@ -79,6 +79,11 @@ pub struct PlayerSlot {
     pub peel_latch: bool,
     /// Placement cooldown (ticks remaining until next place allowed).
     pub place_cooldown: u32,
+    /// Eating cooldown, in fixed ticks (C2a verify M1): eating needs it at
+    /// zero and arms it to `item_actions::EAT_COOLDOWN_TICKS`. Counted in the
+    /// fixed-tick loop, never per frame, so a bite is 0.8 s at any frame rate.
+    /// Transient (not saved).
+    pub eat_cooldown: u32,
     /// Break cooldown (ticks remaining until the next *creative* block break is
     /// allowed). Survival breaking is already paced by `break_time` (block
     /// hardness via `breaking_pos`/`break_progress`), but creative breaks are
@@ -334,6 +339,7 @@ impl PlayerSlot {
             break_progress: 0,
             peel_latch: false,
             place_cooldown: 0,
+            eat_cooldown: 0,
             break_cooldown: 0,
             spawn_pos: spawn,
             fishing: None,
@@ -478,6 +484,20 @@ impl PlayerSlot {
     /// tick for every player, exactly like `place_cooldown`.
     pub fn tick_break_cooldown(&mut self) {
         self.break_cooldown = self.break_cooldown.saturating_sub(1);
+    }
+
+    /// Advance the eating cooldown one FIXED tick, saturating at 0 (not per
+    /// frame: C2a verify M1).
+    pub fn tick_eat_cooldown(&mut self) {
+        self.eat_cooldown = self.eat_cooldown.saturating_sub(1);
+    }
+
+    /// A bite was taken (or, joined, asked for): arm the eating cooldown, and
+    /// keep `place_cooldown` up for the bite's length so it still briefly
+    /// blocks placing.
+    pub fn start_eat_cooldown(&mut self) {
+        self.eat_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS;
+        self.place_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS;
     }
 
     /// Advance the placement cooldown one tick, saturating at 0. Call once

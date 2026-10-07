@@ -303,20 +303,58 @@ fn a_second_eat_inside_the_cooldown_is_refused() {
     rig.tick(1);
     assert!(rig.inbox.outcome(first).accepted);
     let hunger = rig.sp().combat.hunger;
-    rig.tick(item_actions::EAT_COOLDOWN_TICKS - 2);
+    // Read at the server 11 ticks after the first: 5 ticks of the cooldown
+    // left, more than the jitter slack forgives (C2a verify M1).
+    rig.tick(item_actions::EAT_COOLDOWN_TICKS - item_actions::EAT_JITTER_SLACK_TICKS - 2);
     let second = rig.eat(&bread());
     rig.tick(1);
     let out = rig.inbox.outcome(second);
-    assert!(!out.accepted, "inside 16 ticks of the first");
+    assert!(!out.accepted, "11 ticks after the first");
     assert_eq!(ItemNote::from_wire(out.note), ItemNote::TooSoon);
     assert_eq!(rig.sp().combat.hunger, hunger, "no second meal");
     assert_eq!(rig.shadow_count(MaterialId::Bread), 4);
-    // Once the cooldown has run, the next is taken.
-    rig.tick(1);
+    // One tick on, the cooldown is down to the slack: the next is taken.
     let third = rig.eat(&bread());
     rig.tick(1);
-    assert!(rig.inbox.outcome(third).accepted, "after the cooldown");
+    assert!(rig.inbox.outcome(third).accepted, "12 ticks after the first");
     assert_eq!(rig.shadow_count(MaterialId::Bread), 3);
+}
+
+/// Two eats read `apart` server ticks apart: were both accepted?
+fn two_eats_apart(tag: &str, apart: u32) -> (bool, bool) {
+    let mut rig = Rig::new(tag);
+    rig.sp().inventory.set_slot(0, Some(ItemStack::new_material(MaterialId::Bread, 5)));
+    rig.sp().combat.hunger = 2;
+    let first = rig.eat(&bread());
+    rig.tick(1);
+    rig.tick(apart - 1);
+    let second = rig.eat(&bread());
+    rig.tick(1);
+    (rig.inbox.outcome(first).accepted, rig.inbox.outcome(second).accepted)
+}
+
+#[test]
+fn two_eats_13_ticks_apart_are_both_accepted_and_11_apart_are_not() {
+    // The client spaces its eats 16 ticks apart; arrival skew can bring two
+    // of them 13 apart at the server. Under 12 is a real rate-limit breach.
+    assert_eq!(two_eats_apart("eat-13", 13), (true, true), "13 apart: honest, skewed");
+    assert_eq!(two_eats_apart("eat-12", 12), (true, true), "12 apart: the slack's edge");
+    assert_eq!(two_eats_apart("eat-11", 11), (true, false), "11 apart: too soon");
+}
+
+#[test]
+fn a_too_soon_refusal_takes_nothing_and_says_nothing() {
+    let mut rig = Rig::new("eat-quiet");
+    rig.sp().inventory.set_slot(0, Some(ItemStack::new_material(MaterialId::Bread, 5)));
+    rig.sp().combat.hunger = 2;
+    rig.eat(&bread());
+    rig.tick(1);
+    let again = rig.eat(&bread());
+    rig.tick(1);
+    let out = rig.inbox.outcome(again);
+    assert_eq!(ItemNote::from_wire(out.note), ItemNote::TooSoon);
+    assert_eq!(ItemNote::from_wire(out.note).toast(), None, "no toast for a pacing refusal");
+    assert_eq!(rig.shadow_count(MaterialId::Bread), 4);
 }
 
 #[test]
@@ -482,4 +520,172 @@ fn sleeping_by_day_or_at_a_far_bed_or_no_bed_is_refused() {
     assert_eq!(ItemNote::from_wire(rig.inbox.outcome(no_bed).note), ItemNote::NotABed);
     let spawn = rig.sp().spawn_pos;
     assert_ne!(spawn, item_actions::bed_spawn(bed), "no refused sleep set the spawn");
+}
+
+// ─── C2a-fix: tick-paced eating, the night index, the ordering N4 relies on ─
+
+/// Bites a held-down right-click gets in 10 s of play at `fps`, through the
+/// slot's own timer: the fixed 20 Hz tick decrements it, every frame asks.
+fn bites_in_ten_seconds(fps: u32) -> u32 {
+    let mut slot = crate::player_slot::PlayerSlot::new(0, Vec3::new(0.0, 64.0, 0.0), 1.0);
+    let (mut t, mut next_tick, mut bites) = (0.0_f64, 0.0_f64, 0);
+    while t < 10.0 {
+        while next_tick <= t {
+            slot.tick_eat_cooldown();
+            next_tick += 0.05;
+        }
+        if crate::health_sync::may_eat_now(slot.eat_cooldown, false, false) {
+            slot.start_eat_cooldown();
+            bites += 1;
+        }
+        t += 1.0 / f64::from(fps);
+    }
+    bites
+}
+
+#[test]
+fn eating_is_paced_in_ticks_at_any_frame_rate() {
+    // One bite per 0.8 s (16 ticks): 13 in 10 s counting the first. The old
+    // frame-counted cooldown gave 10 s * fps / 16 bites — 90 at 144 fps.
+    for fps in [20, 30, 60, 75, 144, 240] {
+        let bites = bites_in_ten_seconds(fps);
+        assert!((12..=13).contains(&bites), "{fps} fps: {bites} bites in 10 s");
+    }
+}
+
+#[test]
+fn a_sleep_in_the_first_night_tick_after_a_slept_night_is_a_new_night() {
+    // Night k: the joiner sleeps. The clock goes to day, then the host sets
+    // dusk — before inbound processing, so the calendar has not seen it. The
+    // Sleep arm shows it the clock first: a NEW night, so it is accepted
+    // (pre-fix it was refused as the night just slept) and marked as it.
+    let mut rig = Rig::new("night-after-slept");
+    rig.hs.server.world_time = 0;
+    rig.tick(1);
+    let bed = rig.bed_ahead();
+    let first = rig.sleep(bed);
+    rig.tick(1);
+    assert!(rig.inbox.outcome(first).accepted);
+    let slept = rig.hs.server.night_calendar.tonight();
+    assert_eq!(rig.sp().slept_night, Some(slept));
+    rig.hs.server.world_time = 12000;
+    rig.tick(2);
+    rig.sp().combat.health = 5.0;
+    rig.hs.server.world_time = 20000; // dusk, not yet observed
+    let next = rig.sleep(bed);
+    rig.tick(1);
+    assert!(rig.inbox.outcome(next).accepted, "the first tick of the next night");
+    assert_eq!(rig.sp().slept_night, Some(slept + 1));
+    assert_eq!(rig.hs.server.night_calendar.tonight(), slept + 1);
+    assert_eq!(rig.sp().combat.health, 20.0);
+}
+
+#[test]
+fn a_sleep_in_the_first_night_tick_after_an_unslept_night_is_counted_as_tonights() {
+    // The joiner slept no night. The first tick of dusk it sleeps: accepted,
+    // and marked as THIS night — so a second sleep a tick later is refused
+    // and heals nothing (pre-fix the mark was last night's, and the
+    // calendar's catch-up let it sleep and heal again the same night).
+    let mut rig = Rig::new("night-first-tick");
+    rig.hs.server.world_time = 12000;
+    rig.tick(2);
+    let bed = rig.bed_ahead();
+    rig.hs.server.world_time = 20000; // dusk, not yet observed
+    let first = rig.sleep(bed);
+    rig.tick(1);
+    assert!(rig.inbox.outcome(first).accepted);
+    let tonight = rig.hs.server.night_calendar.tonight();
+    assert_eq!(rig.sp().slept_night, Some(tonight), "marked with tonight's number");
+    rig.sp().combat.health = 5.0;
+    let second = rig.sleep(bed);
+    rig.tick(1);
+    let out = rig.inbox.outcome(second);
+    assert!(!out.accepted);
+    assert_eq!(ItemNote::from_wire(out.note), ItemNote::SleptTonight);
+    assert_eq!(rig.sp().combat.health, 5.0, "no second heal");
+}
+
+/// What the joiner's stream held, in the order it arrived.
+#[derive(Debug, PartialEq)]
+enum Arrived {
+    Outcome { seq: u32 },
+    State { acked: u64 },
+}
+
+#[test]
+fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_it() {
+    // C2a verify L4 — the ordering N4's claim-ending relies on, pinned over
+    // the channel transport with a real `JoinerActions`: the request goes
+    // out ahead of input `next`; the server answers it inline while reading
+    // that input's packets, and the StateUpdate acknowledging `next` is
+    // built after. If the ack could overtake the outcome the claim would
+    // end early (can_afford passes, a second request spends the same item).
+    use crate::joiner_actions::{apply_item_outcome, Asked, JoinerActions, Pending};
+    let mut rig = Rig::new("ordering");
+    let two_bread = ItemStack::new_material(MaterialId::Bread, 2);
+    rig.sp().inventory.set_slot(0, Some(two_bread.clone()));
+    rig.sp().combat.hunger = 2;
+    let mut inv = crate::inventory::Inventory::new();
+    inv.set_slot(0, Some(two_bread));
+
+    let mut ja = JoinerActions::default();
+    let next_input = 1_u64; // the first input of the session
+    let ask = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread()) };
+    assert!(ja.can_afford(&inv, Asked::Eat, Some(&bread())));
+    let seq = ja.record(ask, next_input);
+    assert_eq!(rig.eat(&bread()), seq, "the request goes out under the seq it was recorded with");
+    assert!(ja.eat_in_flight(), "the request is in flight");
+    let input = protocol::InputPacket {
+        tick: next_input,
+        x: rig.at.x,
+        y: rig.at.y,
+        z: rig.at.z,
+        health: 20.0,
+        ..Default::default()
+    };
+    rig.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    rig.hs.tick();
+
+    let mut stream = Vec::new();
+    while let Some(pkt) = rig.client.try_recv_from_server() {
+        let Some((ptype, payload)) = protocol::deserialize_header(&pkt) else { continue };
+        match ptype {
+            protocol::PacketType::ItemActionOutcome => {
+                let o: protocol::ItemActionOutcomePacket = protocol::safe_deserialize(payload).unwrap();
+                stream.push((Arrived::Outcome { seq: o.seq }, Some(o)));
+            }
+            protocol::PacketType::StateUpdate => {
+                let st: protocol::StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
+                stream.push((Arrived::State { acked: st.last_acked_input }, None));
+            }
+            _ => {}
+        }
+    }
+    let at = |wanted: &Arrived| stream.iter().position(|(a, _)| a == wanted);
+    let outcome_at = at(&Arrived::Outcome { seq }).expect("the request was answered");
+    let ack_at = stream
+        .iter()
+        .position(|(a, _)| matches!(a, Arrived::State { acked } if *acked >= next_input))
+        .expect("a StateUpdate acknowledged the input");
+    assert!(outcome_at < ack_at, "outcome before its acknowledgement: {:?}", stream.iter().map(|s| &s.0).collect::<Vec<_>>());
+
+    // Replay it the way the client does, in arrival order: the claim is
+    // PAID (one bread taken), not released unpaid.
+    for (arrived, outcome) in &stream {
+        match (arrived, outcome) {
+            (Arrived::Outcome { seq }, Some(o)) => {
+                let pending = ja.take(*seq).expect("still waiting for it");
+                assert_eq!(apply_item_outcome(&mut inv, &pending, o), 1);
+            }
+            (Arrived::State { acked }, _) => ja.acknowledged(*acked),
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(count(&inv), 1, "paid exactly once");
+    assert_eq!(rig.shadow_count(MaterialId::Bread), 1, "the server took the same one");
+    assert!(ja.can_afford(&inv, Asked::Eat, Some(&bread())), "the second bread is free to eat");
+}
+
+fn count(inv: &crate::inventory::Inventory) -> u32 {
+    inv.count_material(MaterialId::Bread) as u32
 }

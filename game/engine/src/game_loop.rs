@@ -6319,11 +6319,10 @@ impl super::GameState {
             // starvation, poison), unless joined: a joiner's is the server's
             // (C2a), which sends its hunger (`own_hunger`) and lands its heals
             // and starvation on the body it holds.
-            if joined {
-                self.players[i].combat.tick_timers();
-            } else {
-                self.players[i].combat.tick();
-            }
+            crate::health_sync::tick_slot_combat(&mut self.players[i].combat, joined);
+            // The eating cooldown counts fixed ticks, whatever the frame
+            // rate (C2a verify M1).
+            self.players[i].tick_eat_cooldown();
 
             // W2 — fall damage (from this tick's physics landing) + drowning.
             // The same shared driver runs server-side for remote players
@@ -13194,7 +13193,16 @@ impl super::GameState {
                     .unwrap_or(false);
                 // A joiner reads these from the server's copy: its hunger
                 // (`own_hunger`) and its health (`health_sync`).
+                // Eating is paced in fixed ticks on every path (C2a verify
+                // M1), and a joiner has one request in flight at a time: it
+                // asks again only once the last was answered or the server
+                // passed it by (`JoinerActions::eat_in_flight`).
                 let can_eat = is_food
+                    && crate::health_sync::may_eat_now(
+                        self.players[pidx].eat_cooldown,
+                        self.joined(),
+                        self.joiner_actions.eat_in_flight(),
+                    )
                     && (self.players[pidx].combat.hunger < self.players[pidx].combat.max_hunger
                         || self.players[pidx].combat.health < self.players[pidx].combat.max_health);
                 if can_eat && self.joined() {
@@ -13203,7 +13211,7 @@ impl super::GameState {
                     // the food (`apply_item_action_outcome`) and the server's
                     // heal and hunger arrive with its state.
                     self.send_eat_request(pidx);
-                    self.players[pidx].place_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS;
+                    self.players[pidx].start_eat_cooldown();
                     ate = true;
                 } else if can_eat
                     && let Some((value, poison)) = self.players[pidx].inventory.try_eat_hotbar(hotbar) {
@@ -13211,7 +13219,7 @@ impl super::GameState {
                         self.fire_challenge(crate::scenario::ChallengeEvent::EatFood);
                         // Eating is a deliberate action — small cooldown so
                         // a single right-click doesn't burn a whole stack.
-                        self.players[pidx].place_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS; // ~0.8s
+                        self.players[pidx].start_eat_cooldown(); // 0.8 s
                         ate = true;
                     }
                 // Bow firing (Wave 23): if the held tool is a Bow AND there's
@@ -21551,10 +21559,9 @@ impl super::GameState {
             // their claims end (their answers came first, on the same stream).
             self.joiner_actions.acknowledged(acked);
             // C2a — our hunger is the server's (it runs our metabolism).
-            if self.joined()
-                && let Some(slot) = self.players.first_mut()
-            {
-                slot.combat.hunger = state.own_hunger.min(slot.combat.max_hunger);
+            let joined = self.joined();
+            if let Some(slot) = self.players.first_mut() {
+                crate::health_sync::apply_own_hunger(&mut slot.combat, joined, state.own_hunger);
             }
             // B2b — the server centres its push radius on our body as IT
             // holds it.

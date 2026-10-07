@@ -32,6 +32,18 @@
 //! ten seconds) let one bucket milk two cows after a longer stall. Leaving
 //! the world forgets every request ([`JoinerActions::clear`], `world_exit`; a
 //! reconnect is always a leave and a new join).
+//!
+//! The ordering this rests on (C2a verify L4): every server-to-client packet
+//! shares ONE ordered stream (QUIC's single bi stream, a WebSocket, the
+//! channel transport), and the server sends an outcome inline while it reads
+//! the request, before the `StateUpdate` that acknowledges the input after
+//! it — so the outcome always arrives before the acknowledgement that ends
+//! its claim. Move `StateUpdate` onto an unreliable or separate channel and
+//! the ack could overtake the outcome: the claim would end early and a second
+//! request could spend the same item. Pinned over the channel transport by
+//! `test_integration::joiner_hunger`
+//! (`an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_it`);
+//! Spec 04 §4.2d.
 
 use std::collections::VecDeque;
 
@@ -169,6 +181,14 @@ impl JoinerActions {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Is an `Eat` still in flight (C2a verify M1)? A joiner sends no new one
+    /// while it is: the entry waits for the outcome, and stops counting once
+    /// the server has passed it by ([`Self::acknowledged`]), so a lost
+    /// request can't block eating for good.
+    pub fn eat_in_flight(&self) -> bool {
+        self.pending.iter().any(|e| e.claims && e.request.kind == Asked::Eat)
     }
 }
 

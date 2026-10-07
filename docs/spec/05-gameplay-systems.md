@@ -1603,8 +1603,15 @@ joiner any more (Spec 04 §4.2c).
   in single-player) sends an `ItemAction::Eat`; the server feeds and heals the
   body by the food value and takes the food from its copy of the joiner's
   inventory, and the client takes the food only when the server says yes. A
-  refusal says why ("You're not hungry."). The 16-tick eating cooldown is the
-  same on both sides.
+  refusal says why ("You're not hungry."; an eat refused only for coming too
+  soon is silent). **Eating is paced in fixed ticks everywhere (C2a-fix):**
+  one bite per 16 ticks (0.8 s) at any frame rate, and a joiner has one
+  request in flight at a time. The server accepts an eat once its cooldown is
+  within 4 ticks of spent, to forgive arrival skew. This is a feel change for
+  single-player and a host's own players: the cooldown used to count frames
+  (one bite per 16 frames, 0.27 s at 60 fps; faster the higher the frame
+  rate), so a held right-click now eats at 0.8 s intervals regardless of fps
+  (owner's test sheet).
 - **A joiner sleeps by asking (C2a).** Right-clicking a bed sends an
   `ItemAction::Sleep`. The server checks the bed is real and in reach, that it
   is night by its clock (the rule the single-player bed uses) and that the
@@ -1614,7 +1621,9 @@ joiner any more (Spec 04 §4.2c).
   set."). Refusals: "You can only sleep at night.", "You've already slept
   tonight.", "That bed is too far away.". **A joiner's sleep does not skip the
   night**: the clock is the host's (until D4); the host's own sleep still
-  skips it for everyone. The bed spawn is not saved across a server restart.
+  skips it for everyone. The bed spawn, health, hunger and the
+  slept-tonight mark all reset when the joiner reconnects or the server
+  restarts, until the per-npub sidecar step.
   `/kill` and `/heal` are op-only, never available to a joiner (were one run,
   `/heal` would heal only its own view: the server ignores reported heals).
 - **A joiner fights and handles the server's mobs (MP-D2b, Spec 04 §4.2d).**
