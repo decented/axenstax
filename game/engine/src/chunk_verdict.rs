@@ -87,24 +87,31 @@ pub struct VerdictBudget {
 }
 
 /// A lending host's budget: its server tick runs inside the host's own frame
-/// (`sim_lend`), so verdicts get 3 ms of it. Measured 1.65 ms a verdict on a
-/// fresh world in the test profile (`opt-level = 1`; a mature world's side
-/// tables cost more), so time governs: about 2 a tick there, a few more in a
-/// release build. The count cap of 8 sits above what 3 ms allows on any
-/// machine we know of, so it only bounds a pathological clock.
+/// (`sim_lend`), so verdicts get 3 ms of it. **Measured** (B2b fix-2 N3,
+/// release build, i5-1235U, `tests::measure_check_costs`, 405 columns on 5
+/// seeds): 1.53 ms a verdict on a fresh column (p95 1.75, max 1.82) and 1.94
+/// ms (p95 2.17, max 2.53) beside three side tables of 20,000 entries each,
+/// every chunk probing its cells; the verdict hashes the scratch it built,
+/// 0.02 ms of that. A release build is no faster than the test profile's
+/// 1.65 ms, because generation, not Rust optimisation, dominates. So time
+/// governs: the first verdict always runs and a second starts if the first
+/// ended inside 3 ms, which is 2 a tick, and the tick's worst case is 3 ms
+/// plus one verdict, about 5.5 ms. The count cap of 4 is what 3 ms allows on
+/// a machine twice as fast, so it only bounds a pathological clock.
 pub const LENDING_VERDICT_BUDGET: VerdictBudget =
-    VerdictBudget { count: 8, time: Duration::from_millis(3) };
+    VerdictBudget { count: 4, time: Duration::from_millis(3) };
 
 /// A server that does not lend (the dedicated server; a `--no-lend` host,
 /// which sends no notes anyway): no frame to protect, only its own 50 ms
 /// tick, whose simulation, streaming and sends fit well inside the other
-/// 38 ms. 12 ms is about 7 verdicts a tick at the test-profile 1.65 ms (140
-/// a second: a joiner's whole R 8 area, 289 columns, in about 2 s), 3-4
-/// times that in release, and still 4 a tick on a mature world at about
-/// 3 ms. The count cap of 32 matches a release build's 12 ms, so time
-/// governs everywhere and the cap only bounds a pathological clock.
+/// 38 ms. 12 ms is 7 to 8 verdicts a tick at the measured 1.53 ms (about 150
+/// a second: a joiner's whole R 8 area, 289 columns, in about 2 s), and 6 on
+/// a mature world at 1.94 ms. The worst tick is 12 ms plus one verdict,
+/// 14.5 ms. The count cap of 16 is what 12 ms allows on a machine twice as
+/// fast, so time governs everywhere and the cap only bounds a pathological
+/// clock.
 pub const OWNING_VERDICT_BUDGET: VerdictBudget =
-    VerdictBudget { count: 32, time: Duration::from_millis(12) };
+    VerdictBudget { count: 16, time: Duration::from_millis(12) };
 
 impl VerdictBudget {
     /// The budget for a server that lends its host's world (`lends`) or not.
@@ -489,7 +496,7 @@ mod tests {
     #[test]
     fn a_lending_host_keeps_a_small_verdict_budget_and_a_dedicated_server_a_large_one() {
         let lend = VerdictBudget::for_server(true);
-        assert_eq!(lend, VerdictBudget { count: 8, time: Duration::from_millis(3) });
+        assert_eq!(lend, VerdictBudget { count: 4, time: Duration::from_millis(3) });
         let own = VerdictBudget::for_server(false);
         assert!((12..=15).contains(&own.time.as_millis()), "12-15 ms of the 50 ms tick");
         assert!(own.count >= 4 * lend.count, "time governs, not a small count");
@@ -541,6 +548,52 @@ mod tests {
         assert_eq!(column_hash(&a, (0, 0)), u32::from_le_bytes([d[0], d[1], d[2], d[3]]), "same byte stream");
     }
 
+    /// B2b fix-2 N2: the empty-column pin above hashes six presence bytes and
+    /// never reaches `feed_bytes`, so it proves nothing about the byte stream.
+    /// This one pins a hand-built column — distinct block ids in several
+    /// chunks, placed bits among them, no worldgen — so a change to the byte
+    /// stream (`Chunk::as_bytes` / `feed_bytes`: the block width, the placed
+    /// word order, the endianness, the presence byte) or a platform
+    /// difference fails here with a number, not on a joiner.
+    #[test]
+    fn the_column_hash_of_a_hand_built_column_is_pinned() {
+        let mut world = World::new();
+        // cy 0, 1, 3 and 5 hold content; cy 2 and 4 stay absent.
+        world.set_block(0, 0, 0, block::STONE);
+        world.set_block(15, 15, 15, block::GLASS);
+        world.set_block(7, 3, 9, block::OAK_LOG);
+        world.set_block(1, 16, 2, block::SAND);
+        world.set_block(14, 31, 6, block::STONE);
+        world.set_block(5, 48, 5, block::GLASS);
+        world.set_block(8, 49, 11, block::GRAVEL);
+        world.set_block(2, 80, 13, block::OAK_LOG);
+        // Player-placed bits, in the first and the last word of a chunk's mask
+        // and in a chunk that also holds natural blocks.
+        world.set_placed(0, 0, 0, true);
+        world.set_placed(15, 15, 15, true);
+        world.set_placed(5, 48, 5, true);
+        world.set_placed(2, 80, 13, true);
+        let pinned = column_hash(&world, (0, 0));
+        assert_eq!(pinned, 0xb9b5_de81, "the hand-built column's hash");
+        // The same column built in the opposite order hashes the same.
+        let mut reversed = World::new();
+        reversed.set_block(2, 80, 13, block::OAK_LOG);
+        reversed.set_block(8, 49, 11, block::GRAVEL);
+        reversed.set_block(5, 48, 5, block::GLASS);
+        reversed.set_block(14, 31, 6, block::STONE);
+        reversed.set_block(1, 16, 2, block::SAND);
+        reversed.set_block(7, 3, 9, block::OAK_LOG);
+        reversed.set_block(15, 15, 15, block::GLASS);
+        reversed.set_block(0, 0, 0, block::STONE);
+        for (x, y, z) in [(2, 80, 13), (5, 48, 5), (15, 15, 15), (0, 0, 0)] {
+            reversed.set_placed(x, y, z, true);
+        }
+        assert_eq!(column_hash(&reversed, (0, 0)), pinned, "build order does not matter");
+        // And each ingredient is in it.
+        world.set_placed(5, 48, 5, false);
+        assert_ne!(column_hash(&world, (0, 0)), pinned, "a placed bit is in the hash");
+    }
+
     /// Measurement (Phase B2b): the false-touched rate on fresh worlds — every
     /// column of the inner 9×9 of an 11×11 area generated nearest first,
     /// five seeds — and the cost of one verdict. Run with
@@ -582,5 +635,82 @@ mod tests {
             times[times.len() * 95 / 100].as_secs_f64() * 1e3,
             times[times.len() - 1].as_secs_f64() * 1e3,
         );
+    }
+    /// Measurement (B2b fix-2 N3): what the budgets are set from, in a release
+    /// build — one verdict on a fresh column and on one beside large side
+    /// tables (every table past a chunk's 4,096 cells, so the probing path
+    /// runs for every chunk), one column hash (the client's check) and one
+    /// scratch generation. Run with `cargo test --release --lib
+    /// measure_check_costs -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_check_costs() {
+        fn stats(label: &str, mut t: Vec<Duration>) {
+            t.sort_unstable();
+            let mean = t.iter().sum::<Duration>() / t.len() as u32;
+            println!(
+                "{label}: n {}, ms mean {:.3}, median {:.3}, p95 {:.3}, max {:.3}",
+                t.len(),
+                mean.as_secs_f64() * 1e3,
+                t[t.len() / 2].as_secs_f64() * 1e3,
+                t[t.len() * 95 / 100].as_secs_f64() * 1e3,
+                t[t.len() - 1].as_secs_f64() * 1e3,
+            );
+        }
+        let timed = |f: &mut dyn FnMut()| {
+            let t = web_time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let (mut verdict, mut verdict_big, mut hash, mut scratch) = (vec![], vec![], vec![], vec![]);
+        for seed in [1u32, 42, 1234, 99_999, 7_777_777] {
+            let biome = BiomeGenerator::new(seed);
+            let centre = ((seed % 97) as i32 - 48, (seed % 89) as i32 - 44);
+            let mut world = generated(&biome, centre, 5);
+            let cols: Vec<(i32, i32)> = (-4..=4)
+                .flat_map(|dx| (-4..=4).map(move |dz| (centre.0 + dx, centre.1 + dz)))
+                .collect();
+            for &col in &cols {
+                verdict.push(timed(&mut || {
+                    std::hint::black_box(decide_column(&world, &biome, col));
+                }));
+                hash.push(timed(&mut || {
+                    std::hint::black_box(column_hash(&world, col));
+                }));
+                scratch.push(timed(&mut || {
+                    std::hint::black_box(generated_column_hash(&world, &biome, col));
+                }));
+            }
+            // A mature world: 20,000 entries in each of three side tables,
+            // far from the measured columns, so every verdict still reads
+            // untouched but every chunk probes its cells.
+            let mut n = 0u32;
+            'fill: for x in 400..528 {
+                for z in 400..528 {
+                    for y in [40, 41, 70] {
+                        world.block_meta.insert((x, y, z), 3);
+                        world.face_attachments.insert((x, y, z), {
+                            let mut f: crate::world::FaceAttachments = Default::default();
+                            f[0] = Some(crate::world::FaceAttachment::Wallpaper(block::GLASS));
+                            f
+                        });
+                        world.insert_sign((x, y + 1, z), crate::sign::SignData::new());
+                        n += 1;
+                        if n == 20_000 {
+                            break 'fill;
+                        }
+                    }
+                }
+            }
+            for &col in &cols {
+                verdict_big.push(timed(&mut || {
+                    std::hint::black_box(decide_column(&world, &biome, col));
+                }));
+            }
+        }
+        stats("verdict, fresh column", verdict);
+        stats("verdict, 20k-entry side tables", verdict_big);
+        stats("column hash (client check)", hash);
+        stats("scratch generation + hash", scratch);
     }
 }

@@ -96,6 +96,20 @@ pub enum IntakeStep {
     Changes(std::ops::Range<usize>),
 }
 
+/// B2b fix-2 N3 — one owned step of a frame's world intake, in arrival order:
+/// what [`ChunkIntake::plan_deltas`] hands the game loop, and what it carries
+/// over to the next frame when a burst of forced column checks has used up
+/// this one's allowance.
+#[derive(Debug)]
+pub enum Delta {
+    /// Apply one pushed chunk packet.
+    Chunk(Box<ChunkDataPacket>),
+    /// Take in a "column is local" note, with its hash.
+    Local((i32, i32), u32),
+    /// Apply one block change from the server.
+    Change(crate::protocol::BlockChange),
+}
+
 /// Lay a frame's chunk-stream packets between its block changes in the order
 /// they arrived: each carries the number of changes that had arrived before
 /// it (`RemoteClient::chunk_queue`).
@@ -120,11 +134,15 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
 }
 
 /// B2b fix LOW-3 — what a scratch generation costs against a frame's check
-/// budget ([`ChunkIntake::run_checks`]), in column hashes: a column's
-/// generation is roughly ten times one SHA-256 pass over its 52 KB of blocks
-/// and placed masks (an estimate, not measured). Charged on top of the hash
-/// that found the difference.
-pub const SCRATCH_CHECK_COST: usize = 8;
+/// budget ([`ChunkIntake::run_checks`]), in column hashes. **Measured**
+/// (B2b fix-2 N3, release build, i5-1235U with SHA extensions,
+/// `chunk_verdict::tests::measure_check_costs`): one column hash 0.024 ms
+/// (p95 0.029), one scratch generation and hash 1.52 ms (p95 1.74), so a
+/// scratch is 63 hashes; the earlier estimate of 8 was far too low. A CPU
+/// without SHA extensions hashes about ten times slower and the ratio falls
+/// to about 6, so 63 over-charges there (the safe side). Charged on top of
+/// the hash that found the difference.
+pub const SCRATCH_CHECK_COST: usize = 63;
 
 /// What a column check found ([`ChunkIntake::verify_local`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +219,10 @@ pub struct ChunkIntake {
     /// its note said: once set, every input asks for everything to be
     /// pushed, for the rest of the session.
     mismatch: Option<ColumnMismatch>,
+    /// B2b fix-2 N3 — steps held back to a later frame, oldest first
+    /// ([`Self::plan_deltas`]): they run before anything that arrives later,
+    /// so the order of the stream is kept. Empty outside a burst.
+    carried: VecDeque<Delta>,
 }
 
 impl ChunkIntake {
@@ -297,6 +319,74 @@ impl ChunkIntake {
         if self.unverified.contains_key(&col) && self.checks_queued.insert(col) {
             self.checks_ready.push_back(col);
         }
+    }
+
+    /// B2b fix-2 N3 — lay a frame's world intake out in arrival order
+    /// ([`interleave`], with each change and the steps carried over from the
+    /// last frame first) and bound the SYNCHRONOUS column checks it will force.
+    /// A server change or a pushed chunk for a column whose check is pending
+    /// checks that column first, outside [`Self::run_checks`]'s budget
+    /// (`GameState::apply_world_deltas`); an unbounded burst of them (a
+    /// lending host's snowfall pass in the second after a join, with up to
+    /// about 289 checks pending) would be one long frame. So the first
+    /// `forced_cap` distinct pending columns the frame would force are let
+    /// through, and the step that would force the next, with every step after
+    /// it, is held back until the next frame: the change waits for its check,
+    /// as it always did, and the order of the stream is kept, because nothing
+    /// overtakes a held step. The first forced check of a frame always
+    /// runs, so a held burst drains a `forced_cap` a frame. The count is
+    /// conservative: a note earlier in the same frame counts as pending, and
+    /// a check that finds nothing to do still counts. Returns the steps to
+    /// run now.
+    pub fn plan_deltas(
+        &mut self,
+        chunks: Vec<(usize, StreamItem)>,
+        changes: &[crate::protocol::BlockChange],
+        forced_cap: usize,
+    ) -> Vec<Delta> {
+        let mut steps: VecDeque<Delta> = std::mem::take(&mut self.carried);
+        for step in interleave(chunks, changes.len()) {
+            match step {
+                IntakeStep::Chunk(p) => steps.push_back(Delta::Chunk(p)),
+                IntakeStep::Local(col, hash) => steps.push_back(Delta::Local(col, hash)),
+                IntakeStep::Changes(range) => {
+                    steps.extend(changes[range].iter().cloned().map(Delta::Change));
+                }
+            }
+        }
+        let cap = forced_cap.max(1);
+        let mut forced: ahash::AHashSet<(i32, i32)> = ahash::AHashSet::new();
+        let mut noted: ahash::AHashSet<(i32, i32)> = ahash::AHashSet::new();
+        let mut run = Vec::with_capacity(steps.len());
+        while let Some(step) = steps.pop_front() {
+            let forces = match &step {
+                Delta::Chunk(p) if !p.compressed_blocks.is_empty() => Some((p.cx, p.cz)),
+                Delta::Change(bc) => Some(crate::chunk_stream::column_of_block(bc.x, bc.z)),
+                _ => None,
+            };
+            if let Some(col) = forces
+                && (self.unverified.contains_key(&col) || noted.contains(&col))
+                && !forced.contains(&col)
+            {
+                if forced.len() >= cap {
+                    self.carried.push_back(step);
+                    self.carried.extend(steps);
+                    return run;
+                }
+                forced.insert(col);
+            }
+            if let Delta::Local(col, _) = &step {
+                noted.insert(*col);
+            }
+            run.push(step);
+        }
+        run
+    }
+
+    /// Steps held back to a later frame. Test-only.
+    #[cfg(test)]
+    pub fn carried_len(&self) -> usize {
+        self.carried.len()
     }
 
     /// Is column `col`'s check still pending? Test-only.
@@ -1314,6 +1404,112 @@ mod tests {
         first.compressed_blocks = vec![1, 2, 3];
         intake.apply(&mut world, &mut loaded, &reg(), &first);
         assert_eq!(intake.drops_for_input(2, 8), vec![ChunkDrop { cx: 9, cz: 9, as_of: 3 }]);
+    }
+
+    /// A change at the origin cell of column `(cx, 0)`.
+    fn change_in(cx: i32) -> protocol::BlockChange {
+        protocol::BlockChange::with_meta(cx * 16, 70, 0, block::STONE, 0)
+    }
+
+    /// Which columns a planned frame's changes sit in, in order.
+    fn change_cols(run: &[Delta]) -> Vec<i32> {
+        run.iter()
+            .filter_map(|d| match d {
+                Delta::Change(bc) => Some(bc.x.div_euclid(16)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_burst_of_forced_checks_is_capped_a_frame_and_the_rest_waits_in_order() {
+        // B2b fix-2 N3: five noted columns, a change for each, then a second
+        // change for the first: with a cap of 2 a frame, the third column's
+        // change and everything after it wait, and nothing overtakes it.
+        let biome = crate::biome::BiomeGenerator::new(42);
+        let mut world = World::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        let empty = crate::chunk_verdict::column_hash(&world, (0, 0));
+        for cx in 1..=5 {
+            intake.note_local((cx, 0), empty);
+        }
+        let changes: Vec<_> = [1, 2, 3, 4, 5, 1].into_iter().map(change_in).collect();
+        let frame1 = intake.plan_deltas(vec![], &changes, 2);
+        assert_eq!(change_cols(&frame1), vec![1, 2], "two columns' forced checks, then it holds");
+        assert_eq!(intake.carried_len(), 4);
+        // The caller runs the checks of what it was given.
+        for cx in [1, 2] {
+            assert_eq!(intake.verify_local(&mut world, &biome, (cx, 0)), ColumnCheck::Matched);
+        }
+        // Next frame: the held steps come first, ahead of anything that arrived since.
+        let later = vec![change_in(9)];
+        let frame2 = intake.plan_deltas(vec![], &later, 2);
+        assert_eq!(change_cols(&frame2), vec![3, 4], "the held steps run first, in order");
+        assert_eq!(intake.carried_len(), 3, "col 5, col 1 again and the new change for col 9");
+        for cx in [3, 4] {
+            intake.verify_local(&mut world, &biome, (cx, 0));
+        }
+        let frame3 = intake.plan_deltas(vec![], &[], 2);
+        assert_eq!(change_cols(&frame3), vec![5, 1, 9], "col 1 is checked already: it and col 9 are not forced");
+        assert_eq!(intake.carried_len(), 0, "drained");
+    }
+
+    #[test]
+    fn the_first_forced_check_of_a_frame_always_runs_whatever_the_cap() {
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        intake.note_local((1, 0), 1);
+        intake.note_local((2, 0), 2);
+        let changes = vec![change_in(1), change_in(2)];
+        let run = intake.plan_deltas(vec![], &changes, 0);
+        assert_eq!(change_cols(&run), vec![1], "progress with a cap of 0: one a frame");
+        assert_eq!(intake.carried_len(), 1);
+    }
+
+    #[test]
+    fn only_a_pending_check_counts_against_the_cap() {
+        let world = World::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        intake.note_local((1, 0), 1);
+        // Many changes in columns that were never noted, and several in the
+        // noted one: one forced check in all.
+        let mut changes = vec![change_in(1), change_in(1), change_in(1)];
+        changes.extend((10..30).map(change_in));
+        let run = intake.plan_deltas(vec![], &changes, 1);
+        assert_eq!(run.len(), changes.len(), "nothing held");
+        assert_eq!(intake.carried_len(), 0);
+        // A pushed chunk for a pending column counts like a change; a note
+        // earlier in the same frame makes its column pending; one with
+        // nothing to hash (a continuation packet) is never a check.
+        intake.note_local((2, 0), 2);
+        let mut cont = packet_of(&world, (2, 0, 0));
+        cont.compressed_blocks.clear();
+        let chunks = vec![
+            (0, StreamItem::Chunk(packet_of(&world, (1, 0, 0)))),
+            (0, StreamItem::Chunk(cont)),
+            (0, StreamItem::Local((3, 0), 3)),
+            (0, StreamItem::Chunk(packet_of(&world, (3, 0, 0)))),
+        ];
+        let run = intake.plan_deltas(chunks, &[], 1);
+        assert_eq!(run.len(), 3, "the push for col 1, the empty packet and the note run");
+        assert_eq!(intake.carried_len(), 1, "the push for col 3 would force a second check: held");
+    }
+
+    #[test]
+    fn no_check_is_forced_once_the_switch_is_set() {
+        let biome = crate::biome::BiomeGenerator::new(42);
+        let mut world = World::new();
+        world.generate_column(1, 0, &biome);
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        intake.note_local((1, 0), 0xBAD);
+        intake.note_local((2, 0), 0xBAD);
+        assert!(intake.verify_local(&mut world, &biome, (1, 0)).let_go());
+        let changes: Vec<_> = (2..12).map(change_in).collect();
+        let run = intake.plan_deltas(vec![], &changes, 1);
+        assert_eq!(run.len(), 10, "no column is checked any more, so none is held");
     }
 
     /// Measurement (B2a review LOW-6): what `clear_side_data` costs per

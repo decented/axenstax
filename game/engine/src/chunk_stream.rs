@@ -173,16 +173,18 @@ impl super::GameState {
     /// Phase B2b — check column `col` against its "local" note now, whatever
     /// the frame's budget, if this client holds it (loaded) and its check is
     /// pending (`ChunkIntake::verify_local`): a server change is about to land
-    /// on it. Returns whether the column went ([`Self::unload_let_go_column`]).
-    fn check_column_now(&mut self, col: (i32, i32)) -> bool {
+    /// on it. A column the check let go of is unloaded
+    /// ([`Self::unload_let_go_column`]). Returns what the check cost in
+    /// column hashes (`ColumnCheck::cost`), `0` if it ran none.
+    fn check_column_now(&mut self, col: (i32, i32)) -> usize {
         if !self.loaded_columns.contains(&col) {
-            return false;
+            return 0;
         }
-        let gone = self.chunk_intake.verify_local(&mut self.world, &self.biome_gen, col).let_go();
-        if gone {
+        let check = self.chunk_intake.verify_local(&mut self.world, &self.biome_gen, col);
+        if check.let_go() {
             self.unload_let_go_column(col);
         }
-        gone
+        check.cost()
     }
 
     /// Phase B2b — a column the check let go of (a real generation
@@ -780,23 +782,28 @@ impl super::GameState {
     /// B2a — apply a joined session's world deltas in arrival order: each
     /// pushed chunk (`chunk_intake`) between the server block changes that
     /// came before and after it, then run up to `check_budget` of the queued
-    /// column checks (B2b, `ChunkIntake::run_checks`; a server change or a
-    /// pushed chunk for a column whose check is pending checks it first,
-    /// whatever the budget), then light and mesh up to `relight_budget`
-    /// pushed columns. A change for a column this client doesn't hold is
-    /// dropped (Phase B1 review): applying it would conjure a stray chunk
-    /// that its own generation later skips — the push brings such columns
-    /// whole.
+    /// column checks (B2b, `ChunkIntake::run_checks`), then light and mesh up
+    /// to `relight_budget` pushed columns. A server change or a pushed chunk
+    /// for a column whose check is pending checks it first, outside that
+    /// budget — but at most `forced_checks` distinct columns a frame
+    /// (B2b fix-2 N3, `ChunkIntake::plan_deltas`): the step that would force
+    /// the next, and everything after it, waits for the next frame, and what
+    /// the forced checks cost comes off `check_budget`. A change for a column
+    /// this client doesn't hold is dropped (Phase B1 review): applying it
+    /// would conjure a stray chunk that its own generation later skips — the
+    /// push brings such columns whole.
     pub(crate) fn apply_world_deltas(
         &mut self,
         chunks: Vec<(usize, crate::chunk_intake::StreamItem)>,
         changes: &[crate::protocol::BlockChange],
         relight_budget: usize,
         check_budget: usize,
+        forced_checks: usize,
     ) {
-        for step in crate::chunk_intake::interleave(chunks, changes.len()) {
+        let mut forced_spent = 0;
+        for step in self.chunk_intake.plan_deltas(chunks, changes, forced_checks) {
             match step {
-                crate::chunk_intake::IntakeStep::Chunk(pkt) => {
+                crate::chunk_intake::Delta::Chunk(pkt) => {
                     // B2b fix D3 (review MEDIUM-1) — a chunk pushed into a
                     // column noted local but not generated yet (an overflow
                     // resync) overlays the generated column, never a void.
@@ -808,11 +815,14 @@ impl super::GameState {
                     // B2b fix LOW-2 — a push into a column whose check is
                     // pending checks it first: the push replaces what it is
                     // checked by.
-                    if self
-                        .chunk_intake
-                        .check_before_chunk(&mut self.world, &self.loaded_columns, &self.biome_gen, &pkt)
-                        .let_go()
-                    {
+                    let check = self.chunk_intake.check_before_chunk(
+                        &mut self.world,
+                        &self.loaded_columns,
+                        &self.biome_gen,
+                        &pkt,
+                    );
+                    forced_spent += check.cost();
+                    if check.let_go() {
                         self.unload_let_go_column((pkt.cx, pkt.cz));
                     }
                     self.chunk_intake.apply(
@@ -822,7 +832,7 @@ impl super::GameState {
                         &pkt,
                     );
                 }
-                crate::chunk_intake::IntakeStep::Local(col, hash) => {
+                crate::chunk_intake::Delta::Local(col, hash) => {
                     // B2b — a note confirms a column: one already held has
                     // its check queued now, one not generated yet when it is.
                     self.chunk_intake.note_local(col, hash);
@@ -830,47 +840,50 @@ impl super::GameState {
                         self.chunk_intake.column_held(col);
                     }
                 }
-                crate::chunk_intake::IntakeStep::Changes(range) => {
-                    for bc in &changes[range] {
-                        // B2b — a change for a column the server said is
-                        // local but this client has not generated yet: the
-                        // column first (the full load path), then the change
-                        // — never a stray chunk.
-                        if let Some(col) =
-                            self.chunk_intake.generate_before(bc, &self.loaded_columns, &self.world)
-                        {
-                            self.load_one_column(col.0, col.1);
-                        }
-                        // A local column whose check is pending is checked
-                        // before the change lands, whatever the budget.
-                        self.check_column_now(column_of_block(bc.x, bc.z));
-                        // A part-pushed column is not loaded yet, but the
-                        // server sends changes only to chunks it has pushed.
-                        if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z)
-                            && !self
-                                .chunk_intake
-                                .holds_chunk(crate::state_outbox::chunk_of(bc))
-                        {
-                            continue;
-                        }
-                        // Task 2b — a joiner asks the host to flip a lever and
-                        // waits for the broadcast, so the latch arrives as a
-                        // metadata bit rather than a local mutation.
-                        // `apply_remote_block_change` folds that bit back into
-                        // the device (it is the shared apply point for this
-                        // loop and the host's loopback loop), or this client's
-                        // own still duplicated power sim would darken the
-                        // host's lit wire the moment anything nearby dirtied
-                        // the network.
-                        if self.world.apply_remote_block_change(bc) {
-                            self.rebuild_chunk_at(bc.x, bc.y, bc.z);
-                        }
+                crate::chunk_intake::Delta::Change(bc) => {
+                    let bc = &bc;
+                    // B2b — a change for a column the server said is
+                    // local but this client has not generated yet: the
+                    // column first (the full load path), then the change
+                    // — never a stray chunk.
+                    if let Some(col) =
+                        self.chunk_intake.generate_before(bc, &self.loaded_columns, &self.world)
+                    {
+                        self.load_one_column(col.0, col.1);
+                    }
+                    // A local column whose check is pending is checked
+                    // before the change lands (at most `forced_checks`
+                    // columns a frame: the planner held back the rest).
+                    forced_spent += self.check_column_now(column_of_block(bc.x, bc.z));
+                    // A part-pushed column is not loaded yet, but the
+                    // server sends changes only to chunks it has pushed.
+                    if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z)
+                        && !self.chunk_intake.holds_chunk(crate::state_outbox::chunk_of(bc))
+                    {
+                        continue;
+                    }
+                    // Task 2b — a joiner asks the host to flip a lever and
+                    // waits for the broadcast, so the latch arrives as a
+                    // metadata bit rather than a local mutation.
+                    // `apply_remote_block_change` folds that bit back into
+                    // the device (it is the shared apply point for this
+                    // loop and the host's loopback loop), or this client's
+                    // own still duplicated power sim would darken the
+                    // host's lit wire the moment anything nearby dirtied
+                    // the network.
+                    if self.world.apply_remote_block_change(bc) {
+                        self.rebuild_chunk_at(bc.x, bc.y, bc.z);
                     }
                 }
             }
         }
         // B2b fix LOW-3 — the queued column checks, within the frame's budget.
-        for col in self.chunk_intake.run_checks(&mut self.world, &self.biome_gen, &self.loaded_columns, check_budget) {
+        for col in self.chunk_intake.run_checks(
+            &mut self.world,
+            &self.biome_gen,
+            &self.loaded_columns,
+            check_budget.saturating_sub(forced_spent),
+        ) {
             self.unload_let_go_column(col);
         }
         // B2a verify NEW-2 — a column given up on (a chunk that did not
@@ -951,6 +964,7 @@ impl super::GameState {
             &changes,
             crate::loading_screen::LOAD_BUDGET_PER_FRAME,
             LOADING_COLUMN_CHECKS_PER_FRAME,
+            LOADING_FORCED_CHECKS_PER_FRAME,
         );
         let r = crate::chunk_push::SPAWN_RING_RADIUS;
         let mut missing = 0;
@@ -998,18 +1012,37 @@ pub(crate) const JOIN_RING_WAIT_LIMIT: std::time::Duration = std::time::Duration
 pub(crate) const PUSH_RELIGHT_PER_FRAME: usize = 2;
 
 /// B2b fix LOW-3 — the column checks a joined session runs per frame in play
-/// (`ChunkIntake::run_checks`), in column hashes: one SHA-256 pass over a
-/// column's 52 KB of blocks and placed masks each, so 8 stay well under a
-/// millisecond, and a scratch generation (a mismatch to confirm) costs
-/// `chunk_intake::SCRATCH_CHECK_COST` more — about one a frame. A whole R 8
-/// area (289 columns) is checked in well under a second. A server change or
-/// a pushed chunk for a column whose check is pending checks it first,
-/// outside the budget.
-pub(crate) const COLUMN_CHECKS_PER_FRAME: usize = 8;
+/// (`ChunkIntake::run_checks`), in column hashes. **Measured** (B2b fix-2 N3,
+/// release build, i5-1235U with SHA extensions,
+/// `chunk_verdict::tests::measure_check_costs`): one hash of a column's 52 KB
+/// of blocks and placed masks is 0.024 ms (a CPU without SHA extensions:
+/// roughly ten times that), a scratch generation is 1.52 ms and costs
+/// `chunk_intake::SCRATCH_CHECK_COST = 63` hashes more. 16 is 0.4 ms of
+/// hashing here (about 4 ms without SHA extensions); a check that finds drift
+/// crosses the budget on its own, so a frame holds at most 15 hashes and one
+/// scratch, about 2 ms. A whole R 8 area (289 columns) is checked in 18
+/// frames, 0.3 s. Forced checks ([`FORCED_CHECKS_PER_FRAME`]) come off it.
+pub(crate) const COLUMN_CHECKS_PER_FRAME: usize = 16;
 
 /// B2b fix LOW-3 — the same on a joined session's loading screen, which has
 /// no frame rate to keep: the spawn area's notes are checked as they come.
-pub(crate) const LOADING_COLUMN_CHECKS_PER_FRAME: usize = 64;
+/// 128 hashes are 3.1 ms here (about 30 ms without SHA extensions), and
+/// nothing has drifted yet on a column just generated, so a scratch is rare.
+pub(crate) const LOADING_COLUMN_CHECKS_PER_FRAME: usize = 128;
+
+/// B2b fix-2 N3 — the distinct columns a joined session's frame in play
+/// checks synchronously because a server change or a pushed chunk is about
+/// to land on them (`ChunkIntake::plan_deltas`); the step that would force
+/// the next waits for the next frame, with everything after it. Each is a
+/// hash (0.024 ms) and, only if the joiner has written to the column, a
+/// scratch (1.52 ms more): 8 are 0.2 ms typically (2 ms without SHA
+/// extensions) and, if every one had drifted, about 12 ms, a frame's worth
+/// and a case that needs eight columns of the joiner's own writes noted at
+/// once. A burst of 289 pending columns drains in 36 frames, 0.6 s.
+pub(crate) const FORCED_CHECKS_PER_FRAME: usize = 8;
+
+/// B2b fix-2 N3 — the same on the loading screen: 64 are 1.5 ms here.
+pub(crate) const LOADING_FORCED_CHECKS_PER_FRAME: usize = 64;
 
 /// Extra columns (Chebyshev) a loaded column may sit beyond the streaming
 /// radius before it unloads, so a player pacing along a column border doesn't

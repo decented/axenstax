@@ -9,6 +9,8 @@
 //!
 //! - A harvested crop (`growth::crop_break`) yields its crop drops and leaves
 //!   its replacement in the cell (tilled soil, a papyrus root).
+//! - Lava, water, fire, smoke and air yield nothing ([`yields_drops`]), for
+//!   every breaker.
 //! - Anything else drops only when the tool's tier allows it
 //!   (`crafting::can_harvest`): the mine drop
 //!   (`BlockRegistry::mine_drop_with_seed`) plus any bonus stack.
@@ -32,7 +34,9 @@ pub fn drop_seed(tick: u64, x: i32, y: i32, z: i32) -> u64 {
 /// The world's Proof-of-Play keys (Spec 06 §1.3): its own random secret
 /// (`WorldMeta.pop_secret`), its seed and the epoch. Whoever holds the world
 /// rolls with these — the single-player client, a host, or a dedicated server
-/// — never a joiner, whose client has no business knowing the secret.
+/// — never a joiner whose edits reach the server, whose client has no
+/// business knowing the secret (a web joiner's edits never arrive, so it rolls
+/// on its own local world's).
 #[derive(Clone, Copy)]
 pub struct PopKeys<'a> {
     pub secret: &'a [u8; 32],
@@ -139,6 +143,19 @@ pub struct BreakYield {
     pub harvestable: bool,
 }
 
+/// Does breaking `blk` yield anything at all? Not an empty cell, and not a
+/// fluid (WATER, LAVA), fire or smoke: a survival break can target LAVA and
+/// FIRE (`raycast::is_pickable` skips only AIR, WATER and smoke) and digs them
+/// up, but they are not items — no LAVA, WATER or FIRE block comes out. One
+/// rule for every breaker (FU2, C1 verify N2): single-player used to get a
+/// placeable LAVA block from digging lava while a joiner, whose break the
+/// server classifies, got nothing.
+pub fn yields_drops(blk: BlockId) -> bool {
+    blk != crate::block::AIR
+        && !crate::block::is_fluid(blk)
+        && !matches!(blk, crate::block::FIRE | crate::block::CAMPFIRE_SMOKE)
+}
+
 /// The yield of breaking `blk` at `cell` with `tool` on tick `tick`, read from
 /// `world` as it stands before the break. See the module doc for the rules.
 pub fn break_yield(
@@ -166,6 +183,7 @@ pub fn break_yield(
     };
     let is_crop = crop.is_some();
     let (replacement, mut drops) = match crop {
+        _ if !yields_drops(blk) => (crate::block::AIR, Vec::new()),
         Some(result) => (result.replacement, result.drops),
         None if harvestable => {
             let mut drops = vec![registry.mine_drop_with_seed(blk, seed)];
@@ -187,11 +205,17 @@ pub fn edits_reach_server(joined: bool, web: bool) -> bool {
 }
 
 /// What [`take_yield`] took.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Taken {
-    /// Part of a crop harvest didn't fit (the break arm's "harvest lost").
-    pub crop_lost: bool,
-    /// The Satori's material, when one was taken (scenario + celebration).
+    /// What didn't fit the inventory, to be spilled on the ground at the
+    /// breaker's feet ([`spill_at_feet`]): the drops that overflowed and a
+    /// Satori that found no slot.
+    pub spilled: Vec<ItemStack>,
+    /// Part of a crop harvest overflowed (the break arm's "inventory full"
+    /// toast: players repeat-harvest, so it says so).
+    pub crop_overflowed: bool,
+    /// The Satori's material, when one was found (scenario + celebration);
+    /// set whether or not it fit: a Satori that spilled is still found.
     pub gem: Option<MaterialId>,
 }
 
@@ -201,26 +225,44 @@ pub struct Taken {
 /// takes nothing: the server yields the same break and grants it by
 /// `InventoryGrant` (C1); taking it here too would double it. A web joiner's
 /// edits never arrive, so it passes `false` and keeps its own drops.
-/// What doesn't fit is lost, as it always was for the break arm (only a crop
-/// harvest says so).
+/// What doesn't fit comes back in [`Taken::spilled`] for the caller to drop at
+/// the breaker's feet ([`spill_at_feet`]) — the rule a joiner's grant has
+/// (`remote_entities::apply_inventory_grant`): nothing is lost, and the
+/// pickup pass takes it back when space frees up (FU2, 2026-10-07; it used to
+/// be lost silently, a crop harvest excepted).
 pub fn take_yield(inv: &mut crate::inventory::Inventory, y: &BreakYield, joined: bool) -> Taken {
     let mut taken = Taken::default();
     if joined {
         return taken;
     }
     for stack in &y.drops {
-        if inv.add_item(stack.clone()).is_some() && y.crop {
-            taken.crop_lost = true;
+        if let Some(leftover) = inv.add_item(stack.clone()) {
+            taken.crop_overflowed |= y.crop;
+            taken.spilled.push(leftover);
         }
     }
     if let Some(gem) = &y.gem {
-        inv.add_item(gem.clone());
+        if let Some(leftover) = inv.add_item(gem.clone()) {
+            taken.spilled.push(leftover);
+        }
         taken.gem = match gem.item {
             crate::item::Item::Material(m) => Some(m),
             _ => None,
         };
     }
     taken
+}
+
+/// Drop `stacks` ([`Taken::spilled`]) on the ground at the breaker's feet
+/// (`pos`) as ordinary item entities, which the pickup pass takes back once
+/// there is room. `seed` spreads them slightly
+/// ([`drop_seed`] of the break).
+pub fn spill_at_feet(ecs: &mut hecs::World, pos: glam::Vec3, stacks: &[ItemStack], seed: u64) {
+    for (i, stack) in stacks.iter().enumerate() {
+        if stack.count > 0 {
+            crate::entity::spawn_item(ecs, pos, stack.clone(), (seed as u32).wrapping_add(i as u32 * 31));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -376,5 +418,90 @@ mod tests {
         assert_eq!(taken.gem, Some(MaterialId::Satori));
         assert_eq!(inv.slot(0).map(|s| s.item.clone()), Some(Item::Block(block::COBBLESTONE)));
         assert_eq!(inv.slot(1).map(|s| s.item.clone()), Some(Item::Material(MaterialId::Satori)));
+    }
+
+    /// An inventory with every slot full of a different-enough full stack.
+    fn full_inventory() -> crate::inventory::Inventory {
+        let mut inv = crate::inventory::Inventory::new();
+        for i in 0..36 {
+            inv.set_slot(i, Some(ItemStack::new_block(block::GLASS, 64)));
+        }
+        inv
+    }
+
+    fn ground_items(ecs: &hecs::World) -> Vec<ItemStack> {
+        ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_, i)| i.stack.clone()).collect()
+    }
+
+    #[test]
+    fn a_break_drop_that_does_not_fit_spills_at_the_feet_instead_of_being_lost() {
+        // FU2 — single-player overflow spill (Spec 05 §2.5 "Drops").
+        let y = BreakYield {
+            replacement: block::AIR,
+            drops: vec![ItemStack::new_block(block::COBBLESTONE, 3)],
+            gem: Some(ItemStack::new_material(MaterialId::Satori, 1)),
+            crop: false,
+            harvestable: true,
+        };
+        let mut inv = full_inventory();
+        let taken = take_yield(&mut inv, &y, false);
+        assert_eq!(
+            taken.spilled,
+            vec![ItemStack::new_block(block::COBBLESTONE, 3), ItemStack::new_material(MaterialId::Satori, 1)],
+            "the whole drop and the Satori, in order"
+        );
+        assert_eq!(taken.gem, Some(MaterialId::Satori), "a Satori that spilled is still found");
+        assert!(!taken.crop_overflowed, "not a crop");
+        let mut ecs = hecs::World::new();
+        spill_at_feet(&mut ecs, glam::Vec3::new(4.5, 70.0, 9.5), &taken.spilled, drop_seed(5, 1, 2, 3));
+        let on_ground = ground_items(&ecs);
+        assert_eq!(on_ground.len(), 2);
+        assert!(on_ground.contains(&ItemStack::new_block(block::COBBLESTONE, 3)));
+        assert!(on_ground.contains(&ItemStack::new_material(MaterialId::Satori, 1)));
+        for (pos, _) in ecs.query::<(&crate::entity::Position, &crate::entity::ItemEntity)>().iter().map(|(_, c)| c) {
+            assert!((pos.0.x - 4.5).abs() < 0.5 && (pos.0.z - 9.5).abs() < 0.5, "at the player's feet");
+        }
+    }
+
+    #[test]
+    fn only_the_part_that_does_not_fit_spills_and_a_crop_says_so() {
+        let mut inv = full_inventory();
+        // One slot with room for 2 more cobblestone.
+        inv.set_slot(7, Some(ItemStack::new_block(block::COBBLESTONE, 62)));
+        let y = BreakYield {
+            replacement: block::AIR,
+            drops: vec![ItemStack::new_block(block::COBBLESTONE, 5)],
+            gem: None,
+            crop: true,
+            harvestable: true,
+        };
+        let taken = take_yield(&mut inv, &y, false);
+        assert_eq!(inv.slot(7).map(|s| s.count), Some(64), "topped up first");
+        assert_eq!(taken.spilled, vec![ItemStack::new_block(block::COBBLESTONE, 3)], "only the remainder");
+        assert!(taken.crop_overflowed, "a crop harvest says the inventory was full");
+        // Nothing to spill when it all fits.
+        let mut roomy = crate::inventory::Inventory::new();
+        assert!(take_yield(&mut roomy, &y, false).spilled.is_empty());
+        // And a joined client's break spills nothing: the server's grant spills at its end.
+        assert_eq!(take_yield(&mut full_inventory(), &y, true), Taken::default());
+    }
+
+    #[test]
+    fn lava_fire_water_and_air_yield_nothing_to_any_breaker() {
+        // C1 verify N2: single-player used to get a placeable LAVA block.
+        let biome = crate::block::BlockRegistry::new();
+        for blk in [block::LAVA, block::FIRE, block::WATER, block::AIR, block::CAMPFIRE_SMOKE] {
+            let w = world_with((5, 6, 5), blk);
+            for tool in [None, Some(pick(ToolMaterial::Diamond))] {
+                let y = break_yield(&w, &biome, blk, (5, 6, 5), tool.as_ref(), 10, &keys(&SECRET));
+                assert!(y.drops.is_empty() && y.gem.is_none(), "{blk} yields nothing");
+                assert_eq!(y.replacement, block::AIR);
+            }
+            assert!(!yields_drops(blk));
+        }
+        // Real blocks still do.
+        let w = world_with((5, 6, 5), block::STONE);
+        let y = break_yield(&w, &biome, block::STONE, (5, 6, 5), Some(&pick(ToolMaterial::Wood)), 10, &keys(&SECRET));
+        assert!(!y.drops.is_empty() && yields_drops(block::STONE));
     }
 }

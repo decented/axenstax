@@ -10,6 +10,10 @@
 //! on a cow in the crosshair milked it every frame without a click, shears
 //! sheared, and companion food rolled a tame (and was eaten) every frame.
 //!
+//! A refused milk or shear does not eat the click ([`MobClick::eats_click`]):
+//! the caller falls through to the next interaction, so filling a bucket at
+//! water beside a recently milked cow works (review D2b B1 residual).
+//!
 //! Toasts, audio, particles, challenge events and the cooldown stay with the
 //! caller, which owns them.
 
@@ -33,12 +37,25 @@ pub struct MobClick {
     pub interaction: Interaction,
 }
 
+impl MobClick {
+    /// Did this click do something that uses it up? A refusal (the cow isn't
+    /// ready, the wool is growing back) does not: the click falls through to
+    /// the next interaction exactly as if the mob were not there (review D2b
+    /// B1 residual) — a bucket aimed at water beside a cow just milked still
+    /// fills. The caller shows the refusal's toast but sets no cooldown and
+    /// does not skip the rest of the right-click chain.
+    pub fn eats_click(&self) -> bool {
+        self.interaction.done
+    }
+}
+
 /// Animals Wave 2 — a bucket on a cow, or shears on a sheep, in the
 /// crosshair (`mob_interact::milk` / `shear`). On a `clicked` frame only.
 /// When it happened, what it used comes out of the hand and its products go
 /// into the inventory (any overflow drops at the player's feet). A refusal
-/// (the cow isn't ready, the wool is growing back) is returned too — it ate
-/// the click — and takes nothing.
+/// (the cow isn't ready, the wool is growing back) is returned too, for its
+/// toast, and takes nothing; it does not eat the click
+/// ([`MobClick::eats_click`]).
 pub fn harvest(
     ecs: &mut hecs::World,
     slot: &mut PlayerSlot,
@@ -174,5 +191,30 @@ mod tests {
         assert!(!right_click_ready(&PlayerIntent { cursor_captured: false, ..intent.clone() }, &slot));
         slot.place_cooldown = 3;
         assert!(!right_click_ready(&intent, &slot));
+    }
+
+    /// Review D2b B1 residual — a cow just milked refuses a second bucket, and
+    /// the refusal does not eat the click: nothing is taken, the caller sets
+    /// no cooldown, and the click falls through (to the bucket fill at water
+    /// beside the cow). The click that milks it does eat the click.
+    #[test]
+    fn a_refused_milk_or_shear_does_not_eat_the_click() {
+        let (mut ecs, mut slot, _cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 2));
+        let first = harvest(&mut ecs, &mut slot, true, 100).expect("the cow is ready");
+        assert!(first.interaction.done && first.eats_click(), "milking uses the click up");
+        let again = harvest(&mut ecs, &mut slot, true, 101).expect("the cow is in the cone: refused");
+        assert!(!again.interaction.done && !again.eats_click(), "not ready: the click falls through");
+        assert_eq!(slot.inventory.count_material(MaterialId::Bucket), 1, "the refusal took nothing");
+        assert_eq!(slot.inventory.count_material(MaterialId::MilkBucket), 1, "and gave nothing");
+        assert_eq!(slot.place_cooldown, 0, "harvest sets no cooldown: that is the caller's, on a done click");
+
+        let (mut ecs, mut slot, _sheep) = facing(MobType::Sheep, ItemStack::new_tool(crate::crafting::Tool::new(
+                crate::crafting::ToolType::Shears,
+                crate::crafting::ToolMaterial::Iron,
+            )));
+        let shorn = harvest(&mut ecs, &mut slot, true, 100).expect("the sheep is ready");
+        assert!(shorn.eats_click());
+        let regrowing = harvest(&mut ecs, &mut slot, true, 101).expect("refused: wool growing back");
+        assert!(!regrowing.eats_click());
     }
 }

@@ -4139,9 +4139,11 @@ impl super::GameState {
     }
 
     /// This client's world's Proof-of-Play keys (`break_drops::PopKeys`), for
-    /// the break arm's Satori roll. A joined client never rolls with them:
-    /// its world is someone else's, and the server rolls a joiner's breaks on
-    /// that world's secret (C1).
+    /// the break arm's Satori roll. A joined client whose edits reach the
+    /// server never uses them: its world is someone else's, and the server
+    /// rolls its breaks on that world's secret (C1). A web joiner's edits
+    /// never arrive (`edits_reach_server`), so it does roll — on its own
+    /// local world's secret, for its own drops.
     pub(crate) fn pop_keys(&self) -> crate::break_drops::PopKeys<'_> {
         crate::break_drops::PopKeys {
             secret: &self.pop_server_secret,
@@ -11953,19 +11955,35 @@ impl super::GameState {
                                     // (`InventoryGrant`) — taking it here too
                                     // would double it. A WEB joiner's edits
                                     // never reach the server (L-web-edit), so
-                                    // it still takes its own drops. Ore / Satori stacks
-                                    // that don't fit are lost silently (review
-                                    // N-2); a crop harvest says so, because
-                                    // players repeat-harvest.
+                                    // it still takes its own drops. Stacks that don't
+                                    // fit spill at the breaker's feet (FU2; they were
+                                    // lost silently, review N-2); a crop harvest says
+                                    // so, because players repeat-harvest.
                                     let joined = self.edits_reach_server();
                                     let taken = crate::break_drops::take_yield(
                                         &mut self.players[pidx].inventory,
                                         &break_yield,
                                         joined,
                                     );
-                                    if taken.crop_lost {
+                                    // What didn't fit lands at the breaker's
+                                    // feet as ground items (FU2), as a
+                                    // joiner's overflowing grant does.
+                                    if !taken.spilled.is_empty() {
+                                        crate::break_drops::spill_at_feet(
+                                            &mut self.ecs,
+                                            self.players[pidx].player.pos,
+                                            &taken.spilled,
+                                            crate::break_drops::drop_seed(
+                                                self.tick_counter,
+                                                pos[0],
+                                                pos[1],
+                                                pos[2],
+                                            ),
+                                        );
+                                    }
+                                    if taken.crop_overflowed {
                                         self.toast = Some((
-                                            "Inventory full — harvest lost".to_string(),
+                                            "Inventory full — harvest dropped at your feet".to_string(),
                                             Instant::now() + Duration::from_secs(3),
                                         ));
                                     }
@@ -12602,6 +12620,7 @@ impl super::GameState {
             if let Some(click) =
                 crate::local_mob_click::harvest(&mut self.ecs, &mut self.players[pidx], clicked, tick)
             {
+                let eats_click = click.eats_click();
                 let (target, kind, r) = (click.target, click.kind, click.interaction);
                 if r.done {
                     self.audio.play_place();
@@ -12630,7 +12649,14 @@ impl super::GameState {
                 {
                     self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
                 }
-                continue;
+                // A refusal (the cow isn't ready, the wool is growing back)
+                // does not eat the click: it falls through to the next
+                // interaction as if the mob were not there, with no cooldown
+                // (review D2b B1 residual — a bucket aimed at water beside a
+                // cow just milked must still fill).
+                if eats_click {
+                    continue;
+                }
             }
 
             // Companions wave — tame a Cat / Parrot / Fox by right-clicking it
@@ -21473,6 +21499,7 @@ impl super::GameState {
             &pending_block_changes,
             crate::chunk_stream::PUSH_RELIGHT_PER_FRAME,
             crate::chunk_stream::COLUMN_CHECKS_PER_FRAME,
+            crate::chunk_stream::FORCED_CHECKS_PER_FRAME,
         );
 
         // Client: apply state update
