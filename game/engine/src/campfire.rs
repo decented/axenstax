@@ -302,6 +302,24 @@ pub fn cleanup_campfire(
     y: i32,
     z: i32,
 ) -> (Vec<crate::item::ItemStack>, Vec<(i32, i32, i32)>) {
+    let spill = cleanup_campfire_keep_smoke(world, x, y, z);
+    let cleared = clear_smoke_pillar(world, x, y, z);
+    (spill, cleared)
+}
+
+/// [`cleanup_campfire`] without the smoke-pillar clear: the entry removed and
+/// the cook slots spilled, the pillar cells left as they are (FU4b, FU3 verify
+/// L5). A joined client whose edits reach the server (`edits_reach_server()`)
+/// breaks a campfire this way: the server's `on_block_edit` clears the pillar
+/// and broadcasts the cells, so the joiner's own clear was a guess that a
+/// refused break (reach, plot) left standing on its screen — a restored fire
+/// with no smoke. The server's block changes clear it instead.
+pub fn cleanup_campfire_keep_smoke(
+    world: &mut crate::world::World,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Vec<crate::item::ItemStack> {
     let mut spill = Vec::new();
     if let Some(cf) = world.campfire_at((x, y, z)) {
         for slot in &cf.slots {
@@ -316,8 +334,7 @@ pub fn cleanup_campfire(
         }
     }
     world.block_entities.remove(&(x, y, z));
-    let cleared = clear_smoke_pillar(world, x, y, z);
-    (spill, cleared)
+    spill
 }
 
 /// The smoke pillar a campfire gets the moment it is lit: placed when the
@@ -917,6 +934,38 @@ mod tests {
 
         let (spill2, _) = cleanup_campfire(&mut world, 10, 70, 10);
         assert!(spill2.is_empty(), "second cleanup is a no-op");
+    }
+
+    /// FU4b (FU3 verify L5) — a joiner whose edits reach the server breaks a
+    /// fire with the keep-smoke variant: the same entry removal and spill, the
+    /// pillar cells left for the server's own clear to arrive.
+    #[test]
+    fn cleanup_campfire_keep_smoke_spills_like_the_full_cleanup_but_leaves_the_pillar() {
+        use crate::item::ItemStack;
+        use crate::world::World;
+        let build = || {
+            let mut world = World::new();
+            let mut cf = CampfireData::default();
+            cf.slots[0] = CookSlot { item: Some(MaterialId::RawBeef), progress_ticks: 50 };
+            world.insert_campfire((10, 70, 10), cf);
+            world.set_block(10, 70, 10, block::CAMPFIRE);
+            for dy in 1..=3 {
+                world.set_block(10, 70 + dy, 10, block::CAMPFIRE_SMOKE);
+            }
+            world
+        };
+        let mut world = build();
+        let spill = cleanup_campfire_keep_smoke(&mut world, 10, 70, 10);
+        assert_eq!(spill, vec![ItemStack::new_material(MaterialId::RawBeef, 1)]);
+        assert!(world.campfire_at((10, 70, 10)).is_none(), "entry removed");
+        for dy in 1..=3 {
+            assert_eq!(world.get_block(10, 70 + dy, 10), block::CAMPFIRE_SMOKE, "the pillar is the server's to clear");
+        }
+        let mut world = build();
+        let (full_spill, cleared) = cleanup_campfire(&mut world, 10, 70, 10);
+        assert_eq!(full_spill.len(), 1);
+        assert_eq!(cleared.len(), 3, "the full cleanup still clears the pillar");
+        assert_eq!(world.get_block(10, 71, 10), block::AIR);
     }
 
     /// FU3 — the rule the server runs on a joiner's campfire edit: lighting a

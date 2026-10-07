@@ -4138,6 +4138,112 @@ impl super::GameState {
         crate::break_drops::edits_reach_server(self.joined(), cfg!(target_arch = "wasm32"))
     }
 
+    /// FU4b (FU3 verify M3) — right-click with an EMPTY bucket: aim with the
+    /// fluid-aware ray (`raycast::cast_ray_fluid`: the first WATER or LAVA
+    /// source cell in reach; every other item's ray passes through water, so a
+    /// bucket could never reach a pond) and fill from what it hits. Returns
+    /// true when the bucket filled, which claims the click. Anything else the
+    /// ray hits (a block, a gate, a log to tap) is left to the right-click
+    /// chain, which sees it as it always did. Every path runs this: single
+    /// player, a host's own seats and a joiner (whose fill is the same
+    /// `broadcast_change` edit as ever; the server's edit check owns the rest).
+    fn try_bucket_fill(&mut self, pidx: usize) -> bool {
+        let hot = self.players[pidx].hotbar_slot;
+        let empty_bucket = self.players[pidx].inventory.hotbar_slot(hot).is_some_and(|s| {
+            matches!(s.item, crate::item::Item::Material(crate::item::MaterialId::Bucket))
+        });
+        if !empty_bucket || !self.play_mode.can_edit_world() {
+            return false;
+        }
+        let eye = self.players[pidx].player.eye_pos();
+        let dir = self.players[pidx].camera.forward();
+        let reach = self.effective_reach(pidx);
+        let (water, lava) = (&self.water, &self.lava);
+        let hit = crate::raycast::cast_aim_ray(
+            true,
+            eye,
+            dir,
+            reach,
+            &self.world,
+            &self.registry,
+            |b, p| {
+                if b == block::WATER {
+                    water.is_source(p[0], p[1], p[2])
+                } else {
+                    lava.is_source(p[0], p[1], p[2])
+                }
+            },
+        );
+        match hit {
+            Some(h) if h.block == block::WATER || h.block == block::LAVA => {
+                self.fill_bucket_at(pidx, h.block_pos, h.block)
+            }
+            _ => false,
+        }
+    }
+
+    /// Buckets MC-parity — fill an empty Bucket from a SOURCE block (flowing
+    /// liquid can't be bottled, matching MC). The eligibility rule lives in
+    /// `bucket::fill_result` (tested in isolation); here we query the liquid
+    /// sim for source-ness and, when it fills, mirror the mine path
+    /// (remove_source + notify so adjacent liquid retracts), clear the block,
+    /// and swap the empty Bucket for the filled one. True when it filled.
+    fn fill_bucket_at(&mut self, pidx: usize, pos: [i32; 3], target_blk: block::BlockId) -> bool {
+        let hotbar = self.players[pidx].hotbar_slot;
+        let is_water = target_blk == block::WATER;
+        let is_source = if is_water {
+            self.water.is_source(pos[0], pos[1], pos[2])
+        } else {
+            self.lava.is_source(pos[0], pos[1], pos[2])
+        };
+        let held = self.players[pidx]
+            .inventory
+            .hotbar_slot(hotbar)
+            .map(|s| s.item.clone());
+        let Some(filled) = held.and_then(|h| crate::bucket::fill_result(&h, target_blk, is_source)) else {
+            return false;
+        };
+        if !self.players[pidx]
+            .inventory
+            .consume_one_material(hotbar, crate::item::MaterialId::Bucket)
+        {
+            return false;
+        }
+        if is_water {
+            self.water.remove_source(pos[0], pos[1], pos[2]);
+        } else {
+            self.lava.remove_source(pos[0], pos[1], pos[2]);
+        }
+        self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
+        if is_water {
+            self.water.notify_block_removed(pos[0], pos[1], pos[2], &self.world);
+        } else {
+            self.lava.notify_block_removed(pos[0], pos[1], pos[2], &self.world);
+        }
+        self.fire_challenge(crate::scenario::ChallengeEvent::UseBucket);
+        let stack = crate::item::ItemStack::new_material(filled, 1);
+        if let Some(leftover) = self.players[pidx].inventory.add_item(stack) {
+            let seed_h = (pos[0] as u32).wrapping_mul(374761393)
+                ^ (self.tick_counter as u32).wrapping_mul(668265263);
+            crate::entity::spawn_item(
+                &mut self.ecs,
+                glam::Vec3::new(
+                    pos[0] as f32 + 0.5,
+                    pos[1] as f32 + 0.5,
+                    pos[2] as f32 + 0.5,
+                ),
+                leftover,
+                seed_h,
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
+        self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
+        self.audio.play_place();
+        self.players[pidx].place_cooldown = 8;
+        true
+    }
+
     /// This client's world's Proof-of-Play keys (`break_drops::PopKeys`), for
     /// the break arm's Satori roll. A joined client whose edits reach the
     /// server never uses them: its world is someone else's, and the server
@@ -4785,7 +4891,13 @@ impl super::GameState {
             self.audio.play_thunder();
             // Strikes start fires (MC parity) — through the normal fire
             // path, so the world toggle/burnout/cap all apply.
-            if self.fire.ignite(&mut self.world, bx, surface_y + 1, bz, self.tick_counter) {
+            // FU4b (Q9 row 3) — a JOINED client's own weather only flashes and
+            // thunders: its fire is pushed to the server as an edit, where it
+            // fights the server's own fire sim (the world's fire is the
+            // server's). BRIDGE until D4 moves weather into `GameServer::tick`.
+            if self.remote_client.is_none()
+                && self.fire.ignite(&mut self.world, bx, surface_y + 1, bz, self.tick_counter)
+            {
                 crate::lighting::update_for_block_change(
                     &mut self.world,
                     (bx, surface_y + 1, bz),
@@ -5612,7 +5724,17 @@ impl super::GameState {
             // return-or-toss) is `dispenser::realise_order`, shared with the
             // dedicated server (block_machines.rs, T1-3); this loop plays the
             // presentation for what it did.
-            for order in crate::dispenser::tick_dispensers(&mut self.world) {
+            // FU4b (Q9 row 3) — a JOINED client runs no dispensers (nor pistons
+            // below): their block changes were pushed to the server as the
+            // joiner's own edits, which fought the server's machines (it runs
+            // both: `block_machines`, and the lending host's sweep) — joiners
+            // see the results as block changes. BRIDGE: D4 / tick parity.
+            let dispenser_orders = if self.remote_client.is_none() {
+                crate::dispenser::tick_dispensers(&mut self.world)
+            } else {
+                Vec::new()
+            };
+            for order in dispenser_orders {
                 let pos = order.pos;
                 let out = {
                     let mut ctx = crate::block_machines::MachineCtx {
@@ -5666,7 +5788,7 @@ impl super::GameState {
                 self.audio.play_place();
             }
 
-            {
+            if self.remote_client.is_none() {
                 let piston_changes = crate::piston::tick_pistons(&mut self.world);
                 if !piston_changes.is_empty() {
                     self.fire_challenge(crate::scenario::ChallengeEvent::UsePiston);
@@ -5805,8 +5927,13 @@ impl super::GameState {
             for bc in &furnace_sweep.changes {
                 dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
             }
+            // FU4b (Q9 row 3) — a JOINED client keeps cooking in its own
+            // furnace UI (the furnace is still client-side until C3) but does
+            // not push the lit flips as edits: they fought the server's copy.
             #[cfg(not(target_arch = "wasm32"))]
-            self.pending_block_changes.extend(furnace_sweep.changes);
+            if self.remote_client.is_none() {
+                self.pending_block_changes.extend(furnace_sweep.changes);
+            }
             for pos in furnace_sweep.completed {
                 // Audio cue on recipe completion. Tied into the
                 // campfire's existing play_place hook for consistency.
@@ -5892,9 +6019,17 @@ impl super::GameState {
             // ones that hit 0 this tick; the game loop detonates them (the blast
             // needs audio/lighting/combat). Fuses are lit by the Firestarter
             // (hand) or a rising-edge power pulse (electricity).
-            for pos in crate::power::tick_keg_fuses(&mut self.world) {
-                self.detonate_keg(pos);
-                self.fire_challenge(crate::scenario::ChallengeEvent::Detonate);
+            // FU4b (Q9 row 3) — a JOINED client lights no fuses or blasts: the
+            // blast's cleared cells were pushed to the server as edits, and
+            // the server runs its own keg sweep (wired kegs, via its power
+            // tick) and broadcasts the result. A keg a joiner lights by hand
+            // lights only its own copy (the fuse is block-entity state, not an
+            // edit), so it no longer blows until D4 / C3. BRIDGE.
+            if self.remote_client.is_none() {
+                for pos in crate::power::tick_keg_fuses(&mut self.world) {
+                    self.detonate_keg(pos);
+                    self.fire_challenge(crate::scenario::ChallengeEvent::Detonate);
+                }
             }
 
             // Drying-rack seasoning tick (Spec 29 Phase 5). Same engine-
@@ -6253,7 +6388,12 @@ impl super::GameState {
         );
         // On a lent world (D1) the server runs it, on this world, right after
         // this tick; `tick_hosted_server` replays its challenges.
-        if self.sim_runs(SimSystem::Power) {
+        // FU4b (Q9 row 3) — a JOINED client runs no power tick: its changes
+        // (lamps, generators, kegs, pistons' energised map) were pushed to the
+        // server as the joiner's own edits, a burst that grew its edit queue
+        // and fought the server's own power sim, which broadcasts them. Checked
+        // first so the sim tally isn't bumped. BRIDGE: D4 / tick parity.
+        if self.remote_client.is_none() && self.sim_runs(SimSystem::Power) {
             let mut power_positions: Vec<(f32, f32, f32)> = self
                 .players
                 .iter()
@@ -11575,9 +11715,24 @@ impl super::GameState {
                                         );
                                     }
                                 }
-                                let (campfire_spill, cleared) = crate::campfire::cleanup_campfire(
-                                    &mut self.world, pos[0], pos[1], pos[2],
-                                );
+                                // FU4b (FU3 verify L5) — a joined client whose edits
+                                // reach the server leaves the smoke pillar to it:
+                                // the server clears the pillar (`on_block_edit`)
+                                // and sends the cells, so a REFUSED break (reach,
+                                // plot) can't leave a restored fire with no smoke
+                                // on this screen. Others clear it themselves.
+                                let (campfire_spill, cleared) = if self.edits_reach_server() {
+                                    (
+                                        crate::campfire::cleanup_campfire_keep_smoke(
+                                            &mut self.world, pos[0], pos[1], pos[2],
+                                        ),
+                                        Vec::new(),
+                                    )
+                                } else {
+                                    crate::campfire::cleanup_campfire(
+                                        &mut self.world, pos[0], pos[1], pos[2],
+                                    )
+                                };
                                 for (k, stack) in campfire_spill.into_iter().enumerate() {
                                     crate::entity::spawn_item(
                                         &mut self.ecs,
@@ -11933,9 +12088,24 @@ impl super::GameState {
                                             }
                                         }
                                     }
-                                    let (campfire_spill, cleared_smoke) = crate::campfire::cleanup_campfire(
+                                    // FU4b (FU3 verify L5) — a joined client whose edits
+                                // reach the server leaves the smoke pillar to it:
+                                // the server clears the pillar (`on_block_edit`)
+                                // and sends the cells, so a REFUSED break (reach,
+                                // plot) can't leave a restored fire with no smoke
+                                // on this screen. Others clear it themselves.
+                                let (campfire_spill, cleared_smoke) = if self.edits_reach_server() {
+                                    (
+                                        crate::campfire::cleanup_campfire_keep_smoke(
+                                            &mut self.world, pos[0], pos[1], pos[2],
+                                        ),
+                                        Vec::new(),
+                                    )
+                                } else {
+                                    crate::campfire::cleanup_campfire(
                                         &mut self.world, pos[0], pos[1], pos[2],
-                                    );
+                                    )
+                                };
                                     for (k, stack) in campfire_spill.into_iter().enumerate() {
                                         crate::entity::spawn_item(
                                             &mut self.ecs,
@@ -12647,11 +12817,20 @@ impl super::GameState {
             // it used to fire every frame the crosshair rested on the cow).
             let clicked = crate::local_mob_click::right_click_ready(intent, &self.players[pidx]);
             let tick = self.tick_counter;
-            // FU3 (FU1 verify N2) — set by a refused milk or shear: every
-            // later MOB arm skips this click (companion tame, pack, mount,
-            // Lead-detach, villager / pet), so the refusal never acts on that
-            // very mob (it untied a leashed cow); the block arms still run.
-            let mut mob_refused = false;
+            // FU3 (FU1 verify N2) — a refused milk or shear: every later MOB
+            // arm skips this click (companion tame, pack, mount, Lead-detach,
+            // villager / pet), so the refusal never acts on that very mob (it
+            // untied a leashed cow); the block arms still run. FU4b (L7): the
+            // decision is `local_mob_click::plan_right_click`, a pure fn with
+            // its own unit tests; this only reads it. (The Lead and feed arms
+            // above already `continue`d if they fired.)
+            let mob_refused = clicked
+                && crate::local_mob_click::plan_at_crosshair(
+                    &self.ecs,
+                    &self.players[pidx],
+                    intent.sneak,
+                    tick,
+                ) == crate::local_mob_click::MobArm::Refused;
             if let Some(click) =
                 crate::local_mob_click::harvest(&mut self.ecs, &mut self.players[pidx], clicked, tick)
             {
@@ -12692,7 +12871,7 @@ impl super::GameState {
                 if eats_click {
                     continue;
                 }
-                mob_refused = true;
+                debug_assert!(mob_refused, "a refused harvest is the plan's Refused (L7)");
             }
 
             // Companions wave — tame a Cat / Parrot / Fox by right-clicking it
@@ -13531,6 +13710,14 @@ impl super::GameState {
                     };
                     self.toast = Some((label, Instant::now() + Duration::from_secs(2)));
                     self.players[pidx].place_cooldown = 8;
+                    continue;
+                }
+
+                // FU4b (FU3 verify M3) — an empty bucket aims with its own
+                // fluid-aware ray (`try_bucket_fill`); `target_block`'s ray
+                // passes through water, so the chain below could never see a
+                // pond. After every mob arm above: a ready cow still milks.
+                if self.try_bucket_fill(pidx) {
                     continue;
                 }
 
@@ -15005,74 +15192,6 @@ impl super::GameState {
                                 ));
                             }
                         }
-                    } else if self.play_mode.can_edit_world()
-                        && (target_blk == block::WATER || target_blk == block::LAVA)
-                        && self.players[pidx]
-                            .inventory
-                            .hotbar_slot(self.players[pidx].hotbar_slot)
-                            .is_some_and(|s| matches!(
-                                s.item,
-                                crate::item::Item::Material(crate::item::MaterialId::Bucket),
-                            ))
-                    {
-                        // Buckets MC-parity — fill an empty Bucket from a SOURCE
-                        // block (flowing liquid can't be bottled, matching MC).
-                        // The eligibility rule lives in `bucket::fill_result`
-                        // (tested in isolation); here we query the liquid sim for
-                        // source-ness and, when it fills, mirror the mine path
-                        // (remove_source + notify so adjacent liquid retracts),
-                        // clear the block, and swap the empty Bucket for the
-                        // filled one.
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let is_water = target_blk == block::WATER;
-                        let is_source = if is_water {
-                            self.water.is_source(pos[0], pos[1], pos[2])
-                        } else {
-                            self.lava.is_source(pos[0], pos[1], pos[2])
-                        };
-                        let held = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
-                            .map(|s| s.item.clone());
-                        if let Some(filled) = held
-                            .and_then(|h| crate::bucket::fill_result(&h, target_blk, is_source))
-                            && self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, crate::item::MaterialId::Bucket)
-                            {
-                                if is_water {
-                                    self.water.remove_source(pos[0], pos[1], pos[2]);
-                                } else {
-                                    self.lava.remove_source(pos[0], pos[1], pos[2]);
-                                }
-                                self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
-                                if is_water {
-                                    self.water.notify_block_removed(pos[0], pos[1], pos[2], &self.world);
-                                } else {
-                                    self.lava.notify_block_removed(pos[0], pos[1], pos[2], &self.world);
-                                }
-                                self.fire_challenge(crate::scenario::ChallengeEvent::UseBucket);
-                                let stack = crate::item::ItemStack::new_material(filled, 1);
-                                if let Some(leftover) = self.players[pidx].inventory.add_item(stack) {
-                                    let seed_h = (pos[0] as u32).wrapping_mul(374761393)
-                                        ^ (self.tick_counter as u32).wrapping_mul(668265263);
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs,
-                                        glam::Vec3::new(
-                                            pos[0] as f32 + 0.5,
-                                            pos[1] as f32 + 0.5,
-                                            pos[2] as f32 + 0.5,
-                                        ),
-                                        leftover,
-                                        seed_h,
-                                    );
-                                }
-                                #[cfg(not(target_arch = "wasm32"))]
-                                self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
-                                self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
-                                self.audio.play_place();
-                                self.players[pidx].place_cooldown = 8;
-                            }
                     } else if self.play_mode.can_edit_world()
                         && self.players[pidx]
                             .inventory

@@ -844,7 +844,7 @@ The Campfire is Tier 1's cooking workstation. Pre-furnace (furnace lands in T1.5
 - **Cold** *(no fuel)* — *"Add fuel (wood), then light…"*.
 - **Cooking lines** appear in every state (so meat on an unlit fire is never invisible): `Cooking: Raw Beef — 45%` while cooking, `Ready: Cooked Beef (empty hand to take)` once mature. Placing raw meat also toasts *"On the fire — cooking…"* (lit) or *"…light it to start cooking"* (unlit).
 
-**In multiplayer (FU3, 2026-10-07).** The world that holds the campfire runs its rules: the fuel burn, cooking and smoke-pillar sweep runs in the single-player or LAN-host client (on the world a host lends its server), never in a joiner (a joiner's sweep, on its own copy of a campfire's state, pushed lit/unlit flips and pillar cells as its own edits). When a joiner breaks, lights or puts out a campfire it sends the one block edit; the server runs `campfire::on_block_edit` on it — the rule the client's own break and light arms run (`cleanup_campfire`, `smoke_on_light`) — clearing a broken fire's smoke and spilling what was cooking, raising a smoky fire's pillar from the server's own campfire state, and broadcasting the cells. (The client used to send the campfire plus up to six pillar cells; the server's 4-edit budget refused three, and the refused smoke floated in the shared world for good, untargetable.) Open: a joiner's fuel, meat and cooked-pickup clicks change only its own copy of the campfire (the server's smoke state may differ from what the joiner put in), and a dedicated server runs no campfire sweep at all, so its fires never burn down (tick parity, D4).
+**In multiplayer (FU3, 2026-10-07).** The world that holds the campfire runs its rules: the fuel burn, cooking and smoke-pillar sweep runs in the single-player or LAN-host client (on the world a host lends its server), never in a joiner (a joiner's sweep, on its own copy of a campfire's state, pushed lit/unlit flips and pillar cells as its own edits). When a joiner breaks, lights or puts out a campfire it sends the one block edit; the server runs `campfire::on_block_edit` on it — the rule the client's own break and light arms run (`cleanup_campfire`, `smoke_on_light`) — clearing a broken fire's smoke and spilling what was cooking, raising a smoky fire's pillar from the server's own campfire state, and broadcasting the cells. (The client used to send the campfire plus up to six pillar cells; the server's 4-edit budget refused three, and the refused smoke floated in the shared world for good, untargetable.) **A joiner's own pillar clear is skipped too (FU4b, L5):** a joined client whose edits reach the server breaks a campfire with `campfire::cleanup_campfire_keep_smoke` (the entry removed and the cook slots spilled, the smoke cells left), so a refused break (reach, plot) cannot leave a restored fire with no smoke on its screen; the server's derived clear arrives as block changes. Open: a joiner's fuel, meat and cooked-pickup clicks change only its own copy of the campfire (the server's smoke state may differ from what the joiner put in), and a dedicated server runs no campfire sweep at all, so its fires never burn down (tick parity, D4).
 
 **Block drops** (Wave 27 additions):
 
@@ -1006,7 +1006,7 @@ item carries:
 
 **Animal products**:
 
-- `Bucket` (item) — crafted 3 iron in V-shape. Right-click on cow → `MilkBucket`. A refused milk or shear (the cow isn't ready, the wool is growing back) does not eat the click: it shows its toast and falls through to the next right-click interaction as if the mob were not there, with no cooldown, so a bucket aimed at water beside a cow just milked still fills (`local_mob_click::MobClick::eats_click`, FU2 2026-10-07; a joined client's refusal already took a 16-tick cooldown on the server's `NotYet`, unchanged).
+- `Bucket` (item) — crafted 3 iron in V-shape. Right-click on cow → `MilkBucket`. A refused milk or shear (the cow isn't ready, the wool is growing back) does not eat the click: it shows its toast and falls through to the next right-click interaction as if the mob were not there, with no cooldown, so a bucket aimed at water beside a cow just milked still fills (`local_mob_click::MobClick::eats_click`, FU2 2026-10-07; the arm order and the refusal rule are the pure `local_mob_click::plan_right_click`, FU4b — Lead attach, feed, milk / shear, where a refused milk or shear is `MobArm::Refused` and fires no mob arm, so a tethered cow just milked is not untied; the later arms (tame, pack, mount, detach, villager / pet) are still decided in `game_loop`; a joined client's refusal already took a 16-tick cooldown on the server's `NotYet`, unchanged).
   Milking, shearing and offering a companion its taming food act **only on a
   right-click** (the place gesture pressed, the cursor captured, off the
   8-tick place cooldown — `local_mob_click::right_click_ready`, the gate every
@@ -1028,6 +1028,19 @@ item carries:
   `papyrus`/`rubber` interaction pattern); the world/inventory orchestration is
   in the block-interaction handler. Single-player/client path only for now (the
   server path is the same tracked dual-sim debt as other interactions).
+  **The empty bucket aims with its own ray (FU4b, 2026-10-07; FU3 verify M3).**
+  The ordinary aim ray (`raycast::cast_ray`: mining, placing, combat) passes
+  through water, so before this fix a bucket could never target the pond it
+  was meant to fill — only lava — and The Plumber Trial could not be finished.
+  An empty bucket now casts `raycast::cast_ray_fluid`: the first WATER or LAVA
+  **source** cell within reach (a flowing cell is passed through, as water is
+  for every other item; a wall, plant or gate still stops the ray, so it can't
+  fill through one) and `GameState::try_bucket_fill` fills from it, on every
+  path (single-player, a host's seats, a joiner, whose fill is the same block
+  edit as ever). It runs after every mob arm, so a ready cow still milks.
+  Every other item keeps `cast_ray`; a FULL bucket's pour still targets the
+  solid block behind the water. `target_block` (highlight, mining) is
+  unchanged.
 
 **Processing workstations** (block-entities on the shared workstation
 framework introduced in Spec 19 §"Furnace" cross-reference):

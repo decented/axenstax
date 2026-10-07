@@ -434,3 +434,56 @@ fn a_joiner_client_never_grows_crops_or_decays_leaves_itself() {
          on_log_broken) — if they moved, update the lint, don't delete it"
     );
 }
+
+// ── A joiner client's own machine sims push no edits (FU4b, Q9 row 3) ───────
+
+#[test]
+fn a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server() {
+    // Source lint, as above (the client tick needs a GPU; the driven version is
+    // the `#[ignore]`d game-harness test
+    // `game_harness_a_joined_clients_machines_push_no_edits`). A joined
+    // client's power tick, dispensers, pistons, keg fuses and lightning fire
+    // pushed their block changes to the server as the joiner's own edits, where
+    // they fought the server's own machines and grew its edit FIFO (FU3 verify
+    // Q9). Each stays behind `remote_client.is_none()`; the furnace sweep still
+    // runs on a joiner (its own furnace UI cooks until C3) but its changes are
+    // not queued for the server.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "joiner-sim lint: cannot read {} ({e}). If the client tick moved, update this \
+             lint's path — do not delete the lint.",
+            path.display()
+        )
+    });
+    let lines: Vec<&str> = raw.lines().collect();
+    // (needle on the call line, lines of code above it to search for the gate)
+    let sites: [(&str, usize); 6] = [
+        ("crate::power::power_tick(", 14),
+        ("crate::dispenser::tick_dispensers(", 4),
+        ("crate::piston::tick_pistons(", 3),
+        ("crate::power::tick_keg_fuses(", 4),
+        ("self.fire.ignite(&mut self.world, bx, surface_y + 1, bz", 3),
+        ("self.pending_block_changes.extend(furnace_sweep.changes)", 3),
+    ];
+    for (needle, back) in sites {
+        let mut found = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !line.contains(needle) {
+                continue;
+            }
+            found += 1;
+            let gated = lines[i.saturating_sub(back)..=i]
+                .iter()
+                .any(|l| !l.trim_start().starts_with("//") && l.contains("remote_client.is_none()"));
+            assert!(
+                gated,
+                "game_loop.rs:{}: `{needle}` runs on a joiner client and pushes its changes to \
+                 the server as the joiner's own edits — gate it behind \
+                 `self.remote_client.is_none()` (the server it joined runs it)",
+                i + 1
+            );
+        }
+        assert!(found >= 1, "joiner-sim lint found no `{needle}` — if it moved, update the lint, don't delete it");
+    }
+}

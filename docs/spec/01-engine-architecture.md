@@ -715,6 +715,20 @@ Rules:
   Gating only the pushes would still grow phantom local trees on the joiner's
   own sapling rolls, so the whole call is skipped. Source lint:
   `test_integration/block_machines.rs::a_joiner_client_never_grows_crops_or_decays_leaves_itself`.
+- **Nor power, dispensers, pistons, keg fuses or lightning fire (FU4b,
+  2026-10-07; FU3 verify Q9 row 3).** The same gate (`remote_client.is_none()`)
+  now sits on the client tick's power tick, dispensers, pistons, Blasting Keg
+  fuse sweep and its own weather's lightning fire (the flash and thunder stay).
+  Each pushed its block changes to the server as the joiner's own edits, where
+  they fought the server's machines (`block_machines`, or the lending host's
+  sweep) and, in a burst over 4 a tick (a lamp clock), grew the joiner's edit
+  FIFO. Joiners see the results as block changes. Costs, until D4: a keg a
+  joiner lights by hand lights only its own copy and no longer blows; a joiner
+  sees a server blast's cleared cells with no boom or particles. **The furnace
+  sweep still runs** on a joined client (its own furnace UI cooks until C3 makes
+  furnaces server-run) but its lit flips are no longer queued as edits. Source
+  lint: `block_machines.rs::a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server`;
+  driven: the GPU harness test `game_harness_a_joined_clients_machines_push_no_edits`.
 - **Persistence.** No save-format change: furnaces, composters, hives,
   dispensers, chests and power devices (keg fuses) are already in `WorldSave`.
 - **Still host-client only:** campfires, drying racks, animated construction

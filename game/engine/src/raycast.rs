@@ -255,7 +255,55 @@ pub fn cast_ray(
     world: &World,
     registry: &BlockRegistry,
 ) -> Option<RayHit> {
-    cast_ray_with(origin, direction, max_dist, world, registry, is_pickable)
+    cast_ray_with(origin, direction, max_dist, world, registry, |_, b, r| is_pickable(b, r))
+}
+
+/// The ray an EMPTY bucket aims with (FU4b, FU3 verify M3): [`cast_ray`]'s
+/// rule, except that a WATER or LAVA **source** cell is a hit. The aim ray
+/// passes through water (so you can see and mine what lies under it), which
+/// meant a bucket could never target the pond it was meant to fill; lava was
+/// the only liquid it could reach. A flowing (non-source) liquid cell is still
+/// passed through, as water is for every other item, so the ray goes on to the
+/// source behind it or to the block under it. Solid blocks, plants and the
+/// rest stop the ray as ever, so a bucket can't fill through a wall.
+///
+/// `is_source(block, [x, y, z])` is asked only for WATER and LAVA cells: the
+/// liquid sims own what counts as a source.
+pub fn cast_ray_fluid(
+    origin: Vec3,
+    direction: Vec3,
+    max_dist: f32,
+    world: &World,
+    registry: &BlockRegistry,
+    is_source: impl Fn(BlockId, [i32; 3]) -> bool,
+) -> Option<RayHit> {
+    cast_ray_with(origin, direction, max_dist, world, registry, |pos, b, r| {
+        if b == block::WATER || b == block::LAVA {
+            is_source(b, pos)
+        } else {
+            is_pickable(b, r)
+        }
+    })
+}
+
+/// The one choice between the two aim rays: an empty bucket (`bucket_aim`)
+/// casts [`cast_ray_fluid`], every other item the ordinary [`cast_ray`], which
+/// passes through water. Placing water from a FULL bucket is an "other item":
+/// it targets the solid block behind the water, as ever.
+pub fn cast_aim_ray(
+    bucket_aim: bool,
+    origin: Vec3,
+    direction: Vec3,
+    max_dist: f32,
+    world: &World,
+    registry: &BlockRegistry,
+    is_source: impl Fn(BlockId, [i32; 3]) -> bool,
+) -> Option<RayHit> {
+    if bucket_aim {
+        cast_ray_fluid(origin, direction, max_dist, world, registry, is_source)
+    } else {
+        cast_ray(origin, direction, max_dist, world, registry)
+    }
 }
 
 /// Like [`cast_ray`] but stops only at blocks whose per-block
@@ -271,7 +319,7 @@ pub fn cast_ray_camera(
     world: &World,
     registry: &BlockRegistry,
 ) -> Option<RayHit> {
-    cast_ray_with(origin, direction, max_dist, world, registry, |b, r| r.camera_occludes(b))
+    cast_ray_with(origin, direction, max_dist, world, registry, |_, b, r| r.camera_occludes(b))
 }
 
 /// Phase 2 — third-person camera collision. Given a `camera` (its eye is
@@ -305,7 +353,7 @@ fn cast_ray_with(
     max_dist: f32,
     world: &World,
     registry: &BlockRegistry,
-    stop: impl Fn(BlockId, &BlockRegistry) -> bool,
+    stop: impl Fn([i32; 3], BlockId, &BlockRegistry) -> bool,
 ) -> Option<RayHit> {
     if direction.length_squared() < 1e-10 {
         return None;
@@ -357,7 +405,7 @@ fn cast_ray_with(
     for _ in 0..max_steps {
         // Check current voxel
         let block = world.get_block(voxel_x, voxel_y, voxel_z);
-        if stop(block, registry) {
+        if stop([voxel_x, voxel_y, voxel_z], block, registry) {
             // Thin rails count as a hit only if the ray actually passes through
             // their shallow floor slab within this cell; otherwise the crosshair
             // skims over and the DDA keeps stepping to the block beyond.
@@ -539,6 +587,84 @@ mod tests {
             &registry,
         );
         assert!(hit.is_none(), "ray must not hit WATER");
+    }
+
+    // ── FU4b (FU3 verify M3) — the empty bucket's fluid-aware aim ray ─────
+
+    /// A one-block-deep pond at y=4 over a stone floor at y=3, the eye above
+    /// it looking straight down; every pond cell is a registered source
+    /// unless `flowing` names it.
+    fn pond(flowing: &[[i32; 3]]) -> (World, BlockRegistry, impl Fn(BlockId, [i32; 3]) -> bool) {
+        let (mut world, registry) = empty_world();
+        for x in 4..=6 {
+            for z in 4..=6 {
+                world.set_block(x, 3, z, block::STONE);
+                world.set_block(x, 4, z, block::WATER);
+            }
+        }
+        let flowing: Vec<[i32; 3]> = flowing.to_vec();
+        (world, registry, move |_b, pos| !flowing.contains(&pos))
+    }
+
+    const DOWN: Vec3 = Vec3::new(0.0, -1.0, 0.0);
+
+    #[test]
+    fn an_empty_bucket_ray_finds_the_pond_cell_the_ordinary_ray_passes_through() {
+        let (world, registry, src) = pond(&[]);
+        let eye = Vec3::new(5.5, 7.5, 5.5);
+        let plain = cast_aim_ray(false, eye, DOWN, 6.0, &world, &registry, &src)
+            .expect("an ordinary ray reaches the pond floor");
+        assert_eq!((plain.block_pos, plain.block), ([5, 3, 5], block::STONE), "it passes through the water");
+        let aimed = cast_aim_ray(true, eye, DOWN, 6.0, &world, &registry, &src)
+            .expect("an empty bucket's ray stops at the water");
+        assert_eq!((aimed.block_pos, aimed.block), ([5, 4, 5], block::WATER));
+        assert_eq!(aimed.face_normal, [0, 1, 0], "entered through the top");
+    }
+
+    #[test]
+    fn an_empty_bucket_ray_finds_lava_and_a_non_bucket_ray_still_does_too() {
+        let (mut world, registry, src) = pond(&[]);
+        world.set_block(5, 4, 5, block::LAVA);
+        let eye = Vec3::new(5.5, 7.5, 5.5);
+        let aimed = cast_aim_ray(true, eye, DOWN, 6.0, &world, &registry, &src).expect("lava is a hit");
+        assert_eq!((aimed.block_pos, aimed.block), ([5, 4, 5], block::LAVA));
+        // Lava was always pickable: unchanged for every other item.
+        let plain = cast_aim_ray(false, eye, DOWN, 6.0, &world, &registry, &src).expect("lava is pickable");
+        assert_eq!(plain.block, block::LAVA);
+    }
+
+    #[test]
+    fn a_flowing_cell_is_passed_through_to_the_source_beneath_or_the_floor() {
+        // The top cell flows (not a source); the one under it is a source.
+        let (mut world, registry, src) = pond(&[[5, 5, 5]]);
+        world.set_block(5, 5, 5, block::WATER);
+        let eye = Vec3::new(5.5, 8.5, 5.5);
+        let hit = cast_aim_ray(true, eye, DOWN, 7.0, &world, &registry, &src).expect("the source beneath");
+        assert_eq!(hit.block_pos, [5, 4, 5], "the flowing cell is not a target");
+        // All flowing: nothing to fill, the ray ends on the floor (as for any item).
+        let (world, registry, src) = pond(&[[5, 4, 5]]);
+        let hit = cast_aim_ray(true, Vec3::new(5.5, 7.5, 5.5), DOWN, 6.0, &world, &registry, &src).unwrap();
+        assert_eq!(hit.block, block::STONE);
+    }
+
+    #[test]
+    fn an_empty_bucket_cannot_fill_through_a_wall_and_a_full_one_places_on_the_floor() {
+        let (mut world, registry, src) = pond(&[]);
+        world.set_block(5, 6, 5, block::STONE); // a slab between the eye and the pond
+        let eye = Vec3::new(5.5, 7.5, 5.5);
+        let hit = cast_aim_ray(true, eye, DOWN, 6.0, &world, &registry, &src).unwrap();
+        assert_eq!((hit.block_pos, hit.block), ([5, 6, 5], block::STONE), "the wall stops it");
+        // A non-bucket ray (a FULL bucket pouring) targets the floor behind the water.
+        let (world, registry, src) = pond(&[]);
+        let hit = cast_aim_ray(false, eye, DOWN, 6.0, &world, &registry, &src).unwrap();
+        assert_eq!(hit.block_pos, [5, 3, 5]);
+    }
+
+    #[test]
+    fn the_fluid_ray_respects_reach() {
+        let (world, registry, src) = pond(&[]);
+        let eye = Vec3::new(5.5, 12.5, 5.5);
+        assert!(cast_aim_ray(true, eye, DOWN, 4.0, &world, &registry, &src).is_none(), "out of reach");
     }
 
     #[test]

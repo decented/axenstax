@@ -898,8 +898,9 @@ mod tests {
     /// milk: the refusal skips every later MOB arm for that click, so the
     /// Lead-detach arm no longer unties the cow (it did: a refused milk fell
     /// through to it), and the click goes on to the block behind — here a
-    /// fence gate at eye height, which opens. (A bucket can't target water
-    /// itself: `raycast::is_pickable` skips WATER.)
+    /// fence gate at eye height, which opens. (Since FU4b a bucket aimed at a
+    /// pond fills from it instead — see the Plumber test below — but a gate
+    /// stops the bucket's fluid ray as it stops any other.)
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
     fn game_harness_a_refused_milk_leaves_a_tethered_cow_tied_and_reaches_the_block() {
@@ -963,6 +964,188 @@ mod tests {
             crate::block_shape::is_open(hg.state.world.meta_at(gate.0, gate.1, gate.2)),
             "the click went on to the block: the gate opened"
         );
+    }
+
+    /// FU4b (FU3 verify M3) — an empty bucket aimed at a pond fills from it:
+    /// the aim ray passes through water for every other item, so a bucket
+    /// could never target the water it was meant to fill and The Plumber Trial
+    /// (kit: one bucket, arena: only water) could not be finished. Runs the
+    /// Trial's real arena and checks its first step completes.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_an_empty_bucket_fills_from_a_pond_and_the_plumbers_first_step_completes() {
+        use crate::item::MaterialId;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-bucket-pond");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        let def = crate::scenario::load_scenario_def(include_bytes!("../assets/scenarios/explorer-bucket.json"))
+            .expect("the Plumber parses");
+        let arena = def.arena.clone().expect("the Plumber has an arena");
+        hg.state.start_scenario(def);
+        hg.state.apply_arena_setup(&arena);
+        let count = |hg: &HeadlessGame, m: MaterialId| hg.state.players[0].inventory.count_material(m);
+        assert_eq!(count(&hg, MaterialId::Bucket), 1, "the kit is one empty bucket");
+        assert_eq!(hg.state.scenario.as_ref().unwrap().objective_progress(), Some((0, 2)));
+
+        // The arena's pond is a source two blocks east of the player's feet.
+        let feet = hg.state.players[0].player.pos;
+        let pond = (feet.x.floor() as i32 + 2, feet.y.floor() as i32, feet.z.floor() as i32);
+        assert_eq!(hg.state.world.get_block(pond.0, pond.1, pond.2), crate::block::WATER);
+        assert!(hg.state.water.is_source(pond.0, pond.1, pond.2), "the arena registers it as a source");
+        // Look at it from the eye.
+        let eye = hg.state.players[0].player.eye_pos();
+        let d = glam::Vec3::new(pond.0 as f32 + 0.5, pond.1 as f32 + 0.5, pond.2 as f32 + 0.5) - eye;
+        hg.state.players[0].camera.yaw = (-d.x).atan2(-d.z);
+        hg.state.players[0].camera.pitch = d.y.atan2(d.x.hypot(d.z));
+        let hot = hg.state.players[0].hotbar_slot;
+        assert!(
+            hg.state.players[0].inventory.hotbar_slot(hot).is_some_and(|s| s.item == crate::item::Item::Material(MaterialId::Bucket)),
+            "the bucket is in the hand"
+        );
+        hg.state.input.right_held = false;
+        hg.frames(1);
+        assert_ne!(
+            hg.state.players[0].target_block,
+            Some([pond.0, pond.1, pond.2]),
+            "the ordinary aim ray still passes through water"
+        );
+
+        hg.state.players[0].place_cooldown = 0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.right_held = true;
+        hg.frames(1);
+        hg.state.input.right_held = false;
+        assert_eq!(
+            (count(&hg, MaterialId::Bucket), count(&hg, MaterialId::WaterBucket)),
+            (0, 1),
+            "the bucket filled from the pond"
+        );
+        assert_eq!(hg.state.world.get_block(pond.0, pond.1, pond.2), crate::block::AIR, "the source is taken");
+        assert!(!hg.state.water.is_source(pond.0, pond.1, pond.2));
+        assert_eq!(
+            hg.state.scenario.as_ref().unwrap().objective_progress(),
+            Some((1, 2)),
+            "The Plumber's first step (a fill) is done"
+        );
+    }
+
+    /// FU4b (FU3 verify Q9 row 3) — a JOINED client's own machine sims push no
+    /// edits to the server: its power tick, dispensers, pistons and lightning
+    /// fire are the server's to run, and its furnace still cooks in its own
+    /// copy (C3 makes it the server's) but the lit flip is not queued as an
+    /// edit. A fuelled steam generator beside a lamp, a loaded furnace and a
+    /// powered dispenser in the joiner's own world, ticked: nothing queued, the
+    /// lamp stays dark (no power tick), the furnace lights locally. The control:
+    /// the same rig on a client that has joined nobody queues the lamp, the
+    /// generator and the furnace.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joined_clients_machines_push_no_edits() {
+        use crate::item::{ItemStack, MaterialId};
+        isolate_saves();
+
+        // Rig the machines in front of the player, on the world's surface.
+        fn rig(hg: &mut HeadlessGame) -> ((i32, i32, i32), (i32, i32, i32), (i32, i32, i32)) {
+            let p = hg.state.players[0].player.pos;
+            let (x, y, z) = (p.x.floor() as i32 + 6, p.y.floor() as i32 + 3, p.z.floor() as i32 + 6);
+            let (gen_pos, lamp, furnace) = ((x, y, z), (x + 1, y, z), (x + 3, y, z));
+            let w = &mut hg.state.world;
+            for dx in -1..=5 {
+                for dz in -1..=1 {
+                    w.set_block(x + dx, y - 1, z + dz, crate::block::STONE);
+                    for dy in 0..=1 {
+                        w.set_block(x + dx, y + dy, z + dz, crate::block::AIR);
+                    }
+                }
+            }
+            for (pos, blk, kind) in [
+                (gen_pos, crate::block::STEAM_GENERATOR, crate::power::PowerDeviceKind::SteamGenerator),
+                (lamp, crate::block::ELECTRIC_LAMP, crate::power::PowerDeviceKind::ElectricLamp),
+            ] {
+                w.set_block(pos.0, pos.1, pos.2, blk);
+                w.block_entities.insert(
+                    pos,
+                    crate::world::BlockEntityData::PowerDevice(crate::power::PowerDeviceData::new(kind, crate::meta::Facing::Up)),
+                );
+            }
+            if let Some(d) = w.power_device_at_mut(gen_pos) {
+                d.fuel = Some(crate::furnace::FurnaceData {
+                    fuel: Some(ItemStack::new_material(MaterialId::Coal, 8)),
+                    ..Default::default()
+                });
+            }
+            w.set_block(furnace.0, furnace.1, furnace.2, crate::block::FURNACE);
+            w.insert_furnace(
+                furnace,
+                crate::furnace::FurnaceData {
+                    input: Some(ItemStack::new_material(MaterialId::Copper, 1)),
+                    fuel: Some(ItemStack::new_material(MaterialId::GreenLog, 1)),
+                    ..Default::default()
+                },
+            );
+            (gen_pos, lamp, furnace)
+        }
+        let queued = |hg: &HeadlessGame, cell: (i32, i32, i32)| {
+            hg.state.pending_block_changes.iter().any(|bc| (bc.x, bc.y, bc.z) == cell)
+        };
+
+        // The control: a client that joined nobody runs and queues all three.
+        let mut solo = HeadlessGame::boot_into_world("harness-q9-solo");
+        solo.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        solo.frames(3);
+        let (gen_pos, lamp, furnace) = rig(&mut solo);
+        solo.state.pending_block_changes.clear();
+        solo.ticks(8);
+        assert!(queued(&solo, lamp), "control: the lamp lights and is queued");
+        assert!(queued(&solo, gen_pos), "control: the generator lights and is queued");
+        assert!(queued(&solo, furnace), "control: the furnace lights and is queued");
+
+        // A joined client.
+        let mut hg = HeadlessGame::boot_into_world("harness-q9-joined");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-q9-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Sparky", 0),
+            None,
+        ));
+        for _ in 0..5 {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        }
+        assert!(hg.state.joined());
+        let (gen_pos, lamp, furnace) = rig(&mut hg);
+        hg.state.pending_block_changes.clear();
+        hg.ticks(8);
+        assert_eq!(
+            hg.state.world.get_block(lamp.0, lamp.1, lamp.2),
+            crate::block::ELECTRIC_LAMP,
+            "no power tick on a joined client: the lamp stays dark in its own copy"
+        );
+        assert_eq!(hg.state.world.get_block(gen_pos.0, gen_pos.1, gen_pos.2), crate::block::STEAM_GENERATOR);
+        assert!(
+            !queued(&hg, lamp) && !queued(&hg, gen_pos),
+            "the joiner pushed power changes: {:?}",
+            hg.state.pending_block_changes.iter().map(|b| (b.x, b.y, b.z)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hg.state.world.get_block(furnace.0, furnace.1, furnace.2),
+            crate::block::FURNACE_LIT,
+            "its own furnace still cooks (C3 makes it the server's)"
+        );
+        assert!(!queued(&hg, furnace), "but the lit flip is not an edit for the server");
     }
 
     /// C2a — a joiner's hunger, eating and sleep through its REAL client: the

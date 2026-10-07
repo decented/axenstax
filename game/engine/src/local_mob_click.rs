@@ -32,6 +32,108 @@ pub fn right_click_ready(intent: &PlayerIntent, slot: &PlayerSlot) -> bool {
     intent.place_block && intent.cursor_captured && slot.place_cooldown == 0
 }
 
+/// Which mob arm of the right-click chain fires for a click on the mob in the
+/// crosshair (FU4b, FU3 verify L7): the ORDER of the chain's first arms, with
+/// the refusal rule, as a pure decision over plain values ([`plan_right_click`])
+/// so `cargo test --lib` pins it without a GPU.
+///
+/// The chain in `game_loop` runs: Lead attach, breeding feed, milk / shear,
+/// then the rest (tame a companion, a Donkey's pack, mount, Lead detach,
+/// villager talk / pet command), then the block arms. A refused milk or shear
+/// ([`MobArm::Refused`]) is the one result that ENDS the mob arms: none of the
+/// rest may act on that very mob (FU3, FU1 verify N2: a Lead-detach after a
+/// refused milk untied the cow), and the block arms still run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MobArm {
+    /// A Lead on a passive mob: tie it to the player.
+    LeadAttach,
+    /// Breeding food on an adult that can breed: love mode.
+    Feed,
+    /// A bucket on a ready cow.
+    Milk,
+    /// Shears on a ready sheep.
+    Shear,
+    /// A bucket on a cow that isn't ready, or shears on a sheep still growing
+    /// wool: no mob arm fires (the harvest arm shows the toast and sets no
+    /// cooldown), and the click goes on to the block arms.
+    Refused,
+    /// None of the above: the remaining mob arms (companion tame, pack, mount,
+    /// Lead detach, villager / pet) each decide for themselves, in their order,
+    /// still in `game_loop` (BRIDGE: lift them here once each one's eligibility
+    /// is on plain values; the joiner's mirror,
+    /// `remote_mobs::right_click_action`, models them from its own flags).
+    Later,
+}
+
+/// What [`plan_right_click`] needs: the mob in the crosshair and the hand, as
+/// plain values.
+pub struct ArmCtx<'a> {
+    pub kind: MobType,
+    pub held: Option<&'a Item>,
+    /// An adult off its breeding cooldown and not already in love: the state
+    /// `mob_interact::feed` accepts food in.
+    pub can_breed: bool,
+    /// `mob_interact::product_ready`: the cow's milk / the sheep's wool.
+    pub product_ready: bool,
+    /// The horse family feeds only while sneaking (`breeding_feed_allowed`).
+    pub sneak: bool,
+}
+
+/// The arm of the right-click mob chain that fires, in the chain's order:
+/// Lead attach, feed, milk / shear (a refusal ends the mob arms), else
+/// [`MobArm::Later`]. Mirrors the rules of `mob_interact::{lead_attach, feed,
+/// milk, shear}` (which still do the work); a tethered mob is no input: the
+/// Lead-detach arm is in [`MobArm::Later`], which a refusal skips.
+pub fn plan_right_click(ctx: &ArmCtx) -> MobArm {
+    let mat = match ctx.held {
+        Some(Item::Material(m)) => Some(*m),
+        _ => None,
+    };
+    if mat == Some(MaterialId::Lead)
+        && crate::mob::mob_def(ctx.kind).category == crate::mob::MobCategory::Passive
+    {
+        return MobArm::LeadAttach;
+    }
+    if let Some(m) = mat
+        && ctx.can_breed
+        && crate::breeding::breeding_food(ctx.kind) == Some(m)
+        && crate::breeding::breeding_feed_allowed(ctx.kind, ctx.sneak)
+    {
+        return MobArm::Feed;
+    }
+    if ctx.kind == MobType::Cow && mat == Some(MaterialId::Bucket) {
+        return if ctx.product_ready { MobArm::Milk } else { MobArm::Refused };
+    }
+    if ctx.kind == MobType::Sheep
+        && matches!(ctx.held, Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears)
+    {
+        return if ctx.product_ready { MobArm::Shear } else { MobArm::Refused };
+    }
+    MobArm::Later
+}
+
+/// [`plan_right_click`] for the mob in `slot`'s crosshair (the cone
+/// `combat::find_attack_target` picks, the one every arm uses), reading the
+/// state the decision needs off its ECS. [`MobArm::Later`] when no mob is there.
+pub fn plan_at_crosshair(ecs: &hecs::World, slot: &PlayerSlot, sneak: bool, tick: u64) -> MobArm {
+    let held = slot.inventory.hotbar_slot(slot.hotbar_slot).map(|s| &s.item);
+    let eye = slot.player.eye_pos();
+    let look_dir = slot.camera.forward();
+    let Some((target, Some(kind))) = crate::combat::find_attack_target(ecs, eye, look_dir) else {
+        return MobArm::Later;
+    };
+    let can_breed = ecs.get::<&crate::breeding::Baby>(target).is_err()
+        && ecs.get::<&crate::breeding::BreedCooldown>(target).is_err()
+        && ecs.get::<&crate::breeding::InLove>(target).is_err();
+    plan_right_click(&ArmCtx {
+        kind,
+        held,
+        can_breed,
+        product_ready: crate::mob_interact::product_ready(ecs, target, tick),
+        sneak,
+    })
+}
+
 /// A right-click that reached a mob: which, what species, and what happened.
 pub struct MobClick {
     pub target: hecs::Entity,
@@ -182,6 +284,84 @@ mod tests {
         let click = tame_companion(&mut ecs, &mut slot, 0, true, 300).expect("the click reaches the cat");
         assert_eq!(click.interaction.consume, 1);
         assert_eq!(count(&slot), 15, "the click's roll eats one");
+    }
+
+    fn arm(kind: MobType, held: Option<&Item>, can_breed: bool, product_ready: bool, sneak: bool) -> MobArm {
+        plan_right_click(&ArmCtx { kind, held, can_breed, product_ready, sneak })
+    }
+    fn mat(m: MaterialId) -> Item {
+        Item::Material(m)
+    }
+    fn shears() -> Item {
+        Item::Tool(crate::crafting::Tool::new(
+            crate::crafting::ToolType::Shears,
+            crate::crafting::ToolMaterial::Iron,
+        ))
+    }
+
+    /// FU4b (FU3 verify L7) — the arm order, on plain values: a Lead on a
+    /// passive mob ties it first; breeding food feeds an adult that can breed;
+    /// a ready cow / sheep is milked / sheared; anything else is left to the
+    /// rest of the chain.
+    #[test]
+    fn the_first_arms_fire_in_order() {
+        let lead = mat(MaterialId::Lead);
+        assert_eq!(arm(MobType::Cow, Some(&lead), true, true, false), MobArm::LeadAttach);
+        let wheat = mat(MaterialId::Wheat);
+        assert_eq!(arm(MobType::Cow, Some(&wheat), true, false, false), MobArm::Feed, "wheat still feeds a not-ready cow");
+        assert_eq!(arm(MobType::Cow, Some(&wheat), false, true, false), MobArm::Later, "a cow in love / a calf takes no food");
+        let bucket = mat(MaterialId::Bucket);
+        assert_eq!(arm(MobType::Cow, Some(&bucket), true, true, false), MobArm::Milk);
+        assert_eq!(arm(MobType::Sheep, Some(&shears()), true, true, false), MobArm::Shear);
+        assert_eq!(arm(MobType::Cow, None, true, true, false), MobArm::Later, "an empty hand: the rest of the chain (detach, pet)");
+        assert_eq!(arm(MobType::Pig, Some(&bucket), true, true, false), MobArm::Later, "a bucket is no tool for a pig");
+    }
+
+    /// FU4b (FU3 verify L7, the N2 rule) — a refused milk or shear fires NO mob
+    /// arm, so a tethered cow just milked is not untied (the Lead-detach arm is
+    /// in `Later`, which a refusal skips) and the click reaches the block.
+    #[test]
+    fn a_refused_milk_or_shear_fires_no_mob_arm() {
+        let bucket = mat(MaterialId::Bucket);
+        assert_eq!(arm(MobType::Cow, Some(&bucket), true, false, false), MobArm::Refused);
+        assert_eq!(arm(MobType::Sheep, Some(&shears()), true, false, false), MobArm::Refused, "a shorn sheep");
+        assert_ne!(arm(MobType::Cow, Some(&bucket), true, false, false), MobArm::Later, "not 'the rest of the chain'");
+        // Sneaking changes nothing for a cow; a Lead still wins over a bucket in
+        // the chain's order, but cannot be in hand with the bucket.
+        assert_eq!(arm(MobType::Cow, Some(&bucket), true, false, true), MobArm::Refused);
+    }
+
+    /// The horse family feeds only while sneaking (a plain click mounts it).
+    #[test]
+    fn a_horse_takes_wheat_only_while_sneaking() {
+        let wheat = mat(MaterialId::Wheat);
+        assert_eq!(arm(MobType::Horse, Some(&wheat), true, false, false), MobArm::Later, "a plain click mounts");
+        assert_eq!(arm(MobType::Horse, Some(&wheat), true, false, true), MobArm::Feed);
+    }
+
+    /// The same decision off a real ECS: a tethered cow just milked, a bucket in
+    /// hand — `plan_at_crosshair` says Refused (and it stays tied, because the
+    /// caller then runs no detach); a ready cow milks; a wheat on a cow in love
+    /// is not a feed.
+    #[test]
+    fn the_plan_reads_the_crosshair_mobs_state() {
+        let (mut ecs, slot, cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 1));
+        ecs.insert_one(cow, crate::tether::Tethered { target: crate::tether::TetherTarget::Player(0) }).unwrap();
+        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 100), MobArm::Milk, "a fresh cow is ready");
+        ecs.get::<&mut crate::animal_products::AnimalProductState>(cow).unwrap().last_action_tick = Some(100);
+        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 101), MobArm::Refused, "just milked");
+        assert!(ecs.get::<&crate::tether::Tethered>(cow).is_ok(), "deciding unties nothing");
+
+        let (mut ecs, slot, cow) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Wheat, 4));
+        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 100), MobArm::Feed);
+        ecs.insert_one(cow, crate::breeding::InLove { until_tick: 999, fed_by: None }).unwrap();
+        assert_eq!(plan_at_crosshair(&ecs, &slot, false, 100), MobArm::Later, "already in love: not a feed");
+
+        let (ecs, slot, _) = facing(MobType::Cow, ItemStack::new_material(MaterialId::Bucket, 1));
+        let mut empty = slot;
+        empty.hotbar_slot = 5; // nothing there, and no mob in front of a different aim
+        empty.camera.yaw = std::f32::consts::PI;
+        assert_eq!(plan_at_crosshair(&ecs, &empty, false, 100), MobArm::Later, "no mob in the crosshair");
     }
 
     /// The gate is the other branches' gate: pressed, captured, off cooldown.
