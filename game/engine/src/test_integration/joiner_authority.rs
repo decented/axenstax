@@ -571,6 +571,32 @@ fn over_budget_edits_wait_and_apply_on_the_next_tick() {
     }
 }
 
+/// FU4a (FU3 verify L1) — a request waits behind its own client's earlier
+/// edits still waiting past the edit budget. A lever placed as the fifth edit
+/// of a tick waits a tick; the flip sent right after it used to be read
+/// first, find no lever and do nothing. Now it waits for the lever.
+#[test]
+fn a_flip_sent_after_a_lever_waiting_past_the_edit_budget_finds_the_lever() {
+    let mut hs = start_open_server("lever-behind-edits");
+    let (client, slot) = join_guest(&mut hs, "Visitor");
+    let mut edits: Vec<_> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .map(|&(dx, dz)| (cell_beside(&hs, slot, dx, 1, dz), block::GLASS))
+        .collect();
+    let lever = cell_beside(&hs, slot, 1, 1, 1);
+    edits.push((lever, block::LEVER)); // the 5th: waits a tick
+    send_edits(&hs, &client, slot, 1, &edits);
+    client.send_to_server(&protocol::serialize_packet(
+        protocol::PacketType::DeviceInteract,
+        &protocol::DeviceInteractPacket { pos: lever },
+    ));
+    hs.tick();
+    assert!(hs.server.world.power_device_at(lever).is_none(), "the lever waits past the budget");
+    hs.tick();
+    let device = hs.server.world.power_device_at(lever).expect("the lever is placed");
+    assert!(device.on, "and the flip sent after it found it");
+}
+
 /// S3: a joiner can't flip a lever inside someone else's plot.
 #[test]
 fn a_joiner_cannot_flip_a_lever_in_a_foreign_plot() {

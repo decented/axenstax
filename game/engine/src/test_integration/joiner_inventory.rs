@@ -676,11 +676,13 @@ fn a_joiners_campfire_break_or_light_leaves_the_smoke_to_the_server() {
     }
 }
 
-/// FU3 — the edit queue's hard cap (`edit_queue::MAX_DEFERRED_EDITS`), which
-/// no honest client reaches: an edit past it is refused and sent back, as a
-/// refused edit always is.
+/// FU3 / FU4a (FU3 verify M2) — the edit queue's hard cap
+/// (`edit_queue::MAX_DEFERRED_EDITS`), which no honest client reaches: an edit
+/// past it is dropped, and nothing is sent back for it. (FU3 sent it back,
+/// like any refusal: a flood at the cap then cost the host a world lookup and
+/// a broadcast per edit.)
 #[test]
-fn an_edit_past_the_edit_queues_cap_is_refused_and_sent_back() {
+fn an_edit_past_the_edit_queues_cap_is_dropped_and_nothing_is_sent_back() {
     let mut rig = Rig::dedicated("edit-cap");
     rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
     // Four processed now, MAX_DEFERRED_EDITS queued: all aimed out of reach
@@ -700,11 +702,74 @@ fn an_edit_past_the_edit_queues_cap_is_refused_and_sent_back() {
     for _ in 0..4 {
         rig.tick();
     }
-    assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::AIR, "the edit past the cap is refused");
+    assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::AIR, "the edit past the cap is dropped");
     assert!(
-        rig.changes.iter().any(|c| (c.x, c.y, c.z) == ABOVE && c.new_block == block::AIR),
-        "and sent back, so the sender's ghost block goes"
+        !rig.changes.iter().any(|c| (c.x, c.y, c.z) == ABOVE),
+        "and nothing is sent back for it"
     );
+}
+
+/// FU4a (FU3 verify M2) — every refusal that sends the real block back is
+/// capped at `MAX_SEND_BACKS_PER_CLIENT_PER_TICK` (64) per client per tick;
+/// past it the refused edit is dropped silently. A joiner that dies with
+/// 1,000 edits waiting has at most 64 of them sent back that tick (FU3 sent
+/// back all of them at once), and the rest are gone, not sent later.
+#[test]
+fn a_dead_joiners_waiting_edits_send_back_at_most_64_in_a_tick() {
+    let mut rig = Rig::dedicated("dead-send-back-cap");
+    rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+    // 1,004 placements in distinct cells of the joiner's own column (the
+    // outbox merges changes of one cell, so each must be its own): four are
+    // processed now, 1,000 wait.
+    let cells: Vec<(i32, i32, i32)> =
+        (0..1_004).map(|k| (32 + k % 16, 90 + k / 256, 32 + (k / 16) % 16)).collect();
+    let edits: Vec<_> = cells.iter().map(|&c| (c, block::STONE)).collect();
+    rig.send(None, &edits, &[]);
+    rig.tick();
+    assert_eq!(rig.hs.edit_queue_len_for_test(rig.slot), 1_000, "1,000 wait");
+    assert!(rig.hs.server.report_player_death(rig.slot), "the joiner dies");
+    rig.changes.clear();
+    rig.tick();
+    let sent_back = |rig: &Rig| rig.changes.iter().filter(|c| cells[4..].contains(&(c.x, c.y, c.z))).count();
+    assert_eq!(sent_back(&rig), 64, "64 of the waiting edits are sent back that tick, no more");
+    assert_eq!(rig.hs.edit_queue_len_for_test(rig.slot), 0, "the rest are dropped");
+    rig.changes.clear();
+    rig.tick();
+    assert_eq!(sent_back(&rig), 0, "not sent back later");
+    for c in &cells[4..] {
+        assert_ne!(rig.world().get_block(c.0, c.1, c.2), block::STONE, "a dead joiner's waiting edit never lands");
+    }
+}
+
+/// FU4a (FU3 verify L2) — a tag is its own edit's from the moment the input
+/// is read: a crop harvest refused (a foreign plot) takes its tag with it,
+/// and a later edit of the same cell, waiting past the budget and accepted a
+/// tick later, yields nothing. (FU3 spent a refused edit's tag only when the
+/// edit emptied its cell, so the harvest's tag stayed for the later emptying
+/// edit, which took it and yielded the whole crop.)
+#[test]
+fn a_refused_harvests_tag_goes_with_it_and_a_later_edit_of_its_cell_yields_nothing() {
+    let mut rig = Rig::dedicated("refused-harvest");
+    let fenced = (40, 79, 41);
+    rig.world().set_block(fenced.0, fenced.1, fenced.2, block::WHEAT_STAGE_3);
+    rig.hs.server.world.plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::LocalPlayer(0),
+        fenced.0,
+        fenced.1 - 5,
+        fenced.2,
+    ));
+    let filler: Vec<((i32, i32, i32), BlockId)> = (0..3).map(|k| ((39 + k, 80, 39), block::STONE)).collect();
+    let mut edits = filler;
+    edits.push((fenced, block::TILLED_SOIL)); // the 4th: the harvest, refused (the plot)
+    edits.push((fenced, block::AIR)); // the 5th: waits a tick
+    rig.send(None, &edits, &[mined(fenced, None)]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(fenced.0, fenced.1, fenced.2), block::WHEAT_STAGE_3, "the harvest: refused");
+    rig.hs.server.world.plots.clear();
+    rig.tick();
+    assert_eq!(rig.world().get_block(fenced.0, fenced.1, fenced.2), block::AIR, "the waiting edit: accepted");
+    assert!(rig.grants.is_empty(), "but it never took the refused harvest's tag: {:?}", rig.grants);
+    assert_eq!(rig.tally().breaks, 0);
 }
 
 /// FU1 (C1 verify N1) — an accepted edit that leaves the block as it was

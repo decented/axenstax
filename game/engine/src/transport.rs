@@ -31,7 +31,8 @@ pub type Packet = Vec<u8>;
 /// hour or more (or a joiner's own freeze of as long, replayed): only a client
 /// that floods gets there. A backlog under it drains fast: past
 /// `hosted_server::CATCH_UP_QUEUE_LEN` waiting, the server reads
-/// `hosted_server::CATCH_UP_PACKETS_PER_TICK` of a client's packets a tick.
+/// `hosted_server::CATCH_UP_PACKETS_PER_TICK` of a client's packets a tick
+/// (not ten), unless that client's edit queue is full (FU4a).
 pub const MAX_INBOUND_BYTES: usize = 8 * 1024 * 1024;
 
 /// FU3 — what one waiting packet costs against [`MAX_INBOUND_BYTES`] beyond

@@ -210,8 +210,10 @@ const OPERATOR_NEEDS_DIRECT_NOTICE: &str = "Operator tools need a direct connect
 /// frame hitch sends up to ten inputs a frame (`game_loop` runs at most 10
 /// ticks a frame) plus the actions it made, and the swing behind them used to
 /// be dropped. Ten covers one such frame. Control packets (`Respawn`,
-/// `Disconnect`) cost nothing against it. A client with more than
-/// [`CATCH_UP_QUEUE_LEN`] waiting gets [`CATCH_UP_PACKETS_PER_TICK`] instead.
+/// `Disconnect`) cost nothing against it, up to
+/// [`FREE_CONTROL_PACKETS_PER_TICK`] a tick. A client with more than
+/// [`CATCH_UP_QUEUE_LEN`] waiting gets [`CATCH_UP_PACKETS_PER_TICK`] instead
+/// (unless its edit queue is full, FU4a).
 /// Memory is bounded by the queue's hard bound (`transport::MAX_INBOUND_BYTES`):
 /// only a client past it is disconnected ([`INBOUND_OVERFLOW_REASON`]).
 /// Spec 04 §11.2a.
@@ -226,19 +228,44 @@ pub const CATCH_UP_QUEUE_LEN: usize = 40;
 
 /// FU3 — the read budget of a client catching up ([`CATCH_UP_QUEUE_LEN`]): a
 /// 55-second host stall (about 1,100 inputs) drains in under a second instead
-/// of two minutes at ten a tick. Its stale movement is not simulated in bulk:
+/// of about 6 s at ten a tick. Its stale movement is not simulated in bulk:
 /// S1 keeps the newest `server::MAX_QUEUED_INTENTS` inputs and steps at most
-/// `server::MAX_INTENTS_PER_TICK` a tick on banked credit, so the joiner snaps
-/// once, as after any stall. The per-kind budgets (edits, entity requests,
-/// device interacts) do not grow: what is past them waits, in order.
+/// `server::MAX_INTENTS_PER_TICK` a tick on banked credit. The inputs S1
+/// drops were acknowledged long after the client sent them, past its
+/// 128-input prediction history, so they reconcile as skipped: the joiner is
+/// corrected on the last tick or two of the catch-up, not input by input. The
+/// per-kind budgets (edits, entity requests, device interacts) do not grow:
+/// what is past them waits, in order. FU4a (FU3 verify M2) — a client whose
+/// edit queue is full (`edit_queue::EditQueue::is_full`) is read
+/// [`MAX_PACKETS_PER_TICK`] however much waits: no honest client is there, and
+/// the catch-up multiplied what its flood cost the host.
 pub const CATCH_UP_PACKETS_PER_TICK: usize = 64;
+
+/// FU4a (FU3 verify L6) — control packets (`Respawn`, `Disconnect`) a client
+/// may have read free of the read budget each tick. Past it each costs one
+/// like any packet, so a burst of tiny control packets in one fill (about
+/// 129,000 fit the inbound bound) is read over many ticks, not in one. An
+/// honest client sends one `Respawn` every ~20 ticks while dead and one
+/// `Disconnect`.
+pub const FREE_CONTROL_PACKETS_PER_TICK: usize = 8;
+
+/// FU4a (FU3 verify M2) — the refused edits sent back per client per tick:
+/// by reach or plot, a dead joiner's (arriving or waiting), an earlier life's.
+/// Each costs a world lookup and a broadcast to every joiner; past it the
+/// refused edit is dropped with nothing sent back. An honest client has at
+/// most the four edits processed a tick refused, plus those of the input it
+/// sent as it died; only a joiner that dies with more than 64 edits waiting
+/// (a long stall's backlog) passes it, and the edits past it stay on its
+/// screen until their cells next change.
+pub const MAX_SEND_BACKS_PER_CLIENT_PER_TICK: usize = 64;
 
 /// FU1 — told to a client disconnected for crossing its inbound queue's hard
 /// bound (`transport::MAX_INBOUND_BYTES`).
 pub const INBOUND_OVERFLOW_REASON: &str =
     "Disconnected: your game sent more than the server could keep up with.";
 
-/// A control packet (MP-A3): costs nothing against [`MAX_PACKETS_PER_TICK`].
+/// A control packet (MP-A3): costs nothing against [`MAX_PACKETS_PER_TICK`]
+/// (up to [`FREE_CONTROL_PACKETS_PER_TICK`] a tick, FU4a).
 fn is_control_packet(packet: &[u8]) -> bool {
     matches!(
         protocol::deserialize_header(packet),
@@ -253,8 +280,22 @@ fn is_control_packet(packet: &[u8]) -> bool {
 /// the joiner's drop bucket is empty (`drop_ready` false:
 /// `item_actions::DropBucket`). Waiting, not skipping: an honest catch-up
 /// can hold more of either than one tick reads.
-fn waits_for_kind_budget(packet: &[u8], entity_requests: usize, device_interacts: usize, drop_ready: bool) -> bool {
+///
+/// FU4a (FU3 verify L1) — and any request ([`is_request`]) while the client
+/// has edits waiting (`edits_waiting`): it was sent after them, so it must
+/// find them made (a lever placed then flipped, a post placed then a Lead
+/// tied to it, a bed placed then slept in).
+fn waits_for_kind_budget(
+    packet: &[u8],
+    entity_requests: usize,
+    device_interacts: usize,
+    drop_ready: bool,
+    edits_waiting: bool,
+) -> bool {
     use protocol::PacketType as P;
+    if edits_waiting && is_request(packet) {
+        return true;
+    }
     match protocol::deserialize_header(packet) {
         Some((P::EntityAttack | P::EntityInteract, _)) => entity_requests >= MAX_ENTITY_REQUESTS_PER_TICK,
         Some((P::DeviceInteract, _)) => device_interacts >= MAX_DEVICE_INTERACTS_PER_TICK,
@@ -267,12 +308,34 @@ fn waits_for_kind_budget(packet: &[u8], entity_requests: usize, device_interacts
     }
 }
 
+/// FU4a (FU3 verify L1) — a request about the world as the client's own
+/// edits left it, so it waits behind those still waiting: `EntityAttack`,
+/// `EntityInteract`, `DeviceInteract`, `ItemAction`. (`Respawn` and
+/// `Disconnect` don't: a dead joiner's waiting edits are sent back.)
+fn is_request(packet: &[u8]) -> bool {
+    use protocol::PacketType as P;
+    matches!(
+        protocol::deserialize_header(packet),
+        Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction, _))
+    )
+}
+
+/// FU4a — one client's edit counters for one tick
+/// (`HostedServer::process_inbound_packets`).
+#[derive(Default)]
+struct EditTickBudget {
+    /// Edits processed, refused or not ([`MAX_BLOCK_CHANGES_PER_TICK`]).
+    edits: usize,
+    /// Refused edits sent back ([`MAX_SEND_BACKS_PER_CLIENT_PER_TICK`]).
+    send_backs: usize,
+}
+
 /// Most block edits the server processes per client per tick, across ALL of
 /// its packets that tick — legitimate play is 1–2. Every processed edit
 /// counts, refused or not. FU3 — edits past it wait in the slot's
 /// `edit_queue::EditQueue` and go first next tick, in arrival order; only
 /// past that queue's hard cap (`edit_queue::MAX_DEFERRED_EDITS`) is an edit
-/// refused for volume.
+/// dropped for volume (FU4a: with nothing sent back).
 const MAX_BLOCK_CHANGES_PER_TICK: usize = 4;
 
 /// Handle to a running hosted server. Owns the `GameServer`, all client
@@ -2217,6 +2280,9 @@ impl HostedServer {
             return;
         }
         if let Some(at) = self.server.respawn_player(i) {
+            // FU4a (FU3 verify L1) — a new life: edits still waiting from the
+            // last one are sent back, not applied (`process_edit_group`).
+            self.server.players[i].respawns = self.server.players[i].respawns.wrapping_add(1);
             let pkt = protocol::serialize_packet(
                 protocol::PacketType::PlayerEvent,
                 &protocol::PlayerEventPacket {
@@ -2573,30 +2639,34 @@ impl HostedServer {
                 }
             };
             // FU3 — a client catching up on a stall gets a bigger read budget
-            // this tick (chosen once, from what waits after the fill).
-            let read_budget = if self.inbound[i].len() > CATCH_UP_QUEUE_LEN {
+            // this tick (chosen once, from what waits after the fill). FU4a
+            // (M2) — not one whose edit queue is full: no honest client is.
+            let read_budget = if self.inbound[i].len() > CATCH_UP_QUEUE_LEN && !self.edit_queues[i].is_full() {
                 CATCH_UP_PACKETS_PER_TICK
             } else {
                 MAX_PACKETS_PER_TICK
             };
             let mut packets_this_tick = 0usize;
+            let mut controls_this_tick = 0usize;
             let mut interacts_this_tick = 0usize;
             let mut entity_requests_this_tick = 0usize;
             let mut item_actions_this_tick = 0usize;
             // Per client per TICK, not per packet (audit 2026-09-27: the
             // budget reset for every packet, so 10 packets × 4 edits got in).
-            let mut edits_this_tick = 0usize;
+            let mut budget = EditTickBudget::default();
             // FU3 — the edits that waited past last tick's budget go first.
-            self.process_waiting_edits(i, &mut edits_this_tick);
+            self.process_waiting_edits(i, &mut budget);
             loop {
                 // FU1 — defer, don't drop: once the budget is spent, the rest
                 // waits for the next tick, in arrival order. Control packets
                 // (MP-A3: `Respawn`, `Disconnect`) cost no budget, so one at
                 // the front is still read — but never ahead of what the client
                 // sent before it (a Respawn read ahead of the health-0 inputs
-                // queued before it would be undone by them).
+                // queued before it would be undone by them). FU4a (L6) — only
+                // the first FREE_CONTROL_PACKETS_PER_TICK of them a tick.
                 if packets_this_tick >= read_budget
-                    && !self.inbound[i].front().is_some_and(|p| is_control_packet(p))
+                    && !(controls_this_tick < FREE_CONTROL_PACKETS_PER_TICK
+                        && self.inbound[i].front().is_some_and(|p| is_control_packet(p)))
                 {
                     if !self.inbound[i].is_empty() {
                         log::debug!(
@@ -2610,12 +2680,20 @@ impl HostedServer {
                 // everything behind it (one ordered stream). FU3 — so do an
                 // entity request and a device interaction past theirs; C2b —
                 // and a Q-drop the joiner's drop bucket can't pay for yet.
+                // FU4a (L1) — and any request while this client's edits wait.
                 let now = self.server.tick_counter;
                 let drop_ready = self.server.players.get(i).is_none_or(|sp| sp.drop_bucket.ready(now));
+                let edits_waiting = !self.edit_queues[i].is_empty();
                 if (item_actions_this_tick >= MAX_ITEM_ACTIONS_PER_TICK
                     && self.inbound[i].front().is_some_and(|p| is_item_action(p)))
                     || self.inbound[i].front().is_some_and(|p| {
-                        waits_for_kind_budget(p, entity_requests_this_tick, interacts_this_tick, drop_ready)
+                        waits_for_kind_budget(
+                            p,
+                            entity_requests_this_tick,
+                            interacts_this_tick,
+                            drop_ready,
+                            edits_waiting,
+                        )
                     })
                 {
                     break;
@@ -2623,7 +2701,9 @@ impl HostedServer {
                 let Some(packet) = self.inbound[i].pop() else {
                     break;
                 };
-                if !is_control_packet(&packet) {
+                if is_control_packet(&packet) && controls_this_tick < FREE_CONTROL_PACKETS_PER_TICK {
+                    controls_this_tick += 1;
+                } else {
                     packets_this_tick += 1;
                 }
                 let Some((ptype, payload)) = protocol::deserialize_header(&packet) else {
@@ -3012,14 +3092,15 @@ impl HostedServer {
                         // MP-A3 — death is server-held for a joiner. While
                         // dead its input is ignored: no moves, no look, no
                         // edits — each edit is sent back so the ghost block
-                        // un-places. Zero health in its input is its own sim
+                        // un-places (FU4a: within the per-tick send-back
+                        // cap). Zero health in its input is its own sim
                         // reporting a death; that is taken at the END of this
                         // packet, because the edits riding with it were made
                         // while the player was still alive.
                         let simulated = sp.server_simulated;
                         if simulated && sp.combat.dead {
                             for bc in &input.block_changes {
-                                self.send_back_authoritative_block(bc);
+                                self.send_back_authoritative_block(bc, &mut budget);
                             }
                             continue;
                         }
@@ -3081,29 +3162,18 @@ impl HostedServer {
                             continue;
                         }
                         // C1/FU1 — this input's `mined` tags (the first
-                        // MAX_MINED_PER_INPUT, its DoS guard), each used by at
-                        // most one edit, in order: the break it was sent with
-                        // (`classify_joiner_edit`). They stay with this
-                        // input's edits (FU3: through the wait past the
-                        // budget too): a refused edit's tag yields nothing and
-                        // is gone.
-                        let tags: Vec<Option<protocol::MinedBlock>> = input
-                            .mined
-                            .iter()
-                            .take(protocol::MAX_MINED_PER_INPUT)
-                            .copied()
-                            .map(Some)
-                            .collect();
+                        // MAX_MINED_PER_INPUT, its DoS guard), each paired
+                        // with its own edit as the input is read (FU4a, L2:
+                        // `edit_queue::EditGroup::new`): the break it was sent
+                        // with. A tag goes where its edit goes (FU3: through
+                        // the wait past the budget too): a refused edit's tag
+                        // yields nothing and is gone with it.
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick,
                         // and what is past it waits (FU3).
-                        let group = crate::edit_queue::EditGroup {
-                            edits: std::mem::take(&mut input.block_changes).into(),
-                            tags,
-                            held_kind: input.held_kind,
-                            held_id: input.held_id,
-                        };
-                        self.process_or_queue_edits(i, group, &mut edits_this_tick);
+                        let edits = std::mem::take(&mut input.block_changes);
+                        let held = (input.held_kind, input.held_id);
+                        self.process_or_queue_edits(i, edits, &input.mined, held, &mut budget);
                         // MP-A3 — a reported death (only ever believed
                         // downward: health coming back is never taken — only
                         // a `Respawn` revives). Drops this packet's move too.
@@ -3241,52 +3311,54 @@ impl HostedServer {
     /// FU3 — process the edits slot `i` has waiting past earlier ticks'
     /// budgets, oldest first, while this tick's edit budget lasts. They go
     /// before anything the client sent this tick.
-    fn process_waiting_edits(&mut self, i: usize, edits_this_tick: &mut usize) {
-        while *edits_this_tick < MAX_BLOCK_CHANGES_PER_TICK {
+    fn process_waiting_edits(&mut self, i: usize, budget: &mut EditTickBudget) {
+        while budget.edits < MAX_BLOCK_CHANGES_PER_TICK {
             let Some(mut group) = self.edit_queues[i].pop_front() else {
                 break;
             };
-            self.process_edit_group(i, &mut group, edits_this_tick);
-            if !group.edits.is_empty() {
+            self.process_edit_group(i, &mut group, budget);
+            if !group.is_empty() {
                 self.edit_queues[i].push_front(group);
                 break;
             }
         }
     }
 
-    /// FU3 — one input's edits: processed now, in order, while the tick's
-    /// edit budget lasts, if nothing of this client's waits ahead of them;
-    /// the rest (all of them, if something waits) queued behind, to go first
-    /// next tick. Nothing is sent back for the budget. Only past the queue's
-    /// hard cap ([`crate::edit_queue::MAX_DEFERRED_EDITS`], which no honest
-    /// client reaches) is an edit refused for volume: sent back, as any
-    /// refused edit is, with a warning.
+    /// FU3 — one input's edits (`edits`, its `tags` and the hand it
+    /// reported): processed now, in order, while the tick's edit budget
+    /// lasts, if nothing of this client's waits ahead of them; the rest (all
+    /// of them, if something waits) queued behind, to go first next tick.
+    /// Nothing is sent back for the budget. FU4a (FU3 verify M1, M2) — past
+    /// the queue's hard cap ([`crate::edit_queue::MAX_DEFERRED_EDITS`], which
+    /// no honest client reaches) an edit is dropped before it is even paired
+    /// with its tag, with nothing sent back (a volume refusal is no honest
+    /// edit to undo, and sending each back multiplied a flood's cost on the
+    /// host), and one warning is logged until the queue next empties.
     fn process_or_queue_edits(
         &mut self,
         i: usize,
-        mut group: crate::edit_queue::EditGroup,
-        edits_this_tick: &mut usize,
+        edits: Vec<protocol::BlockChange>,
+        tags: &[protocol::MinedBlock],
+        held: (u8, u16),
+        budget: &mut EditTickBudget,
     ) {
-        if self.edit_queues[i].is_empty() {
-            self.process_edit_group(i, &mut group, edits_this_tick);
+        let waiting = !self.edit_queues[i].is_empty();
+        let keep = if waiting { self.edit_queues[i].room() } else { usize::MAX };
+        let life = self.server.players.get(i).map_or(0, |sp| sp.respawns);
+        let world = &self.server.world;
+        let (mut group, mut dropped) =
+            crate::edit_queue::EditGroup::new(edits, keep, tags, held, life, |x, y, z| world.get_block(x, y, z));
+        if !waiting {
+            self.process_edit_group(i, &mut group, budget);
         }
-        if group.edits.is_empty() {
-            return;
-        }
-        let refused = self.edit_queues[i].push_back(group);
-        if refused.is_empty() {
-            return;
-        }
-        if self.edit_queues[i].take_cap_warning() {
+        dropped += self.edit_queues[i].push_back(group);
+        if dropped > 0 && self.edit_queues[i].take_cap_warning() {
             log::warn!(
-                "Player {i} has {} block edits waiting, at the cap ({}) — refusing what it sends \
+                "Player {i} has {} block edits waiting, at the cap ({}) — dropping what it sends \
                  past it (no honest client gets here)",
                 self.edit_queues[i].len(),
                 crate::edit_queue::MAX_DEFERRED_EDITS,
             );
-        }
-        for bc in &refused {
-            self.send_back_authoritative_block(bc);
         }
     }
 
@@ -3294,43 +3366,49 @@ impl HostedServer {
     /// lasts; what the budget doesn't reach stays in `group`. A joiner the
     /// server holds dead edits nothing (MP-A3): its waiting edits are sent
     /// back, all at once — they were made while it was alive, but the body
-    /// and inventory they would act on are gone.
+    /// and inventory they would act on are gone. FU4a (FU3 verify L1) — so
+    /// is a group made in an earlier life (`EditGroup::life`): a respawn was
+    /// answered since. Within the per-tick send-back cap
+    /// ([`MAX_SEND_BACKS_PER_CLIENT_PER_TICK`], M2); past it they are dropped.
     fn process_edit_group(
         &mut self,
         i: usize,
         group: &mut crate::edit_queue::EditGroup,
-        edits_this_tick: &mut usize,
+        budget: &mut EditTickBudget,
     ) {
-        if self.joiner_is_dead(i) {
-            for bc in std::mem::take(&mut group.edits) {
-                self.send_back_authoritative_block(&bc);
+        let earlier_life = self.server.players.get(i).is_some_and(|sp| sp.respawns != group.life);
+        if self.joiner_is_dead(i) || earlier_life {
+            for bc in group.take_edits() {
+                self.send_back_authoritative_block(&bc, budget);
             }
             return;
         }
-        while *edits_this_tick < MAX_BLOCK_CHANGES_PER_TICK {
-            let Some(bc) = group.edits.pop_front() else {
+        while budget.edits < MAX_BLOCK_CHANGES_PER_TICK {
+            let Some((bc, tag)) = group.pop_front() else {
                 break;
             };
-            *edits_this_tick += 1;
-            self.process_one_edit(i, &bc, group);
+            budget.edits += 1;
+            self.process_one_edit(i, &bc, tag, (group.held_kind, group.held_id), budget);
         }
     }
 
-    /// Validate and apply one of slot `i`'s edits (`group`: its input's tags
-    /// and hand). A refused edit is sent back, so the sender's optimistic
-    /// local edit is undone, and its tag is spent.
+    /// Validate and apply one of slot `i`'s edits, with its own `mined` tag
+    /// (FU4a, L2) and the hand its input reported. A refused edit is sent
+    /// back (within the per-tick cap), so the sender's optimistic local edit
+    /// is undone; its tag yields nothing.
     fn process_one_edit(
         &mut self,
         i: usize,
         bc: &protocol::BlockChange,
-        group: &mut crate::edit_queue::EditGroup,
+        tag: Option<protocol::MinedBlock>,
+        hand: (u8, u16),
+        budget: &mut EditTickBudget,
     ) {
-        if let Err(why) = self.validate_block_edit(i, bc, (group.held_kind, group.held_id)) {
+        if let Err(why) = self.validate_block_edit(i, bc, hand) {
             log::debug!("Refused slot {i}'s edit at ({}, {}, {}): {why:?}", bc.x, bc.y, bc.z);
             // Un-ghost the refused edit on the sender: re-send what is
             // really there.
-            self.send_back_authoritative_block(bc);
-            group.spend_tag_of_refused(bc);
+            self.send_back_authoritative_block(bc, budget);
             return;
         }
         let old_block =
@@ -3344,9 +3422,7 @@ impl HostedServer {
         // mined, a plain placement, or neither. A break's
         // yield is read now, before the block leaves the
         // world (`break_drops`).
-        let joiner_edit = remote.then(|| {
-            self.classify_joiner_edit(bc, old_block, &mut group.tags, (group.held_kind, group.held_id))
-        });
+        let joiner_edit = remote.then(|| self.classify_joiner_edit(bc, old_block, tag.as_ref(), hand));
         let break_yield = match joiner_edit {
             Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
                 self.joiner_break_yield(bc, old_block, tool)
@@ -3527,24 +3603,28 @@ impl HostedServer {
     }
 
     /// C1 — what slot `i`'s accepted edit `old → bc.new_block` is to its
-    /// inventory (`joiner_inventory::classify`): a break if it is one with the
-    /// oldest unused `mined` tag of its cell in this input (`tags`: the input's
-    /// first [`protocol::MAX_MINED_PER_INPUT`] — the DoS guard, which an honest
-    /// client never exceeds), else a plain placement by what its input says is
-    /// in hand, else unchecked.
+    /// inventory (`joiner_inventory::classify`): a break if it is one with its
+    /// own `mined` tag (`tag`), else a plain placement by what its input says
+    /// is in hand, else unchecked.
     ///
     /// FU1 — a tag is used up by its own edit (C1 verify N4): the break it
     /// yields, or an emptying of the cell that yields nothing (dug lava or
     /// fire). One tag, one edit, so it can never yield for another edit of the
     /// same cell (a later Eraser or bucket there, a re-mine), and the client
     /// sends one per mined edit, beside that edit (`RemoteClient::send_input`).
-    /// A tagged cell's fills are classified as untagged, so a place-then-break
-    /// of one cell in one input consumes the placement and yields the break.
+    /// FU4a (FU3 verify L2) — the pairing is made once, as the input is read
+    /// (`edit_queue::EditGroup::new`), so the edit a tag was paired with
+    /// spends it whatever happens to it (classified here, refused, dropped at
+    /// the cap); it is never "the cell's oldest tag" at processing time. A
+    /// fill is never paired, so a place-then-break of one cell in one input
+    /// consumes the placement and yields the break; an edit whose tag doesn't
+    /// make it a break (the server's copy of the cell disagreed) is classified
+    /// as untagged.
     fn classify_joiner_edit(
         &self,
         bc: &protocol::BlockChange,
         old: crate::block::BlockId,
-        tags: &mut [Option<protocol::MinedBlock>],
+        tag: Option<&protocol::MinedBlock>,
         (held_kind, held_id): (u8, u16),
     ) -> crate::joiner_inventory::JoinerEdit {
         use crate::joiner_inventory::{classify, JoinerEdit};
@@ -3554,17 +3634,10 @@ impl HostedServer {
         // (`edit_queue::EditGroup`), not of a later one read since.
         let hand = crate::joiner_inventory::Hand::from_wire(held_kind, held_id, &self.server.registry);
         let creative = self.server.play_mode.is_creative();
-        let cell = (bc.x, bc.y, bc.z);
-        if let Some(tag) = tags.iter_mut().find(|t| t.is_some_and(|m| (m.x, m.y, m.z) == cell)) {
-            let edit = classify(old, bc.new_block, tag.as_ref(), hand, creative);
-            // The tag's own edit: a break it yields, or an emptying of a cell
-            // that yields nothing (lava or fire dug up, `yields_drops`) —
-            // used up either way, so a later break of the cell takes its own.
-            if matches!(edit, JoinerEdit::Break { .. }) || bc.new_block == crate::block::AIR {
-                *tag = None;
-                if matches!(edit, JoinerEdit::Break { .. }) {
-                    return edit;
-                }
+        if let Some(tag) = tag {
+            let edit = classify(old, bc.new_block, Some(tag), hand, creative);
+            if matches!(edit, JoinerEdit::Break { .. }) {
+                return edit;
             }
         }
         classify(old, bc.new_block, None, hand, creative)
@@ -3846,10 +3919,13 @@ impl HostedServer {
     /// StateUpdate, so the sender's optimistic local edit is overwritten. Rides
     /// the ordinary block-change broadcast (idempotent for everyone else).
     /// Skipped for cells outside the world or in an unloaded column, where the
-    /// server has nothing authoritative to say.
-    fn send_back_authoritative_block(&mut self, bc: &protocol::BlockChange) {
+    /// server has nothing authoritative to say. FU4a (FU3 verify M2) — and
+    /// past the client's [`MAX_SEND_BACKS_PER_CLIENT_PER_TICK`] this tick
+    /// (`budget`): dropped silently.
+    fn send_back_authoritative_block(&mut self, bc: &protocol::BlockChange, budget: &mut EditTickBudget) {
         let cs = crate::chunk::CHUNK_SIZE as i32;
-        if bc.y < 0
+        if budget.send_backs >= MAX_SEND_BACKS_PER_CLIENT_PER_TICK
+            || bc.y < 0
             || bc.y >= 6 * cs
             || !self
                 .server
@@ -3858,6 +3934,7 @@ impl HostedServer {
         {
             return;
         }
+        budget.send_backs += 1;
         self.pending_block_changes.push(protocol::BlockChange {
             x: bc.x,
             y: bc.y,

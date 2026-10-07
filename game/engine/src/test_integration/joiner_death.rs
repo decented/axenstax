@@ -416,6 +416,97 @@ fn a_disconnect_behind_a_flood_of_packets_still_frees_the_slot() {
     assert!(hs.slot_is_free(slot), "a Disconnect past the budget still releases the seat");
 }
 
+/// FU4a (FU3 verify L6) — control packets are free only up to
+/// `FREE_CONTROL_PACKETS_PER_TICK` (8) a tick; past that each counts against
+/// the read budget. A burst of 1,000 `Respawn`s in one fill used to be read
+/// in a single tick; now it takes several, and what the client sent behind it
+/// waits and is read after it, in order.
+#[test]
+fn a_burst_of_respawns_takes_several_ticks_and_what_follows_it_is_read_in_order() {
+    let mut hs = start_dedicated_server("respawn-burst");
+    let (client, slot) = join_guest(&mut hs, "Burster");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    let cell = (at.x.floor() as i32 + 1, at.y as i32, at.z.floor() as i32);
+    for _ in 0..1_000 {
+        send_respawn(&client);
+    }
+    send_input(&client, 1, at, 20.0, 0.0, &[(cell, block::STONE)]);
+    send_input(&client, 2, at, 20.0, 0.0, &[(cell, block::GLASS)]);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(hs.inbound_len_for_test(slot) > 2, "one tick does not read the whole burst");
+    assert_eq!(hs.server.players[slot].last_input_tick, 0, "and nothing behind it is read ahead of it");
+    let mut ticks = 1;
+    while hs.inbound_len_for_test(slot) > 0 {
+        tick_n(&mut hs, &client, &mut inbox, 1);
+        ticks += 1;
+        assert!(ticks < 100, "the burst drains");
+    }
+    assert!(ticks >= 10, "the burst took several ticks, not {ticks}");
+    assert_eq!(hs.server.players[slot].last_input_tick, 2, "the inputs behind it were read");
+    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::GLASS, "in order");
+    assert!(!hs.slot_is_free(slot), "a burst under the byte bound is not a disconnect");
+}
+
+/// FU4a (FU3 verify L1) — edits a joiner made before it died, still waiting
+/// past the edit budget when it dies, never land: not while it is dead, and
+/// not after it respawns.
+#[test]
+fn edits_waiting_when_a_joiner_dies_never_land_even_after_it_respawns() {
+    let mut hs = start_dedicated_server("dead-waiting");
+    let (client, slot) = join_guest(&mut hs, "Unlucky");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    let (x, y, z) = (at.x.floor() as i32, at.y as i32 + 1, at.z.floor() as i32);
+    let cells: Vec<(i32, i32, i32)> = (-2..=2).flat_map(|dx| [(x + dx, y, z + 1), (x + dx, y, z - 1)]).collect();
+    let edits: Vec<_> = cells.iter().map(|&c| (c, block::STONE)).collect();
+    let landed = |hs: &HostedServer| cells.iter().filter(|c| hs.server.world.get_block(c.0, c.1, c.2) == block::STONE).count();
+    // One tick: ten edits (four land, six wait), then the input reporting the death.
+    send_input(&client, 1, at, 20.0, 0.0, &edits);
+    send_input(&client, 2, at, 0.0, 0.0, &[]);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(hs.server.players[slot].combat.dead);
+    assert_eq!(landed(&hs), 4, "the budget's four landed while it was alive");
+    tick_n(&mut hs, &client, &mut inbox, 25);
+    send_respawn(&client);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(!hs.server.players[slot].combat.dead, "respawned");
+    tick_n(&mut hs, &client, &mut inbox, 5);
+    assert_eq!(landed(&hs), 4, "none of the waiting edits landed, dead or respawned");
+    assert_eq!(hs.edit_queue_len_for_test(slot), 0);
+}
+
+/// FU4a (FU3 verify L1) — the stamp itself: each waiting edit group carries
+/// the life it was made in (`ServerPlayer::respawns`, bumped when a respawn
+/// is answered), and one from an earlier life is sent back, not applied.
+/// (Today a joiner's waiting edits are already sent back on the first tick it
+/// is dead, twenty ticks before a Respawn can be answered, so this drives the
+/// stamp directly: a new life while edits wait.)
+#[test]
+fn a_waiting_edit_from_an_earlier_life_is_sent_back_not_applied() {
+    let mut hs = start_dedicated_server("earlier-life");
+    let (client, slot) = join_guest(&mut hs, "Reborn");
+    let mut inbox = Inbox::default();
+    let at = stand_on_floor(&mut hs, slot);
+    let (x, y, z) = (at.x.floor() as i32, at.y as i32 + 1, at.z.floor() as i32);
+    let cells: Vec<(i32, i32, i32)> = (-2..=2).flat_map(|dx| [(x + dx, y, z + 1), (x + dx, y, z - 1)]).collect();
+    let edits: Vec<_> = cells.iter().map(|&c| (c, block::STONE)).collect();
+    send_input(&client, 1, at, 20.0, 0.0, &edits);
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert_eq!(hs.edit_queue_len_for_test(slot), 6, "four landed, six wait");
+    hs.server.players[slot].respawns += 1; // as if a respawn were answered while they waited
+    inbox.block_changes.clear();
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert_eq!(hs.edit_queue_len_for_test(slot), 0);
+    for c in &cells[4..] {
+        assert_eq!(hs.server.world.get_block(c.0, c.1, c.2), block::AIR, "{c:?}: not applied");
+        assert!(
+            inbox.block_changes.iter().any(|bc| (bc.x, bc.y, bc.z) == *c && bc.new_block == block::AIR),
+            "{c:?}: sent back, so the joiner's ghost goes"
+        );
+    }
+}
+
 #[test]
 fn gameplay_packets_past_the_budget_wait_for_the_next_tick() {
     // FU1 — defer, don't drop: an edit in the 11th packet of a tick is

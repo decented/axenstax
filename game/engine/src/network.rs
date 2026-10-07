@@ -157,6 +157,7 @@ impl ServerTransport for QuicServerTransport {
             log::warn!(
                 "QUIC: {queued} bytes queued for a client that isn't reading; disconnecting it"
             );
+            // Relaxed: set and read on the game thread itself, no frame to order (FU4a, L3).
             self.closed.store(true, Ordering::Relaxed);
             self.conn.close(1u32.into(), b"connection too slow");
             return;
@@ -173,7 +174,8 @@ impl ServerTransport for QuicServerTransport {
     }
 
     fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        // Acquire pairs with the bridge's Release: closed ⇒ its last frame is in `rx` (FU4a, L3).
+        self.closed.load(Ordering::Acquire)
     }
 }
 
@@ -423,7 +425,8 @@ async fn bridge_loop(
         _ = writer => {}
     }
     conn.close(0u32.into(), b"closed");
-    closed.store(true, Ordering::Relaxed);
+    // Release after the reader's last send: whoever sees `closed` sees that frame (FU4a, L3).
+    closed.store(true, Ordering::Release);
     if let Some(pkt) = on_close {
         let _ = net_tx.send(pkt);
     }
@@ -495,7 +498,8 @@ pub fn bridge_server_connection(connection: quinn::Connection) -> QuicServerTran
                         _ => log::warn!("QUIC: peer never opened its game stream"),
                     }
                     connection.close(0u32.into(), b"no stream");
-                    closed_net.store(true, Ordering::Relaxed);
+                    // Release, as the bridge's own close (FU4a, L3).
+                    closed_net.store(true, Ordering::Release);
                     let _ = net_tx.send(disconnect);
                 }
             }

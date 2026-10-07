@@ -58,7 +58,8 @@ impl ServerTransport for WebSocketServerTransport {
         true
     }
     fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        // Acquire pairs with the reader's Release: closed ⇒ its last frame is in `inbound` (FU4a, L3).
+        self.closed.load(Ordering::Acquire)
     }
 }
 
@@ -137,7 +138,8 @@ where
                 _ => {} // text/ping/pong — ignored (constant 20 TPS traffic keeps it warm)
             }
         }
-        closed_reader.store(true, Ordering::Relaxed);
+        // Release after the last frame's send: whoever sees `closed` sees that frame (FU4a, L3).
+        closed_reader.store(true, Ordering::Release);
         let dc =
             crate::protocol::serialize_packet(crate::protocol::PacketType::Disconnect, &());
         let _ = in_tx.send(dc);

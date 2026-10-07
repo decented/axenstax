@@ -160,6 +160,11 @@ pub struct ServerPlayer {
     /// client that reports zero health and immediately asks to respawn does not
     /// get a free teleport home with full health.
     pub dead_ticks: u32,
+    /// FU4a (FU3 verify L1) — this player's life: the respawns the server has
+    /// answered (`HostedServer::handle_respawn`). Edits waiting past the edit
+    /// budget carry the life they were made in, and one from an earlier life
+    /// is sent back, not applied.
+    pub respawns: u32,
     /// MP-A3 — a remote slot whose join handshake has not completed. Such a
     /// body is not in the world yet: it takes no survival damage (a slow
     /// handshake underwater used to drown it inside the pre-auth window), picks
@@ -426,6 +431,7 @@ impl ServerPlayer {
             client_worldgen_version: crate::world::worldgen_fingerprint(),
             spawn_pos: spawn,
             dead_ticks: 0,
+            respawns: 0,
             awaiting_join: false,
             armour_points: 0,
             armour_wear_hits: 0,
