@@ -104,6 +104,8 @@ mod showcase_ui;
 mod open_stash;
 mod gamestr;
 mod craft_ui;
+// C3a-1 — the inventory window's click rules, one pure model.
+mod window;
 mod recipe_book_ui;
 mod egui_integration;
 mod menu;

@@ -1809,10 +1809,11 @@ either way. The food an `Eat` claims is the client's word until the shadow is
 enforced (C3).
 
 **Craft (C2b).** The 2×2 player grid and a crafting table's 3×3 grid both
-craft at one site, the click on the result (`ClickTarget::ResultSlot`,
-`CraftingUi::click_result`; the recipe book only fills the grid). On a joined
-client, before the click, the claims gate (§4.2d, `may_craft`) may stop it;
-when `click_result` actually crafted, the client sends `Craft` with the grid
+craft at one site, the click on the result (`ClickTarget::ResultSlot`, the
+window rule `WindowClick::Result` in `window::apply`, C3a-1; the recipe book
+only fills the grid). On a joined client, before the click, the claims gate
+(§4.2d, `may_craft`) may stop it; when the click actually crafted
+(`ClickResult::Crafted`), the client sends `Craft` with the grid
 as it was BEFORE the craft consumed it (`item_actions::craft_grid_wire`:
 row-major `inventory::item_to_ref` pairs — ingredients are always blocks or
 materials, so the pair is lossless) and `table`, the crafting table's cell

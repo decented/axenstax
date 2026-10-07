@@ -5,10 +5,11 @@
 
 use crate::armour::{self, ArmourItem, ArmourSlot as ArmSlot};
 use crate::block::BlockRegistry;
-use crate::crafting::{self, CraftSlot};
+use crate::crafting::CraftSlot;
 use crate::egui_integration::EguiIntegration;
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
+use crate::window::{self, ClickCtx, ClickResult, Station, WindowClick, WindowMut, WindowSlot};
 
 /// Theme colours for crafting UI.
 const OVERLAY_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 210);
@@ -19,40 +20,6 @@ const RESULT_BORDER: egui::Color32 = egui::Color32::from_rgb(100, 200, 80);
 const PAD_FOCUS_BORDER: egui::Color32 = egui::Color32::from_rgb(255, 210, 80);
 const TITLE_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 200, 120);
 const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
-
-/// Two items are the same kind (block id / material id). Tools/plans/armour
-/// never appear as crafting ingredients, so they're never equal here.
-fn same_item(a: &Item, b: &Item) -> bool {
-    match (a, b) {
-        (Item::Block(x), Item::Block(y)) => x == y,
-        (Item::Material(x), Item::Material(y)) => x == y,
-        _ => false,
-    }
-}
-
-/// Total count of `item` across all inventory slots.
-fn inv_count(inv: &Inventory, item: &Item) -> u32 {
-    (0..36)
-        .filter_map(|i| inv.slot(i))
-        .filter(|s| same_item(&s.item, item))
-        .map(|s| s.count as u32)
-        .sum()
-}
-
-/// Remove one unit of `item` from the lowest matching inventory slot.
-/// Returns false if none was found.
-fn inv_remove_one(inv: &mut Inventory, item: &Item) -> bool {
-    for i in 0..36 {
-        if let Some(s) = inv.slot(i)
-            && same_item(&s.item, item) && s.count >= 1 {
-                let mut ns = s.clone();
-                ns.count -= 1;
-                inv.set_slot(i, if ns.count == 0 { None } else { Some(ns) });
-                return true;
-            }
-    }
-    false
-}
 
 /// The crafting UI state.
 pub struct CraftingUi {
@@ -182,7 +149,41 @@ impl CraftingUi {
         self.book_uses_filter = None;
     }
 
-    /// Return all grid + cursor items to the inventory and close the panel.
+    /// The grid on screen: the player's 2×2 or a table's 3×3.
+    pub fn station(&self) -> Station {
+        if self.is_table { Station::Table } else { Station::Player }
+    }
+
+    /// C3a-1 — apply one window click: the pure rule (`window::apply`) over
+    /// this screen's grid and cursor plus the player's `inv` and `armour`,
+    /// then refresh the result shown. Every item move the screen makes goes
+    /// through here.
+    pub fn apply_click(
+        &mut self,
+        inv: &mut Inventory,
+        armour: &mut [Option<ArmourItem>; 4],
+        click: &WindowClick,
+        creative: bool,
+    ) -> ClickResult {
+        let ctx = ClickCtx { creative, station: self.station(), craft: self.result.clone() };
+        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
+        let out = window::apply(&mut view, click, &ctx);
+        // A close that couldn't return everything has always left the
+        // result as it was.
+        if *click != WindowClick::Close {
+            self.update_result();
+        }
+        out
+    }
+
+    /// `apply_click` for a click that never touches the armour slots.
+    fn apply_bag_click(&mut self, inv: &mut Inventory, click: &WindowClick) -> ClickResult {
+        let mut no_armour = [None; 4];
+        self.apply_click(inv, &mut no_armour, click, false)
+    }
+
+    /// Return all grid + cursor items to the inventory and close the panel
+    /// (`WindowClick::Close`).
     ///
     /// `add_item` is non-atomic, so if the inventory can't hold everything the
     /// un-returnable items STAY in the grid/cursor and the panel stays **open**
@@ -191,21 +192,7 @@ impl CraftingUi {
     /// if the panel actually closed; callers can surface a "make room" hint on
     /// `false`.
     pub fn close(&mut self, inventory: &mut Inventory) -> bool {
-        let mut all_placed = true;
-        for r in 0..3 {
-            for c in 0..3 {
-                if let Some(stack) = self.grid[r][c].take()
-                    && let Some(remainder) = inventory.add_item(stack) {
-                        self.grid[r][c] = Some(remainder); // keep what didn't fit
-                        all_placed = false;
-                    }
-            }
-        }
-        if let Some(cursor) = self.cursor_item.take()
-            && let Some(remainder) = inventory.add_item(cursor) {
-                self.cursor_item = Some(remainder);
-                all_placed = false;
-            }
+        let all_placed = self.apply_bag_click(inventory, &WindowClick::Close).ok();
         if all_placed {
             self.open = false;
             self.result = None;
@@ -217,395 +204,42 @@ impl CraftingUi {
         all_placed
     }
 
-    /// Recipe-book auto-fill (2026-06-12). Lay a catalogue card's
-    /// `example_grid` into the crafting grid by pulling the exact items from
-    /// `inv`, so the existing matcher then produces the card's output. The
-    /// book never crafts directly — it only drives this grid, and the real
-    /// `match_recipe` (via `update_result`) decides the result.
-    ///
-    /// Behaviour:
-    /// 1. Any items currently in the grid (and the cursor) are returned to
-    ///    the inventory first (nothing is destroyed).
-    /// 2. If the inventory holds every item the example needs, they're moved
-    ///    in and the grid becomes `example`. Returns `true`.
-    /// 3. If anything is short, nothing is taken (step-1 returns stand) and
-    ///    the grid is left empty. Returns `false` — the caller can toast
-    ///    "not enough materials".
-    ///
-    /// v1 fills the example's *exact* items (e.g. an Oak Log for the
-    /// any-log plank recipe). Substituting a different in-set item the
-    /// player happens to hold (spruce log) is a deferred nicety.
-    pub fn autofill_from_example(
-        &mut self,
-        example: &[[CraftSlot; 3]; 3],
-        inv: &mut Inventory,
-    ) -> bool {
-        // Step 1 — clear the grid + cursor back into the inventory.
-        for r in 0..3 {
-            for c in 0..3 {
-                if let Some(stack) = self.grid[r][c].take()
-                    && let Some(rem) = inv.add_item(stack) {
-                        // Inventory full mid-return: put it back and bail —
-                        // never destroy items.
-                        self.grid[r][c] = Some(rem);
-                        self.update_result();
-                        return false;
-                    }
-            }
-        }
-        if let Some(cursor) = self.cursor_item.take()
-            && let Some(rem) = inv.add_item(cursor) {
-                self.cursor_item = Some(rem);
-                self.update_result();
-                return false;
-            }
-
-        // Step 2 — tally what the example needs (exact items).
-        let mut needs: Vec<(crate::item::Item, u32)> = Vec::new();
-        for row in example.iter() {
-            for slot in row.iter() {
-                let item = match *slot {
-                    CraftSlot::Block(b) => crate::item::Item::Block(b),
-                    CraftSlot::Material(m) => crate::item::Item::Material(m),
-                    CraftSlot::Empty => continue,
-                };
-                if let Some(entry) = needs.iter_mut().find(|(it, _)| same_item(it, &item)) {
-                    entry.1 += 1;
-                } else {
-                    needs.push((item, 1));
-                }
-            }
-        }
-
-        // Step 3 — affordability check before taking anything.
-        for (item, count) in &needs {
-            if inv_count(inv, item) < *count {
-                self.update_result();
-                return false; // grid already empty; items already returned
-            }
-        }
-
-        // Step 4 — remove from inventory and lay the grid.
-        for (item, count) in &needs {
-            for _ in 0..*count {
-                let _ = inv_remove_one(inv, item);
-            }
-        }
-        for (grid_row, example_row) in self.grid.iter_mut().zip(example.iter()) {
-            for (cell, ex) in grid_row.iter_mut().zip(example_row.iter()) {
-                *cell = match *ex {
-                    CraftSlot::Block(b) => Some(ItemStack::new_block(b, 1)),
-                    CraftSlot::Material(m) => Some(ItemStack::new_material(m, 1)),
-                    CraftSlot::Empty => None,
-                };
-            }
-        }
-        self.update_result();
-        true
+    /// Recipe-book auto-fill (`WindowClick::Autofill`). Returns `false` when
+    /// the inventory is short (the caller toasts "not enough materials").
+    #[cfg(test)]
+    pub fn autofill_from_example(&mut self, example: &[[CraftSlot; 3]; 3], inv: &mut Inventory) -> bool {
+        self.apply_bag_click(inv, &WindowClick::Autofill { example: *example }).ok()
     }
 
+    /// Recompute the result shown from the grid (`window::recipe_output`).
     pub fn update_result(&mut self) {
-        let mut craft_grid = [[CraftSlot::Empty; 3]; 3];
-        for (craft_row, grid_row) in craft_grid.iter_mut().zip(self.grid.iter()) {
-            for (slot, cell) in craft_row.iter_mut().zip(grid_row.iter()) {
-                *slot = match cell {
-                    Some(stack) => CraftSlot::from_item(&stack.item),
-                    None => CraftSlot::Empty,
-                };
-            }
-        }
-        self.result = crafting::match_recipe(&craft_grid);
+        self.result = window::recipe_output(&self.grid);
     }
 
-    /// Click a crafting-grid cell. Minecraft semantics: **left** (`right=false`)
-    /// works on the whole stack, **right** (`right=true`) on a single item.
-    /// All paths are lossless. `update_result()` runs after every mutation.
-    pub fn click_grid_slot(&mut self, row: usize, col: usize, _inventory: &mut Inventory, right: bool) -> bool {
-        if !self.is_table && (row >= 2 || col >= 2) {
-            return false;
-        }
-
-        if let Some(cursor) = self.cursor_item.take() {
-            match self.grid[row][col].take() {
-                // Empty cell.
-                None => {
-                    if right {
-                        // Right: drop one, keep the rest on the cursor.
-                        self.grid[row][col] = Some(ItemStack { item: cursor.item.clone(), count: 1 });
-                        if cursor.count > 1 {
-                            self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - 1 });
-                        }
-                    } else {
-                        // Left: drop the whole stack (capped at max_stack; a
-                        // cursor never exceeds max in practice, but stay safe).
-                        let max = cursor.item.max_stack();
-                        if cursor.count <= max {
-                            self.grid[row][col] = Some(cursor);
-                        } else {
-                            self.grid[row][col] = Some(ItemStack { item: cursor.item.clone(), count: max });
-                            self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - max });
-                        }
-                    }
-                }
-                // Same item already in the cell.
-                Some(mut cell) if cell.item.can_stack_with(&cursor.item) => {
-                    let room = cell.item.max_stack().saturating_sub(cell.count);
-                    if right {
-                        // Right: add one if there's room (click-to-stack); else no-op.
-                        if room >= 1 {
-                            cell.count += 1;
-                            self.grid[row][col] = Some(cell);
-                            if cursor.count > 1 {
-                                self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - 1 });
-                            }
-                        } else {
-                            self.grid[row][col] = Some(cell);
-                            self.cursor_item = Some(cursor);
-                        }
-                    } else {
-                        // Left: merge the whole stack up to max; remainder stays on cursor.
-                        let add = cursor.count.min(room);
-                        cell.count += add;
-                        self.grid[row][col] = Some(cell);
-                        if add < cursor.count {
-                            self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - add });
-                        }
-                    }
-                }
-                // Different item → swap (both buttons). Lossless: the cell holds
-                // the whole cursor (≤ max), the cursor takes the displaced cell.
-                Some(cell) => {
-                    self.grid[row][col] = Some(cursor);
-                    self.cursor_item = Some(cell);
-                }
-            }
-        } else if let Some(cell) = self.grid[row][col].take() {
-            // Empty cursor → pick up. Left = whole, right = ceil-half (leave the rest).
-            if right {
-                let take = cell.count / 2 + cell.count % 2;
-                let leave = cell.count - take;
-                self.cursor_item = Some(ItemStack { item: cell.item.clone(), count: take });
-                if leave > 0 {
-                    self.grid[row][col] = Some(ItemStack { item: cell.item, count: leave });
-                }
-            } else {
-                self.cursor_item = Some(cell);
-            }
-        }
-
-        self.update_result();
-        true
+    /// Click a crafting-grid cell (`WindowClick::Grid`).
+    #[cfg(test)]
+    pub fn click_grid_slot(&mut self, row: usize, col: usize, inventory: &mut Inventory, right: bool) -> bool {
+        self.apply_bag_click(inventory, &WindowClick::Grid { row, col, right }).ok()
     }
 
+    /// Click the result slot (`WindowClick::Result`).
+    #[cfg(test)]
     pub fn click_result(&mut self, inventory: &mut Inventory) -> bool {
-        let Some(result) = self.result.clone() else {
-            return false;
-        };
-        // Plan where the result lands BEFORE consuming anything (audit
-        // 2026-09-27): if the cursor can't absorb it and the inventory has
-        // no room for what's left, refuse the craft and consume nothing.
-        //  - empty cursor → the result goes on the cursor.
-        //  - result stacks with the cursor → merge up to max_stack onto the
-        //    cursor; only the *overflow* must fit the inventory.
-        //  - different item on the cursor → the whole result must fit the
-        //    inventory. The cursor is never overwritten or re-added.
-        let mut new_cursor = self.cursor_item.clone();
-        let mut new_inventory: Option<Inventory> = None;
-        match new_cursor.as_mut() {
-            None => new_cursor = Some(result),
-            Some(cursor) => {
-                let to_inventory = if cursor.item.can_stack_with(&result.item) {
-                    let space = cursor.item.max_stack().saturating_sub(cursor.count);
-                    let merge = result.count.min(space);
-                    cursor.count += merge;
-                    let overflow = result.count - merge;
-                    (overflow > 0).then(|| ItemStack { item: result.item.clone(), count: overflow })
-                } else {
-                    Some(result)
-                };
-                if let Some(stack) = to_inventory {
-                    let mut trial = inventory.clone();
-                    if trial.add_item(stack).is_some() {
-                        return false;
-                    }
-                    new_inventory = Some(trial);
-                }
-            }
-        }
-
-        for r in 0..3 {
-            for c in 0..3 {
-                if let Some(stack) = &mut self.grid[r][c] {
-                    stack.count -= 1;
-                    if stack.count == 0 {
-                        self.grid[r][c] = None;
-                    }
-                }
-            }
-        }
-        self.result = None;
-        self.cursor_item = new_cursor;
-        if let Some(inv) = new_inventory {
-            *inventory = inv;
-        }
-        self.update_result();
-        true
+        self.apply_bag_click(inventory, &WindowClick::Result).ok()
     }
 
-    /// Spec 28e — click an armour-slot in the inventory overlay.
+    /// Spec 28e — click an armour slot (`WindowClick::Armour`);
     /// `armour_slot_idx` is `ArmourSlot as usize` (0..=3).
-    ///
-    /// Behaviour mirrors Minecraft's armour-slot picker:
-    ///  * Holding nothing + slot has piece → pick the piece up to cursor.
-    ///  * Holding an `Item::Armour` that matches this slot → equip it (the
-    ///    previously-equipped piece, if any, goes onto the cursor as a
-    ///    swap).
-    ///  * Holding any other item, or armour for the wrong slot → no-op
-    ///    (cursor stays put, slot stays put) so the player can't lose
-    ///    items by accidentally clicking an unrelated slot.
-    pub fn click_armour_slot(
-        &mut self,
-        armour_slot_idx: usize,
-        armour_slots: &mut [Option<ArmourItem>; 4],
-    ) -> bool {
-        let expected_slot = match armour_slot_idx {
-            0 => ArmSlot::Helmet,
-            1 => ArmSlot::Chestplate,
-            2 => ArmSlot::Leggings,
-            3 => ArmSlot::Boots,
-            _ => return false,
-        };
-        match self.cursor_item.take() {
-            None => {
-                // Unequip path: lift the piece (if any) into the cursor.
-                if let Some(piece) = armour_slots[armour_slot_idx].take() {
-                    self.cursor_item = Some(ItemStack {
-                        item: Item::Armour(piece),
-                        count: 1,
-                    });
-                }
-                true
-            }
-            Some(cursor) => {
-                match &cursor.item {
-                    Item::Armour(piece) if piece.slot == expected_slot => {
-                        // Equip — swap with whatever's in the slot.
-                        let previous = armour_slots[armour_slot_idx].take();
-                        armour_slots[armour_slot_idx] = Some(*piece);
-                        // If the cursor stack carried more than one (shouldn't —
-                        // armour never stacks — but defensive) put the rest back.
-                        if cursor.count > 1 {
-                            self.cursor_item = Some(ItemStack {
-                                item: cursor.item.clone(),
-                                count: cursor.count - 1,
-                            });
-                            // The swapped-out piece is dropped here on the
-                            // floor of the cursor — but cursor is occupied,
-                            // so push back into the slot we just vacated.
-                            // Realistically armour never stacks so this
-                            // branch never fires, but keep the path sound.
-                            if let Some(prev) = previous {
-                                armour_slots[armour_slot_idx] = Some(prev);
-                            }
-                        } else {
-                            self.cursor_item = previous.map(|p| ItemStack {
-                                item: Item::Armour(p),
-                                count: 1,
-                            });
-                        }
-                        true
-                    }
-                    _ => {
-                        // Wrong-slot armour or non-armour item — bounce the
-                        // cursor back unchanged so the player doesn't lose
-                        // it on a stray click.
-                        self.cursor_item = Some(cursor);
-                        false
-                    }
-                }
-            }
-        }
+    #[cfg(test)]
+    pub fn click_armour_slot(&mut self, armour_slot_idx: usize, armour_slots: &mut [Option<ArmourItem>; 4]) -> bool {
+        let mut unused = Inventory::new();
+        self.apply_click(&mut unused, armour_slots, &WindowClick::Armour { slot: armour_slot_idx }, false).ok()
     }
 
-    /// #45 #28 — destroy the stack currently carried on the cursor (the trash
-    /// slot). Returns true if anything was actually binned. Only ever deletes
-    /// the held cursor item, never a slot's contents, so it can't nuke an
-    /// inventory by accident — you must pick something up first.
-    pub fn trash_cursor(&mut self) -> bool {
-        self.cursor_item.take().is_some()
-    }
-
-    /// Click an inventory slot. Minecraft semantics: **left** (`right=false`)
-    /// works on the whole stack, **right** (`right=true`) on a single item
-    /// (place one / pick up the ceil-half). All paths are lossless.
+    /// Click an inventory slot (`WindowClick::Slot`).
+    #[cfg(test)]
     pub fn click_inventory_slot(&mut self, slot: usize, inventory: &mut Inventory, right: bool) -> bool {
-        if let Some(cursor) = self.cursor_item.take() {
-            match inventory.slot(slot).cloned() {
-                // Empty slot.
-                None => {
-                    if right {
-                        // Right: place one, keep the rest on the cursor.
-                        inventory.set_slot(slot, Some(ItemStack { item: cursor.item.clone(), count: 1 }));
-                        if cursor.count > 1 {
-                            self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - 1 });
-                        }
-                    } else {
-                        // Left: place the whole stack.
-                        inventory.set_slot(slot, Some(cursor));
-                    }
-                }
-                // Same item — merge.
-                Some(existing) if existing.item.can_stack_with(&cursor.item) => {
-                    let existing_count = existing.count;
-                    // saturating_sub: an over-max slot (legacy save, or the old
-                    // chest 255-cap bug) leaves zero room instead of underflowing;
-                    // `existing_count + add` can't overflow u8 because add <= room
-                    // (engine audit 2026-06-04, A: u8 overflow in this branch).
-                    let room = cursor.item.max_stack().saturating_sub(existing_count);
-                    if right {
-                        // Right: add one if there's room; else no-op (restore cursor).
-                        if room >= 1 {
-                            inventory.set_slot(slot, Some(ItemStack { item: cursor.item.clone(), count: existing_count + 1 }));
-                            if cursor.count > 1 {
-                                self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - 1 });
-                            }
-                        } else {
-                            self.cursor_item = Some(cursor);
-                        }
-                    } else {
-                        // Left: merge the whole stack up to max; remainder stays on cursor.
-                        let add = cursor.count.min(room);
-                        if add == cursor.count {
-                            inventory.set_slot(slot, Some(ItemStack { item: cursor.item, count: existing_count + add }));
-                        } else {
-                            inventory.set_slot(slot, Some(ItemStack { item: cursor.item.clone(), count: existing_count + add }));
-                            self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - add });
-                        }
-                    }
-                }
-                // Different item → swap (both buttons). Lossless.
-                Some(existing) => {
-                    inventory.set_slot(slot, Some(cursor));
-                    self.cursor_item = Some(existing);
-                }
-            }
-        } else if let Some(stack) = inventory.slot(slot).cloned() {
-            // Empty cursor → pick up. Left = whole, right = ceil-half (leave the rest).
-            if right {
-                let take = stack.count / 2 + stack.count % 2;
-                let leave = stack.count - take;
-                self.cursor_item = Some(ItemStack { item: stack.item.clone(), count: take });
-                if leave > 0 {
-                    inventory.set_slot(slot, Some(ItemStack { item: stack.item, count: leave }));
-                } else {
-                    inventory.set_slot(slot, None);
-                }
-            } else {
-                self.cursor_item = Some(stack);
-                inventory.set_slot(slot, None);
-            }
-        }
-        true
+        self.apply_bag_click(inventory, &WindowClick::Slot { slot, right }).ok()
     }
 
     /// End any in-progress drag gesture (call on panel close / no button down).
@@ -614,130 +248,51 @@ impl CraftingUi {
         self.drag_visited.clear();
     }
 
-    // ── #45 P3 — Mouse-Tweaks drag paint ──────────────────────────────────────
-    // Each deposits/gathers exactly ONE unit per painted slot, conserving the
-    // total item count (the carried cursor is the only buffer). The draw layer
-    // ensures each slot is painted once per gesture (`drag_visited`).
+    // ── #45 P3 — Mouse-Tweaks drag paint (`WindowClick::Drag*`) ─────────────
+    // The draw layer paints each slot once per gesture (`drag_visited`) and
+    // sends one slot per paint.
 
-    /// RMB-drag: drop one carried item into an inventory slot (empty or matching
-    /// with room). Returns true if a unit moved.
+    #[cfg(test)]
     pub fn drag_distribute_into_inventory(&mut self, slot: usize, inventory: &mut Inventory) -> bool {
-        let Some(cursor) = self.cursor_item.take() else { return false };
-        let deposited = match inventory.slot(slot).cloned() {
-            None => {
-                inventory.set_slot(slot, Some(ItemStack { item: cursor.item.clone(), count: 1 }));
-                true
-            }
-            Some(ex)
-                if ex.item.can_stack_with(&cursor.item)
-                    && ex.count < cursor.item.max_stack() =>
-            {
-                inventory.set_slot(slot, Some(ItemStack { item: cursor.item.clone(), count: ex.count + 1 }));
-                true
-            }
-            _ => false,
-        };
-        // Keep the remaining cursor (or clear it if that was the last unit).
-        if deposited {
-            if cursor.count > 1 {
-                self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - 1 });
-            }
-        } else {
-            self.cursor_item = Some(cursor);
-        }
-        deposited
+        self.apply_bag_click(inventory, &WindowClick::DragDistribute { slots: vec![WindowSlot::Inv(slot)] }).ok()
     }
 
-    /// LMB-drag: gather matching items from an inventory slot into the cursor.
-    /// An empty cursor adopts the slot's item type and starts collecting.
+    #[cfg(test)]
     pub fn drag_gather_from_inventory(&mut self, slot: usize, inventory: &mut Inventory) -> bool {
-        let Some(stack) = inventory.slot(slot).cloned() else { return false };
-        match self.cursor_item.take() {
-            None => {
-                self.cursor_item = Some(stack);
-                inventory.set_slot(slot, None);
-                true
-            }
-            Some(cursor) => {
-                if !cursor.item.can_stack_with(&stack.item) {
-                    self.cursor_item = Some(cursor);
-                    return false;
-                }
-                let room = cursor.item.max_stack().saturating_sub(cursor.count);
-                let take = stack.count.min(room);
-                if take == 0 {
-                    self.cursor_item = Some(cursor);
-                    return false;
-                }
-                self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count + take });
-                let leave = stack.count - take;
-                inventory.set_slot(slot, if leave > 0 {
-                    Some(ItemStack { item: stack.item, count: leave })
-                } else {
-                    None
-                });
-                true
-            }
-        }
+        self.apply_bag_click(inventory, &WindowClick::DragGather { slots: vec![WindowSlot::Inv(slot)] }).ok()
     }
+}
 
-    /// RMB-drag onto a crafting-grid cell — same one-unit deposit as inventory.
-    pub fn drag_distribute_into_grid(&mut self, r: usize, c: usize) -> bool {
-        let Some(cursor) = self.cursor_item.take() else { return false };
-        let deposited = match self.grid[r][c].clone() {
-            None => {
-                self.grid[r][c] = Some(ItemStack { item: cursor.item.clone(), count: 1 });
-                true
+impl ClickTarget {
+    /// The window transition this click makes, if it moves items. `FillPinned`
+    /// needs the pinned card, so the caller builds its `WindowClick::Autofill`;
+    /// the rest (book, guide, show-uses) only change what the screen shows.
+    pub fn window_click(&self) -> Option<WindowClick> {
+        let drag = |at: WindowSlot, distribute: bool| {
+            if distribute {
+                WindowClick::DragDistribute { slots: vec![at] }
+            } else {
+                WindowClick::DragGather { slots: vec![at] }
             }
-            Some(ex)
-                if ex.item.can_stack_with(&cursor.item)
-                    && ex.count < cursor.item.max_stack() =>
-            {
-                self.grid[r][c] = Some(ItemStack { item: cursor.item.clone(), count: ex.count + 1 });
-                true
-            }
-            _ => false,
         };
-        if deposited {
-            if cursor.count > 1 {
-                self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count - 1 });
-            }
-        } else {
-            self.cursor_item = Some(cursor);
-        }
-        deposited
-    }
-
-    /// LMB-drag over a crafting-grid cell — gather matching into the cursor.
-    pub fn drag_gather_from_grid(&mut self, r: usize, c: usize) -> bool {
-        let Some(stack) = self.grid[r][c].clone() else { return false };
-        match self.cursor_item.take() {
-            None => {
-                self.cursor_item = Some(stack);
-                self.grid[r][c] = None;
-                true
-            }
-            Some(cursor) => {
-                if !cursor.item.can_stack_with(&stack.item) {
-                    self.cursor_item = Some(cursor);
-                    return false;
-                }
-                let room = cursor.item.max_stack().saturating_sub(cursor.count);
-                let take = stack.count.min(room);
-                if take == 0 {
-                    self.cursor_item = Some(cursor);
-                    return false;
-                }
-                self.cursor_item = Some(ItemStack { item: cursor.item, count: cursor.count + take });
-                let leave = stack.count - take;
-                self.grid[r][c] = if leave > 0 {
-                    Some(ItemStack { item: stack.item, count: leave })
-                } else {
-                    None
-                };
-                true
-            }
-        }
+        Some(match *self {
+            ClickTarget::GridSlot(row, col, right) => WindowClick::Grid { row, col, right },
+            ClickTarget::ResultSlot => WindowClick::Result,
+            ClickTarget::InventorySlot(slot, right) => WindowClick::Slot { slot, right },
+            ClickTarget::DragInventory(slot, distribute) => drag(WindowSlot::Inv(slot), distribute),
+            ClickTarget::DragGrid(r, c, distribute) => drag(WindowSlot::Grid(r, c), distribute),
+            ClickTarget::ArmourSlot(slot) => WindowClick::Armour { slot },
+            ClickTarget::SortInventory => WindowClick::Sort,
+            ClickTarget::ToggleLock(slot) => WindowClick::ToggleLock { slot },
+            ClickTarget::TrashCursor => WindowClick::Trash,
+            ClickTarget::None
+            | ClickTarget::OpenBook
+            | ClickTarget::FillPinned
+            | ClickTarget::DismissPinned
+            | ClickTarget::DrillIngredient(_)
+            | ClickTarget::PinnedBack
+            | ClickTarget::ShowUses(_) => return None,
+        })
     }
 }
 

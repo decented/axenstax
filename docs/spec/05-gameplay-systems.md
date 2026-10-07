@@ -567,7 +567,7 @@ creates or drops items (covered by unit tests).
   holds; "Restock" pulls back kinds the player already carries; "Take all" empties the chest into the
   bag. All re-insert only the genuinely-unplaced remainder (no dupes).
 - **Trash** (#28) — a Trash button in the inventory screen destroys the stack currently held on the
-  cursor (`CraftingUi::trash_cursor`). It only ever bins the held item — you must pick something up
+  cursor (`WindowClick::Trash`). It only ever bins the held item — you must pick something up
   first, so it can't nuke an inventory by accident.
 - **Auto-refill** (`Inventory::auto_refill`, default on) — when a hotbar **stackable** is exhausted by
   placing, the next matching stack is pulled from the bag (main region first), skipping locked
@@ -664,9 +664,11 @@ The inventory UI supports standard drag-and-drop interactions:
 
 …and with an **empty cursor** clicking a filled slot: **left** picks up the whole stack, **right** picks up the ceil-half (e.g. 5 → 3 to cursor, 2 left behind). All paths are lossless (swaps exchange full stacks; the cursor never strands items). The merge/cap respects `Item::max_stack()` (64 for blocks/materials; tools/plans/armour are 1 and never stack).
 
-This means **crafting-grid cells can hold more than one item** — fill the grid with stacks (left-click to dump a whole stack into a cell, or right-click to place one) and pull many results out in a row (batch crafting), instead of re-laying the recipe after every craft. Axolittle flagged "you can't stack blocks in the crafting table or inventory grid" (2026-06-07) — left/right stacking is the fix. The button is plumbed via `ClickTarget::{GridSlot, InventorySlot}(.., right: bool)` (egui `secondary_clicked()` → `right=true`) and consumed by `CraftingUi::click_grid_slot` / `click_inventory_slot`.
+This means **crafting-grid cells can hold more than one item** — fill the grid with stacks (left-click to dump a whole stack into a cell, or right-click to place one) and pull many results out in a row (batch crafting), instead of re-laying the recipe after every craft. Axolittle flagged "you can't stack blocks in the crafting table or inventory grid" (2026-06-07) — left/right stacking is the fix. The button is plumbed via `ClickTarget::{GridSlot, InventorySlot}(.., right: bool)` (egui `secondary_clicked()` → `right=true`) and turned into a `WindowClick::{Grid, Slot}` for `window::apply` (below).
 
 **Crafting-panel interactions are lossless (engine audit 2026-06-04, A; revised 2026-06-07).** Two paths used to delete items: (1) dropping a multi-count cursor onto an *occupied* grid cell placed one and discarded `count-1` — now left/right merge-or-swap (see the table above) never discards anything; (2) closing the panel returned grid+cursor items to the inventory but dropped whatever didn't fit — now `CraftingUi::close` keeps un-returnable items in the grid/cursor and **stays open** (returns `false`), so the player frees space rather than losing items. The E-press close surfaces a "make room" toast on a blocked close; the pause path simply leaves the panel open under the menu.
+
+**One window model (C3a-1, 2026-10-07).** Every item move the inventory screen makes is one pure transition, `window::apply(&mut WindowMut, &WindowClick, &ClickCtx) -> ClickResult` in `window.rs`, over a borrowed view of the state that screen touches: the 36 slots (with locks and `auto_refill`), the four armour slots, the cursor, the crafting grid, and an open container's slots (`None` until C3b). `ClickCtx` carries what the view can't: the station (the player's 2×2 or a table's 3×3, which bounds a grid click), creative, and the craft the grid makes as the caller judged it. `ClickResult` reports what the caller does outside the window: `Crafted(stack)` (challenge events, first-craft hints), `Binned(stack)` (the trash toast) or `Refused`. The transitions (`WindowClick`): `Slot`, `Grid`, `Armour`, `Result`, `Trash`, `DragDistribute`/`DragGather` (a slot list over inventory and grid cells; the screen sends one slot per paint), `Sort` (the bag 9..36), `ToggleLock`, `Autofill` (recipe-book "Fill from bag", carrying the card's example grid) and `Close` (grid and cursor back to the inventory). `craft_ui.rs` keeps all egui drawing, hover and open state and maps a `ClickTarget` to a `WindowClick` (`ClickTarget::window_click`); `CraftingUi::apply_click` builds the view from the player's inventory and armour plus the screen's grid and cursor, applies it and refreshes the result shown. Every rule is unit-tested on plain values in `window.rs`. The same rules are what the server will run on its copy of a joiner's window (C3a-2, `docs/foundations/2026-10-07-c3-server-owned-inventory.md` §2). A slot, lock or drag index past the end is refused (the screen never sends one; `Inventory::set_slot` would have dropped the cursor).
 
 All drag-and-drop actions generate `InventoryAction` events that are sent to the server. The client applies them optimistically. The server validates (e.g., cannot place a helmet in the boot slot; cannot exceed max stack size) and either confirms or reverts.
 
@@ -2676,6 +2678,7 @@ Current world folder name stored in `Mutex<Option<String>>` static. Cursor captu
 - Full inventory grid below with hotbar and 27 main slots
 - Drag cursor item follows mouse
 - All rendered via egui with block textures as managed textures
+- Drawing, hover and open state only: every item move is a `WindowClick` applied by `window::apply` (§3.6, "One window model")
 
 ##### Touch platforms + Android (`touch_input.rs`, 2026-10-03)
 

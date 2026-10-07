@@ -21164,22 +21164,14 @@ impl super::GameState {
             crate::chat_ui::ChatAction::None => {}
         }
 
-        // Process deferred crafting click actions (mutable borrow safe now)
+        // Process deferred crafting click actions (mutable borrow safe now).
+        // C3a-1 — every item move is one pure window transition
+        // (`window::apply`, via `CraftingUi::apply_click`) over the player's
+        // inventory + armour and the screen's grid + cursor.
+        let creative = self.is_creative;
         for (pidx, click_target) in craft_clicks {
             match click_target {
-                crate::craft_ui::ClickTarget::GridSlot(r, c, right) => {
-                    let p = &mut self.players[pidx];
-                    p.crafting_ui.click_grid_slot(r, c, &mut p.inventory, right);
-                }
                 crate::craft_ui::ClickTarget::ResultSlot => {
-                    // UX polish sweep Task 2 — peek what's about to be crafted
-                    // BEFORE `click_result` takes `crafting_ui.result`, so a
-                    // first-ever craft of a non-obvious item can teach a hint.
-                    let craft_item = self.players[pidx]
-                        .crafting_ui
-                        .result
-                        .as_ref()
-                        .map(|s| s.item.clone());
                     // C2b — a joiner's craft must not spend an item a request
                     // in flight needs (it does nothing), and is mirrored on
                     // the server from the grid as it was BEFORE the craft.
@@ -21194,7 +21186,18 @@ impl super::GameState {
                     let grid_before = joined.then(|| crate::item_actions::craft_grid_wire(&p.crafting_ui.grid));
                     let table = p.crafting_ui.table;
                     let p = &mut self.players[pidx];
-                    let crafted = p.crafting_ui.click_result(&mut p.inventory);
+                    // UX polish sweep Task 2 — what was crafted, so a
+                    // first-ever craft of a non-obvious item can teach a hint.
+                    let craft_item = match p.crafting_ui.apply_click(
+                        &mut p.inventory,
+                        &mut p.armour_slots,
+                        &crate::window::WindowClick::Result,
+                        creative,
+                    ) {
+                        crate::window::ClickResult::Crafted(stack) => Some(stack.item),
+                        _ => None,
+                    };
+                    let crafted = craft_item.is_some();
                     if crafted && let Some(grid) = grid_before {
                         self.send_craft_mirror(grid, table);
                     }
@@ -21232,32 +21235,21 @@ impl super::GameState {
                         }
                     }
                 }
-                crate::craft_ui::ClickTarget::InventorySlot(s, right) => {
-                    let p = &mut self.players[pidx];
-                    p.crafting_ui.click_inventory_slot(s, &mut p.inventory, right);
-                }
-                // #45 P3 — Mouse-Tweaks drag paint: distribute (RMB) deposits one
-                // carried item per slot; gather (LMB) pulls matching into the cursor.
-                crate::craft_ui::ClickTarget::DragInventory(s, distribute) => {
-                    let p = &mut self.players[pidx];
-                    if distribute {
-                        p.crafting_ui.drag_distribute_into_inventory(s, &mut p.inventory);
-                    } else {
-                        p.crafting_ui.drag_gather_from_inventory(s, &mut p.inventory);
+                // Slot, grid, armour and drag-paint clicks (#45 P3 Mouse-Tweaks:
+                // distribute deposits one carried item per slot, gather pulls
+                // matching into the cursor), Sort (#45: the bag 9..36, locked
+                // slots stay put) and Alt+click lock toggles.
+                crate::craft_ui::ClickTarget::GridSlot(..)
+                | crate::craft_ui::ClickTarget::InventorySlot(..)
+                | crate::craft_ui::ClickTarget::DragInventory(..)
+                | crate::craft_ui::ClickTarget::DragGrid(..)
+                | crate::craft_ui::ClickTarget::ArmourSlot(_)
+                | crate::craft_ui::ClickTarget::SortInventory
+                | crate::craft_ui::ClickTarget::ToggleLock(_) => {
+                    if let Some(click) = click_target.window_click() {
+                        let p = &mut self.players[pidx];
+                        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, creative);
                     }
-                }
-                crate::craft_ui::ClickTarget::DragGrid(r, c, distribute) => {
-                    let cu = &mut self.players[pidx].crafting_ui;
-                    if distribute {
-                        cu.drag_distribute_into_grid(r, c);
-                    } else {
-                        cu.drag_gather_from_grid(r, c);
-                    }
-                    cu.update_result();
-                }
-                crate::craft_ui::ClickTarget::ArmourSlot(s) => {
-                    let p = &mut self.players[pidx];
-                    p.crafting_ui.click_armour_slot(s, &mut p.armour_slots);
                 }
                 crate::craft_ui::ClickTarget::OpenBook => {
                     self.players[pidx].crafting_ui.open_book();
@@ -21271,7 +21263,8 @@ impl super::GameState {
                         let example = card.example_grid;
                         let name = card.name.clone();
                         let p = &mut self.players[pidx];
-                        let ok = p.crafting_ui.autofill_from_example(&example, &mut p.inventory);
+                        let fill = crate::window::WindowClick::Autofill { example };
+                        let ok = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &fill, creative).ok();
                         if !ok {
                             self.toast = Some((
                                 format!("Not enough materials for {name}"),
@@ -21296,16 +21289,11 @@ impl super::GameState {
                         stack.pop();
                     }
                 }
-                crate::craft_ui::ClickTarget::SortInventory => {
-                    // #45 — tidy the main inventory region (9..36); locked slots
-                    // stay put. Hotbar (0..9) is the player's curated bar.
-                    self.players[pidx].inventory.sort_region(9, 36);
-                }
-                crate::craft_ui::ClickTarget::ToggleLock(s) => {
-                    self.players[pidx].inventory.toggle_lock(s);
-                }
                 crate::craft_ui::ClickTarget::TrashCursor => {
-                    if self.players[pidx].crafting_ui.trash_cursor() {
+                    let p = &mut self.players[pidx];
+                    let trash = crate::window::WindowClick::Trash;
+                    let binned = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &trash, creative);
+                    if matches!(binned, crate::window::ClickResult::Binned(_)) {
                         self.toast = Some((
                             "Binned the held item".to_string(),
                             Instant::now() + Duration::from_secs(2),
