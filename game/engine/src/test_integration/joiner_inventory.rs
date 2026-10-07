@@ -416,3 +416,157 @@ fn placing_what_the_shadow_lacks_is_counted_and_still_accepted() {
     let summary = rig.tally().summary("Miner").unwrap();
     assert!(summary.contains("1 mismatched"), "{summary}");
 }
+
+/// FU1 item 3 — an honest place-then-break of one cell in one input (and a
+/// break-then-place): the placement is consumed from the shadow and the
+/// break is yielded. The cell's `mined` tag belongs to the break alone; it
+/// used to make the placement an unchecked "tagged fill".
+#[test]
+fn a_place_and_a_break_of_one_cell_in_one_input_consume_and_yield_in_order() {
+    let mut rig = Rig::dedicated("place-break");
+    let stone = Item::Block(block::STONE);
+    let cobble = Item::Block(block::COBBLESTONE);
+    let wood = Some(pick(ToolMaterial::Wood));
+    rig.hs.server.players[rig.slot].inventory.set_slot(0, Some(ItemStack::new_block(block::STONE, 3)));
+
+    // Place, then break, the air cell above the floor.
+    rig.send(Some(&stone), &[(ABOVE, block::STONE), (ABOVE, block::AIR)], &[mined(ABOVE, wood)]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::AIR);
+    assert_eq!(rig.shadow_count(&stone), 2, "the placement was consumed");
+    assert_eq!(rig.granted(&cobble), 1, "the break was yielded");
+    assert_eq!((rig.tally().matched, rig.tally().breaks), (1, 1));
+
+    // Break, then place, the floor cell.
+    rig.send(Some(&stone), &[(FLOOR, block::AIR), (FLOOR, block::STONE)], &[mined(FLOOR, wood)]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::STONE);
+    assert_eq!(rig.granted(&cobble), 2, "the break was yielded");
+    assert_eq!(rig.shadow_count(&stone), 1, "and the placement consumed");
+    assert_eq!((rig.tally().matched, rig.tally().breaks), (2, 2));
+    assert!(rig.world().is_placed(FLOOR.0, FLOOR.1, FLOOR.2), "the refill is player-placed");
+}
+
+/// FU1 (C1 verify N4) — one tag yields one break. A later emptying edit of
+/// the same cell (the Eraser on what was placed there, a bucket, the
+/// client's own piston) never takes it, in the same input or the next; each
+/// tag the joiner sends yields exactly once.
+#[test]
+fn each_mined_tag_yields_exactly_once_and_never_for_another_edit_of_its_cell() {
+    let mut rig = Rig::dedicated("tag-once");
+    let cobble = Item::Block(block::COBBLESTONE);
+    let wood = Some(pick(ToolMaterial::Wood));
+    // Mine the floor cell, refill it, empty it again — one tag, in one input.
+    rig.send(
+        None,
+        &[(FLOOR, block::AIR), (FLOOR, block::STONE), (FLOOR, block::AIR)],
+        &[mined(FLOOR, wood)],
+    );
+    rig.tick();
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::AIR);
+    assert_eq!(rig.granted(&cobble), 1, "the tag yielded its own break, and only it");
+    assert_eq!(rig.tally().breaks, 1);
+    // The next tick: refilled and emptied again, untagged — nothing.
+    rig.send(None, &[(FLOOR, block::STONE)], &[]);
+    rig.tick();
+    rig.send(None, &[(FLOOR, block::AIR)], &[]);
+    rig.tick();
+    assert_eq!(rig.granted(&cobble), 1, "no tag of its own: nothing");
+    // A second mine with its own tag yields once more.
+    rig.world().set_block(FLOOR.0, FLOOR.1, FLOOR.2, block::STONE);
+    rig.mine(FLOOR, block::AIR, wood);
+    assert_eq!(rig.granted(&cobble), 2, "each tag once");
+    assert_eq!(rig.tally().breaks, 2);
+    // Two mines of one cell in one input, each with its tag: both yield.
+    rig.world().set_block(FLOOR.0, FLOOR.1, FLOOR.2, block::STONE);
+    rig.send(
+        None,
+        &[(FLOOR, block::AIR), (FLOOR, block::STONE), (FLOOR, block::AIR)],
+        &[mined(FLOOR, wood), mined(FLOOR, wood)],
+    );
+    rig.tick();
+    assert_eq!(rig.granted(&cobble), 4, "two tags, two breaks");
+    // Lava dug up by hand (its tag yields nothing — lava is no item) and the
+    // stone poured over it mined with a pickaxe, in one input: each edit
+    // takes its own tag, so the mine has the pickaxe and yields.
+    rig.world().set_block(FLOOR.0, FLOOR.1, FLOOR.2, block::LAVA);
+    rig.send(
+        None,
+        &[(FLOOR, block::AIR), (FLOOR, block::STONE), (FLOOR, block::AIR)],
+        &[mined(FLOOR, None), mined(FLOOR, wood)],
+    );
+    rig.tick();
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::AIR);
+    assert_eq!(rig.granted(&cobble), 5, "the mine used its own (pickaxe) tag, not the lava's bare hand");
+    assert_eq!(rig.granted(&Item::Block(block::LAVA)), 0, "and the lava yielded nothing");
+}
+
+/// C1 review LOW-7 / LOW-3 — a tagged edit the server refuses (over the
+/// per-tick edit budget, out of reach, inside someone else's plot) yields
+/// nothing, and its tag doesn't linger: a later untagged emptying of the
+/// same cell yields nothing either.
+#[test]
+fn a_refused_tagged_edit_yields_nothing_and_its_tag_does_not_linger() {
+    let mut rig = Rig::dedicated("refused-tag");
+    let wood = Some(pick(ToolMaterial::Wood));
+    let stone_at = |rig: &mut Rig, c: (i32, i32, i32)| rig.world().get_block(c.0, c.1, c.2) == block::STONE;
+
+    // Over budget: four edits first, the tagged mine fifth.
+    let others: Vec<((i32, i32, i32), BlockId)> =
+        (0..4).map(|k| ((39 + k, 80, 41), block::STONE)).collect();
+    let mut edits = others.clone();
+    edits.push((FLOOR, block::AIR));
+    rig.send(None, &edits, &[mined(FLOOR, wood)]);
+    rig.tick();
+    assert!(stone_at(&mut rig, FLOOR), "the fifth edit of the tick is refused");
+    assert!(rig.grants.is_empty(), "and yields nothing");
+
+    // Out of reach.
+    let far = (60, 79, 40);
+    rig.loaded(far);
+    rig.world().set_block(far.0, far.1, far.2, block::STONE);
+    rig.mine(far, block::AIR, wood);
+    assert!(stone_at(&mut rig, far), "out of reach: refused");
+    assert!(rig.grants.is_empty());
+
+    // Inside a plot the joiner doesn't own.
+    let fenced = (40, 79, 41);
+    rig.hs.server.world.plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::LocalPlayer(0),
+        fenced.0,
+        fenced.1 - 5,
+        fenced.2,
+    ));
+    rig.mine(fenced, block::AIR, wood);
+    assert!(stone_at(&mut rig, fenced), "a foreign plot: refused");
+    assert!(rig.grants.is_empty());
+    rig.hs.server.world.plots.clear();
+
+    // None of those tags lingers: the cells emptied untagged yield nothing.
+    rig.send(None, &[(FLOOR, block::AIR), (fenced, block::AIR)], &[]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::AIR, "accepted now");
+    assert!(rig.grants.is_empty(), "but nothing yielded");
+    assert_eq!(rig.tally().breaks, 0);
+}
+
+/// FU1 (C1 verify N1) — an accepted edit that leaves the block as it was
+/// (a modified client "replacing" natural deepslate with itself, or a
+/// meta-only toggle) puts nothing in the cell: it stays natural.
+#[test]
+fn an_edit_that_leaves_the_block_unchanged_leaves_a_natural_cell_natural() {
+    let mut rig = Rig::dedicated("no-op-edit");
+    rig.world().set_block(FLOOR.0, FLOOR.1, FLOOR.2, block::PURE_DEEPSLATE);
+    assert!(!rig.world().is_placed(FLOOR.0, FLOOR.1, FLOOR.2));
+    let deepslate = Item::Block(block::PURE_DEEPSLATE);
+    rig.send(Some(&deepslate), &[(FLOOR, block::PURE_DEEPSLATE)], &[]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::PURE_DEEPSLATE);
+    assert!(!rig.world().is_placed(FLOOR.0, FLOOR.1, FLOOR.2), "still natural: its Satori roll stands");
+    // A real placement in that cell is still flagged.
+    rig.send(Some(&deepslate), &[(FLOOR, block::AIR)], &[]);
+    rig.tick();
+    rig.send(Some(&deepslate), &[(FLOOR, block::PURE_DEEPSLATE)], &[]);
+    rig.tick();
+    assert!(rig.world().is_placed(FLOOR.0, FLOOR.1, FLOOR.2), "a block put there is player-placed");
+}

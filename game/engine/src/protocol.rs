@@ -582,10 +582,13 @@ pub struct InputPacket {
     /// know the tool: the `held_kind`/`held_id` pair carries no tool type,
     /// and is sampled after the strike wore the tool (the strike that breaks
     /// a pickaxe still yields). The tool is the client's word, like every held
-    /// item (BRIDGE: possession check). Only for an edit in `block_changes`;
-    /// the server reads at most [`MAX_MINED_PER_INPUT`], and the client never
-    /// sends more: edits past the limit wait for its next input with their
-    /// tags (`RemoteClient::send_input`).
+    /// item (BRIDGE: possession check). One tag per mined edit, in the
+    /// packet carrying that edit and never another (FU1, C1 verify N4: paired
+    /// at the source, `RemoteClient::send_input`); the server gives a cell's
+    /// tags, in order, to the edits of that cell that break it, each tag to
+    /// one (`HostedServer::classify_joiner_edit`). The server reads at most
+    /// [`MAX_MINED_PER_INPUT`], and the client never sends more: edits past
+    /// the limit wait for its next input with their tags.
     #[serde(default)]
     pub mined: Vec<MinedBlock>,
 }
@@ -750,7 +753,7 @@ pub enum WireItem {
 /// `meta` carries the per-block metadata byte (Spec 48 — facing/state/aux) so
 /// directional and stateful blocks (levers, gates, powered rail, lamps) render
 /// correctly on the client. `0` for every plain block — the common case.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockChange {
     pub x: i32,
     pub y: i32,

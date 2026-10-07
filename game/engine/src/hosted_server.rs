@@ -51,7 +51,11 @@ pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
 
 /// MP-D2b — `EntityAttack` + `EntityInteract` requests read per client per
 /// tick (their own budget, not the block-change one's); the rest are dropped
-/// unanswered.
+/// unanswered. FU1 — no honest client reaches it: the ten packets a tick
+/// ([`MAX_PACKETS_PER_TICK`]) span at most eleven of its ticks (one input
+/// each, actions riding between), where a 10-tick swing cooldown
+/// (`combat::ATTACK_COOLDOWN`) and an 8-tick right-click cooldown allow at
+/// most two of each.
 const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
 
 /// Review D2b LOW-2 — how far ahead of a joiner's server body a target must
@@ -174,6 +178,31 @@ const KICK_REASON: &str = "You were removed from this world by its operator.";
 /// (Spec 08 §9.0.1, T-JOIN-RELAY). Normal play is unaffected.
 const OPERATOR_NEEDS_DIRECT_NOTICE: &str = "Operator tools need a direct connection.";
 
+/// FU1 — the packets the server processes per client per tick (its CPU
+/// budget for one client's traffic). Packets past it are NOT dropped: they
+/// wait in the slot's `transport::InboundQueue` for the next tick, in arrival
+/// order, so an honest client never loses one — a client catching up after a
+/// frame hitch sends up to ten inputs a frame (`game_loop` runs at most 10
+/// ticks a frame) plus the actions it made, and the swing behind them used to
+/// be dropped. Ten covers one such frame. Control packets (`Respawn`,
+/// `Disconnect`) cost nothing against it. Memory is bounded by the queue's
+/// hard bound (`transport::MAX_INBOUND_PACKETS` / `MAX_INBOUND_BYTES`): only a
+/// client past it is disconnected ([`INBOUND_OVERFLOW_REASON`]). Spec 04 §11.2a.
+pub const MAX_PACKETS_PER_TICK: usize = 10;
+
+/// FU1 — told to a client disconnected for crossing its inbound queue's hard
+/// bound (`transport::MAX_INBOUND_PACKETS` / `MAX_INBOUND_BYTES`).
+pub const INBOUND_OVERFLOW_REASON: &str =
+    "Disconnected: your game sent more than the server could keep up with.";
+
+/// A control packet (MP-A3): costs nothing against [`MAX_PACKETS_PER_TICK`].
+fn is_control_packet(packet: &[u8]) -> bool {
+    matches!(
+        protocol::deserialize_header(packet),
+        Some((protocol::PacketType::Respawn | protocol::PacketType::Disconnect, _))
+    )
+}
+
 /// Most block edits one client may submit per tick, across ALL of its packets
 /// that tick — legitimate play is 1–2. Every edit counts, refused or not.
 const MAX_BLOCK_CHANGES_PER_TICK: usize = 4;
@@ -207,6 +236,11 @@ pub struct HostedServer {
     /// Server tick at which each slot was attached — the pre-auth timeout
     /// clock (`PRE_AUTH_TIMEOUT_TICKS`). Local slots: 0 (no handshake).
     attached_tick: Vec<u64>,
+    /// FU1 — per slot, indexed like `transports`: the packets its client sent
+    /// that the server has not processed yet (past the per-tick budget,
+    /// [`MAX_PACKETS_PER_TICK`]), in arrival order. Emptied whenever a slot is
+    /// attached or released.
+    inbound: Vec<transport::InboundQueue>,
     /// Block changes the server produced (falling blocks, remote edits)
     /// that haven't been broadcast yet. Drained into the per-client
     /// `outboxes` on the next broadcast.
@@ -699,6 +733,7 @@ impl HostedServer {
             handshake_done,
             disconnected,
             attached_tick: vec![0; num_local_players],
+            inbound: (0..num_local_players).map(|_| transport::InboundQueue::default()).collect(),
             pending_block_changes: Vec::new(),
             host_world,
             lent_sim_changes: Vec::new(),
@@ -966,6 +1001,7 @@ impl HostedServer {
         self.handshake_done.push(true);
         self.disconnected.push(false);
         self.attached_tick.push(self.server_tick);
+        self.inbound.push(transport::InboundQueue::default());
         self.outboxes.push(crate::state_outbox::ClientOutbox::new(false));
         self.entity_interest.push(Default::default());
         self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
@@ -1514,6 +1550,9 @@ impl HostedServer {
         }
         let was_joined = self.handshake_done[i];
         self.disconnected[i] = true;
+        // FU1 — whatever it sent and the server had not yet read goes with the
+        // connection.
+        self.inbound[i].clear();
         if let Some(sp) = self.server.players.get_mut(i) {
             sp.connected = false;
             sp.pending_intent = None;
@@ -1980,13 +2019,15 @@ impl HostedServer {
     /// Free every remote slot whose connection has gone (peer closed, network
     /// error, idle timeout) or that has sat past `PRE_AUTH_TIMEOUT_TICKS`
     /// without completing its join. Runs every tick after inbound packets, so a
-    /// transport's last packets (a `Disconnect`) are read first.
+    /// transport's last packets (a `Disconnect`) are read first — and a closed
+    /// connection's slot is held until the packets it sent before closing,
+    /// still waiting past the per-tick budget (FU1), have all been read.
     fn reap_slots(&mut self) {
         for i in self.num_local_players..self.transports.len() {
             if self.disconnected[i] {
                 continue;
             }
-            if self.transports[i].is_closed() {
+            if self.transports[i].is_closed() && self.inbound[i].is_empty() {
                 log::info!("Player {i}: connection closed");
                 if let Some(left) = self.release_slot(i, None) {
                     self.send_to_joined_except(i, &left);
@@ -2148,6 +2189,7 @@ impl HostedServer {
                 self.handshake_done[j] = false;
                 self.disconnected[j] = false;
                 self.attached_tick[j] = self.server_tick;
+                self.inbound[j].clear();
                 self.outboxes[j] = crate::state_outbox::ClientOutbox::new(true);
                 self.entity_interest[j] = Default::default();
                 self.chunk_pushes[j] = crate::chunk_push::ClientChunkPush::default();
@@ -2159,6 +2201,7 @@ impl HostedServer {
                 self.handshake_done.push(false);
                 self.disconnected.push(false);
                 self.attached_tick.push(self.server_tick);
+                self.inbound.push(transport::InboundQueue::default());
                 self.outboxes.push(crate::state_outbox::ClientOutbox::new(true));
                 self.entity_interest.push(Default::default());
                 self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
@@ -2240,14 +2283,12 @@ impl HostedServer {
     }
 
     fn process_inbound_packets(&mut self) {
-        // Per-client packet budget — each client can send at most this many
-        // packets per tick. Remaining packets are drained unprocessed so
-        // buffer pressure doesn't grow unboundedly.
-        const MAX_PACKETS_PER_TICK: usize = 10;
         // Max device interactions per tick per client. A right-click is
         // gated client-side by an 8-tick place cooldown, so legitimate play is
         // well under one a tick; this is the `DeviceInteract` sibling of the
-        // block-change budget above, which it does NOT share.
+        // block-change budget above, which it does NOT share. FU1 — the rest
+        // are skipped, which no honest client meets: the ten packets read a
+        // tick span at most eleven client ticks, two right-clicks' worth.
         const MAX_DEVICE_INTERACTS_PER_TICK: usize = 2;
 
         // Queue of StateUpdate-shaped events to fan out after we've
@@ -2259,44 +2300,59 @@ impl HostedServer {
             if self.disconnected[i] {
                 continue;
             }
+            // FU1 — everything the client sent goes to the back of its queue
+            // first; the queue's hard bound is the one thing that ends a
+            // connection for what it sends (no honest client gets there).
+            let arrived = match self.inbound[i].fill_from(&*self.transports[i]) {
+                Ok(arrived) => arrived,
+                Err(over) => {
+                    log::warn!(
+                        "Player {i} has {} packets ({} bytes) waiting, past the inbound bound \
+                         ({} packets / {} bytes) — disconnecting it",
+                        over.packets,
+                        over.bytes,
+                        transport::MAX_INBOUND_PACKETS,
+                        transport::MAX_INBOUND_BYTES,
+                    );
+                    if let Some(left) = self.release_slot(i, Some(INBOUND_OVERFLOW_REASON)) {
+                        broadcasts.push_back((i, left));
+                    }
+                    continue;
+                }
+            };
             let mut packets_this_tick = 0usize;
             let mut interacts_this_tick = 0usize;
             let mut entity_requests_this_tick = 0usize;
             // Per client per TICK, not per packet (audit 2026-09-27: the
             // budget reset for every packet, so 10 packets × 4 edits got in).
             let mut edits_this_tick = 0usize;
-            while let Some(packet) = self.transports[i].try_recv_from_client() {
-                packets_this_tick += 1;
-                let over_budget = packets_this_tick > MAX_PACKETS_PER_TICK;
-                if packets_this_tick == MAX_PACKETS_PER_TICK + 1 {
-                    log::warn!("Player {i} exceeded packet budget — dropping excess gameplay packets");
+            loop {
+                // FU1 — defer, don't drop: once the budget is spent, the rest
+                // waits for the next tick, in arrival order. Control packets
+                // (MP-A3: `Respawn`, `Disconnect`) cost no budget, so one at
+                // the front is still read — but never ahead of what the client
+                // sent before it (a Respawn read ahead of the health-0 inputs
+                // queued before it would be undone by them).
+                if packets_this_tick >= MAX_PACKETS_PER_TICK
+                    && !self.inbound[i].front().is_some_and(|p| is_control_packet(p))
+                {
+                    if !self.inbound[i].is_empty() {
+                        log::debug!(
+                            "Player {i}: {} packets wait for the next tick (budget {MAX_PACKETS_PER_TICK})",
+                            self.inbound[i].len()
+                        );
+                    }
+                    break;
+                }
+                let Some(packet) = self.inbound[i].pop() else {
+                    break;
+                };
+                if !is_control_packet(&packet) {
+                    packets_this_tick += 1;
                 }
                 let Some((ptype, payload)) = protocol::deserialize_header(&packet) else {
                     continue;
                 };
-                // The budget bounds gameplay traffic, never control packets
-                // (MP-A3): a `Respawn` or `Disconnect` past the 10th packet of
-                // a tick is still read. Dropped, a joiner could be left dead on
-                // the server for good, or a leaver's seat held. Everything else
-                // past the budget is drained and discarded, as before.
-                if over_budget
-                    && !matches!(
-                        ptype,
-                        protocol::PacketType::Respawn | protocol::PacketType::Disconnect
-                    )
-                {
-                    // B2a review HIGH-2 — an input's chunk acknowledgement,
-                    // drop reports and render distance are still taken: lost,
-                    // a drop left the server pushing changes into a column the
-                    // joiner had discarded (and never pushing it again).
-                    if ptype == protocol::PacketType::ClientInput
-                        && self.handshake_done[i]
-                        && let Ok(input) = protocol::safe_deserialize::<protocol::InputPacket>(payload)
-                    {
-                        self.take_chunk_feedback(i, &input);
-                    }
-                    continue;
-                }
                 match ptype {
                     protocol::PacketType::JoinRequest => {
                         if self.handshake_done[i] {
@@ -2748,6 +2804,21 @@ impl HostedServer {
                             self.pending_block_changes.extend(input.block_changes.iter().cloned());
                             continue;
                         }
+                        // C1/FU1 — this input's `mined` tags (the first
+                        // MAX_MINED_PER_INPUT, its DoS guard), each used by at
+                        // most one edit, in order: the break it was sent with
+                        // (`classify_joiner_edit`). They live for this input
+                        // only: a refused edit's tag yields nothing and is
+                        // gone with the input (a later edit of its cell in
+                        // the same input meets the same refusal — the budget
+                        // only shrinks, reach and plots don't change).
+                        let mut tags: Vec<Option<protocol::MinedBlock>> = input
+                            .mined
+                            .iter()
+                            .take(protocol::MAX_MINED_PER_INPUT)
+                            .copied()
+                            .map(Some)
+                            .collect();
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick.
                         for bc in &input.block_changes {
@@ -2783,7 +2854,7 @@ impl HostedServer {
                             // yield is read now, before the block leaves the
                             // world (`break_drops`).
                             let joiner_edit = remote
-                                .then(|| self.classify_joiner_edit(i, bc, old_block, &input.mined));
+                                .then(|| self.classify_joiner_edit(i, bc, old_block, &mut tags));
                             let break_yield = match joiner_edit {
                                 Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
                                     self.joiner_break_yield(bc, old_block, tool)
@@ -2814,7 +2885,13 @@ impl HostedServer {
                                 self.server.world.release_plot((bc.x, bc.y, bc.z));
                             }
                             self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
-                            if remote {
+                            // FU1 (C1 verify N1) — only when the block really
+                            // changed: an edit that leaves it as it was (a
+                            // meta-only toggle, or a modified client
+                            // "replacing" natural deepslate with itself) puts
+                            // nothing into the cell, so a natural cell stays
+                            // natural (its Satori roll stands).
+                            if remote && old_block != bc.new_block {
                                 // C1 (review MEDIUM-1) — every block a joiner
                                 // puts into a cell is player-placed, whatever
                                 // the edit was classified as (a plain
@@ -3012,6 +3089,33 @@ impl HostedServer {
                     _ => {}
                 }
             }
+            // B2a review HIGH-2 / FU1 — an input that arrived this tick but
+            // waits past the budget still has its chunk acknowledgement and
+            // drop reports taken now, so a backlog never holds the push's
+            // window shut (the joiner needs chunks most right after a hitch).
+            // Both are cumulative and `as_of`-stamped: taken again in order
+            // when the input is processed, they change nothing. Its render
+            // distance waits for its turn (a newer one read early would be
+            // undone by the older inputs still queued), and so does all of an
+            // input carrying a column-mismatch switch the server has not acted
+            // on yet — and every input after it, which carries it too: in
+            // order the switch comes before the drops (`take_chunk_feedback`),
+            // and a drop taken first would hold the mismatched column off.
+            let waiting_new = arrived.min(self.inbound[i].len());
+            if waiting_new > 0 && self.handshake_done[i] && i >= self.num_local_players {
+                let push = &mut self.chunk_pushes[i];
+                for packet in self.inbound[i].newest(waiting_new) {
+                    if let Some((protocol::PacketType::ClientInput, payload)) = protocol::deserialize_header(packet)
+                        && let Ok(input) = protocol::safe_deserialize::<protocol::InputPacket>(payload)
+                    {
+                        if input.column_mismatch.is_some() && !push.pushes_everything() {
+                            break;
+                        }
+                        push.ack(input.chunk_ack);
+                        push.drop_columns(&input.chunk_drops);
+                    }
+                }
+            }
         }
 
         for (source_idx, pkt) in broadcasts {
@@ -3027,27 +3131,47 @@ impl HostedServer {
     }
 
     /// C1 — what slot `i`'s accepted edit `old → bc.new_block` is to its
-    /// inventory (`joiner_inventory::classify`): a break if its input tagged
-    /// the cell as mined (`InputPacket.mined`, first [`protocol::MAX_MINED_PER_INPUT`]
-    /// — the DoS guard, which an honest client never exceeds), a plain
-    /// placement by what its input says is in hand, else unchecked.
+    /// inventory (`joiner_inventory::classify`): a break if it is one with the
+    /// oldest unused `mined` tag of its cell in this input (`tags`: the input's
+    /// first [`protocol::MAX_MINED_PER_INPUT`] — the DoS guard, which an honest
+    /// client never exceeds), else a plain placement by what its input says is
+    /// in hand, else unchecked.
+    ///
+    /// FU1 — a tag is used up by its own edit (C1 verify N4): the break it
+    /// yields, or an emptying of the cell that yields nothing (dug lava or
+    /// fire). One tag, one edit, so it can never yield for another edit of the
+    /// same cell (a later Eraser or bucket there, a re-mine), and the client
+    /// sends one per mined edit, beside that edit (`RemoteClient::send_input`).
+    /// A tagged cell's fills are classified as untagged, so a place-then-break
+    /// of one cell in one input consumes the placement and yields the break.
     fn classify_joiner_edit(
         &self,
         i: usize,
         bc: &protocol::BlockChange,
         old: crate::block::BlockId,
-        mined: &[protocol::MinedBlock],
+        tags: &mut [Option<protocol::MinedBlock>],
     ) -> crate::joiner_inventory::JoinerEdit {
+        use crate::joiner_inventory::{classify, JoinerEdit};
         let sp = &self.server.players[i];
-        let mined = mined
-            .iter()
-            .take(protocol::MAX_MINED_PER_INPUT)
-            .find(|m| (m.x, m.y, m.z) == (bc.x, bc.y, bc.z));
         // BRIDGE: possession check — the hand (and a break's tool) is the
         // client's word until the shadow can be enforced (see
         // `validate_block_edit`).
         let hand = crate::joiner_inventory::Hand::from_wire(sp.held_kind, sp.held_id, &self.server.registry);
-        crate::joiner_inventory::classify(old, bc.new_block, mined, hand, self.server.play_mode.is_creative())
+        let creative = self.server.play_mode.is_creative();
+        let cell = (bc.x, bc.y, bc.z);
+        if let Some(tag) = tags.iter_mut().find(|t| t.is_some_and(|m| (m.x, m.y, m.z) == cell)) {
+            let edit = classify(old, bc.new_block, tag.as_ref(), hand, creative);
+            // The tag's own edit: a break it yields, or an emptying of a cell
+            // that yields nothing (lava or fire dug up, `yields_drops`) —
+            // used up either way, so a later break of the cell takes its own.
+            if matches!(edit, JoinerEdit::Break { .. }) || bc.new_block == crate::block::AIR {
+                *tag = None;
+                if matches!(edit, JoinerEdit::Break { .. }) {
+                    return edit;
+                }
+            }
+        }
+        classify(old, bc.new_block, None, hand, creative)
     }
 
     /// C1 — the yield of a joiner's break of `old` at `bc` with `tool`: the
@@ -3599,8 +3723,12 @@ impl HostedServer {
     /// B2b — slot `i` reports that its generation of a column it was told is
     /// local does not hash as our note said (`InputPacket::column_mismatch`,
     /// repeated in every input; only the first does anything). A determinism
-    /// bug with matching worldgen fingerprints (a platform floating-point
-    /// difference, an order dependence): logged loudly, and that joiner is
+    /// bug with matching worldgen fingerprints — a platform floating-point
+    /// difference in generating the column on its own. (Not an order
+    /// dependence: the joiner confirms a mismatch on a scratch generation of
+    /// the column alone, as the server's note was made, so a generation that
+    /// depends on its neighbours reads there as the joiner's own drift and is
+    /// kept, never reported — FU1, B2b fix2-verify N1.) Logged loudly, and that joiner is
     /// pushed everything for the rest of its session — every column it was
     /// noted is pushed again, since all of them are suspect, and it is noted
     /// no more (`sends_notes`). Ignored, silently, from a joiner never sent a

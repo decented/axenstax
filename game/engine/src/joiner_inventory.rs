@@ -64,15 +64,14 @@ fn side_effect_block(b: BlockId) -> bool {
         || crate::growth::is_crop(b)
 }
 
-/// A block a survival break can mine (review LOW-1): not an empty cell, and
-/// not a fluid, fire or smoke — the client's raycast never targets those, so
-/// a `mined` tag on one is a modified client's, and it yields nothing (no
-/// LAVA, WATER or FIRE items). Drops come only from the shared break rules
-/// (`break_drops`) for a cell a player can actually mine.
+/// A block whose break yields anything (review LOW-1): the shared break
+/// rules' own test (`break_drops::yields_drops`, FU2) — not an empty cell, a
+/// fluid, fire or smoke. A survival break can target LAVA and FIRE and dig
+/// them up, but they are no items, for a joiner as in single-player; a tag on
+/// an empty, water or smoke cell is a modified client's. Either way the edit
+/// is no `Break` and yields nothing.
 fn minable(b: BlockId) -> bool {
-    b != crate::block::AIR
-        && !crate::block::is_fluid(b)
-        && !matches!(b, crate::block::FIRE | crate::block::CAMPFIRE_SMOKE)
+    crate::break_drops::yields_drops(b)
 }
 
 /// The block an item places, if it places one (`Inventory::hotbar_placeable_id`'s rule).
@@ -290,9 +289,9 @@ mod tests {
         assert_eq!(classify(block::STONE, block::AIR, Some(&t), Hand::Empty, true), JoinerEdit::Unchecked);
     }
 
-    /// Review LOW-1 — the client's raycast never targets a fluid, fire or
-    /// smoke, and an empty cell has nothing to mine: a `mined` tag on one is
-    /// no break and yields nothing (no LAVA or FIRE items).
+    /// Review LOW-1 / FU2 — lava and fire dug up are no items (the shared
+    /// `break_drops::yields_drops`), and water, smoke and an empty cell are
+    /// never mined: a `mined` tag on one is no break and yields nothing.
     #[test]
     fn a_mined_tag_on_a_fluid_fire_smoke_or_air_cell_is_no_break() {
         let t = tag(Some(Tool::new(ToolType::Pickaxe, ToolMaterial::Diamond)));

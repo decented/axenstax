@@ -390,18 +390,14 @@ pub struct RemoteClient {
     pub pending_entity_batches: Vec<crate::remote_entities::EntityDeltas>,
     pub pending_block_changes: Vec<protocol::BlockChange>,
     /// Edits [`serialize_input_within_cap`] trimmed off an earlier input
-    /// packet, oldest first. [`Self::send_input`] puts them ahead of the next
+    /// packet (or [`hold_back_for_tags`] held back), oldest first, each with
+    /// the `mined` tag of the break that made it, if it was one (C1; paired
+    /// at the source, FU1). [`Self::send_input`] puts them ahead of the next
     /// packet's own edits, so a burst too big for one packet is spread over
     /// several instead of the tail being lost (the host never saw it, so it
-    /// could never refuse and un-ghost it on this client). At most
-    /// [`INPUT_CARRY_OVER_MAX_CHANGES`].
-    input_carry_over: Vec<protocol::BlockChange>,
-    /// C1 — the `mined` tags of edits still in [`Self::input_carry_over`],
-    /// oldest first: the server yields a mined cell only when the tag rides
-    /// with its edit, so a held-back edit's tag rides again with it in the
-    /// next packet. Never more than the edits waiting (a tag whose edit is
-    /// dropped at [`INPUT_CARRY_OVER_MAX_CHANGES`] goes with it).
-    mined_carry_over: Vec<protocol::MinedBlock>,
+    /// could never refuse and un-ghost it on this client); a tag rides only
+    /// with its own edit. At most [`INPUT_CARRY_OVER_MAX_CHANGES`].
+    input_carry_over: Vec<PairedEdit>,
     /// World chat (Phase 2) — lines the server delivered to us this poll,
     /// drained by the game loop each frame into `ChatState`. Bounded like
     /// `pending_grants`: a hostile server can't grow this without limit
@@ -678,7 +674,6 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
-            mined_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -724,7 +719,6 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
-            mined_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -1171,23 +1165,19 @@ impl RemoteClient {
             self.send_respawn();
         }
 
-        // Edits trimmed from an earlier packet go first: the host validates
-        // them in the order they were made.
-        if !self.input_carry_over.is_empty() {
-            let mut edits = std::mem::take(&mut self.input_carry_over);
-            edits.append(&mut input.block_changes);
-            input.block_changes = edits;
-        }
-        // C1 — and so do their `mined` tags, ahead of this input's.
-        let mut tags = std::mem::take(&mut self.mined_carry_over);
-        tags.append(&mut input.mined);
-        // C1 (review LOW-3) — the server reads at most MAX_MINED_PER_INPUT
-        // tags from one input (its DoS guard), and a tag counts only beside
-        // its edit: the edits from the first tagged cell past that limit wait
-        // for the next packet, with their tags.
-        let mut held_back = hold_back_past_tag_limit(&mut input.block_changes, &tags);
-        input.mined = tags_beside(&input.block_changes, &tags);
-        let (packet, mut trimmed) = serialize_input_within_cap(&mut input);
+        // C1/FU1 — this tick's edits, each paired with the `mined` tag of the
+        // break that made it, behind the edits trimmed from earlier packets
+        // (the host validates them in the order they were made).
+        let fresh = pair_tags_with_edits(
+            std::mem::take(&mut input.block_changes),
+            std::mem::take(&mut input.mined),
+        );
+        let mut edits = std::mem::take(&mut self.input_carry_over);
+        edits.extend(fresh);
+        // C1 (review LOW-3) / FU1 (C1 verify N4) — the edits from the first
+        // that can't go with its tag in this packet wait for the next one.
+        let mut held_back = hold_back_for_tags(&mut edits);
+        let (packet, mut trimmed) = serialize_input_within_cap(&mut input, edits);
         trimmed.append(&mut held_back);
         if trimmed.len() > INPUT_CARRY_OVER_MAX_CHANGES {
             let drop = trimmed.len() - INPUT_CARRY_OVER_MAX_CHANGES;
@@ -1197,13 +1187,6 @@ impl RemoteClient {
             );
             trimmed.drain(..drop);
         }
-        // C1 — every tag of an edit still waiting rides again with it, oldest
-        // first: lossless, and bounded by the edits' own cap above (a tag
-        // goes only with its edit).
-        let waiting: std::collections::HashSet<(i32, i32, i32)> =
-            trimmed.iter().map(|bc| (bc.x, bc.y, bc.z)).collect();
-        tags.retain(|m| waiting.contains(&(m.x, m.y, m.z)));
-        self.mined_carry_over = tags;
         self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
         Some(seq)
@@ -1340,6 +1323,14 @@ impl RemoteClient {
     }
 }
 
+impl RemoteClient {
+    /// Test-only: the `mined` tags still waiting with their edits.
+    #[cfg(test)]
+    fn carried_tags(&self) -> usize {
+        self.input_carry_over.iter().filter(|(_, tag)| tag.is_some()).count()
+    }
+}
+
 impl Drop for RemoteClient {
     fn drop(&mut self) {
         if self.is_connected() {
@@ -1354,11 +1345,23 @@ impl Drop for RemoteClient {
 /// holding them without bound would grow memory for nothing. About 240 KB.
 const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
 
-/// Serialize a `ClientInput`, trimming its block changes (newest first) until
-/// the packet fits [`protocol::MAX_WIRE_PACKET_LEN`] — the frame cap, which a
-/// bigger packet would trip, closing the connection (gap-audit T2-12). Before
-/// the cap was aligned such a packet still went out, and the host dropped the
-/// whole of it (position included) at `safe_deserialize`.
+/// C1/FU1 — an edit waiting to be sent, with the `mined` tag of the break
+/// that made it (`None` for every other edit).
+type PairedEdit = (protocol::BlockChange, Option<protocol::MinedBlock>);
+
+/// Write `edits` into `input`: its block changes in order, and beside them the
+/// tags of the tagged ones, in the same order.
+fn set_input_edits(input: &mut protocol::InputPacket, edits: &[PairedEdit]) {
+    input.block_changes = edits.iter().map(|(bc, _)| bc.clone()).collect();
+    input.mined = edits.iter().filter_map(|(_, tag)| *tag).collect();
+}
+
+/// Serialize a `ClientInput` carrying `edits`, trimming them (newest first)
+/// until the packet fits [`protocol::MAX_WIRE_PACKET_LEN`] — the frame cap,
+/// which a bigger packet would trip, closing the connection (gap-audit
+/// T2-12). Before the cap was aligned such a packet still went out, and the
+/// host dropped the whole of it (position included) at `safe_deserialize`.
+/// A trimmed edit's tag goes with it.
 ///
 /// Returns the packet and the trimmed tail, oldest first. The caller carries it
 /// into the next packet (`RemoteClient::send_input`): the host applies at most
@@ -1366,66 +1369,85 @@ const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
 /// each it refuses, but it can only do that for an edit it has seen.
 fn serialize_input_within_cap(
     input: &mut protocol::InputPacket,
-) -> (Vec<u8>, Vec<protocol::BlockChange>) {
+    mut edits: Vec<PairedEdit>,
+) -> (Vec<u8>, Vec<PairedEdit>) {
+    set_input_edits(input, &edits);
     let packet = protocol::serialize_packet(PacketType::ClientInput, &*input);
-    let Some(first) = input.block_changes.first() else {
+    let Some((first, _)) = edits.first() else {
         return (packet, Vec::new());
     };
     if packet.len() <= protocol::MAX_WIRE_PACKET_LEN {
         return (packet, Vec::new());
     }
+    // Each edit dropped frees at least its block change (a tagged one, its
+    // tag too), so dropping this many always fits.
     let per_change = bincode::serialized_size(first).expect("a block change sizes") as usize;
     let excess = packet.len() - protocol::MAX_WIRE_PACKET_LEN;
-    let keep = input.block_changes.len().saturating_sub(excess.div_ceil(per_change));
+    let keep = edits.len().saturating_sub(excess.div_ceil(per_change));
     log::warn!(
         "input packet over the {}-byte cap: sending {keep} of {} block changes, the rest in the next packet(s)",
         protocol::MAX_WIRE_PACKET_LEN,
-        input.block_changes.len()
+        edits.len()
     );
-    let trimmed = input.block_changes.split_off(keep);
-    // C1 — a trimmed edit's `mined` tag goes with it (`RemoteClient::send_input`).
-    let kept: std::collections::HashSet<(i32, i32, i32)> =
-        input.block_changes.iter().map(|bc| (bc.x, bc.y, bc.z)).collect();
-    input.mined.retain(|m| kept.contains(&(m.x, m.y, m.z)));
+    let trimmed = edits.split_off(keep);
+    set_input_edits(input, &edits);
     (protocol::serialize_packet(PacketType::ClientInput, &*input), trimmed)
 }
 
-/// C1 (review LOW-3) — cut `edits` before the first edit whose tagged cell
-/// would be the (`MAX_MINED_PER_INPUT` + 1)th distinct one in this packet, and
-/// return the cut-off tail (empty when it all fits). The server reads no more
-/// tags than that from one input, so an honest client never sends more: what
-/// is past the limit goes in the next packet, in order, tags and all.
-fn hold_back_past_tag_limit(
-    edits: &mut Vec<protocol::BlockChange>,
-    tags: &[protocol::MinedBlock],
-) -> Vec<protocol::BlockChange> {
-    if tags.is_empty() {
-        return Vec::new();
+/// FU1 (C1 verify N4) — pair this tick's `tags` with this tick's `edits`, at
+/// the source, so a tag only ever travels with the edit it was made for. The
+/// survival break arm pushes a mined cell's edit and then its tag, so each tag
+/// goes to the last edit of its cell not yet paired that emptied it (the
+/// break leaves AIR), or failing that the last of its cell not yet paired (a
+/// crop harvest leaves its replacement). A tag with no edit of its cell this
+/// tick has nothing to yield and is not sent.
+fn pair_tags_with_edits(
+    edits: Vec<protocol::BlockChange>,
+    tags: Vec<protocol::MinedBlock>,
+) -> Vec<PairedEdit> {
+    let mut paired: Vec<PairedEdit> = edits.into_iter().map(|bc| (bc, None)).collect();
+    for tag in tags {
+        let cell = (tag.x, tag.y, tag.z);
+        let free_here = |(bc, t): &PairedEdit| t.is_none() && (bc.x, bc.y, bc.z) == cell;
+        let at = paired
+            .iter()
+            .rposition(|p| free_here(p) && p.0.new_block == crate::block::AIR)
+            .or_else(|| paired.iter().rposition(free_here));
+        match at {
+            Some(k) => paired[k].1 = Some(tag),
+            None => log::debug!("a mined tag for {cell:?} with no edit of its cell: not sent"),
+        }
     }
-    let tagged: std::collections::HashSet<(i32, i32, i32)> = tags.iter().map(|m| (m.x, m.y, m.z)).collect();
-    let mut cells = std::collections::HashSet::new();
-    for (i, bc) in edits.iter().enumerate() {
+    paired
+}
+
+/// C1 (review LOW-3) / FU1 (C1 verify N4) — cut `edits` before the first
+/// tagged edit that can't go in this packet with its tag, and return the
+/// cut-off tail (empty when it all fits); it goes in the next packet, in
+/// order, tags and all. Two reasons:
+///
+/// - the server reads at most `MAX_MINED_PER_INPUT` tags from one input, so
+///   the 17th tagged edit waits;
+/// - the server gives a cell's tags, in order, to the edits of that cell that
+///   break it (`HostedServer::classify_joiner_edit`), so a tagged edit behind
+///   an untagged edit of its own cell (an Eraser, a bucket, the client's own
+///   piston clearing it — or a placement there) waits: the untagged one could
+///   otherwise take its tag.
+fn hold_back_for_tags(edits: &mut Vec<PairedEdit>) -> Vec<PairedEdit> {
+    let mut tagged = 0;
+    let mut untagged_cells = std::collections::HashSet::new();
+    for (i, (bc, tag)) in edits.iter().enumerate() {
         let cell = (bc.x, bc.y, bc.z);
-        if tagged.contains(&cell) && cells.insert(cell) && cells.len() > protocol::MAX_MINED_PER_INPUT {
+        if tag.is_none() {
+            untagged_cells.insert(cell);
+            continue;
+        }
+        tagged += 1;
+        if tagged > protocol::MAX_MINED_PER_INPUT || untagged_cells.contains(&cell) {
             return edits.split_off(i);
         }
     }
     Vec::new()
-}
-
-/// C1 — the tags to send beside `edits`: the first (oldest) tag of each
-/// edited cell, in order. The server matches a tag to an edit by its cell, so
-/// a second tag for the same cell in one packet adds nothing.
-fn tags_beside(edits: &[protocol::BlockChange], tags: &[protocol::MinedBlock]) -> Vec<protocol::MinedBlock> {
-    if tags.is_empty() {
-        return Vec::new();
-    }
-    let edited: std::collections::HashSet<(i32, i32, i32)> = edits.iter().map(|bc| (bc.x, bc.y, bc.z)).collect();
-    let mut seen = std::collections::HashSet::new();
-    tags.iter()
-        .filter(|m| edited.contains(&(m.x, m.y, m.z)) && seen.insert((m.x, m.y, m.z)))
-        .copied()
-        .collect()
 }
 
 #[cfg(test)]
@@ -1881,7 +1903,8 @@ mod tests {
             block_changes: vec![protocol::BlockChange::with_meta(1, 2, 3, 4, 0)],
             ..Default::default()
         };
-        let (pkt, trimmed) = serialize_input_within_cap(&mut small);
+        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None)).collect();
+        let (pkt, trimmed) = serialize_input_within_cap(&mut small, edits);
         assert!(trimmed.is_empty(), "nothing trimmed under the cap");
         assert_eq!(small.block_changes.len(), 1, "a packet under the cap is untouched");
         assert_eq!(pkt, protocol::serialize_packet(PacketType::ClientInput, &small));
@@ -1892,7 +1915,8 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let (pkt, trimmed) = serialize_input_within_cap(&mut big);
+        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None)).collect();
+        let (pkt, trimmed) = serialize_input_within_cap(&mut big, edits);
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
         let back: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
@@ -1900,7 +1924,7 @@ mod tests {
         assert_eq!(back.block_changes[0].x, 0, "the oldest changes are the ones kept");
         // The trimmed tail is handed back, not lost: kept + trimmed is the lot, in order.
         assert_eq!(back.block_changes.len() + trimmed.len(), 10_000);
-        let xs: Vec<i32> = back.block_changes.iter().chain(&trimmed).map(|b| b.x).collect();
+        let xs: Vec<i32> = back.block_changes.iter().chain(trimmed.iter().map(|(b, _)| b)).map(|b| b.x).collect();
         assert_eq!(xs, (0..10_000).collect::<Vec<_>>());
     }
 
@@ -1989,7 +2013,7 @@ mod tests {
             rc.send_input(&protocol::InputPacket::default());
         }
         assert!(tagged_with_edit, "the tag went out in the packet carrying its edit");
-        assert!(rc.mined_carry_over.is_empty(), "and stopped riding once the edit went");
+        assert_eq!(rc.carried_tags(), 0, "and stopped riding once the edit went");
     }
 
     /// Review LOW-3 — the server reads at most `MAX_MINED_PER_INPUT` tags
@@ -2012,7 +2036,7 @@ mod tests {
             rc.send_input(&input);
             next_input(&*srv)
         }];
-        assert_eq!(rc.mined_carry_over.len(), max as usize, "16 tags carried over with their edits");
+        assert_eq!(rc.carried_tags(), max as usize, "16 tags carried over with their edits");
         // The next input mines one more cell.
         let mut next = input_with([50_000]);
         next.mined = vec![tag(50_000)];
@@ -2037,7 +2061,77 @@ mod tests {
         let mut all: Vec<i32> = (0..n).collect();
         all.push(50_000);
         assert_eq!(edits, all, "and every edit once, in order");
-        assert!(rc.mined_carry_over.is_empty() && rc.input_carry_over.is_empty());
+        assert!(rc.carried_tags() == 0 && rc.input_carry_over.is_empty());
+    }
+
+    /// FU1 (C1 verify N4) — a tag rides only with the edit it was made for.
+    /// The mined edit goes out in the first packet; a later placement in the
+    /// same cell, trimmed onto a later packet, used to take the tag along
+    /// again (tags waited while ANY edit of their cell did), and the server
+    /// would have read it beside that edit.
+    #[test]
+    fn a_tag_never_rides_again_beside_a_later_edit_of_its_cell() {
+        let (srv, mut rc) = connected_client();
+        let tag = protocol::MinedBlock { x: 5, y: 64, z: 0, tool: protocol::WireItem::None };
+        let mut input = input_with(0..10_000);
+        input.block_changes[5].new_block = crate::block::AIR; // the mine
+        input.block_changes.push(protocol::BlockChange::with_meta(5, 64, 0, 1, 0)); // refilled after
+        input.mined = vec![tag];
+        rc.send_input(&input);
+        let mut packets = vec![next_input(&*srv)];
+        for _ in 0..6 {
+            rc.send_input(&protocol::InputPacket::default());
+            packets.push(next_input(&*srv));
+        }
+        let with_tag: Vec<usize> = (0..packets.len()).filter(|&k| !packets[k].mined.is_empty()).collect();
+        assert_eq!(with_tag, vec![0], "the tag goes out once, in the first packet");
+        assert_eq!(packets[0].mined, vec![tag]);
+        assert!(packets[0].block_changes.iter().any(|b| b.x == 5 && b.new_block == crate::block::AIR));
+        let refill = packets.iter().position(|p| p.block_changes.iter().any(|b| b.x == 5 && b.new_block == 1));
+        assert!(refill.is_some_and(|k| k > 0), "the refill went later, untagged");
+        let edits: usize = packets.iter().map(|p| p.block_changes.len()).sum();
+        assert_eq!(edits, 10_001, "every edit once");
+        assert_eq!(rc.carried_tags(), 0);
+    }
+
+    /// FU1 (C1 verify N4) — the server gives a cell's tags in order to the
+    /// edits that break it, so a mined edit behind an untagged edit of its
+    /// own cell (an Eraser, then a placement, then the mine) waits for the
+    /// next packet: the untagged one can't take its tag.
+    #[test]
+    fn a_tagged_edit_behind_an_untagged_edit_of_its_cell_waits_for_the_next_packet() {
+        let (srv, mut rc) = connected_client();
+        let tag = protocol::MinedBlock { x: 7, y: 64, z: 0, tool: protocol::WireItem::None };
+        let edit = |b| protocol::BlockChange::with_meta(7, 64, 0, b, 0);
+        let input = protocol::InputPacket {
+            block_changes: vec![edit(crate::block::AIR), edit(1), edit(crate::block::AIR)],
+            mined: vec![tag],
+            ..Default::default()
+        };
+        rc.send_input(&input);
+        let first = next_input(&*srv);
+        assert_eq!(first.block_changes, vec![edit(crate::block::AIR), edit(1)]);
+        assert!(first.mined.is_empty(), "the Eraser and the placement go untagged");
+        rc.send_input(&protocol::InputPacket::default());
+        let second = next_input(&*srv);
+        assert_eq!(second.block_changes, vec![edit(crate::block::AIR)]);
+        assert_eq!(second.mined, vec![tag], "the mine goes next, with its tag");
+    }
+
+    /// FU1 — a tag pairs with the edit its break made: the last of its cell
+    /// that emptied it this tick (a mine, then a placement there in the same
+    /// tick, pairs with the mine), else the last of its cell (a harvest);
+    /// one with no edit of its cell is not sent.
+    #[test]
+    fn tags_pair_with_the_edit_their_break_made() {
+        let tag = |x| protocol::MinedBlock { x, y: 64, z: 0, tool: protocol::WireItem::None };
+        let edit = |x, b| protocol::BlockChange::with_meta(x, 64, 0, b, 0);
+        let paired = pair_tags_with_edits(
+            vec![edit(1, crate::block::AIR), edit(1, 3), edit(2, crate::block::TILLED_SOIL)],
+            vec![tag(1), tag(2), tag(9)],
+        );
+        let tags: Vec<Option<i32>> = paired.iter().map(|(_, t)| t.map(|m| m.x)).collect();
+        assert_eq!(tags, vec![Some(1), None, Some(2)]);
     }
 
     #[test]

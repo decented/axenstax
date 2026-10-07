@@ -4,11 +4,109 @@
 //! - ChannelTransport: in-process mpsc channels (split screen, host-as-server local)
 //! - NetworkTransport: UDP sockets (LAN/online) — future Phase 2
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 /// Serialized packet bytes.
 pub type Packet = Vec<u8>;
+
+/// FU1 — the hard bound on one client's [`InboundQueue`], in packets. An
+/// honest client sends about 20 a second (one input per tick it runs, plus a
+/// few actions), and after a frame hitch it catches up at up to ten a frame
+/// (`game_loop` runs at most 10 ticks a frame and banks the rest), while the
+/// server reads `hosted_server::MAX_PACKETS_PER_TICK` = 10 of them a tick, 200 a
+/// second. Its queue therefore grows only while a burst arrives faster than
+/// that: a QUIC stall is at most 30 seconds (quinn's idle timeout ends the
+/// connection) — some 600 inputs plus actions — and a game-thread freeze of
+/// `T` seconds queues at most the `20·T` inputs it then catches up (fewer: the
+/// server reads ten a tick while they arrive). 1024 is a freeze of most of a
+/// minute; only a client that floods gets there.
+pub const MAX_INBOUND_PACKETS: usize = 1024;
+
+/// FU1 — the hard bound on one client's [`InboundQueue`], in bytes (the
+/// outbound queue's 8 MiB, `network::MAX_OUTBOUND_QUEUE_BYTES`). Honest inputs
+/// are about a hundred bytes; even a client's largest edit burst
+/// (`RemoteClient::send_input`'s carry-over) is a handful of full packets.
+pub const MAX_INBOUND_BYTES: usize = 8 * 1024 * 1024;
+
+/// FU1 — how far over its hard bound a client's [`InboundQueue`] went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InboundOverflow {
+    /// Packets waiting when the bound was crossed.
+    pub packets: usize,
+    /// Their bytes.
+    pub bytes: usize,
+}
+
+/// FU1 — the packets one client has sent that the server has not processed
+/// yet, in arrival order. The server reads a client's packets into it every
+/// tick, processes at most its per-tick budget from the front, and leaves the
+/// rest for the next tick: a packet past the budget waits, it is never
+/// dropped. Bounded by [`MAX_INBOUND_PACKETS`] and [`MAX_INBOUND_BYTES`]: a
+/// client that crosses either is one no honest client can be, and is
+/// disconnected (`HostedServer::process_inbound_packets`).
+#[derive(Default)]
+pub struct InboundQueue {
+    packets: VecDeque<Packet>,
+    bytes: usize,
+}
+
+impl InboundQueue {
+    /// Move everything `transport` has received to the back of the queue;
+    /// returns how many packets that was. Stops reading, with the overflow, as
+    /// soon as the queue is over either hard bound — so a flood costs at most
+    /// the bound's worth of work.
+    pub fn fill_from(&mut self, transport: &dyn ServerTransport) -> Result<usize, InboundOverflow> {
+        let mut arrived = 0;
+        while let Some(packet) = transport.try_recv_from_client() {
+            self.push(packet)?;
+            arrived += 1;
+        }
+        Ok(arrived)
+    }
+
+    fn push(&mut self, packet: Packet) -> Result<(), InboundOverflow> {
+        self.bytes += packet.len();
+        self.packets.push_back(packet);
+        if self.packets.len() > MAX_INBOUND_PACKETS || self.bytes > MAX_INBOUND_BYTES {
+            return Err(InboundOverflow { packets: self.packets.len(), bytes: self.bytes });
+        }
+        Ok(())
+    }
+
+    /// The oldest packet waiting.
+    pub fn front(&self) -> Option<&Packet> {
+        self.packets.front()
+    }
+
+    /// The newest `n` packets waiting (all of them if fewer), oldest first.
+    pub fn newest(&self, n: usize) -> impl Iterator<Item = &Packet> {
+        self.packets.iter().skip(self.packets.len().saturating_sub(n))
+    }
+
+    /// Take the oldest packet waiting.
+    pub fn pop(&mut self) -> Option<Packet> {
+        let packet = self.packets.pop_front()?;
+        self.bytes -= packet.len();
+        Some(packet)
+    }
+
+    /// Packets waiting.
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    /// Forget everything waiting (the connection ended).
+    pub fn clear(&mut self) {
+        self.packets.clear();
+        self.bytes = 0;
+    }
+}
 
 /// `Send` on native, nothing on wasm.
 ///
@@ -204,5 +302,58 @@ impl ServerTransport for BoundServerTransport {
     }
     fn is_closed(&self) -> bool {
         self.inner.is_closed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_inbound_queue_keeps_arrival_order_and_counts_its_bytes() {
+        let (server, client) = channel_pair();
+        for n in 1..=3u8 {
+            client.send_to_server(&vec![n; n as usize]);
+        }
+        let mut q = InboundQueue::default();
+        assert_eq!(q.fill_from(&server), Ok(3));
+        assert_eq!((q.len(), q.bytes), (3, 6));
+        assert_eq!(q.pop(), Some(vec![1]));
+        client.send_to_server(&[4]);
+        assert_eq!(q.fill_from(&server), Ok(1));
+        assert_eq!(q.front(), Some(&vec![2, 2]), "the oldest still first");
+        assert_eq!(q.newest(2).collect::<Vec<_>>(), vec![&vec![3, 3, 3], &vec![4]]);
+        assert_eq!(q.newest(9).count(), 3, "at most what is there");
+        let rest: Vec<_> = std::iter::from_fn(|| q.pop()).collect();
+        assert_eq!(rest, vec![vec![2, 2], vec![3, 3, 3], vec![4]]);
+        assert_eq!((q.len(), q.bytes), (0, 0));
+    }
+
+    #[test]
+    fn the_inbound_queue_overflows_past_either_bound_and_stops_reading() {
+        let (server, client) = channel_pair();
+        for _ in 0..MAX_INBOUND_PACKETS {
+            client.send_to_server(&[0]);
+        }
+        let mut q = InboundQueue::default();
+        assert_eq!(q.fill_from(&server), Ok(MAX_INBOUND_PACKETS), "exactly at the bound is still honest");
+        client.send_to_server(&[0]);
+        client.send_to_server(&[0]);
+        assert_eq!(
+            q.fill_from(&server),
+            Err(InboundOverflow { packets: MAX_INBOUND_PACKETS + 1, bytes: MAX_INBOUND_PACKETS + 1 })
+        );
+        assert!(server.try_recv_from_client().is_some(), "it stopped reading at the bound");
+
+        let (server, client) = channel_pair();
+        let big = vec![0u8; MAX_INBOUND_BYTES / 2];
+        let mut q = InboundQueue::default();
+        client.send_to_server(&big);
+        client.send_to_server(&big);
+        assert_eq!(q.fill_from(&server), Ok(2));
+        client.send_to_server(&[0]);
+        assert_eq!(q.fill_from(&server).map_err(|o| o.bytes), Err(MAX_INBOUND_BYTES + 1));
+        q.clear();
+        assert!(q.is_empty() && q.bytes == 0);
     }
 }

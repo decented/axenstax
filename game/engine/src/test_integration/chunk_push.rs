@@ -310,6 +310,53 @@ fn a_hitch_of_more_than_ten_inputs_in_a_tick_still_delivers_acks_and_drops() {
     assert!(j.take_in() > 0, "the window reopened");
 }
 
+/// FU1 — the input carrying a joiner's column-mismatch switch (and the drop
+/// of the column it let go of) arrives past the per-tick budget and waits. A
+/// waiting input's acks and drops are taken on arrival, but not this one's
+/// ahead of its switch: taken first, the drop held the column off for 5 s,
+/// where in order the switch comes first and the column is pushed again at
+/// once (B2b, Spec 04 §4.1).
+#[test]
+fn a_waiting_mismatch_report_still_has_its_column_pushed_again_at_once() {
+    let mut hs = super::push_joiner::start_dedicated("mismatch-burst");
+    hs.server.set_sim_distance(3);
+    let mut j = Joiner::join(&mut hs, 3, false);
+    hs.forge_note_hashes_for_test(j.slot);
+    for _ in 0..200 {
+        if j.intake.column_mismatch().is_some() {
+            break;
+        }
+        j.ack();
+        hs.tick();
+        j.take_in();
+    }
+    let m = j.intake.column_mismatch().expect("a forged note was caught");
+    let bad = (m.cx, m.cz);
+    // A frame hitch: eleven stale inputs, then the one with the switch and drop.
+    for _ in 0..11 {
+        let input = protocol::InputPacket { health: 20.0, ..Default::default() };
+        j.rc.send_input(&input).expect("connected");
+    }
+    let last = j.input();
+    assert!(last.column_mismatch.is_some());
+    assert!(last.chunk_drops.iter().any(|d| (d.cx, d.cz) == bad), "it carries the drop");
+    j.rc.send_input(&last).expect("connected");
+    hs.tick();
+    assert!(!hs.chunk_push_for_test(j.slot).pushes_everything(), "the twelfth input waits");
+    j.take_in();
+    hs.tick();
+    assert!(hs.chunk_push_for_test(j.slot).pushes_everything(), "the server switched");
+    for _ in 0..60 {
+        if j.intake.column_complete(bad) {
+            break;
+        }
+        j.take_in();
+        j.ack();
+        hs.tick();
+    }
+    assert!(j.intake.column_complete(bad), "the column it let go of was pushed again, not held off");
+}
+
 #[test]
 fn a_lowered_render_distance_never_starts_a_push_and_drop_churn() {
     // Review MEDIUM-1: the push radius followed the JOIN render distance, so

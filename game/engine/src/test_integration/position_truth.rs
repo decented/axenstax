@@ -639,6 +639,35 @@ fn a_client_frame_hitch_catches_up_without_a_correction() {
 }
 
 #[test]
+fn a_burst_past_the_packet_budget_catches_up_without_a_correction() {
+    // FU1 — more inputs than the server reads a tick reach it at once (a
+    // network stall, or two catch-up frames landing together). The ones past
+    // `MAX_PACKETS_PER_TICK` wait for the next tick instead of being dropped,
+    // so every one is still simulated, in order, on the steps the stall
+    // banked: the prediction is never corrected, and the acknowledgement
+    // reaches the newest input.
+    let mut hs = start_dedicated("burst-past-budget");
+    let mut j = Joiner::join_via_remote_client(&mut hs, on_floor(3.5, -10.5), 1);
+    let south = Move { forward: 1.0, yaw: SOUTH, ..Default::default() };
+    j.run(&mut hs, Move::default(), 5);
+    j.run(&mut hs, south, 5);
+    let burst = crate::hosted_server::MAX_PACKETS_PER_TICK + 2;
+    for _ in 0..burst {
+        j.server_tick(&mut hs);
+    }
+    for _ in 0..burst {
+        j.predict_and_send(Move { sprint: true, ..south });
+    }
+    j.server_tick(&mut hs);
+    j.run(&mut hs, south, 6);
+    j.run(&mut hs, Move::default(), 6);
+    assert!(j.agreed() > 10, "{:?}", j.outcomes);
+    assert!(j.max_error < 1e-4, "the burst cost the server steps: off by {}", j.max_error);
+    assert_eq!(j.corrections(), 0, "{:?}", j.outcomes);
+    assert!((j.body.pos - j.server_pos(&hs)).length() < 1e-4);
+}
+
+#[test]
 fn state_updates_acknowledge_the_last_input_the_server_applied() {
     let mut hs = start_dedicated("ack");
     let mut j = Joiner::join(&mut hs, on_floor(0.5, 0.5), 0);

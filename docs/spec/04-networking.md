@@ -29,6 +29,7 @@
 - **v70** (2026-10-07, MP-D2b): **Joiners act on the server's mobs.** Appended, no existing shape changed: `PacketType::EntityAttack = 58` and `EntityInteract = 59` (C→S: a swing, or a one-shot right-click — `InteractKind` feed, tame, shear, milk, Lead on, Lead off, sit toggle — on the entity named by its `ProtocolId`, or `LeadToPost { post }`, a Lead on a fence post; the held item is the client's word), `InteractOutcome = 60` (S→C, to the asker: accepted, items to take from the hand, a note code — 17 `NotOnThisServer` where the server doesn't simulate breeding, Leads or pets) and `KillEvent = 61` (S→C, to the killer alone: species, why it was credited — `kill_reason::LAST_HIT` / `NEAREST` — position, flags); `PlayerEventType::DiedOf { cause: WireDamageCause }` (sent instead of `Died`: the death screen's real cause), `ArmourWorn { hits }` (server-landed hits, keg blasts included, wear the joiner's armour) and `Bred { offspring }` (a baby born to an animal this joiner fed); `entity_flags::TETHERED = 16`. A joiner's kill or breed credits that joiner and never a host's player, nor a later joiner given its slot. Bumped because a v69 peer can't decode the new variants. See §4.2d.
 - **v71** (2026-10-07, Phase B2b): **Touched columns.** A joiner whose terrain generator matches the host's is pushed only the columns that differ from generation; for every other column within its push radius the server sends `PacketType::ColumnLocal = 4` (`ColumnLocalPacket { cx, cz, hash }`, 13 bytes; `hash` = `chunk_verdict::column_hash` of the column as generation makes it, cached with its `Untouched` verdict, so also the server's live column) in the same ordered, numbered chunk stream (it counts towards `chunk_ack`), and the joiner generates that column itself and checks the hash. `JoinAcceptPacket` gains trailing `chunk_note_radius: u8`: the server's push limit when it sends notes, `0` when it pushes everything (`--chunk-sync all`, another generator, an owning `--no-lend` host). `InputPacket` gains trailing `column_mismatch: Option<ColumnMismatch { cx, cz, server_hash, client_hash }>`, a sticky "push me everything" switch (ignored from a joiner the server never sent a note). `--chunk-sync touched` is now the default. Bumped because packet shapes and a packet type were added. See §4.1 "Touched columns".
 - **v72** (2026-10-07, C1): **The server yields a joiner's breaks.** `InputPacket` gains trailing `mined: Vec<MinedBlock>` (`MinedBlock { x, y, z: i32, tool: WireItem }`, at most `MAX_MINED_PER_INPUT = 16` read; appended after B2b's `column_mismatch`): the cells the client's survival break arm mined since its previous input, each with the tool it mined with. The server computes the drop by the client's own rules (`break_drops`: crop harvest, tool-tier mine drop + bonus, Satori on the world's Proof-of-Play secret) and grants it by `InventoryGrant`; a joined client no longer grants itself break drops. The server also keeps a shadow of each joiner's inventory with a log-only possession check on placements. Packet shape CHANGED, hence the bump. See §4.2e.
+- **A client's packets past the per-tick budget wait; they are never dropped (2026-10-07, FU1, NO wire change — still v72).** The server used to read 10 of a client's packets a tick and discard the rest, so the swing or right-click a client made while catching up after a frame hitch (ten inputs a frame, then the action) was lost unanswered. Packets past the budget now wait in a per-client inbound queue for the next tick, in arrival order; only a client past the queue's hard bound (1024 packets or 8 MiB) is disconnected, with a reason. See §11.2a.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -998,10 +999,12 @@ never revived). Not reconciliation: outside these two events the joiner still
 owns its own position (S1, next).
 
 **The Respawn request is reliable at the application layer.** Past a client's
-10th packet in a tick the server drops the rest — but `Respawn` and `Disconnect`
-are control packets and are always read (everything else past the budget is
-still discarded), so a flood can neither strand a joiner dead nor hold a
-leaver's seat. A client whose `Respawn` has gone unanswered re-sends it every
+10th packet in a tick the rest wait for the next tick (§11.2a, FU1); `Respawn`
+and `Disconnect` are control packets and cost no budget, but they are read in
+arrival order, never ahead of what the client sent before them (a Respawn read
+ahead of the zero-health inputs queued before it would be undone by them). So a
+flood can neither strand a joiner dead nor hold a leaver's seat for longer than
+its queue takes to drain. A client whose `Respawn` has gone unanswered re-sends it every
 `RESPAWN_RESEND_TICKS` (20 = the dead-time minimum, so an honest click inside the
 first second lands on the resend), from `RemoteClient::send_input`, until its own
 `Respawned` arrives; the resend stops on disconnect, when the client is dropped
@@ -1281,10 +1284,21 @@ are kept by `seq`, at most 64 outstanding):
   only while the inventory holds more of it than the requests in flight
   already claim (`JoinerActions::can_afford`). One bucket can't milk two cows
   on a link slower than the 8-tick right-click cooldown. A request the server
-  dropped unanswered (past its per-tick budget) stops claiming once a later
-  one is answered: the server reads requests in the order sent and answers
-  each at once on the same ordered stream, so it never will be
-  (`JoinerActions::take` forgets every earlier entry still waiting).
+  never answers stops claiming once a later one is answered: the server reads
+  requests in the order sent and answers each at once on the same ordered
+  stream, so it never will be (`JoinerActions::take` forgets every earlier
+  entry still waiting). **A claim never outlives its request (FU1, D2b verify
+  N2):** since FU1 the server defers rather than drops an honest client's
+  requests (§11.2a), but one can still go unanswered (lost to a stall, or a
+  connection that went), and it used to hold its item until some later request
+  was answered — right-clicking a cow with the only bucket silently did
+  nothing. A request unanswered for `joiner_actions::CLAIM_TIMEOUT` = 10 s
+  stops claiming: well above a slow round trip plus the longest an honest
+  request can wait in the server's inbound queue (about 5 s at its hard bound),
+  so a request still on its way never frees its item for a second one. The
+  entry stays, so an answer that does come is applied. Leaving the world
+  forgets every claim (`JoinerActions::clear`, `world_exit`); every reconnect is
+  a leave and a new join.
 Products ride `InventoryGrant`; a bucket → milk swap is "consume 1 + grant 1".
 Since C1 the server's shadow of the joiner's inventory follows the same
 accepted outcome: `consume_held` taken by the client's own owed rule
@@ -1296,7 +1310,11 @@ challenge event single-player fires for the same interaction (`ShearOrMilk`,
 
 **Per-tick budget.** `EntityAttack` + `EntityInteract` share
 `MAX_ENTITY_REQUESTS_PER_TICK` = 4 per client per tick (inside the general
-10-packet budget); the rest are dropped unanswered.
+10-packet budget, §11.2a); the rest are dropped unanswered. No honest client
+reaches it (FU1): the ten packets read a tick span at most eleven of its ticks
+(one input a tick, the actions between), where the 10-tick swing cooldown and
+the 8-tick right-click cooldown allow two of each. A request past the general
+budget is not dropped: it waits for the next tick.
 
 **Kill attribution — one rule (`combat::attribute_kill`).** `LastAttacker`
 names one of:
@@ -1441,19 +1459,38 @@ Only a tagged cell is yielded: an edit that empties a cell untagged — a
 bucket scoop, an Eraser on blueprint paper, a lifted Latent Print, a cell the
 joiner's own pistons or kegs cleared — yields nothing (that is why the tag is
 on the wire: the server can't tell them apart from a mined block, and the
-`held_kind`/`held_id` pair carries no tool type). Only a cell a break can
-mine is yielded: a tag on a water, lava, fire, smoke or empty cell yields
-nothing (`joiner_inventory::minable`; the client's raycast never targets
-them, so drops come only from the shared break rules). A tag needs its edit
-in the same packet, and the server reads at most `MAX_MINED_PER_INPUT` (16)
-tags from one input — its DoS guard. The client never sends more: from the
-first tagged cell past the limit its edits wait for the next input, tags and
-all, and an edit trimmed at the packet's byte cap takes its tag along
-(`RemoteClient::send_input`, `mined_carry_over`, oldest first). The carry-over
-is lossless and bounded by the edits' own cap (`INPUT_CARRY_OVER_MAX_CHANGES`:
-a tag is dropped only with its edit), so only a modified client's extra tags
-are ever ignored (review C1 LOW-3: 16 carried-over tags used to go out ahead
-of a new one, which the server never read). An edit past the server's
+`held_kind`/`held_id` pair carries no tool type). Only a cell whose break
+yields anything is yielded: a tag on a water, lava, fire, smoke or empty cell yields
+nothing (the shared break rules' `break_drops::yields_drops`, which
+`joiner_inventory::minable` reads; FU2 — a survival break can dig up lava and
+fire, but they are no items, for a joiner as in single-player). **A tag is its own
+edit's, and yields once (FU1, C1 verify N4).** The client pairs each tag with
+the edit its break made, at the source (`remote_client::pair_tags_with_edits`:
+the last edit of its cell that tick that emptied it, else the last of its cell
+— a harvest), carries the pair together (`input_carry_over`) and sends a tag
+only in the packet carrying its edit — one tag per mined edit, no per-cell
+merging. The server gives a cell's tags, in order, to the edits of that cell
+that break it (`classify` says `Break` with the tag) or empty it (dug lava or
+fire, which yield nothing), and each tag is used up by that edit
+(`HostedServer::classify_joiner_edit`): a later
+emptying edit of the same cell — an Eraser, a bucket, the client's own piston,
+in that input or the next — never takes it, and a tagged cell's other edits
+are classified as untagged, so a place-then-break (or break-then-place) of one
+cell in one input consumes the placement and yields the break (FU1 item 3; a
+tagged fill used to be unchecked). Until FU1 tags paired with edits by cell,
+and a carried tag rode again beside any later edit of its cell. The client
+holds back (to the next packet, in order) a tagged edit behind an untagged
+edit of its own cell in the same packet, so an untagged emptying edit can
+never take its tag. Tags live for one input on the server: a refused edit's
+tag yields nothing and goes with the input. The server reads at most
+`MAX_MINED_PER_INPUT` (16) tags from one input — its DoS guard. The client
+never sends more: from the 17th tagged edit its edits wait for the next input,
+tags and all, and an edit trimmed at the packet's byte cap takes its tag along
+(`RemoteClient::send_input`, oldest first). The carry-over is lossless and
+bounded by the edits' own cap (`INPUT_CARRY_OVER_MAX_CHANGES`: a tag is
+dropped only with its edit), so only a modified client's extra tags are ever
+ignored (review C1 LOW-3: 16 carried-over tags used to go out ahead of a new
+one, which the server never read). An edit past the server's
 4-per-tick edit budget is refused and sent back like any other, tagged or
 not: the block reappears on the client, nothing is yielded and no drop is
 lost (the strike's tool wear, client-side, stays spent). A tagged edit that doesn't leave what the
@@ -1464,14 +1501,17 @@ for every grant (a ground item only it sees); the shadow drops it.
 
 **Every block a joiner puts into a cell is player-placed**, whatever the
 edit was classified as below — a plain placement, a fill with a tool claimed
-in hand, a fill carrying a `mined` tag, anything in creative — as the
-client's own placements always are (review C1 MEDIUM-1: only a plain
+in hand, anything in creative — as the client's own placements always are (review C1 MEDIUM-1: only a plain
 placement used to be flagged, so a modified client could refill a cell that
 had just yielded a Satori by another accepted path and mine it again — the
 roll is deterministic per cell and the cell's exposure entry stands — for a
 Satori every two edits). The flag is set at the one point every accepted
 joiner write goes through (`HostedServer`'s apply loop, right after
-`set_block`): a non-air block is player-placed; a break the server yielded
+`set_block`), and only when the block changes (FU1, C1 verify N1: an accepted
+edit that leaves the block as it was — a meta-only toggle of a generated
+door, or a modified client "replacing" natural deepslate with itself — puts
+nothing into the cell, and used to flag natural cells, killing their Satori
+for everyone): a non-air block is player-placed; a break the server yielded
 leaves the cell natural again (AIR, or a harvested crop's tilled soil), as
 single-player's break arm does; any other emptying edit leaves it natural.
 So a Satori, like any seed- or exposure-driven drop, rolls only on a natural
@@ -1515,13 +1555,21 @@ bought blocks):
   setting and locked slots (the shadow always auto-refills and locks
   nothing), and a placement charged to the hotbar slot named in the input (a
   scroll after a placement within one send window charges the wrong slot).
-  The check keys on the held slot, so layout drift alone mismatches.
+  The check keys on the held slot, so layout drift alone mismatches;
+- a bucket filled at a source (C1 verify N3): the client swaps a Bucket for a
+  Water or Lava Bucket, and the scoop edit is untagged, so it is unchecked —
+  the shadow never sees the filled bucket.
 
 The other direction — the shadow holds MORE: crafting inputs, container
 deposits, Q-drops, eating, tool and armour wear, armour put on, and the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
-cells. No refusal comes of those, but once C2 persists the shadow they would
-be duplication.
+cells; and **death** (C1 verify N3): off a keep-inventory world the client
+empties all 36 slots into a grave or a scatter, client-side, while the shadow
+keeps everything — once C2 persists the shadow, a death and a grave retrieval
+would duplicate the whole inventory. No refusal comes of those, but once C2
+persists the shadow they would be duplication. (A fill carrying a `mined`
+tag, C1's MEDIUM-1 residual, is no longer one: since FU1 it is classified
+like any fill and a plain placement consumes.)
 
 **Possession check — LOG-ONLY for one release.** An accepted edit that fills
 an empty (or water) cell is a *plain placement* when the hand (the input's
@@ -1681,7 +1729,7 @@ A joiner has **one** position: the one the server simulates from its inputs. Its
 - Each joiner input is queued as a `QueuedInput { seq, yaw, pitch, intent }` — `seq` is `InputPacket.tick`, `intent` is `PlayerIntent::from_input_packet`, and the look is the one the client predicted that input with. `tick_player_physics` steps queued inputs with `Player::tick`, building its throwaway camera from the **input's own** yaw/pitch (until now it used the newest packet's, so two inputs bunched into one tick both moved along the later heading). `ServerPlayer.yaw/pitch` stay the newest, for the avatar broadcast.
 - `ServerPlayer.last_applied_input` = the `seq` of the last input whose effect is in the server's state: set when physics consumes an input, and when a position-trusted local slot's input is applied. `broadcast_state` writes it per client into `last_acked_input`. It is not `last_input_tick` (highest *received*), which runs ahead while inputs wait in the queue. A dead joiner's ignored inputs are not acknowledged (the client's history is bounded; acks resume after Respawn).
 - **Steps per tick — step credit.** `ServerPlayer.step_credit` gains one each server tick (capped at `MAX_STEP_CREDIT = 12`) and each input simulated spends one; a tick steps at most `MAX_INTENTS_PER_TICK = 4` inputs. A tick with nothing queued (the client's frame hitched, or the network bunched its packets) therefore banks its step, and when the late inputs arrive together they catch up at up to four a tick instead of standing in the queue as latency or overflowing it. Over any `n` ticks a body takes at most `n + 12` steps, each still held to the per-step speed cap (`MAX_HORIZONTAL_PER_TICK`, about 1.63 blocks): a client flooding inputs still moves one step a tick, and withholding inputs to bank steps buys a burst no longer than the time it stood still.
-- The queue is bounded (one pending + `MAX_QUEUED_INTENTS = 12`, room for one client frame's catch-up — `game_loop` runs at most 10 ticks a frame — with spare; overflow drops the oldest). A dropped input's `toggle_flight` is carried (XOR) into the next queued one: flight state is not on the wire, so the client could never learn back a toggle the server lost. Remaining loss, by design: a hitch longer than half a second makes the client run 10 ticks a frame for several frames, more than the server's 10-packets-per-tick budget per client takes in one tick; the excess is dropped and the joiner is corrected (snap) once.
+- The queue is bounded (one pending + `MAX_QUEUED_INTENTS = 12`, room for one client frame's catch-up — `game_loop` runs at most 10 ticks a frame — with spare; overflow drops the oldest). A dropped input's `toggle_flight` is carried (XOR) into the next queued one: flight state is not on the wire, so the client could never learn back a toggle the server lost. Inputs past the server's 10-packets-a-tick read budget are not lost (FU1, §11.2a): they wait for the next tick, in order, so a burst of more than ten (a network stall, two catch-up frames landing together) is still simulated input by input on the steps the stall banked, and the acknowledgement reaches the newest (tested: twelve at once, no correction). Remaining loss, by design: a body still takes at most `n + 12` steps in `n` ticks, so after a hitch longer than the 12 banked steps the queue overflows (oldest dropped) and the joiner is corrected (snap) once — movement only; the edits, health changes and chunk reports those inputs carry are all read, and so is every action packet.
 - **Terrain ahead of a joiner (owning `--no-lend` LAN / online host; a lending host's client streamer anchors on its joiners instead — "Hosted mode — the host lends its world").** An owning host's `loaded_columns` is the area round where hosting began plus the 3×3 at each joiner's spawn, so its joiners used to meet an invisible wall at that area's edge. Before the bodies step each tick, `GameServer::refill_columns_round_simulated_players` generates (via `ensure_column_loaded`, the join-spawn path) the unloaded columns of the 3×3 round every server-simulated body in the world, nearest first across all bodies, at most `column_refill_per_tick` a tick in all — `HOST_COLUMN_REFILL_PER_TICK = 2` on an owning server with local players, `0` (off) on a lending host and on a dedicated server, which streams round every player instead (Phase B1, Spec 01 §4.1.2). A column is loaded through the streamers' shared terrain step (`ColumnSims::load_terrain`: restore-else-generate, light, fluid/fire; no wildlife on a host's server). The 3×3 keeps at least a column's width (16 blocks; 14+ ticks at fly-sprint) of lead, enough at two columns a tick. A column generated here is generated from the seed: edits the host made while the server had that column unloaded are not in it (they were refused as `Unloaded`).
 - **Edge of the server's terrain (a backstop: a host refills and the dedicated server streams ahead of every body, so it is reached only when a body outruns them):** a step that would still end in a column outside `GameServer.loaded_columns` (the set edit validation already uses — a dedicated server's edge, or a host's refill budget spent) is refused **sideways only**: x/z position and x/z velocity revert, height and vertical speed stand, so the body stops at the edge like a wall but a jump or fall against it carries on (reverting y too left a joiner hanging in mid-air for as long as it pushed). Not "has a chunk": generating a column writes sparse chunks into its neighbours.
 
@@ -2186,6 +2234,71 @@ The HMAC key rotates every 60 seconds (the server accepts cookies signed with th
 | Global new connection rate | 50 connections/sec (configurable) | Queue excess, respond with `ServerBusy` |
 
 Rate limiting is applied **before** any decryption or packet parsing to minimise CPU cost of attack traffic.
+
+### 11.2a As built: the per-client inbound budget (FU1, 2026-10-07 — NO wire change, still v72)
+
+The table above is the design. What the server actually bounds, per client per
+tick (`HostedServer::process_inbound_packets`, `transport::InboundQueue`):
+
+- **Read budget: `MAX_PACKETS_PER_TICK` = 10 packets.** Every tick the server
+  moves everything a client's transport has received to the back of that
+  client's **inbound queue**, then processes at most ten from the front.
+  **Packets past the budget are not dropped: they wait for the next tick, in
+  arrival order.** Ten covers one frame of an honest client's catch-up after a
+  frame hitch (`game_loop` runs at most 10 ticks a frame and banks the rest,
+  sending one input per tick) — the case that used to lose the swing or
+  right-click made during it, the 12th or 13th packet of the tick, dropped
+  unanswered.
+- **Control packets** (`Respawn`, `Disconnect`) cost nothing against the
+  budget, so one at the front of the queue is read even when the budget is
+  spent — but nothing is ever read out of order: a Respawn read ahead of the
+  zero-health inputs queued before it would be undone by them (§4.2b).
+- **Hard bound: `MAX_INBOUND_PACKETS` = 1024 packets or `MAX_INBOUND_BYTES` =
+  8 MiB waiting** (the outbound queue's 8 MiB, "Game-packet framing on QUIC").
+  The queue is filled packet by packet and stops reading the moment either is
+  crossed; that client is disconnected (`release_slot` with
+  `INBOUND_OVERFLOW_REASON`, shown to the player: "Disconnected: your game sent
+  more than the server could keep up with.") and a warning is logged with the
+  counts. Nothing else a client sends ends its connection. **No honest client
+  reaches it:** it sends about 20 packets a second and the server reads 200,
+  so its queue grows only while a burst arrives faster than that — a QUIC
+  stall lasts at most 30 s (quinn's idle timeout ends the connection: some 600
+  inputs plus actions), and a game-thread freeze of `T` seconds queues at most
+  the `20·T` inputs it then catches up. 1024 is a freeze of most of a minute.
+- **Bounded work, bounded memory.** A tick processes at most ten packets per
+  client plus control packets; filling the queue costs at most the bound's
+  worth of reads (before FU1 the server drained everything past the budget
+  anyway, deserialising its inputs). The per-type budgets still apply inside the ten:
+  block edits (`MAX_BLOCK_CHANGES_PER_TICK` = 4, each one past it refused and
+  sent back, "Host authority over joiner block edits"), `DeviceInteract` (2)
+  and `EntityAttack` + `EntityInteract` (4, §4.2d) — the last two skip the
+  excess, which no honest client sends: the ten packets of a tick span at most
+  eleven client ticks, two right-clicks' and two swings' worth.
+- **What waiting costs.** A deferred packet is read late, never lost: a
+  joiner's position is acknowledged later (`last_acked_input`, §5.3.1 — the
+  prediction holds up to 128 inputs and reconciles when the acknowledgement
+  catches up), and a request is
+  answered later — at the bound, about five seconds behind (1024 packets at ten
+  a tick), which the client's claim on a request's item outlasts (§4.2d).
+  An input that waits still has its chunk acknowledgement and drop reports
+  taken in the tick it arrives (B2a review HIGH-2: a backlog must not hold the
+  push's window shut just after a hitch, when the joiner needs chunks most);
+  both are cumulative and `as_of`-stamped, so taking them again in order when
+  the input is processed changes nothing. Its render distance waits for its
+  turn (a newer one read early would be undone by older inputs still queued),
+  and so does all of an input carrying a column-mismatch switch the server has
+  not acted on yet, and every input after it: in order the switch is read
+  before the drops, so the column the joiner let go of is pushed again at once
+  rather than held off (§4.1 "The column check").
+  A closed connection keeps its slot until the packets it sent before closing
+  have all been read (`reap_slots`). Its queue is emptied when the slot is
+  released or reused.
+- **Open:** the block-edit budget still refuses (and un-ghosts) the fifth edit of
+  a tick rather than deferring it; an honest catch-up can reach it (5-tick
+  break and 8-tick place cooldowns: up to five edits in eleven client ticks).
+  Server-side action cooldowns (`next_swing_tick`, `INTERACT_COOLDOWN_TICKS`)
+  count server ticks, so a catch-up that reads two of a client's actions a
+  server tick apart can refuse the second (answered).
 
 ### 11.3 Amplification Prevention
 

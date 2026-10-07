@@ -959,7 +959,11 @@ the mirror goes with `--no-lend`, and so does that path's second Proof-of-Play
 state (C1 review LOW-5, accepted): the owning copy keeps its own exposure map
 (`World::pop_exposure` travels only with a lend), so a cell the host exposed
 reads unexposed to a joiner's break there and the other way round, and the host's
-own placements reach it unflagged. Single-player runs no server at all (D3 will
+own placements reach it unflagged — and the other way round too (C1 verify
+N5): a joiner's placements reach the host client's own copy by loopback
+(`World::apply_remote_block_change`, block only, no placed bit), so a cell a
+joiner refilled or built in pure deepslate reads natural there and rolls when
+the host mines it, on the host's secret and exposure map. Single-player runs no server at all (D3 will
 lend there too); the dedicated server always owns its world. Native only: the
 web build never hosts.
 

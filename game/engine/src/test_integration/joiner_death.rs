@@ -366,13 +366,17 @@ fn die_and_wait(
     tick_n(hs, client, inbox, 25);
 }
 
-// ── Control packets are never starved by the gameplay budget ────────────────
+// ── The per-tick budget defers; it never drops (FU1) ────────────────────────
 
 #[test]
 fn a_respawn_behind_a_flood_of_packets_still_lands() {
-    // The server reads at most 10 packets a client sends per tick and drops the
-    // rest. Respawn is a control packet: dropped, the joiner would be dead on
-    // the server for good while walking about its own respawned body.
+    // The server reads at most `MAX_PACKETS_PER_TICK` (10) of a client's
+    // packets a tick; the rest wait for the next, in arrival order. Respawn
+    // is a control packet: it costs no budget, but it is never read ahead of
+    // what was sent before it — here, inputs reporting zero health, which
+    // would kill the joiner again if they were read after it. Dropped (as
+    // past the budget it once was), the joiner would be dead on the server
+    // for good while walking about its own respawned body.
     let mut hs = start_dedicated_server("respawn-flood");
     let (client, slot) = join_guest(&mut hs, "Flooded");
     let mut inbox = Inbox::default();
@@ -385,9 +389,16 @@ fn a_respawn_behind_a_flood_of_packets_still_lands() {
     }
     send_respawn(&client); // the 13th packet this tick
     tick_n(&mut hs, &client, &mut inbox, 1);
+    assert!(
+        hs.server.players[slot].combat.dead,
+        "the Respawn waits behind the two inputs the budget deferred"
+    );
+    tick_n(&mut hs, &client, &mut inbox, 1);
 
     assert!(!hs.server.players[slot].combat.dead, "the Respawn past the budget was honoured");
     assert_eq!(inbox.respawned(slot).len(), 1, "and the joiner was told");
+    tick_n(&mut hs, &client, &mut inbox, 3);
+    assert!(!hs.server.players[slot].combat.dead, "and nothing sent before it undid it");
 }
 
 #[test]
@@ -400,13 +411,15 @@ fn a_disconnect_behind_a_flood_of_packets_still_frees_the_slot() {
         send_input(&client, 1 + t, at, 20.0, 0.0, &[]);
     }
     send_disconnect(&client);
-    tick_n(&mut hs, &client, &mut inbox, 1);
+    // Ten inputs this tick; the last two and the Disconnect the next.
+    tick_n(&mut hs, &client, &mut inbox, 2);
     assert!(hs.slot_is_free(slot), "a Disconnect past the budget still releases the seat");
 }
 
 #[test]
-fn gameplay_packets_past_the_budget_are_still_dropped() {
-    // The exemption is for control packets only.
+fn gameplay_packets_past_the_budget_wait_for_the_next_tick() {
+    // FU1 — defer, don't drop: an edit in the 11th packet of a tick is
+    // applied on the next one (it used to be thrown away).
     let mut hs = start_dedicated_server("budget-still-bites");
     let (client, slot) = join_guest(&mut hs, "Spammer");
     let mut inbox = Inbox::default();
@@ -420,7 +433,43 @@ fn gameplay_packets_past_the_budget_are_still_dropped() {
     assert_eq!(
         hs.server.world.get_block(cell.0, cell.1, cell.2),
         block::AIR,
-        "an edit in the 11th packet of a tick is dropped"
+        "an edit in the 11th packet of a tick is not read that tick"
+    );
+    tick_n(&mut hs, &client, &mut inbox, 1);
+    assert_eq!(
+        hs.server.world.get_block(cell.0, cell.1, cell.2),
+        block::STONE,
+        "it waited for the next tick, and was applied then"
+    );
+}
+
+#[test]
+fn a_client_past_the_inbound_bound_is_disconnected_with_a_reason() {
+    // FU1 — the one thing a client is disconnected for sending: more than its
+    // inbound queue's hard bound, which no honest client reaches.
+    let mut hs = start_dedicated_server("inbound-bound");
+    let (client, slot) = join_guest(&mut hs, "Flooder");
+    let ping = protocol::serialize_packet(protocol::PacketType::Ping, &());
+    for _ in 0..crate::transport::MAX_INBOUND_PACKETS {
+        client.send_to_server(&ping);
+    }
+    hs.tick();
+    assert!(!hs.slot_is_free(slot), "a queue exactly at the bound is kept");
+    for _ in 0..crate::transport::MAX_INBOUND_PACKETS {
+        client.send_to_server(&ping);
+    }
+    hs.tick();
+    assert!(hs.slot_is_free(slot), "past the bound the client is disconnected");
+    let mut reason = None;
+    while let Some(pkt) = client.try_recv_from_server() {
+        if let Some((protocol::PacketType::JoinReject, payload)) = protocol::deserialize_header(&pkt) {
+            reason = protocol::safe_deserialize::<protocol::JoinRejectPacket>(payload).ok().map(|r| r.reason);
+        }
+    }
+    assert_eq!(
+        reason.as_deref(),
+        Some(crate::hosted_server::INBOUND_OVERFLOW_REASON),
+        "and told why"
     );
 }
 

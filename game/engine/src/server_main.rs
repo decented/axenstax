@@ -757,7 +757,6 @@ pub fn run_show_connect(args: &[String]) {
     );
 }
 
-/// Entry point dispatched from `main()` when `--server` is present.
 /// C1 — this server rolls its joiners' Satori drops on the world's secret,
 /// and from its first tick that is the secret ON DISK. Called once the world
 /// has opened, before the first tick (Spec 02 §8.4); the client's
@@ -788,6 +787,7 @@ fn settle_pop_secret(world: &str, server: &mut crate::server::GameServer) {
     }
 }
 
+/// Entry point dispatched from `main()` when `--server` is present.
 pub fn run(args: &[String]) {
     // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
     // refuse to boot rather than guess whether the operator meant to open the

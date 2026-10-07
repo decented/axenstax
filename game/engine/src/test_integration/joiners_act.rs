@@ -107,9 +107,31 @@ struct Joiner {
     slot: usize,
     inbox: Inbox,
     seq: u32,
+    /// The sequence number of its last `ClientInput` (counts from 1).
+    input_seq: u64,
 }
 
 impl Joiner {
+    /// FU1 — `n` inputs standing still, looking along +z (where these tests
+    /// put the mobs), as a client catching up after a frame hitch sends them:
+    /// one per tick it ran, all at once.
+    fn catch_up_burst(&mut self, at: Vec3, n: u32) {
+        for _ in 0..n {
+            self.input_seq += 1;
+            let input = protocol::InputPacket {
+                tick: self.input_seq,
+                x: at.x,
+                y: at.y,
+                z: at.z,
+                yaw: std::f32::consts::PI,
+                health: 20.0,
+                ..Default::default()
+            };
+            self.client
+                .send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        }
+    }
+
     fn attack(&mut self, entity: u32, held: Option<&Item>, sneak: bool) -> u32 {
         self.seq += 1;
         let (held_kind, held_id, held_full) = held_wire(held);
@@ -249,7 +271,7 @@ impl Rig {
             Some(host) => host.world = world,
             None => self.hs.server.world = world,
         }
-        self.joiners.push(Joiner { client, slot, inbox: Inbox::default(), seq: 0 });
+        self.joiners.push(Joiner { client, slot, inbox: Inbox::default(), seq: 0, input_seq: 0 });
         self.joiners.len() - 1
     }
 
@@ -418,6 +440,66 @@ fn the_server_holds_a_joiners_swings_to_the_clients_rate() {
     rig.tick(2); // read at t0 + 17
     assert!(swing_at(&mut rig), "+10 after the scheduled time it was due");
     assert_eq!(rig.health(cow), max - 3.0, "three fists, no more");
+}
+
+// ── FU1: an action behind a catch-up burst waits; it is never dropped ───────
+
+/// FU1 — a client catching up after a frame hitch runs up to ten ticks a
+/// frame and sends one input for each, all at once; the swing it made
+/// arrives behind them. The server reads at most
+/// `hosted_server::MAX_PACKETS_PER_TICK` of a client's packets a tick and the
+/// rest wait for the next, in arrival order: the swing lands, exactly once.
+/// (It used to be the 13th packet of the tick and was dropped unanswered.)
+#[test]
+fn a_swing_behind_a_catch_up_burst_is_applied_exactly_once() {
+    let mut rig = Rig::new("burst-swing", 1);
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    let max = rig.health(cow);
+    let at = rig.at;
+    let burst = crate::hosted_server::MAX_PACKETS_PER_TICK as u32 + 2;
+    rig.joiners[0].catch_up_burst(at, burst);
+    let seq = rig.joiners[0].attack(id, Some(&sword()), false);
+    for _ in 0..3 {
+        // Held where the swing was aimed until it is read.
+        if rig.joiners[0].inbox.outcomes.is_empty() {
+            rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+        }
+        rig.tick(1);
+    }
+    let answers: Vec<_> = rig.joiners[0].inbox.outcomes.iter().filter(|o| o.seq == seq).collect();
+    assert_eq!(answers.len(), 1, "the swing behind the burst is answered, once");
+    assert!(answers[0].accepted, "and confirmed");
+    assert_eq!(rig.health(cow), max - sword().attack_damage(), "one sword hit landed");
+    assert_eq!(
+        rig.hs.server.players[rig.joiners[0].slot].last_input_tick,
+        u64::from(burst),
+        "every input of the burst was read"
+    );
+}
+
+/// FU1 — the same for a right-click: milking behind a catch-up burst is
+/// applied once (one bucket used, one milk bucket granted).
+#[test]
+fn an_interaction_behind_a_catch_up_burst_is_applied_exactly_once() {
+    let mut rig = Rig::new("burst-milk", 1);
+    let slot = rig.joiners[0].slot;
+    rig.hs.server.players[slot]
+        .inventory
+        .set_slot(0, Some(crate::item::ItemStack::new_material(MaterialId::Bucket, 1)));
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 1.5));
+    let at = rig.at;
+    rig.joiners[0].catch_up_burst(at, crate::hosted_server::MAX_PACKETS_PER_TICK as u32 + 2);
+    let seq = rig.joiners[0].interact(id, InteractKind::Milk, Some(&mat(MaterialId::Bucket)));
+    for _ in 0..3 {
+        if rig.joiners[0].inbox.outcomes.is_empty() {
+            rig.place(cow, Vec3::new(0.0, 0.0, 1.5));
+        }
+        rig.tick(1);
+    }
+    let answers: Vec<_> = rig.joiners[0].inbox.outcomes.iter().filter(|o| o.seq == seq).collect();
+    assert_eq!(answers.len(), 1, "the right-click behind the burst is answered, once");
+    assert!(answers[0].accepted && answers[0].consume_held == 1, "and the bucket is used");
+    assert_eq!(rig.joiners[0].inbox.granted(MaterialId::MilkBucket), 1, "one milk bucket");
 }
 
 #[test]

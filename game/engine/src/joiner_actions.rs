@@ -17,18 +17,38 @@
 //! sent only while the inventory holds one more than its requests in flight
 //! already claim ([`JoinerActions::can_afford`]), so one bucket can't milk
 //! two cows on a slow link.
+//!
+//! FU1 — a claim never outlives its request: one unanswered for
+//! [`CLAIM_TIMEOUT`] stops claiming (a request the server never got, lost to a
+//! stall), and leaving the world forgets them all ([`JoinerActions::clear`],
+//! `world_exit`; a reconnect is always a leave and a new join).
 
 use std::collections::VecDeque;
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::item::Item;
 use crate::mob::MobType;
 use crate::protocol::{InteractKind, InteractOutcomePacket};
 
 /// Requests kept waiting for an answer. The server answers every request it
-/// reads; one past its per-tick budget is dropped unanswered — forgotten when
-/// a later one is answered ([`JoinerActions::take`]) — and the oldest waiting
-/// entry is forgotten once this many are outstanding.
+/// reads, in the order sent (one past its per-tick budget waits for its next
+/// tick, FU1); one it never answers — lost with a connection, or skipped by a
+/// per-type budget no honest client reaches — is forgotten when a later one
+/// is answered ([`JoinerActions::take`]), and the oldest waiting entry is
+/// forgotten once this many are outstanding.
 pub const MAX_PENDING: usize = 64;
+
+/// FU1 — how long a request waits for its answer before it stops claiming its
+/// item ([`JoinerActions::can_afford`]). Ten seconds: well above a slow round
+/// trip (a second or two) plus the longest an honest request can wait in the
+/// server's inbound queue (its hard bound, 1024 packets read ten a tick: about
+/// five seconds, Spec 04 §11.2a) — so a request still on its way never frees
+/// its item for a second one — and short enough that after a stall the item
+/// is usable again soon. The entry itself is kept: an answer that still comes
+/// is applied as usual.
+pub const CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One request awaiting its outcome.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,45 +68,62 @@ pub struct Pending {
 #[derive(Default)]
 pub struct JoinerActions {
     next_seq: u32,
-    pending: VecDeque<(u32, Pending)>,
+    /// `(seq, when it was sent, the request)`, oldest first.
+    pending: VecDeque<(u32, Instant, Pending)>,
 }
 
 impl JoinerActions {
     /// Remember a request; returns the `seq` to send it under.
     pub fn record(&mut self, request: Pending) -> u32 {
+        self.record_at(request, Instant::now())
+    }
+
+    fn record_at(&mut self, request: Pending, now: Instant) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
         if self.pending.len() >= MAX_PENDING {
             self.pending.pop_front();
         }
-        self.pending.push_back((self.next_seq, request));
+        self.pending.push_back((self.next_seq, now, request));
         self.next_seq
     }
 
     /// The request `seq` answered, if this client is waiting for it. Every
     /// request sent before it and still waiting is forgotten too: the server
     /// reads requests in the order they were sent and answers each at once,
-    /// on the same ordered stream, so one it left unanswered (past its
-    /// per-tick budget) never will be — and must not keep claiming the item
-    /// it would have used ([`Self::can_afford`]).
+    /// on the same ordered stream, so one it left unanswered never will be —
+    /// and must not keep claiming the item it would have used
+    /// ([`Self::can_afford`]).
     pub fn take(&mut self, seq: u32) -> Option<Pending> {
-        let at = self.pending.iter().position(|(s, _)| *s == seq)?;
+        let at = self.pending.iter().position(|(s, _, _)| *s == seq)?;
         self.pending.drain(..at);
-        self.pending.pop_front().map(|(_, p)| p)
+        self.pending.pop_front().map(|(_, _, p)| p)
     }
 
-    /// Forget everything (the session ended).
+    /// Forget everything (the session ended: leaving the world, and so every
+    /// reconnect — `world_exit`).
     pub fn clear(&mut self) {
         self.pending.clear();
     }
 
     /// May a request of `kind` made with `held` go out now (review D2b
     /// LOW-1)? Yes when it uses nothing; otherwise only while `inv` holds
-    /// more of the item than the requests still in flight would use.
+    /// more of the item than the requests still in flight would use — those
+    /// sent within [`CLAIM_TIMEOUT`] (FU1: an older one has no claim left).
     pub fn can_afford(
         &self,
         inv: &crate::inventory::Inventory,
         kind: Option<InteractKind>,
         held: Option<&Item>,
+    ) -> bool {
+        self.can_afford_at(inv, kind, held, Instant::now())
+    }
+
+    fn can_afford_at(
+        &self,
+        inv: &crate::inventory::Inventory,
+        kind: Option<InteractKind>,
+        held: Option<&Item>,
+        now: Instant,
     ) -> bool {
         let need = uses(kind);
         if need == 0 {
@@ -96,8 +133,9 @@ impl JoinerActions {
         let claimed: u32 = self
             .pending
             .iter()
-            .filter(|(_, p)| p.held.as_ref().is_some_and(|h| same_item(h, item)))
-            .map(|(_, p)| u32::from(uses(p.kind)))
+            .filter(|(_, sent, _)| now.saturating_duration_since(*sent) < CLAIM_TIMEOUT)
+            .filter(|(_, _, p)| p.held.as_ref().is_some_and(|h| same_item(h, item)))
+            .map(|(_, _, p)| u32::from(uses(p.kind)))
             .sum();
         count_of(inv, item) >= claimed + u32::from(need)
     }
@@ -336,9 +374,9 @@ mod tests {
         assert!(!a.can_afford(&inv, milk, None), "an empty hand has nothing to spend");
     }
 
-    /// Review D2b LOW-1 — a request the server dropped unanswered (past its
-    /// per-tick budget) stops claiming its item once a LATER request is
-    /// answered: the server answers in order, so it never will be.
+    /// Review D2b LOW-1 — a request the server never answered stops claiming
+    /// its item once a LATER request is answered: the server answers in
+    /// order, so it never will be.
     #[test]
     fn an_unanswered_request_stops_claiming_once_a_later_one_is_answered() {
         let bucket = Item::Material(MaterialId::Bucket);
@@ -356,6 +394,55 @@ mod tests {
         assert!(a.take(swing).is_some());
         assert!(a.can_afford(&inv, milk, Some(&bucket)), "the server answered past it: it never will be");
         assert!(a.take(dropped).is_none(), "forgotten");
+        assert_eq!(a.len(), 0);
+    }
+
+    /// FU1 (D2b verify N2) — after a stall, a request the server never got
+    /// (and so never answers) used to hold its item until some later request
+    /// was answered: the only bucket was "spoken for" and right-clicking a cow
+    /// did nothing. Its claim now ends after `CLAIM_TIMEOUT`; an answer that
+    /// still comes is applied.
+    #[test]
+    fn an_unanswered_claim_expires_after_the_timeout_and_on_leaving() {
+        let bucket = Item::Material(MaterialId::Bucket);
+        let inv = inv_with(0, ItemStack::new_material(MaterialId::Bucket, 1));
+        let milk = Some(InteractKind::Milk);
+        let req = || Pending {
+            kind: milk,
+            mob: Some(MobType::Cow),
+            hotbar_slot: 0,
+            held: Some(bucket.clone()),
+        };
+        let t0 = Instant::now();
+        let mut a = JoinerActions::default();
+        let lost = a.record_at(req(), t0);
+        let later = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        assert!(!a.can_afford_at(&inv, milk, Some(&bucket), t0));
+        assert!(
+            !a.can_afford_at(&inv, milk, Some(&bucket), later(5.0)),
+            "still claimed while an answer may be on its way (a slow link, a queued request)"
+        );
+        assert!(
+            !a.can_afford_at(&inv, milk, Some(&bucket), t0 + CLAIM_TIMEOUT - Duration::from_millis(1)),
+            "claimed right up to the timeout"
+        );
+        assert!(
+            a.can_afford_at(&inv, milk, Some(&bucket), t0 + CLAIM_TIMEOUT),
+            "unanswered for the timeout: the bucket is free again"
+        );
+        // The one it frees is claimed afresh by the next request.
+        let next = a.record_at(req(), later(12.0));
+        assert!(!a.can_afford_at(&inv, milk, Some(&bucket), later(12.5)));
+        // A late answer to the expired request is still applied.
+        assert_eq!(a.take(lost).map(|p| p.kind), Some(milk));
+        assert!(a.take(next).is_some());
+
+        // Leaving the world (and so every reconnect) forgets every claim.
+        let mut a = JoinerActions::default();
+        a.record_at(req(), t0);
+        assert!(!a.can_afford_at(&inv, milk, Some(&bucket), t0));
+        a.clear();
+        assert!(a.can_afford_at(&inv, milk, Some(&bucket), t0));
         assert_eq!(a.len(), 0);
     }
 
