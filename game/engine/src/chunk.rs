@@ -247,6 +247,27 @@ impl Chunk {
         bytes
     }
 
+    /// Phase B2b — hand `sink` exactly the bytes [`Self::as_bytes`] returns,
+    /// in order (each `u16` block, then each `u64` placed word, little-endian),
+    /// a slice at a time through a small stack buffer: no allocation. For
+    /// hashing a column (`chunk_verdict::column_hash`), where an 8.7 KB `Vec`
+    /// per chunk per check added up.
+    pub(crate) fn feed_bytes(&self, mut sink: impl FnMut(&[u8])) {
+        let mut buf = [0u8; 1024];
+        for blocks in self.blocks.chunks(buf.len() / 2) {
+            for (out, block) in buf.chunks_exact_mut(2).zip(blocks) {
+                out.copy_from_slice(&block.to_le_bytes());
+            }
+            sink(&buf[..blocks.len() * 2]);
+        }
+        for words in self.placed.chunks(buf.len() / 8) {
+            for (out, word) in buf.chunks_exact_mut(8).zip(words) {
+                out.copy_from_slice(&word.to_le_bytes());
+            }
+            sink(&buf[..words.len() * 8]);
+        }
+    }
+
     /// Deserialize chunk from raw bytes. Accepts two lengths: the legacy
     /// pre-feature length (block array only — placed mask reads all-natural)
     /// and the current length (block array + placed mask). Any other length
@@ -413,6 +434,23 @@ mod tests {
         assert!(back.is_placed(15, 0, 7));
         assert!(!back.is_placed(0, 0, 0));
         assert_eq!(back.get(1, 2, 3), STONE);
+    }
+
+    #[test]
+    fn feed_bytes_hands_out_exactly_the_as_bytes_stream() {
+        // Phase B2b: the column hash feeds a hasher straight from here, and
+        // its value must not move off what `as_bytes` defined it over.
+        let mut c = Chunk::new();
+        for i in 0..CHUNK_VOLUME {
+            if i % 7 == 0 {
+                c.set(i % 16, i / 256, (i / 16) % 16, (i as u16).wrapping_mul(31) | 1);
+            }
+        }
+        c.set_placed(1, 2, 3, true);
+        c.set_placed(15, 15, 15, true);
+        let mut fed = Vec::new();
+        c.feed_bytes(|b| fed.extend_from_slice(b));
+        assert_eq!(fed, c.as_bytes());
     }
 
     #[test]

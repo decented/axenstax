@@ -7,7 +7,7 @@
 //! (`protocol::ColumnLocalPacket`) instead of pushing six chunks
 //! (`chunk_push`). This module decides which columns qualify.
 //!
-//! - **The verdict is per column** ([`column_verdict`]). A column is
+//! - **The verdict is per column** ([`decide_column`]). A column is
 //!   [`Verdict::Touched`] if any of its chunks differs from a scratch
 //!   regeneration of that one column. The comparison covers blocks, the
 //!   player-placed bits, and, on the block cells, `block_meta`, block entities
@@ -44,11 +44,14 @@
 //!   meanwhile, so the budget paces how fast touched columns appear, not
 //!   whether terrain exists.
 //! - **The column hash** ([`column_hash`]). A "local" note carries a hash of
-//!   the server's live column (blocks and placed bits; it was just proved
-//!   equal to generation), and the joiner checks its own generation against
-//!   it: a generation that differs despite a matching fingerprint (a
-//!   platform floating-point difference, say) is caught instead of
-//!   diverging silently.
+//!   the column's blocks and placed bits, computed once, from the scratch,
+//!   when the verdict is `Untouched` and cached with it ([`Verdicts::note_hash`]):
+//!   exact by construction, since `Untouched` means live == scratch and any
+//!   edit since flips the verdict. No note hashes anything. The joiner checks
+//!   its own column against it, and on a difference its own scratch
+//!   generation ([`generated_column_hash`]): a generation that differs
+//!   despite a matching fingerprint (a platform floating-point difference,
+//!   say) is caught instead of diverging silently.
 //!
 //! Untouched columns come from the joiner's own generation, so the anti-X-ray
 //! obfuscation that `chunk_push::build_chunk_packets` could apply to a push
@@ -110,13 +113,59 @@ impl VerdictBudget {
     }
 }
 
-/// Compare column `col` of `world` against a scratch regeneration of it (see
-/// the module docs). `biome_gen` must be the generator `world` was generated
-/// with.
+/// A decided column as the cache holds it: an `Untouched` one with the hash
+/// its notes carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decided {
+    Untouched { hash: u32 },
+    Touched,
+}
+
+impl Decided {
+    fn verdict(self) -> Verdict {
+        match self {
+            Decided::Untouched { .. } => Verdict::Untouched,
+            Decided::Touched => Verdict::Touched,
+        }
+    }
+}
+
+/// [`decide_column`]'s verdict alone. Test-only.
+#[cfg(test)]
 pub fn column_verdict(world: &World, biome_gen: &BiomeGenerator, col: (i32, i32)) -> Verdict {
+    decide_column(world, biome_gen, col).verdict()
+}
+
+/// Compare column `col` of `world` against a scratch regeneration of it (see
+/// the module docs), keeping the hash of an `Untouched` column: taken from
+/// the scratch the comparison already built (equal to the live column, or
+/// the verdict would be `Touched`; B2b fix LOW-3). `biome_gen` must be the
+/// generator `world` was generated with.
+fn decide_column(world: &World, biome_gen: &BiomeGenerator, col: (i32, i32)) -> Decided {
+    let scratch = generated_column(world, biome_gen, col);
+    if column_matches(world, &scratch, col) {
+        Decided::Untouched { hash: column_hash(&scratch, col) }
+    } else {
+        Decided::Touched
+    }
+}
+
+/// A scratch `World` holding only column `col` as generation makes it, from
+/// `world`'s generation inputs (`World::generation_twin`) and `biome_gen`. No
+/// light, no registration, nothing written to `world`.
+fn generated_column(world: &World, biome_gen: &BiomeGenerator, col: (i32, i32)) -> World {
     let mut scratch = world.generation_twin();
     scratch.generate_column(col.0, col.1, biome_gen);
-    if column_matches(world, &scratch, col) { Verdict::Untouched } else { Verdict::Touched }
+    scratch
+}
+
+/// The [`column_hash`] column `col` would have as generation makes it, from
+/// `world`'s generation inputs and `biome_gen`: generated in scratch, so
+/// whatever `world` holds there (its own edits, its simulation's writes) is
+/// left out. A joiner confirms a column-check mismatch with it
+/// (`ChunkIntake::verify_local`).
+pub fn generated_column_hash(world: &World, biome_gen: &BiomeGenerator, col: (i32, i32)) -> u32 {
+    column_hash(&generated_column(world, biome_gen, col), col)
 }
 
 /// Does column `col` of `live` hold what it holds in `pristine`: the same
@@ -164,12 +213,13 @@ pub(crate) fn column_matches(live: &World, pristine: &World, col: (i32, i32)) ->
 
 /// The hash a "local" note carries for column `col` of `world`
 /// (`ColumnLocalPacket.hash`): SHA-256 over its six chunks' block arrays and
-/// player-placed masks (`Chunk::as_bytes`, explicit little-endian), each
-/// preceded by a presence byte, truncated to the first four bytes read as a
-/// little-endian `u32`. Light and side data are not in it. An absent chunk
-/// hashes as one that is all air with no placed bit, as the verdict compares
-/// them. Stable across platforms and builds: no `DefaultHasher`, no
-/// in-memory layout.
+/// player-placed masks (the `Chunk::as_bytes` byte stream: each `u16` block,
+/// then each `u64` placed word, little-endian — fed straight to the hasher
+/// by `Chunk::feed_bytes`, no allocation), each chunk preceded by a presence
+/// byte, truncated to the first four bytes read as a little-endian `u32`.
+/// Light and side data are not in it. An absent chunk hashes as one that is
+/// all air with no placed bit, as the verdict compares them. Stable across
+/// platforms and builds: no `DefaultHasher`, no in-memory layout.
 pub fn column_hash(world: &World, col: (i32, i32)) -> u32 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -177,7 +227,7 @@ pub fn column_hash(world: &World, col: (i32, i32)) -> u32 {
         match world.get_chunk(col.0, cy, col.1).filter(|c| !c.is_bare()) {
             Some(chunk) => {
                 hasher.update([1u8]);
-                hasher.update(chunk.as_bytes());
+                chunk.feed_bytes(|bytes| hasher.update(bytes));
             }
             None => hasher.update([0u8]),
         }
@@ -208,18 +258,28 @@ fn side_entities(world: &World, chunk: &Chunk, coord: (i32, i32, i32)) -> Option
 /// The server's shared verdict cache. See the module docs.
 #[derive(Debug, Default)]
 pub struct Verdicts {
-    map: ahash::AHashMap<(i32, i32), Verdict>,
+    map: ahash::AHashMap<(i32, i32), Decided>,
 }
 
 impl Verdicts {
     /// The verdict on column `col`, if it has one.
     pub fn get(&self, col: (i32, i32)) -> Option<Verdict> {
-        self.map.get(&col).copied()
+        self.map.get(&col).map(|d| d.verdict())
+    }
+
+    /// The hash a "local" note for column `col` carries: cached with its
+    /// `Untouched` verdict (B2b fix LOW-3: no note hashes anything). `None`
+    /// for a column that is touched or not decided.
+    pub fn note_hash(&self, col: (i32, i32)) -> Option<u32> {
+        match self.map.get(&col) {
+            Some(Decided::Untouched { hash }) => Some(*hash),
+            _ => None,
+        }
     }
 
     /// Column `col` was edited: touched for good.
     pub fn touch(&mut self, col: (i32, i32)) {
-        self.map.insert(col, Verdict::Touched);
+        self.map.insert(col, Decided::Touched);
     }
 
     /// Decide the columns in `candidates` (nearest first) that have no
@@ -240,16 +300,21 @@ impl Verdicts {
             if self.map.contains_key(&col) {
                 continue;
             }
-            self.map.insert(col, column_verdict(world, biome_gen, col));
+            self.map.insert(col, decide_column(world, biome_gen, col));
             decided += 1;
         }
         decided
     }
 
-    /// Set a verdict outright. Test-only.
+    /// Set a verdict outright; an `Untouched` one caches the hash of column
+    /// `col` of `world` as it is now. Test-only.
     #[cfg(test)]
-    pub fn set_for_test(&mut self, col: (i32, i32), verdict: Verdict) {
-        self.map.insert(col, verdict);
+    pub fn set_for_test(&mut self, world: &World, col: (i32, i32), verdict: Verdict) {
+        let decided = match verdict {
+            Verdict::Untouched => Decided::Untouched { hash: column_hash(world, col) },
+            Verdict::Touched => Decided::Touched,
+        };
+        self.map.insert(col, decided);
     }
 
     /// How many columns have a verdict. Test-only.
@@ -261,7 +326,7 @@ impl Verdicts {
     /// How many verdicts are `Touched`. Test-only.
     #[cfg(test)]
     pub fn touched(&self) -> usize {
-        self.map.values().filter(|&&v| v == Verdict::Touched).count()
+        self.map.values().filter(|&&d| d == Decided::Touched).count()
     }
 }
 
@@ -391,6 +456,37 @@ mod tests {
     }
 
     #[test]
+    fn an_untouched_verdict_caches_the_hash_its_notes_carry() {
+        // B2b fix LOW-3: hashed once, from the verdict's scratch — equal to
+        // the live column — and read by every note after.
+        let biome = BiomeGenerator::new(SEED);
+        let mut world = generated(&biome, (0, 0), 1);
+        world.set_block(3, 90, 3, block::GLASS); // column (0, 0): touched
+        let mut v = Verdicts::default();
+        let budget = VerdictBudget { count: 8, time: Duration::from_secs(60) };
+        assert_eq!(v.decide(&world, &biome, &[(0, 0), (1, 0)], budget), 2);
+        assert_eq!(v.note_hash((1, 0)), Some(column_hash(&world, (1, 0))), "the live column's hash");
+        assert_eq!(v.note_hash((1, 0)), Some(generated_column_hash(&world, &biome, (1, 0))));
+        assert_eq!(v.note_hash((0, 0)), None, "a touched column has none");
+        assert_eq!(v.note_hash((5, 5)), None, "nor an undecided one");
+        v.touch((1, 0));
+        assert_eq!(v.note_hash((1, 0)), None, "an edit takes it away with the verdict");
+    }
+
+    #[test]
+    fn a_scratch_generation_leaves_out_what_the_world_holds() {
+        // B2b fix HIGH-1: a joiner confirms a mismatch against generation,
+        // not against its own column.
+        let biome = BiomeGenerator::new(SEED);
+        let mut world = generated(&biome, (0, 0), 1);
+        let pristine = column_hash(&world, (0, 0));
+        world.set_block(3, 90, 3, block::GLASS);
+        assert_ne!(column_hash(&world, (0, 0)), pristine);
+        assert_eq!(generated_column_hash(&world, &biome, (0, 0)), pristine);
+        assert_eq!(world.get_block(3, 90, 3), block::GLASS, "nothing written to the world");
+    }
+
+    #[test]
     fn a_lending_host_keeps_a_small_verdict_budget_and_a_dedicated_server_a_large_one() {
         let lend = VerdictBudget::for_server(true);
         assert_eq!(lend, VerdictBudget { count: 8, time: Duration::from_millis(3) });
@@ -428,6 +524,21 @@ mod tests {
         let mut b = World::new();
         b.generate_column(0, 0, &biome);
         assert_eq!(column_hash(&a, (0, 0)), column_hash(&b, (0, 0)), "order-independent");
+        // B2b fix LOW-3 fed the hasher without allocating: the byte stream —
+        // and so every hash — is the one first defined over `as_bytes`.
+        use sha2::{Digest, Sha256};
+        let mut old = Sha256::new();
+        for cy in 0..=MAX_CHUNK_Y {
+            match a.get_chunk(0, cy, 0).filter(|c| !c.is_bare()) {
+                Some(chunk) => {
+                    old.update([1u8]);
+                    old.update(chunk.as_bytes());
+                }
+                None => old.update([0u8]),
+            }
+        }
+        let d: [u8; 32] = old.finalize().into();
+        assert_eq!(column_hash(&a, (0, 0)), u32::from_le_bytes([d[0], d[1], d[2], d[3]]), "same byte stream");
     }
 
     /// Measurement (Phase B2b): the false-touched rate on fresh worlds — every

@@ -73,10 +73,11 @@
 //! terrain generator differs from the host's (`ServerPlayer::
 //! worldgen_mismatch`) always gets everything, and so does every joiner of
 //! an owning (`--no-lend`) host (`HostedServer::sends_notes`). A note
-//! carries the hash of the column (`chunk_verdict::column_hash`); a joiner
-//! whose own generation does not match it is pushed everything for the rest
-//! of its session, every column it was noted included
-//! ([`ClientChunkPush::push_everything_from_now`]).
+//! carries the hash of the column (`chunk_verdict::column_hash`), cached with
+//! its `Untouched` verdict (`chunk_verdict::Verdicts::note_hash`; no note
+//! hashes anything); a joiner whose own generation does not match it is
+//! pushed everything for the rest of its session, every column it was noted
+//! included ([`ClientChunkPush::push_everything_from_now`]).
 //!
 //! **What a push carries** ([`build_chunk_packets`]): the blocks and the
 //! player-placed mask (`Chunk::as_bytes`, LZ4), the chunk's `block_meta`, the
@@ -236,6 +237,10 @@ pub struct ClientChunkPush {
     /// hash as the note said: for the rest of its session it is pushed
     /// everything and noted nothing (`HostedServer::sends_notes`).
     push_everything: bool,
+    /// B2b fix LOW-4 — this client has been sent a note this session. Only
+    /// then can its `column_mismatch` report be honest (a client sets it only
+    /// from a note); from one never noted it is ignored.
+    noted_ever: bool,
     /// Test-only: notes carry a wrong hash (a forged mismatch).
     #[cfg(test)]
     pub(crate) forge_note_hashes: bool,
@@ -368,6 +373,12 @@ impl ClientChunkPush {
         self.push_everything
     }
 
+    /// B2b fix LOW-4 — has this client been sent a "local" note this
+    /// session? A column-mismatch report from one that never was is ignored.
+    pub fn noted_ever(&self) -> bool {
+        self.noted_ever
+    }
+
     /// Phase B2b — this client's generation of a column it was told is local
     /// did not hash as the note said (`InputPacket::column_mismatch`): every
     /// column it was noted is suspect, not just that one. From now on it is
@@ -450,16 +461,18 @@ impl ClientChunkPush {
             self.sent.insert((col.0, cy, col.1), number);
         }
         self.noted.insert(col);
+        self.noted_ever = true;
         self.pushed = number;
         self.in_flight.push_back((number, packet.len()));
         self.in_flight_bytes += packet.len();
     }
 
-    /// The `ColumnLocal` note for column `col` of `world`, carrying the hash
-    /// of the column as it is now (`chunk_verdict::column_hash`): the live
-    /// column, which its `Untouched` verdict proved equal to generation.
-    fn note_for(&self, world: &World, col: (i32, i32)) -> Vec<u8> {
-        let hash = crate::chunk_verdict::column_hash(world, col);
+    /// The `ColumnLocal` note for column `col`, carrying `hash`: the hash its
+    /// `Untouched` verdict cached (`chunk_verdict::Verdicts::note_hash`),
+    /// exact by construction — `Untouched` means the live column equals the
+    /// scratch it was taken from, and any edit since flips the verdict (B2b
+    /// fix LOW-3: a note hashes nothing, so a plan of 64 notes stays cheap).
+    fn note_for(&self, col: (i32, i32), hash: u32) -> Vec<u8> {
         #[cfg(test)]
         let hash = if self.forge_note_hashes { !hash } else { hash };
         build_local_note(col, hash)
@@ -550,23 +563,27 @@ impl ClientChunkPush {
             if unsent.is_empty() {
                 continue;
             }
-            let local = match verdicts.map(|v| v.get((cx, cz))) {
-                None | Some(Some(crate::chunk_verdict::Verdict::Touched)) => false,
-                Some(Some(crate::chunk_verdict::Verdict::Untouched)) => {
-                    unsent.len() == (MAX_CHUNK_Y + 1) as usize
-                }
-                Some(None) => {
-                    if in_ring {
-                        break;
+            // `Some(hash)`: a note, carrying the hash its verdict cached.
+            let local = match verdicts {
+                None => None,
+                Some(v) => match v.get((cx, cz)) {
+                    Some(crate::chunk_verdict::Verdict::Touched) => None,
+                    Some(crate::chunk_verdict::Verdict::Untouched) => {
+                        v.note_hash((cx, cz)).filter(|_| unsent.len() == (MAX_CHUNK_Y + 1) as usize)
                     }
-                    continue;
-                }
+                    None => {
+                        if in_ring {
+                            break;
+                        }
+                        continue;
+                    }
+                },
             };
             if planned >= room || !(in_ring || self.window_open()) {
                 return out;
             }
-            if local {
-                let note = self.note_for(world, (cx, cz));
+            if let Some(hash) = local {
+                let note = self.note_for((cx, cz), hash);
                 planned += note.len();
                 self.record_local((cx, cz), &note);
                 out.push(Planned::Local((cx, cz), note));
@@ -1332,12 +1349,16 @@ mod tests {
     }
 
     #[test]
-    fn a_note_carries_the_live_columns_hash() {
+    fn a_note_carries_the_live_columns_hash_as_its_verdict_cached_it() {
         use crate::chunk_verdict::{column_hash, Verdict, Verdicts};
         let mut world = World::new();
         world.set_block(20, 5, 3, crate::block::STONE); // column (1, 0)
         let mut verdicts = Verdicts::default();
-        verdicts.set_for_test((1, 0), Verdict::Untouched);
+        verdicts.set_for_test(&world, (1, 0), Verdict::Untouched);
+        let live = column_hash(&world, (1, 0));
+        // B2b fix LOW-3: the note reads the cache and hashes nothing (here a
+        // raw write the edit drain would have turned into `Touched`).
+        world.set_block(21, 5, 3, crate::block::GLASS);
         let mut push = ClientChunkPush::new(1);
         let out = push.plan_columns(&world, &all_loaded(1), (1, 0), 8, usize::MAX, Some(&verdicts));
         let Some(Planned::Local(col, note)) = out.into_iter().find(|p| matches!(p, Planned::Local(..))) else {
@@ -1346,7 +1367,8 @@ mod tests {
         let (_, payload) = protocol::deserialize_header(&note).unwrap();
         let pkt: protocol::ColumnLocalPacket = protocol::safe_deserialize(payload).unwrap();
         assert_eq!((pkt.cx, pkt.cz), col);
-        assert_eq!(pkt.hash, column_hash(&world, (1, 0)));
+        assert_eq!(pkt.hash, live);
+        assert_ne!(pkt.hash, column_hash(&world, (1, 0)), "the cached hash, not a fresh one");
     }
 
     #[test]
@@ -1356,7 +1378,7 @@ mod tests {
         let mut verdicts = Verdicts::default();
         for dx in -2..=2 {
             for dz in -2..=2 {
-                verdicts.set_for_test((dx, dz), Verdict::Untouched);
+                verdicts.set_for_test(&world, (dx, dz), Verdict::Untouched);
             }
         }
         let mut push = ClientChunkPush::new(2);
@@ -1391,7 +1413,7 @@ mod tests {
         let mut verdicts = Verdicts::default();
         for dx in -1..=1 {
             for dz in -1..=1 {
-                verdicts.set_for_test((dx, dz), Verdict::Untouched);
+                verdicts.set_for_test(&world, (dx, dz), Verdict::Untouched);
             }
         }
         verdicts.touch((0, 0));
@@ -1413,7 +1435,7 @@ mod tests {
         }
         // An undecided ring column holds back everything farther.
         let mut far_only = Verdicts::default();
-        far_only.set_for_test((2, 0), Verdict::Untouched);
+        far_only.set_for_test(&world, (2, 0), Verdict::Untouched);
         let mut push = ClientChunkPush::new(2);
         let out = push.plan_columns(&world, &all_loaded(2), (0, 0), 8, usize::MAX, Some(&far_only));
         assert!(out.is_empty(), "the ring goes first: {} planned", out.len());

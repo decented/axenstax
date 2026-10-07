@@ -2719,6 +2719,8 @@ impl super::GameState {
                 }
             }
             self.loaded_columns.insert((cx, cz));
+            // B2b — a joiner's column noted local has its check queued.
+            self.chunk_intake.column_held((cx, cz));
         }
     }
 
@@ -21550,6 +21552,7 @@ impl super::GameState {
             client_chunks,
             &pending_block_changes,
             crate::chunk_stream::PUSH_RELIGHT_PER_FRAME,
+            crate::chunk_stream::COLUMN_CHECKS_PER_FRAME,
         );
 
         // Client: apply state update

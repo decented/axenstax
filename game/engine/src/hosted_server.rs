@@ -253,6 +253,10 @@ pub struct HostedServer {
     /// Phase B2b — verdicts computed in the last tick. Test-only.
     #[cfg(test)]
     verdicts_last_tick: usize,
+    /// Phase B2b — column-mismatch warnings logged (`column_mismatch`).
+    /// Test-only.
+    #[cfg(test)]
+    column_mismatch_warnings: usize,
     /// Test-only: the pre-B2a delivery (no pushes, every block change to
     /// every client), for the tests that pin the outbox on its own.
     #[cfg(test)]
@@ -721,6 +725,8 @@ impl HostedServer {
             },
             #[cfg(test)]
             verdicts_last_tick: 0,
+            #[cfg(test)]
+            column_mismatch_warnings: 0,
             #[cfg(test)]
             chunk_push_off: false,
             server_tick: 0,
@@ -3412,10 +3418,13 @@ impl HostedServer {
     /// difference, an order dependence): logged loudly, and that joiner is
     /// pushed everything for the rest of its session — every column it was
     /// noted is pushed again, since all of them are suspect, and it is noted
-    /// no more (`sends_notes`).
+    /// no more (`sends_notes`). Ignored, silently, from a joiner never sent a
+    /// note this session (B2b fix LOW-4: an honest client sets it only from a
+    /// note, so it is a hostile one, and its report would be a misleading
+    /// warning).
     fn column_mismatch(&mut self, i: usize, m: protocol::ColumnMismatch) {
         let Some(push) = self.chunk_pushes.get_mut(i) else { return };
-        if push.pushes_everything() {
+        if push.pushes_everything() || !push.noted_ever() {
             return;
         }
         let repushed = push.push_everything_from_now();
@@ -3430,6 +3439,10 @@ impl HostedServer {
                 format!("slot {i} ({})", sp.display_name)
             },
         );
+        #[cfg(test)]
+        {
+            self.column_mismatch_warnings += 1;
+        }
         log::warn!(
             "Terrain generation differs on joiner {who}: column ({}, {}) hashes {:#010x} there, {:#010x} here, \
              with the same worldgen fingerprint {:#010x} — a determinism bug, please report it. \
@@ -3572,6 +3585,12 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn chunk_push_for_test(&self, slot: usize) -> &crate::chunk_push::ClientChunkPush {
         &self.chunk_pushes[slot]
+    }
+
+    /// Test-only (B2b): how many column-mismatch warnings were logged.
+    #[cfg(test)]
+    pub(crate) fn column_mismatch_warnings_for_test(&self) -> usize {
+        self.column_mismatch_warnings
     }
 
     /// Test-only (B2b): slot `slot`'s notes carry a wrong column hash (a

@@ -563,12 +563,14 @@ pub struct InputPacket {
     #[serde(default)]
     pub render_distance: u8,
     /// v71 (Phase B2b) — set once this client found a column it was told is
-    /// local whose own generation does not hash as the server's note said
+    /// local whose own generation (a scratch generation, not the column as
+    /// it holds it: B2b fix HIGH-1) does not hash as the server's note said
     /// (`ColumnLocalPacket::hash`), then sent in EVERY input for the rest of
     /// the session: a sticky "push me everything" switch (repeating it makes
     /// it survive a lost or budget-dropped input; the server acts on the
-    /// first and ignores the rest). The server logs it as a determinism bug,
-    /// pushes this client every column it had noted local and notes no more.
+    /// first and ignores the rest, and ignores it from a client it never
+    /// sent a note). The server logs it as a determinism bug, pushes this
+    /// client every column it had noted local and notes no more.
     #[serde(default)]
     pub column_mismatch: Option<ColumnMismatch>,
 }
@@ -580,9 +582,9 @@ pub struct InputPacket {
 pub struct ColumnMismatch {
     pub cx: i32,
     pub cz: i32,
-    /// `ColumnLocalPacket::hash`: the server's live column.
+    /// `ColumnLocalPacket::hash`: the server's column, as generation makes it.
     pub server_hash: u32,
-    /// The same hash over the client's own generation of the column.
+    /// The same hash over the client's own scratch generation of the column.
     pub client_hash: u32,
 }
 
@@ -1151,11 +1153,13 @@ pub struct ChunkDataPacket {
 pub struct ColumnLocalPacket {
     pub cx: i32,
     pub cz: i32,
-    /// `chunk_verdict::column_hash` of the server's live column when the note
-    /// was sent (its blocks and placed bits; the verdict had just proved them
-    /// equal to generation). The joiner checks its own generation against it
-    /// and, on a mismatch, lets the column go and asks for everything to be
-    /// pushed ([`InputPacket::column_mismatch`]).
+    /// `chunk_verdict::column_hash` of the column as generation makes it (its
+    /// blocks and placed bits), taken from the scratch its `Untouched` verdict
+    /// compared against and cached with that verdict — so it is the server's
+    /// live column too, and the note hashes nothing. The joiner checks its
+    /// own column against it, and on a difference its own scratch generation;
+    /// only a generation that differs lets the column go and asks for
+    /// everything to be pushed ([`InputPacket::column_mismatch`]).
     pub hash: u32,
 }
 

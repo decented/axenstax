@@ -125,11 +125,8 @@ impl super::GameState {
             // evicted column. The rest mirrors the save-load path (light,
             // fluid/fire rescan, mesh).
             self.column_sims().stream_in(cx, cz);
-            // B2b — a column noted local is checked against its note now,
-            // before anything lands on it; one that does not match is gone.
-            if self.verify_local_column((cx, cz)) {
-                continue;
-            }
+            // B2b — a column noted local has its check queued.
+            self.chunk_intake.column_held((cx, cz));
 
             // Mesh new chunks in this column
             for cy in 0..=MAX_CHUNK_Y {
@@ -173,19 +170,27 @@ impl super::GameState {
         }
     }
 
-    /// Phase B2b — check column `col`, which this client holds, against its
-    /// "local" note's hash if it has one not yet checked
-    /// (`ChunkIntake::verify_local`). On a mismatch the column is gone —
-    /// discarded and reported, unloaded (wildlife, fluids, loaded mark) and
-    /// its meshes dropped — and every input from now on asks for everything
-    /// to be pushed. Returns whether it went.
-    fn verify_local_column(&mut self, col: (i32, i32)) -> bool {
-        if !self.chunk_intake.verify_local(&mut self.world, col) {
+    /// Phase B2b — check column `col` against its "local" note now, whatever
+    /// the frame's budget, if this client holds it (loaded) and its check is
+    /// pending (`ChunkIntake::verify_local`): a server change is about to land
+    /// on it. Returns whether the column went ([`Self::unload_let_go_column`]).
+    fn check_column_now(&mut self, col: (i32, i32)) -> bool {
+        if !self.loaded_columns.contains(&col) {
             return false;
         }
+        let gone = self.chunk_intake.verify_local(&mut self.world, &self.biome_gen, col).let_go();
+        if gone {
+            self.unload_let_go_column(col);
+        }
+        gone
+    }
+
+    /// Phase B2b — a column the check let go of (a real generation
+    /// difference: discarded and reported, the push-everything switch set)
+    /// is unloaded with it: wildlife, fluids and loaded mark, then meshes.
+    fn unload_let_go_column(&mut self, col: (i32, i32)) {
         self.column_sims().stream_out(col.0, col.1);
         self.drop_column_meshes(col);
-        true
     }
 
     /// The world-side state a column stream-in / stream-out touches, borrowed
@@ -544,6 +549,7 @@ impl super::GameState {
                     self.world.generate_column(dx, dz, &self.biome_gen);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, dx, dz, &self.registry);
                     self.loaded_columns.insert((dx, dz));
+                    self.chunk_intake.column_held((dx, dz));
                 }
             }
 
@@ -705,6 +711,7 @@ impl super::GameState {
                     load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, true);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
                     self.loaded_columns.insert((cx, cz));
+                    self.chunk_intake.column_held((cx, cz));
                 }
             }
         }
@@ -738,16 +745,13 @@ impl super::GameState {
     /// neighbours, and mark it loaded. Shared by `step_load`, the spawn
     /// ring's local columns (`join_ring_pending`) and a block change or a
     /// pushed chunk for a local column not generated yet
-    /// (`apply_world_deltas`, B2b). A local column is checked against its
-    /// note before anything else touches it: one that does not match is not
-    /// loaded at all.
+    /// (`apply_world_deltas`, B2b). A local column has its check queued
+    /// (`ChunkIntake::column_held`); a caller about to land a server change
+    /// on it checks it first (`check_column_now`).
     pub(crate) fn load_one_column(&mut self, cx: i32, cz: i32) {
         // Spec 02 §7.5 — restore an evicted column first (it wins over any
         // world-gen spill a neighbour left); generate only if neither.
         load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
-        if self.verify_local_column((cx, cz)) {
-            return;
-        }
         crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
         self.water.register_column_sources(cx, cz, &self.world);
         self.lava.register_column_sources(cx, cz, &self.world);
@@ -770,11 +774,15 @@ impl super::GameState {
             }
         }
         self.loaded_columns.insert((cx, cz));
+        self.chunk_intake.column_held((cx, cz));
     }
 
     /// B2a — apply a joined session's world deltas in arrival order: each
     /// pushed chunk (`chunk_intake`) between the server block changes that
-    /// came before and after it, then light and mesh up to `relight_budget`
+    /// came before and after it, then run up to `check_budget` of the queued
+    /// column checks (B2b, `ChunkIntake::run_checks`; a server change or a
+    /// pushed chunk for a column whose check is pending checks it first,
+    /// whatever the budget), then light and mesh up to `relight_budget`
     /// pushed columns. A change for a column this client doesn't hold is
     /// dropped (Phase B1 review): applying it would conjure a stray chunk
     /// that its own generation later skips — the push brings such columns
@@ -784,6 +792,7 @@ impl super::GameState {
         chunks: Vec<(usize, crate::chunk_intake::StreamItem)>,
         changes: &[crate::protocol::BlockChange],
         relight_budget: usize,
+        check_budget: usize,
     ) {
         for step in crate::chunk_intake::interleave(chunks, changes.len()) {
             match step {
@@ -796,6 +805,16 @@ impl super::GameState {
                     {
                         self.load_one_column(col.0, col.1);
                     }
+                    // B2b fix LOW-2 — a push into a column whose check is
+                    // pending checks it first: the push replaces what it is
+                    // checked by.
+                    if self
+                        .chunk_intake
+                        .check_before_chunk(&mut self.world, &self.loaded_columns, &self.biome_gen, &pkt)
+                        .let_go()
+                    {
+                        self.unload_let_go_column((pkt.cx, pkt.cz));
+                    }
                     self.chunk_intake.apply(
                         &mut self.world,
                         &mut self.loaded_columns,
@@ -804,11 +823,11 @@ impl super::GameState {
                     );
                 }
                 crate::chunk_intake::IntakeStep::Local(col, hash) => {
-                    // B2b — a note confirms a column: one already generated
-                    // is checked now, one not generated yet when it is.
+                    // B2b — a note confirms a column: one already held has
+                    // its check queued now, one not generated yet when it is.
                     self.chunk_intake.note_local(col, hash);
                     if self.loaded_columns.contains(&col) {
-                        self.verify_local_column(col);
+                        self.chunk_intake.column_held(col);
                     }
                 }
                 crate::chunk_intake::IntakeStep::Changes(range) => {
@@ -822,12 +841,9 @@ impl super::GameState {
                         {
                             self.load_one_column(col.0, col.1);
                         }
-                        // A local column still unchecked (held through some
-                        // other path) is checked before the change lands.
-                        let col = column_of_block(bc.x, bc.z);
-                        if self.loaded_columns.contains(&col) {
-                            self.verify_local_column(col);
-                        }
+                        // A local column whose check is pending is checked
+                        // before the change lands, whatever the budget.
+                        self.check_column_now(column_of_block(bc.x, bc.z));
                         // A part-pushed column is not loaded yet, but the
                         // server sends changes only to chunks it has pushed.
                         if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z)
@@ -852,6 +868,10 @@ impl super::GameState {
                     }
                 }
             }
+        }
+        // B2b fix LOW-3 — the queued column checks, within the frame's budget.
+        for col in self.chunk_intake.run_checks(&mut self.world, &self.biome_gen, &self.loaded_columns, check_budget) {
+            self.unload_let_go_column(col);
         }
         // B2a verify NEW-2 — a column given up on (a chunk that did not
         // decode) loses its meshes with its blocks.
@@ -926,7 +946,12 @@ impl super::GameState {
         let changes = std::mem::take(&mut client.pending_block_changes);
         let undecodable = std::mem::take(&mut client.undecodable_chunks);
         self.chunk_intake.count_undecodable(undecodable);
-        self.apply_world_deltas(chunks, &changes, crate::loading_screen::LOAD_BUDGET_PER_FRAME);
+        self.apply_world_deltas(
+            chunks,
+            &changes,
+            crate::loading_screen::LOAD_BUDGET_PER_FRAME,
+            LOADING_COLUMN_CHECKS_PER_FRAME,
+        );
         let r = crate::chunk_push::SPAWN_RING_RADIUS;
         let mut missing = 0;
         for dx in -r..=r {
@@ -971,6 +996,20 @@ pub(crate) const JOIN_RING_WAIT_LIMIT: std::time::Duration = std::time::Duration
 /// B2a — pushed columns a joined session lights and meshes per frame in play
 /// (`finish_pushed_columns`); its own streamer does `STREAM_BUDGET` more.
 pub(crate) const PUSH_RELIGHT_PER_FRAME: usize = 2;
+
+/// B2b fix LOW-3 — the column checks a joined session runs per frame in play
+/// (`ChunkIntake::run_checks`), in column hashes: one SHA-256 pass over a
+/// column's 52 KB of blocks and placed masks each, so 8 stay well under a
+/// millisecond, and a scratch generation (a mismatch to confirm) costs
+/// `chunk_intake::SCRATCH_CHECK_COST` more — about one a frame. A whole R 8
+/// area (289 columns) is checked in well under a second. A server change or
+/// a pushed chunk for a column whose check is pending checks it first,
+/// outside the budget.
+pub(crate) const COLUMN_CHECKS_PER_FRAME: usize = 8;
+
+/// B2b fix LOW-3 — the same on a joined session's loading screen, which has
+/// no frame rate to keep: the spawn area's notes are checked as they come.
+pub(crate) const LOADING_COLUMN_CHECKS_PER_FRAME: usize = 64;
 
 /// Extra columns (Chebyshev) a loaded column may sit beyond the streaming
 /// radius before it unloads, so a player pacing along a column border doesn't

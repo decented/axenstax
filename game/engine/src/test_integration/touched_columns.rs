@@ -192,6 +192,7 @@ fn a_forged_column_hash_switches_the_joiner_to_every_column_pushed() {
     hs.tick();
     assert!(hs.chunk_push_for_test(j.slot).pushes_everything(), "the server switched");
     assert_eq!(hs.chunk_push_for_test(j.slot).noted_len(), 0);
+    assert_eq!(hs.column_mismatch_warnings_for_test(), 1, "warned once");
     j.take_in();
     let notes_at_switch = j.notes_received;
     settle_range(&mut hs, &mut j, SIM);
@@ -213,6 +214,59 @@ fn a_forged_column_hash_switches_the_joiner_to_every_column_pushed() {
     let me = j.column(&hs);
     assert!(columns_within(me, SIM).iter().all(|&c| j.intake.column_complete(c)));
     assert!(j.input().column_mismatch.is_some(), "the switch rides every input");
+    assert_eq!(hs.column_mismatch_warnings_for_test(), 1, "and the server warned once a session");
+}
+
+#[test]
+fn a_column_the_joiner_wrote_to_before_its_note_came_is_kept_without_a_switch() {
+    // B2b fix HIGH-1: the joiner's own writes to a column it generated before
+    // the column's note (its snowfall, its fluids, its player's edit) are no
+    // determinism bug. The note's hash matches a scratch generation, so the
+    // column is checked and kept as it stands: no switch, no warning, no
+    // report, no regeneration.
+    let mut hs = dedicated("drift");
+    // One verdict a tick: the join decides no farther than the spawn ring.
+    let budget = hs.verdict_budget_for_test();
+    hs.set_verdict_budget_for_test(VerdictBudget { count: 1, ..budget });
+    let mut j = Joiner::join_without_generating(&mut hs, SIM as u8);
+    let me = j.column(&hs);
+    let col = (me.0 + SIM, me.1 - 1);
+    assert!(!j.intake.decided(col), "not decided yet");
+    j.generate(col);
+    let cs = CHUNK_SIZE as i32;
+    let cell = (col.0 * cs + 4, 3, col.1 * cs + 11); // deep: inside terrain
+    assert_ne!(j.world.get_block(cell.0, cell.1, cell.2), block::GLASS);
+    j.world.set_block(cell.0, cell.1, cell.2, block::GLASS); // this client's own write
+    hs.set_verdict_budget_for_test(budget);
+    settle_range(&mut hs, &mut j, SIM);
+    assert!(j.intake.is_local(col), "noted local");
+    assert!(!j.intake.has_pending_check(col), "and checked");
+    assert!(j.loaded.contains(&col), "kept");
+    assert_eq!(j.world.get_block(cell.0, cell.1, cell.2), block::GLASS, "as it stands");
+    assert_eq!(j.generated.iter().filter(|&&c| c == col).count(), 1, "never generated again");
+    assert_eq!(j.intake.column_mismatch(), None, "no switch");
+    assert!(!hs.chunk_push_for_test(j.slot).pushes_everything());
+    assert_eq!(hs.column_mismatch_warnings_for_test(), 0, "no warning");
+    assert_eq!(j.intake.pending_drops(), 0, "nothing reported");
+}
+
+#[test]
+fn a_mismatch_report_from_a_joiner_never_noted_changes_nothing() {
+    // B2b fix LOW-4: an honest client reports a mismatch only from a note. One
+    // that was never sent a note (here: `all` mode) and reports one anyway
+    // changes nothing and is not logged.
+    let mut hs = dedicated("never-noted");
+    hs.set_chunk_sync(crate::chunk_push::ChunkSync::All);
+    let mut j = Joiner::join(&mut hs, SIM as u8, false);
+    j.settle(&mut hs);
+    assert!(!hs.chunk_push_for_test(j.slot).noted_ever());
+    let mut input = j.input();
+    input.column_mismatch =
+        Some(crate::protocol::ColumnMismatch { cx: 0, cz: 0, server_hash: 1, client_hash: 2 });
+    j.rc.send_input(&input).expect("connected");
+    hs.tick();
+    assert!(!hs.chunk_push_for_test(j.slot).pushes_everything(), "no mode change");
+    assert_eq!(hs.column_mismatch_warnings_for_test(), 0, "nothing logged");
 }
 
 #[test]

@@ -44,18 +44,29 @@
 //!   nor pushed) is none of the server's business: it unloads like a
 //!   single-player column and is never reported.
 //! - **The column check** ([`ChunkIntake::verify_local`]). A note carries the
-//!   hash of the server's live column (`chunk_verdict::column_hash`). The
-//!   client hashes its own generation — at the note when it already has the
-//!   column, else as soon as it generates it, before any server change lands
-//!   on it — and on a mismatch lets the column go (reported) and asks, in
-//!   every input from then on, for everything to be pushed
-//!   ([`ChunkIntake::column_mismatch`], `InputPacket::column_mismatch`).
+//!   hash of the server's column as generation makes it
+//!   (`chunk_verdict::column_hash`, cached with its `Untouched` verdict). The
+//!   check is pending from the note; it is queued once this client holds the
+//!   column ([`ChunkIntake::column_held`]: at the note for a column already
+//!   held, else wherever the column is generated or restored) and run a few a
+//!   frame ([`ChunkIntake::run_checks`]) — first, whatever the budget, when a
+//!   server change or a pushed chunk is about to land on the column. It
+//!   hashes the column as held; on a difference it hashes a SCRATCH
+//!   generation of it (B2b fix HIGH-1), since this client may have written to
+//!   its own copy since generating it (its snowfall, fluids, falling blocks,
+//!   its player's edits, a drifted copy back from the evicted store). Scratch
+//!   = note: generation agrees, the column is kept as it stands. Scratch ≠
+//!   note: a real generation difference — the column is let go of (reported)
+//!   and every input from then on asks for everything to be pushed
+//!   ([`ChunkIntake::column_mismatch`], `InputPacket::column_mismatch`); no
+//!   column is checked after that (the server pushes them all again).
 //!
 //! Renderer-free (the game loop meshes what [`ChunkIntake::take_relight`]
 //! hands it), so it is unit-tested on a bare `World`.
 
 use std::collections::VecDeque;
 
+use crate::biome::BiomeGenerator;
 use crate::chunk::Chunk;
 use crate::chunk_push::{cell_pos, cells_in};
 use crate::protocol::{ChunkDataPacket, ChunkDrop, ColumnMismatch, PushedAttachment, PushedEntity};
@@ -108,6 +119,48 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
     steps
 }
 
+/// B2b fix LOW-3 — what a scratch generation costs against a frame's check
+/// budget ([`ChunkIntake::run_checks`]), in column hashes: a column's
+/// generation is roughly ten times one SHA-256 pass over its 52 KB of blocks
+/// and placed masks (an estimate, not measured). Charged on top of the hash
+/// that found the difference.
+pub const SCRATCH_CHECK_COST: usize = 8;
+
+/// What a column check found ([`ChunkIntake::verify_local`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnCheck {
+    /// No check was pending: the column was never noted, is checked already,
+    /// or the session has switched to everything pushed.
+    NotPending,
+    /// The column as held hashes as its note said.
+    Matched,
+    /// It does not, but a scratch generation of it does: generation agrees,
+    /// and the difference is this client's own writes since. Kept as it
+    /// stands, and checked.
+    Drifted,
+    /// A scratch generation differs too: a real generation difference. The
+    /// column was let go of (discarded and reported) and the push-everything
+    /// switch set.
+    Mismatched,
+}
+
+impl ColumnCheck {
+    /// Was the column let go of? The caller then unloads what else it holds
+    /// of it (loaded mark, meshes, fluids, wildlife).
+    pub fn let_go(self) -> bool {
+        self == ColumnCheck::Mismatched
+    }
+
+    /// What it cost against a frame's check budget, in column hashes.
+    pub fn cost(self) -> usize {
+        match self {
+            ColumnCheck::NotPending => 0,
+            ColumnCheck::Matched => 1,
+            ColumnCheck::Drifted | ColumnCheck::Mismatched => 1 + SCRATCH_CHECK_COST,
+        }
+    }
+}
+
 /// A joined client's pushed-chunk state. See the module docs.
 #[derive(Debug, Default)]
 pub struct ChunkIntake {
@@ -140,6 +193,10 @@ pub struct ChunkIntake {
     /// Phase B2b — local columns whose generation is not checked yet, each
     /// with the hash its note carried ([`Self::verify_local`]).
     unverified: ahash::AHashMap<(i32, i32), u32>,
+    /// B2b fix LOW-3 — columns of `unverified` this client holds, waiting
+    /// for their check ([`Self::run_checks`]), oldest first.
+    checks_ready: VecDeque<(i32, i32)>,
+    checks_queued: ahash::AHashSet<(i32, i32)>,
     /// Phase B2b — the first local column whose generation did not hash as
     /// its note said: once set, every input asks for everything to be
     /// pushed, for the rest of the session.
@@ -210,9 +267,10 @@ impl ChunkIntake {
     /// otherwise in a session that expects no notes (B2b review LOW-2: a
     /// push-only joiner must never generate a column on one) and for a column
     /// this client holds pushed chunks of: those are the server's own data,
-    /// never replaced by a generation. The column waits for
-    /// [`Self::verify_local`] — now if the caller has it, else once
-    /// generated.
+    /// never replaced by a generation. The column's check is pending from
+    /// here; the caller queues it with [`Self::column_held`] if it holds the
+    /// column, else whoever generates it does. After the push-everything
+    /// switch no check is pending (B2b fix LOW-1): the column is just local.
     pub fn note_local(&mut self, col: (i32, i32), hash: u32) {
         self.applied = self.applied.wrapping_add(1);
         if !self.server_decides() {
@@ -224,32 +282,130 @@ impl ChunkIntake {
             return;
         }
         self.local.insert(col);
-        self.unverified.insert(col, hash);
+        if self.mismatch.is_none() {
+            self.unverified.insert(col, hash);
+        }
     }
 
-    /// Phase B2b — check this client's generation of local column `col`
-    /// against its note's hash, if it has not checked it yet. Call it only
-    /// while this client holds the column — right after generating it, or at
-    /// the note for one already held — and before any server change lands on
-    /// it, or the change itself would read as a mismatch. On a mismatch the
-    /// column is let go of (discarded and reported) and
-    /// [`Self::column_mismatch`] is set for the rest of the session (the
-    /// first one is kept). Returns whether it let the column go: the caller
-    /// then unloads what else it holds of it (loaded mark, meshes, fluids,
-    /// wildlife).
-    pub fn verify_local(&mut self, world: &mut World, col: (i32, i32)) -> bool {
-        let Some(server_hash) = self.unverified.remove(&col) else { return false };
-        let client_hash = crate::chunk_verdict::column_hash(world, col);
+    /// B2b fix LOW-2 — this client holds column `col` now: it was generated
+    /// or restored (the streamer, the loading queue, both spawn-area
+    /// pregenerations, the post-load void repair, a column generated for a
+    /// change or a pushed chunk), or it was already held at its note. If its
+    /// check is pending, queue it ([`Self::run_checks`]). Every path that
+    /// makes a noted column present calls this.
+    pub fn column_held(&mut self, col: (i32, i32)) {
+        if self.unverified.contains_key(&col) && self.checks_queued.insert(col) {
+            self.checks_ready.push_back(col);
+        }
+    }
+
+    /// Is column `col`'s check still pending? Test-only.
+    #[cfg(test)]
+    pub fn has_pending_check(&self, col: (i32, i32)) -> bool {
+        self.unverified.contains_key(&col)
+    }
+
+    /// B2b fix LOW-3 — run queued checks ([`Self::column_held`]), oldest
+    /// first, until `budget` column hashes are spent (a scratch generation
+    /// costs [`SCRATCH_CHECK_COST`] more; the check that crosses the budget
+    /// finishes, so one always runs). A queued column this client no longer
+    /// holds (`loaded`) is skipped: it is queued again when it is. Returns
+    /// the columns let go of, for the caller to unload.
+    pub fn run_checks(
+        &mut self,
+        world: &mut World,
+        biome_gen: &BiomeGenerator,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        budget: usize,
+    ) -> Vec<(i32, i32)> {
+        let mut spent = 0;
+        let mut gone = Vec::new();
+        while spent < budget {
+            let Some(col) = self.checks_ready.pop_front() else { break };
+            self.checks_queued.remove(&col);
+            if !loaded.contains(&col) {
+                continue;
+            }
+            let check = self.verify_local(world, biome_gen, col);
+            spent += check.cost();
+            if check.let_go() {
+                gone.push(col);
+            }
+        }
+        gone
+    }
+
+    /// Phase B2b — check local column `col`, which this client holds, against
+    /// its note's hash, if its check is pending (the caller decides when:
+    /// [`Self::run_checks`], or first, whatever the budget, before a server
+    /// change or a pushed chunk lands on it). It hashes the column as held;
+    /// if that differs it hashes a scratch generation of it
+    /// (`chunk_verdict::generated_column_hash`, `biome_gen` being the
+    /// generator this client generates with), so this client's own writes
+    /// since generating it never read as a determinism bug (B2b fix HIGH-1):
+    /// the column is then kept as it stands. Only a scratch that differs too
+    /// lets the column go (discarded and reported) and sets
+    /// [`Self::column_mismatch`] for the rest of the session, which clears
+    /// every pending check (B2b fix LOW-1: the server pushes every noted
+    /// column again, so nothing is left worth checking).
+    pub fn verify_local(&mut self, world: &mut World, biome_gen: &BiomeGenerator, col: (i32, i32)) -> ColumnCheck {
+        if self.mismatch.is_some() {
+            return ColumnCheck::NotPending;
+        }
+        let Some(server_hash) = self.unverified.remove(&col) else { return ColumnCheck::NotPending };
+        let held_hash = crate::chunk_verdict::column_hash(world, col);
+        if held_hash == server_hash {
+            return ColumnCheck::Matched;
+        }
+        let client_hash = crate::chunk_verdict::generated_column_hash(world, biome_gen, col);
         if client_hash == server_hash {
-            return false;
+            log::debug!(
+                "Local column {col:?} differs from its note only by this client's own writes since it was \
+                 generated (held {held_hash:#010x}, generation {client_hash:#010x}); kept"
+            );
+            return ColumnCheck::Drifted;
         }
         log::warn!(
-            "Local column {col:?} does not match the server's (hash {client_hash:#010x}, server {server_hash:#010x}); \
-             letting it go and asking for every column to be pushed"
+            "Local column {col:?} does not generate as the server's does (generation {client_hash:#010x}, \
+             held {held_hash:#010x}, server {server_hash:#010x}); letting it go and asking for every column to be pushed"
         );
-        self.mismatch.get_or_insert(ColumnMismatch { cx: col.0, cz: col.1, server_hash, client_hash });
+        self.mismatch = Some(ColumnMismatch { cx: col.0, cz: col.1, server_hash, client_hash });
+        self.unverified.clear();
+        self.checks_ready.clear();
+        self.checks_queued.clear();
         self.discard(world, col, true);
-        true
+        ColumnCheck::Mismatched
+    }
+
+    /// B2b fix LOW-2 — call before [`Self::apply`] on pushed packet `pkt`
+    /// (after generating a noted column not held yet,
+    /// [`Self::generate_before_chunk`]): a chunk pushed into a column whose
+    /// check is pending (an overflow resync) replaces part of what the column
+    /// is checked by, so the column is checked first, as it stands, whatever
+    /// the budget. A column in the evicted store comes back for it, as
+    /// `apply` would bring it back. Before the packet counts, so the drop
+    /// report of a column let go of predates the push, which the server then
+    /// keeps as sent: the push still lands, on a column the server pushes
+    /// whole again once it has the switch.
+    pub fn check_before_chunk(
+        &mut self,
+        world: &mut World,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        biome_gen: &BiomeGenerator,
+        pkt: &ChunkDataPacket,
+    ) -> ColumnCheck {
+        let col = (pkt.cx, pkt.cz);
+        if pkt.compressed_blocks.is_empty() || !self.unverified.contains_key(&col) {
+            return ColumnCheck::NotPending;
+        }
+        if !loaded.contains(&col) {
+            world.restore_column(col.0, col.1);
+        }
+        if !(0..=MAX_CHUNK_Y).any(|cy| world.has_chunk(col.0, cy, col.1)) {
+            // Nothing held to check; the push makes it the server's.
+            return ColumnCheck::NotPending;
+        }
+        self.verify_local(world, biome_gen, col)
     }
 
     /// Phase B2b — the first local column whose generation did not match its
@@ -395,7 +551,8 @@ impl ChunkIntake {
         if !loaded.contains(&col) {
             world.restore_column(col.0, col.1);
         }
-        // The column now holds server data: nothing left to check it by.
+        // The column now holds server data: nothing left to check it by
+        // (the caller checked it first, `check_before_chunk`).
         self.unverified.remove(&col);
         world.insert_chunk(pkt.cx, pkt.cy, pkt.cz, chunk);
         clear_side_data(world, coord);
@@ -875,24 +1032,142 @@ mod tests {
         world.generate_column(1, 0, &biome);
         let good = crate::chunk_verdict::column_hash(&world, (1, 0));
         intake.note_local((1, 0), good);
-        assert!(!intake.verify_local(&mut world, (1, 0)), "it matches");
+        assert!(!intake.verify_local(&mut world, &biome, (1, 0)).let_go(), "it matches");
         assert!(intake.is_local((1, 0)) && intake.column_mismatch().is_none());
         // Noted before it is generated: nothing to check until it is.
+        intake.note_local((4, 0), 0x600D);
         intake.note_local((2, 0), 0xBAD);
         world.generate_column(2, 0, &biome);
         let got = crate::chunk_verdict::column_hash(&world, (2, 0));
-        assert!(intake.verify_local(&mut world, (2, 0)), "a mismatch lets it go");
+        assert!(intake.verify_local(&mut world, &biome, (2, 0)).let_go(), "a mismatch lets it go");
         assert!(!world.has_chunk(2, 0, 0) && !intake.is_local((2, 0)), "discarded");
-        assert_eq!(intake.drops_for_input(1, 8), vec![ChunkDrop { cx: 2, cz: 0, as_of: 2 }], "reported");
+        assert_eq!(intake.drops_for_input(1, 8), vec![ChunkDrop { cx: 2, cz: 0, as_of: 3 }], "reported");
         let first = ColumnMismatch { cx: 2, cz: 0, server_hash: 0xBAD, client_hash: got };
         assert_eq!(intake.column_mismatch(), Some(first), "the switch is set");
         // Checked once: a later call (a change landing on it) never re-checks.
-        assert!(!intake.verify_local(&mut world, (1, 0)));
-        // Sticky: the first mismatch is the one kept.
+        assert!(!intake.verify_local(&mut world, &biome, (1, 0)).let_go());
+        // B2b fix LOW-1 (this replaces "every later mismatch is let go of
+        // too"): once the switch is set nothing is checked any more — the
+        // server pushes every noted column again. A check pending from before
+        // is cleared, and a column noted after is just local, kept as it is.
+        assert!(!intake.has_pending_check((4, 0)), "cleared at the switch");
         intake.note_local((3, 0), 0xBAD);
         world.generate_column(3, 0, &biome);
-        assert!(intake.verify_local(&mut world, (3, 0)));
+        assert_eq!(intake.verify_local(&mut world, &biome, (3, 0)), ColumnCheck::NotPending, "a no-op");
+        assert!(world.has_chunk(3, 0, 0) && intake.is_local((3, 0)), "kept");
+        assert_eq!(intake.pending_drops(), 1, "nothing more reported");
+        // Sticky: the first mismatch is the one kept.
         assert_eq!(intake.column_mismatch(), Some(first));
+    }
+
+    #[test]
+    fn a_local_column_written_to_before_its_note_is_kept_and_checked() {
+        // B2b fix HIGH-1: the joiner generated the column, then wrote to it
+        // (its snowfall, its fluids, its player's edit) before the note came.
+        // Generation agrees — a scratch generation hashes as the note — so it
+        // is no determinism bug: no switch, no report, the column kept.
+        let biome = crate::biome::BiomeGenerator::new(42);
+        let mut server = World::new();
+        server.generate_column(1, 0, &biome);
+        let note = crate::chunk_verdict::column_hash(&server, (1, 0));
+        let mut world = World::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        world.generate_column(1, 0, &biome);
+        world.set_block(20, 90, 4, block::GLASS); // this client's own write
+        intake.note_local((1, 0), note);
+        assert_eq!(intake.verify_local(&mut world, &biome, (1, 0)), ColumnCheck::Drifted);
+        assert!(intake.is_local((1, 0)) && !intake.has_pending_check((1, 0)), "local and checked");
+        assert_eq!(world.get_block(20, 90, 4), block::GLASS, "kept as it stands");
+        assert!(intake.column_mismatch().is_none(), "no switch");
+        assert_eq!(intake.pending_drops(), 0, "nothing reported");
+        // A note whose hash is not generation's is still caught, drift or not.
+        world.generate_column(2, 0, &biome);
+        world.set_block(40, 90, 4, block::GLASS);
+        let wrong = crate::chunk_verdict::generated_column_hash(&world, &biome, (2, 0)) ^ 1;
+        intake.note_local((2, 0), wrong);
+        assert_eq!(intake.verify_local(&mut world, &biome, (2, 0)), ColumnCheck::Mismatched);
+        assert!(!world.has_chunk(2, 0, 0) && !intake.is_local((2, 0)), "let go of");
+        let m = intake.column_mismatch().expect("the switch is set");
+        assert_eq!((m.cx, m.cz, m.server_hash), (2, 0, wrong));
+        assert_eq!(m.client_hash, wrong ^ 1, "the generation's hash is reported");
+    }
+
+    #[test]
+    fn pending_checks_run_within_a_frame_budget_and_a_scratch_counts_against_it() {
+        // B2b fix LOW-3.
+        let biome = crate::biome::BiomeGenerator::new(42);
+        let mut world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        for x in 0..5 {
+            world.generate_column(x, 0, &biome);
+            loaded.insert((x, 0));
+            intake.note_local((x, 0), crate::chunk_verdict::column_hash(&world, (x, 0)));
+        }
+        // Four queued (once each); (4, 0) is held but never queued.
+        for x in 0..4 {
+            intake.column_held((x, 0));
+        }
+        intake.column_held((0, 0));
+        assert!(intake.run_checks(&mut world, &biome, &loaded, 2).is_empty());
+        assert!(!intake.has_pending_check((0, 0)) && !intake.has_pending_check((1, 0)), "two checked");
+        assert!(intake.has_pending_check((2, 0)) && intake.has_pending_check((3, 0)), "the rest wait");
+        // A drifted column needs a scratch generation: it spends the frame.
+        world.set_block(2 * 16 + 3, 90, 3, block::GLASS);
+        intake.run_checks(&mut world, &biome, &loaded, 2);
+        assert!(!intake.has_pending_check((2, 0)), "checked (drift, kept)");
+        assert!(intake.has_pending_check((3, 0)), "the scratch took the rest of the budget");
+        assert_eq!(ColumnCheck::Drifted.cost(), 1 + SCRATCH_CHECK_COST);
+        intake.run_checks(&mut world, &biome, &loaded, 2);
+        assert!(!intake.has_pending_check((3, 0)));
+        assert!(intake.has_pending_check((4, 0)), "never queued: waits for its caller");
+        // A queued column no longer held is skipped and stays pending.
+        intake.column_held((4, 0));
+        loaded.remove(&(4, 0));
+        intake.run_checks(&mut world, &biome, &loaded, 8);
+        assert!(intake.has_pending_check((4, 0)));
+        assert!(intake.column_mismatch().is_none());
+    }
+
+    #[test]
+    fn a_push_into_a_column_with_a_pending_check_checks_it_first() {
+        // B2b fix LOW-2: an overflow resync used to clear the pending check
+        // unchecked.
+        let biome = crate::biome::BiomeGenerator::new(42);
+        let host = World::new();
+        let mut world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        // A held column with a true note: checked, then the push lands.
+        world.generate_column(1, 0, &biome);
+        loaded.insert((1, 0));
+        intake.note_local((1, 0), crate::chunk_verdict::column_hash(&world, (1, 0)));
+        let pkt = packet_of(&host, (1, 2, 0));
+        assert_eq!(intake.check_before_chunk(&mut world, &loaded, &biome, &pkt), ColumnCheck::Matched);
+        intake.apply(&mut world, &mut loaded, &reg(), &pkt);
+        // An evicted copy (drifted) comes back to be checked.
+        world.generate_column(3, 0, &biome);
+        let note = crate::chunk_verdict::column_hash(&world, (3, 0));
+        world.set_block(3 * 16 + 2, 90, 2, block::GLASS);
+        assert!(world.evict_column(3, 0));
+        intake.note_local((3, 0), note);
+        let pkt = packet_of(&host, (3, 1, 0));
+        assert_eq!(intake.check_before_chunk(&mut world, &loaded, &biome, &pkt), ColumnCheck::Drifted);
+        // A forged note: let go of before the push counts, so the drop
+        // report predates it and the server keeps the push as sent.
+        world.generate_column(5, 0, &biome);
+        loaded.insert((5, 0));
+        intake.note_local((5, 0), crate::chunk_verdict::column_hash(&world, (5, 0)) ^ 1);
+        let before = intake.applied();
+        let pkt = packet_of(&host, (5, 0, 0));
+        assert_eq!(intake.check_before_chunk(&mut world, &loaded, &biome, &pkt), ColumnCheck::Mismatched);
+        assert_eq!(intake.drops_for_input(1, 8), vec![ChunkDrop { cx: 5, cz: 0, as_of: before }]);
+        // A continuation, or a column with no check pending, checks nothing.
+        let cont = ChunkDataPacket { compressed_blocks: Vec::new(), ..packet_of(&host, (1, 2, 0)) };
+        assert_eq!(intake.check_before_chunk(&mut world, &loaded, &biome, &cont), ColumnCheck::NotPending);
     }
 
     #[test]
