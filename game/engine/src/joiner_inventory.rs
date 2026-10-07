@@ -20,7 +20,7 @@
 //!   shadow spills at the joiner's feet as a real item.
 //!
 //! Still the client's alone (the shadow does not see them): the inventory it
-//! joined with, chests and furnaces, tool and armour wear, armour equip,
+//! joined with, chests and furnaces, armour wear (a break's and swing's tool wear is mirrored since C3a-2b), armour equip,
 //! face-attachment and drying-rack recovery, and moving stacks between slots
 //! (the full list of gaps, which must close before enforcement: Spec 04
 //! §4.2e). So the shadow
@@ -184,6 +184,38 @@ pub fn check_placement(inv: &mut Inventory, hotbar_slot: usize, placed: BlockId)
     }
 }
 
+/// The verdict on wearing a joiner's tool in the shadow ([`wear_tool`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WearCheck {
+    /// The slot held that tool; it wore (and is gone from the slot if that
+    /// was its last use, `broke`).
+    Worn { broke: bool },
+    /// The slot holds no tool of that type and material. Nothing wore.
+    Mismatched,
+}
+
+/// C3a-2b — wear `tool`, the one a joiner's break or swing used, in the
+/// shadow's slot `slot`: the client's own rule (`Inventory::use_tool_at`,
+/// which every client break arm reaches through `use_hotbar_tool`), run on
+/// the same slot the client used. A slot that doesn't hold a tool of the same
+/// type and material (a tool is the same tool by those; durability is what
+/// wears) wears nothing and is a [`WearCheck::Mismatched`]; log-only, like the
+/// placement check — the shadow doesn't yet see the inventory the joiner
+/// arrived with or its slot moves.
+pub fn wear_tool(inv: &mut Inventory, slot: usize, tool: &Tool) -> WearCheck {
+    let holds = matches!(
+        inv.slot(slot).map(|s| &s.item),
+        Some(Item::Tool(t)) if t.tool_type == tool.tool_type && t.material == tool.material
+    );
+    if !holds {
+        return WearCheck::Mismatched;
+    }
+    match inv.use_tool_at(slot) {
+        Some(info) => WearCheck::Worn { broke: info.just_broke },
+        None => WearCheck::Mismatched,
+    }
+}
+
 /// The level a possession-mismatch line is logged at, given what
 /// [`PossessionTally::note_mismatch`] said: a warning when one is due (at most
 /// one a minute per player), otherwise a debug line.
@@ -225,6 +257,10 @@ pub struct PossessionTally {
     /// server pickup) gave the client that the shadow had no room for. Counted,
     /// never spilled: the client holds them.
     pub grant_overflow: u32,
+    /// C3a-2b — tool wear the shadow couldn't apply: a break's or swing's
+    /// tool the shadow's slot didn't hold ([`wear_tool`]). Logged at debug
+    /// only; never refused.
+    pub wear_mismatch: u32,
     /// Mismatches since the last warning.
     suppressed: u32,
     /// When the last warning went out.
@@ -248,6 +284,14 @@ impl PossessionTally {
         Some(std::mem::take(&mut self.suppressed))
     }
 
+    /// C3a-2b — count a tool-wear verdict: a mismatch is tallied (the shadow
+    /// wore nothing), a wear is not.
+    pub fn note_wear(&mut self, check: WearCheck) {
+        if check == WearCheck::Mismatched {
+            self.wear_mismatch = self.wear_mismatch.saturating_add(1);
+        }
+    }
+
     /// C2b — count a craft the server didn't mirror.
     pub fn note_craft_refused(&mut self, why: crate::item_actions::CraftRefusal) {
         let n = &mut self.crafts_refused[why.index()];
@@ -264,7 +308,11 @@ impl PossessionTally {
     pub fn summary(&self, label: &str) -> Option<String> {
         let refused = self.crafts_refused_total();
         let c2b = [self.crafts, refused, self.craft_overflow, self.drops, self.grant_overflow];
-        if [self.breaks, self.matched, self.mismatched, self.unchecked].iter().chain(&c2b).all(|&n| n == 0) {
+        if [self.breaks, self.matched, self.mismatched, self.unchecked, self.wear_mismatch]
+            .iter()
+            .chain(&c2b)
+            .all(|&n| n == 0)
+        {
             return None;
         }
         let mut line = format!(
@@ -272,6 +320,12 @@ impl PossessionTally {
              (placements or interactions), {} edit(s) unchecked; {} break(s) yielded by the server",
             self.matched, self.mismatched, self.unchecked, self.breaks
         );
+        if self.wear_mismatch > 0 {
+            line.push_str(&format!(
+                "; {} tool use(s) the shadow's slot didn't hold a tool for",
+                self.wear_mismatch
+            ));
+        }
         if c2b.iter().any(|&n| n > 0) {
             let reasons: Vec<String> = crate::item_actions::CraftRefusal::ALL
                 .iter()

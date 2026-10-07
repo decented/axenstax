@@ -1132,3 +1132,47 @@ fn a_species_hit_lands_on_a_joiners_body_wears_its_armour_and_names_the_species(
         Vec3::ZERO,
     ));
 }
+
+/// C3a-2b — an accepted swing wears the weapon in the server's shadow as it
+/// wears on the client (`Inventory::use_tool_at` via
+/// `joiner_actions::apply_outcome`), by the latest input's hotbar slot. A
+/// refused swing wears nothing, and a swing with a sword the shadow's slot
+/// doesn't hold is a tallied `wear_mismatch`, never refused.
+#[test]
+fn an_accepted_swing_wears_the_shadows_sword_as_the_clients_wears() {
+    let mut rig = Rig::new("swing-wear", 1);
+    let slot = rig.joiners[0].slot;
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    {
+        let mut h = rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap();
+        h.max = 10_000.0;
+        h.current = 10_000.0;
+    }
+    rig.hs.server.players[slot].inventory.set_slot(0, Some(crate::item::ItemStack { item: sword(), count: 1 }));
+    let mut client = crate::inventory::Inventory::new();
+    client.set_slot(0, Some(crate::item::ItemStack { item: sword(), count: 1 }));
+    let swing = |rig: &mut Rig, held: Option<&Item>| -> bool {
+        rig.tick(10); // past the swing schedule
+        rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+        rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().invincible_timer = 0;
+        let seq = rig.joiners[0].attack(id, held, false);
+        rig.tick(1);
+        rig.joiners[0].inbox.outcome(seq).accepted
+    };
+    for _ in 0..5 {
+        assert!(swing(&mut rig, Some(&sword())));
+        client.use_hotbar_tool(0);
+    }
+    let shadow = |rig: &Rig| rig.hs.server.players[slot].inventory.slot(0).map(|s| s.item.clone());
+    assert_eq!(shadow(&rig), client.slot(0).map(|s| s.item.clone()), "five swings wear alike");
+    assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 0);
+    // A bare-hand swing wears nothing and is no mismatch.
+    assert!(swing(&mut rig, None));
+    assert_eq!(shadow(&rig), client.slot(0).map(|s| s.item.clone()));
+    assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 0);
+    // A different weapon than the slot holds: accepted, tallied, nothing worn.
+    let axe = Item::Tool(Tool::new(ToolType::Axe, ToolMaterial::Iron));
+    assert!(swing(&mut rig, Some(&axe)));
+    assert_eq!(shadow(&rig), client.slot(0).map(|s| s.item.clone()));
+    assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 1);
+}

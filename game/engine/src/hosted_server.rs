@@ -1903,6 +1903,25 @@ impl HostedServer {
     fn handle_entity_attack(&mut self, i: usize, req: &protocol::EntityAttackPacket) {
         let accepted = self.land_joiner_swing(i, req);
         self.send_outcome(i, req.seq, req.entity, None, accepted, 0, 0);
+        if accepted {
+            self.wear_joiner_weapon(i, req);
+        }
+    }
+
+    /// C3a-2b — an accepted swing wears the weapon in the server's shadow as
+    /// it wears on the client (`joiner_actions::apply_outcome`: a swing that
+    /// found its target wears the tool, damage or not). `EntityAttack`
+    /// carries no hotbar slot, so it is the latest input's
+    /// (`ServerPlayer.hotbar_slot`); a slot that doesn't hold that tool is a
+    /// `wear_mismatch`. A non-tool in hand wears nothing. Log-only: the
+    /// claimed weapon still sets the damage (C3d).
+    fn wear_joiner_weapon(&mut self, i: usize, req: &protocol::EntityAttackPacket) {
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        let Some(crate::item::Item::Tool(tool)) = held else { return };
+        let sp = &mut self.server.players[i];
+        let slot = sp.hotbar_slot;
+        let check = crate::joiner_inventory::wear_tool(&mut sp.inventory, slot, &tool);
+        sp.possession.note_wear(check);
     }
 
     fn land_joiner_swing(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> bool {
@@ -3208,7 +3227,7 @@ impl HostedServer {
                         // and what is past it waits (FU3).
                         let edits = std::mem::take(&mut input.block_changes);
                         let held = (input.held_kind, input.held_id);
-                        self.process_or_queue_edits(i, edits, &input.mined, held, &mut budget);
+                        self.process_or_queue_edits(i, edits, &input.mined, held, input.hotbar_slot, &mut budget);
                         // MP-A3 — a reported death (only ever believed
                         // downward: health coming back is never taken — only
                         // a `Respawn` revives). Drops this packet's move too.
@@ -3375,6 +3394,7 @@ impl HostedServer {
         edits: Vec<protocol::BlockChange>,
         tags: &[protocol::MinedBlock],
         held: (u8, u16),
+        hotbar_slot: Option<u8>,
         budget: &mut EditTickBudget,
     ) {
         let waiting = !self.edit_queues[i].is_empty();
@@ -3382,7 +3402,7 @@ impl HostedServer {
         let life = self.server.players.get(i).map_or(0, |sp| sp.respawns);
         let world = &self.server.world;
         let (mut group, mut dropped) =
-            crate::edit_queue::EditGroup::new(edits, keep, tags, held, life, |x, y, z| world.get_block(x, y, z));
+            crate::edit_queue::EditGroup::new(edits, keep, tags, held, life, hotbar_slot, |x, y, z| world.get_block(x, y, z));
         if !waiting {
             self.process_edit_group(i, &mut group, budget);
         }
@@ -3423,7 +3443,12 @@ impl HostedServer {
                 break;
             };
             budget.edits += 1;
-            self.process_one_edit(i, &bc, tag, (group.held_kind, group.held_id), budget);
+            // C3a-2b — the hotbar slot of the input that carried the edit, the
+            // latest input's only if it sent none (it is always below 9).
+            let slot = group
+                .hotbar_slot
+                .map_or_else(|| self.server.players[i].hotbar_slot, usize::from);
+            self.process_one_edit(i, &bc, tag, (group.held_kind, group.held_id), slot, budget);
         }
     }
 
@@ -3437,6 +3462,7 @@ impl HostedServer {
         bc: &protocol::BlockChange,
         tag: Option<protocol::MinedBlock>,
         hand: (u8, u16),
+        slot: usize,
         budget: &mut EditTickBudget,
     ) {
         if let Err(why) = self.validate_block_edit(i, bc, hand) {
@@ -3509,7 +3535,7 @@ impl HostedServer {
             self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
         }
         if let Some(edit) = joiner_edit {
-            self.settle_joiner_edit(i, bc, edit, break_yield);
+            self.settle_joiner_edit(i, bc, slot, edit, break_yield);
         }
         // T1-3 — a log broken by a REMOTE player queues its
         // leaves for the server's leaf-decay pass (the
@@ -3710,15 +3736,32 @@ impl HostedServer {
     /// `InventoryGrant`. A plain placement: the log-only possession
     /// check, consuming one from the shadow's held slot on a match. Anything
     /// else is counted unchecked.
+    ///
+    /// C3a-2b — `slot` is the hotbar slot of the input that carried the edit
+    /// (`EditGroup::hotbar_slot`): a placement is charged to it and a break
+    /// wears the tool in it, not whatever slot a later input scrolled to. A
+    /// break the client mined with a tool wears that tool in the shadow
+    /// (`joiner_inventory::wear_tool`, the client's `use_tool_at`) — a tool
+    /// that wears out is gone from the shadow, as on the client; a slot that
+    /// doesn't hold it is a `wear_mismatch`, log-only. The claimed tool still
+    /// sets the drop tier (C3d flips that).
     fn settle_joiner_edit(
         &mut self,
         i: usize,
         bc: &protocol::BlockChange,
+        slot: usize,
         edit: crate::joiner_inventory::JoinerEdit,
         break_yield: Option<crate::break_drops::BreakYield>,
     ) {
         use crate::joiner_inventory::{JoinerEdit, PlaceCheck};
         let tick = self.server.tick_counter;
+        // The client's break arm wears the tool it mined with whether or not
+        // the server's copy of the cell agreed with the yield.
+        if let JoinerEdit::Break { tool: Some(tool) } = &edit {
+            let sp = &mut self.server.players[i];
+            let check = crate::joiner_inventory::wear_tool(&mut sp.inventory, slot, tool);
+            sp.possession.note_wear(check);
+        }
         match (edit, break_yield) {
             (JoinerEdit::Break { .. }, Some(y)) => {
                 let world = &mut self.server.world;
@@ -3728,7 +3771,6 @@ impl HostedServer {
             }
             (JoinerEdit::Place, _) => {
                 let sp = &mut self.server.players[i];
-                let slot = sp.hotbar_slot;
                 match crate::joiner_inventory::check_placement(&mut sp.inventory, slot, bc.new_block) {
                     PlaceCheck::Matched => sp.possession.matched += 1,
                     PlaceCheck::Mismatched { held } => {

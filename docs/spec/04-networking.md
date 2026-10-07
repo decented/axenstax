@@ -1651,15 +1651,29 @@ bought blocks):
 - drying-rack recovery on a break (its logs; likewise no double grant);
 - slot layout: moving stacks between slots, the client's `auto_refill`
   setting and locked slots (the shadow always auto-refills and locks
-  nothing), and a placement charged to the hotbar slot named in the input (a
-  scroll after a placement within one send window charges the wrong slot).
-  The check keys on the held slot, so layout drift alone mismatches;
+  nothing). The check keys on the held slot, so layout drift alone
+  mismatches. (A scroll after a placement no longer charges the wrong slot:
+  since C3a-2b each edit group carries the hotbar slot of the input that made
+  it, `EditGroup::hotbar_slot`, and a placement is charged to that slot even
+  if it waits in the edit queue while a later input scrolls on; an input that
+  names no slot falls back to the latest one);
 - a bucket filled at a source (C1 verify N3): the client swaps a Bucket for a
   Water or Lava Bucket, and the scoop edit is untagged, so it is unchecked —
   the shadow never sees the filled bucket.
 
+**Tool wear (C3a-2b, log-only).** A joiner's accepted `Break` whose `mined`
+tag names a tool wears that tool in the shadow, at the edit group's hotbar
+slot, by the client's own rule (`Inventory::use_tool_at`,
+`joiner_inventory::wear_tool`); a tool that wears out leaves the shadow, as on
+the client, and the break still yields. A slot that doesn't hold a tool of the
+same type and material wears nothing and counts a
+`PossessionTally.wear_mismatch`. An accepted `EntityAttack` wears the held
+weapon the same way at the latest input's slot (it carries no slot of its
+own). The claimed tool still sets the drop tier and the damage; enforcement is
+C3d.
+
 The other direction — the shadow holds MORE: container
-deposits, tool and armour wear, armour put on, and the
+deposits, armour wear, armour put on, and the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
 cells; and **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow

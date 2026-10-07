@@ -130,6 +130,17 @@ impl Rig {
     /// One input from the joiner: `edits`, the cells it says it mined, and
     /// what its hand holds (hotbar slot 0).
     fn send(&mut self, held: Option<&Item>, edits: &[((i32, i32, i32), BlockId)], mined: &[MinedBlock]) {
+        self.send_at(0, held, edits, mined);
+    }
+
+    /// [`Self::send`] from hotbar slot `slot`.
+    fn send_at(
+        &mut self,
+        slot: u8,
+        held: Option<&Item>,
+        edits: &[((i32, i32, i32), BlockId)],
+        mined: &[MinedBlock],
+    ) {
         self.input += 1;
         let (held_kind, held_id) = match held {
             Some(item) => crate::inventory::item_to_ref(item).to_wire(),
@@ -143,7 +154,7 @@ impl Rig {
             health: 20.0,
             held_kind,
             held_id,
-            hotbar_slot: Some(0),
+            hotbar_slot: Some(slot),
             block_changes: edits
                 .iter()
                 .map(|&((x, y, z), b)| protocol::BlockChange { x, y, z, new_block: b, meta: 0 })
@@ -791,4 +802,137 @@ fn an_edit_that_leaves_the_block_unchanged_leaves_a_natural_cell_natural() {
     rig.send(Some(&deepslate), &[(FLOOR, block::PURE_DEEPSLATE)], &[]);
     rig.tick();
     assert!(rig.world().is_placed(FLOOR.0, FLOOR.1, FLOOR.2), "a block put there is player-placed");
+}
+
+// ── C3a-2b: each edit carries its own hotbar slot; the server wears tools ───
+
+/// C3a-2b — a placement is charged to the hotbar slot of the input that
+/// carried it, not the slot the joiner scrolled to in a later input before
+/// the edit was processed. Five placements from slot 2: four fit this tick's
+/// budget, the fifth waits in the FIFO while the next input (scrolled to
+/// slot 5, no edits) is read in the same tick. All five are charged to slot
+/// 2 — the waiting one used to be charged to slot 5.
+#[test]
+fn a_waiting_placement_is_charged_to_the_slot_it_was_made_at_not_the_one_scrolled_to() {
+    for mut rig in [Rig::dedicated("slot-skew"), Rig::lent("slot-skew")] {
+        let stone = Item::Block(block::STONE);
+        let inv = &mut rig.hs.server.players[rig.slot].inventory;
+        inv.set_slot(2, Some(ItemStack::new_block(block::STONE, 5)));
+        // Not stone: the last of a stack would refill from it.
+        inv.set_slot(5, Some(ItemStack::new_block(block::DIRT, 5)));
+        rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+        let cells: Vec<(i32, i32, i32)> = (0..5).map(|k| (38 + k, 80, 42)).collect();
+        let edits: Vec<_> = cells.iter().map(|&c| (c, block::STONE)).collect();
+        rig.send_at(2, Some(&stone), &edits, &[]);
+        rig.send_at(5, Some(&Item::Block(block::DIRT)), &[], &[]);
+        rig.tick();
+        rig.tick();
+        for &c in &cells {
+            assert_eq!(rig.world().get_block(c.0, c.1, c.2), block::STONE, "{c:?} placed");
+        }
+        let inv = &rig.hs.server.players[rig.slot].inventory;
+        assert!(inv.slot(2).is_none(), "all five charged to slot 2 (the slot they were made at)");
+        assert_eq!(inv.slot(5).map(|s| s.count), Some(5), "slot 5 untouched");
+        assert_eq!(rig.tally().matched, 5);
+        assert_eq!(rig.tally().mismatched, 0);
+    }
+}
+
+/// One iron pickaxe on slot 0 of the shadow, `durability` left on it.
+fn give_pick(rig: &mut Rig, durability: u16) {
+    let mut t = pick(ToolMaterial::Iron);
+    t.durability = durability;
+    rig.hs.server.players[rig.slot].inventory.set_slot(0, Some(ItemStack { item: Item::Tool(t), count: 1 }));
+}
+
+fn shadow_pick(rig: &Rig) -> Option<Tool> {
+    match rig.hs.server.players[rig.slot].inventory.slot(0).map(|s| &s.item) {
+        Some(Item::Tool(t)) => Some(*t),
+        _ => None,
+    }
+}
+
+/// C3a-2b — 1,000 breaks of stone with an iron pickaxe wear the shadow's
+/// pickaxe exactly as the client's wears over the same breaks
+/// (`Inventory::use_hotbar_tool`, its break arm's call), on a dedicated
+/// server and a lending host. Nothing is a wear mismatch.
+#[test]
+fn a_thousand_breaks_wear_the_shadows_pickaxe_as_the_clients_wears() {
+    for mut rig in [Rig::dedicated("wear-1000"), Rig::lent("wear-1000")] {
+        // More than the iron pickaxe's own durability, so the wear is not
+        // cut short by it breaking (that is the next test).
+        give_pick(&mut rig, 5_000);
+        let mut client = crate::inventory::Inventory::new();
+        client.set_slot(0, Some(ItemStack { item: Item::Tool(shadow_pick(&rig).unwrap()), count: 1 }));
+        let cells = [(41, 79, 40), (42, 79, 40), (41, 79, 41), (42, 79, 41)];
+        rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+        for _ in 0..250 {
+            for &c in &cells {
+                rig.world().set_block(c.0, c.1, c.2, block::STONE);
+            }
+            let tool = shadow_pick(&rig).unwrap();
+            let edits: Vec<_> = cells.iter().map(|&c| (c, block::AIR)).collect();
+            let tags: Vec<_> = cells.iter().map(|&c| mined(c, Some(tool))).collect();
+            rig.send(Some(&Item::Tool(tool)), &edits, &tags);
+            rig.tick();
+            for _ in 0..4 {
+                client.use_hotbar_tool(0);
+            }
+        }
+        assert_eq!(rig.tally().breaks, 1000);
+        assert_eq!(rig.tally().wear_mismatch, 0);
+        let Some(Item::Tool(want)) = client.slot(0).map(|s| s.item.clone()) else { panic!("client pickaxe gone") };
+        assert_eq!(want.durability, 4_000);
+        assert_eq!(shadow_pick(&rig), Some(want), "the same wear as the client's");
+    }
+}
+
+/// C3a-2b — a tool that wears out on the server is gone from the shadow, as
+/// on the client; the break that used it up still yields, and a break after
+/// it, mined with a tool the shadow no longer has, is a wear mismatch.
+#[test]
+fn a_tool_the_server_wears_out_is_gone_from_the_shadow() {
+    let mut rig = Rig::dedicated("wear-break");
+    give_pick(&mut rig, 2);
+    let cobble = Item::Block(block::COBBLESTONE);
+    let tool = shadow_pick(&rig).unwrap();
+    let mut client = crate::inventory::Inventory::new();
+    client.set_slot(0, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
+    let cells = [FLOOR, (42, 79, 40), (41, 79, 41)];
+    for (n, &c) in cells.iter().enumerate() {
+        rig.mine(c, block::AIR, Some(tool));
+        let info = client.use_hotbar_tool(0);
+        assert_eq!(rig.granted(&cobble), (n + 1) as u32, "break {n} still yields");
+        match n {
+            0 => assert_eq!(shadow_pick(&rig).map(|t| t.durability), Some(1)),
+            _ => assert!(shadow_pick(&rig).is_none(), "break {n}: the pickaxe is gone"),
+        }
+        assert_eq!(shadow_pick(&rig).is_none(), client.slot(0).is_none(), "break {n}: as on the client");
+        assert_eq!(info.is_some_and(|i| i.just_broke), n == 1);
+    }
+    assert_eq!(rig.tally().wear_mismatch, 1, "the third break had no pickaxe to wear");
+}
+
+/// C3a-2b — a slot that holds a different tool (or nothing) wears nothing
+/// and is tallied, never refused: the break is still accepted and yields.
+#[test]
+fn a_break_whose_tool_the_shadows_slot_lacks_is_tallied_and_accepted() {
+    let mut rig = Rig::dedicated("wear-mismatch");
+    // Slot 0 holds a wooden pickaxe; the joiner says it mined with iron.
+    rig.hs.server.players[rig.slot]
+        .inventory
+        .set_slot(0, Some(ItemStack { item: Item::Tool(pick(ToolMaterial::Wood)), count: 1 }));
+    rig.mine(FLOOR, block::AIR, Some(pick(ToolMaterial::Iron)));
+    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::AIR, "accepted");
+    assert_eq!(rig.tally().wear_mismatch, 1);
+    assert_eq!(rig.tally().breaks, 1);
+    assert_eq!(shadow_pick_material(&rig), Some(ToolMaterial::Wood));
+    assert_eq!(shadow_pick(&rig).map(|t| t.durability), Some(pick(ToolMaterial::Wood).durability), "unworn");
+    // A bare-hand break wears nothing and is no mismatch.
+    rig.mine((42, 79, 40), block::AIR, None);
+    assert_eq!(rig.tally().wear_mismatch, 1);
+}
+
+fn shadow_pick_material(rig: &Rig) -> Option<ToolMaterial> {
+    shadow_pick(rig).map(|t| t.material)
 }

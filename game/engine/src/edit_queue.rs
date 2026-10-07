@@ -9,10 +9,11 @@
 //! here, per client, in arrival order, and go first on the next tick.
 //!
 //! **Kept with their input.** An edit is queued with the rest of its input's
-//! edits, the hand its input reported and the life it was made in, so it is
-//! judged exactly as it would have been in its own tick: a placement is
-//! classified by what was in hand when it was made, not by a later input's
-//! hand, and an edit made before its joiner died and respawned is sent back,
+//! edits, the hand and hotbar slot its input reported and the life it was
+//! made in, so it is judged exactly as it would have been in its own tick: a
+//! placement is classified by what was in hand when it was made, and charged
+//! to the slot it was made at (C3a-2b), not a later input's hand or slot, and
+//! an edit made before its joiner died and respawned is sent back,
 //! not applied (FU4a, FU3 verify L1). Reach and plot rules are checked when
 //! the edit is processed (the body the server holds then).
 //!
@@ -83,6 +84,12 @@ pub struct EditGroup {
     /// (`server::ServerPlayer::respawns`): a group from an earlier life is
     /// sent back, not applied.
     pub life: u32,
+    /// C3a-2b — the hotbar slot the input was made at
+    /// (`InputPacket.hotbar_slot`, below 9; `None` if it sent none or an
+    /// out-of-range one): the slot its placements are charged to and its
+    /// tool wears in, whatever the joiner scrolled to in a later input
+    /// before these edits were processed.
+    pub hotbar_slot: Option<u8>,
 }
 
 impl EditGroup {
@@ -98,8 +105,10 @@ impl EditGroup {
         tags: &[MinedBlock],
         (held_kind, held_id): (u8, u16),
         life: u32,
+        hotbar_slot: Option<u8>,
         block_at: impl FnMut(i32, i32, i32) -> BlockId,
     ) -> (Self, usize) {
+        let hotbar_slot = hotbar_slot.filter(|&s| s < 9);
         let dropped = edits.len().saturating_sub(keep);
         if dropped > 0 {
             edits.truncate(keep);
@@ -107,7 +116,7 @@ impl EditGroup {
         }
         let tags = &tags[..tags.len().min(crate::protocol::MAX_MINED_PER_INPUT)];
         let tags = pair_tags(&edits, tags, block_at);
-        (Self { edits: edits.into(), tags, next: 0, held_kind, held_id, life }, dropped)
+        (Self { edits: edits.into(), tags, next: 0, held_kind, held_id, life, hotbar_slot }, dropped)
     }
 
     /// Edits still waiting.
@@ -317,7 +326,7 @@ mod tests {
     }
 
     fn group_in(edits: &[BlockChange], tags: &[MinedBlock], world: impl FnMut(i32, i32, i32) -> BlockId) -> EditGroup {
-        EditGroup::new(edits.to_vec(), usize::MAX, tags, (0, 0), 0, world).0
+        EditGroup::new(edits.to_vec(), usize::MAX, tags, (0, 0), 0, None, world).0
     }
 
     /// Each edit with its tag, in order.
@@ -424,7 +433,7 @@ mod tests {
             let mut t = 0;
             while !q.is_full() {
                 let (v, tags) = full_input(t);
-                q.push_back(EditGroup::new(v, usize::MAX, &tags, (0, 0), 0, |_, _, _| STONE).0);
+                q.push_back(EditGroup::new(v, usize::MAX, &tags, (0, 0), 0, None, |_, _, _| STONE).0);
                 t += 1;
             }
             let mut peak = 0;
@@ -444,7 +453,7 @@ mod tests {
                 let (v, tags) = full_input(t);
                 t += 1;
                 let keep = if truncated_as_read { q.room() } else { usize::MAX };
-                let (g, dropped) = EditGroup::new(v, keep, &tags, (0, 0), 0, |_, _, _| STONE);
+                let (g, dropped) = EditGroup::new(v, keep, &tags, (0, 0), 0, None, |_, _, _| STONE);
                 let dropped = dropped + q.push_back(g);
                 assert_eq!(dropped + q.len(), MAX_DEFERRED_EDITS - 4 + max_input, "only what fits is kept");
                 peak = peak.max(q.allocated_bytes());
