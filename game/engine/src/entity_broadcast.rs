@@ -52,16 +52,70 @@ const VEL_EPSILON: f32 = 1e-3;
 /// Yaw change (radians) below which an update is "unchanged".
 const YAW_EPSILON: f32 = 1e-3;
 
-/// One broadcastable entity as it stands this tick: the spawn a client is
-/// sent when the entity enters its interest, and its current update.
+/// What a broadcastable entity is, as far as its spawn needs to know.
+#[derive(Clone, Copy, Debug)]
+enum Class {
+    Mob(crate::mob::MobType),
+    Cart,
+    Item,
+    Projectile,
+}
+
+/// One broadcastable entity as it stands this tick: its current update, and
+/// where to build the spawn a client is sent when the entity enters its
+/// interest. The spawn is built only then ([`Self::spawn`], review D2a
+/// LOW-5): an entrant is rare, and a spawn costs a stack encode per dropped
+/// item, so a tick's work stays proportional to the population's updates
+/// plus the entrants, not a full spawn per entity per tick.
 pub(crate) struct LiveEntity {
-    pub spawn: EntitySpawn,
+    entity: hecs::Entity,
+    class: Class,
     pub update: EntityUpdate,
 }
 
 impl LiveEntity {
     fn pos(&self) -> Vec3 {
         Vec3::new(self.update.x, self.update.y, self.update.z)
+    }
+
+    /// The `EntitySpawn` for this entity's current state: position and yaw
+    /// from this tick's update (a spawn and its update agree), the rest from
+    /// the ECS (`ecs` is the world `EntityBroadcast::diff` read this tick).
+    pub fn spawn(&self, ecs: &hecs::World) -> EntitySpawn {
+        let u = &self.update;
+        let mut spawn = EntitySpawn {
+            id: u.id,
+            kind: EntityKind::Cart,
+            x: u.x,
+            y: u.y,
+            z: u.z,
+            yaw: u.yaw,
+            health: 0,
+            item_kind: 0,
+            item_id: 0,
+            item_count: 0,
+            full_item: WireItem::None,
+        };
+        match self.class {
+            Class::Mob(kind) => {
+                spawn.kind = wire_kind_for(kind);
+                spawn.health = crate::mob::mob_def(kind).health;
+            }
+            Class::Cart => {}
+            Class::Projectile => spawn.kind = EntityKind::Projectile,
+            Class::Item => {
+                spawn.kind = EntityKind::Item;
+                if let Ok(item) = ecs.get::<&crate::entity::ItemEntity>(self.entity) {
+                    let (item_kind, item_id) =
+                        crate::inventory::item_to_ref(&item.stack.item).to_wire();
+                    spawn.item_kind = item_kind;
+                    spawn.item_id = item_id;
+                    spawn.item_count = item.stack.count;
+                    spawn.full_item = crate::inventory::item_to_wire_full(&item.stack.item);
+                }
+            }
+        }
+        spawn
     }
 }
 
@@ -178,7 +232,8 @@ fn update_changed(prev: &EntityUpdate, next: &EntityUpdate) -> bool {
         || far(prev.vz, next.vz, VEL_EPSILON)
 }
 
-/// Every broadcastable entity's spawn + current update, by `ProtocolId`.
+/// Every broadcastable entity's current update (and how to build its
+/// spawn), by `ProtocolId`.
 fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
     use crate::cart::CartData;
     use crate::entity::{ItemEntity, MobKind, Position, ProjectileEntity, ProtocolId, Velocity};
@@ -230,19 +285,6 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
         if satoshi.is_some() {
             flags |= entity_flags::SATOSHI;
         }
-        let spawn = EntitySpawn {
-            id: pid.0,
-            kind: wire_kind_for(kind.0),
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw,
-            health: crate::mob::mob_def(kind.0).health,
-            item_kind: 0,
-            item_id: 0,
-            item_count: 0,
-            full_item: WireItem::None,
-        };
         let update = EntityUpdate {
             id: pid.0,
             x: pos.0.x,
@@ -255,7 +297,7 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
             vz: vel.0.z,
             flags,
         };
-        live.insert(pid.0, LiveEntity { spawn, update });
+        live.insert(pid.0, LiveEntity { entity: e, class: Class::Mob(kind.0), update });
     }
 
     // Rail freight Phase 1 — carts ride the same broadcast and the same
@@ -263,20 +305,7 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
     // the lerped render anchor; yaw is `CartData.facing`. Carts are not
     // combat entities: neutral health/state, no velocity (the cart sim
     // steps cell to cell, it has no `Velocity`).
-    for (_e, (pid, cart, pos)) in ecs.query::<(&ProtocolId, &CartData, &Position)>().iter() {
-        let spawn = EntitySpawn {
-            id: pid.0,
-            kind: EntityKind::Cart,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: cart.facing,
-            health: 0,
-            item_kind: 0,
-            item_id: 0,
-            item_count: 0,
-            full_item: WireItem::None,
-        };
+    for (e, (pid, cart, pos)) in ecs.query::<(&ProtocolId, &CartData, &Position)>().iter() {
         let update = EntityUpdate {
             id: pid.0,
             x: pos.0.x,
@@ -285,32 +314,17 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
             yaw: cart.facing,
             ..Default::default()
         };
-        live.insert(pid.0, LiveEntity { spawn, update });
+        live.insert(pid.0, LiveEntity { entity: e, class: Class::Cart, update });
     }
 
     // Death-drops phase 2 — dropped items, so a joiner can SEE server-side
     // loot. The stack rides the spawn's item_* fields (+ the full-fidelity
     // payload for tools and armour, phase 3); updates carry the
     // settle/magnet motion.
-    for (_e, (pid, item, pos, vel)) in ecs
+    for (e, (pid, _item, pos, vel)) in ecs
         .query::<(&ProtocolId, &ItemEntity, &Position, Option<&Velocity>)>()
         .iter()
     {
-        let (item_kind, item_id) = crate::inventory::item_to_ref(&item.stack.item).to_wire();
-        let full_item = crate::inventory::item_to_wire_full(&item.stack.item);
-        let spawn = EntitySpawn {
-            id: pid.0,
-            kind: EntityKind::Item,
-            x: pos.0.x,
-            y: pos.0.y,
-            z: pos.0.z,
-            yaw: 0.0,
-            health: 0,
-            item_kind,
-            item_id,
-            item_count: item.stack.count,
-            full_item,
-        };
         let v = vel.map_or(Vec3::ZERO, |v| v.0);
         let update = EntityUpdate {
             id: pid.0,
@@ -322,13 +336,13 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
             vz: v.z,
             ..Default::default()
         };
-        live.insert(pid.0, LiveEntity { spawn, update });
+        live.insert(pid.0, LiveEntity { entity: e, class: Class::Item, update });
     }
 
     // MP-A3 — projectiles in flight (a dedicated server's dispenser arrows):
     // spawn on first sight, an update while they fly, one despawn when a hit
     // or lifetime expiry removes them.
-    for (_e, (pid, proj, pos, vel)) in ecs
+    for (e, (pid, proj, pos, vel)) in ecs
         .query::<(&ProtocolId, &ProjectileEntity, &Position, &Velocity)>()
         .iter()
     {
@@ -344,7 +358,7 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
             vz: vel.0.z,
             flags: 0,
         };
-        live.insert(pid.0, LiveEntity { spawn: projectile_spawn(pid.0, pos.0, vel.0), update });
+        live.insert(pid.0, LiveEntity { entity: e, class: Class::Projectile, update });
     }
 
     live
@@ -396,22 +410,6 @@ fn projectile_yaw(vel: Vec3) -> f32 {
     (-vel.x).atan2(-vel.z)
 }
 
-/// MP-A3 — the `EntitySpawn` for a projectile in flight.
-fn projectile_spawn(id: u32, pos: Vec3, vel: Vec3) -> EntitySpawn {
-    EntitySpawn {
-        id,
-        kind: EntityKind::Projectile,
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-        yaw: projectile_yaw(vel),
-        health: 0,
-        item_kind: 0,
-        item_id: 0,
-        item_count: 0,
-        full_item: WireItem::None,
-    }
-}
 
 /// One client's share of a tick's entity events.
 #[derive(Default, Debug)]
@@ -429,9 +427,16 @@ pub(crate) struct ClientInterest {
 }
 
 impl ClientInterest {
-    /// This client's events for `tick`. `anchor` is where its body stands
-    /// (a joiner); `None` for a local slot, which hears about everything.
-    pub fn events(&mut self, tick: &EntityTick, anchor: Option<Vec3>) -> ClientEntityEvents {
+    /// This client's events for `tick`. `ecs` is the world the tick was
+    /// diffed from (an entrant's spawn is built from it). `anchor` is where
+    /// its body stands (a joiner); `None` for a local slot, which hears about
+    /// everything.
+    pub fn events(
+        &mut self,
+        tick: &EntityTick,
+        ecs: &hecs::World,
+        anchor: Option<Vec3>,
+    ) -> ClientEntityEvents {
         let mut ev = ClientEntityEvents::default();
         for id in &tick.despawns {
             if self.shown.remove(id) {
@@ -452,7 +457,7 @@ impl ClientInterest {
                 // where it first appeared), and its full current update
                 // follows whether or not it changed this tick.
                 self.shown.insert(*id);
-                ev.spawns.push(e.spawn.clone());
+                ev.spawns.push(e.spawn(ecs));
                 ev.updates.push(e.update.clone());
             }
         }
@@ -487,7 +492,8 @@ mod tests {
         b: &mut EntityBroadcast,
         all: &mut ClientInterest,
     ) -> (Vec<EntitySpawn>, Vec<EntityUpdate>, Vec<u32>) {
-        let ev = all.events(&b.diff(ecs), None);
+        let tick = b.diff(ecs);
+        let ev = all.events(&tick, ecs, None);
         (ev.spawns, ev.updates, ev.despawns)
     }
 
@@ -501,7 +507,7 @@ mod tests {
         entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(3.0, 4.0, 5.0));
         let tick = b.diff(&mut ecs);
         let mut client = ClientInterest::default();
-        let ev = client.events(&tick, None);
+        let ev = client.events(&tick, &ecs, None);
 
         assert_eq!(ev.spawns.len(), 1, "new mob must produce one EntitySpawn");
         assert_eq!(ev.updates.len(), 1, "…and an EntityUpdate so yaw/state/flags are set");
@@ -519,10 +525,10 @@ mod tests {
         let (mut ecs, mut b) = fresh();
         entity::spawn_mob(&mut ecs, MobType::Brigand, Vec3::new(0.0, 64.0, 0.0));
         let mut client = ClientInterest::default();
-        let _ = client.events(&b.diff(&mut ecs), None);
+        let _ = client.events(&b.diff(&mut ecs), &ecs, None);
 
         // Nothing moved: changed-only sends nothing.
-        let ev = client.events(&b.diff(&mut ecs), None);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, None);
         assert!(ev.spawns.is_empty(), "already-shown mob must not re-spawn");
         assert!(ev.updates.is_empty(), "an unchanged mob sends no update");
         assert!(ev.despawns.is_empty());
@@ -530,16 +536,16 @@ mod tests {
         // A sub-epsilon nudge is still "unchanged"…
         let e = only_entity(&ecs);
         ecs.get::<&mut entity::Position>(e).unwrap().0.x += 1e-4;
-        assert!(client.events(&b.diff(&mut ecs), None).updates.is_empty());
+        assert!(client.events(&b.diff(&mut ecs), &ecs, None).updates.is_empty());
         // …but drift accumulates against the last SENT update, not last tick's.
         for _ in 0..12 {
             ecs.get::<&mut entity::Position>(e).unwrap().0.x += 1e-4;
-            let _ = client.events(&b.diff(&mut ecs), None);
+            let _ = client.events(&b.diff(&mut ecs), &ecs, None);
         }
         // A real step sends exactly one update carrying the new state.
         ecs.get::<&mut entity::Position>(e).unwrap().0.x = 0.5;
         ecs.get::<&mut entity::Velocity>(e).unwrap().0 = Vec3::new(0.1, 0.0, 0.0);
-        let ev = client.events(&b.diff(&mut ecs), None);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, None);
         assert_eq!(ev.updates.len(), 1);
         assert_eq!(ev.updates[0].x, 0.5);
         assert_eq!(ev.updates[0].vx, 0.1, "velocity rides the update");
@@ -551,11 +557,11 @@ mod tests {
         entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         let e = only_entity(&ecs);
         let mut client = ClientInterest::default();
-        let _ = client.events(&b.diff(&mut ecs), None);
+        let _ = client.events(&b.diff(&mut ecs), &ecs, None);
         let mut sent = 0;
         for _ in 0..30 {
             ecs.get::<&mut entity::Position>(e).unwrap().0.x += 4e-4;
-            sent += client.events(&b.diff(&mut ecs), None).updates.len();
+            sent += client.events(&b.diff(&mut ecs), &ecs, None).updates.len();
         }
         assert!(sent >= 3, "a slow drift crosses the epsilon repeatedly (sent {sent})");
     }
@@ -598,13 +604,13 @@ mod tests {
         let (mut ecs, mut b) = fresh();
         let e = entity::spawn_mob(&mut ecs, MobType::Chicken, Vec3::new(1.0, 2.0, 3.0));
         let mut client = ClientInterest::default();
-        let id = client.events(&b.diff(&mut ecs), None).spawns[0].id;
+        let id = client.events(&b.diff(&mut ecs), &ecs, None).spawns[0].id;
 
         ecs.despawn(e).unwrap();
-        let ev = client.events(&b.diff(&mut ecs), None);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, None);
         assert!(ev.spawns.is_empty() && ev.updates.is_empty());
         assert_eq!(ev.despawns, vec![id]);
-        assert!(client.events(&b.diff(&mut ecs), None).despawns.is_empty(), "…only once");
+        assert!(client.events(&b.diff(&mut ecs), &ecs, None).despawns.is_empty(), "…only once");
     }
 
     #[test]
@@ -616,28 +622,28 @@ mod tests {
         let joiner = Some(Vec3::new(0.0, 64.0, 0.0));
         let mut client = ClientInterest::default();
 
-        let ev = client.events(&b.diff(&mut ecs), joiner);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, joiner);
         assert_eq!(ev.spawns.len(), 1, "only the in-range mob is sent");
         assert_eq!(Some(ev.spawns[0].id), id(&ecs, near));
         assert!(!client.shows(id(&ecs, far).unwrap()), "an out-of-range mob is never sent");
 
         // Wandering out past ENTER but inside LEAVE: still shown (hysteresis).
         ecs.get::<&mut entity::Position>(near).unwrap().0.x = INTEREST_ENTER_RADIUS + 8.0;
-        let ev = client.events(&b.diff(&mut ecs), joiner);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, joiner);
         assert!(ev.despawns.is_empty(), "inside the leave radius it stays");
         assert_eq!(ev.updates.len(), 1, "and keeps getting its updates");
 
         // Past LEAVE: withdrawn with one despawn.
         ecs.get::<&mut entity::Position>(near).unwrap().0.x = INTEREST_LEAVE_RADIUS + 1.0;
-        let ev = client.events(&b.diff(&mut ecs), joiner);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, joiner);
         assert_eq!(ev.despawns, vec![id(&ecs, near).unwrap()]);
         // Back inside LEAVE but outside ENTER: not re-sent until it enters.
         ecs.get::<&mut entity::Position>(near).unwrap().0.x = INTEREST_ENTER_RADIUS + 8.0;
-        assert!(client.events(&b.diff(&mut ecs), joiner).spawns.is_empty());
+        assert!(client.events(&b.diff(&mut ecs), &ecs, joiner).spawns.is_empty());
 
         // The far pig wanders into range: it ENTERS with its current state.
         ecs.get::<&mut entity::Position>(far).unwrap().0 = Vec3::new(5.0, 70.0, 5.0);
-        let ev = client.events(&b.diff(&mut ecs), joiner);
+        let ev = client.events(&b.diff(&mut ecs), &ecs, joiner);
         assert_eq!(ev.spawns.len(), 1);
         assert_eq!((ev.spawns[0].x, ev.spawns[0].y), (5.0, 70.0), "spawn = where it is now");
         assert_eq!(ev.updates.len(), 1, "an entering entity's update always follows");
@@ -660,11 +666,11 @@ mod tests {
         // The host has been broadcasting for a while before the joiner arrives.
         let mut host = ClientInterest::default();
         for _ in 0..3 {
-            let _ = host.events(&b.diff(&mut ecs), None);
+            let _ = host.events(&b.diff(&mut ecs), &ecs, None);
         }
 
         let mut late = ClientInterest::default();
-        let ev = late.events(&b.diff(&mut ecs), Some(Vec3::new(0.0, 64.0, 0.0)));
+        let ev = late.events(&b.diff(&mut ecs), &ecs, Some(Vec3::new(0.0, 64.0, 0.0)));
         assert_eq!(ev.spawns.len(), 3, "every pre-existing entity in range, once");
         let bone = ev
             .spawns
@@ -681,7 +687,7 @@ mod tests {
                 == Some(crate::item::Item::Tool(axe))),
             "a tool arrives at its true durability"
         );
-        assert!(late.events(&b.diff(&mut ecs), Some(Vec3::ZERO)).spawns.is_empty());
+        assert!(late.events(&b.diff(&mut ecs), &ecs, Some(Vec3::ZERO)).spawns.is_empty());
     }
 
     #[test]
@@ -841,7 +847,7 @@ mod tests {
 
         // A late joiner in range sees both arrows already in flight.
         let mut late = ClientInterest::default();
-        let ev = late.events(&b.diff(&mut ecs), Some(Vec3::new(0.0, 70.0, 0.0)));
+        let ev = late.events(&b.diff(&mut ecs), &ecs, Some(Vec3::new(0.0, 70.0, 0.0)));
         assert_eq!(ev.spawns.iter().filter(|s| s.kind == EntityKind::Projectile).count(), 2);
 
         let ids: Vec<hecs::Entity> =

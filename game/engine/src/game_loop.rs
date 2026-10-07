@@ -21786,9 +21786,7 @@ impl super::GameState {
         let mut pending_exhibits = None;
         let mut pending_grants = Vec::new();
         let mut pending_life_events = Vec::new();
-        let mut pending_entity_spawns = Vec::new();
-        let mut pending_entity_updates = Vec::new();
-        let mut pending_entity_despawns = Vec::new();
+        let mut pending_entity_batches = Vec::new();
         let mut pending_block_changes = Vec::new();
         // World chat (Phase 2) — lines delivered to us this poll, from
         // whichever transport is active (host loopback below, or the
@@ -21812,9 +21810,7 @@ impl super::GameState {
             // Deltas accumulated across every StateUpdate since last frame —
             // sourced from the accumulators, NOT latest_state, so a frame
             // hitch that batches two server ticks loses nothing.
-            pending_entity_spawns = std::mem::take(&mut client.pending_entity_spawns);
-            pending_entity_updates = std::mem::take(&mut client.pending_entity_updates);
-            pending_entity_despawns = std::mem::take(&mut client.pending_entity_despawns);
+            pending_entity_batches = std::mem::take(&mut client.pending_entity_batches);
             pending_block_changes = std::mem::take(&mut client.pending_block_changes);
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -22080,31 +22076,24 @@ impl super::GameState {
                 self.rebuild_chunk_at(bc.x, bc.y, bc.z);
             }
         }
-        // Death-drops phase 2b — fold the server's entity diff into the
-        // remote-item table (render-only ghosts; despawn on pickup/decay
-        // rides the same diff). Client-path only: the HOST renders its own
-        // client-sim items — the server sim's drops would be phantoms it
-        // can never pick up (dual-sim, see CLAUDE.md known debt).
-        self.remote_items.apply(
-            &pending_entity_spawns,
-            &pending_entity_updates,
-            &pending_entity_despawns,
+        // Fold the server's entity diff in, one StateUpdate at a time in
+        // arrival order (review D2a MEDIUM-2): death-drops phase 2b's
+        // remote-item table (render-only ghosts; despawn on pickup/decay rides
+        // the same diff), MP-A3's projectiles in flight and — MP-D2a — the
+        // mob and cart mirror while joined (this client keeps no mobs of its
+        // own then). Client-path only: the HOST renders its own client-sim
+        // items — the server sim's drops would be phantoms it can never pick
+        // up (dual-sim, see CLAUDE.md known debt).
+        let joined = self.joined();
+        crate::remote_entities::apply_entity_batches(
+            &pending_entity_batches,
+            &mut self.remote_items,
+            &mut self.remote_projectiles,
+            joined.then_some(&mut self.remote_mobs),
         );
-        // MP-A3 — and the server's projectiles in flight (same diff).
-        self.remote_projectiles.apply(
-            &pending_entity_spawns,
-            &pending_entity_updates,
-            &pending_entity_despawns,
-        );
-        // MP-D2a — and its mobs and carts, into the render-only mirror; this
-        // client keeps no mobs of its own while joined. The mirror glides
-        // every frame between the server's (changed-only) updates.
-        if self.joined() {
-            self.remote_mobs.apply(
-                &pending_entity_spawns,
-                &pending_entity_updates,
-                &pending_entity_despawns,
-            );
+        // The mirror glides every frame between the server's (changed-only)
+        // updates.
+        if joined {
             crate::remote_mobs::purge_private_mobs(&mut self.ecs);
             let now = Instant::now();
             let dt = self

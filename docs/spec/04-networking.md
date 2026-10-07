@@ -999,7 +999,11 @@ mobs chased joiners but never damaged anyone.
 **Server feed (`entity_broadcast.rs`, `HostedServer::broadcast_state`).**
 - `EntityBroadcast::diff` gives every mob, cart, dropped item and projectile a
   `ProtocolId` on first sight (stable for its life; on a lending host it lives
-  on the host's ECS) and builds each one's spawn and current update.
+  on the host's ECS) and builds each one's current update. The `EntitySpawn`
+  is built only for an entity entering some client's interest
+  (`LiveEntity::spawn`, from the ECS the tick was diffed from), so a tick
+  costs one update per entity plus one spawn per entrant — not a spawn (and,
+  for a dropped item, a stack encode) per entity per tick.
 - **Changed-only.** An `EntityUpdate` is sent only when it differs from the
   last update broadcast for that entity: position or velocity by more than
   `1e-3` (blocks, blocks/tick) on any axis, yaw by more than `1e-3` rad, or a
@@ -1017,6 +1021,20 @@ mobs chased joiners but never damaged anyone.
   with the slot. **No backfill:** a late joiner's set starts empty, so every
   entity in range enters on its first broadcast, with its full payload (item
   stack, tool durability).
+- **Re-entry under a backlog (`state_outbox`).** An id can now be spawned
+  again (withdrawn past 96, back inside 80) while its withdrawal still waits
+  in the client's outbox behind a block backlog. A re-entry spawn **cancels**
+  that queued despawn (the client's spawn replaces any copy it holds), the
+  outbox counts queued spawns per id, and an update is kept only for an id
+  the client will hold once the queue drains (no despawn queued) and is sent
+  only once no spawn for it is still queued — so it lands on the newest copy,
+  never on the one a spawn then replaces (which would leave the new copy with
+  no velocity or flags). On the client, `RemoteClient` keeps each
+  `StateUpdate`'s entity deltas together (`remote_entities::EntityDeltas`) and
+  `apply_entity_batches` applies them packet by packet, in arrival order: a
+  despawn in one packet and the re-entry spawn in the next must not be folded
+  into one list and applied spawn-first, despawn-last (the mob would vanish
+  while the server counted it shown).
 - **Wire (v68, appended):** `EntityUpdate.vx/vy/vz` and `flags`
   (`entity_flags`: `HURT = 1` — `Health::is_flashing`; `BABY = 2` —
   `breeding::Baby`; `TAMED = 4` — `tameable::pet_owner_of`, no renderer reads

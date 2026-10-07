@@ -482,7 +482,12 @@ pub struct InputPacket {
     /// each hit armour soaks up. Client-asserted, like `held_kind`: a lying
     /// client could only claim armour it isn't wearing, and until D2a its
     /// health was wholly its own anyway. Ignored for a local slot.
-    /// APPEND-ONLY with `health_delta` (bincode is positional).
+    /// APPEND-ONLY with `health_delta` (bincode is positional). Like every
+    /// earlier append, `serde(default)` here documents intent only: a v67
+    /// peer's shorter packet would fail to decode, not default, and the
+    /// join-time `PROTOCOL_VERSION` gate is the real back-compat (see
+    /// `InventoryGrantPacket.full_item` and the test
+    /// `state_update_from_a_shorter_older_peer_is_rejected_not_defaulted`).
     #[serde(default)]
     pub armour_points: u8,
     /// MP-D2a (v68) — the change this client made to its own health since its
@@ -492,7 +497,9 @@ pub struct InputPacket {
     /// when it simulates the input, so the next `StateUpdate` acknowledging
     /// the input (`last_acked_input`) carries it. Fall, drowning, mob and
     /// lava/fire damage are NOT in it: the server applies those itself.
-    /// Zero from a local slot (its `health` is applied as sent).
+    /// Zero from a local slot (its `health` is applied as sent). The server
+    /// caps a heal at `combat::MAX_REPORTED_HEAL_PER_INPUT`. `serde(default)`:
+    /// see `armour_points`.
     #[serde(default)]
     pub health_delta: f32,
 }
@@ -794,7 +801,9 @@ pub struct EntityUpdate {
     pub state: u8,
     /// MP-D2a (v68) — velocity in blocks per tick (`entity::Velocity`), for
     /// the walk cycle and to smooth the motion between updates. Zero for an
-    /// entity with no velocity (a cart). APPEND-ONLY with `flags`.
+    /// entity with no velocity (a cart). APPEND-ONLY with `flags`. The
+    /// `serde(default)`s on these four document intent only — the join-time
+    /// version gate is the real back-compat (see `InputPacket.armour_points`).
     #[serde(default)]
     pub vx: f32,
     #[serde(default)]

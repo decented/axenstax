@@ -19,6 +19,53 @@
 use glam::Vec3;
 use std::collections::HashMap;
 
+/// One `StateUpdate`'s entity deltas, kept together: the server orders a
+/// packet's deltas (spawns, then updates, then despawns) and an entity can be
+/// withdrawn in one packet and re-spawned in the next (`entity_broadcast`'s
+/// interest radius). Folding several packets into one flat list would apply
+/// the later spawn BEFORE the earlier despawn and delete the new copy
+/// (review D2a MEDIUM-2), so a client keeps one of these per packet and
+/// applies them in arrival order ([`apply_entity_batches`]).
+#[derive(Clone, Debug, Default)]
+pub struct EntityDeltas {
+    pub spawns: Vec<crate::protocol::EntitySpawn>,
+    pub updates: Vec<crate::protocol::EntityUpdate>,
+    pub despawns: Vec<u32>,
+}
+
+impl EntityDeltas {
+    /// Take a decoded `StateUpdate`'s entity deltas (leaving them empty).
+    pub fn take_from(state: &mut crate::protocol::StateUpdatePacket) -> Self {
+        Self {
+            spawns: std::mem::take(&mut state.entity_spawns),
+            updates: std::mem::take(&mut state.entity_updates),
+            despawns: std::mem::take(&mut state.entity_despawns),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spawns.is_empty() && self.updates.is_empty() && self.despawns.is_empty()
+    }
+}
+
+/// Fold a frame's entity deltas into a joined client's render tables, one
+/// `StateUpdate` at a time in arrival order: dropped items, projectiles,
+/// and — when `mobs` is given (joined) — the mob and cart mirror.
+pub fn apply_entity_batches(
+    batches: &[EntityDeltas],
+    items: &mut RemoteItems,
+    projectiles: &mut RemoteProjectiles,
+    mut mobs: Option<&mut crate::remote_mobs::RemoteMobs>,
+) {
+    for b in batches {
+        items.apply(&b.spawns, &b.updates, &b.despawns);
+        projectiles.apply(&b.spawns, &b.updates, &b.despawns);
+        if let Some(mobs) = mobs.as_deref_mut() {
+            mobs.apply(&b.spawns, &b.updates, &b.despawns);
+        }
+    }
+}
+
 /// One server-side dropped item, keyed by its wire `ProtocolId`.
 pub struct RemoteItem {
     pub pos: Vec3,

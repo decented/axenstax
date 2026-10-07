@@ -150,8 +150,13 @@ pub struct ClientOutbox {
     update_cursor: u32,
     /// Ids whose spawn this client has been sent and whose despawn it hasn't.
     delivered: HashSet<u32>,
-    /// Ids whose spawn is still in `queue`.
-    spawn_queued: HashSet<u32>,
+    /// Ids with a spawn still in `queue`, and how many: an entity that
+    /// leaves a joiner's interest and comes back (`entity_broadcast`) is
+    /// spawned again, possibly before its first spawn has drained.
+    spawn_queued: HashMap<u32, u32>,
+    /// Ids with a despawn still in `queue` → that entry's `seq`. A re-entry
+    /// spawn cancels it (see [`Self::push_spawns`]).
+    despawn_queued: HashMap<u32, u64>,
     /// Chunks whose block changes were dropped on overflow.
     resync: BTreeSet<ChunkCoord>,
     /// Overflow log rate limit.
@@ -173,7 +178,8 @@ impl ClientOutbox {
             updates: BTreeMap::new(),
             update_cursor: 0,
             delivered: HashSet::new(),
-            spawn_queued: HashSet::new(),
+            spawn_queued: HashMap::new(),
+            despawn_queued: HashMap::new(),
             resync: BTreeSet::new(),
             next_overflow_log: 0,
             dropped_since_log: 0,
@@ -187,10 +193,42 @@ impl ClientOutbox {
     }
 
     /// Queue entity spawns (the late-join backfill, or a tick's new entities).
+    ///
+    /// A spawn for an id whose despawn is still queued — it left this
+    /// client's interest and came back before the withdrawal went out —
+    /// cancels that despawn (review D2a MEDIUM-2). The client's spawn
+    /// replaces any copy it already holds, so the withdrawal is moot; sent,
+    /// it could land in the same frame as the re-entry and delete the new
+    /// copy, after which this outbox (counting the id as delivered) would
+    /// feed it updates the client drops.
     pub fn push_spawns(&mut self, spawns: &[EntitySpawn]) {
         for s in spawns {
-            self.spawn_queued.insert(s.id);
+            if let Some(seq) = self.despawn_queued.remove(&s.id) {
+                self.cancel_entry(seq);
+            }
+            *self.spawn_queued.entry(s.id).or_insert(0) += 1;
             self.push_entry(Delta::Spawn(s.clone()));
+        }
+    }
+
+    /// Will this client hold entity `id` once everything queued has gone
+    /// out? Only then is an update for it worth keeping.
+    fn will_hold(&self, id: u32) -> bool {
+        !self.despawn_queued.contains_key(&id)
+            && (self.delivered.contains(&id) || self.spawn_queued.contains_key(&id))
+    }
+
+    /// Drop the queued entry `seq` (a reliable delta that no longer needs
+    /// sending).
+    fn cancel_entry(&mut self, seq: u64) {
+        let Ok(at) = self.queue.binary_search_by_key(&seq, |e| e.seq) else {
+            return;
+        };
+        if let Some(e) = self.queue.remove(at) {
+            self.queued_bytes -= e.size;
+            if matches!(e.delta, Delta::Block(_)) {
+                self.queued_block_bytes -= e.size;
+            }
         }
     }
 
@@ -211,8 +249,9 @@ impl ClientOutbox {
             // Only an entity this client knows about (or is about to) needs
             // telling it is gone; its pending update is moot either way.
             self.updates.remove(&id);
-            if self.delivered.contains(&id) || self.spawn_queued.contains(&id) {
+            if self.will_hold(id) {
                 self.push_entry(Delta::Despawn(id));
+                self.despawn_queued.insert(id, self.next_seq - 1);
             }
         }
         for b in blocks {
@@ -222,7 +261,7 @@ impl ClientOutbox {
             }
         }
         for u in updates {
-            if self.delivered.contains(&u.id) || self.spawn_queued.contains(&u.id) {
+            if self.will_hold(u.id) {
                 self.updates.insert(u.id, u.clone());
             }
         }
@@ -446,13 +485,19 @@ impl ClientOutbox {
                     pkt.block_changes.push(b);
                 }
                 Delta::Spawn(s) => {
-                    self.spawn_queued.remove(&s.id);
+                    if let Some(n) = self.spawn_queued.get_mut(&s.id) {
+                        *n -= 1;
+                        if *n == 0 {
+                            self.spawn_queued.remove(&s.id);
+                        }
+                    }
                     self.delivered.insert(s.id);
                     pkt.entity_spawns.push(s);
                 }
                 Delta::Despawn(id) => {
                     self.delivered.remove(&id);
                     self.updates.remove(&id);
+                    self.despawn_queued.remove(&id);
                     pkt.entity_despawns.push(id);
                 }
             }
@@ -466,13 +511,16 @@ impl ClientOutbox {
 
     /// Move pending updates for delivered entities into `pkt` while they fit
     /// under `limit`, taking ids in turn from the cursor. Returns whether
-    /// every deliverable update went.
+    /// every deliverable update went. An update waits while a spawn for its
+    /// id is still queued: it belongs to the newest incarnation, and sent
+    /// ahead of that spawn it would land on the copy the spawn then
+    /// replaces, leaving the new one with no velocity or flags.
     fn fill_updates(&mut self, pkt: &mut StateUpdatePacket, size: &mut usize, limit: usize) -> bool {
         let cursor = self.update_cursor;
         let mut taken: Vec<u32> = Vec::new();
         let mut drained = true;
         for (&id, u) in self.updates.range(cursor..).chain(self.updates.range(..cursor)) {
-            if !self.delivered.contains(&id) {
+            if !self.delivered.contains(&id) || self.spawn_queued.contains_key(&id) {
                 continue;
             }
             let s = wire_size(u);
@@ -789,6 +837,72 @@ mod tests {
             }
         }
         assert_eq!(order, vec![('s', 4), ('d', 4)]);
+    }
+
+    /// What a joiner holds for entity `id` after `states`, applied the way
+    /// its client does — per packet: spawns, then updates, then despawns.
+    /// `None` = not held; `Some(None)` = held with no update since its
+    /// (latest) spawn; `Some(Some(x))` = held, latest update at `x`.
+    fn client_view(states: &[StateUpdatePacket], id: u32, view: &mut Option<Option<f32>>) {
+        for s in states {
+            if s.entity_spawns.iter().any(|e| e.id == id) {
+                *view = Some(None);
+            }
+            if let Some(u) = s.entity_updates.iter().rev().find(|u| u.id == id)
+                && view.is_some()
+            {
+                *view = Some(Some(u.x));
+            }
+            if s.entity_despawns.contains(&id) {
+                *view = None;
+            }
+        }
+    }
+
+    /// Review D2a MEDIUM-2 (b), the delivered case. Entity 9 is shown, a
+    /// block backlog builds, it leaves interest (despawn queued behind the
+    /// backlog) and comes back (re-spawn + its update). The joiner must end
+    /// up holding the re-spawned copy WITH that update — not the update sent
+    /// ahead of the despawn onto the old copy and then lost to the spawn.
+    #[test]
+    fn a_reentry_while_the_withdrawal_is_queued_keeps_its_update() {
+        let mut ob = ClientOutbox::new(true);
+        let mut view = None;
+        ob.push_tick(0, &[spawn(9)], &[], &[], &[update(9, 1.0)]);
+        client_view(&tick(&mut ob, true), 9, &mut view);
+        assert_eq!(view, Some(Some(1.0)));
+
+        let filler: Vec<BlockChange> = (0..8_000).map(|i| bc(i, 1)).collect();
+        ob.push_tick(1, &[], &[], &filler, &[]);
+        ob.push_tick(2, &[], &[9], &[], &[]);
+        ob.push_tick(3, &[spawn(9)], &[], &[], &[update(9, 7.0)]);
+        let mut despawns = 0;
+        for _ in 0..10 {
+            let states = tick(&mut ob, true);
+            despawns += states.iter().filter(|s| s.entity_despawns.contains(&9)).count();
+            client_view(&states, 9, &mut view);
+        }
+        assert_eq!(view, Some(Some(7.0)), "the re-entered copy, with its update");
+        assert_eq!(despawns, 0, "the moot withdrawal was cancelled, never sent");
+    }
+
+    /// Review D2a MEDIUM-2 (b), the queued case: the first spawn hasn't gone
+    /// out either when the entity leaves and re-enters. Two spawns queued:
+    /// draining the first must not let the update jump ahead of the second,
+    /// and the despawn must not delete the re-entry's update.
+    #[test]
+    fn a_reentry_before_the_first_spawn_drained_keeps_its_update() {
+        let mut ob = ClientOutbox::new(true);
+        let mut view = None;
+        let filler: Vec<BlockChange> = (0..8_000).map(|i| bc(i, 1)).collect();
+        ob.push_tick(0, &[], &[], &filler, &[]);
+        ob.push_tick(1, &[spawn(9)], &[], &[], &[update(9, 1.0)]);
+        ob.push_tick(2, &[], &[9], &[], &[]);
+        ob.push_tick(3, &[spawn(9)], &[], &[], &[update(9, 7.0)]);
+        for _ in 0..10 {
+            client_view(&tick(&mut ob, true), 9, &mut view);
+        }
+        assert_eq!(view, Some(Some(7.0)), "held, with the re-entry's update last");
     }
 
     #[test]

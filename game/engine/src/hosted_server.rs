@@ -2884,7 +2884,7 @@ impl HostedServer {
             // hears about entities near its body, changed-only (a late
             // joiner's empty interest set doubles as its backfill).
             let anchor = self.entity_interest_anchor(i);
-            let entities = self.entity_interest[i].events(&entity_tick, anchor);
+            let entities = self.entity_interest[i].events(&entity_tick, &self.server.ecs, anchor);
             let outbox = &mut self.outboxes[i];
             outbox.push_tick(
                 self.server_tick,

@@ -328,9 +328,11 @@ pub struct RemoteClient {
     /// frame hitch batched two server ticks into one poll — lost spawns
     /// meant permanently invisible loot, lost despawns ghost items, lost
     /// block changes world desync. Drained via `std::mem::take` each frame.
-    pub pending_entity_spawns: Vec<protocol::EntitySpawn>,
-    pub pending_entity_updates: Vec<protocol::EntityUpdate>,
-    pub pending_entity_despawns: Vec<u32>,
+    ///
+    /// Entity deltas stay grouped per StateUpdate, in arrival order
+    /// (`remote_entities::EntityDeltas`): an entity withdrawn in one packet
+    /// and re-spawned in the next must not have the despawn applied last.
+    pub pending_entity_batches: Vec<crate::remote_entities::EntityDeltas>,
     pub pending_block_changes: Vec<protocol::BlockChange>,
     /// Edits [`serialize_input_within_cap`] trimmed off an earlier input
     /// packet, oldest first. [`Self::send_input`] puts them ahead of the next
@@ -582,9 +584,7 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             respawn_resend_from: None,
             pending_operator_snapshot_json: None,
-            pending_entity_spawns: Vec::new(),
-            pending_entity_updates: Vec::new(),
-            pending_entity_despawns: Vec::new(),
+            pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -626,9 +626,7 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             respawn_resend_from: None,
             pending_operator_snapshot_json: None,
-            pending_entity_spawns: Vec::new(),
-            pending_entity_updates: Vec::new(),
-            pending_entity_despawns: Vec::new(),
+            pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -726,9 +724,10 @@ impl RemoteClient {
                         if let Ok(mut state) = protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload) {
                             // Deltas accumulate — see the pending_* field docs.
                             // Snapshot fields stay latest-wins via latest_state.
-                            self.pending_entity_spawns.append(&mut state.entity_spawns);
-                            self.pending_entity_updates.append(&mut state.entity_updates);
-                            self.pending_entity_despawns.append(&mut state.entity_despawns);
+                            let deltas = crate::remote_entities::EntityDeltas::take_from(&mut state);
+                            if !deltas.is_empty() {
+                                self.pending_entity_batches.push(deltas);
+                            }
                             self.pending_block_changes.append(&mut state.block_changes);
                             self.latest_state = Some(state);
                             changed = true;
@@ -1499,13 +1498,95 @@ mod tests {
         ));
         rc.poll();
 
-        let spawn_ids: Vec<u32> = rc.pending_entity_spawns.iter().map(|s| s.id).collect();
+        let batches = &rc.pending_entity_batches;
+        assert_eq!(batches.len(), 2, "one batch per StateUpdate, in arrival order");
+        let spawn_ids: Vec<u32> = batches[0].spawns.iter().map(|s| s.id).collect();
         assert_eq!(spawn_ids, vec![7], "tick 1's spawn survives tick 2's packet");
-        assert_eq!(rc.pending_entity_despawns, vec![7], "tick 2's despawn kept too");
+        assert_eq!(batches[1].despawns, vec![7], "tick 2's despawn kept too");
         let change_xs: Vec<i32> = rc.pending_block_changes.iter().map(|b| b.x).collect();
         assert_eq!(change_xs, vec![1, 2], "BOTH ticks' block changes, in order");
         // Snapshot data stays last-write-wins.
         assert_eq!(rc.latest_state.as_ref().map(|s| s.tick), Some(2));
+    }
+
+    /// Review D2a MEDIUM-2 (a). A mob leaves our interest (despawn, tick 1)
+    /// and comes back (full spawn + its update, tick 2), and both packets
+    /// land in one frame. Applied packet by packet the mob is there, moving;
+    /// folded into one flat list (spawns, then updates, then despawns) the
+    /// earlier despawn would delete the new copy — and the server, counting
+    /// it as shown, would send only updates the mirror drops.
+    #[test]
+    fn a_withdrawal_and_reentry_in_one_frame_leave_the_mob_mirrored() {
+        use crate::remote_entities::{apply_entity_batches, RemoteItems, RemoteProjectiles};
+        use crate::remote_mobs::RemoteMobs;
+        let cow = protocol::EntitySpawn {
+            id: 5,
+            kind: protocol::EntityKind::Cow,
+            x: 3.0,
+            y: 64.0,
+            z: 3.0,
+            yaw: 0.0,
+            health: 10,
+            item_kind: 0,
+            item_id: 0,
+            item_count: 0,
+            full_item: protocol::WireItem::None,
+        };
+        let mut shown = RemoteMobs::default();
+        shown.apply(std::slice::from_ref(&cow), &[], &[]);
+
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(
+            Box::new(client),
+            build_join_request_guest("Me", 0),
+            None,
+        );
+        let packet = |tick, spawns: Vec<protocol::EntitySpawn>, updates, despawns| {
+            protocol::serialize_packet(
+                PacketType::StateUpdate,
+                &protocol::StateUpdatePacket {
+                    tick,
+                    players: Vec::new(),
+                    block_changes: Vec::new(),
+                    world_time: 0,
+                    last_acked_input: 0,
+                    entity_spawns: spawns,
+                    entity_updates: updates,
+                    entity_despawns: despawns,
+                    reserve_richness: 0.0,
+                    reserve_target_sats: 0,
+                    reserve_current_sats: 0,
+                    rain_ticks_left: 0,
+                    storm_ticks_left: 0,
+                },
+            )
+        };
+        let moving = protocol::EntityUpdate {
+            id: 5,
+            x: 3.5,
+            y: 64.0,
+            z: 3.0,
+            vx: 0.1,
+            ..Default::default()
+        };
+        srv.send_to_client(&packet(1, vec![], vec![], vec![5]));
+        srv.send_to_client(&packet(2, vec![cow.clone()], vec![moving], vec![]));
+        rc.poll();
+
+        let (mut items, mut projectiles) = (RemoteItems::default(), RemoteProjectiles::default());
+        apply_entity_batches(&rc.pending_entity_batches, &mut items, &mut projectiles, Some(&mut shown));
+        assert_eq!(shown.len(), 1, "the re-entered cow is mirrored");
+        assert!(shown.drawn(5).is_some());
+
+        // The flat fold this replaces loses it.
+        let mut flat = RemoteMobs::default();
+        flat.apply(std::slice::from_ref(&cow), &[], &[]);
+        let all = &rc.pending_entity_batches;
+        let spawns: Vec<_> = all.iter().flat_map(|b| b.spawns.clone()).collect();
+        let updates: Vec<_> = all.iter().flat_map(|b| b.updates.clone()).collect();
+        let despawns: Vec<_> = all.iter().flat_map(|b| b.despawns.clone()).collect();
+        flat.apply(&spawns, &updates, &despawns);
+        assert_eq!(flat.len(), 0, "(the hazard: a flat fold applies the despawn last)");
     }
 
     /// Gap-audit T2-12: with the frame cap aligned to the decode cap, an
