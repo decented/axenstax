@@ -58,6 +58,11 @@ fn inv_remove_one(inv: &mut Inventory, item: &Item) -> bool {
 pub struct CraftingUi {
     pub open: bool,
     pub is_table: bool,
+    /// C2b — the crafting table the 3×3 grid was opened from (`None` for
+    /// the 2×2 player grid). A joined client names it in its
+    /// `ItemAction::Craft`, so the server can check the table is there and
+    /// in reach for a recipe bigger than 2×2.
+    pub table: Option<[i32; 3]>,
     pub grid: [[Option<ItemStack>; 3]; 3],
     pub result: Option<ItemStack>,
     pub cursor_item: Option<ItemStack>,
@@ -131,6 +136,7 @@ impl CraftingUi {
         Self {
             open: false,
             is_table: false,
+            table: None,
             grid: [[None, None, None], [None, None, None], [None, None, None]],
             result: None,
             cursor_item: None,
@@ -151,6 +157,7 @@ impl CraftingUi {
     pub fn open_player_crafting(&mut self) {
         self.open = true;
         self.is_table = false;
+        self.table = None;
         self.grid = [[None, None, None], [None, None, None], [None, None, None]];
         self.result = None;
         self.pad_focus = None;
@@ -160,9 +167,12 @@ impl CraftingUi {
         self.book_uses_filter = None;
     }
 
-    pub fn open_table_crafting(&mut self) {
+    /// Open the 3×3 grid of the crafting table at `table` (C2b: recorded
+    /// for a joiner's `ItemAction::Craft`).
+    pub fn open_table_crafting(&mut self, table: [i32; 3]) {
         self.open = true;
         self.is_table = true;
+        self.table = Some(table);
         self.grid = [[None, None, None], [None, None, None], [None, None, None]];
         self.result = None;
         self.pad_focus = None;

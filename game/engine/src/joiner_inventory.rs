@@ -13,13 +13,17 @@
 //!   ([`check_placement`]), and an accepted interaction takes what its
 //!   `InteractOutcome.consume_held` says, owed from wherever the item is
 //!   (`joiner_actions::take_owed`, the same function the client runs); and,
-//!   C2a, the food of an accepted `ItemAction::Eat` (`item_actions`).
+//!   C2a, the food of an accepted `ItemAction::Eat` (`item_actions`);
+//! - C2b: a craft is mirrored (`ItemAction::Craft`: one of each input taken,
+//!   owed; the output added) and a Q-drop taken (`ItemAction::Drop`, owed;
+//!   the item becomes a real ground item); a grant that doesn't fit the
+//!   shadow spills at the joiner's feet as a real item.
 //!
 //! Still the client's alone (the shadow does not see them): the inventory it
-//! joined with, crafting, chests and furnaces, Q-drops, tool and
-//! armour wear, armour equip, client-side pickups, face-attachment and
-//! drying-rack recovery, and moving stacks between slots (the full list of
-//! gaps, which must close before enforcement: Spec 04 §4.2e). So the shadow
+//! joined with, chests and furnaces, tool and armour wear, armour equip,
+//! face-attachment and drying-rack recovery, and moving stacks between slots
+//! (the full list of gaps, which must close before enforcement: Spec 04
+//! §4.2e). So the shadow
 //! drifts, and the possession check on placements is LOG-ONLY for one
 //! release ([`PossessionTally`]): it counts and logs a mismatch (debug; a
 //! warning at most once a minute per player), never refuses or corrects.
@@ -206,6 +210,17 @@ pub struct PossessionTally {
     /// Edits not checked: creative, non-block placements, meta toggles, side
     /// effects, a tagged break whose edit didn't match the server's yield.
     pub unchecked: u32,
+    /// C2b — crafts mirrored on the shadow (an input it couldn't pay is a
+    /// mismatch too).
+    pub crafts: u32,
+    /// C2b — crafts not mirrored, per reason
+    /// (`item_actions::CraftRefusal::index`).
+    pub crafts_refused: [u32; crate::item_actions::CraftRefusal::ALL.len()],
+    /// C2b — crafted items that didn't fit the shadow (counted, never
+    /// spilled: the client holds them).
+    pub craft_overflow: u32,
+    /// C2b — Q-drops spawned as ground items.
+    pub drops: u32,
     /// Mismatches since the last warning.
     suppressed: u32,
     /// When the last warning went out.
@@ -229,17 +244,44 @@ impl PossessionTally {
         Some(std::mem::take(&mut self.suppressed))
     }
 
+    /// C2b — count a craft the server didn't mirror.
+    pub fn note_craft_refused(&mut self, why: crate::item_actions::CraftRefusal) {
+        let n = &mut self.crafts_refused[why.index()];
+        *n = n.saturating_add(1);
+    }
+
+    /// C2b — crafts not mirrored, whatever the reason.
+    pub fn crafts_refused_total(&self) -> u32 {
+        self.crafts_refused.iter().fold(0u32, |a, &n| a.saturating_add(n))
+    }
+
     /// The one-line summary logged when `label` leaves, or `None` if nothing
     /// was counted.
     pub fn summary(&self, label: &str) -> Option<String> {
-        if [self.breaks, self.matched, self.mismatched, self.unchecked].iter().all(|&n| n == 0) {
+        let refused = self.crafts_refused_total();
+        let c2b = [self.crafts, refused, self.craft_overflow, self.drops];
+        if [self.breaks, self.matched, self.mismatched, self.unchecked].iter().chain(&c2b).all(|&n| n == 0) {
             return None;
         }
-        Some(format!(
+        let mut line = format!(
             "{label} left — possession check (log-only): {} placement(s) matched, {} mismatched \
              (placements or interactions), {} edit(s) unchecked; {} break(s) yielded by the server",
             self.matched, self.mismatched, self.unchecked, self.breaks
-        ))
+        );
+        if c2b.iter().any(|&n| n > 0) {
+            let reasons: Vec<String> = crate::item_actions::CraftRefusal::ALL
+                .iter()
+                .filter(|r| self.crafts_refused[r.index()] > 0)
+                .map(|r| format!("{} {}", self.crafts_refused[r.index()], r.label()))
+                .collect();
+            let reasons = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.join(", ")) };
+            line.push_str(&format!(
+                "; {} craft(s) mirrored, {refused} refused{reasons}, {} crafted item(s) didn't fit; \
+                 {} Q-drop(s) spawned",
+                self.crafts, self.craft_overflow, self.drops
+            ));
+        }
+        Some(line)
     }
 }
 
@@ -350,6 +392,27 @@ mod tests {
         assert_eq!(t.mismatched, 4, "every mismatch is counted");
         assert!(PossessionTally::default().summary("Visitor").is_none());
         assert!(t.summary("Visitor").unwrap().contains("4 mismatched"));
+        assert!(!t.summary("Visitor").unwrap().contains("craft"), "no craft part until one is counted");
+    }
+
+    /// C2b — crafts (mirrored, refused by reason, overflow) and Q-drops are
+    /// counted and summarised when the player leaves.
+    #[test]
+    fn crafts_and_drops_are_counted_in_the_summary() {
+        use crate::item_actions::CraftRefusal;
+        let mut t = PossessionTally::default();
+        t.note_craft_refused(CraftRefusal::NeedsTable);
+        assert!(t.summary("Crafter").is_some(), "a refused craft alone is worth a line");
+        t.crafts = 3;
+        t.note_craft_refused(CraftRefusal::NeedsTable);
+        t.note_craft_refused(CraftRefusal::NoRecipe);
+        t.craft_overflow = 1;
+        t.drops = 5;
+        assert_eq!(t.crafts_refused_total(), 3);
+        let line = t.summary("Crafter").unwrap();
+        assert!(line.contains("3 craft(s) mirrored, 3 refused (1 no recipe, 2 needs a table)"), "{line}");
+        assert!(line.contains("1 crafted item(s) didn't fit"), "{line}");
+        assert!(line.contains("5 Q-drop(s) spawned"), "{line}");
     }
 
     /// Review LOW-6 — the shadow starts empty, so a building joiner

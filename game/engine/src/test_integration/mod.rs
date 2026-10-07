@@ -36,6 +36,7 @@ pub mod entity_mirror; // MP-D2a — joiners see and are hurt by the server's mo
 pub mod joiners_act; // MP-D2b — joiners attack, interact with and kill the server's mobs.
 pub mod joiner_inventory; // C1 — the server yields joiners' breaks and shadows their inventory.
 pub mod joiner_hunger; // C2a — the server runs joiners' hunger, eating and sleep.
+pub mod joiner_craft_drop; // C2b — the server mirrors joiners' crafts and spawns their Q-drops.
 pub mod state_budget; // T1-5 — bounded server→client StateUpdates.
 pub mod joiner_authority;
 // D1 — a host lends its world to its server: one world, one sim.

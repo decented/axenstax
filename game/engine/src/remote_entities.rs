@@ -254,7 +254,11 @@ pub fn apply_inventory_grant(
     if let Some(remainder) = inv.add_item(stack) {
         // Inventory full (or partially) — spill what didn't fit at the
         // player's feet as a normal local ground item; the client pickup
-        // pass re-grants it when space frees up.
+        // pass re-grants it when space frees up. C2b: this is a late
+        // delivery of an item the server's shadow ALREADY holds (a grant
+        // carries only what landed in the shadow; what didn't fit there the
+        // server spills as a real item), so picking it up later is not a
+        // duplicate — the client is catching up with the shadow.
         if remainder.count > 0 {
             crate::entity::spawn_item(&mut *ecs, player_pos, remainder, id as u32);
         }

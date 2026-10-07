@@ -1,0 +1,568 @@
+//! C2b (2026-10-07, protocol v74) — a joiner's crafting and
+//! Q-drops are mirrored on the server, and a grant that doesn't fit the
+//! server's shadow of its inventory spills as a real item.
+//!
+//! Every test drives a REAL `HostedServer` over the in-process transport — a
+//! dedicated server, or a lending host where the world and ECS are the
+//! host's — and reads what the server's shadow holds, what lies on its
+//! ground and what the joiner is sent.
+//!
+//! The client half (the claims gate on a Q-drop or a craft click, the owed
+//! payment from the crafting grid and the cursor) needs a GPU-backed
+//! `GameState`; its rules are the pure `joiner_actions` functions the
+//! client sites call (`can_spend`, `may_craft`, `take_owed_held`),
+//! unit-tested there.
+
+use glam::Vec3;
+
+use crate::block;
+use crate::crafting::{Tool, ToolMaterial, ToolType};
+use crate::entity::{ItemEntity, Position};
+use crate::hosted_server::{HostedServer, RemoteTransport};
+use crate::item::{Item, ItemStack, MaterialId};
+use crate::item_actions::{CraftRefusal, DROP_INTERVAL_TICKS};
+use crate::protocol::{self, InventoryGrantPacket, ItemAction};
+use crate::sim_lend::OwnedSimParts;
+use crate::transport::{ChannelClientTransport, ClientTransport};
+
+use super::joiner_authority::join_guest;
+use super::joiners_act::floor_and_stand;
+use super::lent_world::{join_guest_lent, start_lent};
+
+/// One joiner.
+struct Joiner {
+    client: ChannelClientTransport,
+    slot: usize,
+    seq: u32,
+    grants: Vec<InventoryGrantPacket>,
+}
+
+/// Joiners standing on a stone floor round (40, 80, 40), on a dedicated
+/// server or a lending host (`host`: the host client's world and ECS, lent
+/// to the server each tick).
+struct Rig {
+    hs: HostedServer,
+    host: Option<OwnedSimParts>,
+    joiners: Vec<Joiner>,
+    at: Vec3,
+}
+
+impl Rig {
+    fn dedicated(tag: &str, joiners: usize) -> Self {
+        let mut hs = HostedServer::start(
+            0,
+            format!("joiner-craft-drop-{tag}-{}", std::process::id()),
+            42,
+            0,
+            RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        let joined: Vec<_> = (0..joiners).map(|n| join_guest(&mut hs, &format!("Crafter{n}"))).collect();
+        Self::stand(hs, None, joined)
+    }
+
+    fn lent(tag: &str) -> Self {
+        let (mut hs, mut host) = start_lent(&format!("joiner-craft-drop-{tag}"));
+        let joined = join_guest_lent(&mut hs, &mut host, "Crafter0");
+        Self::stand(hs, Some(host), vec![joined])
+    }
+
+    fn stand(mut hs: HostedServer, mut host: Option<OwnedSimParts>, joined: Vec<(ChannelClientTransport, usize)>) -> Self {
+        hs.server.column_streamer = None;
+        hs.server.column_refill_per_tick = 0;
+        hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let world = match host.as_mut() {
+            Some(h) => &mut h.world,
+            None => &mut hs.server.world,
+        };
+        let mut world = std::mem::replace(world, crate::world::World::new());
+        let mut at = Vec3::ZERO;
+        for (_, slot) in &joined {
+            at = floor_and_stand(&mut world, &mut hs, *slot);
+        }
+        match host.as_mut() {
+            Some(h) => h.world = world,
+            None => hs.server.world = world,
+        }
+        let ecs = match host.as_mut() {
+            Some(h) => &mut h.ecs,
+            None => &mut hs.server.ecs,
+        };
+        crate::remote_mobs::purge_private_mobs(ecs);
+        clear_items(ecs);
+        let joiners =
+            joined.into_iter().map(|(client, slot)| Joiner { client, slot, seq: 0, grants: Vec::new() }).collect();
+        let mut rig = Rig { hs, host, joiners, at };
+        rig.tick();
+        for j in &mut rig.joiners {
+            j.grants.clear();
+        }
+        rig
+    }
+
+    fn tick(&mut self) {
+        match self.host.as_mut() {
+            Some(h) => h.lend_tick(&mut self.hs),
+            None => self.hs.tick(),
+        }
+        for j in &mut self.joiners {
+            while let Some(pkt) = j.client.try_recv_from_server() {
+                if let Some((protocol::PacketType::InventoryGrant, payload)) = protocol::deserialize_header(&pkt) {
+                    j.grants.push(protocol::safe_deserialize(payload).unwrap());
+                }
+            }
+        }
+    }
+
+    fn ticks(&mut self, n: u32) {
+        for _ in 0..n {
+            self.tick();
+        }
+    }
+
+    fn world(&mut self) -> &mut crate::world::World {
+        match self.host.as_mut() {
+            Some(h) => &mut h.world,
+            None => &mut self.hs.server.world,
+        }
+    }
+
+    fn ecs(&self) -> &hecs::World {
+        match &self.host {
+            Some(h) => &h.ecs,
+            None => &self.hs.server.ecs,
+        }
+    }
+
+    fn sp(&mut self, j: usize) -> &mut crate::server::ServerPlayer {
+        let slot = self.joiners[j].slot;
+        &mut self.hs.server.players[slot]
+    }
+
+    fn send(&mut self, j: usize, action: ItemAction) {
+        let joiner = &mut self.joiners[j];
+        joiner.seq += 1;
+        let pkt = protocol::ItemActionPacket { seq: joiner.seq, action };
+        joiner.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    }
+
+    fn craft(&mut self, j: usize, grid: [(u8, u16); 9], table: Option<[i32; 3]>) {
+        self.send(j, ItemAction::Craft { grid, table });
+    }
+
+    fn drop(&mut self, j: usize, item: &Item) {
+        let (held_kind, held_id) = crate::inventory::item_to_ref(item).to_wire();
+        self.send(
+            j,
+            ItemAction::Drop { hotbar_slot: 0, held_kind, held_id, held_full: crate::inventory::item_to_wire_full(item) },
+        );
+    }
+
+    /// Put `stack` in joiner `j`'s shadow, slot `slot`.
+    fn give(&mut self, j: usize, slot: usize, stack: ItemStack) {
+        self.sp(j).inventory.set_slot(slot, Some(stack));
+    }
+
+    fn shadow_count(&self, j: usize, item: &Item) -> u32 {
+        self.hs.server.players[self.joiners[j].slot]
+            .inventory
+            .slots_iter()
+            .flatten()
+            .filter(|s| same(&s.item, item))
+            .map(|s| u32::from(s.count))
+            .sum()
+    }
+
+    fn tally(&self, j: usize) -> crate::joiner_inventory::PossessionTally {
+        self.hs.server.players[self.joiners[j].slot].possession
+    }
+
+    /// Every ground item: where it is, what it holds, its dropper.
+    fn items(&self) -> Vec<(Vec3, ItemStack, Option<u8>)> {
+        self.ecs()
+            .query::<(&Position, &ItemEntity)>()
+            .iter()
+            .map(|(_, (p, it))| (p.0, it.stack.clone(), it.dropper))
+            .collect()
+    }
+
+    fn granted(&self, j: usize, item: &Item) -> u32 {
+        self.joiners[j]
+            .grants
+            .iter()
+            .filter(|g| {
+                let got = crate::inventory::item_from_wire_full(&g.full_item)
+                    .or_else(|| crate::inventory::item_from_ref(g.item_kind, g.item_id, &crate::block::BlockRegistry::new()));
+                got.is_some_and(|got| same(&got, item))
+            })
+            .map(|g| u32::from(g.count))
+            .sum()
+    }
+}
+
+fn clear_items(ecs: &mut hecs::World) {
+    let ids: Vec<hecs::Entity> = ecs.query::<&ItemEntity>().iter().map(|(e, _)| e).collect();
+    for e in ids {
+        let _ = ecs.despawn(e);
+    }
+}
+
+/// The same item for counting: a tool by type and material.
+fn same(a: &Item, b: &Item) -> bool {
+    match (a, b) {
+        (Item::Tool(a), Item::Tool(b)) => (a.tool_type, a.material) == (b.tool_type, b.material),
+        (a, b) => a == b,
+    }
+}
+
+fn pair(item: &Item) -> (u8, u16) {
+    crate::inventory::item_to_ref(item).to_wire()
+}
+
+fn grid_of(cells: &[(usize, Item)]) -> [(u8, u16); 9] {
+    let mut g = [protocol::ItemRef::Empty.to_wire(); 9];
+    for (i, item) in cells {
+        g[*i] = pair(item);
+    }
+    g
+}
+
+fn planks() -> Item {
+    Item::Block(block::OAK_PLANKS)
+}
+
+fn cobble() -> Item {
+    Item::Block(block::COBBLESTONE)
+}
+
+fn stick() -> Item {
+    Item::Material(MaterialId::Stick)
+}
+
+/// 4 planks, 2×2 → a crafting table.
+fn table_recipe() -> [(u8, u16); 9] {
+    grid_of(&[(0, planks()), (1, planks()), (3, planks()), (4, planks())])
+}
+
+/// 3 cobblestone over 2 sticks, 3×3 → a stone pickaxe (a table recipe).
+fn pickaxe_recipe() -> [(u8, u16); 9] {
+    grid_of(&[(0, cobble()), (1, cobble()), (2, cobble()), (4, stick()), (7, stick())])
+}
+
+fn stone_pickaxe() -> Item {
+    Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Stone))
+}
+
+// ─── Crafting (decision 1) ─────────────────────────────────────────────────
+
+#[test]
+fn a_joiners_2x2_craft_is_mirrored_on_the_shadow() {
+    let mut rig = Rig::dedicated("craft-2x2", 1);
+    rig.give(0, 3, ItemStack::new_block(block::OAK_PLANKS, 5));
+    rig.craft(0, table_recipe(), None);
+    rig.tick();
+    assert_eq!(rig.shadow_count(0, &planks()), 1, "four planks taken, one per cell");
+    assert_eq!(rig.shadow_count(0, &Item::Block(block::CRAFTING_TABLE)), 1, "the output added");
+    assert_eq!(rig.tally(0).crafts, 1);
+    assert_eq!(rig.tally(0).mismatched, 0);
+    assert!(rig.joiners[0].grants.is_empty(), "a craft is never granted: the client made it");
+}
+
+#[test]
+fn a_craft_bigger_than_2x2_needs_a_crafting_table_in_reach() {
+    let mut rig = Rig::dedicated("craft-3x3", 1);
+    rig.give(0, 0, ItemStack::new_block(block::COBBLESTONE, 6));
+    rig.give(0, 1, ItemStack::new_material(MaterialId::Stick, 4));
+    let shadow = |rig: &Rig| (rig.shadow_count(0, &cobble()), rig.shadow_count(0, &stick()), rig.shadow_count(0, &stone_pickaxe()));
+
+    // From the 2×2 player grid (no table): refused, the shadow untouched.
+    rig.craft(0, pickaxe_recipe(), None);
+    rig.tick();
+    assert_eq!(shadow(&rig), (6, 4, 0));
+    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::NeedsTable.index()], 1);
+
+    // A crafting table two blocks ahead: accepted.
+    let (x, y, z) = (rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32);
+    let near = [x, y, z + 2];
+    rig.world().set_block(near[0], near[1], near[2], block::CRAFTING_TABLE);
+    rig.craft(0, pickaxe_recipe(), Some(near));
+    rig.tick();
+    assert_eq!(shadow(&rig), (3, 2, 1));
+    assert_eq!(rig.tally(0).crafts, 1);
+
+    // A table out of reach, or a cell that holds none: refused.
+    let far = [x + 7, y, z];
+    rig.world().set_block(far[0], far[1], far[2], block::CRAFTING_TABLE);
+    rig.craft(0, pickaxe_recipe(), Some(far));
+    rig.tick();
+    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::TableTooFar.index()], 1);
+    let floor = [x + 1, y - 1, z];
+    rig.craft(0, pickaxe_recipe(), Some(floor));
+    rig.tick();
+    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::NotATable.index()], 1);
+    assert_eq!(shadow(&rig), (3, 2, 1), "a refused craft leaves the shadow as it was");
+    assert_eq!(rig.tally(0).crafts, 1);
+}
+
+#[test]
+fn a_grid_with_no_recipe_or_a_bad_ingredient_is_refused() {
+    let mut rig = Rig::dedicated("craft-none", 1);
+    rig.give(0, 0, ItemStack::new_block(block::OAK_PLANKS, 4));
+    rig.craft(0, grid_of(&[(0, planks()), (4, stick())]), None);
+    let mut bad = table_recipe();
+    bad[8] = pair(&stone_pickaxe());
+    rig.craft(0, bad, None);
+    rig.tick();
+    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::NoRecipe.index()], 1);
+    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::BadIngredient.index()], 1);
+    assert_eq!(rig.shadow_count(0, &planks()), 4, "nothing taken");
+    assert_eq!(rig.tally(0).crafts, 0);
+}
+
+#[test]
+fn a_crafted_tool_lands_in_the_shadow_at_full_durability() {
+    let mut rig = Rig::dedicated("craft-tool", 1);
+    rig.give(0, 0, ItemStack::new_material(MaterialId::IronIngot, 2));
+    let iron = Item::Material(MaterialId::IronIngot);
+    rig.craft(0, grid_of(&[(0, iron.clone()), (3, iron)]), None);
+    rig.tick();
+    let shears = rig.hs.server.players[rig.joiners[0].slot].inventory.slots_iter().flatten().find_map(|s| match &s.item {
+        Item::Tool(t) => Some(*t),
+        _ => None,
+    });
+    let fresh = Tool::new(ToolType::Shears, ToolMaterial::Iron);
+    assert_eq!(shears.map(|t| (t.tool_type, t.durability)), Some((ToolType::Shears, fresh.durability)));
+    assert_eq!(rig.shadow_count(0, &Item::Material(MaterialId::IronIngot)), 0);
+}
+
+/// An input the shadow can't pay is a log-only mismatch: the craft is still
+/// mirrored (the client holds the output).
+#[test]
+fn a_craft_the_shadow_cannot_pay_is_mirrored_and_counted() {
+    let mut rig = Rig::dedicated("craft-short", 1);
+    rig.give(0, 0, ItemStack::new_block(block::OAK_PLANKS, 1));
+    rig.craft(0, table_recipe(), None);
+    rig.tick();
+    assert_eq!(rig.shadow_count(0, &planks()), 0);
+    assert_eq!(rig.shadow_count(0, &Item::Block(block::CRAFTING_TABLE)), 1);
+    assert_eq!(rig.tally(0).mismatched, 3, "three planks the shadow lacked");
+}
+
+/// Decision 2 — crafts count against the item-action budget: one past it
+/// waits for the next tick.
+#[test]
+fn crafts_count_against_the_item_action_budget() {
+    let mut rig = Rig::dedicated("craft-budget", 1);
+    rig.give(0, 0, ItemStack::new_block(block::OAK_PLANKS, 24));
+    for _ in 0..6 {
+        rig.craft(0, table_recipe(), None);
+    }
+    rig.tick();
+    assert_eq!(rig.tally(0).crafts, 4, "MAX_ITEM_ACTIONS_PER_TICK this tick");
+    rig.tick();
+    assert_eq!(rig.tally(0).crafts, 6, "the rest the next");
+    assert_eq!(rig.shadow_count(0, &planks()), 0);
+}
+
+// ─── Dropping (decision 2) ─────────────────────────────────────────────────
+
+/// The item lands, and its position settles.
+fn settle(rig: &mut Rig) -> Vec3 {
+    rig.ticks(12);
+    let items = rig.items();
+    assert_eq!(items.len(), 1, "one ground item");
+    items[0].0
+}
+
+#[test]
+fn a_joiners_drop_is_a_real_item_another_joiner_can_pick_up() {
+    let mut rig = Rig::dedicated("drop-other", 2);
+    let stick_item = stick();
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 3));
+    rig.sp(1).player.pos = Vec3::new(34.5, 80.0, 34.5); // on the floor, out of reach
+    rig.drop(0, &stick_item);
+    rig.tick();
+    let items = rig.items();
+    assert_eq!(items.len(), 1, "the drop is on the server's ground");
+    assert_eq!(items[0].1, ItemStack::new_material(MaterialId::Stick, 1));
+    assert_eq!(items[0].2, Some(rig.joiners[0].slot as u8), "the dropper is the joiner's server slot");
+    let eye = rig.hs.server.players[rig.joiners[0].slot].player.eye_pos();
+    assert!((items[0].0 - eye).length() < 1.0, "thrown from the server body's eye");
+    assert_eq!(rig.shadow_count(0, &stick_item), 2, "the shadow is debited");
+    assert_eq!(rig.tally(0).drops, 1);
+
+    // The other joiner walks onto it inside the dropper's delay and picks
+    // it up at once.
+    let at = settle(&mut rig);
+    rig.sp(1).player.pos = at;
+    rig.tick();
+    assert!(rig.items().is_empty(), "picked up");
+    assert_eq!(rig.granted(1, &stick_item), 1, "granted to the other joiner");
+    assert_eq!(rig.shadow_count(1, &stick_item), 1);
+    assert_eq!(rig.granted(0, &stick_item), 0);
+}
+
+#[test]
+fn the_dropper_waits_out_the_pickup_delay_then_gets_it_back() {
+    let mut rig = Rig::dedicated("drop-self", 1);
+    let bone = Item::Material(MaterialId::Bone);
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Bone, 1));
+    rig.drop(0, &bone);
+    rig.tick();
+    assert_eq!(rig.shadow_count(0, &bone), 0);
+    let at = settle(&mut rig); // 13 ticks since the drop
+    rig.sp(0).player.pos = at;
+    rig.ticks(crate::entity::ITEM_DROP_PICKUP_DELAY_TICKS - 16);
+    assert_eq!(rig.items().len(), 1, "still on the ground inside the delay");
+    assert_eq!(rig.granted(0, &bone), 0);
+    rig.ticks(6);
+    assert!(rig.items().is_empty(), "the delay is over: picked up");
+    assert_eq!(rig.granted(0, &bone), 1, "by InventoryGrant");
+    assert_eq!(rig.shadow_count(0, &bone), 1);
+}
+
+#[test]
+fn an_item_the_shadow_lacks_still_drops_and_is_counted() {
+    let mut rig = Rig::dedicated("drop-short", 1);
+    let wheat = Item::Material(MaterialId::Wheat);
+    rig.drop(0, &wheat);
+    rig.tick();
+    let items = rig.items();
+    assert_eq!(items.len(), 1, "it still spawns (log-only, as placements until C3)");
+    assert_eq!(items[0].1, ItemStack::new_material(MaterialId::Wheat, 1));
+    assert_eq!(rig.tally(0).mismatched, 1);
+    assert_eq!(rig.tally(0).drops, 1);
+}
+
+/// The claimed item drops at full fidelity: a worn tool keeps its wear.
+#[test]
+fn a_dropped_tool_keeps_the_wear_the_client_claims() {
+    let mut rig = Rig::dedicated("drop-tool", 1);
+    let mut pick = Tool::new(ToolType::Pickaxe, ToolMaterial::Iron);
+    pick.durability = 17;
+    rig.give(0, 0, ItemStack { item: Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron)), count: 1 });
+    rig.drop(0, &Item::Tool(pick));
+    rig.tick();
+    let items = rig.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].1.item, Item::Tool(pick), "the client's wear, not the shadow's");
+    assert_eq!(rig.shadow_count(0, &Item::Tool(pick)), 0, "the shadow's pickaxe is taken");
+}
+
+/// Pacing: five drops arriving in one tick all spawn, in order, two at once
+/// (the bucket's capacity) and then one per `DROP_INTERVAL_TICKS`. None is
+/// lost or refused; what follows them waits with them.
+#[test]
+fn five_drops_in_one_tick_all_spawn_in_order() {
+    let mut rig = Rig::dedicated("drop-pace", 1);
+    let sent: Vec<Item> = [MaterialId::Stick, MaterialId::Bone, MaterialId::Wheat, MaterialId::Bread, MaterialId::Coal]
+        .into_iter()
+        .map(Item::Material)
+        .collect();
+    for item in &sent {
+        rig.drop(0, item);
+    }
+    let mut seen: Vec<(Item, u32)> = Vec::new();
+    for t in 0..20u32 {
+        rig.tick();
+        for (_, stack, _) in rig.items() {
+            if !seen.iter().any(|(i, _)| *i == stack.item) {
+                seen.push((stack.item, t));
+            }
+        }
+    }
+    let order: Vec<Item> = seen.iter().map(|(i, _)| i.clone()).collect();
+    assert_eq!(order, sent, "every drop spawned, in the order sent");
+    let at: Vec<u32> = seen.iter().map(|(_, t)| *t).collect();
+    let step = DROP_INTERVAL_TICKS as u32;
+    assert_eq!(at, vec![0, 0, step, 2 * step, 3 * step], "two at once, then one per interval");
+    assert_eq!(rig.tally(0).drops, 5);
+}
+
+/// The host already drops into the shared world; a joiner's drop on a
+/// lending host lands there too — in the host client's own ECS.
+#[test]
+fn a_joiners_drop_on_a_lending_host_lands_in_the_hosts_world() {
+    let mut rig = Rig::lent("drop-lent");
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 2));
+    rig.drop(0, &stick());
+    rig.tick();
+    let host_items = rig.host.as_ref().unwrap().ecs.query::<&ItemEntity>().iter().count();
+    assert_eq!(host_items, 1, "the drop is in the host's ECS");
+    assert_eq!(rig.shadow_count(0, &stick()), 1);
+}
+
+// ─── Grant overflow (decision 3) ───────────────────────────────────────────
+
+fn fill_shadow(rig: &mut Rig, j: usize) {
+    for i in 0..36 {
+        rig.give(j, i, ItemStack::new_material(MaterialId::Bone, 64));
+    }
+}
+
+/// A grant that only partly fits the shadow: what fits is granted, the rest
+/// spills at the server body's feet as a real item.
+#[test]
+fn a_grant_spills_what_does_not_fit_the_shadow_and_grants_only_what_landed() {
+    let mut rig = Rig::dedicated("grant-spill", 1);
+    fill_shadow(&mut rig, 0);
+    rig.give(0, 7, ItemStack::new_material(MaterialId::Wheat, 60));
+    let slot = rig.joiners[0].slot;
+    rig.hs.grant_to_joiner(slot, [ItemStack::new_material(MaterialId::Wheat, 10)]);
+    rig.tick();
+    let wheat = Item::Material(MaterialId::Wheat);
+    assert_eq!(rig.granted(0, &wheat), 4, "the grant carries only what landed");
+    assert_eq!(rig.shadow_count(0, &wheat), 64);
+    let items = rig.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].1, ItemStack::new_material(MaterialId::Wheat, 6), "the rest is on the ground");
+    assert_eq!(items[0].2, None, "a spill, not a throw");
+    let feet = rig.hs.server.players[slot].player.pos;
+    assert!((items[0].0 - feet).length() < 1.5, "at the joiner's feet");
+}
+
+/// End to end: a break the joiner mines into a full shadow yields nothing to
+/// grant; its drop lies at the joiner's feet for anyone, and the joiner's
+/// body takes it once the shadow has room.
+#[test]
+fn a_break_into_a_full_shadow_spills_its_drop_and_it_is_picked_up_once_there_is_room() {
+    let mut rig = Rig::dedicated("grant-break", 1);
+    fill_shadow(&mut rig, 0);
+    let floor = (rig.at.x.floor() as i32 + 1, rig.at.y as i32 - 1, rig.at.z.floor() as i32);
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    rig.hs.server.loaded_columns.insert((floor.0.div_euclid(cs), floor.2.div_euclid(cs)));
+    let wood = Tool::new(ToolType::Pickaxe, ToolMaterial::Wood);
+    let input = protocol::InputPacket {
+        tick: 1,
+        x: rig.at.x,
+        y: rig.at.y,
+        z: rig.at.z,
+        health: 20.0,
+        held_kind: pair(&Item::Tool(wood)).0,
+        held_id: pair(&Item::Tool(wood)).1,
+        hotbar_slot: Some(0),
+        block_changes: vec![protocol::BlockChange { x: floor.0, y: floor.1, z: floor.2, new_block: block::AIR, meta: 0 }],
+        mined: vec![protocol::MinedBlock {
+            x: floor.0,
+            y: floor.1,
+            z: floor.2,
+            tool: crate::inventory::item_to_wire_full(&Item::Tool(wood)),
+        }],
+        ..Default::default()
+    };
+    rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    rig.tick();
+    assert_eq!(rig.world().get_block(floor.0, floor.1, floor.2), block::AIR);
+    assert_eq!(rig.tally(0).breaks, 1);
+    assert_eq!(rig.granted(0, &cobble()), 0, "nothing landed, nothing granted");
+    let items = rig.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].1, ItemStack::new_block(block::COBBLESTONE, 1));
+    // Room appears in the shadow: the body standing on the spill takes it.
+    rig.sp(0).inventory.set_slot(35, None);
+    rig.sp(0).player.pos = items[0].0;
+    rig.ticks(15);
+    assert!(rig.items().is_empty());
+    assert_eq!(rig.granted(0, &cobble()), 1);
+    assert_eq!(rig.shadow_count(0, &cobble()), 1);
+}

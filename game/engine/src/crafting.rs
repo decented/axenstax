@@ -2452,8 +2452,11 @@ fn armour_material_from_slot(slot: CraftSlot) -> Option<crate::armour::ArmourMat
     }
 }
 
-/// Find the bounding box of non-empty slots in the grid.
-fn grid_bounds(grid: &[[CraftSlot; 3]; 3]) -> (usize, usize, usize, usize) {
+/// Find the bounding box of non-empty slots in the grid: `(min_row,
+/// max_row, min_col, max_col)`. C2b: the server's craft mirror reads it to
+/// tell a 2×2 recipe from one that needs a crafting table
+/// (`item_actions::judge_craft`).
+pub(crate) fn grid_bounds(grid: &[[CraftSlot; 3]; 3]) -> (usize, usize, usize, usize) {
     let mut min_r = 3;
     let mut max_r = 0;
     let mut min_c = 3;

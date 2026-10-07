@@ -208,7 +208,10 @@ fn protocol_version_is_the_pinned_value() {
     // v73 (2026-10-07, C2a): `ItemAction = 62` (Eat, Sleep),
     //   `ItemActionOutcome = 63`, `StateUpdatePacket.own_hunger` — the server
     //   runs a joiner's hunger, eating and sleep.
-    assert_eq!(protocol::PROTOCOL_VERSION, 73);
+    // v74 (2026-10-07, C2b, PROVISIONAL — renumbered at merge):
+    //   `ItemAction::Craft` and `ItemAction::Drop` — the server mirrors a
+    //   joiner's crafting and spawns its Q-drops.
+    assert_eq!(protocol::PROTOCOL_VERSION, 74);
 }
 
 #[test]

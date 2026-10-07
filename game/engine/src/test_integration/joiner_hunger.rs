@@ -628,10 +628,11 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
     let mut inv = crate::inventory::Inventory::new();
     inv.set_slot(0, Some(two_bread));
 
+    let mut ui = crate::craft_ui::CraftingUi::new(); // C2b: the holdings' grid and cursor, empty
     let mut ja = JoinerActions::default();
     let next_input = 1_u64; // the first input of the session
     let ask = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread()) };
-    assert!(ja.can_afford(&inv, Asked::Eat, Some(&bread())));
+    assert!(ja.can_afford(&inv, &ui, Asked::Eat, Some(&bread())));
     let seq = ja.record(ask, next_input);
     assert_eq!(rig.eat(&bread()), seq, "the request goes out under the seq it was recorded with");
     assert!(ja.eat_in_flight(), "the request is in flight");
@@ -675,7 +676,7 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
         match (arrived, outcome) {
             (Arrived::Outcome { seq }, Some(o)) => {
                 let pending = ja.take(*seq).expect("still waiting for it");
-                assert_eq!(apply_item_outcome(&mut inv, &pending, o), 1);
+                assert_eq!(apply_item_outcome(&mut inv, &mut ui, &pending, o), 1);
             }
             (Arrived::State { acked }, _) => ja.acknowledged(*acked),
             _ => unreachable!(),
@@ -683,7 +684,7 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
     }
     assert_eq!(count(&inv), 1, "paid exactly once");
     assert_eq!(rig.shadow_count(MaterialId::Bread), 1, "the server took the same one");
-    assert!(ja.can_afford(&inv, Asked::Eat, Some(&bread())), "the second bread is free to eat");
+    assert!(ja.can_afford(&inv, &ui, Asked::Eat, Some(&bread())), "the second bread is free to eat");
 }
 
 fn count(inv: &crate::inventory::Inventory) -> u32 {

@@ -36,20 +36,14 @@ pub struct ServerPlayer {
     /// A server-simulated player (joiner or guest): the SHADOW the server
     /// keeps of its inventory (C1, `joiner_inventory`) — empty at attach, fed
     /// every gain the server decides (pickups, the drops of the joiner's
-    /// breaks, interaction products) and every consume it accepts (plain
-    /// block placements, interaction outcomes, C2a accepted eats). It doesn't
-    /// see what the client does alone (the inventory it joined with,
-    /// crafting, chests, slot moves, wear), so it drifts and checks nothing
-    /// yet (log-only).
+    /// breaks, interaction products, C2b crafted outputs) and every consume
+    /// it accepts (plain block placements, interaction outcomes, C2a accepted
+    /// eats, C2b crafting inputs and Q-drops). It doesn't see what the client
+    /// does alone (the inventory it joined with, chests, slot moves, wear),
+    /// so it drifts and checks nothing yet (log-only).
     pub inventory: Inventory,
     pub combat: PlayerCombat,
     pub hotbar_slot: usize,
-    // BRIDGE: server-side crafting isn't wired up (the known `ServerPlayer` vs
-    // `PlayerSlot` duplication in CLAUDE.md's tech-debt list) — crafting today
-    // is client-authoritative even in the single-player-bypasses-GameServer
-    // path. Kept here for when server-authoritative crafting lands.
-    #[allow(dead_code)]
-    pub crafting_ui: crate::craft_ui::CraftingUi,
     /// Camera yaw (radians) — relayed from client InputPacket for state broadcast.
     pub yaw: f32,
     /// Camera pitch (radians) — relayed from client InputPacket for state broadcast.
@@ -199,6 +193,10 @@ pub struct ServerPlayer {
     /// `ATTACK_COOLDOWN_JITTER_TICKS` early. Swings may bunch with network
     /// jitter, but never beat the client's own rate on average.
     pub next_swing_tick: u64,
+    /// C2b — the pacing of this joiner's Q-drops
+    /// (`item_actions::DropBucket`): a drop past it waits in the client's
+    /// inbound queue.
+    pub drop_bucket: crate::item_actions::DropBucket,
     /// C1 — this connection's log-only possession-check counters
     /// (`joiner_inventory::PossessionTally`), summarised in the log when it
     /// leaves.
@@ -398,7 +396,6 @@ impl ServerPlayer {
             inventory: Inventory::new(),
             combat: PlayerCombat::new(),
             hotbar_slot: 0,
-            crafting_ui: crate::craft_ui::CraftingUi::new(),
             yaw: 0.0,
             pitch: 0.0,
             held_item: 0,
@@ -435,6 +432,7 @@ impl ServerPlayer {
             interact_cooldown: 0,
             attach_gen: 0,
             next_swing_tick: 0,
+            drop_bucket: crate::item_actions::DropBucket::default(),
             possession: crate::joiner_inventory::PossessionTally::default(),
             eat_cooldown: 0,
             slept_night: None,

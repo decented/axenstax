@@ -47,6 +47,11 @@ pub struct PlayerSlot {
     /// Quantises scroll so a fast spin / high-DPI wheel doesn't run the
     /// selection away (#11). Not persisted — transient input state.
     pub hotbar_scroll_ready_tick: u64,
+    /// C2b — earliest tick at which a joined client may Q-drop again
+    /// (`item_actions::DROP_INTERVAL_TICKS` after the last), the rate the
+    /// server's drop bucket refills at. Single-player and a host's seats
+    /// drop as before. Not persisted — transient input state.
+    pub drop_ready_tick: u64,
     /// Sub-notch scroll carried between ticks. One wheel notch (~1.0) selects
     /// exactly one slot; fractional/trackpad deltas accumulate here until a whole
     /// notch is reached, so selection no longer walks at a fixed rate
@@ -329,6 +334,7 @@ impl PlayerSlot {
             combat: PlayerCombat::new(),
             hotbar_slot: 0,
             hotbar_scroll_ready_tick: 0,
+            drop_ready_tick: 0,
             hotbar_scroll_accum: 0.0,
             crafting_ui: CraftingUi::new(),
             target_block: None,

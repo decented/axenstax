@@ -59,13 +59,15 @@ pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
 /// packets a tick) would leave honest requests unanswered.
 const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
 
-/// C2a — `ItemAction` requests (eat, sleep) read per client per tick: their
-/// own budget, not [`MAX_ENTITY_REQUESTS_PER_TICK`]'s. One past it WAITS for
-/// the next tick in the client's inbound queue (FU1), with everything sent
-/// after it: never dropped, never refused (FU3: as an entity request or a
-/// device interaction past its own budget now does). No honest client reaches
-/// it (an eat every 16 ticks, `item_actions::EAT_COOLDOWN_TICKS`; a sleep once
-/// a night).
+/// C2a — `ItemAction` requests (eat, sleep; C2b craft, drop) read per client
+/// per tick: their own budget, not [`MAX_ENTITY_REQUESTS_PER_TICK`]'s. One
+/// past it WAITS for the next tick in the client's inbound queue (FU1), with
+/// everything sent after it: never dropped, never refused (FU3: as an entity
+/// request or a device interaction past its own budget now does). No honest
+/// client reaches it (an eat every 16 ticks, `item_actions::EAT_COOLDOWN_TICKS`;
+/// a sleep once a night; a drop every `item_actions::DROP_INTERVAL_TICKS`; a
+/// craft per click). C2b — a drop also waits while the joiner's drop bucket
+/// is empty (`item_actions::DropBucket`).
 const MAX_ITEM_ACTIONS_PER_TICK: usize = 4;
 
 /// C2a — is `packet` an `ItemAction` (budgeted by deferral, not dropping)?
@@ -247,13 +249,20 @@ fn is_control_packet(packet: &[u8]) -> bool {
 /// FU3 — does `packet` (at the front of a client's queue) wait for the next
 /// tick because its kind's budget is spent this tick: an entity request past
 /// [`MAX_ENTITY_REQUESTS_PER_TICK`], a device interaction past
-/// [`MAX_DEVICE_INTERACTS_PER_TICK`]. Waiting, not skipping: an honest
-/// catch-up can hold more of either than one tick reads.
-fn waits_for_kind_budget(packet: &[u8], entity_requests: usize, device_interacts: usize) -> bool {
+/// [`MAX_DEVICE_INTERACTS_PER_TICK`], or (C2b) an `ItemAction::Drop` while
+/// the joiner's drop bucket is empty (`drop_ready` false:
+/// `item_actions::DropBucket`). Waiting, not skipping: an honest catch-up
+/// can hold more of either than one tick reads.
+fn waits_for_kind_budget(packet: &[u8], entity_requests: usize, device_interacts: usize, drop_ready: bool) -> bool {
     use protocol::PacketType as P;
     match protocol::deserialize_header(packet) {
         Some((P::EntityAttack | P::EntityInteract, _)) => entity_requests >= MAX_ENTITY_REQUESTS_PER_TICK,
         Some((P::DeviceInteract, _)) => device_interacts >= MAX_DEVICE_INTERACTS_PER_TICK,
+        Some((P::ItemAction, payload))
+            if protocol::peek_item_action_variant(payload) == Some(protocol::item_action_variant::DROP) =>
+        {
+            !drop_ready
+        }
         _ => false,
     }
 }
@@ -1957,6 +1966,12 @@ impl HostedServer {
                     })
                     .map(|()| 0)
             }
+            // C2b — fire-and-forget: mirrored on the server, never answered.
+            protocol::ItemAction::Craft { grid, table } => return self.mirror_joiner_craft(i, grid, *table),
+            protocol::ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                return self.spawn_joiner_drop(i, usize::from(*hotbar_slot), held);
+            }
         };
         let (accepted, consume_held, note) = match served {
             Ok(n) => (true, n, ItemNote::None.to_wire()),
@@ -1975,18 +1990,84 @@ impl HostedServer {
     /// the shadow can't pay is a possession mismatch — counted and logged
     /// (rate-limited), never refused. `how` ends the log line's "used … ".
     fn shadow_take_owed(&mut self, i: usize, slot: usize, held: &crate::item::Item, n: u8, how: &str) {
-        let tick = self.server.tick_counter;
         let Some(sp) = self.server.players.get_mut(i) else { return };
         let taken = crate::joiner_actions::take_owed(&mut sp.inventory, slot, held, n);
-        if taken < n {
-            let due = sp.possession.note_mismatch(tick);
-            log::log!(
-                crate::joiner_inventory::mismatch_log_level(due),
-                "possession check (log-only): {} used {n} × {held:?} {how}; the server's copy \
-                 of their inventory held {taken}{} — accepted",
-                sp.display_name,
-                held_back_note(due),
-            );
+        self.note_shortfall(i, held, n, taken, how);
+    }
+
+    /// C1 — joiner `i` used `n` of `held` `how`, and the shadow paid `taken`:
+    /// a shortfall is a possession mismatch, counted and logged
+    /// (rate-limited), never refused.
+    fn note_shortfall(&mut self, i: usize, held: &crate::item::Item, n: u8, taken: u8, how: &str) {
+        if taken >= n {
+            return;
+        }
+        let tick = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let due = sp.possession.note_mismatch(tick);
+        log::log!(
+            crate::joiner_inventory::mismatch_log_level(due),
+            "possession check (log-only): {} used {n} × {held:?} {how}; the server's copy \
+             of their inventory held {taken}{} — accepted",
+            sp.display_name,
+            held_back_note(due),
+        );
+    }
+
+    /// C2b — joiner `i` crafted once from `grid` (`table`: the crafting table
+    /// its 3×3 grid was opened from): judged and mirrored on the server's
+    /// shadow of its inventory by `item_actions::serve_craft` (one of each
+    /// input taken, owed; the output added). Never answered — the client's
+    /// own craft stands. An input the shadow can't pay is a log-only
+    /// mismatch; an output that doesn't fit is counted, not spilled (the
+    /// client holds it); a refusal leaves the shadow as it was and is counted
+    /// by reason.
+    // BRIDGE: replaced when C3a mirrors the craft grid as window state (the
+    // result click becomes a window op); judge_craft's rule carries over.
+    fn mirror_joiner_craft(&mut self, i: usize, grid: &[(u8, u16); 9], table: Option<[i32; 3]>) {
+        let server = &mut self.server;
+        let Some(sp) = server.players.get_mut(i) else { return };
+        let short = match crate::item_actions::serve_craft(sp, &server.world, &server.registry, grid, table) {
+            Ok(applied) => {
+                sp.possession.crafts = sp.possession.crafts.saturating_add(1);
+                sp.possession.craft_overflow =
+                    sp.possession.craft_overflow.saturating_add(u32::from(applied.overflow));
+                applied.short
+            }
+            Err(why) => {
+                log::debug!("{}'s craft not mirrored: {}", sp.display_name, why.label());
+                sp.possession.note_craft_refused(why);
+                return;
+            }
+        };
+        for item in &short {
+            self.note_shortfall(i, item, 1, 0, "in a craft");
+        }
+    }
+
+    /// C2b — joiner `i` Q-dropped one of `held` from hotbar slot `slot`: the
+    /// CLAIMED item (full fidelity — the client's wear is nearer the truth
+    /// than the shadow's) is thrown from the server body as a real ground
+    /// item everyone sees and can pick up (`entity::q_drop_launch` +
+    /// `spawn_thrown_item`, the client's own drop; the dropper waits out
+    /// `ITEM_DROP_PICKUP_DELAY_TICKS`), and taken from the shadow by the
+    /// owed rule. A shortfall is a log-only mismatch and the item still
+    /// spawns. Never answered. The drop already spent a token of the
+    /// joiner's drop bucket (it waited in the inbound queue for one).
+    ///
+    /// BRIDGE: possession check — a modified client can drop an item it
+    /// doesn't hold, and that item is then real for everyone. Closes with
+    /// enforcement (C3).
+    fn spawn_joiner_drop(&mut self, i: usize, slot: usize, held: Option<crate::item::Item>) {
+        let tick = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        sp.drop_bucket.take(tick);
+        let Some(drop) = crate::item_actions::serve_drop(sp, slot, held) else { return };
+        sp.possession.drops = sp.possession.drops.saturating_add(1);
+        let (pos, velocity) = crate::entity::q_drop_launch(drop.eye, drop.forward);
+        crate::entity::spawn_thrown_item(&mut self.server.ecs, pos, velocity, drop.stack.clone(), i as u8);
+        if !drop.paid {
+            self.note_shortfall(i, &drop.stack.item, 1, 0, "in a Q-drop");
         }
     }
 
@@ -2527,11 +2608,14 @@ impl HostedServer {
                 }
                 // C2a — an item action past its budget waits too, and so does
                 // everything behind it (one ordered stream). FU3 — so do an
-                // entity request and a device interaction past theirs.
+                // entity request and a device interaction past theirs; C2b —
+                // and a Q-drop the joiner's drop bucket can't pay for yet.
+                let now = self.server.tick_counter;
+                let drop_ready = self.server.players.get(i).is_none_or(|sp| sp.drop_bucket.ready(now));
                 if (item_actions_this_tick >= MAX_ITEM_ACTIONS_PER_TICK
                     && self.inbound[i].front().is_some_and(|p| is_item_action(p)))
                     || self.inbound[i].front().is_some_and(|p| {
-                        waits_for_kind_budget(p, entity_requests_this_tick, interacts_this_tick)
+                        waits_for_kind_budget(p, entity_requests_this_tick, interacts_this_tick, drop_ready)
                     })
                 {
                     break;
@@ -3560,20 +3644,40 @@ impl HostedServer {
 
     /// C1 — what the server gives joiner `i` (a break's yield, an
     /// interaction's products): into its shadow of the joiner's inventory, and
-    /// to the joiner by `InventoryGrant`. A stack that doesn't fit the shadow
-    /// is dropped from it; the client spills what doesn't fit at its feet (as
-    /// for every grant), a ground item only it can see. Plans have no wire
-    /// form and are never granted.
-    fn grant_to_joiner(&mut self, i: usize, stacks: impl IntoIterator<Item = crate::item::ItemStack>) {
-        let grants: Vec<(usize, crate::item::ItemStack)> = stacks
-            .into_iter()
-            .filter(|s| s.count > 0 && !matches!(s.item, crate::item::Item::Plan(_)))
-            .map(|s| (i, s))
-            .collect();
-        if let Some(sp) = self.server.players.get_mut(i) {
-            for (_, stack) in &grants {
-                let _ = sp.inventory.add_item(stack.clone());
+    /// to the joiner by `InventoryGrant`. C2b — what doesn't fit the shadow
+    /// spills at the server body's feet as a real ground item
+    /// (`break_drops::spill_at_feet`, the shared spill), which the joiner's
+    /// body picks up once the shadow has room; the `InventoryGrant` carries
+    /// only what landed in the shadow. (The client's own spill when ITS
+    /// inventory is full — `remote_entities::apply_inventory_grant` — is a
+    /// late delivery of an item the shadow already holds, not a duplicate.)
+    /// Plans have no wire form and are never granted.
+    pub(crate) fn grant_to_joiner(&mut self, i: usize, stacks: impl IntoIterator<Item = crate::item::ItemStack>) {
+        let tick = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let mut grants: Vec<(usize, crate::item::ItemStack)> = Vec::new();
+        let mut spill: Vec<crate::item::ItemStack> = Vec::new();
+        for stack in stacks {
+            if stack.count == 0 || matches!(stack.item, crate::item::Item::Plan(_)) {
+                continue;
             }
+            let landed = match sp.inventory.add_item(stack.clone()) {
+                None => stack.count,
+                Some(rest) => {
+                    let landed = stack.count.saturating_sub(rest.count);
+                    spill.push(rest);
+                    landed
+                }
+            };
+            if landed > 0 {
+                grants.push((i, crate::item::ItemStack { item: stack.item, count: landed }));
+            }
+        }
+        if !spill.is_empty() {
+            let feet = sp.player.pos;
+            let cell = feet.floor().as_ivec3();
+            let seed = crate::break_drops::drop_seed(tick, cell.x, cell.y, cell.z);
+            crate::break_drops::spill_at_feet(&mut self.server.ecs, feet, &spill, seed);
         }
         for (slot, pkt) in build_grant_packets(&grants) {
             self.send_to_joined_slot(slot, &pkt);
@@ -3605,8 +3709,8 @@ impl HostedServer {
     /// is NOT refused. Since C1 the server keeps a SHADOW of a remote
     /// player's inventory (`ServerPlayer.inventory`, `joiner_inventory`) and
     /// checks each plain block placement against its held slot, but LOG-ONLY
-    /// (`PossessionTally`): the shadow doesn't yet see crafting, chests, slot
-    /// moves or what the joiner arrived with, so refusing would refuse
+    /// (`PossessionTally`): the shadow doesn't yet see chests, slot moves or
+    /// what the joiner arrived with (C2b mirrors crafting), so refusing would refuse
     /// legitimate placements. Make it refuse (and send the block back) when
     /// the remaining gains reach the server (inventory authority merges 2-3,
     /// the `ServerPlayer` vs `PlayerSlot` debt in CLAUDE.md).

@@ -624,7 +624,7 @@ The inventory system is a dedicated ECS system that:
 
 ### 3.5 Inventory Synchronisation
 
-> **As built (C1, 2026-10-07).** None of the design below exists yet: there is no join-time inventory send, `SlotUpdate` or resync. A joined client's inventory is its own; the server learns only the changes it decides itself and grants them by `InventoryGrant` (pickups, the joiner's break drops, interaction products), and keeps a drifting **shadow** of each joiner's inventory from those plus the consumes it accepts (plain placements, interaction outcomes), with a log-only possession check on placements. What is server-computed and what is still client-trusted: Spec 04 §4.2e.
+> **As built (C1, 2026-10-07).** None of the design below exists yet: there is no join-time inventory send, `SlotUpdate` or resync. A joined client's inventory is its own; the server learns only the changes it decides itself and grants them by `InventoryGrant` (pickups, the joiner's break drops, interaction products), and keeps a drifting **shadow** of each joiner's inventory from those plus the consumes it accepts (plain placements, interaction outcomes), with a log-only possession check on placements. Since C2b (v74) the shadow also mirrors a joiner's crafting and Q-drops, and a grant that doesn't fit it spills as a real item. What is server-computed and what is still client-trusted: Spec 04 §4.2e.
 
 - On join, the server sends the full inventory state to the client.
 - During gameplay, only **delta updates** are sent: `SlotUpdate { slot_id, new_contents }`.
@@ -639,7 +639,7 @@ The inventory UI supports standard drag-and-drop interactions:
 - **Right-click**: Pick up half stack (rounded up) / place one item.
 - **Shift-click**: Move full stack to the other inventory section (hotbar <-> main).
 - **Number keys (1-9)**: Swap hovered item with the corresponding hotbar slot.
-- **Q key**: Drop one item — from the cursor-held stack when the inventory UI is open, or from the active hotbar slot during gameplay. The dropped stack spawns as an `ItemEntity` in front of the player's eye with a small forward + upward velocity. Tools and other unstackable items drop the whole stack regardless. (Implemented via `Inventory::take_one_from_hotbar` + `entity::spawn_thrown_item`; Q is wired in `InputState::key_pressed` and surfaced through `PlayerIntent.drop_item`.)
+- **Q key**: Drop one item — from the cursor-held stack when the inventory UI is open, or from the active hotbar slot during gameplay. The dropped stack spawns as an `ItemEntity` in front of the player's eye with a small forward + upward velocity. Tools and other unstackable items drop the whole stack regardless. (Implemented via `Inventory::take_one_from_hotbar` + `entity::q_drop_launch` + `entity::spawn_thrown_item`; Q is wired in `InputState::key_pressed` and surfaced through `PlayerIntent.drop_item`.) *(As built: only the hotbar drop exists — the panel ignores Q while open. Q is edge-triggered, one drop per press. A joiner's drop is spawned by the server as a real item, at most one every `DROP_INTERVAL_TICKS` = 4, C2b — §6.4.1, Spec 04 §4.2f.)*
 
   **Pickup delay**: A Q-dropped item has `ITEM_DROP_PICKUP_DELAY_TICKS = 30` (1.5 s @ 20 TPS) before its dropper can pick it up again, so the player can't instantly hoover their own throw. The `ItemEntity.dropper` field carries the dropper's player index and is honoured per-player by `tick_item_pickups` — **other players bypass the delay and pick it up immediately**. Natural drops (mining, mob death) use `dropper = None` + the shorter `ITEM_PICKUP_DELAY_TICKS = 10` (0.5 s), which blocks every player during the window. The slice signature is `&mut [(real_player_index, position, &mut Inventory)]` so the real index — not the alive-player slot — is what gets matched against `dropper`.
 - **Ctrl+Q**: Drop the entire held stack. (Not yet implemented.)
@@ -1626,6 +1626,22 @@ joiner any more (Spec 04 §4.2c).
   restarts, until the per-npub sidecar step.
   `/kill` and `/heal` are op-only, never available to a joiner (were one run,
   `/heal` would heal only its own view: the server ignores reported heals).
+- **A joiner's crafting and Q-drops reach the server (C2b, v74, Spec 04
+  §4.2f).** A joiner crafts exactly as in single-player (2×2 grid or a
+  crafting table's 3×3, one craft per click on the result); after each craft
+  its client tells the server the grid it crafted from, and the server repeats
+  the craft on its copy of the joiner's inventory (inputs out, output in) — a
+  recipe bigger than 2×2 only at a real crafting table within reach. Nothing
+  is undone on the client. A joiner's Q-drop becomes a real item in the
+  server's world, thrown from the joiner's body, which everyone sees and can
+  pick up (the dropper waits the usual 1.5 s); its client spawns nothing
+  itself. A joiner can Q-drop at most once every 4 ticks (single-player is
+  unchanged: one drop per press). A Plan still drops only in the joiner's own
+  view (no wire form). Neither a drop nor a craft may spend an item a request
+  still waiting on the server needs (milking with the only bucket, feeding
+  the only wheat): the key or click then does nothing. An item the server
+  gives a joiner whose inventory (as the server holds it) is full lands at
+  the joiner's feet as a real item, as single-player's full-inventory spill.
 - **A joiner fights and handles the server's mobs (MP-D2b, Spec 04 §4.2d).**
   Its swing at the mob under the crosshair (in front of the first block, not
   the swing's wide cone) goes to the server as `EntityAttack`; the server

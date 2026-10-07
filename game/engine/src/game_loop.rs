@@ -10341,16 +10341,23 @@ impl super::GameState {
             // Drop one of the held hotbar item (Q key). Requires the cursor
             // to be captured so a Q-press during chat/inventory doesn't leak
             // through. Tosses the dropped stack along the look direction.
+            // C2b — a joiner's drop is the server's (`send_drop_request`),
+            // except a Plan's, which has no wire form.
             if intent.drop_item
                 && intent.cursor_captured
                 && !self.players[pidx].crafting_ui.open
             {
                 let slot_idx = self.players[pidx].hotbar_slot;
-                if let Some(stack) = self.players[pidx].inventory.take_one_from_hotbar(slot_idx) {
+                let plan = matches!(
+                    self.players[pidx].inventory.hotbar_slot(slot_idx).map(|s| &s.item),
+                    Some(crate::item::Item::Plan(_))
+                );
+                if self.joined() && !plan {
+                    self.send_drop_request(pidx, slot_idx);
+                } else if let Some(stack) = self.players[pidx].inventory.take_one_from_hotbar(slot_idx) {
                     let eye = self.players[pidx].player.eye_pos();
                     let fwd = self.players[pidx].camera.forward();
-                    let drop_pos = eye + fwd * 0.4 + glam::Vec3::new(0.0, -0.2, 0.0);
-                    let velocity = fwd * 0.3 + glam::Vec3::new(0.0, 0.2, 0.0);
+                    let (drop_pos, velocity) = crate::entity::q_drop_launch(eye, fwd);
                     crate::entity::spawn_thrown_item(
                         &mut self.ecs,
                         drop_pos,
@@ -13530,7 +13537,7 @@ impl super::GameState {
                 if let Some(pos) = self.players[pidx].target_block {
                     let target_blk = self.world.get_block(pos[0], pos[1], pos[2]);
                     if target_blk == block::CRAFTING_TABLE {
-                        self.players[pidx].crafting_ui.open_table_crafting();
+                        self.players[pidx].crafting_ui.open_table_crafting(pos);
                         if pidx == 0 { self.release_cursor(); }
                     } else if crate::block_shape::is_toggleable(target_blk) {
                         // Wave 2 / F1 — open/close toggle for fence gates,
@@ -21054,8 +21061,24 @@ impl super::GameState {
                         .result
                         .as_ref()
                         .map(|s| s.item.clone());
+                    // C2b — a joiner's craft must not spend an item a request
+                    // in flight needs (it does nothing), and is mirrored on
+                    // the server from the grid as it was BEFORE the craft.
+                    // BRIDGE: replaced when C3a mirrors the craft grid as
+                    // window state (the result click becomes a window op);
+                    // judge_craft's rule carries over.
+                    let joined = self.joined();
+                    let p = &self.players[pidx];
+                    if joined && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui) {
+                        continue;
+                    }
+                    let grid_before = joined.then(|| crate::item_actions::craft_grid_wire(&p.crafting_ui.grid));
+                    let table = p.crafting_ui.table;
                     let p = &mut self.players[pidx];
                     let crafted = p.crafting_ui.click_result(&mut p.inventory);
+                    if crafted && let Some(grid) = grid_before {
+                        self.send_craft_mirror(grid, table);
+                    }
                     // Phase 3 — coverage-challenge CraftItem event (only on a real craft).
                     if crafted
                         && let Some(scenario) = &mut self.scenario {
@@ -21971,7 +21994,8 @@ impl super::GameState {
     ) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let asked = crate::joiner_actions::Asked::Interact(kind);
-        if !self.joiner_actions.can_afford(&self.players[pidx].inventory, asked, held.as_ref()) {
+        let p = &self.players[pidx];
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
         let next_input = self.next_input_seq();
@@ -22001,7 +22025,8 @@ impl super::GameState {
     pub(crate) fn send_eat_request(&mut self, pidx: usize) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let asked = crate::joiner_actions::Asked::Eat;
-        if !self.joiner_actions.can_afford(&self.players[pidx].inventory, asked, held.as_ref()) {
+        let p = &self.players[pidx];
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
         let next_input = self.next_input_seq();
@@ -22018,6 +22043,54 @@ impl super::GameState {
                     held_id,
                     held_full,
                 },
+            });
+        }
+    }
+
+    /// C2b — player `pidx` (a joiner) Q-drops one of what is in hotbar slot
+    /// `slot`: not inside `DROP_INTERVAL_TICKS` of its last drop (the
+    /// server's drop bucket refills at that rate), and not an item a request
+    /// in flight needs (`JoinerActions::can_spend`) — either does nothing.
+    /// Otherwise the item leaves the hand exactly as single-player's drop
+    /// (`take_one_from_hotbar`), nothing is spawned here, and the server is
+    /// told (`ItemAction::Drop`, never answered): it throws the item from our
+    /// body as a real ground item everyone sees, which we see as its ghost.
+    fn send_drop_request(&mut self, pidx: usize, slot: usize) {
+        let now = self.tick_counter;
+        let p = &self.players[pidx];
+        if now < p.drop_ready_tick {
+            return;
+        }
+        let Some(held) = p.inventory.hotbar_slot(slot).map(|s| s.item.clone()) else { return };
+        if !self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &held, 1) {
+            return;
+        }
+        let p = &mut self.players[pidx];
+        let Some(stack) = p.inventory.take_one_from_hotbar(slot) else { return };
+        p.drop_ready_tick = now + crate::item_actions::DROP_INTERVAL_TICKS;
+        let (held_kind, held_id) = crate::inventory::item_to_ref(&stack.item).to_wire();
+        let held_full = crate::inventory::item_to_wire_full(&stack.item);
+        let seq = self.joiner_actions.unanswered();
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_item_action(&crate::protocol::ItemActionPacket {
+                seq,
+                action: crate::protocol::ItemAction::Drop { hotbar_slot: slot as u8, held_kind, held_id, held_full },
+            });
+        }
+    }
+
+    /// C2b — we (a joiner) crafted once from `grid` (the wire form of the
+    /// grid before the craft, `item_actions::craft_grid_wire`) at `table`:
+    /// tell the server, which mirrors it on its copy of our inventory. Never
+    /// answered; our craft stands.
+    // BRIDGE: replaced when C3a mirrors the craft grid as window state (the
+    // result click becomes a window op); judge_craft's rule carries over.
+    fn send_craft_mirror(&mut self, grid: [(u8, u16); 9], table: Option<[i32; 3]>) {
+        let seq = self.joiner_actions.unanswered();
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_item_action(&crate::protocol::ItemActionPacket {
+                seq,
+                action: crate::protocol::ItemAction::Craft { grid, table },
             });
         }
     }
@@ -22058,7 +22131,8 @@ impl super::GameState {
         if self.players.is_empty() {
             return;
         }
-        crate::joiner_actions::apply_item_outcome(&mut self.players[0].inventory, &request, out);
+        let p = &mut self.players[0];
+        crate::joiner_actions::apply_item_outcome(&mut p.inventory, &mut p.crafting_ui, &request, out);
         if out.accepted {
             match request.kind {
                 crate::joiner_actions::Asked::Eat => {
@@ -22091,8 +22165,8 @@ impl super::GameState {
         if self.players.is_empty() {
             return;
         }
-        let applied =
-            crate::joiner_actions::apply_outcome(&mut self.players[0].inventory, &request, out);
+        let p = &mut self.players[0];
+        let applied = crate::joiner_actions::apply_outcome(&mut p.inventory, &mut p.crafting_ui, &request, out);
         if applied.wear.is_some() {
             self.handle_tool_use(applied.wear);
         }

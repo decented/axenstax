@@ -894,8 +894,9 @@ pub struct EntityInteractPacket {
     pub sneak: bool,
 }
 
-/// What an [`ItemActionPacket`] asks for (C2a). Wire-stable, APPEND ONLY:
-/// C2b appends `Craft` and `Drop`.
+/// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`).
+/// Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2, Drop = 3
+/// (pinned on the wire bytes by `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
@@ -907,6 +908,39 @@ pub enum ItemAction {
     /// the server body, the night and once a night, then sets the spawn point
     /// there and heals the body to full. It never skips the night.
     Sleep { bed: [i32; 3] },
+    /// C2b — the client crafted once from this grid (row-major, as it stood
+    /// BEFORE the craft consumed it), each cell an `(item_kind, item_id)`
+    /// pair in the `inventory::item_to_ref` encoding (ingredients are always
+    /// blocks or materials, so the pair is lossless). `table` is the crafting
+    /// table the 3×3 grid was opened from; `None` for the 2×2 player grid.
+    /// Fire-and-forget: the server mirrors the craft on its shadow of the
+    /// joiner's inventory (`item_actions::judge_craft`) and answers nothing;
+    /// the client's own craft stands.
+    // BRIDGE: replaced when C3a mirrors the craft grid as window state (the
+    // result click becomes a window op); judge_craft's rule carries over.
+    Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> },
+    /// C2b — the client Q-dropped one of the item in hotbar slot
+    /// `hotbar_slot` (the held claim mirrors `Eat`'s). It spawned nothing
+    /// itself: the server spawns the claimed item, full fidelity from
+    /// `held_full`, as a real ground item everyone sees. Fire-and-forget,
+    /// paced by the server's drop bucket (`item_actions::DropBucket`).
+    Drop { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+}
+
+/// Wire index of an [`ItemAction`] variant the server reads before decoding
+/// (bincode writes it as a `u32` right after the packet's `seq`,
+/// [`peek_item_action_variant`]). The order is Eat = 0, Sleep = 1, Craft = 2,
+/// Drop = 3, pinned by `item_action_packets_round_trip`.
+pub mod item_action_variant {
+    /// `ItemAction::Drop`, paced by the joiner's drop bucket.
+    pub const DROP: u32 = 3;
+}
+
+/// C2b — the variant index of an `ItemActionPacket` payload without decoding
+/// it ([`item_action_variant`]): the `u32` after the leading `seq`. `None`
+/// when the payload is shorter than that.
+pub fn peek_item_action_variant(payload: &[u8]) -> Option<u32> {
+    payload.get(4..8).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Client → Server: one item action (C2a, `PacketType::ItemAction`).
@@ -914,6 +948,7 @@ pub enum ItemAction {
 pub struct ItemActionPacket {
     /// The client's request number, echoed in the outcome. Shares its
     /// sequence with `EntityAttack` / `EntityInteract` (`joiner_actions`).
+    /// A `Craft` or `Drop` takes a number too, and is never answered.
     pub seq: u32,
     pub action: ItemAction,
 }
@@ -1783,7 +1818,14 @@ pub struct ServerAnnouncePacket {
 ///   FU3 (2026-10-07, NO bump — no shape change): `entity_flags::
 ///   PRODUCT_NOT_READY` (bit 32) on a mirrored cow or sheep whose milk or
 ///   wool isn't ready; 0 means ready or unknown, so either side may be older.
-pub const PROTOCOL_VERSION: u32 = 73;
+/// - v74 (2026-10-07, C2b — PROVISIONAL, the final number is assigned at
+///   merge): a joiner's crafting and Q-drops are mirrored on the server.
+///   `ItemAction` appends `Craft { grid, table }` (= 2) and `Drop` (= 3,
+///   the held claim of `Eat`); both fire-and-forget (no outcome). The server
+///   mirrors a craft on its shadow of the joiner's inventory and spawns a
+///   Q-drop as a real ground item; a grant that doesn't fit the shadow
+///   spills at the joiner's feet.
+pub const PROTOCOL_VERSION: u32 = 74;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1952,7 +1994,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 73);
+        // C2b — v74.
+        assert_eq!(super::PROTOCOL_VERSION, 74);
     }
 
     #[test]
@@ -2563,7 +2606,11 @@ mod tests {
         // v73 (2026-10-07, C2a): `ItemAction = 62` (Eat, Sleep),
         //   `ItemActionOutcome = 63`, `StateUpdatePacket.own_hunger` — a
         //   joiner's hunger, eating and sleep are the server's.
-        assert_eq!(PROTOCOL_VERSION, 73);
+        // v74 (2026-10-07, C2b, PROVISIONAL — renumbered at merge):
+        //   `ItemAction::Craft` (= 2) and `ItemAction::Drop` (= 3), both
+        //   unanswered — a joiner's crafting and Q-drops are mirrored on the
+        //   server.
+        assert_eq!(PROTOCOL_VERSION, 74);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2752,7 +2799,7 @@ mod tests {
 
     /// C2a (v73) — the item-action request and its outcome keep their tags
     /// and shapes, and the `ItemAction` variants their wire order (append
-    /// only: C2b adds `Craft` and `Drop` after `Sleep`).
+    /// only: Eat = 0, Sleep = 1, C2b's Craft = 2 and Drop = 3).
     #[test]
     fn item_action_packets_round_trip() {
         let eat = ItemActionPacket {
@@ -2777,6 +2824,35 @@ mod tests {
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), sleep);
         assert_eq!(&payload[4..8], &1u32.to_le_bytes(), "Sleep = 1");
+
+        // C2b (v74) — Craft = 2 and Drop = 3, appended after Sleep.
+        let mut grid = [(item_kind::EMPTY, 0u16); 9];
+        grid[0] = (item_kind::MATERIAL, 3);
+        grid[4] = (item_kind::BLOCK, 5);
+        for table in [None, Some([7, 64, -9])] {
+            let craft = ItemActionPacket { seq: 13, action: ItemAction::Craft { grid, table } };
+            let bytes = serialize_packet(PacketType::ItemAction, &craft);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), craft);
+            assert_eq!(&payload[4..8], &2u32.to_le_bytes(), "Craft = 2");
+            assert_eq!(peek_item_action_variant(payload), Some(2));
+        }
+        let drop = ItemActionPacket {
+            seq: 14,
+            action: ItemAction::Drop {
+                hotbar_slot: 8,
+                held_kind: item_kind::TOOL,
+                held_id: 2,
+                held_full: WireItem::Tool { tool_type: 1, material: 2, durability: 77 },
+            },
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &drop);
+        assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), drop);
+        assert_eq!(&payload[4..8], &3u32.to_le_bytes(), "Drop = 3");
+        assert_eq!(peek_item_action_variant(payload), Some(item_action_variant::DROP));
+        assert_eq!(peek_item_action_variant(&payload[..7]), None, "too short to say");
 
         let outcome = ItemActionOutcomePacket { seq: 12, accepted: false, consume_held: 0, note: 5 };
         let bytes = serialize_packet(PacketType::ItemActionOutcome, &outcome);

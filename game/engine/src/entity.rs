@@ -951,6 +951,15 @@ pub fn spawn_item(
     ));
 }
 
+/// Where a Q-drop leaves the hand and how fast (blocks/tick), for a player
+/// whose eye is at `eye` looking along `forward`: just in front of the eye,
+/// tossed along the look. The one rule for both drops: the client's own
+/// (single-player, a host's seats) and the server's for a joiner's
+/// `ItemAction::Drop` (C2b), each then [`spawn_thrown_item`].
+pub fn q_drop_launch(eye: Vec3, forward: Vec3) -> (Vec3, Vec3) {
+    (eye + forward * 0.4 + Vec3::new(0.0, -0.2, 0.0), forward * 0.3 + Vec3::new(0.0, 0.2, 0.0))
+}
+
 /// Spawn one stack of items as an ItemEntity at `position` with an explicit
 /// initial `velocity` (blocks/tick). Used by Q-drop so the item is tossed in
 /// the player's look direction rather than dribbling at their feet.
