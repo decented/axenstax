@@ -502,6 +502,76 @@ fn an_interaction_behind_a_catch_up_burst_is_applied_exactly_once() {
     assert_eq!(rig.joiners[0].inbox.granted(MaterialId::MilkBucket), 1, "one milk bucket");
 }
 
+/// FU3 (FU1 verify N1) — a host whose game thread stops for 55 s (a long
+/// save, a loading screen) finds about 1,100 of each joiner's inputs waiting:
+/// the joiner's bridge thread kept reading and queueing them. That used to
+/// cross FU1's 1,024-packet bound and disconnect every joiner as a flooder.
+/// Now the joiner stays, its queue drains in about a second (a client with
+/// more than `CATCH_UP_QUEUE_LEN` waiting is read
+/// `CATCH_UP_PACKETS_PER_TICK` a tick), the swing it made mid-stall is
+/// answered exactly once, and S1's acknowledgement stays sound: monotonic,
+/// never ahead of what arrived, and caught up with the newest input once the
+/// host has replayed its missed ticks (it runs up to ten a frame, so a
+/// joiner's next input arrives only every few server ticks meanwhile).
+#[test]
+fn a_55_second_host_stall_keeps_the_joiner_and_answers_its_swing_once() {
+    let mut rig = Rig::new("host-stall", 1);
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    let max = rig.health(cow);
+    let at = rig.at;
+    let slot = rig.joiners[0].slot;
+    // The stall: the server doesn't tick while the joiner sends 20 inputs a
+    // second, with a swing in the middle.
+    let stall_inputs = 55 * 20;
+    rig.joiners[0].catch_up_burst(at, stall_inputs / 2);
+    let seq = rig.joiners[0].attack(id, Some(&sword()), false);
+    rig.joiners[0].catch_up_burst(at, stall_inputs - stall_inputs / 2);
+    let charged: usize = {
+        let input = protocol::InputPacket { tick: 1_000, health: 20.0, ..Default::default() };
+        protocol::serialize_packet(protocol::PacketType::ClientInput, &input).len()
+            + crate::transport::INBOUND_ENTRY_OVERHEAD
+    };
+    // The figure transport.rs and Spec 04 §11.2a derive "half an hour or
+    // more" from: a bare input is charged about 150 bytes (90 on the wire).
+    assert!((120..=200).contains(&charged), "a bare input is charged about 150 bytes, not {charged}");
+    assert!(
+        charged * stall_inputs as usize * 8 < crate::transport::MAX_INBOUND_BYTES,
+        "the stall is far under the byte bound ({charged} B an input)"
+    );
+
+    let mut drained_at = None;
+    let mut last_ack = 0;
+    // Four seconds of the host replaying its missed ticks at twice real time
+    // (it runs up to ten a frame): one joiner input every other server tick.
+    for t in 0..80u32 {
+        if rig.joiners[0].inbox.outcomes.is_empty() {
+            rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+        }
+        if t % 2 == 0 {
+            rig.joiners[0].catch_up_burst(at, 1);
+        }
+        rig.tick(1);
+        let sp = &rig.hs.server.players[slot];
+        assert!(sp.last_applied_input >= last_ack, "the acknowledgement never goes back");
+        assert!(sp.last_applied_input <= sp.last_input_tick, "nor runs ahead of what arrived");
+        assert!(sp.step_credit <= crate::server::MAX_STEP_CREDIT);
+        last_ack = sp.last_applied_input;
+        if drained_at.is_none() && rig.hs.inbound_len_for_test(slot) == 0 {
+            drained_at = Some(t + 1);
+        }
+    }
+    assert!(!rig.hs.slot_is_free(slot), "an honest stall is not a flood: the joiner stays");
+    let drained_at = drained_at.expect("the backlog drained");
+    assert!(drained_at <= 40, "within about two seconds of ticks: {drained_at}");
+    let answers: Vec<_> = rig.joiners[0].inbox.outcomes.iter().filter(|o| o.seq == seq).collect();
+    assert_eq!(answers.len(), 1, "the swing made mid-stall is answered, once");
+    assert!(answers[0].accepted, "and lands");
+    assert_eq!(rig.health(cow), max - sword().attack_damage(), "one sword hit");
+    let sp = &rig.hs.server.players[slot];
+    assert_eq!(sp.last_input_tick, rig.joiners[0].input_seq, "every input was read");
+    assert_eq!(sp.last_applied_input, rig.joiners[0].input_seq, "and the acknowledgement caught up with the newest");
+}
+
 #[test]
 fn a_dedicated_servers_kill_goes_to_the_killer_alone_and_drops_loot() {
     let mut rig = Rig::new("kill-dedicated", 2);

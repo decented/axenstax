@@ -50,26 +50,36 @@ pub const ATTACK_COOLDOWN_JITTER_TICKS: u32 = 3;
 pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
 
 /// MP-D2b — `EntityAttack` + `EntityInteract` requests read per client per
-/// tick (their own budget, not the block-change one's); the rest are dropped
-/// unanswered. FU1 — no honest client reaches it: the ten packets a tick
-/// ([`MAX_PACKETS_PER_TICK`]) span at most eleven of its ticks (one input
-/// each, actions riding between), where a 10-tick swing cooldown
-/// (`combat::ATTACK_COOLDOWN`) and an 8-tick right-click cooldown allow at
-/// most two of each.
+/// tick (their own budget, not the block-change one's). FU3 — the rest WAIT,
+/// with everything the client sent after them (arrival order is kept): a
+/// catch-up reads up to [`CATCH_UP_PACKETS_PER_TICK`] packets a tick, which
+/// span about 64 client ticks — six swings (10-tick `combat::ATTACK_COOLDOWN`)
+/// and eight right-clicks (8-tick place cooldown) — so an honest stall dump
+/// does reach it, and skipping the excess (FU1's rule, safe only at ten
+/// packets a tick) would leave honest requests unanswered.
 const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
 
 /// C2a — `ItemAction` requests (eat, sleep) read per client per tick: their
-/// own budget, not [`MAX_ENTITY_REQUESTS_PER_TICK`]'s, whose excess is
-/// dropped. One past it WAITS for the next tick in the client's inbound
-/// queue (FU1), with everything sent after it: never dropped, never refused.
-/// No honest client reaches it (an eat every 16 ticks,
-/// `item_actions::EAT_COOLDOWN_TICKS`; a sleep once a night).
+/// own budget, not [`MAX_ENTITY_REQUESTS_PER_TICK`]'s. One past it WAITS for
+/// the next tick in the client's inbound queue (FU1), with everything sent
+/// after it: never dropped, never refused (FU3: as an entity request or a
+/// device interaction past its own budget now does). No honest client reaches
+/// it (an eat every 16 ticks, `item_actions::EAT_COOLDOWN_TICKS`; a sleep once
+/// a night).
 const MAX_ITEM_ACTIONS_PER_TICK: usize = 4;
 
 /// C2a — is `packet` an `ItemAction` (budgeted by deferral, not dropping)?
 fn is_item_action(packet: &[u8]) -> bool {
     matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::ItemAction, _)))
 }
+
+/// Max device interactions per tick per client. A right-click is gated
+/// client-side by an 8-tick place cooldown, so legitimate play is well under
+/// one a tick; this is the `DeviceInteract` sibling of the block-change budget,
+/// which it does NOT share. FU3 — past it the interaction waits for the next
+/// tick, in order, like an entity request past [`MAX_ENTITY_REQUESTS_PER_TICK`]
+/// (a catch-up's 64 packets can hold eight right-clicks).
+const MAX_DEVICE_INTERACTS_PER_TICK: usize = 2;
 
 /// Review D2b LOW-2 — how far ahead of a joiner's server body a target must
 /// be for its swing or right-click: `dot(look, to-target) >= 0`, the half
@@ -198,13 +208,31 @@ const OPERATOR_NEEDS_DIRECT_NOTICE: &str = "Operator tools need a direct connect
 /// frame hitch sends up to ten inputs a frame (`game_loop` runs at most 10
 /// ticks a frame) plus the actions it made, and the swing behind them used to
 /// be dropped. Ten covers one such frame. Control packets (`Respawn`,
-/// `Disconnect`) cost nothing against it. Memory is bounded by the queue's
-/// hard bound (`transport::MAX_INBOUND_PACKETS` / `MAX_INBOUND_BYTES`): only a
-/// client past it is disconnected ([`INBOUND_OVERFLOW_REASON`]). Spec 04 §11.2a.
+/// `Disconnect`) cost nothing against it. A client with more than
+/// [`CATCH_UP_QUEUE_LEN`] waiting gets [`CATCH_UP_PACKETS_PER_TICK`] instead.
+/// Memory is bounded by the queue's hard bound (`transport::MAX_INBOUND_BYTES`):
+/// only a client past it is disconnected ([`INBOUND_OVERFLOW_REASON`]).
+/// Spec 04 §11.2a.
 pub const MAX_PACKETS_PER_TICK: usize = 10;
 
+/// FU3 (FU1 verify N1) — a client with more packets than this waiting (about
+/// two seconds of an honest client's traffic: it sends about 20 a second) is
+/// catching up on a stall — usually the host's own (the host's game thread
+/// stopped while each joiner's bridge thread kept queueing), or its own
+/// replayed freeze — and gets [`CATCH_UP_PACKETS_PER_TICK`] read that tick.
+pub const CATCH_UP_QUEUE_LEN: usize = 40;
+
+/// FU3 — the read budget of a client catching up ([`CATCH_UP_QUEUE_LEN`]): a
+/// 55-second host stall (about 1,100 inputs) drains in under a second instead
+/// of two minutes at ten a tick. Its stale movement is not simulated in bulk:
+/// S1 keeps the newest `server::MAX_QUEUED_INTENTS` inputs and steps at most
+/// `server::MAX_INTENTS_PER_TICK` a tick on banked credit, so the joiner snaps
+/// once, as after any stall. The per-kind budgets (edits, entity requests,
+/// device interacts) do not grow: what is past them waits, in order.
+pub const CATCH_UP_PACKETS_PER_TICK: usize = 64;
+
 /// FU1 — told to a client disconnected for crossing its inbound queue's hard
-/// bound (`transport::MAX_INBOUND_PACKETS` / `MAX_INBOUND_BYTES`).
+/// bound (`transport::MAX_INBOUND_BYTES`).
 pub const INBOUND_OVERFLOW_REASON: &str =
     "Disconnected: your game sent more than the server could keep up with.";
 
@@ -216,8 +244,26 @@ fn is_control_packet(packet: &[u8]) -> bool {
     )
 }
 
-/// Most block edits one client may submit per tick, across ALL of its packets
-/// that tick — legitimate play is 1–2. Every edit counts, refused or not.
+/// FU3 — does `packet` (at the front of a client's queue) wait for the next
+/// tick because its kind's budget is spent this tick: an entity request past
+/// [`MAX_ENTITY_REQUESTS_PER_TICK`], a device interaction past
+/// [`MAX_DEVICE_INTERACTS_PER_TICK`]. Waiting, not skipping: an honest
+/// catch-up can hold more of either than one tick reads.
+fn waits_for_kind_budget(packet: &[u8], entity_requests: usize, device_interacts: usize) -> bool {
+    use protocol::PacketType as P;
+    match protocol::deserialize_header(packet) {
+        Some((P::EntityAttack | P::EntityInteract, _)) => entity_requests >= MAX_ENTITY_REQUESTS_PER_TICK,
+        Some((P::DeviceInteract, _)) => device_interacts >= MAX_DEVICE_INTERACTS_PER_TICK,
+        _ => false,
+    }
+}
+
+/// Most block edits the server processes per client per tick, across ALL of
+/// its packets that tick — legitimate play is 1–2. Every processed edit
+/// counts, refused or not. FU3 — edits past it wait in the slot's
+/// `edit_queue::EditQueue` and go first next tick, in arrival order; only
+/// past that queue's hard cap (`edit_queue::MAX_DEFERRED_EDITS`) is an edit
+/// refused for volume.
 const MAX_BLOCK_CHANGES_PER_TICK: usize = 4;
 
 /// Handle to a running hosted server. Owns the `GameServer`, all client
@@ -254,6 +300,11 @@ pub struct HostedServer {
     /// [`MAX_PACKETS_PER_TICK`]), in arrival order. Emptied whenever a slot is
     /// attached or released.
     inbound: Vec<transport::InboundQueue>,
+    /// FU3 — per slot, indexed like `transports`: the block edits its client
+    /// sent past the per-tick edit budget ([`MAX_BLOCK_CHANGES_PER_TICK`]),
+    /// waiting, in arrival order, to go first next tick. Emptied whenever a
+    /// slot is attached or released.
+    edit_queues: Vec<crate::edit_queue::EditQueue>,
     /// Block changes the server produced (falling blocks, remote edits)
     /// that haven't been broadcast yet. Drained into the per-client
     /// `outboxes` on the next broadcast.
@@ -747,6 +798,7 @@ impl HostedServer {
             disconnected,
             attached_tick: vec![0; num_local_players],
             inbound: (0..num_local_players).map(|_| transport::InboundQueue::default()).collect(),
+            edit_queues: (0..num_local_players).map(|_| Default::default()).collect(),
             pending_block_changes: Vec::new(),
             host_world,
             lent_sim_changes: Vec::new(),
@@ -1015,6 +1067,7 @@ impl HostedServer {
         self.disconnected.push(false);
         self.attached_tick.push(self.server_tick);
         self.inbound.push(transport::InboundQueue::default());
+        self.edit_queues.push(Default::default());
         self.outboxes.push(crate::state_outbox::ClientOutbox::new(false));
         self.entity_interest.push(Default::default());
         self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
@@ -1564,8 +1617,9 @@ impl HostedServer {
         let was_joined = self.handshake_done[i];
         self.disconnected[i] = true;
         // FU1 — whatever it sent and the server had not yet read goes with the
-        // connection.
+        // connection (FU3: and the edits still waiting past the budget).
         self.inbound[i].clear();
+        self.edit_queues[i].clear();
         if let Some(sp) = self.server.players.get_mut(i) {
             sp.connected = false;
             sp.pending_intent = None;
@@ -2089,15 +2143,22 @@ impl HostedServer {
     /// Free every remote slot whose connection has gone (peer closed, network
     /// error, idle timeout) or that has sat past `PRE_AUTH_TIMEOUT_TICKS`
     /// without completing its join. Runs every tick after inbound packets, so a
-    /// transport's last packets (a `Disconnect`) are read first — and a closed
-    /// connection's slot is held until the packets it sent before closing,
-    /// still waiting past the per-tick budget (FU1), have all been read.
-    fn reap_slots(&mut self) {
+    /// transport's last packets (a `Disconnect`) are read first.
+    ///
+    /// FU3 (FU1 verify N6) — only a slot whose transport was ALREADY closed
+    /// before this tick's fill (`closed_before_fill`, from
+    /// [`Self::process_inbound_packets`]) and whose queue is empty now is
+    /// freed: a connection's bridge hands over every frame before it marks
+    /// the connection closed, so that fill took everything it sent. A slot
+    /// that closed after the fill (its last frame may have landed after it
+    /// too) waits a tick, and one with packets still waiting past the
+    /// per-tick budget (FU1) waits until they have been read.
+    fn reap_slots(&mut self, closed_before_fill: &[bool]) {
         for i in self.num_local_players..self.transports.len() {
             if self.disconnected[i] {
                 continue;
             }
-            if self.transports[i].is_closed() && self.inbound[i].is_empty() {
+            if closed_before_fill.get(i).copied().unwrap_or(false) && self.inbound[i].is_empty() {
                 log::info!("Player {i}: connection closed");
                 if let Some(left) = self.release_slot(i, None) {
                     self.send_to_joined_except(i, &left);
@@ -2116,6 +2177,18 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn advance_clock_for_test(&mut self, ticks: u64) {
         self.server_tick += ticks;
+    }
+
+    /// Test-only: how many of slot `slot`'s packets wait in its inbound queue.
+    #[cfg(test)]
+    pub(crate) fn inbound_len_for_test(&self, slot: usize) -> usize {
+        self.inbound.get(slot).map_or(0, transport::InboundQueue::len)
+    }
+
+    /// Test-only: how many of slot `slot`'s block edits wait past the budget.
+    #[cfg(test)]
+    pub(crate) fn edit_queue_len_for_test(&self, slot: usize) -> usize {
+        self.edit_queues.get(slot).map_or(0, crate::edit_queue::EditQueue::len)
     }
 
     /// Test-only: whether slot `slot` is currently free.
@@ -2144,8 +2217,8 @@ impl HostedServer {
             "a lending HostedServer ticks only inside a LentSim window (and an owning one never does)"
         );
         self.accept_new_remote_connections();
-        self.process_inbound_packets();
-        self.reap_slots();
+        let closed_before_fill = self.process_inbound_packets();
+        self.reap_slots(&closed_before_fill);
         self.server.tick();
         self.announce_joiner_deaths();
         self.announce_joiner_hits_and_kills();
@@ -2260,6 +2333,7 @@ impl HostedServer {
                 self.disconnected[j] = false;
                 self.attached_tick[j] = self.server_tick;
                 self.inbound[j].clear();
+                self.edit_queues[j].clear();
                 self.outboxes[j] = crate::state_outbox::ClientOutbox::new(true);
                 self.entity_interest[j] = Default::default();
                 self.chunk_pushes[j] = crate::chunk_push::ClientChunkPush::default();
@@ -2272,6 +2346,7 @@ impl HostedServer {
                 self.disconnected.push(false);
                 self.attached_tick.push(self.server_tick);
                 self.inbound.push(transport::InboundQueue::default());
+                self.edit_queues.push(Default::default());
                 self.outboxes.push(crate::state_outbox::ClientOutbox::new(true));
                 self.entity_interest.push(Default::default());
                 self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
@@ -2338,6 +2413,21 @@ impl HostedServer {
         client_side
     }
 
+    /// Test-only (FU3, FU1 verify N6): attach a remote whose last frame lands
+    /// just after a fill has emptied its channel, with the close right behind
+    /// it (`transport::LateFrameServerTransport`). Put the frame in the
+    /// returned slot to arm it.
+    #[cfg(test)]
+    pub(crate) fn attach_test_remote_late_frame(
+        &mut self,
+    ) -> (transport::ChannelClientTransport, std::sync::Arc<std::sync::Mutex<Option<transport::Packet>>>) {
+        let (server_side, client_side) = transport::channel_pair();
+        let late = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.current_remote.fetch_add(1, Ordering::Relaxed);
+        self.attach_remote_transport(Box::new(transport::LateFrameServerTransport::new(server_side, late.clone())));
+        (client_side, late)
+    }
+
     /// Test-only: attach a remote whose server side reports `is_websocket()`
     /// (no channel binding) — stands in for a WebSocket connection.
     #[cfg(test)]
@@ -2352,19 +2442,24 @@ impl HostedServer {
         client_side
     }
 
-    fn process_inbound_packets(&mut self) {
-        // Max device interactions per tick per client. A right-click is
-        // gated client-side by an 8-tick place cooldown, so legitimate play is
-        // well under one a tick; this is the `DeviceInteract` sibling of the
-        // block-change budget above, which it does NOT share. FU1 — the rest
-        // are skipped, which no honest client meets: the ten packets read a
-        // tick span at most eleven client ticks, two right-clicks' worth.
-        const MAX_DEVICE_INTERACTS_PER_TICK: usize = 2;
-
+    /// Read and process every client's packets for this tick. Returns, per
+    /// slot, whether its transport was already closed before this tick's
+    /// fill (FU3, FU1 verify N6): `reap_slots` frees only such a slot, so a
+    /// frame that lands between the fill and the close is still read next
+    /// tick (the bridge sends every frame before it marks the connection
+    /// closed, so a fill after the close has taken them all).
+    fn process_inbound_packets(&mut self) -> Vec<bool> {
         // Queue of StateUpdate-shaped events to fan out after we've
         // finished reading. We can't send directly inside the read loop
         // because we mutate `self.transports`/`handshake_done`/etc. above.
         let mut broadcasts: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+        // FU3 (N6) — read before any fill this tick.
+        let closed_before_fill: Vec<bool> = self
+            .transports
+            .iter()
+            .zip(&self.disconnected)
+            .map(|(t, &gone)| !gone && t.is_closed())
+            .collect();
 
         for i in 0..self.transports.len() {
             if self.disconnected[i] {
@@ -2377,11 +2472,10 @@ impl HostedServer {
                 Ok(arrived) => arrived,
                 Err(over) => {
                     log::warn!(
-                        "Player {i} has {} packets ({} bytes) waiting, past the inbound bound \
-                         ({} packets / {} bytes) — disconnecting it",
+                        "Player {i} has {} packets ({} bytes charged) waiting, past the inbound \
+                         bound ({} bytes) — disconnecting it",
                         over.packets,
                         over.bytes,
-                        transport::MAX_INBOUND_PACKETS,
                         transport::MAX_INBOUND_BYTES,
                     );
                     if let Some(left) = self.release_slot(i, Some(INBOUND_OVERFLOW_REASON)) {
@@ -2390,6 +2484,13 @@ impl HostedServer {
                     continue;
                 }
             };
+            // FU3 — a client catching up on a stall gets a bigger read budget
+            // this tick (chosen once, from what waits after the fill).
+            let read_budget = if self.inbound[i].len() > CATCH_UP_QUEUE_LEN {
+                CATCH_UP_PACKETS_PER_TICK
+            } else {
+                MAX_PACKETS_PER_TICK
+            };
             let mut packets_this_tick = 0usize;
             let mut interacts_this_tick = 0usize;
             let mut entity_requests_this_tick = 0usize;
@@ -2397,6 +2498,8 @@ impl HostedServer {
             // Per client per TICK, not per packet (audit 2026-09-27: the
             // budget reset for every packet, so 10 packets × 4 edits got in).
             let mut edits_this_tick = 0usize;
+            // FU3 — the edits that waited past last tick's budget go first.
+            self.process_waiting_edits(i, &mut edits_this_tick);
             loop {
                 // FU1 — defer, don't drop: once the budget is spent, the rest
                 // waits for the next tick, in arrival order. Control packets
@@ -2404,21 +2507,25 @@ impl HostedServer {
                 // the front is still read — but never ahead of what the client
                 // sent before it (a Respawn read ahead of the health-0 inputs
                 // queued before it would be undone by them).
-                if packets_this_tick >= MAX_PACKETS_PER_TICK
+                if packets_this_tick >= read_budget
                     && !self.inbound[i].front().is_some_and(|p| is_control_packet(p))
                 {
                     if !self.inbound[i].is_empty() {
                         log::debug!(
-                            "Player {i}: {} packets wait for the next tick (budget {MAX_PACKETS_PER_TICK})",
+                            "Player {i}: {} packets wait for the next tick (budget {read_budget})",
                             self.inbound[i].len()
                         );
                     }
                     break;
                 }
                 // C2a — an item action past its budget waits too, and so does
-                // everything behind it (one ordered stream).
-                if item_actions_this_tick >= MAX_ITEM_ACTIONS_PER_TICK
-                    && self.inbound[i].front().is_some_and(|p| is_item_action(p))
+                // everything behind it (one ordered stream). FU3 — so do an
+                // entity request and a device interaction past theirs.
+                if (item_actions_this_tick >= MAX_ITEM_ACTIONS_PER_TICK
+                    && self.inbound[i].front().is_some_and(|p| is_item_action(p)))
+                    || self.inbound[i].front().is_some_and(|p| {
+                        waits_for_kind_budget(p, entity_requests_this_tick, interacts_this_tick)
+                    })
                 {
                     break;
                 }
@@ -2783,7 +2890,7 @@ impl HostedServer {
                         if !self.handshake_done[i] {
                             continue;
                         }
-                        let Ok(input) = protocol::safe_deserialize::<protocol::InputPacket>(payload)
+                        let Ok(mut input) = protocol::safe_deserialize::<protocol::InputPacket>(payload)
                         else {
                             continue;
                         };
@@ -2885,12 +2992,11 @@ impl HostedServer {
                         // C1/FU1 — this input's `mined` tags (the first
                         // MAX_MINED_PER_INPUT, its DoS guard), each used by at
                         // most one edit, in order: the break it was sent with
-                        // (`classify_joiner_edit`). They live for this input
-                        // only: a refused edit's tag yields nothing and is
-                        // gone with the input (a later edit of its cell in
-                        // the same input meets the same refusal — the budget
-                        // only shrinks, reach and plots don't change).
-                        let mut tags: Vec<Option<protocol::MinedBlock>> = input
+                        // (`classify_joiner_edit`). They stay with this
+                        // input's edits (FU3: through the wait past the
+                        // budget too): a refused edit's tag yields nothing and
+                        // is gone.
+                        let tags: Vec<Option<protocol::MinedBlock>> = input
                             .mined
                             .iter()
                             .take(protocol::MAX_MINED_PER_INPUT)
@@ -2898,191 +3004,15 @@ impl HostedServer {
                             .map(Some)
                             .collect();
                         // Every edit — from every packet this tick — goes
-                        // through the one validator; the budget is per tick.
-                        for bc in &input.block_changes {
-                            if edits_this_tick >= MAX_BLOCK_CHANGES_PER_TICK {
-                                // Over budget: refused like any other edit, so
-                                // un-ghost it on the sender (review S5).
-                                log::debug!("Player {i} exceeded block change budget");
-                                self.send_back_authoritative_block(bc);
-                                continue;
-                            }
-                            edits_this_tick += 1;
-                            if let Err(why) = self.validate_block_edit(i, bc) {
-                                log::debug!(
-                                    "Refused slot {i}'s edit at ({}, {}, {}): {why:?}",
-                                    bc.x,
-                                    bc.y,
-                                    bc.z
-                                );
-                                // Un-ghost the refused edit on the sender:
-                                // re-send what is really there.
-                                self.send_back_authoritative_block(bc);
-                                continue;
-                            }
-                            let old_block =
-                                self.server.world.get_block(bc.x, bc.y, bc.z);
-                            // A container broken out from under the host
-                            // spills its contents instead of stranding them
-                            // as an orphan block entity (audit 2026-09-27).
-                            let remote = self.server.players[i].server_simulated;
-                            // C1 — what a server-simulated player's edit is to
-                            // its inventory (`joiner_inventory`): a break it
-                            // mined, a plain placement, or neither. A break's
-                            // yield is read now, before the block leaves the
-                            // world (`break_drops`).
-                            let joiner_edit = remote
-                                .then(|| self.classify_joiner_edit(i, bc, old_block, &mut tags));
-                            let break_yield = match joiner_edit {
-                                Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
-                                    self.joiner_break_yield(bc, old_block, tool)
-                                }
-                                _ => None,
-                            };
-                            self.spill_container_on_change(
-                                (bc.x, bc.y, bc.z),
-                                old_block,
-                                bc.new_block,
-                                remote,
-                            );
-                            // …and an economy block (vendor, tip jar, auction)
-                            // broken out from under its entity leaves no
-                            // orphan either — what a receiving client's
-                            // `World::apply_remote_block_change` does. On a
-                            // lent world this IS the host's entity.
-                            self.server.world.drop_orphaned_family_entity(
-                                (bc.x, bc.y, bc.z),
-                                old_block,
-                                bc.new_block,
-                            );
-                            // The validator only lets a plot marker's owner
-                            // break it — breaking it releases the claim.
-                            if old_block == crate::block::PLOT_MARKER
-                                && bc.new_block != crate::block::PLOT_MARKER
-                            {
-                                self.server.world.release_plot((bc.x, bc.y, bc.z));
-                            }
-                            self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
-                            // FU1 (C1 verify N1) — only when the block really
-                            // changed: an edit that leaves it as it was (a
-                            // meta-only toggle, or a modified client
-                            // "replacing" natural deepslate with itself) puts
-                            // nothing into the cell, so a natural cell stays
-                            // natural (its Satori roll stands).
-                            if remote && old_block != bc.new_block {
-                                // C1 (review MEDIUM-1) — every block a joiner
-                                // puts into a cell is player-placed, whatever
-                                // the edit was classified as (a plain
-                                // placement, a tool claimed in hand, a fill
-                                // carrying a `mined` tag, creative), as the
-                                // client's own placements always are: re-mining
-                                // it yields no Satori (Spec 06 §2.2). A break
-                                // the server yielded leaves the cell natural
-                                // again (AIR, or a harvested crop's tilled
-                                // soil), as single-player's break arm does.
-                                let placed = bc.new_block != crate::block::AIR && break_yield.is_none();
-                                self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
-                            }
-                            if let Some(edit) = joiner_edit {
-                                self.settle_joiner_edit(i, bc, edit, break_yield);
-                            }
-                            // T1-3 — a log broken by a REMOTE player queues its
-                            // leaves for the server's leaf-decay pass (the
-                            // client break arms' `on_log_broken`, server side),
-                            // on EVERY host kind: a joiner's client runs no
-                            // decay of its own (that rolled a second set of
-                            // saplings), so the server is the only one who can.
-                            // Gated on `remote`, NOT `simulates_block_machines`:
-                            // a LAN host's own (local) breaks stay with the host
-                            // client's decay, so feeding them here too would
-                            // roll every sapling twice.
-                            if remote
-                                && crate::block::is_any_log_block(old_block)
-                                && !crate::block::is_any_log_block(bc.new_block)
-                            {
-                                self.server.leaf_decay.on_log_broken(
-                                    bc.x,
-                                    bc.y,
-                                    bc.z,
-                                    &self.server.world,
-                                );
-                            }
-                            // Keep both fluid systems' source bookkeeping in step
-                            // with the edit (placed water/lava becomes a source,
-                            // dug fluid drops its source, an opened gap wakes a
-                            // neighbour) — same as the client's inline handling.
-                            crate::fluids::notify_block_edit(
-                                &mut self.server.water,
-                                &mut self.server.lava,
-                                &self.server.world,
-                                bc.x,
-                                bc.y,
-                                bc.z,
-                                old_block,
-                                bc.new_block,
-                            );
-                            // The wire carries a metadata byte for exactly this
-                            // reason — facing, lever latch, gate op, rail state.
-                            // Dropping it left every directional block a joiner
-                            // placed facing north on the host, so a Logic Gate
-                            // drove the wrong cell and a Mirror bounced the wrong
-                            // way in the world the SERVER simulates.
-                            let cell = (bc.x, bc.y, bc.z);
-                            self.server.world.set_meta(cell, bc.meta);
-                            // Spec 48 (Electricity) — register (or drop) the
-                            // PowerDevice behind a joiner's placement, mirroring
-                            // the client's own place/break arms via the shared
-                            // kind table. Without it the host's authoritative
-                            // power sim saw a lever with nothing behind it —
-                            // nothing sourced, nothing lit, and a broken source
-                            // lived on as a ghost that powered the run forever.
-                            // Keyed on the KIND changing, so a lit↔unlit twin
-                            // swap (generator, lamp, wheel, mill) leaves the
-                            // device — and its fuel and charge — alone.
-                            let old_kind = crate::power::device_kind_for_block(old_block);
-                            let new_kind = crate::power::device_kind_for_block(bc.new_block);
-                            if old_kind != new_kind {
-                                self.server.world.block_entities.remove(&cell);
-                                if let Some(kind) = new_kind {
-                                    self.server.world.insert_power_device(
-                                        cell,
-                                        crate::power::PowerDeviceData::new(
-                                            kind,
-                                            crate::meta::facing(bc.meta),
-                                        ),
-                                    );
-                                }
-                            }
-                            // …and because that rebuild is keyed on the KIND,
-                            // a same-kind meta-only change — which is exactly
-                            // what a lever flip looks like on the wire, LEVER
-                            // to LEVER with the state bit moved — left the
-                            // SERVER's device latched the old way. The
-                            // authoritative sim then disagreed with the host
-                            // about every switch the host threw. Same fold as
-                            // the client apply path does.
-                            crate::power::sync_device_from_meta(
-                                &mut self.server.world,
-                                cell,
-                                bc.meta,
-                            );
-                            // Spec 48 §2.3 — EVERY edit nudges the six
-                            // neighbours: a plain block can still change a
-                            // network (block a Beam Sensor's beam, support a
-                            // Pressure Plate). Power cells seed themselves too.
-                            if crate::block::is_power_block(bc.new_block)
-                                || crate::block::is_power_block(old_block)
-                            {
-                                self.server.world.mark_dirty(cell);
-                            }
-                            self.server.world.notify_neighbours(cell);
-                            self.pending_block_changes.push(bc.clone());
-                            // D1 — a joiner's edit landed in the host's own
-                            // world: its client must remesh the cell.
-                            if self.lends_host_world() {
-                                self.lent_edit_cells.push(cell);
-                            }
-                        }
+                        // through the one validator; the budget is per tick,
+                        // and what is past it waits (FU3).
+                        let group = crate::edit_queue::EditGroup {
+                            edits: std::mem::take(&mut input.block_changes).into(),
+                            tags,
+                            held_kind: input.held_kind,
+                            held_id: input.held_id,
+                        };
+                        self.process_or_queue_edits(i, group, &mut edits_this_tick);
                         // MP-A3 — a reported death (only ever believed
                         // downward: health coming back is never taken — only
                         // a `Respawn` revives). Drops this packet's move too.
@@ -3094,10 +3024,9 @@ impl HostedServer {
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
+                        // Never past the budget: one at it waits at the
+                        // front (`waits_for_kind_budget`).
                         interacts_this_tick += 1;
-                        if interacts_this_tick > MAX_DEVICE_INTERACTS_PER_TICK {
-                            continue;
-                        }
                         let Ok(req) =
                             protocol::safe_deserialize::<protocol::DeviceInteractPacket>(payload)
                         else {
@@ -3117,10 +3046,8 @@ impl HostedServer {
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
+                        // Never past the budget (`waits_for_kind_budget`).
                         entity_requests_this_tick += 1;
-                        if entity_requests_this_tick > MAX_ENTITY_REQUESTS_PER_TICK {
-                            continue;
-                        }
                         if ptype == protocol::PacketType::EntityAttack {
                             if let Ok(req) =
                                 protocol::safe_deserialize::<protocol::EntityAttackPacket>(payload)
@@ -3217,6 +3144,295 @@ impl HostedServer {
                 }
             }
         }
+        closed_before_fill
+    }
+
+    /// FU3 — process the edits slot `i` has waiting past earlier ticks'
+    /// budgets, oldest first, while this tick's edit budget lasts. They go
+    /// before anything the client sent this tick.
+    fn process_waiting_edits(&mut self, i: usize, edits_this_tick: &mut usize) {
+        while *edits_this_tick < MAX_BLOCK_CHANGES_PER_TICK {
+            let Some(mut group) = self.edit_queues[i].pop_front() else {
+                break;
+            };
+            self.process_edit_group(i, &mut group, edits_this_tick);
+            if !group.edits.is_empty() {
+                self.edit_queues[i].push_front(group);
+                break;
+            }
+        }
+    }
+
+    /// FU3 — one input's edits: processed now, in order, while the tick's
+    /// edit budget lasts, if nothing of this client's waits ahead of them;
+    /// the rest (all of them, if something waits) queued behind, to go first
+    /// next tick. Nothing is sent back for the budget. Only past the queue's
+    /// hard cap ([`crate::edit_queue::MAX_DEFERRED_EDITS`], which no honest
+    /// client reaches) is an edit refused for volume: sent back, as any
+    /// refused edit is, with a warning.
+    fn process_or_queue_edits(
+        &mut self,
+        i: usize,
+        mut group: crate::edit_queue::EditGroup,
+        edits_this_tick: &mut usize,
+    ) {
+        if self.edit_queues[i].is_empty() {
+            self.process_edit_group(i, &mut group, edits_this_tick);
+        }
+        if group.edits.is_empty() {
+            return;
+        }
+        let refused = self.edit_queues[i].push_back(group);
+        if refused.is_empty() {
+            return;
+        }
+        if self.edit_queues[i].take_cap_warning() {
+            log::warn!(
+                "Player {i} has {} block edits waiting, at the cap ({}) — refusing what it sends \
+                 past it (no honest client gets here)",
+                self.edit_queues[i].len(),
+                crate::edit_queue::MAX_DEFERRED_EDITS,
+            );
+        }
+        for bc in &refused {
+            self.send_back_authoritative_block(bc);
+        }
+    }
+
+    /// FU3 — process `group`'s edits in order while this tick's edit budget
+    /// lasts; what the budget doesn't reach stays in `group`. A joiner the
+    /// server holds dead edits nothing (MP-A3): its waiting edits are sent
+    /// back, all at once — they were made while it was alive, but the body
+    /// and inventory they would act on are gone.
+    fn process_edit_group(
+        &mut self,
+        i: usize,
+        group: &mut crate::edit_queue::EditGroup,
+        edits_this_tick: &mut usize,
+    ) {
+        if self.joiner_is_dead(i) {
+            for bc in std::mem::take(&mut group.edits) {
+                self.send_back_authoritative_block(&bc);
+            }
+            return;
+        }
+        while *edits_this_tick < MAX_BLOCK_CHANGES_PER_TICK {
+            let Some(bc) = group.edits.pop_front() else {
+                break;
+            };
+            *edits_this_tick += 1;
+            self.process_one_edit(i, &bc, group);
+        }
+    }
+
+    /// Validate and apply one of slot `i`'s edits (`group`: its input's tags
+    /// and hand). A refused edit is sent back, so the sender's optimistic
+    /// local edit is undone, and its tag is spent.
+    fn process_one_edit(
+        &mut self,
+        i: usize,
+        bc: &protocol::BlockChange,
+        group: &mut crate::edit_queue::EditGroup,
+    ) {
+        if let Err(why) = self.validate_block_edit(i, bc, (group.held_kind, group.held_id)) {
+            log::debug!("Refused slot {i}'s edit at ({}, {}, {}): {why:?}", bc.x, bc.y, bc.z);
+            // Un-ghost the refused edit on the sender: re-send what is
+            // really there.
+            self.send_back_authoritative_block(bc);
+            group.spend_tag_of_refused(bc);
+            return;
+        }
+        let old_block =
+            self.server.world.get_block(bc.x, bc.y, bc.z);
+        // A container broken out from under the host
+        // spills its contents instead of stranding them
+        // as an orphan block entity (audit 2026-09-27).
+        let remote = self.server.players[i].server_simulated;
+        // C1 — what a server-simulated player's edit is to
+        // its inventory (`joiner_inventory`): a break it
+        // mined, a plain placement, or neither. A break's
+        // yield is read now, before the block leaves the
+        // world (`break_drops`).
+        let joiner_edit = remote.then(|| {
+            self.classify_joiner_edit(bc, old_block, &mut group.tags, (group.held_kind, group.held_id))
+        });
+        let break_yield = match joiner_edit {
+            Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
+                self.joiner_break_yield(bc, old_block, tool)
+            }
+            _ => None,
+        };
+        self.spill_container_on_change(
+            (bc.x, bc.y, bc.z),
+            old_block,
+            bc.new_block,
+            remote,
+        );
+        // …and an economy block (vendor, tip jar, auction)
+        // broken out from under its entity leaves no
+        // orphan either — what a receiving client's
+        // `World::apply_remote_block_change` does. On a
+        // lent world this IS the host's entity.
+        self.server.world.drop_orphaned_family_entity(
+            (bc.x, bc.y, bc.z),
+            old_block,
+            bc.new_block,
+        );
+        // The validator only lets a plot marker's owner
+        // break it — breaking it releases the claim.
+        if old_block == crate::block::PLOT_MARKER
+            && bc.new_block != crate::block::PLOT_MARKER
+        {
+            self.server.world.release_plot((bc.x, bc.y, bc.z));
+        }
+        self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+        // FU1 (C1 verify N1) — only when the block really
+        // changed: an edit that leaves it as it was (a
+        // meta-only toggle, or a modified client
+        // "replacing" natural deepslate with itself) puts
+        // nothing into the cell, so a natural cell stays
+        // natural (its Satori roll stands).
+        if remote && old_block != bc.new_block {
+            // C1 (review MEDIUM-1) — every block a joiner
+            // puts into a cell is player-placed, whatever
+            // the edit was classified as (a plain
+            // placement, a tool claimed in hand, a fill
+            // carrying a `mined` tag, creative), as the
+            // client's own placements always are: re-mining
+            // it yields no Satori (Spec 06 §2.2). A break
+            // the server yielded leaves the cell natural
+            // again (AIR, or a harvested crop's tilled
+            // soil), as single-player's break arm does.
+            let placed = bc.new_block != crate::block::AIR && break_yield.is_none();
+            self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
+        }
+        if let Some(edit) = joiner_edit {
+            self.settle_joiner_edit(i, bc, edit, break_yield);
+        }
+        // T1-3 — a log broken by a REMOTE player queues its
+        // leaves for the server's leaf-decay pass (the
+        // client break arms' `on_log_broken`, server side),
+        // on EVERY host kind: a joiner's client runs no
+        // decay of its own (that rolled a second set of
+        // saplings), so the server is the only one who can.
+        // Gated on `remote`, NOT `simulates_block_machines`:
+        // a LAN host's own (local) breaks stay with the host
+        // client's decay, so feeding them here too would
+        // roll every sapling twice.
+        if remote
+            && crate::block::is_any_log_block(old_block)
+            && !crate::block::is_any_log_block(bc.new_block)
+        {
+            self.server.leaf_decay.on_log_broken(
+                bc.x,
+                bc.y,
+                bc.z,
+                &self.server.world,
+            );
+        }
+        // Keep both fluid systems' source bookkeeping in step
+        // with the edit (placed water/lava becomes a source,
+        // dug fluid drops its source, an opened gap wakes a
+        // neighbour) — same as the client's inline handling.
+        crate::fluids::notify_block_edit(
+            &mut self.server.water,
+            &mut self.server.lava,
+            &self.server.world,
+            bc.x,
+            bc.y,
+            bc.z,
+            old_block,
+            bc.new_block,
+        );
+        // The wire carries a metadata byte for exactly this
+        // reason — facing, lever latch, gate op, rail state.
+        // Dropping it left every directional block a joiner
+        // placed facing north on the host, so a Logic Gate
+        // drove the wrong cell and a Mirror bounced the wrong
+        // way in the world the SERVER simulates.
+        let cell = (bc.x, bc.y, bc.z);
+        self.server.world.set_meta(cell, bc.meta);
+        // Spec 48 (Electricity) — register (or drop) the
+        // PowerDevice behind a joiner's placement, mirroring
+        // the client's own place/break arms via the shared
+        // kind table. Without it the host's authoritative
+        // power sim saw a lever with nothing behind it —
+        // nothing sourced, nothing lit, and a broken source
+        // lived on as a ghost that powered the run forever.
+        // Keyed on the KIND changing, so a lit↔unlit twin
+        // swap (generator, lamp, wheel, mill) leaves the
+        // device — and its fuel and charge — alone.
+        let old_kind = crate::power::device_kind_for_block(old_block);
+        let new_kind = crate::power::device_kind_for_block(bc.new_block);
+        if old_kind != new_kind {
+            self.server.world.block_entities.remove(&cell);
+            if let Some(kind) = new_kind {
+                self.server.world.insert_power_device(
+                    cell,
+                    crate::power::PowerDeviceData::new(
+                        kind,
+                        crate::meta::facing(bc.meta),
+                    ),
+                );
+            }
+        }
+        // …and because that rebuild is keyed on the KIND,
+        // a same-kind meta-only change — which is exactly
+        // what a lever flip looks like on the wire, LEVER
+        // to LEVER with the state bit moved — left the
+        // SERVER's device latched the old way. The
+        // authoritative sim then disagreed with the host
+        // about every switch the host threw. Same fold as
+        // the client apply path does.
+        crate::power::sync_device_from_meta(
+            &mut self.server.world,
+            cell,
+            bc.meta,
+        );
+        // Spec 48 §2.3 — EVERY edit nudges the six
+        // neighbours: a plain block can still change a
+        // network (block a Beam Sensor's beam, support a
+        // Pressure Plate). Power cells seed themselves too.
+        if crate::block::is_power_block(bc.new_block)
+            || crate::block::is_power_block(old_block)
+        {
+            self.server.world.mark_dirty(cell);
+        }
+        self.server.world.notify_neighbours(cell);
+        self.pending_block_changes.push(bc.clone());
+        // D1 — a joiner's edit landed in the host's own
+        // world: its client must remesh the cell.
+        if self.lends_host_world() {
+            self.lent_edit_cells.push(cell);
+        }
+        // FU3 (FU1 verify N3) — a joiner's campfire edit: the server runs the
+        // campfire rule itself, so the joiner sends the one edit, not the
+        // pillar behind it. Gated on `remote` like the container spill: a
+        // host's own edits carry their smoke already.
+        if remote {
+            self.derive_campfire_edit(cell, old_block, bc.new_block);
+        }
+    }
+
+    /// FU3 (FU1 verify N3) — what a joiner's accepted edit `old → new` at
+    /// `cell` does to a campfire there (`campfire::on_block_edit`, the rule a
+    /// client's own break and light arms run): a broken fire's smoke cleared
+    /// and what was cooking spilled into the world, a smoky fire's pillar
+    /// raised when it is lit, a pillar cleared when it goes out — from the
+    /// SERVER's campfire state, and broadcast to everyone (the joiner itself
+    /// included: it no longer sends or predicts the pillar).
+    fn derive_campfire_edit(&mut self, cell: (i32, i32, i32), old: crate::block::BlockId, new: crate::block::BlockId) {
+        let edit = crate::campfire::on_block_edit(&mut self.server.world, cell, old, new);
+        let at = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.5, cell.2 as f32 + 0.5);
+        for (k, stack) in edit.spill.into_iter().enumerate() {
+            crate::entity::spawn_item(&mut self.server.ecs, at, stack, k as u32 * 6529);
+        }
+        for ((x, y, z), new_block) in edit.smoke {
+            self.pending_block_changes.push(protocol::BlockChange { x, y, z, new_block, meta: 0 });
+            if self.lends_host_world() {
+                self.lent_edit_cells.push((x, y, z));
+            }
+        }
     }
 
     /// C1 — what slot `i`'s accepted edit `old → bc.new_block` is to its
@@ -3235,17 +3451,17 @@ impl HostedServer {
     /// of one cell in one input consumes the placement and yields the break.
     fn classify_joiner_edit(
         &self,
-        i: usize,
         bc: &protocol::BlockChange,
         old: crate::block::BlockId,
         tags: &mut [Option<protocol::MinedBlock>],
+        (held_kind, held_id): (u8, u16),
     ) -> crate::joiner_inventory::JoinerEdit {
         use crate::joiner_inventory::{classify, JoinerEdit};
-        let sp = &self.server.players[i];
         // BRIDGE: possession check — the hand (and a break's tool) is the
         // client's word until the shadow can be enforced (see
-        // `validate_block_edit`).
-        let hand = crate::joiner_inventory::Hand::from_wire(sp.held_kind, sp.held_id, &self.server.registry);
+        // `validate_block_edit`). FU3 — the hand of the edit's own input
+        // (`edit_queue::EditGroup`), not of a later one read since.
+        let hand = crate::joiner_inventory::Hand::from_wire(held_kind, held_id, &self.server.registry);
         let creative = self.server.play_mode.is_creative();
         let cell = (bc.x, bc.y, bc.z);
         if let Some(tag) = tags.iter_mut().find(|t| t.is_some_and(|m| (m.x, m.y, m.z) == cell)) {
@@ -3391,6 +3607,7 @@ impl HostedServer {
         &self,
         i: usize,
         bc: &protocol::BlockChange,
+        (held_kind, held_id): (u8, u16),
     ) -> Result<(), EditRefusal> {
         let Some(sp) = self.server.players.get(i) else {
             return Err(EditRefusal::Malformed);
@@ -3417,12 +3634,7 @@ impl HostedServer {
         let dx = bc.x as f32 + 0.5 - eye.x;
         let dy = bc.y as f32 + 0.5 - eye.y;
         let dz = bc.z as f32 + 0.5 - eye.z;
-        if !block_change_within_reach(
-            dx * dx + dy * dy + dz * dz,
-            sp.held_kind,
-            sp.held_id,
-            sp.server_simulated,
-        ) {
+        if !block_change_within_reach(dx * dx + dy * dy + dz * dz, held_kind, held_id, sp.server_simulated) {
             return Err(EditRefusal::Reach);
         }
         if sp.server_simulated {
@@ -3671,7 +3883,7 @@ impl HostedServer {
             .map(|(idx, sp)| crate::server::collect_player_state(sp, idx as u32))
             .collect();
 
-        let entity_tick = self.entity_broadcast.diff(&mut self.server.ecs);
+        let entity_tick = self.entity_broadcast.diff(&mut self.server.ecs, self.server.tick_counter);
 
         // Deepslate Reserve snapshot (Spec 16). Synthetic value in alpha
         // pending Sentinel D-003 reversal — see `reserve::ReserveState::synthetic_default`.

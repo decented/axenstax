@@ -32,6 +32,8 @@ struct Rig {
     at: Vec3,
     input: u64,
     grants: Vec<InventoryGrantPacket>,
+    /// Every block change the joiner was sent (`StateUpdate`s).
+    changes: Vec<protocol::BlockChange>,
 }
 
 impl Rig {
@@ -73,7 +75,7 @@ impl Rig {
             Some(h) => h.world = world,
             None => hs.server.world = world,
         }
-        let mut rig = Rig { hs, host, client, slot, at, input: 0, grants: Vec::new() };
+        let mut rig = Rig { hs, host, client, slot, at, input: 0, grants: Vec::new(), changes: Vec::new() };
         rig.loaded((40, 79, 40));
         rig.tick();
         rig.grants.clear();
@@ -112,8 +114,15 @@ impl Rig {
             None => self.hs.tick(),
         }
         while let Some(pkt) = self.client.try_recv_from_server() {
-            if let Some((protocol::PacketType::InventoryGrant, payload)) = protocol::deserialize_header(&pkt) {
-                self.grants.push(protocol::safe_deserialize(payload).unwrap());
+            match protocol::deserialize_header(&pkt) {
+                Some((protocol::PacketType::InventoryGrant, payload)) => {
+                    self.grants.push(protocol::safe_deserialize(payload).unwrap());
+                }
+                Some((protocol::PacketType::StateUpdate, payload)) => {
+                    let state: protocol::StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
+                    self.changes.extend(state.block_changes);
+                }
+                _ => {}
             }
         }
     }
@@ -501,25 +510,16 @@ fn each_mined_tag_yields_exactly_once_and_never_for_another_edit_of_its_cell() {
     assert_eq!(rig.granted(&Item::Block(block::LAVA)), 0, "and the lava yielded nothing");
 }
 
-/// C1 review LOW-7 / LOW-3 — a tagged edit the server refuses (over the
-/// per-tick edit budget, out of reach, inside someone else's plot) yields
-/// nothing, and its tag doesn't linger: a later untagged emptying of the
-/// same cell yields nothing either.
+/// C1 review LOW-7 / LOW-3 — a tagged edit the server refuses (out of reach,
+/// inside someone else's plot) yields nothing, and its tag doesn't linger: a
+/// later untagged emptying of the same cell yields nothing either. (FU3 — an
+/// edit past the per-tick budget is no longer refused: it waits, and its tag
+/// with it: `edits_past_the_budget_wait_and_each_tag_yields_once`.)
 #[test]
 fn a_refused_tagged_edit_yields_nothing_and_its_tag_does_not_linger() {
     let mut rig = Rig::dedicated("refused-tag");
     let wood = Some(pick(ToolMaterial::Wood));
     let stone_at = |rig: &mut Rig, c: (i32, i32, i32)| rig.world().get_block(c.0, c.1, c.2) == block::STONE;
-
-    // Over budget: four edits first, the tagged mine fifth.
-    let others: Vec<((i32, i32, i32), BlockId)> =
-        (0..4).map(|k| ((39 + k, 80, 41), block::STONE)).collect();
-    let mut edits = others.clone();
-    edits.push((FLOOR, block::AIR));
-    rig.send(None, &edits, &[mined(FLOOR, wood)]);
-    rig.tick();
-    assert!(stone_at(&mut rig, FLOOR), "the fifth edit of the tick is refused");
-    assert!(rig.grants.is_empty(), "and yields nothing");
 
     // Out of reach.
     let far = (60, 79, 40);
@@ -542,12 +542,169 @@ fn a_refused_tagged_edit_yields_nothing_and_its_tag_does_not_linger() {
     assert!(rig.grants.is_empty());
     rig.hs.server.world.plots.clear();
 
-    // None of those tags lingers: the cells emptied untagged yield nothing.
-    rig.send(None, &[(FLOOR, block::AIR), (fenced, block::AIR)], &[]);
+    // A refused mine and a later accepted emptying of its cell in ONE input
+    // (the refusal and the acceptance a tick apart, the second edit waiting
+    // past the budget): the refused edit's tag is spent with it, so the
+    // later, untagged edit takes nothing.
+    rig.hs.server.world.plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::LocalPlayer(0),
+        fenced.0,
+        fenced.1 - 5,
+        fenced.2,
+    ));
+    let filler: Vec<((i32, i32, i32), BlockId)> = (0..3).map(|k| ((39 + k, 80, 39), block::STONE)).collect();
+    let mut edits = filler.clone();
+    edits.push((fenced, block::AIR)); // the 4th: refused (the plot)
+    edits.push((fenced, block::AIR)); // the 5th: waits a tick
+    rig.send(None, &edits, &[mined(fenced, wood)]);
     rig.tick();
-    assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::AIR, "accepted now");
+    assert!(stone_at(&mut rig, fenced), "the mine in the plot: refused");
+    rig.hs.server.world.plots.clear();
+    rig.tick();
+    assert_eq!(rig.world().get_block(fenced.0, fenced.1, fenced.2), block::AIR, "the waiting edit: accepted");
+    assert!(rig.grants.is_empty(), "but it never took the refused mine's tag");
+
+    // None of those tags lingers: cells emptied untagged yield nothing.
+    rig.world().set_block(fenced.0, fenced.1, fenced.2, block::STONE);
+    rig.send(None, &[(far, block::STONE), (fenced, block::AIR)], &[]);
+    rig.tick();
+    assert_eq!(rig.world().get_block(fenced.0, fenced.1, fenced.2), block::AIR, "accepted now");
     assert!(rig.grants.is_empty(), "but nothing yielded");
     assert_eq!(rig.tally().breaks, 0);
+}
+
+/// FU3 (FU1 verify N3) — a joiner's edits past the per-tick budget
+/// (`MAX_BLOCK_CHANGES_PER_TICK` = 4) wait and go first next tick, in the
+/// order they were made, each with its own `mined` tag; nothing is sent back
+/// for the budget. Twelve mines in one input apply across three ticks and
+/// yield exactly once each — on a dedicated server and on a lending host.
+#[test]
+fn edits_past_the_budget_wait_and_each_tag_yields_once() {
+    for mut rig in [Rig::dedicated("edit-queue"), Rig::lent("edit-queue")] {
+        let wood = Some(pick(ToolMaterial::Wood));
+        let cobble = Item::Block(block::COBBLESTONE);
+        let cells: Vec<(i32, i32, i32)> =
+            (0..12).map(|k| (38 + k % 6, 79, 39 + k / 6)).collect();
+        rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+        let edits: Vec<_> = cells.iter().map(|&c| (c, block::AIR)).collect();
+        let tags: Vec<_> = cells.iter().map(|&c| mined(c, wood)).collect();
+        rig.send(None, &edits, &tags);
+        let air = |rig: &mut Rig| -> Vec<bool> {
+            cells.clone().into_iter().map(|c| rig.world().get_block(c.0, c.1, c.2) == block::AIR).collect()
+        };
+        for (tick, applied) in [(1, 4), (2, 8), (3, 12)] {
+            rig.tick();
+            let expect: Vec<bool> = (0..12).map(|k| k < applied).collect();
+            assert_eq!(air(&mut rig), expect, "tick {tick}: the first {applied}, in the order made");
+            assert_eq!(rig.granted(&cobble), applied as u32, "tick {tick}: one yield per applied mine");
+        }
+        rig.tick();
+        assert_eq!(rig.granted(&cobble), 12, "each tag exactly once");
+        assert_eq!(rig.tally().breaks, 12);
+        assert!(
+            !rig.changes.iter().any(|c| c.new_block == block::STONE && cells.contains(&(c.x, c.y, c.z))),
+            "nothing was sent back for the budget"
+        );
+    }
+}
+
+/// FU3 (FU1 verify N3) — a joiner's campfire action is one edit: the server
+/// derives the smoke from its own campfire (`campfire::on_block_edit`). A
+/// joiner breaking a lit, smoky campfire leaves no smoke in the shared world
+/// (the 4-edit budget used to refuse three of the seven cells the client
+/// sent, stranding them); lighting a smoky one raises the pillar for
+/// everyone, and breaking it again clears it — on a dedicated server and on
+/// a lending host.
+#[test]
+fn a_joiners_campfire_break_or_light_leaves_the_smoke_to_the_server() {
+    for mut rig in [Rig::dedicated("campfire"), Rig::lent("campfire")] {
+        let fire = (42, 80, 40);
+        let pillar: Vec<(i32, i32, i32)> =
+            (1..=crate::campfire::SMOKE_PILLAR_HEIGHT).map(|dy| (fire.0, fire.1 + dy, fire.2)).collect();
+        rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+        let smoke = |rig: &mut Rig| {
+            pillar.iter().filter(|c| rig.world().get_block(c.0, c.1, c.2) == block::CAMPFIRE_SMOKE).count()
+        };
+        // A lit, smoky campfire with its pillar standing.
+        {
+            let world = rig.world();
+            for c in &pillar {
+                world.set_block(c.0, c.1, c.2, block::AIR);
+            }
+            world.set_block(fire.0, fire.1, fire.2, block::CAMPFIRE);
+            let cf = world.campfire_at_mut_or_default(fire);
+            cf.fuel_ticks = 2_000;
+            cf.smoke_ticks = 1_200;
+            crate::campfire::place_smoke_pillar(world, fire.0, fire.1, fire.2);
+        }
+        assert_eq!(smoke(&mut rig), 6);
+
+        // Broken: the joiner sends the one edit, as its client now does.
+        rig.send(None, &[(fire, block::AIR)], &[]);
+        rig.tick();
+        assert_eq!(rig.world().get_block(fire.0, fire.1, fire.2), block::AIR);
+        assert_eq!(smoke(&mut rig), 0, "no smoke left floating in the shared world");
+        assert!(rig.world().campfire_at(fire).is_none(), "nor an orphan campfire");
+        for c in &pillar {
+            assert!(
+                rig.changes.iter().any(|bc| (bc.x, bc.y, bc.z) == *c && bc.new_block == block::AIR),
+                "the cleared cell {c:?} reached the joiner"
+            );
+        }
+
+        // An unlit, smoky campfire, lit by the joiner: the pillar rises.
+        {
+            let world = rig.world();
+            world.set_block(fire.0, fire.1, fire.2, block::CAMPFIRE_UNLIT);
+            let cf = world.campfire_at_mut_or_default(fire);
+            cf.fuel_ticks = 2_000;
+            cf.smoke_ticks = 1_200;
+        }
+        rig.changes.clear();
+        rig.send(None, &[(fire, block::CAMPFIRE)], &[]);
+        rig.tick();
+        assert_eq!(rig.world().get_block(fire.0, fire.1, fire.2), block::CAMPFIRE);
+        assert_eq!(smoke(&mut rig), 6, "lit: the server raised the pillar");
+        assert!(
+            rig.changes.iter().filter(|bc| bc.new_block == block::CAMPFIRE_SMOKE).count() >= 6,
+            "and everyone, the joiner included, is sent it"
+        );
+        // …then broken again: nothing left.
+        rig.send(None, &[(fire, block::AIR)], &[]);
+        rig.tick();
+        assert_eq!(smoke(&mut rig), 0, "lit then broken: no smoke left");
+    }
+}
+
+/// FU3 — the edit queue's hard cap (`edit_queue::MAX_DEFERRED_EDITS`), which
+/// no honest client reaches: an edit past it is refused and sent back, as a
+/// refused edit always is.
+#[test]
+fn an_edit_past_the_edit_queues_cap_is_refused_and_sent_back() {
+    let mut rig = Rig::dedicated("edit-cap");
+    rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+    // Four processed now, MAX_DEFERRED_EDITS queued: all aimed out of reach
+    // (refused when their turn comes). Sent in packets under the wire cap.
+    let far = (60, 79, 40);
+    rig.loaded(far);
+    let mut left = 4 + crate::edit_queue::MAX_DEFERRED_EDITS;
+    while left > 0 {
+        let n = left.min(4_000);
+        rig.send(None, &vec![(far, block::STONE); n], &[]);
+        left -= n;
+    }
+    // The one past the cap: a placement in reach, beside the joiner.
+    rig.send(None, &[(ABOVE, block::STONE)], &[]);
+    rig.tick();
+    assert_eq!(rig.hs.edit_queue_len_for_test(rig.slot), crate::edit_queue::MAX_DEFERRED_EDITS, "full");
+    for _ in 0..4 {
+        rig.tick();
+    }
+    assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::AIR, "the edit past the cap is refused");
+    assert!(
+        rig.changes.iter().any(|c| (c.x, c.y, c.z) == ABOVE && c.new_block == block::AIR),
+        "and sent back, so the sender's ghost block goes"
+    );
 }
 
 /// FU1 (C1 verify N1) — an accepted edit that leaves the block as it was

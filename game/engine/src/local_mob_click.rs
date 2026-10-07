@@ -11,8 +11,10 @@
 //! sheared, and companion food rolled a tame (and was eaten) every frame.
 //!
 //! A refused milk or shear does not eat the click ([`MobClick::eats_click`]):
-//! the caller falls through to the next interaction, so filling a bucket at
-//! water beside a recently milked cow works (review D2b B1 residual).
+//! the caller falls through, past every other MOB interaction (FU3, FU1
+//! verify N2 — a Lead-detach on the refused cow untied it) to the block ones,
+//! so filling a bucket at water beside a recently milked cow works (review
+//! D2b B1 residual).
 //!
 //! Toasts, audio, particles, challenge events and the cooldown stay with the
 //! caller, which owns them.
@@ -39,11 +41,12 @@ pub struct MobClick {
 
 impl MobClick {
     /// Did this click do something that uses it up? A refusal (the cow isn't
-    /// ready, the wool is growing back) does not: the click falls through to
-    /// the next interaction exactly as if the mob were not there (review D2b
-    /// B1 residual) — a bucket aimed at water beside a cow just milked still
-    /// fills. The caller shows the refusal's toast but sets no cooldown and
-    /// does not skip the rest of the right-click chain.
+    /// ready, the wool is growing back) does not: the click falls through as
+    /// if the mob were not there (review D2b B1 residual) — a bucket aimed at
+    /// water beside a cow just milked still fills. The caller shows the
+    /// refusal's toast and sets no cooldown, and skips the rest of the MOB
+    /// arms for this click (FU3: none of them may act on the refused mob — a
+    /// Lead-detach untied it), running only the block ones.
     pub fn eats_click(&self) -> bool {
         self.interaction.done
     }

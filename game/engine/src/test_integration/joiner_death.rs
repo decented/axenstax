@@ -443,19 +443,24 @@ fn gameplay_packets_past_the_budget_wait_for_the_next_tick() {
     );
 }
 
+/// FU1/FU3 (FU1 verify N1) — the one thing a client is disconnected for
+/// sending: more than its inbound queue's hard bound, which no honest client
+/// reaches. Bytes only (no packet count bound of its own), each packet charged
+/// `transport::INBOUND_ENTRY_OVERHEAD` more, so a flood of tiny packets still
+/// gets there.
 #[test]
 fn a_client_past_the_inbound_bound_is_disconnected_with_a_reason() {
-    // FU1 — the one thing a client is disconnected for sending: more than its
-    // inbound queue's hard bound, which no honest client reaches.
     let mut hs = start_dedicated_server("inbound-bound");
     let (client, slot) = join_guest(&mut hs, "Flooder");
     let ping = protocol::serialize_packet(protocol::PacketType::Ping, &());
-    for _ in 0..crate::transport::MAX_INBOUND_PACKETS {
+    let fits = crate::transport::MAX_INBOUND_BYTES / (ping.len() + crate::transport::INBOUND_ENTRY_OVERHEAD);
+    for _ in 0..fits {
         client.send_to_server(&ping);
     }
     hs.tick();
-    assert!(!hs.slot_is_free(slot), "a queue exactly at the bound is kept");
-    for _ in 0..crate::transport::MAX_INBOUND_PACKETS {
+    assert!(!hs.slot_is_free(slot), "a queue under the bound is kept ({fits} tiny packets)");
+    // That tick read a catch-up's worth; this many more crosses the bound.
+    for _ in 0..crate::hosted_server::CATCH_UP_PACKETS_PER_TICK + 2 {
         client.send_to_server(&ping);
     }
     hs.tick();
@@ -471,6 +476,37 @@ fn a_client_past_the_inbound_bound_is_disconnected_with_a_reason() {
         Some(crate::hosted_server::INBOUND_OVERFLOW_REASON),
         "and told why"
     );
+}
+
+/// FU3 (FU1 verify N6) — a closing client's last frame can land just after a
+/// tick's fill, with the connection closing right behind it. The slot is
+/// freed only once a fill that started after the close has run, so that
+/// frame (here an input with an edit) is read, not lost.
+#[test]
+fn a_frame_that_lands_after_the_fill_is_read_before_its_closed_slot_is_freed() {
+    let mut hs = start_dedicated_server("late-frame");
+    let (client, late) = hs.attach_test_remote_late_frame();
+    send_guest_join(&client, "Late");
+    hs.tick();
+    let slot = super::joiner_authority::accepted(&client).expect("joined").player_index as usize;
+    super::joiner_authority::settle_chunk_push(&mut hs, &client, HostedServer::tick);
+    let at = stand_on_floor(&mut hs, slot);
+    let cell = (at.x.floor() as i32 + 1, at.y as i32, at.z.floor() as i32);
+    let mut last = protocol::InputPacket { tick: 1, x: at.x, y: at.y, z: at.z, health: 20.0, ..Default::default() };
+    last.block_changes.push(protocol::BlockChange { x: cell.0, y: cell.1, z: cell.2, new_block: block::STONE, meta: 0 });
+    *late.lock().unwrap() = Some(protocol::serialize_packet(protocol::PacketType::ClientInput, &last));
+    drop(client);
+
+    hs.tick();
+    assert!(!hs.slot_is_free(slot), "closed after this tick's fill: the slot waits a tick");
+    assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::AIR, "its last frame came too late for it");
+    hs.tick();
+    assert_eq!(
+        hs.server.world.get_block(cell.0, cell.1, cell.2),
+        block::STONE,
+        "the next tick read the frame that landed before the close"
+    );
+    assert!(hs.slot_is_free(slot), "and then freed the slot");
 }
 
 // ── Death and respawn belong to their owner alone ───────────────────────────

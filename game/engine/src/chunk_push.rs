@@ -42,9 +42,10 @@
 //!   one column may take it past its bound. The spawn ring is pushed
 //!   whatever the window, so a loading joiner — which sends no input yet —
 //!   still gets the ground it needs, however heavy (B2a review LOW-4).
-//!   Acknowledgement, drops and render distance are read from EVERY input,
-//!   one the server otherwise discards over its per-tick packet budget
-//!   included (review HIGH-2).
+//!   Acknowledgement, drops and render distance are read from every input;
+//!   one waiting past the per-tick read budget has its acknowledgement and
+//!   drops taken on arrival (FU1), its render distance in turn (review
+//!   HIGH-2).
 //! - **Letting go.** The client reports every column it discards
 //!   (`InputPacket.chunk_drops`, with its `chunk_ack` count at the time),
 //!   repeating the report in every input until the server has applied an

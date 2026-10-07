@@ -31,6 +31,7 @@
 - **v72** (2026-10-07, C1): **The server yields a joiner's breaks.** `InputPacket` gains trailing `mined: Vec<MinedBlock>` (`MinedBlock { x, y, z: i32, tool: WireItem }`, at most `MAX_MINED_PER_INPUT = 16` read; appended after B2b's `column_mismatch`): the cells the client's survival break arm mined since its previous input, each with the tool it mined with. The server computes the drop by the client's own rules (`break_drops`: crop harvest, tool-tier mine drop + bonus, Satori on the world's Proof-of-Play secret) and grants it by `InventoryGrant`; a joined client no longer grants itself break drops. The server also keeps a shadow of each joiner's inventory with a log-only possession check on placements. Packet shape CHANGED, hence the bump. See §4.2e.
 - **A client's packets past the per-tick budget wait; they are never dropped (2026-10-07, FU1, NO wire change — still v72).** The server used to read 10 of a client's packets a tick and discard the rest, so the swing or right-click a client made while catching up after a frame hitch (ten inputs a frame, then the action) was lost unanswered. Packets past the budget now wait in a per-client inbound queue for the next tick, in arrival order; only a client past the queue's hard bound (1024 packets or 8 MiB) is disconnected, with a reason. See §11.2a.
 - **v73** (2026-10-07, C2a): **A joiner's hunger, eating and sleep are the server's.** Appended: `PacketType::ItemAction = 62` (C→S, `ItemActionPacket { seq, action: ItemAction }`, `ItemAction` = `Eat { hotbar_slot, held_kind, held_id, held_full }` | `Sleep { bed: [i32; 3] }`, append only — C2b adds `Craft` and `Drop`) and `ItemActionOutcome = 63` (S→C, to the asker: `{ seq, accepted, consume_held, note }`); `StateUpdatePacket` gains trailing `own_hunger: u8` (per client, like `last_acked_input`: the addressed joiner's hunger as the server holds it). The server runs every joiner's metabolism (the client's `PlayerCombat::tick_metabolism`, starvation floor from its own difficulty; Hard starvation is a server death, `DiedOf { Starvation }`); a joined client runs none of its own and eats and sleeps by request; `InputPacket.health_delta` counts **losses only** (a reported heal is zero; `MAX_REPORTED_HEAL_PER_INPUT` is gone). A joiner's sleep sets its server spawn point and heals it but never skips the night. Also (no wire change): a request's item claim ends when the server acknowledges the input sent after it, not after FU1's 10 s (FU verify N4). See §4.2f, §5.3.2.
+- **The FU1 verify fixes (2026-10-07, FU3, NO wire change — still v73).** The inbound queue's hard bound is bytes only (8 MiB, each packet charged 64 bytes more): FU1's 1,024-packet bound disconnected every joiner after an honest host stall of about 51 s, because each joiner's bridge thread keeps queueing while the host's game thread is stopped. A client with more than 40 packets waiting is read 64 a tick (catch-up); entity requests and device interactions past their per-kind budgets wait instead of being skipped. Block edits past the 4-a-tick budget wait in a per-client edit queue (with their input's tags and hand) instead of being refused, up to a hard cap of 16,384. The server derives a joiner's campfire smoke itself (`campfire::on_block_edit`), so a campfire action is one edit, and a joiner runs no campfire sweep. A closed connection's slot is freed only after a fill that began after the close. A refused milk or shear skips every later mob arm of that click (it untied a leashed cow), and `entity_flags::PRODUCT_NOT_READY` (bit 32; 0 = ready or unknown, so no bump) lets a joiner's bucket or shears click on an animal that isn't ready go to the block. See §11.2a, §4.1, §4.2d.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -737,7 +738,7 @@ The design below (palette + RLE, view-direction priority, `ChunkRequest`) is **n
 - **Touched columns** (Phase B2b; `chunk_verdict.rs`, server; `chunk_intake.rs`, joiner). **The verdict is per column** (`chunk_verdict::decide_column`): `Touched` if any chunk of the column differs from a scratch regeneration of that one column — blocks, the player-placed bits, and on the block cells `block_meta`, block entities (type, position and contents, compared as their serialized bytes: a looted worldgen chest is touched) and face attachments; light is excluded; an absent chunk equals an all-air one with no placed bit. The scratch is a fresh `World` with the server world's generation inputs (`World::generation_twin`: Workshop void, world type, flat floor, water depth) generating just that column with the server's own `BiomeGenerator`. Generation is order-independent and column-clipped (Phase B0, Spec 02 §5.2), so a fresh column matches; a feature that spilled across columns would read as a false `Touched` (safe: bandwidth only). **Measured 2026-10-07:** 0 of 405 columns false-touched on fresh worlds (5 seeds, the inner 9×9 of an 11×11 area generated nearest first, `chunk_verdict::tests::measure_verdicts`), and 0 of 169 columns round a joiner touched by a dedicated server's own simulation over 400 ticks (3 seeds; `test_integration::touched_columns::measure_touched_after_play`). A lending host's client-only systems (crops, campfires, hives, machines) were not measured: each column they write reads touched. **The cache is shared and monotonic** (`chunk_verdict::Verdicts` on `HostedServer`, one for every joiner, never persisted): a column with no verdict is compared once; any non-worldgen write marks it `Touched` for good. The `World` records the columns its setters edit (`World::track_edited_columns`, runtime-only, on for the world a hosted server pushes from and drained into the cache every tick): `set_block` and `set_placed` where they mark `persist`, `set_meta` on a change, every block-entity insert and removal, every `*_at_mut` block-entity accessor (a `&mut` handed out counts — conservative), and face-attachment set and removal; never `generate_column` (`worldgen_depth`), `insert_chunk` / `Chunk::from_bytes`, or a save restore (`save::apply_world_save_state` runs under `World::without_edit_tracking`, so a column loaded from a save starts with no verdict and is compared once). The tick's broadcast block changes mark their columns too. A verdict survives the column's unload (its saved content cannot change while unloaded; a write-through to an evicted column still marks it). Raw writes to the side tables outside `World` (`block_entities.remove` beside a `set_block`, the `--no-lend` mirror) rely on the block change next to them. **Budget** (`chunk_verdict::VerdictBudget::for_server`): verdicts are computed lazily in `broadcast_state`, nearest first round each noted joiner's server body across all of them (ties rotate between joiners), only for loaded columns inside the push radius not yet sent whole — and, while a joiner's credit window is shut, only in its spawn ring. No new one starts once the budget's time has gone, and one always runs, so nothing starves. A **lending host** (its server tick runs in the host's own frame) allows 3 ms and at most 4 a tick (`LENDING_VERDICT_BUDGET`); a server that **does not lend** — the dedicated server, and a `--no-lend` host, which sends no notes anyway — has no frame to protect and allows 12 ms of its 50 ms tick and at most 16 (`OWNING_VERDICT_BUDGET`; B2b fix D2, after review MEDIUM-2; the count caps set from the release measurement below, B2b fix-2 N3). Time governs in both: each cap is what its time allows on a machine twice as fast. **Measured 2026-10-07 in a release build** (i5-1235U, 405 columns on 5 seeds, `chunk_verdict::tests::measure_check_costs`): **1.53 ms per verdict** on a fresh column (p95 1.75, max 1.82), and **1.94 ms** (p95 2.17, max 2.53) beside three side tables of 20,000 entries each, where `column_matches` probes every block cell of every chunk. A release build is no faster than the test profile's earlier 1.65 ms, because generation dominates. So a lending host's frame runs about 2 verdicts a tick (worst tick 3 ms plus one verdict, about 5.5 ms) and a dedicated server 7 to 8 (6 on a mature world; worst tick 12 ms plus one, 14.5 ms). The budget only paces how fast touched columns appear: the joiner shows its own generation meanwhile. A column with no verdict yet is neither pushed nor declared local; in the spawn ring it holds back everything farther, like an unloaded one. **Notes:** for each column within `R` the server sends either the column (pushed whole, as above) or a `ColumnLocal { cx, cz, hash }` note in the same ordered stream — the client's `interleave` orders it between the block changes around it — numbered and acknowledged like a push (it takes one credit-window slot). A note puts all six chunks of its column in the sent-set, so later changes to it reach the joiner, a drop report takes it out, and an overflow resync pushes the chunk. A column that becomes `Touched` while already local for a joiner is never pushed again for it: the change is sent as normal and lands on the joiner's own, identical, generation. **Fresh world, R = 5 (121 columns):** 121 notes, 1,089 bytes, against 1,539,170 bytes for `all` on the same world (`touched_columns::a_touched_mode_join_on_a_fresh_world_gets_notes_not_pushes`). **The joiner** learns the radius from `JoinAccept.chunk_note_radius` and centres it on its body as the server last reported it (the `JoinAccept` spawn until the first `StateUpdate`). **It generates its own terrain everywhere a single-player client would** — the streamer, the loading queue (`step_load`), the spawn-area pregeneration, the post-load void repair and the void heal — inside `R` too, before any verdict (B2b fix D1, 2026-10-07: the first build generated inside `R` only on a note, which left a void moat, rings 2..R, for 3.5-14 s on every join, teleport and first visit; review MEDIUM-2). **A note confirms a column:** one the joiner already generated is just marked local (it then counts among the columns it reports on letting go); one not generated yet is generated as usual. **A push replaces a column whole** (below), so a touched column can briefly show unedited terrain until its push lands — B2a's accepted behaviour. **A column generated before any verdict** (neither noted nor pushed) is not in the server's sent-set: on unload it is evicted or dropped like a single-player column and never reported; only noted or pushed columns are. Its loading screen still waits for the spawn 3×3 to be pushed whole or noted local (`ChunkIntake::decided`) — that is where a pristine flash would be at the player's feet — and generates a noted ring column on the spot. A block change for a column noted local that it has not generated yet generates the column first, through the full load path (`GameState::load_one_column`: restore-else-generate, light, water/lava/fire registration, wildlife, meshes), then applies — never a stray chunk (`ChunkIntake::generate_before`); so does a pushed chunk for such a column (B2b fix D3, review MEDIUM-1: an overflow resync pushes one chunk of a noted column with no change before it, and applied alone it left the column part-pushed and never generated, a 16×16 shaft of void with every later change to its other chunks conjuring a stray chunk; `ChunkIntake::generate_before_chunk`). A pushed column replaces whatever the joiner held there, its own generation included, every cy: the push carries all six chunks, an absent one as explicit air, so a local tree chunk above an area the server cleared is gone. **The column check** (B2b fix D4, review LOW-3; reworked by the B2b fix-review round, HIGH-1 and LOW-1..4). The fingerprint is static (`WORLDGEN_VERSION` + the bundled plan hash), so a generation that differs anyway would otherwise diverge silently, since a note is never overwritten by a push. **What the check catches:** a generation that differs from the server's for the same column inputs, run in isolation on both sides (a platform floating-point difference, e.g. an aarch64 Android joiner on an x86 host). **What it cannot catch:** a neighbour-order dependence, i.e. a column that generates differently with its neighbours present than alone. Both hashes it compares at the end are isolated generations (the server's scratch, the joiner's scratch confirmation), so such a column reads on the joiner as its own drift (held differs, scratch equals the note) and is kept without a word, and on the server it reads `Touched` and is never noted. Generation is order-independent and column-clipped by design (Spec 02 §5.2) and the verdict measurement found no case; the check is not a second guard for it. So each note carries `chunk_verdict::column_hash` of the column: SHA-256 over the six chunks' block arrays and player-placed masks (the `Chunk::as_bytes` byte stream — each `u16` block, then each `u64` placed word, explicit little-endian — fed straight to the hasher by `Chunk::feed_bytes`, no allocation), each after a presence byte, an absent chunk hashed as a bare one; light and side data are not in it; the first four bytes as a little-endian `u32`; pinned by `chunk_verdict::tests` (the allocation-free feed left the byte stream, and so every hash, unchanged). **The server hashes once a verdict, never a note:** `decide_column` hashes the scratch it already built and caches the hash with `Untouched` (`Verdicts::note_hash`). That is exact by construction — `Untouched` means live == scratch, and any edit since flips the verdict to `Touched` before a plan reads it — and it keeps a plan of up to 64 notes out of the lending host's frame. **The joiner's check is pending from the note.** It is queued once the joiner holds the column (`ChunkIntake::column_held`): at the note for a column already held, else on whichever path makes the column present — the streamer's stream-in (a restore from the evicted store included), the loading queue (`load_one_column`), both spawn-area pregenerations, the post-load void repair, and a column generated for a change or a pushed chunk. Queued checks run a few a frame (`ChunkIntake::run_checks` at the end of `apply_world_deltas`: `COLUMN_CHECKS_PER_FRAME = 16` column hashes in play, `LOADING_COLUMN_CHECKS_PER_FRAME = 128` on the loading screen, a scratch generation costing `SCRATCH_CHECK_COST = 63` more — **measured 2026-10-07 in a release build** (i5-1235U with SHA extensions, `chunk_verdict::tests::measure_check_costs`): one column hash **0.024 ms** (p95 0.029), one scratch generation and hash **1.52 ms** (p95 1.74), so a scratch is 63 hashes, and a CPU without SHA extensions hashes about ten times slower, where 63 over-charges, the safe side; so a frame in play does at most 15 hashes and one scratch, about 2 ms, and an R 8 area of 289 columns is checked in 18 frames, 0.3 s), except that a server block change for a column whose check is pending checks it first, synchronously, and so does a pushed chunk (an overflow resync) for one — **at most `FORCED_CHECKS_PER_FRAME = 8` distinct columns a frame in play, `LOADING_FORCED_CHECKS_PER_FRAME = 64` on the loading screen** (B2b fix-2 N3: before it the count was unbounded, and a lending host's snowfall pass in the second after a join, with up to about 289 checks pending, was one long frame). `ChunkIntake::plan_deltas` lays the frame's stream out in order and lets through the steps up to the cap; the step that would force the next column's check, and every step after it, is carried to the next frame, in order (nothing overtakes a held step, so the stream's order is kept), and the first forced check of a frame always runs, so a held burst drains 8 a frame (289 columns in 36 frames, 0.6 s). Eight forced checks cost 0.2 ms typically and, only if every one found drift, about 12 ms; what they cost comes off the frame's queue budget. The count is conservative (a note earlier in the frame counts as pending), so a frame can hold a step it need not. A pushed chunk is checked before its packet counts (`ChunkIntake::check_before_chunk`, which brings an evicted copy back to check it): the push replaces what the column is checked by, and its pending entry is cleared only after that. So every noted column the joiner holds is checked before a server change or a push lands on it — except a copy sitting in the evicted store (an undecided speculative column the joiner edited, unloaded, then had noted), which a server change writes through to and which is checked when it comes back; the scratch confirmation below makes that order harmless, since a mismatch is judged on generation, not on the held copy. What lands after a check never re-runs it. **The check confirms a mismatch on a scratch generation** (`ChunkIntake::verify_local`): it hashes the column as held; on a match, done. On a difference it generates the column in scratch (`chunk_verdict::generated_column_hash`: `World::generation_twin` + `generate_column`, no world writes, no light, no registration) and hashes that, because the joiner may have written to its own copy since generating it — a joiner runs its own snowfall, fluids, fire, falling blocks and leaf decay (the dual-sim debt), its player's edits land on its world before they are sent, and a drifted copy survives an unload in the evicted store. **Scratch = note:** generation agrees and the difference is the joiner's own writes; the column is checked and kept as it stands (logged at debug; no switch, no warning, no report; `touched_columns::a_column_the_joiner_wrote_to_before_its_note_came_is_kept_without_a_switch`). **Scratch ≠ note:** a real generation difference. The joiner lets the column go (discarded and reported) and sets a sticky switch, `InputPacket.column_mismatch` (with the scratch generation's hash as `client_hash`), sent in every input for the rest of the session; from then on no column is checked — every pending check is cleared and the check is a no-op (B2b fix LOW-1), since the server pushes every noted column again. The server, on the first report from a joiner it has sent a note this session (`ClientChunkPush::noted_ever`; a report from one never noted — `all` mode, a push-only joiner — is ignored silently, B2b fix LOW-4: an honest client sets it only from a note; `touched_columns::a_mismatch_report_from_a_joiner_never_noted_changes_nothing`), logs the joiner, the column and both hashes with the shared fingerprint at warn (a determinism bug to report), puts that joiner in push-everything mode for the rest of its session (`ClientChunkPush::push_everything_from_now`; `HostedServer::sends_notes` is then false), and takes every column it has noted to that joiner out of the sent-set — all of them are suspect, not just the one — so the next plans push them whole, those inside `R` nearest first and the rest when back in range, and never held off. The switch is read before the input's drop reports, so the column the joiner let go of in the same input is pushed again at once. **A kept drifted column stays different from the server's** while the joiner holds it: its own writes stay on its copy (as they always did in a joined session's dual sim) and server changes keep landing on it. A local column is discarded when let go of, never kept evicted, so on return it is generated clean (or pushed, if touched meanwhile). A note for a column the joiner holds pushed chunks of is ignored (counted, not applied). A column noted local is let go of like a pushed one — on unload, and also when it was never generated before the joiner moved out of range (`ChunkIntake::local_not_loaded`), or it would stay "local" on the joiner while the server forgot it, and be generated on return before the server had decided it again. Pinned on a lending host too (`touched_columns::a_lending_host_notes_untouched_columns_and_its_own_edits_touch_them`): the host's own edit between two lend windows is tracked on its lent world and touches the column; a joiner that already holds it gets the change, a later joiner the push.
 - **Payload** (`chunk_push::build_chunk_packets`). `compressed_blocks` = LZ4 (`compress_chunk`, `lz4_flex` size-prepended) of `Chunk::as_bytes()` (u16 ids + the 512-byte player-placed mask, 8,704 bytes raw). Measured 2026-10-07: fresh terrain (4 seeds × 9×9 columns × 6) median about 2.3 KB, p95 about 4.0 KB, max about 4.4 KB per chunk; saved worlds (2,216 / 762 / 18 chunks) median 2.5 KB / 61 B / 61 B, max 4.3 KB / 3.2 KB / 507 B. Side data: the chunk's `block_meta` entries (`(cell, meta)`, `cell = x + z*16 + y*256` chunk-local), its render-visible block entities (sign text; item-frame item as the held-item `(kind, id)` pair + `WireItem`, rotation; campfire fuel / smoke / smoulder ticks and raid-warning tint), and its face attachments as render stubs (wallpaper block, blank blueprint, blueprint with its develop state only). **Never** a container's contents, an escrow, a vendor's stock, a grave or a plan. Not carried: drying racks, plots, rigs, waypoints and other world-level tables (exhibits ride `JoinAccept`). Side data belongs to a block, so only entries on a chunk's non-air cells are sent, and an all-air or absent chunk carries none (and costs no side-table lookup; the scans walk a table when it is smaller than the chunk's block count, else probe only the block cells — no per-chunk index, which the tables' many direct writers would let go stale). A chunk whose side data does not fit one packet (≤ `CHUNK_PACKET_MAX_BYTES`, 32 KiB — well under a tick's 48 KiB budget, so a chunk packet always fits after the tick's first packet) goes as several: the first carries the blocks, each continuation (empty `compressed_blocks`) more side data.
 - **The sent-set and the filter.** A chunk is *sent* from the moment its push is queued. `broadcast_state` passes a joiner only block changes for chunks in its sent-set; a change to an unsent chunk is dropped for that joiner (the push carries it). Each tick a client's deltas are queued first and its new pushes after, from the world those deltas are already in: a change this tick to a chunk first pushed this tick is filtered and is in the snapshot; one to a chunk sent earlier rides after that chunk's snapshot. The host's own loopback slots are never filtered or pushed.
-- **Pacing.** Pushes ride the client's outbox FIFO (§ "Bounded StateUpdates") as whole `ChunkData` packets in line with its deltas, inside its 48 KiB-a-tick budget, never first in a tick (the first packet carries the player positions); at most about one tick's budget is queued ahead (`QUEUE_AHEAD_BYTES`) plus the rest of the column that passed it (columns go whole), so the next tick's deltas wait behind at most that — a few ticks for a column heavy with side data, never a pile of chunks. **Nothing at the head of the queue can wedge it** (B2a review HIGH-1, 2026-10-07: a 45-56 KiB packet of a sign- or wallpaper-heavy chunk used to wait for room that never came, stalling every later delta and push for the session): when a chunk is next in line, the tick's first packet leaves it room — entity updates beyond the 8 KiB reserve take only what the chunk leaves — and a chunk that is at the head of the queue when the tick's drain starts always goes, even past the budget. So a tick sends at most the budget, or its first packet plus one chunk packet. A **credit window** bounds what is in flight: at most `CHUNK_WINDOW_PACKETS = 64` packets and `CHUNK_WINDOW_BYTES = 512 KiB` not yet acknowledged (checked between columns, so up to one column more); the client acknowledges cumulatively in every `InputPacket` (`chunk_ack`). The **spawn ring is pushed whatever the window** (review LOW-4): a loading joiner sends no input, so no acknowledgement, and a ring needing more than 64 packets (heavy side data) would otherwise have waited out the 30 s loading limit. The ring is 9 columns and moves only with the body, so this cannot flood a link; the transport's 8 MiB queue cap is the backstop. The server reads `chunk_ack`, `chunk_drops` and `render_distance` from **every** `InputPacket` it receives — before its finiteness and freshness checks, and also from one past its 10-packets-a-tick budget that it otherwise discards (review HIGH-2). At about 2.3 KB a chunk a default join is about 4 MB and takes about 4 s at the budget.
+- **Pacing.** Pushes ride the client's outbox FIFO (§ "Bounded StateUpdates") as whole `ChunkData` packets in line with its deltas, inside its 48 KiB-a-tick budget, never first in a tick (the first packet carries the player positions); at most about one tick's budget is queued ahead (`QUEUE_AHEAD_BYTES`) plus the rest of the column that passed it (columns go whole), so the next tick's deltas wait behind at most that — a few ticks for a column heavy with side data, never a pile of chunks. **Nothing at the head of the queue can wedge it** (B2a review HIGH-1, 2026-10-07: a 45-56 KiB packet of a sign- or wallpaper-heavy chunk used to wait for room that never came, stalling every later delta and push for the session): when a chunk is next in line, the tick's first packet leaves it room — entity updates beyond the 8 KiB reserve take only what the chunk leaves — and a chunk that is at the head of the queue when the tick's drain starts always goes, even past the budget. So a tick sends at most the budget, or its first packet plus one chunk packet. A **credit window** bounds what is in flight: at most `CHUNK_WINDOW_PACKETS = 64` packets and `CHUNK_WINDOW_BYTES = 512 KiB` not yet acknowledged (checked between columns, so up to one column more); the client acknowledges cumulatively in every `InputPacket` (`chunk_ack`). The **spawn ring is pushed whatever the window** (review LOW-4): a loading joiner sends no input, so no acknowledgement, and a ring needing more than 64 packets (heavy side data) would otherwise have waited out the 30 s loading limit. The ring is 9 columns and moves only with the body, so this cannot flood a link; the transport's 8 MiB queue cap is the backstop. The server reads `chunk_ack`, `chunk_drops` and `render_distance` from every `InputPacket` it processes, before its finiteness and freshness checks. An input waiting past the 10-packets-a-tick read budget (deferred, never discarded: §11.2a, FU1) has its `chunk_ack` and `chunk_drops` taken in the tick it arrives (review HIGH-2). The exception is an input carrying a column-mismatch switch the server has not acted on: it, and every input after it, waits its turn. Its `render_distance` is read when its turn comes. (FU1 verify N7, accepted: an early-taken drop can run ahead of an older waiting input's render-distance rise, which clears the hold-off, and cost one extra column push.) At about 2.3 KB a chunk a default join is about 4 MB and takes about 4 s at the budget.
 - **Coalescing rule (the "Phase B rule").** A queued push is a snapshot at its place in line: no later change may be folded into a change queued before it. `ClientOutbox::push_chunk` removes the chunk's cells from the coalescing index, and entering backlog mode treats a queued push as a barrier for its cells. An overflow (past 2 MiB of block changes) drops the queued changes but keeps queued pushes (their bytes are not counted against the bound); the dropped changes' chunks are pushed again whole, before any new chunk (`take_chunk_resync_requests` → `ClientChunkPush::request_resync`) — those still inside `R`; one outside it leaves the sent-set and is pushed again with its column once that is back in range. A drop report cancels any pending resync of its column (review LOW-2: the client holds nothing newer to bring up to date).
 - **Letting go.** When a joiner unloads a pushed column — or, since B2b, a column it was told is local — (beyond its render distance + 2) it discards it — chunks and side data, never into its evicted store — and reports it (`chunk_drops`, with its `chunk_ack` count then, so a drop older than a re-push cannot undo it). The report rides **every** input until the server has applied one that carried it — the joiner retires it once `StateUpdate.last_acked_input` reaches the first input that carried it (the stream is ordered and the server reads every input's reports, so by then it has read this one); `as_of` makes each repeat a no-op (review HIGH-2: a one-shot report lost to the packet budget left the server sending changes into a column the joiner had discarded, and never pushing it again). The server takes the column out of the sent-set: its changes stop, and it is pushed afresh when back in range. A column let go of while still inside `R` is **held off**: not pushed again until it has been outside `R` and come back (review MEDIUM-1), for at most `HELD_OFF_PLANS = 100` ticks (5 s), and never past a rise in the client's render distance (which clears every hold). **An honest joiner can drop inside `R`** (B2a verify NEW-1, 2026-10-07; the B2a premise that it never does was wrong): a ride sends inputs with no movement (the ride BRIDGE), so the server body — and the push radius round it — stays where the ride began while the client body, and the client's unload radius, move away. Two fixes: the joiner never unloads a pushed or local column within `render distance + 2` of its **server** body's column (`ChunkIntake::keeps_near_server_body`, centred on the body the last `StateUpdate` reported — the same position `OwnPrediction` reconciles against; unloading only, nothing is loaded or generated round it), so getting off finds them there; and the hold-off ends on its own, so a client that did let go (an older one, a render distance dropped and raised inside one server tick) gets them back within 5 s instead of holding a stale or void patch for good. The hold-off stays as defence in depth against a push → unload → drop → push churn (a stale render distance, a body that drifted from the server's, a hostile client) — bounded now, not stopped. Backstop: the server forgets chunks more than `max(R, render distance) + 2 + FORGET_SLACK (4)` columns from the body without a report (a client that holds one then has a stale copy until it comes back in range).
 - **The sent-set dies with the connection**: it is reset whenever a slot is attached, joined or released.
@@ -1087,7 +1088,8 @@ mobs chased joiners but never damaged anyone.
   `breeding::Baby`; `TAMED = 4` — `tameable::pet_owner_of`, which a joiner
   reads to offer the sit / follow command (§4.2d); `SATOSHI = 8` —
   `SatoshiMarker`; since v70 `TETHERED = 16` — on a Lead, so a joiner's
-  right-click takes it off, as in single-player). These are what the entity
+  right-click takes it off, as in single-player; since FU3 (no bump)
+  `PRODUCT_NOT_READY = 32` — a cow not ready to milk or a shorn sheep, §4.2d). These are what the entity
   renderer reads (position, velocity for the walk cycle, facing, hurt flash,
   baby scale, Satoshi's model); per-species tints are static per kind, so no
   genetics are sent. An update is now 34 bytes (was 21).
@@ -1259,6 +1261,24 @@ and charged — the wheat taken, the Lead taken, a tame landed — and nothing
 ever came of it (no baby, a Lead that never pulled, a pet that never
 followed). `Shear`, `Milk` and `LeadDetach` need nothing that runs over time
 and work everywhere.
+
+**An animal that isn't ready (FU3, FU1 verify N8 — NO version bump).** The
+mirror carries `entity_flags::PRODUCT_NOT_READY = 32` on a cow that can't be
+milked yet or a sheep whose wool is growing back, set by the rule `Milk` and
+`Shear` refuse by (`mob_interact::product_ready`, on the server's clock) and
+cleared, in a changed-only update, when the product is back. A joiner's
+`MirrorTarget::right_click_action` with a bucket on such a cow, or shears on
+such a sheep, returns no mob action at all: no `EntityInteract` is sent and
+no later mob arm runs (a tethered one is not untied), so the click goes on to
+the block, as in single-player (where a refused milk or shear skips every
+later mob arm of that click, FU3 N2, and the click reaches the block arms).
+The bit's polarity (0 = ready or unknown) means an older server, which never
+sets it, and an older joiner, which ignores it, both behave as before; within
+a round trip of a milking the joiner may still ask and be refused. Tests:
+`entity_broadcast::product_not_ready_marks_a_milked_cow_and_a_shorn_sheep`,
+`remote_mobs::a_bucket_or_shears_on_an_animal_that_isnt_ready_goes_to_the_block`;
+single-player:
+`game_harness_a_refused_milk_leaves_a_tethered_cow_tied_and_reaches_the_block`.
 
 **Pets.** A tame sets the pet's owner (`OwnershipData.owner_pubkey`) to the
 joiner's verified npub (bech32, `ServerPlayer::pet_owner_key`); local seats
@@ -2349,10 +2369,11 @@ The HMAC key rotates every 60 seconds (the server accepts cookies signed with th
 
 Rate limiting is applied **before** any decryption or packet parsing to minimise CPU cost of attack traffic.
 
-### 11.2a As built: the per-client inbound budget (FU1, 2026-10-07 — NO wire change, still v72)
+### 11.2a As built: the per-client inbound budget (FU1 + FU3, 2026-10-07 — NO wire change)
 
 The table above is the design. What the server actually bounds, per client per
-tick (`HostedServer::process_inbound_packets`, `transport::InboundQueue`):
+tick (`HostedServer::process_inbound_packets`, `transport::InboundQueue`,
+`edit_queue::EditQueue`):
 
 - **Read budget: `MAX_PACKETS_PER_TICK` = 10 packets.** Every tick the server
   moves everything a client's transport has received to the back of that
@@ -2363,38 +2384,84 @@ tick (`HostedServer::process_inbound_packets`, `transport::InboundQueue`):
   sending one input per tick) — the case that used to lose the swing or
   right-click made during it, the 12th or 13th packet of the tick, dropped
   unanswered.
+- **Catch-up (FU3, FU1 verify N1).** A client with more than
+  `CATCH_UP_QUEUE_LEN` = 40 packets waiting after the fill (about two seconds
+  of an honest client's traffic) is read `CATCH_UP_PACKETS_PER_TICK` = 64 that
+  tick, chosen once per tick. A 55-second host stall (about 1,100 inputs)
+  drains in under a second instead of two minutes. Its stale movement is not
+  simulated in bulk: S1 keeps the newest `MAX_QUEUED_INTENTS` inputs (the
+  dropped ones' flight toggle and health change carried forward) and steps at
+  most `MAX_INTENTS_PER_TICK` a tick on banked credit, so the joiner snaps
+  once, as after any stall; the acknowledgement stays monotonic and never
+  runs ahead of what arrived, and it catches up with the newest input once the
+  server has ticks to spare — a lending host replays its missed ticks (its
+  accumulator runs up to ten a frame) and banks the credit. (A server that
+  did not replay them would keep up to `MAX_QUEUED_INTENTS` of a joiner's
+  inputs waiting until a tick with nothing queued — S1's step cap, unchanged
+  by the catch-up.) Test:
+  `joiners_act::a_55_second_host_stall_keeps_the_joiner_and_answers_its_swing_once`.
 - **Control packets** (`Respawn`, `Disconnect`) cost nothing against the
   budget, so one at the front of the queue is read even when the budget is
   spent — but nothing is ever read out of order: a Respawn read ahead of the
   zero-health inputs queued before it would be undone by them (§4.2b).
-- **Hard bound: `MAX_INBOUND_PACKETS` = 1024 packets or `MAX_INBOUND_BYTES` =
-  8 MiB waiting** (the outbound queue's 8 MiB, "Game-packet framing on QUIC").
-  The queue is filled packet by packet and stops reading the moment either is
-  crossed; that client is disconnected (`release_slot` with
-  `INBOUND_OVERFLOW_REASON`, shown to the player: "Disconnected: your game sent
-  more than the server could keep up with.") and a warning is logged with the
-  counts. Nothing else a client sends ends its connection. **No honest client
-  reaches it:** it sends about 20 packets a second and the server reads 200,
-  so its queue grows only while a burst arrives faster than that — a QUIC
-  stall lasts at most 30 s (quinn's idle timeout ends the connection: some 600
-  inputs plus actions), and a game-thread freeze of `T` seconds queues at most
-  the `20·T` inputs it then catches up. 1024 is a freeze of most of a minute.
+- **Hard bound: `MAX_INBOUND_BYTES` = 8 MiB waiting** (the outbound queue's
+  8 MiB, "Game-packet framing on QUIC"), each packet charged its length plus
+  `INBOUND_ENTRY_OVERHEAD` = 64 bytes, so a flood of tiny packets reaches it
+  too (about 120,000 empty ones). **Bytes only (FU3):** FU1's second bound,
+  1,024 packets, disconnected every joiner after an honest host stall of
+  about 51 s. The backlog is not only the client's doing: a lending host's
+  server ticks inside the host's frame, while each joiner's QUIC bridge thread
+  (`network::bridge_loop`) keeps reading — and ACKing, so the connection never
+  idles and quinn's idle timeout never ends it — and pushes every frame into
+  an unbounded channel. A host whose game thread stops (a long save, a loading
+  screen, a debugger, possibly a minimised window) finds each joiner's whole
+  stall there on the first tick after, and the fill takes it at once. A bare
+  honest input is charged about 150 bytes (90 on the wire; pinned by the stall
+  test), more with acknowledgements, drops and edits, so 8 MiB is a stall (or
+  a joiner's own replayed freeze) of half an hour or more. The queue is filled
+  packet by packet and stops reading the moment the bound is crossed; that
+  client is disconnected (`release_slot` with `INBOUND_OVERFLOW_REASON`, shown
+  to the player: "Disconnected: your game sent more than the server could keep
+  up with.") and a warning is logged with the counts. Nothing else a client
+  sends ends its connection.
 - **Bounded work, bounded memory.** A tick processes at most ten packets per
-  client plus control packets; filling the queue costs at most the bound's
-  worth of reads (before FU1 the server drained everything past the budget
-  anyway, deserialising its inputs). The per-type budgets still apply inside the ten:
-  block edits (`MAX_BLOCK_CHANGES_PER_TICK` = 4, each one past it refused and
-  sent back, "Host authority over joiner block edits"), `DeviceInteract` (2)
-  and `EntityAttack` + `EntityInteract` (4, §4.2d) — the last two skip the
-  excess, which no honest client sends: the ten packets of a tick span at most
-  eleven client ticks, two right-clicks' and two swings' worth.
+  client (64 catching up) plus control packets; filling the queue costs at
+  most the bound's worth of reads. The per-type budgets apply inside that and
+  do not grow with the catch-up; **what is past one waits, with everything
+  sent after it** (arrival order is kept):
+  - **block edits: `MAX_BLOCK_CHANGES_PER_TICK` = 4, deferred (FU3, N3).**
+    Edits past it wait in the client's edit queue (`edit_queue::EditQueue`),
+    each kept with the rest of its input's edits, that input's `mined` tags
+    and the hand its input reported, and go first next tick, in arrival
+    order; nothing is sent back for the budget. A tag still pairs with its own
+    edit (§4.2e), and a placement is classified by the hand it was made with.
+    Reach and plot rules are checked when the edit is processed (the body the
+    server holds then). A refused emptying edit spends its tag, so a later
+    edit of its cell can't take it. A joiner the server holds dead edits
+    nothing: its waiting edits are sent back. The queue's hard cap,
+    `MAX_DEFERRED_EDITS` = 16,384 edits (about 256 KiB), is one no honest
+    client reaches: per client tick an honest player makes at most one break
+    (survival's floor is one tick, `crafting::break_time_ticks`; creative's
+    cooldown five) and one placement (held repeat every 10 ticks, a fresh
+    click at once), each at most two cells (a door, a bed) — four edits a
+    tick, 80 a second at the absolute ceiling, so the cap is a 3½-minute stall
+    at that ceiling and hours of real building; the largest single action, a
+    keg blast, is about 260 cells. Past the cap an edit is refused and sent
+    back, with one warning until the queue next empties. Tests:
+    `joiner_inventory::edits_past_the_budget_wait_and_each_tag_yields_once`,
+    `…::an_edit_past_the_edit_queues_cap_is_refused_and_sent_back`,
+    `joiner_authority::over_budget_edits_wait_and_apply_on_the_next_tick`.
+  - `DeviceInteract`: 2 a tick, deferred (FU3; FU1 skipped the excess).
+  - `EntityAttack` + `EntityInteract`: 4 a tick (§4.2d), deferred (FU3; FU1
+    skipped the excess, safe only at ten packets a tick — a catch-up's 64
+    packets span about six swings and eight right-clicks).
+  - `ItemAction` (eat, sleep — §4.2f, C2a): 4 a tick, deferred.
 - **What waiting costs.** A deferred packet is read late, never lost: a
   joiner's position is acknowledged later (`last_acked_input`, §5.3.1 — the
   prediction holds up to 128 inputs and reconciles when the acknowledgement
-  catches up), and a request is
-  answered later — at the bound, about five seconds behind (1024 packets at ten
-  a tick); the client's claim on a request's item lasts until the server
-  acknowledges the input sent after it, however late (§4.2d, N4).
+  catches up), and a request is answered later; the client's claim on a
+  request's item lasts until the server acknowledges the input sent after it,
+  however late (§4.2d, N4).
   An input that waits still has its chunk acknowledgement and drop reports
   taken in the tick it arrives (B2a review HIGH-2: a backlog must not hold the
   push's window shut just after a hitch, when the joiner needs chunks most);
@@ -2405,15 +2472,20 @@ tick (`HostedServer::process_inbound_packets`, `transport::InboundQueue`):
   not acted on yet, and every input after it: in order the switch is read
   before the drops, so the column the joiner let go of is pushed again at once
   rather than held off (§4.1 "The column check").
-  A closed connection keeps its slot until the packets it sent before closing
-  have all been read (`reap_slots`). Its queue is emptied when the slot is
-  released or reused.
-- **Open:** the block-edit budget still refuses (and un-ghosts) the fifth edit of
-  a tick rather than deferring it; an honest catch-up can reach it (5-tick
-  break and 8-tick place cooldowns: up to five edits in eleven client ticks).
-  Server-side action cooldowns (`next_swing_tick`, `INTERACT_COOLDOWN_TICKS`)
-  count server ticks, so a catch-up that reads two of a client's actions a
-  server tick apart can refuse the second (answered).
+- **A closed connection (FU3, N6).** A slot is freed only when its transport
+  was already closed before that tick's fill and its queue is empty after it
+  (`reap_slots`): a bridge hands over every frame before it marks the
+  connection closed, so that fill took everything the client sent. A frame
+  landing between a fill and the close is read the next tick
+  (`joiner_death::a_frame_that_lands_after_the_fill_is_read_before_its_closed_slot_is_freed`);
+  a dropped connection's slot is freed a tick later than before. The queues
+  are emptied when the slot is released or reused; edits still waiting go
+  with them, as on a `Disconnect`.
+- **Open:** server-side action cooldowns (`next_swing_tick`,
+  `INTERACT_COOLDOWN_TICKS`) count server ticks, so a catch-up that reads two
+  of a client's actions a server tick apart can refuse the second (answered);
+  a 64-packet catch-up reads more of them per tick than the 10-packet budget
+  did. (The edit-budget "Open" bullet FU1 left is closed: FU3 defers edits.)
 
 ### 11.3 Amplification Prevention
 
@@ -2701,8 +2773,8 @@ set. `network` tests cover the forged-header rejection over real quinn.
 **Still open:** `JoinAccept` is not bounded — a world whose exhibits serialize past 64 KiB now
 closes the joiner's connection (before: a hang on an undecodable packet). The LAN host's own
 client-side sim output (crops, pistons) reaches the server through the host's `InputPacket`, which
-passes the same `MAX_BLOCK_CHANGES_PER_TICK` gate as a joiner's (unverified whether a big host-side
-burst is refused there).
+passes the same `MAX_BLOCK_CHANGES_PER_TICK` gate as a joiner's on an owning server (on a lent one it
+is only broadcast); since FU3 a burst past it waits and applies over the next ticks (§11.2a).
 
 ### Host authority over joiner block edits (2026-09-28, audit fix)
 
@@ -2720,8 +2792,9 @@ economy block (vendor, tip jar, auction, plot marker, market bell) only for the 
 joiner doesn't own (Spec 36 rule, creative bypasses; a joiner owns a plot only via
 `PlotOwner::Npub`). A refused edit re-sends the authoritative block on the next `StateUpdate` so
 the sender's local ghost is undone. The budget (`MAX_BLOCK_CHANGES_PER_TICK = 4`) is per client
-per tick across all packets, refused edits included; edits over the budget are sent back like any
-other refusal. `DeviceInteract` passes the same play-mode and plot gates as a block edit. Movement intents are queued (bounded to 3
+per tick across all packets, refused edits included; edits over the budget used to be sent back like
+any other refusal, and since FU3 (2026-10-07) they wait in the client's edit queue and go first next
+tick, in order (§11.2a). `DeviceInteract` passes the same play-mode and plot gates as a block edit. Movement intents are queued (bounded to 3
 behind the pending one, one simulated per tick), not overwritten, so jitter-bunched inputs don't
 drop a step. A plot marker's owner breaking it releases the plot.
 

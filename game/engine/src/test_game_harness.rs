@@ -627,6 +627,7 @@ mod tests {
                 tamed: false,
                 baby: false,
                 tethered: false,
+                product_not_ready: false,
             },
             false,
             false,
@@ -891,6 +892,77 @@ mod tests {
         hg.state.input.right_held = false;
         assert_eq!(count(&hg, MaterialId::MilkBucket), 1, "the click milks it");
         assert_eq!(count(&hg, MaterialId::Bucket), 0);
+    }
+
+    /// FU3 (FU1 verify N2) — a bucket on a tethered cow that isn't ready to
+    /// milk: the refusal skips every later MOB arm for that click, so the
+    /// Lead-detach arm no longer unties the cow (it did: a refused milk fell
+    /// through to it), and the click goes on to the block behind — here a
+    /// fence gate at eye height, which opens. (A bucket can't target water
+    /// itself: `raycast::is_pickable` skips WATER.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_refused_milk_leaves_a_tethered_cow_tied_and_reaches_the_block() {
+        use crate::item::{ItemStack, MaterialId};
+        use crate::mob::MobType;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-n2-refused-milk");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        hg.state.players[0].camera.yaw = 0.0;
+        hg.state.players[0].camera.pitch = 0.0;
+        let hot = hg.state.players[0].hotbar_slot;
+        hg.state.players[0].inventory.set_slot(hot, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        // A closed gate at eye height, three blocks ahead, in clear air.
+        let (eye, fwd) = (hg.state.players[0].player.eye_pos(), hg.state.players[0].camera.forward());
+        let g = eye + fwd * 3.0;
+        let gate = (g.x.floor() as i32, g.y.floor() as i32, g.z.floor() as i32);
+        for k in 1..=2 {
+            let c = eye + fwd * k as f32;
+            hg.state.world.set_block(c.x.floor() as i32, c.y.floor() as i32, c.z.floor() as i32, crate::block::AIR);
+        }
+        hg.state.world.set_block(gate.0, gate.1, gate.2, crate::block::OAK_FENCE_GATE);
+        hg.state.world.set_meta(gate, 0);
+        // A cow just milked, on a Lead, held 1.5 blocks ahead at the feet.
+        let cow = crate::entity::spawn_mob(&mut hg.state.ecs, MobType::Cow, glam::Vec3::ZERO);
+        let now = hg.state.tick_counter;
+        hg.state.ecs.get::<&mut crate::animal_products::AnimalProductState>(cow).unwrap().last_action_tick = Some(now);
+        hg.state
+            .ecs
+            .insert_one(cow, crate::tether::Tethered { target: crate::tether::TetherTarget::Player(0) })
+            .unwrap();
+        let pin = |hg: &mut HeadlessGame| {
+            let slot = &hg.state.players[0];
+            let at = slot.player.pos + slot.camera.forward() * 1.5;
+            hg.state.ecs.get::<&mut crate::entity::Position>(cow).unwrap().0 = at;
+            hg.state.ecs.get::<&mut crate::entity::Velocity>(cow).unwrap().0 = glam::Vec3::ZERO;
+        };
+        hg.state.input.right_held = false;
+        pin(&mut hg);
+        hg.frames(1);
+        assert_eq!(hg.state.players[0].target_block, Some([gate.0, gate.1, gate.2]), "aimed at the gate");
+
+        pin(&mut hg);
+        hg.state.players[0].place_cooldown = 0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.right_held = true;
+        hg.frames(1);
+        hg.state.input.right_held = false;
+        assert!(
+            hg.state.toast.as_ref().is_some_and(|(msg, _)| msg.contains("needs time")),
+            "the click reached the cow and was refused: {:?}",
+            hg.state.toast.as_ref().map(|(m, _)| m)
+        );
+        assert!(
+            hg.state.ecs.get::<&crate::tether::Tethered>(cow).is_ok(),
+            "the refused milk did not untie the cow"
+        );
+        let count = |m| hg.state.players[0].inventory.count_material(m);
+        assert_eq!((count(MaterialId::Bucket), count(MaterialId::MilkBucket), count(MaterialId::Lead)), (1, 0, 0));
+        assert!(
+            crate::block_shape::is_open(hg.state.world.meta_at(gate.0, gate.1, gate.2)),
+            "the click went on to the block: the gate opened"
+        );
     }
 
     /// C2a — a joiner's hunger, eating and sleep through its REAL client: the

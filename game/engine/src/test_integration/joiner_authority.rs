@@ -298,6 +298,10 @@ fn a_dropped_connection_frees_its_slot_and_the_next_join_reuses_it() {
     let (_occupied, total_before) = hs.occupancy();
     let len_before = hs.server.players.len();
     drop(a); // laptop lid closed: no Disconnect packet, the link just goes
+    // FU3 (FU1 verify N6) — the tick that finds the link closed reads what
+    // it sent last; the slot is freed on the next one.
+    hs.tick();
+    assert!(!hs.slot_is_free(slot_a), "the tick that sees the close still reads its last packets");
     hs.tick();
     assert!(hs.slot_is_free(slot_a), "the dead connection's slot is freed");
     assert!(!hs.server.players[slot_a].connected, "no ghost player in the sim");
@@ -306,6 +310,7 @@ fn a_dropped_connection_frees_its_slot_and_the_next_join_reuses_it() {
         let (c, slot) = join_guest(&mut hs, &format!("Churn{n}"));
         assert_eq!(slot, slot_a, "a freed slot is reused");
         drop(c);
+        hs.tick();
         hs.tick();
     }
     assert_eq!(hs.server.players.len(), len_before, "connections coming and going don't grow the server");
@@ -351,6 +356,7 @@ fn a_kick_after_a_rejoin_hits_the_live_player() {
     hs.server.players[slot_a1].verified_pubkey = Some(pk);
     drop(alice1);
     hs.tick();
+    hs.tick(); // FU3 (N6): freed the tick after the one that saw the close
     let (bob, slot_b) = join_guest(&mut hs, "Bob");
     assert_eq!(slot_b, slot_a1);
     let (alice2, slot_a2) = join_guest(&mut hs, "Alice");
@@ -528,9 +534,12 @@ fn an_overhead_break_at_max_reach_is_accepted() {
     assert_eq!(hs.server.world.get_block(cell.0, cell.1, cell.2), block::AIR);
 }
 
-/// S5: edits cut off by the per-tick budget are sent back like any refusal.
+/// S5 / FU3 (FU1 verify N3): edits past the per-tick budget (4) used to be
+/// sent back like any refusal, so an honest client's fifth edit of a tick was
+/// lost. Now they wait and apply on the next tick, in order; nothing is sent
+/// back for the budget.
 #[test]
-fn over_budget_edits_are_sent_back() {
+fn over_budget_edits_wait_and_apply_on_the_next_tick() {
     let mut hs = start_open_server("budget-back");
     let (client, slot) = join_guest(&mut hs, "Visitor");
     let cells: Vec<_> = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)]
@@ -541,11 +550,23 @@ fn over_budget_edits_are_sent_back() {
     let edits: Vec<_> = cells.iter().map(|&c| (c, block::GLASS)).collect();
     send_edits(&hs, &client, slot, 1, &edits);
     hs.tick();
-    let back = block_changes_seen(&client);
+    let first = block_changes_seen(&client);
     for c in &cells[4..] {
         assert!(
-            back.iter().any(|bc| (bc.x, bc.y, bc.z) == *c && bc.new_block != block::GLASS),
-            "over-budget edit at {c:?} is un-ghosted"
+            !first.iter().any(|bc| (bc.x, bc.y, bc.z) == *c && bc.new_block != block::GLASS),
+            "the over-budget edit at {c:?} is not sent back"
+        );
+        assert_ne!(hs.server.world.get_block(c.0, c.1, c.2), block::GLASS, "nor applied yet");
+    }
+    hs.tick();
+    let second = block_changes_seen(&client);
+    for c in &cells {
+        assert_eq!(hs.server.world.get_block(c.0, c.1, c.2), block::GLASS, "{c:?} applied");
+    }
+    for c in &cells[4..] {
+        assert!(
+            second.iter().any(|bc| (bc.x, bc.y, bc.z) == *c && bc.new_block == block::GLASS),
+            "the waiting edit at {c:?} reaches the joiner the next tick"
         );
     }
 }

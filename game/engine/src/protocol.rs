@@ -1114,6 +1114,14 @@ pub mod entity_flags {
     /// isn't feeding, milking, shearing or companion food takes the Lead off,
     /// as in single-player.
     pub const TETHERED: u8 = 16;
+    /// FU3 (FU1 verify N8, NO version bump) — a cow that can't be milked yet
+    /// or a sheep whose wool is growing back (`mob_interact::product_ready`,
+    /// on the server's clock). A joiner's bucket or shears on it is then no
+    /// mob action (`remote_mobs::MirrorTarget::right_click_action`): the
+    /// click goes on to the block — a bucket fills at water beside a cow just
+    /// milked. 0 means ready OR unknown, so an older server (never sets it)
+    /// and an older joiner (ignores it) behave as they did.
+    pub const PRODUCT_NOT_READY: u8 = 32;
 }
 
 /// Server → client: an existing entity's position/state changed.
@@ -1772,6 +1780,9 @@ pub struct ServerAnnouncePacket {
 ///   `own_hunger: u8` (the addressed client's hunger as the server holds
 ///   it). The server runs every joiner's metabolism and ignores a reported
 ///   heal (`InputPacket.health_delta` counts losses only).
+///   FU3 (2026-10-07, NO bump — no shape change): `entity_flags::
+///   PRODUCT_NOT_READY` (bit 32) on a mirrored cow or sheep whose milk or
+///   wool isn't ready; 0 means ready or unknown, so either side may be older.
 pub const PROTOCOL_VERSION: u32 = 73;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this

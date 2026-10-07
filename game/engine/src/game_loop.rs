@@ -5717,8 +5717,17 @@ impl super::GameState {
             // single-player ownership as growth. Wave 28 adds smoke-pillar
             // lifecycle — On/Off transitions place or clear a column of
             // CAMPFIRE_SMOKE blocks above the campfire.
-            let positions: Vec<(i32, i32, i32)> =
-                self.world.block_entities.keys().copied().collect();
+            // FU3 (FU1 verify N3) — a JOINER (`remote_client` set) runs no
+            // campfire sweep, as it runs no growth: the world it joined burns
+            // its fires down and raises and clears their smoke (a LAN host's
+            // client, on the world it lends its server) and broadcasts every
+            // change. A joiner's sweep, on its own copy of a campfire's state,
+            // pushed lit/unlit flips and pillar cells as its own edits.
+            let positions: Vec<(i32, i32, i32)> = if self.remote_client.is_none() {
+                self.world.block_entities.keys().copied().collect()
+            } else {
+                Vec::new()
+            };
             for pos in positions {
                 let current = self.world.get_block(pos.0, pos.1, pos.2);
                 // Spec 20 Phase 2 — block_entities is now a tagged
@@ -11574,8 +11583,13 @@ impl super::GameState {
                                 #[cfg(not(target_arch = "wasm32"))]
                                 {
                                     self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
-                                    for (sx, sy, sz) in &cleared {
-                                        self.pending_block_changes.push(broadcast_change(&self.world, *sx, *sy, *sz, block::AIR));
+                                    // FU3 — a joiner's server clears the pillar
+                                    // itself (`campfire::on_block_edit`): only
+                                    // the campfire's own edit is sent.
+                                    if !self.edits_reach_server() {
+                                        for (sx, sy, sz) in &cleared {
+                                            self.pending_block_changes.push(broadcast_change(&self.world, *sx, *sy, *sz, block::AIR));
+                                        }
                                     }
                                 }
                                 for (sx, sy, sz) in cleared {
@@ -11944,8 +11958,12 @@ impl super::GameState {
                                                 }),
                                             });
                                         }
-                                        for (sx, sy, sz) in &cleared_smoke {
-                                            self.pending_block_changes.push(broadcast_change(&self.world, *sx, *sy, *sz, block::AIR));
+                                        // FU3 — a joiner's server clears the
+                                        // pillar itself (`campfire::on_block_edit`).
+                                        if !self.edits_reach_server() {
+                                            for (sx, sy, sz) in &cleared_smoke {
+                                                self.pending_block_changes.push(broadcast_change(&self.world, *sx, *sy, *sz, block::AIR));
+                                            }
                                         }
                                     }
                                     for (sx, sy, sz) in cleared_smoke {
@@ -12623,6 +12641,11 @@ impl super::GameState {
             // it used to fire every frame the crosshair rested on the cow).
             let clicked = crate::local_mob_click::right_click_ready(intent, &self.players[pidx]);
             let tick = self.tick_counter;
+            // FU3 (FU1 verify N2) — set by a refused milk or shear: every
+            // later MOB arm skips this click (companion tame, pack, mount,
+            // Lead-detach, villager / pet), so the refusal never acts on that
+            // very mob (it untied a leashed cow); the block arms still run.
+            let mut mob_refused = false;
             if let Some(click) =
                 crate::local_mob_click::harvest(&mut self.ecs, &mut self.players[pidx], clicked, tick)
             {
@@ -12656,13 +12679,14 @@ impl super::GameState {
                     self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
                 }
                 // A refusal (the cow isn't ready, the wool is growing back)
-                // does not eat the click: it falls through to the next
-                // interaction as if the mob were not there, with no cooldown
-                // (review D2b B1 residual — a bucket aimed at water beside a
-                // cow just milked must still fill).
+                // does not eat the click: it falls through, with no cooldown,
+                // past every mob arm to the block interactions (review D2b B1
+                // residual — a bucket aimed at water beside a cow just milked
+                // must still fill; FU3 — and the cow is not untied).
                 if eats_click {
                     continue;
                 }
+                mob_refused = true;
             }
 
             // Companions wave — tame a Cat / Parrot / Fox by right-clicking it
@@ -12678,7 +12702,7 @@ impl super::GameState {
                 &mut self.ecs,
                 &mut self.players[pidx],
                 pidx,
-                clicked,
+                clicked && !mob_refused,
                 tick,
             ) {
                 let (target, kind, r) = (click.target, click.kind, click.interaction);
@@ -12835,6 +12859,7 @@ impl super::GameState {
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
                 && self.players[pidx].riding.is_none()
+                && !mob_refused
             {
                 let hot = self.players[pidx].hotbar_slot;
                 let held_slot = self.players[pidx].inventory.hotbar_slot(hot);
@@ -12906,6 +12931,7 @@ impl super::GameState {
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
                 && self.players[pidx].riding.is_none()
+                && !mob_refused
             {
                 let look_dir = self.players[pidx].camera.forward();
                 let eye = self.players[pidx].player.eye_pos();
@@ -12957,6 +12983,7 @@ impl super::GameState {
             if intent.place_block
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
+                && !mob_refused
             {
                 let holding_lead = self.players[pidx]
                     .inventory
@@ -13016,6 +13043,7 @@ impl super::GameState {
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
                 && self.players[pidx].dialogue_villager.is_none()
+                && !mob_refused
             {
                 let look_dir = self.players[pidx].camera.forward();
                 let eye = self.players[pidx].player.eye_pos();
@@ -14155,17 +14183,15 @@ impl super::GameState {
                                 // 14-block block-light reaches every
                                 // affected chunk.
                                 self.rebuild_chunks_for_lighting(pos[0], pos[1], pos[2]);
-                                // Smoke-pillar parity with friction-ignite: if the
-                                // fuel mix includes leaves or green logs, smoke_ticks
-                                // is already > 0 and the pillar must be placed now
-                                // (tick_one's On signal no longer fires the unlit→
-                                // lit transition since fuel-add doesn't auto-ignite).
-                                let smoky = self.world
-                                    .campfire_at(pos_key)
-                                    .map(|cf| cf.smoke_ticks > 0)
-                                    .unwrap_or(false);
-                                if smoky {
-                                    let placed = crate::campfire::place_smoke_pillar(
+                                // Smoke-pillar parity with friction-ignite: a smoky
+                                // fire's pillar rises now (`campfire::smoke_on_light`).
+                                // FU3 — a joiner whose edits reach its server leaves
+                                // that to the server, which raises it from ITS
+                                // campfire (`campfire::on_block_edit`) and
+                                // broadcasts it: this copy's smoke state is not
+                                // the world's.
+                                if !self.edits_reach_server() {
+                                    let placed = crate::campfire::smoke_on_light(
                                         &mut self.world, pos[0], pos[1], pos[2],
                                     );
                                     #[cfg(not(target_arch = "wasm32"))]
@@ -14339,17 +14365,12 @@ impl super::GameState {
                                         self.rebuild_chunks_for_lighting(pos[0], pos[1], pos[2]);
                                         // If smoke_ticks > 0 (player added leaves
                                         // or green logs before lighting), the smoke
-                                        // pillar must be placed here — tick_one's
-                                        // On signal no longer fires the unlit→lit
-                                        // transition since fuel-add doesn't auto-
-                                        // ignite. Friction is the explicit ignition
-                                        // moment; place the pillar to match.
-                                        let smoky = self.world
-                                            .campfire_at(pos_key)
-                                            .map(|cf| cf.smoke_ticks > 0)
-                                            .unwrap_or(false);
-                                        if smoky {
-                                            let placed = crate::campfire::place_smoke_pillar(
+                                        // pillar rises here (`campfire::smoke_on_light`)
+                                        // — friction is the explicit ignition moment.
+                                        // FU3 — a joiner whose edits reach its server
+                                        // leaves it to the server (`on_block_edit`).
+                                        if !self.edits_reach_server() {
+                                            let placed = crate::campfire::smoke_on_light(
                                                 &mut self.world, pos[0], pos[1], pos[2],
                                             );
                                             #[cfg(not(target_arch = "wasm32"))]

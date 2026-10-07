@@ -1398,8 +1398,9 @@ fn set_input_edits(input: &mut protocol::InputPacket, edits: &[PairedEdit]) {
 ///
 /// Returns the packet and the trimmed tail, oldest first. The caller carries it
 /// into the next packet (`RemoteClient::send_input`): the host applies at most
-/// `MAX_BLOCK_CHANGES_PER_TICK` edits a tick and sends back the real block for
-/// each it refuses, but it can only do that for an edit it has seen.
+/// `MAX_BLOCK_CHANGES_PER_TICK` edits a tick (the rest wait, FU3) and sends back
+/// the real block for each it refuses, but it can only do that for an edit it
+/// has seen.
 fn serialize_input_within_cap(
     input: &mut protocol::InputPacket,
     mut edits: Vec<PairedEdit>,

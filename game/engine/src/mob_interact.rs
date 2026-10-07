@@ -239,7 +239,10 @@ pub fn feed(
     Some(Interaction::done(1, InteractNote::Fed))
 }
 
-fn product_ready(ecs: &hecs::World, target: hecs::Entity, tick: u64) -> bool {
+/// Whether `target`'s product (a cow's milk, a sheep's wool) is ready at
+/// `tick` — the rule [`milk`] and [`shear`] refuse by, and the one the entity
+/// broadcast's `entity_flags::PRODUCT_NOT_READY` is set by (FU3).
+pub(crate) fn product_ready(ecs: &hecs::World, target: hecs::Entity, tick: u64) -> bool {
     ecs.get::<&crate::animal_products::AnimalProductState>(target)
         .map(|s| crate::animal_products::can_milk(*s, tick))
         .unwrap_or(false)

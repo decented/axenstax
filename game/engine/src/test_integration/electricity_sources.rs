@@ -733,7 +733,9 @@ fn a_meta_only_lever_flip_latches_the_servers_own_device() {
 /// Task 2b review fix (5). `DeviceInteract` has its own per-tick budget: it does
 /// NOT share the block-change one, and `MAX_PACKETS_PER_TICK` alone would let a
 /// client send ten a tick. Two per tick is well above the 8-tick client-side
-/// place cooldown that gates a real right-click.
+/// place cooldown that gates a real right-click. FU3 — the interactions past
+/// it wait for the next tick, in order (a catch-up's 64 packets can hold eight
+/// honest right-clicks); they used to be skipped.
 #[test]
 fn a_client_cannot_spend_more_than_its_device_interact_budget_in_one_tick() {
     let mut hs = start_open_server("electricity-interact-budget-test");
@@ -757,10 +759,12 @@ fn a_client_cannot_spend_more_than_its_device_interact_budget_in_one_tick() {
         !hs.server.world.power_device_at(origin).expect("lever").on,
         "only 2 of the 5 interacts were spent, so the lever is back down"
     );
-    // The budget resets each tick — the next one still works.
-    send_device_interact(&client, origin);
+    // The budget resets each tick: two more of the waiting three…
     hs.tick();
-    assert!(hs.server.world.power_device_at(origin).expect("lever").on);
+    assert!(!hs.server.world.power_device_at(origin).expect("lever").on, "4 of 5: down again");
+    // …and the last: none was dropped.
+    hs.tick();
+    assert!(hs.server.world.power_device_at(origin).expect("lever").on, "5 of 5: up");
 }
 
 /// Task 2b review fix (2). `interact_device` is reached from a network packet,

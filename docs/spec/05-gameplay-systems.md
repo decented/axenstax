@@ -844,6 +844,8 @@ The Campfire is Tier 1's cooking workstation. Pre-furnace (furnace lands in T1.5
 - **Cold** *(no fuel)* — *"Add fuel (wood), then light…"*.
 - **Cooking lines** appear in every state (so meat on an unlit fire is never invisible): `Cooking: Raw Beef — 45%` while cooking, `Ready: Cooked Beef (empty hand to take)` once mature. Placing raw meat also toasts *"On the fire — cooking…"* (lit) or *"…light it to start cooking"* (unlit).
 
+**In multiplayer (FU3, 2026-10-07).** The world that holds the campfire runs its rules: the fuel burn, cooking and smoke-pillar sweep runs in the single-player or LAN-host client (on the world a host lends its server), never in a joiner (a joiner's sweep, on its own copy of a campfire's state, pushed lit/unlit flips and pillar cells as its own edits). When a joiner breaks, lights or puts out a campfire it sends the one block edit; the server runs `campfire::on_block_edit` on it — the rule the client's own break and light arms run (`cleanup_campfire`, `smoke_on_light`) — clearing a broken fire's smoke and spilling what was cooking, raising a smoky fire's pillar from the server's own campfire state, and broadcasting the cells. (The client used to send the campfire plus up to six pillar cells; the server's 4-edit budget refused three, and the refused smoke floated in the shared world for good, untargetable.) Open: a joiner's fuel, meat and cooked-pickup clicks change only its own copy of the campfire (the server's smoke state may differ from what the joiner put in), and a dedicated server runs no campfire sweep at all, so its fires never burn down (tick parity, D4).
+
 **Block drops** (Wave 27 additions):
 
 - **Gravel → Flint at 15%** (per break). Deterministic per (tick × position). 85% chance still drops gravel itself.

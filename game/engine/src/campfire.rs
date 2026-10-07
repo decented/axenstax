@@ -320,6 +320,67 @@ pub fn cleanup_campfire(
     (spill, cleared)
 }
 
+/// The smoke pillar a campfire gets the moment it is lit: placed when the
+/// fire is smoky (`smoke_ticks > 0` — leaves or green logs went in before it
+/// was lit), since [`tick_one`]'s `On` signal never fires the unlit → lit
+/// transition (fuel-add doesn't auto-ignite). Returns the cells placed. The
+/// client's flint-and-steel and friction arms run it on their own world; the
+/// server runs it (via [`on_block_edit`]) on a joiner's lighting.
+pub fn smoke_on_light(world: &mut crate::world::World, x: i32, y: i32, z: i32) -> Vec<(i32, i32, i32)> {
+    if world.campfire_at((x, y, z)).is_some_and(|cf| cf.smoke_ticks > 0) {
+        place_smoke_pillar(world, x, y, z)
+    } else {
+        Vec::new()
+    }
+}
+
+/// What a campfire block edit does around it ([`on_block_edit`]).
+#[derive(Debug, Default, PartialEq)]
+pub struct CampfireEdit {
+    /// What was cooking on a broken fire ([`cleanup_campfire`]), to spill.
+    pub spill: Vec<crate::item::ItemStack>,
+    /// The smoke cells it wrote, each with its new block (`CAMPFIRE_SMOKE`
+    /// placed, `AIR` cleared), to broadcast.
+    pub smoke: Vec<((i32, i32, i32), BlockId)>,
+}
+
+fn is_campfire(b: BlockId) -> bool {
+    b == block::CAMPFIRE || b == block::CAMPFIRE_UNLIT
+}
+
+/// FU3 (FU1 verify N3) — the campfire rule for an edit `old → new` at `cell`
+/// (already applied, or about to be: it touches only the block entity and the
+/// cells above): a broken fire is cleaned up ([`cleanup_campfire`]: its smoke
+/// cleared, what was cooking returned to spill), a lit one raises its pillar
+/// if smoky ([`smoke_on_light`]), and one going out clears its pillar (as
+/// [`tick_one`]'s `Off`). Anything else: nothing.
+///
+/// The server runs it on every accepted JOINER edit (`HostedServer`), so a
+/// joiner sends one edit for a campfire action, not the up to six pillar
+/// cells behind it — which used to overflow the server's per-tick edit
+/// budget and leave the refused cells as smoke floating in the shared world.
+/// A host's own edits already carry their smoke (they are made in the world
+/// the server ticks, or sent as edits by a `--no-lend` host's client).
+pub fn on_block_edit(
+    world: &mut crate::world::World,
+    (x, y, z): (i32, i32, i32),
+    old: BlockId,
+    new: BlockId,
+) -> CampfireEdit {
+    if is_campfire(old) && !is_campfire(new) {
+        let (spill, cleared) = cleanup_campfire(world, x, y, z);
+        return CampfireEdit { spill, smoke: cleared.into_iter().map(|c| (c, block::AIR)).collect() };
+    }
+    let smoke = if old == block::CAMPFIRE_UNLIT && new == block::CAMPFIRE {
+        smoke_on_light(world, x, y, z).into_iter().map(|c| (c, block::CAMPFIRE_SMOKE)).collect()
+    } else if old == block::CAMPFIRE && new == block::CAMPFIRE_UNLIT {
+        clear_smoke_pillar(world, x, y, z).into_iter().map(|c| (c, block::AIR)).collect()
+    } else {
+        Vec::new()
+    };
+    CampfireEdit { spill: Vec::new(), smoke }
+}
+
 /// Block-radius around a lit campfire where mobs feel "too hot" to
 /// approach further. Scales with current fuel level — more fuel → bigger
 /// roaring fire → wider safe zone. The log-of-fuel mapping gives a
@@ -856,5 +917,40 @@ mod tests {
 
         let (spill2, _) = cleanup_campfire(&mut world, 10, 70, 10);
         assert!(spill2.is_empty(), "second cleanup is a no-op");
+    }
+
+    /// FU3 — the rule the server runs on a joiner's campfire edit: lighting a
+    /// smoky fire raises its pillar (a clean one raises none), putting it out
+    /// clears it, and breaking it clears the pillar and spills what cooked.
+    #[test]
+    fn on_block_edit_raises_clears_and_cleans_up_the_smoke_pillar() {
+        use crate::world::World;
+        let at = (10, 70, 10);
+        let mut world = World::new();
+        let mut cf = CampfireData { fuel_ticks: 1_000, smoke_ticks: 600, ..Default::default() };
+        cf.slots[0] = CookSlot { item: Some(MaterialId::RawBeef), progress_ticks: 0 };
+        world.insert_campfire(at, cf);
+        world.set_block(at.0, at.1, at.2, block::CAMPFIRE);
+        let pillar: Vec<(i32, i32, i32)> = (1..=SMOKE_PILLAR_HEIGHT).map(|dy| (at.0, at.1 + dy, at.2)).collect();
+        let smoke_cells = |w: &World| pillar.iter().filter(|c| w.get_block(c.0, c.1, c.2) == block::CAMPFIRE_SMOKE).count();
+
+        let lit = on_block_edit(&mut world, at, block::CAMPFIRE_UNLIT, block::CAMPFIRE);
+        assert_eq!(lit.smoke, pillar.iter().map(|&c| (c, block::CAMPFIRE_SMOKE)).collect::<Vec<_>>());
+        assert_eq!(smoke_cells(&world), 6, "a smoky fire lit: the pillar rises");
+
+        let out = on_block_edit(&mut world, at, block::CAMPFIRE, block::CAMPFIRE_UNLIT);
+        assert_eq!(out.smoke.len(), 6);
+        assert_eq!(smoke_cells(&world), 0, "put out: the pillar clears");
+
+        let _ = on_block_edit(&mut world, at, block::CAMPFIRE_UNLIT, block::CAMPFIRE);
+        let broken = on_block_edit(&mut world, at, block::CAMPFIRE, block::AIR);
+        assert_eq!(broken.smoke.iter().filter(|(_, b)| *b == block::AIR).count(), 6);
+        assert_eq!(smoke_cells(&world), 0, "broken: no smoke left");
+        assert_eq!(broken.spill.len(), 1, "and what was cooking spills");
+        assert!(world.campfire_at(at).is_none(), "its block entity is gone");
+
+        world.insert_campfire(at, CampfireData { fuel_ticks: 1_000, ..Default::default() });
+        assert_eq!(on_block_edit(&mut world, at, block::CAMPFIRE_UNLIT, block::CAMPFIRE), CampfireEdit::default(), "a clean fire: no smoke");
+        assert_eq!(on_block_edit(&mut world, at, block::STONE, block::AIR), CampfireEdit::default(), "not a campfire: nothing");
     }
 }

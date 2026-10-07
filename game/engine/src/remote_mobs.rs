@@ -88,6 +88,10 @@ pub struct MirrorTarget {
     pub baby: bool,
     /// On a Lead (`entity_flags::TETHERED`, v70).
     pub tethered: bool,
+    /// A cow that can't be milked yet, or a shorn sheep
+    /// (`entity_flags::PRODUCT_NOT_READY`, FU3): false means ready OR an
+    /// older server that never says.
+    pub product_not_ready: bool,
 }
 
 /// What a joiner's right-click on a mirrored mob means (MP-D2b).
@@ -105,7 +109,8 @@ impl MirrorTarget {
     /// asks for, in single-player's own order of right-click branches (so a
     /// joiner's click means what it would mean in single-player): a Lead on
     /// a passive mob; breeding food (horse family only while sneaking,
-    /// never a baby); a bucket on a cow, shears on a sheep; companion food
+    /// never a baby); a bucket on a cow, shears on a sheep (none at all if
+    /// the server says it isn't ready, FU3); companion food
     /// (a Cat Treat on a cat); a steed (anything in hand: pack or mount —
     /// D2c); a Lead taken off a tethered mob (anything but a Lead in hand);
     /// a villager (talk / trade — D2c); a Bone on a wolf (Mixed Berries on a
@@ -138,13 +143,17 @@ impl MirrorTarget {
         {
             return ask(InteractKind::Feed);
         }
+        // FU3 (FU1 verify N8) — a cow that isn't ready, or a shorn sheep:
+        // no mob action at all, so the click goes on to the block (a bucket
+        // fills at water beside a cow just milked) and never on to another
+        // mob arm (a tethered cow is not untied — the joiner's side of N2).
         if kind == MobType::Cow && mat == Some(MaterialId::Bucket) {
-            return ask(InteractKind::Milk);
+            return (!self.product_not_ready).then_some(MirrorClick::Interact(InteractKind::Milk));
         }
         if kind == MobType::Sheep
             && matches!(held, Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears)
         {
-            return ask(InteractKind::Shear);
+            return (!self.product_not_ready).then_some(MirrorClick::Interact(InteractKind::Shear));
         }
         if let Some(m) = mat
             && !self.tamed
@@ -346,6 +355,7 @@ impl RemoteMobs {
             tamed: m.flags & entity_flags::TAMED != 0,
             baby: m.flags & entity_flags::BABY != 0,
             tethered: m.flags & entity_flags::TETHERED != 0,
+            product_not_ready: m.flags & entity_flags::PRODUCT_NOT_READY != 0,
         })
     }
 
@@ -659,7 +669,7 @@ mod tests {
         let hit = m.ray_target(eye, look, 5.0).expect("the crosshair is on the wolf");
         assert_eq!(
             hit,
-            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, baby: false, tethered: false }
+            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, baby: false, tethered: false, product_not_ready: false }
         );
         assert_eq!(m.ray_target(eye, Vec3::new(1.0, 0.0, 0.0), 5.0), None, "looking away misses");
         assert_eq!(m.ray_target(eye, look, 1.0), None, "out of reach (or behind a block)");
@@ -683,7 +693,7 @@ mod tests {
     }
 
     fn target(kind: MobType) -> MirrorTarget {
-        MirrorTarget { id: 1, kind, tamed: false, baby: false, tethered: false }
+        MirrorTarget { id: 1, kind, tamed: false, baby: false, tethered: false, product_not_ready: false }
     }
 
     /// MP-D2b — a right-click on a mirror asks the server for what it would
@@ -728,6 +738,43 @@ mod tests {
         assert_eq!(target(MobType::Horse).right_click_action(None, false), Some(MirrorClick::NotYet));
         // A bucket aimed past a fish scoops water, as in single-player.
         assert_eq!(target(MobType::Fish).right_click_action(Some(&mat(MaterialId::Bucket)), false), None);
+    }
+
+    /// FU3 (FU1 verify N8) — a cow the server says isn't ready, or a shorn
+    /// sheep (`entity_flags::PRODUCT_NOT_READY`): a bucket or shears on it is
+    /// no mob action, so the click goes on to the block (the bucket fills at
+    /// water) — even on a tethered one, which a later arm would untie. The
+    /// bit off (ready, or an older server): asked as before.
+    #[test]
+    fn a_bucket_or_shears_on_an_animal_that_isnt_ready_goes_to_the_block() {
+        use crate::crafting::{ToolMaterial, ToolType};
+        use crate::item::{Item, MaterialId};
+        use crate::protocol::InteractKind::*;
+        let bucket = Item::Material(MaterialId::Bucket);
+        let shears = Item::Tool(crate::crafting::Tool::new(ToolType::Shears, ToolMaterial::Iron));
+        let milked = MirrorTarget { product_not_ready: true, tethered: true, ..target(MobType::Cow) };
+        assert_eq!(milked.right_click_action(Some(&bucket), false), None, "not milk, and not untie");
+        assert_eq!(
+            milked.right_click_action(Some(&Item::Material(MaterialId::Wheat)), false),
+            Some(MirrorClick::Interact(Feed)),
+            "only the product's own tool skips it"
+        );
+        let shorn = MirrorTarget { product_not_ready: true, ..target(MobType::Sheep) };
+        assert_eq!(shorn.right_click_action(Some(&shears), false), None);
+        assert_eq!(
+            target(MobType::Sheep).right_click_action(Some(&shears), false),
+            Some(MirrorClick::Interact(Shear)),
+            "the bit off: asked as before"
+        );
+
+        // From the wire: the flag on the update sets it on the target.
+        let mut m = RemoteMobs::default();
+        let at = Vec3::new(0.0, 63.0, -2.0);
+        m.apply(&[spawn(5, EntityKind::Cow, at)], &[update(5, at, entity_flags::PRODUCT_NOT_READY)], &[]);
+        m.advance(1.0);
+        let hit = m.ray_target(Vec3::new(0.0, 64.0, 0.0), Vec3::new(0.0, 0.0, -1.0), 5.0).expect("on the cow");
+        assert!(hit.product_not_ready);
+        assert_eq!(hit.right_click_action(Some(&bucket), false), None);
     }
 
     #[test]

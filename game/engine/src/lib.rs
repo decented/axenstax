@@ -336,6 +336,8 @@ mod server;
 mod server_stream; // Phase B1 — the dedicated server's column streamer.
 mod block_machines; // T1-3 — GameServer's block-machine pass + the shared MachineCtx.
 mod hosted_server;
+// FU3 — a client's block edits waiting past the server's per-tick budget.
+mod edit_queue;
 mod sim_lend;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
 mod state_outbox;
