@@ -57,7 +57,7 @@ pub(super) fn settle_chunk_push<T>(
         while let Some(pkt) = client.try_recv_from_server() {
             pushed |= matches!(
                 protocol::deserialize_header(&pkt),
-                Some((protocol::PacketType::ChunkData, _))
+                Some((protocol::PacketType::ChunkData | protocol::PacketType::ColumnLocal, _))
             );
         }
         if !pushed {

@@ -67,3 +67,7 @@ pub mod online_play;
 // Red line 2 — no AxeNStax-operated relay in any shipped relay default.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod relay_defaults_lint;
+// Phase B2b — only touched columns are pushed; joiners generate the rest.
+pub mod touched_columns;
+// The joiner harness the chunk-push suites share.
+pub mod push_joiner;

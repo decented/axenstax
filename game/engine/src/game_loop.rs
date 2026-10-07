@@ -2676,8 +2676,12 @@ impl super::GameState {
             for dz in -rd..=rd {
                 let (cx, cz) = (pcx + dx, pcz + dz);
                 let floor = self.world.get_block(cx * cs + 8, 0, cz * cs + 8);
-                // B2a — a column the server pushed is the server's, as it is.
-                if floor != crate::block::BEDROCK && !self.chunk_intake.holds_pushed((cx, cz)) {
+                // B2a — a column the server pushed is the server's, as it is;
+                // B2b — one it has not decided yet is never generated early.
+                if floor != crate::block::BEDROCK
+                    && !self.chunk_intake.holds_pushed((cx, cz))
+                    && !self.chunk_intake.awaits_verdict((cx, cz), rd)
+                {
                     if (0..=crate::world::MAX_CHUNK_Y).any(|cy| self.world.has_chunk(cx, cy, cz)) {
                         had_chunk += 1;
                     }
@@ -3172,6 +3176,15 @@ impl super::GameState {
         // B2a review — another generator's terrain is never shown: the server
         // pushes such a joiner every column in range, and that is all it sees.
         self.joined_push_only = joined.worldgen_mismatch_notice().is_some();
+        // B2b — a host that sends "local" notes decides every column within
+        // that radius of our server body (the spawn, until the first state
+        // update): we generate one there only once told it is local.
+        if !self.joined_push_only
+            && let Some(spawn) = joined.spawn
+        {
+            self.chunk_intake
+                .expect_notes(joined.chunk_note_radius, crate::chunk_stream::column_of(spawn));
+        }
         log::info!(
             "Joined world: seed {}, type '{}', worldgen {:#010x} (ours {:#010x})",
             joined.seed,
@@ -21356,7 +21369,7 @@ impl super::GameState {
         // Phase 1: Collect raw packets from transport (borrows hosted_server or remote_client)
         let mut host_packets: Vec<Vec<u8>> = Vec::new();
         let mut client_state: Option<crate::protocol::StateUpdatePacket> = None;
-        let mut client_chunks: Vec<(usize, crate::protocol::ChunkDataPacket)> = Vec::new();
+        let mut client_chunks: Vec<(usize, crate::chunk_intake::StreamItem)> = Vec::new();
         let mut client_undecodable = 0u32;
         let mut my_idx: u32 = 0;
 
@@ -21566,6 +21579,11 @@ impl super::GameState {
             let acked = state.last_acked_input;
             // B2a — drop reports carried by inputs up to `acked` were read.
             self.chunk_intake.confirm_drops(acked);
+            // B2b — the server centres its push radius on our body as IT
+            // holds it.
+            if let Some(pos) = own_server_pos {
+                self.chunk_intake.set_server_centre(crate::chunk_stream::column_of(pos));
+            }
             if let Some(server_health) = own_server_health
                 && let Some(slot) = self.players.first_mut()
                 && !self.is_creative

@@ -2821,6 +2821,12 @@ fn load_chunk_dir(chunks_dir: &std::path::Path, world: &mut World) -> Result<u32
 /// every save path but was historically restored on none, silently resetting the
 /// per-(village, player) raid-defender leaderboard on every reload.
 pub fn apply_world_save_state(world: &mut World, save: &WorldSave) {
+    // Phase B2b — a restore is no edit: a restored column is compared against
+    // generation once (`chunk_verdict`), never assumed touched.
+    world.without_edit_tracking(|world| restore_world_save_state(world, save));
+}
+
+fn restore_world_save_state(world: &mut World, save: &WorldSave) {
     // Wave 27 — restore campfire block-entity state. Old saves have an
     // empty `campfires` Vec via `#[serde(default)]`; that just leaves
     // `world.block_entities` empty (correct — no campfires existed

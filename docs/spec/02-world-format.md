@@ -1426,6 +1426,16 @@ It is set:
 - never by light writes (`set_block_light_at`, `set_sky_light_at`, the lighting
   BFS).
 
+**Edited columns** (Phase B2b, 2026-10-07; runtime-only). `persist` cannot
+say "edited": a chunk from a save carries it too. A world a hosted server
+pushes from also records which **columns** were written outside world-gen
+(`World::track_edited_columns` / `take_edited_columns`): the same two
+`persist` sites, plus `set_meta` on a change, every block-entity insert and
+removal, every `*_at_mut` block-entity accessor, and face-attachment set and
+removal — never `generate_column`, `insert_chunk` or a save restore
+(`World::without_edit_tracking`). The server turns each into a permanent
+"touched" verdict for the chunk push (Spec 04 §4.1 "Touched columns").
+
 **Whole-column eviction.** `World::evict_column(cx, cz)` replaces the old
 per-chunk remove. If any chunk in the column has `persist`, all of the column's
 chunks move to `World::evicted`. Otherwise they are dropped, because pristine

@@ -239,8 +239,19 @@ pub struct HostedServer {
     /// sent, its credit window and its pending resyncs. Local slots carry an
     /// idle one (they share the host's world; nothing is pushed or filtered).
     chunk_pushes: Vec<crate::chunk_push::ClientChunkPush>,
-    /// `--chunk-sync`: which chunks a joiner is pushed (`all` in B2a).
+    /// `--chunk-sync`: which chunks a joiner is pushed (`touched` by default,
+    /// Phase B2b; `all` pushes everything, B2a).
     chunk_sync: crate::chunk_push::ChunkSync,
+    /// Phase B2b — the shared verdict cache (`chunk_verdict`): which columns
+    /// still match generation. Read by every joiner's push plan; an edit makes
+    /// a column touched for good. Lives as long as this server (never saved).
+    verdicts: crate::chunk_verdict::Verdicts,
+    /// Phase B2b — verdicts computed per tick (`chunk_verdict::VERDICT_BUDGET`;
+    /// a test may change it).
+    verdict_budget: crate::chunk_verdict::VerdictBudget,
+    /// Phase B2b — verdicts computed in the last tick. Test-only.
+    #[cfg(test)]
+    verdicts_last_tick: usize,
     /// Test-only: the pre-B2a delivery (no pushes, every block change to
     /// every client), for the tests that pin the outbox on its own.
     #[cfg(test)]
@@ -696,6 +707,19 @@ impl HostedServer {
                 .map(|_| crate::chunk_push::ClientChunkPush::default())
                 .collect(),
             chunk_sync: crate::chunk_push::chunk_sync(),
+            verdicts: crate::chunk_verdict::Verdicts::default(),
+            // Tests count verdicts, never time them: the time cap would make
+            // how many a tick decides depend on the machine's load.
+            verdict_budget: if cfg!(test) {
+                crate::chunk_verdict::VerdictBudget {
+                    time: std::time::Duration::MAX,
+                    ..crate::chunk_verdict::VERDICT_BUDGET
+                }
+            } else {
+                crate::chunk_verdict::VERDICT_BUDGET
+            },
+            #[cfg(test)]
+            verdicts_last_tick: 0,
             #[cfg(test)]
             chunk_push_off: false,
             server_tick: 0,
@@ -2501,6 +2525,13 @@ impl HostedServer {
                             // needs to build the same world before any terrain.
                             world_rules: self.server.world_rules(),
                             worldgen_version: crate::world::worldgen_fingerprint(),
+                            // B2b — how far round its body this joiner hears
+                            // a push or a "local" note for every column.
+                            chunk_note_radius: if self.sends_notes(i) {
+                                u8::try_from(self.chunk_push_limit()).unwrap_or(u8::MAX)
+                            } else {
+                                0
+                            },
                         };
                         let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &accept);
                         self.transports[i].send_to_client(&pkt);
@@ -3281,6 +3312,18 @@ impl HostedServer {
             "the chunk push reads a lent world only inside the lend window"
         );
         let push_limit = self.chunk_push_limit();
+        // B2b — the world's edits since last tick touch their columns for
+        // good (the changes broadcast now included: their columns were marked
+        // as the writes landed); then this tick's verdicts, nearest first.
+        self.server.world.track_edited_columns();
+        for col in self.server.world.take_edited_columns() {
+            self.verdicts.touch(col);
+        }
+        for b in &block_changes {
+            let (cx, _, cz) = crate::state_outbox::chunk_of(b);
+            self.verdicts.touch((cx, cz));
+        }
+        self.decide_verdicts(push_limit);
         for i in 0..self.transports.len() {
             if !self.handshake_done[i] || self.disconnected[i] {
                 continue;
@@ -3305,6 +3348,7 @@ impl HostedServer {
                 &block_changes
             };
             let push_centre = self.push_centre(i);
+            let verdicts = self.sends_notes(i).then_some(&self.verdicts);
             let outbox = &mut self.outboxes[i];
             outbox.push_tick(
                 self.server_tick,
@@ -3324,6 +3368,7 @@ impl HostedServer {
                     &self.server.loaded_columns,
                     centre,
                     push_limit,
+                    verdicts,
                 );
             }
             // The last input of THIS client's that its server state includes
@@ -3352,22 +3397,75 @@ impl HostedServer {
         push.drop_columns(&input.chunk_drops);
     }
 
-    /// Does slot `i`'s block-change stream go through its sent-set? Exactly
-    /// when it is pushed chunks (B2a): a remote slot in a mode that pushes it
-    /// everything. A local slot shares the host's world. (B2b: a joiner that
-    /// generates untouched chunks itself needs their changes too — this is
-    /// the rule to widen.)
+    /// Does slot `i`'s block-change stream go through its sent-set? For every
+    /// remote slot: it hears of changes only to chunks it has been pushed or
+    /// told are local (B2b: a note puts the whole column in the sent-set).
+    /// A local slot shares the host's world.
     fn filters_changes(&self, i: usize) -> bool {
         #[cfg(test)]
         if self.chunk_push_off {
             return false;
         }
         i >= self.num_local_players
+    }
+
+    /// B2b — does slot `i` get verdicts (a push for a touched column, a
+    /// "local" note for the rest) rather than every chunk? A remote joiner
+    /// whose terrain generator matches ours, under `--chunk-sync touched`, on
+    /// a server that keeps every column round a joiner loaded out to its push
+    /// limit: the dedicated server (it streams round each player) or a
+    /// lending host (its client's streamer anchors on each joiner). An owning
+    /// (`--no-lend`) host loads only round where hosting began and each
+    /// joiner's 3×3, so a column in range might never get a verdict and its
+    /// joiner, waiting for one, would show a hole: it pushes everything, as
+    /// in B2a.
+    fn sends_notes(&self, i: usize) -> bool {
+        i >= self.num_local_players
+            && (self.lends_host_world() || self.server.column_streamer.is_some())
             && self
                 .server
                 .players
                 .get(i)
-                .is_some_and(|sp| self.chunk_sync.pushes_everything(sp.worldgen_mismatch()))
+                .is_some_and(|sp| !self.chunk_sync.pushes_everything(sp.worldgen_mismatch()))
+    }
+
+    /// B2b — this tick's verdicts (`chunk_verdict`): the undecided columns
+    /// within every noted joiner's push radius, nearest first across all of
+    /// them, up to the budget. Ties go to the joiners in turn (the start
+    /// rotates with the tick), so none waits behind another's ring.
+    fn decide_verdicts(&mut self, push_limit: i32) {
+        let budget = self.verdict_budget;
+        let joiners: Vec<usize> = (0..self.transports.len())
+            .filter(|&i| self.handshake_done[i] && !self.disconnected[i] && self.sends_notes(i))
+            .collect();
+        let mut candidates: Vec<(i64, usize, (i32, i32))> = Vec::new();
+        let n = joiners.len().max(1);
+        for (k, &i) in joiners.iter().enumerate() {
+            let Some(centre) = self.push_centre(i) else { continue };
+            let turn = (k + self.server_tick as usize) % n;
+            candidates.extend(
+                self.chunk_pushes[i]
+                    .verdict_candidates(
+                        &self.server.loaded_columns,
+                        centre,
+                        push_limit,
+                        &self.verdicts,
+                        budget.count,
+                    )
+                    .into_iter()
+                    .map(|(d, col)| (d, turn, col)),
+            );
+        }
+        candidates.sort_unstable();
+        let cols: Vec<(i32, i32)> = candidates.into_iter().map(|(_, _, col)| col).collect();
+        let decided =
+            self.verdicts.decide(&self.server.world, &self.server.biome_gen, &cols, budget);
+        #[cfg(test)]
+        {
+            self.verdicts_last_tick = decided;
+        }
+        #[cfg(not(test))]
+        let _ = decided;
     }
 
     /// How far round a joiner this server can push (`chunk_push`): as far as
@@ -3384,8 +3482,8 @@ impl HostedServer {
 
     /// B2a — the column round which slot `i` is pushed chunks (its server
     /// body's), or `None` when it is pushed nothing: a local slot, a slot not
-    /// (or no longer) joined, a body with no finite position, or a mode that
-    /// pushes this joiner nothing (`chunk_push::ChunkSync`).
+    /// (or no longer) joined, or a body with no finite position. Every mode
+    /// pushes (B2b: `touched` pushes only touched columns and notes the rest).
     fn push_centre(&self, i: usize) -> Option<(i32, i32)> {
         #[cfg(test)]
         if self.chunk_push_off {
@@ -3394,10 +3492,8 @@ impl HostedServer {
         if i < self.num_local_players || !self.handshake_done[i] || self.disconnected[i] {
             return None;
         }
-        let sp = self.server.players.get(i)?;
-        let pos = sp.player.pos;
-        (pos.is_finite() && self.chunk_sync.pushes_everything(sp.worldgen_mismatch()))
-            .then(|| crate::chunk_stream::column_of(pos))
+        let pos = self.server.players.get(i)?.player.pos;
+        pos.is_finite().then(|| crate::chunk_stream::column_of(pos))
     }
 
     /// `--chunk-sync` for this server (the dedicated server's flag).
@@ -3429,6 +3525,24 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn chunk_push_for_test(&self, slot: usize) -> &crate::chunk_push::ClientChunkPush {
         &self.chunk_pushes[slot]
+    }
+
+    /// Test-only (B2b): the shared verdict cache.
+    #[cfg(test)]
+    pub(crate) fn verdicts_for_test(&self) -> &crate::chunk_verdict::Verdicts {
+        &self.verdicts
+    }
+
+    /// Test-only (B2b): how many verdicts the last tick computed.
+    #[cfg(test)]
+    pub(crate) fn verdicts_last_tick_for_test(&self) -> usize {
+        self.verdicts_last_tick
+    }
+
+    /// Test-only (B2b): the per-tick verdict budget.
+    #[cfg(test)]
+    pub(crate) fn set_verdict_budget_for_test(&mut self, budget: crate::chunk_verdict::VerdictBudget) {
+        self.verdict_budget = budget;
     }
 
     /// Test-only: chunks whose block changes slot `slot` will never receive

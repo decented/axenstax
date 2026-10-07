@@ -28,6 +28,17 @@
 //!   `last_acked_input` echo, [`ChunkIntake::confirm_drops`]); the report's
 //!   `as_of` makes a repeat harmless on the server.
 //!
+//! - **Local notes** (Phase B2b, `chunk_verdict`). A server in `--chunk-sync
+//!   touched` mode tells this joiner, for every column within
+//!   `R = min(render distance, JoinAccept.chunk_note_radius)` of its SERVER
+//!   body, either the column (a push, as above) or "this column is local"
+//!   (`ColumnLocal`, numbered and acknowledged with the pushes). Inside `R`
+//!   the client generates a column only once it has been told it is local
+//!   ([`ChunkIntake::awaits_verdict`]), never before, so a touched column
+//!   never flashes pristine terrain; outside `R` it generates as before. A
+//!   local column is let go like a pushed one (discarded and reported), so
+//!   the server decides it afresh on return.
+//!
 //! Renderer-free (the game loop meshes what [`ChunkIntake::take_relight`]
 //! hands it), so it is unit-tested on a bare `World`.
 
@@ -39,29 +50,44 @@ use crate::protocol::{ChunkDataPacket, ChunkDrop, PushedAttachment, PushedEntity
 use crate::state_outbox::ChunkCoord;
 use crate::world::{FaceAttachment, World, MAX_CHUNK_Y};
 
+/// One packet of the server's numbered chunk stream, as `RemoteClient`
+/// queues it.
+#[derive(Debug)]
+pub enum StreamItem {
+    /// A pushed chunk (`ChunkData`).
+    Chunk(ChunkDataPacket),
+    /// "Column `(cx, cz)` is local" (`ColumnLocal`, Phase B2b).
+    Local((i32, i32)),
+}
+
 /// One step of a frame's world intake, in arrival order (see [`interleave`]).
 #[derive(Debug)]
 pub enum IntakeStep {
     /// Apply one pushed chunk packet.
     Chunk(Box<ChunkDataPacket>),
+    /// Take in a "column is local" note (Phase B2b).
+    Local((i32, i32)),
     /// Apply these block changes (indices into the frame's
     /// `pending_block_changes`).
     Changes(std::ops::Range<usize>),
 }
 
-/// Lay a frame's pushed chunks between its block changes in the order they
-/// arrived: each chunk carries the number of changes that had arrived before
+/// Lay a frame's chunk-stream packets between its block changes in the order
+/// they arrived: each carries the number of changes that had arrived before
 /// it (`RemoteClient::chunk_queue`).
-pub fn interleave(chunks: Vec<(usize, ChunkDataPacket)>, changes: usize) -> Vec<IntakeStep> {
+pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<IntakeStep> {
     let mut steps = Vec::with_capacity(chunks.len() * 2 + 1);
     let mut done = 0;
-    for (before, chunk) in chunks {
+    for (before, item) in chunks {
         let before = before.min(changes);
         if before > done {
             steps.push(IntakeStep::Changes(done..before));
             done = before;
         }
-        steps.push(IntakeStep::Chunk(Box::new(chunk)));
+        steps.push(match item {
+            StreamItem::Chunk(chunk) => IntakeStep::Chunk(Box::new(chunk)),
+            StreamItem::Local(col) => IntakeStep::Local(col),
+        });
     }
     if changes > done {
         steps.push(IntakeStep::Changes(done..changes));
@@ -85,6 +111,16 @@ pub struct ChunkIntake {
     /// first, each with the sequence number of the first input that carried
     /// it (`None` = not sent yet).
     drops: Vec<(ChunkDrop, Option<u64>)>,
+    /// Phase B2b — `JoinAccept.chunk_note_radius`: how far round its server
+    /// body this client is told about every column (`0` = no notes).
+    note_radius: i32,
+    /// Phase B2b — the column of this client's body as the server last
+    /// reported it (the `JoinAccept` spawn until the first `StateUpdate`):
+    /// where the server's push radius is centred.
+    server_centre: Option<(i32, i32)>,
+    /// Phase B2b — columns the server said are local, held (generated or to
+    /// be generated) and not let go of.
+    local: ahash::AHashSet<(i32, i32)>,
 }
 
 impl ChunkIntake {
@@ -124,6 +160,90 @@ impl ChunkIntake {
     /// Has every chunk of column `col` been pushed?
     pub fn column_complete(&self, col: (i32, i32)) -> bool {
         self.pushed_per_column.get(&col).copied().unwrap_or(0) as i32 > MAX_CHUNK_Y
+    }
+
+    /// Phase B2b — this joined session hears a push or a "local" note for
+    /// every column within `note_radius` (`JoinAccept.chunk_note_radius`; `0`
+    /// = none) of its server body, which starts in column `spawn`.
+    pub fn expect_notes(&mut self, note_radius: u8, spawn: (i32, i32)) {
+        self.note_radius = i32::from(note_radius);
+        self.server_centre = Some(spawn);
+    }
+
+    /// Phase B2b — does the server decide the columns round this client's
+    /// body (a push or a "local" note for each)?
+    pub fn server_decides(&self) -> bool {
+        self.note_radius > 0
+    }
+
+    /// Phase B2b — the server now holds this client's body in column `col`.
+    pub fn set_server_centre(&mut self, col: (i32, i32)) {
+        self.server_centre = Some(col);
+    }
+
+    /// Phase B2b — take in a `ColumnLocal` note: the server said column
+    /// `col` is local. It counts towards the ack like a push (it is a
+    /// numbered packet of the same stream). Ignored otherwise for a column
+    /// this client holds pushed chunks of: those are the server's own data,
+    /// never replaced by a generation.
+    pub fn note_local(&mut self, col: (i32, i32)) {
+        self.applied = self.applied.wrapping_add(1);
+        if self.holds_pushed(col) {
+            log::debug!("Local note for pushed column {col:?}; keeping the pushed copy");
+            return;
+        }
+        self.local.insert(col);
+    }
+
+    /// Phase B2b — has the server said column `col` is local (and this
+    /// client not let go of it since)?
+    pub fn is_local(&self, col: (i32, i32)) -> bool {
+        self.local.contains(&col)
+    }
+
+    /// Phase B2b — must column `col` wait for the server before this client
+    /// generates it? Yes when it lies within `min(render_distance,
+    /// note_radius)` of the server body and the server has not yet said it is
+    /// local or pushed any of it. Outside that radius a column is generated
+    /// as before; so is every column of a session the server sends no notes.
+    pub fn awaits_verdict(&self, col: (i32, i32), render_distance: i32) -> bool {
+        let Some(centre) = self.server_centre else { return false };
+        let r = render_distance.min(self.note_radius);
+        self.note_radius > 0
+            && (col.0 - centre.0).abs() <= r
+            && (col.1 - centre.1).abs() <= r
+            && !self.local.contains(&col)
+            && !self.holds_pushed(col)
+    }
+
+    /// Phase B2b — the column a server block change `bc` lands in, when it
+    /// is one the server said is local that this client has not generated
+    /// (nor holds evicted): generate it first — the full load path — then
+    /// apply the change, never a stray chunk. `None` otherwise.
+    pub fn generate_before(
+        &self,
+        bc: &crate::protocol::BlockChange,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        world: &World,
+    ) -> Option<(i32, i32)> {
+        let col = crate::chunk_stream::column_of_block(bc.x, bc.z);
+        (self.local.contains(&col)
+            && !crate::chunk_stream::remote_change_is_loaded(loaded, world, bc.x, bc.z))
+        .then_some(col)
+    }
+
+    /// Phase B2b — the columns the server said are local. Test-only.
+    #[cfg(test)]
+    pub fn local_columns(&self) -> Vec<(i32, i32)> {
+        let mut cols: Vec<(i32, i32)> = self.local.iter().copied().collect();
+        cols.sort_unstable();
+        cols
+    }
+
+    /// Phase B2b — has the server decided column `col` for this client:
+    /// pushed it whole, or said it is local?
+    pub fn decided(&self, col: (i32, i32)) -> bool {
+        self.column_complete(col) || self.local.contains(&col)
     }
 
     /// Apply one pushed packet to `world` (see the module docs). A chunk
@@ -208,12 +328,14 @@ impl ChunkIntake {
         out
     }
 
-    /// This client is letting go of pushed column `col` (out of range):
-    /// discard it — chunks and side data, never into the evicted store, since
-    /// the server pushes it afresh — and queue the report to the server.
-    /// No-op for a column holding no pushed chunk.
+    /// This client is letting go of pushed or local column `col` (out of
+    /// range): discard it — chunks and side data, never into the evicted
+    /// store, since the server pushes it afresh or decides it again — and
+    /// queue the report to the server. No-op for a column the server told
+    /// this client nothing about.
     pub fn let_go(&mut self, world: &mut World, col: (i32, i32)) {
-        if self.pushed_per_column.remove(&col).is_none() {
+        let was_local = self.local.remove(&col);
+        if self.pushed_per_column.remove(&col).is_none() && !was_local {
             return;
         }
         for cy in 0..=MAX_CHUNK_Y {
@@ -377,16 +499,20 @@ mod tests {
     #[test]
     fn interleave_keeps_each_snapshot_between_the_changes_around_it() {
         let world = World::new();
-        let c = |x| packet_of(&world, (x, 0, 0));
-        let steps = interleave(vec![(0, c(1)), (2, c(2)), (2, c(3)), (5, c(4))], 6);
+        let c = |x| StreamItem::Chunk(packet_of(&world, (x, 0, 0)));
+        let steps = interleave(
+            vec![(0, c(1)), (2, c(2)), (2, StreamItem::Local((7, 7))), (2, c(3)), (5, c(4))],
+            6,
+        );
         let shape: Vec<String> = steps
             .iter()
             .map(|s| match s {
                 IntakeStep::Chunk(p) => format!("C{}", p.cx),
+                IntakeStep::Local(col) => format!("L{}", col.0),
                 IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
             })
             .collect();
-        assert_eq!(shape, ["C1", "0..2", "C2", "C3", "2..5", "C4", "5..6"]);
+        assert_eq!(shape, ["C1", "0..2", "C2", "L7", "C3", "2..5", "C4", "5..6"]);
     }
 
     /// A host world with an edit + side data in chunk (0, 1, 0), and the
@@ -534,11 +660,12 @@ mod tests {
             BlockChange::with_meta(1, 1, 1, block::DIRT, 0), // before: older than the snapshot
             BlockChange::with_meta(2, 2, 2, block::GLASS, 0), // after
         ];
-        for step in interleave(vec![(1, snapshot)], changes.len()) {
+        for step in interleave(vec![(1, StreamItem::Chunk(snapshot))], changes.len()) {
             match step {
                 IntakeStep::Chunk(p) => {
                     intake.apply(&mut joiner, &mut loaded, &reg(), &p);
                 }
+                IntakeStep::Local(_) => unreachable!(),
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         joiner.apply_remote_block_change(bc);
@@ -582,6 +709,58 @@ mod tests {
         assert!(!intake.apply(&mut joiner, &mut loaded, &reg(), &cont));
         assert_eq!(intake.applied(), 7);
         assert_eq!(joiner.meta_at(32, 0, 48), 0);
+    }
+
+    #[test]
+    fn inside_the_note_radius_a_column_waits_for_its_verdict() {
+        let mut intake = ChunkIntake::default();
+        assert!(!intake.awaits_verdict((0, 0), 10), "no notes: generate as before");
+        intake.expect_notes(3, (10, 10));
+        assert!(intake.server_decides());
+        assert!(intake.awaits_verdict((13, 7), 10), "inside min(rd 10, radius 3) of the server body");
+        assert!(!intake.awaits_verdict((14, 10), 10), "outside it: generated as before");
+        assert!(!intake.awaits_verdict((12, 10), 1), "the render distance caps it too");
+        intake.note_local((13, 7));
+        assert_eq!(intake.applied(), 1, "a note counts towards the ack");
+        assert!(!intake.awaits_verdict((13, 7), 10), "told it is local: generate it");
+        assert!(intake.decided((13, 7)) && !intake.decided((12, 12)));
+        // The centre follows the server body.
+        intake.set_server_centre((20, 10));
+        assert!(!intake.awaits_verdict((12, 12), 10), "out of range now");
+        assert!(intake.awaits_verdict((22, 12), 10));
+    }
+
+    #[test]
+    fn a_change_for_a_local_column_not_generated_yet_generates_it_first() {
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        let world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let bc = BlockChange::with_meta(20, 70, -5, block::GLASS, 0); // column (1, -1)
+        assert_eq!(intake.generate_before(&bc, &loaded, &world), None, "not local: not ours to make");
+        intake.note_local((1, -1));
+        assert_eq!(intake.generate_before(&bc, &loaded, &world), Some((1, -1)));
+        loaded.insert((1, -1));
+        assert_eq!(intake.generate_before(&bc, &loaded, &world), None, "already generated");
+    }
+
+    #[test]
+    fn letting_go_of_a_local_column_discards_it_and_reports_it() {
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        let mut joiner = World::new();
+        let biome = crate::biome::BiomeGenerator::new(42);
+        intake.note_local((1, 2));
+        joiner.generate_column(1, 2, &biome);
+        joiner.set_block(20, 90, 40, block::GLASS); // a server change applied on top
+        assert!(joiner.evict_column(1, 2), "edited: the streamer's stream-out keeps it");
+        intake.let_go(&mut joiner, (1, 2));
+        assert!(!joiner.is_column_evicted(1, 2), "discarded, never restored stale");
+        assert!(!intake.is_local((1, 2)));
+        assert_eq!(intake.drops_for_input(1, 16), vec![ChunkDrop { cx: 1, cz: 2, as_of: 1 }]);
+        // A column the server told it nothing about is no one's business.
+        intake.let_go(&mut joiner, (5, 5));
+        assert_eq!(intake.pending_drops(), 1);
     }
 
     #[test]

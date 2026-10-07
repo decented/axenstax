@@ -438,6 +438,16 @@ pub struct World {
     /// trees, villages, structures — including spill into neighbouring chunks)
     /// don't mark a chunk `persist`. Runtime-only.
     worldgen_depth: u32,
+    /// Phase B2b (Spec 04 §4.1 "Touched columns") — the columns written
+    /// outside world-gen since the last [`World::take_edited_columns`]:
+    /// blocks, metadata, player-placed bits, block entities (a `&mut` handed
+    /// out counts) and face attachments. `None` = not tracking: only a world a
+    /// hosted server pushes from tracks (it drains this every tick into its
+    /// shared verdict cache), so single-player and a joiner keep nothing.
+    /// Never set by world-gen (`worldgen_depth`), by a save restore
+    /// ([`World::without_edit_tracking`]) or by `insert_chunk`
+    /// (`Chunk::from_bytes`). Runtime-only.
+    edited_columns: Option<ahash::AHashSet<(i32, i32)>>,
     /// Spec 02 §8.4 — chunk coordinates whose `.chunk` file this session read in
     /// (`save::load_chunk_dir`, from `chunks/` or `autosave/chunks/`) or wrote (every
     /// native save path). A save deletes a chunk's file — the all-air, mined-out
@@ -731,6 +741,23 @@ pub struct RigDisplay {
     pub clip: crate::anim_set::AnimClip,
 }
 
+/// Phase B2b — mark the column holding block `pos` edited in `set` (the
+/// `World::edited_columns` field), unless world-gen is running (`worldgen_depth`).
+/// A free function so a `&mut` accessor can mark through a disjoint field
+/// borrow while it hands out its reference.
+fn note_edit(
+    set: &mut Option<ahash::AHashSet<(i32, i32)>>,
+    worldgen_depth: u32,
+    pos: (i32, i32, i32),
+) {
+    if worldgen_depth == 0
+        && let Some(set) = set
+    {
+        let cs = CHUNK_SIZE as i32;
+        set.insert((pos.0.div_euclid(cs), pos.2.div_euclid(cs)));
+    }
+}
+
 impl World {
     pub fn new() -> Self {
         Self {
@@ -738,6 +765,7 @@ impl World {
             evicted: AHashMap::new(),
             evicted_columns: ahash::AHashSet::new(),
             worldgen_depth: 0,
+            edited_columns: None,
             disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
             drying_racks: AHashMap::new(),
@@ -964,6 +992,44 @@ impl World {
             .contains(&key)
     }
 
+    /// Phase B2b — start recording which columns are edited (see the
+    /// `edited_columns` field). Idempotent; a hosted server calls it on the
+    /// world it pushes from.
+    pub fn track_edited_columns(&mut self) {
+        self.edited_columns.get_or_insert_with(ahash::AHashSet::new);
+    }
+
+    /// Phase B2b — the columns edited since the last call (none when not
+    /// tracking), cleared.
+    pub fn take_edited_columns(&mut self) -> Vec<(i32, i32)> {
+        self.edited_columns
+            .as_mut()
+            .map(|set| set.drain().collect())
+            .unwrap_or_default()
+    }
+
+    /// Phase B2b — record an edit at block `pos` (no-op inside world-gen or
+    /// when not tracking). Every World setter that changes what a joiner
+    /// would see calls it; a raw write to a side table must call it too.
+    pub fn mark_edited(&mut self, pos: (i32, i32, i32)) {
+        note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+    }
+
+    /// Phase B2b — run `f` with edit tracking paused: a save restore puts back
+    /// what a column already held, so it is no edit (the verdict compares a
+    /// restored column against generation once).
+    pub fn without_edit_tracking<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let tracking = self.edited_columns.take();
+        let out = f(self);
+        if let Some(mut set) = tracking {
+            if let Some(during) = self.edited_columns.take() {
+                set.extend(during);
+            }
+            self.edited_columns = Some(set);
+        }
+        out
+    }
+
     /// Spec 02 §7.5 — stream a column out. If ANY of its chunks has `persist`,
     /// move ALL of the column's chunks into the evicted store (whole-column, so a
     /// restore never mixes regenerated and restored slices); otherwise drop them
@@ -1112,6 +1178,19 @@ impl World {
         self.keep_inventory = meta.keep_inventory;
     }
 
+    /// Phase B2b — a fresh, empty world with this one's generation inputs
+    /// (the Workshop void, the world type, the flat floor and its water
+    /// depth): what `generate_column` reads besides the `BiomeGenerator`
+    /// (the seed). `chunk_verdict` regenerates a column into it to compare.
+    pub fn generation_twin(&self) -> World {
+        let mut twin = World::new();
+        twin.is_workshop = self.is_workshop;
+        twin.world_type = self.world_type.clone();
+        twin.ground = self.ground.clone();
+        twin.water_depth = self.water_depth;
+        twin
+    }
+
     /// Spec 02 §7.5 — every chunk a save must write: the loaded chunks plus the
     /// evicted store. An evicted chunk wins over a loaded one at the same
     /// position (the loaded one can only be world-gen spill from a neighbour).
@@ -1145,7 +1224,11 @@ impl World {
 
     /// Mutable get for the Campfire state at `pos`.
     pub fn campfire_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::campfire::CampfireData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_campfire_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_campfire_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
 
     /// Insert a Campfire entry at `pos`. Replaces any prior entry —
@@ -1153,6 +1236,7 @@ impl World {
     /// first with `campfire_at`.
     pub fn insert_campfire(&mut self, pos: (i32, i32, i32), data: crate::campfire::CampfireData) {
         self.block_entities.insert(pos, BlockEntityData::Campfire(data));
+        self.mark_edited(pos);
     }
 
     /// `Entry::or_insert_with` analog — returns a mutable Campfire
@@ -1164,6 +1248,7 @@ impl World {
     /// Campfire.
     pub fn campfire_at_mut_or_default(&mut self, pos: (i32, i32, i32)) -> &mut crate::campfire::CampfireData {
         let is_campfire = matches!(self.block_entities.get(&pos), Some(BlockEntityData::Campfire(_)));
+        self.mark_edited(pos);
         if !is_campfire {
             self.block_entities.insert(pos, BlockEntityData::Campfire(crate::campfire::CampfireData::default()));
         }
@@ -1186,11 +1271,16 @@ impl World {
     }
 
     pub fn furnace_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::furnace::FurnaceData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_furnace_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_furnace_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
 
     pub fn insert_furnace(&mut self, pos: (i32, i32, i32), data: crate::furnace::FurnaceData) {
         self.block_entities.insert(pos, BlockEntityData::Furnace(data));
+        self.mark_edited(pos);
     }
 
     pub fn iter_furnaces(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::furnace::FurnaceData)> {
@@ -1204,11 +1294,16 @@ impl World {
     }
 
     pub fn composter_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::workstation::WorkstationState> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_composter_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_composter_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
 
     pub fn insert_composter(&mut self, pos: (i32, i32, i32), data: crate::workstation::WorkstationState) {
         self.block_entities.insert(pos, BlockEntityData::Composter(data));
+        self.mark_edited(pos);
     }
 
     pub fn iter_composters(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::workstation::WorkstationState)> {
@@ -1222,11 +1317,16 @@ impl World {
     }
 
     pub fn vendor_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::vendor::VendorData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_vendor_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_vendor_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
 
     pub fn insert_vendor(&mut self, pos: (i32, i32, i32), data: crate::vendor::VendorData) {
         self.block_entities.insert(pos, BlockEntityData::Vendor(data));
+        self.mark_edited(pos);
     }
 
     pub fn iter_vendors(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::vendor::VendorData)> {
@@ -1238,10 +1338,15 @@ impl World {
         self.block_entities.get(&pos).and_then(BlockEntityData::as_hive)
     }
     pub fn hive_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::bee_hive::HiveData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_hive_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_hive_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_hive(&mut self, pos: (i32, i32, i32), data: crate::bee_hive::HiveData) {
         self.block_entities.insert(pos, BlockEntityData::Hive(data));
+        self.mark_edited(pos);
     }
     pub fn iter_hives(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::bee_hive::HiveData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_hive().map(|h| (pos, h)))
@@ -1253,10 +1358,15 @@ impl World {
         self.block_entities.get(&pos).and_then(BlockEntityData::as_chest)
     }
     pub fn chest_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::chest::ChestData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_chest_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_chest_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_chest(&mut self, pos: (i32, i32, i32), data: crate::chest::ChestData) {
         self.block_entities.insert(pos, BlockEntityData::Chest(data));
+        self.mark_edited(pos);
     }
     pub fn iter_chests(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::chest::ChestData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_chest().map(|c| (pos, c)))
@@ -1267,10 +1377,15 @@ impl World {
         self.block_entities.get(&pos).and_then(BlockEntityData::as_sign)
     }
     pub fn sign_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::sign::SignData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_sign_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_sign_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_sign(&mut self, pos: (i32, i32, i32), data: crate::sign::SignData) {
         self.block_entities.insert(pos, BlockEntityData::Sign(data));
+        self.mark_edited(pos);
     }
     pub fn iter_signs(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::sign::SignData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_sign().map(|s| (pos, s)))
@@ -1281,10 +1396,15 @@ impl World {
         self.block_entities.get(&pos).and_then(BlockEntityData::as_item_frame)
     }
     pub fn item_frame_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::item_frame::ItemFrameData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_item_frame_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_item_frame_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_item_frame(&mut self, pos: (i32, i32, i32), data: crate::item_frame::ItemFrameData) {
         self.block_entities.insert(pos, BlockEntityData::ItemFrame(data));
+        self.mark_edited(pos);
     }
     pub fn iter_item_frames(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::item_frame::ItemFrameData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_item_frame().map(|f| (pos, f)))
@@ -1299,10 +1419,15 @@ impl World {
     /// mutation path clones + `insert_grave`s instead.
     #[allow(dead_code)]
     pub fn grave_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::grave::GraveData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_grave_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_grave_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_grave(&mut self, pos: (i32, i32, i32), data: crate::grave::GraveData) {
         self.block_entities.insert(pos, BlockEntityData::Grave(data));
+        self.mark_edited(pos);
     }
     pub fn iter_graves(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::grave::GraveData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_grave().map(|g| (pos, g)))
@@ -1313,10 +1438,15 @@ impl World {
         self.block_entities.get(&pos).and_then(BlockEntityData::as_tip_jar)
     }
     pub fn tip_jar_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::tip_jar::TipJarData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_tip_jar_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_tip_jar_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_tip_jar(&mut self, pos: (i32, i32, i32), data: crate::tip_jar::TipJarData) {
         self.block_entities.insert(pos, BlockEntityData::TipJar(data));
+        self.mark_edited(pos);
     }
     pub fn iter_tip_jars(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::tip_jar::TipJarData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_tip_jar().map(|t| (pos, t)))
@@ -1327,10 +1457,15 @@ impl World {
         self.block_entities.get(&pos).and_then(BlockEntityData::as_auction)
     }
     pub fn auction_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::auction::AuctionData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_auction_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_auction_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_auction(&mut self, pos: (i32, i32, i32), data: crate::auction::AuctionData) {
         self.block_entities.insert(pos, BlockEntityData::Auction(data));
+        self.mark_edited(pos);
     }
     pub fn iter_auctions(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::auction::AuctionData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_auction().map(|a| (pos, a)))
@@ -1345,10 +1480,15 @@ impl World {
     /// instead.
     #[allow(dead_code)]
     pub fn latent_print_at_mut(&mut self, pos: (i32, i32, i32)) -> Option<&mut crate::latent_print::LatentPrintData> {
-        self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_latent_print_mut)
+        let e = self.block_entities.get_mut(&pos).and_then(BlockEntityData::as_latent_print_mut);
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        e
     }
     pub fn insert_latent_print(&mut self, pos: (i32, i32, i32), data: crate::latent_print::LatentPrintData) {
         self.block_entities.insert(pos, BlockEntityData::LatentPrint(data));
+        self.mark_edited(pos);
     }
     pub fn iter_latent_prints(&self) -> impl Iterator<Item = ((i32, i32, i32), &crate::latent_print::LatentPrintData)> {
         self.block_entities.iter().filter_map(|(&pos, be)| be.as_latent_print().map(|l| (pos, l)))
@@ -1357,7 +1497,9 @@ impl World {
     /// Remove any block-entity entry at `pos`. Variant-agnostic — used
     /// by the universal break-block / set-block-to-air path.
     pub fn remove_block_entity(&mut self, pos: (i32, i32, i32)) {
-        self.block_entities.remove(&pos);
+        if self.block_entities.remove(&pos).is_some() {
+            self.mark_edited(pos);
+        }
     }
 
     /// Owner-inbox #1/2/3 — attach décor/data (`Wallpaper` or `Blueprint`) to
@@ -1375,6 +1517,7 @@ impl World {
         self.face_attachments
             .entry(pos)
             .or_insert_with(|| std::array::from_fn(|_| None))[face_idx] = Some(data);
+        self.mark_edited(pos);
     }
 
     /// Owner-inbox #1/2/3 — the attachment on one face, if any. By reference —
@@ -1396,9 +1539,14 @@ impl World {
         pos: (i32, i32, i32),
         face_idx: usize,
     ) -> Option<&mut FaceAttachment> {
-        self.face_attachments
+        let a = self
+            .face_attachments
             .get_mut(&pos)
-            .and_then(|faces| faces.get_mut(face_idx).and_then(Option::as_mut))
+            .and_then(|faces| faces.get_mut(face_idx).and_then(Option::as_mut));
+        if a.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
+        }
+        a
     }
 
     /// Owner-inbox #1/2/3 — remove the attachment on one face (the peel action),
@@ -1418,6 +1566,9 @@ impl World {
                 self.face_attachments.remove(&pos);
             }
         }
+        if removed.is_some() {
+            self.mark_edited(pos);
+        }
         removed
     }
 
@@ -1425,9 +1576,13 @@ impl World {
     /// destroy action), returning what was attached so the caller can drop the
     /// recovered items.
     pub fn remove_face_attachments_at(&mut self, pos: (i32, i32, i32)) -> FaceAttachments {
-        self.face_attachments
-            .remove(&pos)
-            .unwrap_or_else(|| std::array::from_fn(|_| None))
+        match self.face_attachments.remove(&pos) {
+            Some(faces) => {
+                self.mark_edited(pos);
+                faces
+            }
+            None => std::array::from_fn(|_| None),
+        }
     }
 
     /// Owner-inbox #1/2/3 — iterate every block with attachments + its per-face
@@ -1563,10 +1718,9 @@ impl World {
     /// Set the metadata byte at `pos`. Writing 0 removes the entry so the map
     /// stays sparse (the plain-block default is "no entry").
     pub fn set_meta(&mut self, pos: (i32, i32, i32), m: u8) {
-        if m == 0 {
-            self.block_meta.remove(&pos);
-        } else {
-            self.block_meta.insert(pos, m);
+        let was = if m == 0 { self.block_meta.remove(&pos) } else { self.block_meta.insert(pos, m) };
+        if was.unwrap_or(0) != m {
+            self.mark_edited(pos);
         }
     }
 
@@ -1730,16 +1884,21 @@ impl World {
         &mut self,
         pos: (i32, i32, i32),
     ) -> Option<&mut crate::power::PowerDeviceData> {
-        match self.block_entities.get_mut(&pos) {
+        let e = match self.block_entities.get_mut(&pos) {
             Some(BlockEntityData::PowerDevice(d)) => Some(d),
             _ => None,
+        };
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
         }
+        e
     }
 
     /// Insert / replace the power-device block-entity at `pos` (Spec 48). Used
     /// by the place handler and the save-restore path. Mirrors `insert_furnace`.
     pub fn insert_power_device(&mut self, pos: (i32, i32, i32), data: crate::power::PowerDeviceData) {
         self.block_entities.insert(pos, BlockEntityData::PowerDevice(data));
+        self.mark_edited(pos);
     }
 
     /// Borrow the dispenser/dropper at `pos`, if present.
@@ -1755,16 +1914,21 @@ impl World {
         &mut self,
         pos: (i32, i32, i32),
     ) -> Option<&mut crate::dispenser::DispenserData> {
-        match self.block_entities.get_mut(&pos) {
+        let e = match self.block_entities.get_mut(&pos) {
             Some(BlockEntityData::Dispenser(d)) => Some(d),
             _ => None,
+        };
+        if e.is_some() {
+            note_edit(&mut self.edited_columns, self.worldgen_depth, pos);
         }
+        e
     }
 
     /// Insert / replace the dispenser block-entity at `pos` (place path +
     /// save restore). Mirrors `insert_power_device`.
     pub fn insert_dispenser(&mut self, pos: (i32, i32, i32), data: crate::dispenser::DispenserData) {
         self.block_entities.insert(pos, BlockEntityData::Dispenser(data));
+        self.mark_edited(pos);
     }
 
     /// Iterate all dispenser/dropper block-entities (save snapshot).
@@ -1813,10 +1977,14 @@ impl World {
         let chunk = self.chunk_for_block_write(cx, cy, cz);
         // Spec 02 §7.5 — a real change outside world-gen makes the chunk
         // persist-worthy (it no longer matches what `generate_column` produces).
-        if !in_worldgen && chunk.get(lx, ly, lz) != block {
+        let edit = !in_worldgen && chunk.get(lx, ly, lz) != block;
+        if edit {
             chunk.mark_persist();
         }
         chunk.set(lx, ly, lz, block);
+        if edit {
+            self.mark_edited((x, y, z));
+        }
     }
 
     // ── Spec 06 §2.2 — player-placed mask (anti-farming) ─────────────
@@ -1854,10 +2022,14 @@ impl World {
         };
         if let Some(c) = chunk {
             // Spec 02 §7.5 — the placed mask is saved, so flipping it is an edit.
-            if !in_worldgen && c.is_placed(lx, ly, lz) != placed {
+            let edit = !in_worldgen && c.is_placed(lx, ly, lz) != placed;
+            if edit {
                 c.mark_persist();
             }
             c.set_placed(lx, ly, lz, placed);
+            if edit {
+                self.mark_edited((x, y, z));
+            }
         }
     }
 

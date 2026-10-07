@@ -201,7 +201,9 @@ fn protocol_version_is_the_pinned_value() {
     //   `EntityAttack = 58`, `EntityInteract = 59`, `InteractOutcome = 60`,
     //   `KillEvent = 61`, `PlayerEventType::{DiedOf, ArmourWorn, Bred}` and
     //   `entity_flags::TETHERED`, all appended.
-    assert_eq!(protocol::PROTOCOL_VERSION, 70);
+    // v71 (2026-10-07, B2b): touched columns — PacketType::ColumnLocal (tag
+    //   4), JoinAccept.chunk_note_radius.
+    assert_eq!(protocol::PROTOCOL_VERSION, 71);
 }
 
 #[test]
@@ -299,6 +301,7 @@ fn join_accept_carries_spawn_and_game_mode() {
         }],
         world_rules: protocol::WorldRules::default(),
         worldgen_version: crate::world::worldgen_fingerprint(),
+        chunk_note_radius: 0,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinAccept, &acc);
     let (_ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

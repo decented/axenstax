@@ -117,6 +117,9 @@ pub struct JoinedWorld {
     /// Where the host placed us. `None` when the host sent a non-finite
     /// position (NaN/inf would poison every f32→i32 cast downstream).
     pub spawn: Option<glam::Vec3>,
+    /// Phase B2b — `JoinAccept.chunk_note_radius`: how far round our server
+    /// body the host tells us about every column (`0` = it pushes everything).
+    pub chunk_note_radius: u8,
 }
 
 impl JoinedWorld {
@@ -127,6 +130,7 @@ impl JoinedWorld {
             rules: accept.world_rules.clone(),
             worldgen_version: accept.worldgen_version,
             spawn: spawn.is_finite().then_some(spawn),
+            chunk_note_radius: accept.chunk_note_radius,
         }
     }
 
@@ -292,7 +296,9 @@ pub struct RemoteClient {
     /// change applied first would be overwritten by the older snapshot.
     /// Never trimmed: the server's credit window bounds it, and a server past
     /// [`MAX_QUEUED_CHUNK_PACKETS`] ends the session loudly instead.
-    pub chunk_queue: Vec<(usize, protocol::ChunkDataPacket)>,
+    /// Phase B2b: the stream also carries `ColumnLocal` notes, queued here
+    /// in arrival order with the pushes ([`crate::chunk_intake::StreamItem`]).
+    pub chunk_queue: Vec<(usize, crate::chunk_intake::StreamItem)>,
     /// `ChunkData` packets received since the game loop last drained
     /// [`Self::chunk_queue`] that did not decode. Drained with it into
     /// `ChunkIntake::count_undecodable`: the server numbered them, so the
@@ -812,7 +818,10 @@ impl RemoteClient {
                     PacketType::ChunkData => {
                         match protocol::safe_deserialize::<protocol::ChunkDataPacket>(payload) {
                             Ok(chunk) if self.chunk_queue.len() < MAX_QUEUED_CHUNK_PACKETS => {
-                                self.chunk_queue.push((self.pending_block_changes.len(), chunk));
+                                self.chunk_queue.push((
+                                    self.pending_block_changes.len(),
+                                    crate::chunk_intake::StreamItem::Chunk(chunk),
+                                ));
                                 changed = true;
                             }
                             Ok(_) => {
@@ -828,6 +837,32 @@ impl RemoteClient {
                             }
                             Err(e) => {
                                 log::warn!("Undecodable chunk packet: {e}");
+                                self.undecodable_chunks = self.undecodable_chunks.wrapping_add(1);
+                            }
+                        }
+                    }
+                    // Phase B2b — "this column is local": in line with the
+                    // pushes, numbered with them (it counts towards the ack).
+                    PacketType::ColumnLocal => {
+                        match protocol::safe_deserialize::<protocol::ColumnLocalPacket>(payload) {
+                            Ok(note) if self.chunk_queue.len() < MAX_QUEUED_CHUNK_PACKETS => {
+                                self.chunk_queue.push((
+                                    self.pending_block_changes.len(),
+                                    crate::chunk_intake::StreamItem::Local((note.cx, note.cz)),
+                                ));
+                                changed = true;
+                            }
+                            Ok(_) => {
+                                log::error!(
+                                    "Server sent over {MAX_QUEUED_CHUNK_PACKETS} undrained chunk packets; leaving"
+                                );
+                                self.state = ConnectionState::Failed(
+                                    "The server sent more world data than this game can take in.".to_string(),
+                                );
+                                changed = true;
+                            }
+                            Err(e) => {
+                                log::warn!("Undecodable column note: {e}");
                                 self.undecodable_chunks = self.undecodable_chunks.wrapping_add(1);
                             }
                         }
@@ -2022,6 +2057,7 @@ mod tests {
             exhibits: Vec::new(),
             world_rules: protocol::WorldRules::default(),
             worldgen_version: crate::world::worldgen_fingerprint(),
+            chunk_note_radius: 0,
         }
     }
 
@@ -2058,6 +2094,7 @@ mod tests {
                 rules: flat_sand_rules(),
                 worldgen_version: crate::world::worldgen_fingerprint(),
                 spawn: Some(glam::Vec3::new(100.5, 41.0, -7.5)),
+                chunk_note_radius: 0,
             })
         );
     }
@@ -2582,6 +2619,26 @@ mod tests {
         assert!(rc.chunk_queue.iter().all(|(before, _)| *before == 2), "each after the first two changes");
         assert_eq!(rc.pending_block_changes.len(), 3);
         assert!(!matches!(rc.state, ConnectionState::Failed(_)));
+    }
+
+    #[test]
+    fn a_column_local_note_is_queued_in_line_with_the_pushes() {
+        let (srv, client) = channel_pair();
+        let mut rc =
+            RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
+        srv.send_to_client(&chunk_pkt(1));
+        srv.send_to_client(&crate::chunk_push::build_local_note((5, -6)));
+        srv.send_to_client(&chunk_pkt(2));
+        rc.poll();
+        let shape: Vec<String> = rc
+            .chunk_queue
+            .iter()
+            .map(|(_, item)| match item {
+                crate::chunk_intake::StreamItem::Chunk(p) => format!("C{}", p.cx),
+                crate::chunk_intake::StreamItem::Local((x, z)) => format!("L{x},{z}"),
+            })
+            .collect();
+        assert_eq!(shape, ["C1", "L5,-6", "C2"]);
     }
 
     #[test]

@@ -16,6 +16,11 @@ pub enum PacketType {
     StateUpdate = 2,
     /// Server → Client: chunk data (reliable, ordered)
     ChunkData = 3,
+    /// Server → Client: "this column is local" (v71, Phase B2b): the column is
+    /// exactly as generation made it, so the joiner generates it itself. Rides
+    /// the same ordered stream as `ChunkData` and is numbered with it (it
+    /// counts towards `InputPacket.chunk_ack`). See [`ColumnLocalPacket`].
+    ColumnLocal = 4,
     /// Client → Server: request to join
     JoinRequest = 10,
     /// Server → Client: join accepted with player info
@@ -236,6 +241,15 @@ pub struct JoinAcceptPacket {
     /// different version warns its player that terrain may look different.
     #[serde(default)]
     pub worldgen_version: u32,
+    /// Phase B2b (v71): how far round its server body, in columns (Chebyshev),
+    /// this joiner hears a verdict for every column — a push or a
+    /// [`ColumnLocalPacket`] — capped further by its own render distance.
+    /// Inside that it generates a column only on a "local" note; outside it,
+    /// as before. `0` = this server sends no notes: it pushes everything in
+    /// range (`--chunk-sync all`, another terrain generator, or a host that
+    /// does not keep columns loaded round its joiners).
+    #[serde(default)]
+    pub chunk_note_radius: u8,
 }
 
 /// The rule + generation flags of a world that a joiner needs to generate and
@@ -1106,6 +1120,17 @@ pub struct ChunkDataPacket {
     pub attachments: Vec<PushedFaceAttachment>,
 }
 
+/// "Column `(cx, cz)` is local" (v71, Phase B2b; Spec 04 §4.1 "Touched
+/// columns"): every chunk of it is exactly what generation makes from the
+/// world's seed and flags, so the joiner generates it itself instead of being
+/// pushed it. A snapshot claim at its place in the ordered chunk stream, like
+/// a push: block changes after it apply to the joiner's own generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnLocalPacket {
+    pub cx: i32,
+    pub cz: i32,
+}
+
 /// A render-visible block entity in a pushed chunk (v69). `cell` as in
 /// [`ChunkDataPacket::meta`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1592,7 +1617,16 @@ pub struct ServerAnnouncePacket {
 ///   joiner's armour) and `Bred { offspring }` (a baby of an animal this
 ///   joiner fed); `entity_flags::TETHERED`. Kills and breeds a joiner makes
 ///   credit that joiner, never a host's player nor a later joiner in its slot.
-pub const PROTOCOL_VERSION: u32 = 70;
+/// - v71 (2026-10-07, Phase B2b): touched columns. A joiner whose terrain
+///   generator matches the host's is pushed only the columns that differ from
+///   generation; for every other column within its push radius the server
+///   sends `PacketType::ColumnLocal = 4` ([`ColumnLocalPacket`] `{ cx, cz }`)
+///   in the same ordered, numbered chunk stream, and the joiner generates it
+///   itself. `JoinAcceptPacket` gains trailing `chunk_note_radius: u8` (the
+///   server's push limit when it sends notes, `0` when it pushes everything).
+///   `--chunk-sync touched` is the default. See `chunk_verdict`, `chunk_push`
+///   and Spec 04 §4.1.
+pub const PROTOCOL_VERSION: u32 = 71;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1637,6 +1671,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         1 => PacketType::ClientInput,
         2 => PacketType::StateUpdate,
         3 => PacketType::ChunkData,
+        4 => PacketType::ColumnLocal,
         10 => PacketType::JoinRequest,
         11 => PacketType::JoinAccept,
         12 => PacketType::JoinReject,
@@ -1758,7 +1793,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 70);
+        assert_eq!(super::PROTOCOL_VERSION, 71);
     }
 
     #[test]
@@ -2324,7 +2359,9 @@ mod tests {
         //   59` (`InteractKind::LeadToPost` included), `InteractOutcome = 60`,
         //   `KillEvent = 61`, `PlayerEventType::{DiedOf, ArmourWorn, Bred}`,
         //   `entity_flags::TETHERED` — joiners act on the server's mobs.
-        assert_eq!(PROTOCOL_VERSION, 70);
+        // v71 (2026-10-07, B2b): touched columns — PacketType::ColumnLocal
+        //   (tag 4), JoinAccept.chunk_note_radius.
+        assert_eq!(PROTOCOL_VERSION, 71);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2352,6 +2389,7 @@ mod tests {
                 keep_inventory: true,
             },
             worldgen_version: 9,
+            chunk_note_radius: 0,
         }
     }
 

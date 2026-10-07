@@ -49,8 +49,9 @@ struct ServerConfig {
     /// `--sim-distance` / `AXENSTAX_SIM_DISTANCE`: columns (radius) the server
     /// keeps loaded around each connected player + the spawn (Phase B1).
     sim_distance: i32,
-    /// `--chunk-sync` / `AXENSTAX_CHUNK_SYNC` (Phase B2a): which chunks each
-    /// joiner is pushed. `all` (the default, and the only mode built).
+    /// `--chunk-sync` / `AXENSTAX_CHUNK_SYNC` (Phase B2a/B2b): which chunks
+    /// each joiner is pushed. `touched` (the default: only columns that differ
+    /// from generation; the joiner generates the rest) or `all`.
     chunk_sync: crate::chunk_push::ChunkSync,
 }
 
@@ -103,11 +104,11 @@ fn parse_config(args: &[String]) -> ServerConfig {
         args,
         "--chunk-sync",
         "AXENSTAX_CHUNK_SYNC",
-        "all",
+        "touched",
     ))
     .unwrap_or_else(|why| {
-        log::warn!("{why}; pushing every chunk");
-        crate::chunk_push::ChunkSync::All
+        log::warn!("{why}; keeping --chunk-sync touched");
+        crate::chunk_push::ChunkSync::Touched
     });
 
     ServerConfig {
@@ -1263,9 +1264,10 @@ mod tests {
         let cfg = |a: &[&str]| parse_config(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         use crate::chunk_push::ChunkSync;
         assert_eq!(cfg(&["--chunk-sync", "all"]).chunk_sync, ChunkSync::All);
-        // Not built yet / unknown: logged, and every chunk is pushed.
-        assert_eq!(cfg(&["--chunk-sync", "touched"]).chunk_sync, ChunkSync::All);
-        assert_eq!(cfg(&["--chunk-sync", "junk"]).chunk_sync, ChunkSync::All);
+        assert_eq!(cfg(&["--chunk-sync", "touched"]).chunk_sync, ChunkSync::Touched);
+        // Unset or unknown: the default (an unknown value is logged).
+        assert_eq!(cfg(&[]).chunk_sync, ChunkSync::Touched);
+        assert_eq!(cfg(&["--chunk-sync", "junk"]).chunk_sync, ChunkSync::Touched);
     }
 
     #[test]

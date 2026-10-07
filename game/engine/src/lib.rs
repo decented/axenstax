@@ -342,6 +342,7 @@ mod state_outbox;
 mod chunk_push;
 // B2a — a joiner taking in pushed chunks (ordered apply, budgeted relight).
 mod chunk_intake;
+mod chunk_verdict;
 #[cfg(not(target_arch = "wasm32"))]
 mod network;
 #[cfg(not(target_arch = "wasm32"))]

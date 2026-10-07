@@ -20,222 +20,16 @@
 //! whole, even as the body moves (LOW-3); and a spawn ring heavier than the
 //! credit window still arrives before any acknowledgement (LOW-4).
 
+use super::push_joiner::{
+    assert_chunk_matches, columns_within, fill_with_signs, move_body, start_host, Joiner,
+};
 use crate::block;
 use crate::chunk::CHUNK_SIZE;
-use crate::chunk_intake::{interleave, ChunkIntake, IntakeStep};
-use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::protocol::{self, BlockChange};
-use crate::remote_client::{build_join_request_guest, RemoteClient};
-use crate::state_outbox::{ChunkCoord, CLIENT_TICK_BUDGET_BYTES};
+use crate::remote_client::build_join_request_guest;
+use crate::state_outbox::CLIENT_TICK_BUDGET_BYTES;
 use crate::transport::ClientTransport;
-use crate::world::{World, MAX_CHUNK_Y};
-
-/// WebSocket + 0 remote slots: no accept thread, no sockets, the open
-/// (guest) join policy. One local player (the host) at slot 0. The world name
-/// must not exist on disk.
-fn start_host(tag: &str) -> HostedServer {
-    HostedServer::start(
-        1,
-        format!("chunk-push-{tag}-{}", std::process::id()),
-        42,
-        0,
-        RemoteTransport::WebSocket { port: 0 },
-    )
-    .expect("hosted server starts")
-}
-
-/// A joined client as the game loop runs one, minus the renderer.
-struct Joiner {
-    rc: RemoteClient,
-    world: World,
-    loaded: ahash::AHashSet<(i32, i32)>,
-    intake: ChunkIntake,
-    registry: crate::block::BlockRegistry,
-    /// Every server block change that reached this client.
-    changes_seen: Vec<BlockChange>,
-    slot: usize,
-    /// The render distance its inputs carry (`InputPacket.render_distance`).
-    render_distance: u8,
-}
-
-impl Joiner {
-    /// Attach and join with `render_distance`; `mismatch` announces a terrain
-    /// generator different from the host's.
-    fn join(hs: &mut HostedServer, render_distance: u8, mismatch: bool) -> Self {
-        Self::join_with(hs, render_distance, mismatch, HostedServer::tick)
-    }
-
-    fn join_with(
-        hs: &mut HostedServer,
-        render_distance: u8,
-        mismatch: bool,
-        mut tick: impl FnMut(&mut HostedServer),
-    ) -> Self {
-        let client = hs.attach_test_remote();
-        let mut req = build_join_request_guest("Joiner", 0);
-        req.render_distance = render_distance;
-        if mismatch {
-            req.worldgen_version = crate::world::worldgen_fingerprint() ^ 1;
-        }
-        let rc = RemoteClient::from_transport(Box::new(client), req, None);
-        tick(hs);
-        let mut j = Joiner {
-            rc,
-            world: World::new(),
-            loaded: ahash::AHashSet::new(),
-            intake: ChunkIntake::default(),
-            registry: crate::block::BlockRegistry::new(),
-            changes_seen: Vec::new(),
-            slot: usize::MAX,
-            render_distance,
-        };
-        j.take_in();
-        j.slot = j.rc.player_index().expect("joined") as usize;
-        j
-    }
-
-    /// Take in everything received: pushed chunks between the block changes
-    /// around them (`GameState::apply_world_deltas`). Returns how many chunk
-    /// packets came.
-    fn take_in(&mut self) -> u32 {
-        self.rc.poll();
-        let chunks = std::mem::take(&mut self.rc.chunk_queue);
-        let changes = std::mem::take(&mut self.rc.pending_block_changes);
-        self.intake.count_undecodable(std::mem::take(&mut self.rc.undecodable_chunks));
-        if let Some(state) = self.rc.latest_state.take() {
-            self.intake.confirm_drops(state.last_acked_input);
-        }
-        let before = self.intake.applied();
-        for step in interleave(chunks, changes.len()) {
-            match step {
-                IntakeStep::Chunk(p) => {
-                    self.intake.apply(&mut self.world, &mut self.loaded, &self.registry, &p);
-                }
-                IntakeStep::Changes(r) => {
-                    for bc in &changes[r] {
-                        self.changes_seen.push(bc.clone());
-                        if crate::chunk_stream::remote_change_is_loaded(
-                            &self.loaded, &self.world, bc.x, bc.z,
-                        ) || self.intake.holds_chunk(crate::state_outbox::chunk_of(bc))
-                        {
-                            self.world.apply_remote_block_change(bc);
-                        }
-                    }
-                }
-            }
-        }
-        self.intake.applied() - before
-    }
-
-    /// The idle input `network_send_input` would send now: the chunk ack,
-    /// the drop reports not yet applied and the current render distance.
-    fn input(&mut self) -> protocol::InputPacket {
-        let seq = self.rc.next_input_seq();
-        protocol::InputPacket {
-            health: 20.0,
-            chunk_ack: self.intake.applied(),
-            chunk_drops: self.intake.drops_for_input(seq, protocol::MAX_CHUNK_DROPS_PER_INPUT),
-            render_distance: self.render_distance,
-            ..Default::default()
-        }
-    }
-
-    /// Send that input.
-    fn ack(&mut self) {
-        let input = self.input();
-        self.rc.send_input(&input).expect("connected");
-    }
-
-    /// Let go of column `col` as the game loop's streamer does.
-    fn let_go(&mut self, col: (i32, i32)) {
-        self.intake.let_go(&mut self.world, col);
-        self.loaded.remove(&col);
-    }
-
-    /// The streamer's unload pass (`stream_chunks`): let go of every pushed
-    /// column — whole or part-pushed — more than `keep` columns from where
-    /// this client stands. Returns how many.
-    fn unload_beyond(&mut self, hs: &HostedServer, keep: i32) -> usize {
-        let me = self.column(hs);
-        let mut held: Vec<(i32, i32)> = self.loaded.iter().copied().collect();
-        held.extend(self.intake.part_pushed_columns(&self.loaded));
-        let far: Vec<(i32, i32)> = held
-            .into_iter()
-            .filter(|&(x, z)| (x - me.0).abs() > keep || (z - me.1).abs() > keep)
-            .collect();
-        for &col in &far {
-            self.let_go(col);
-        }
-        far.len()
-    }
-
-    /// `ticks` frames of play standing still: input, tick, take in, unload
-    /// beyond `keep`. Returns the chunk packets that came.
-    fn play(&mut self, hs: &mut HostedServer, ticks: usize, keep: i32) -> u32 {
-        let mut got = 0;
-        for _ in 0..ticks {
-            self.ack();
-            hs.tick();
-            got += self.take_in();
-            self.unload_beyond(hs, keep);
-        }
-        got
-    }
-
-    /// Tick, take in, acknowledge — until three ticks in a row bring no
-    /// chunk. Returns the ticks it took.
-    fn settle(&mut self, hs: &mut HostedServer) -> usize {
-        self.settle_with(hs, HostedServer::tick)
-    }
-
-    fn settle_with(&mut self, hs: &mut HostedServer, mut tick: impl FnMut(&mut HostedServer)) -> usize {
-        let mut quiet = 0;
-        for ticks in 1..2_000 {
-            self.ack();
-            tick(hs);
-            if self.take_in() == 0 {
-                quiet += 1;
-                if quiet == 3 {
-                    return ticks;
-                }
-            } else {
-                quiet = 0;
-            }
-        }
-        panic!("the chunk push never settled");
-    }
-
-    /// The column the server holds this joiner's body in.
-    fn column(&self, hs: &HostedServer) -> (i32, i32) {
-        crate::chunk_stream::column_of(hs.server.players[self.slot].player.pos)
-    }
-}
-
-/// Assert the joiner's chunk `c` is the server's, block for block.
-fn assert_chunk_matches(server: &World, joiner: &World, c: ChunkCoord) {
-    let cs = CHUNK_SIZE as i32;
-    for x in c.0 * cs..(c.0 + 1) * cs {
-        for y in c.1 * cs..(c.1 + 1) * cs {
-            for z in c.2 * cs..(c.2 + 1) * cs {
-                assert_eq!(
-                    joiner.get_block(x, y, z),
-                    server.get_block(x, y, z),
-                    "joiner's block at ({x},{y},{z}) differs from the server's"
-                );
-            }
-        }
-    }
-}
-
-fn columns_within(centre: (i32, i32), r: i32) -> Vec<(i32, i32)> {
-    let mut out = Vec::new();
-    for dx in -r..=r {
-        for dz in -r..=r {
-            out.push((centre.0 + dx, centre.1 + dz));
-        }
-    }
-    out
-}
+use crate::world::MAX_CHUNK_Y;
 
 #[test]
 fn a_host_edit_far_from_spawn_reaches_a_late_joiner() {
@@ -399,6 +193,9 @@ fn the_sent_set_dies_with_the_connection_and_a_new_joiner_starts_afresh() {
 #[test]
 fn a_lending_hosts_push_reads_the_hosts_own_world_inside_the_lend_window() {
     let (mut hs, mut host) = super::lent_world::start_lent("chunk-push");
+    // A mechanism test: where the push reads the world. Every chunk is
+    // pushed, so each can be compared (B2b's touched mode notes most).
+    hs.set_chunk_sync(crate::chunk_push::ChunkSync::All);
     // The host client's world (lent to the server each tick) carries a
     // marker the server's own between-window world can't have.
     let at = hs.server.players[0].player.pos;
@@ -446,27 +243,6 @@ fn a_column_the_joiner_lets_go_of_is_pushed_afresh() {
     j.settle(&mut hs);
     assert!(j.intake.column_complete(col), "pushed again once back in range");
     assert_eq!(j.world.get_block(cell.0, cell.1, cell.2), block::GLASS, "with what changed meanwhile");
-}
-
-/// Move slot `slot`'s server body `columns` columns east (west if negative).
-fn move_body(hs: &mut HostedServer, slot: usize, columns: i32) {
-    let p = &mut hs.server.players[slot].player;
-    p.pos.x += (columns * CHUNK_SIZE as i32) as f32;
-    p.velocity = glam::Vec3::ZERO;
-    p.reset_fall();
-}
-
-/// Fill `count` cells of chunk `c` (from its bottom layer up) with signs of
-/// the longest text: about 134 bytes of side data each.
-fn fill_with_signs(world: &mut World, c: ChunkCoord, count: i32) {
-    let cs = CHUNK_SIZE as i32;
-    for i in 0..count {
-        let at = (c.0 * cs + i % cs, c.1 * cs + i / (cs * cs), c.2 * cs + (i / cs) % cs);
-        let mut sign = crate::sign::SignData::new();
-        sign.set_text(&format!("{i:03}{}", "s".repeat(crate::sign::SIGN_MAX_CHARS - 3)));
-        world.set_block(at.0, at.1, at.2, block::OAK_SIGN);
-        world.insert_sign(at, sign);
-    }
 }
 
 #[test]

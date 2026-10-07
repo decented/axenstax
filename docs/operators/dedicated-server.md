@@ -214,7 +214,7 @@ Set these as environment variables in `docker-compose.yml`:
 | `AXENSTAX_SERVER_NAME` | `Axe'n'Stax Server` | Display name |
 | `AXENSTAX_AUTOSAVE_SECS` | `60` | Autosave interval |
 | `AXENSTAX_SIM_DISTANCE` (or `--sim-distance`) | `8` | Radius, in 16-block columns, the server keeps loaded and simulated around each connected player and the world spawn (2–16). Higher = more RAM and CPU per player |
-| `AXENSTAX_CHUNK_SYNC` (or `--chunk-sync`) | `all` | Which chunks the server sends each player: `all` = every chunk out to the player's render distance (at most the sim distance), so everyone stands on the server's real world. The only mode this build has |
+| `AXENSTAX_CHUNK_SYNC` (or `--chunk-sync`) | `touched` | Which chunks the server sends each player, out to the player's render distance (at most the sim distance), so everyone stands on the server's real world. `touched` = only the areas that differ from the world's generated terrain (anything built, dug or changed); the game makes the rest itself from the world's seed, so joining costs a fraction of the bandwidth. A player whose game version generates terrain differently always gets everything. `all` = send every chunk to everyone (more bandwidth; for a player whose terrain looks wrong) |
 | `AXENSTAX_SEED` | _(random)_ | Fixed terrain seed for a **new** world |
 
 Worlds persist on the `axenstax-worlds` volume and are saved on autosave and on a

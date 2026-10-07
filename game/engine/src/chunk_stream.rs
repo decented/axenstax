@@ -20,9 +20,11 @@ impl super::GameState {
         // Use player 0 for initial load centre
         let (pcx0, pcz0) = player_cols[0];
 
-        if self.loaded_columns.is_empty() && !self.joined_push_only {
+        if self.loaded_columns.is_empty() && !self.joined_push_only && !self.chunk_intake.server_decides() {
             // (A push-only joiner (B2a) holds only what its server has
-            // pushed, so "nothing loaded" is not "never loaded" there.)
+            // pushed, and a joiner the server tells about every column near it
+            // (B2b) only what it has been told, so "nothing loaded" is not
+            // "never loaded" there.)
             // Fallback path only: the normal world entry runs through the
             // `GameMode::Loading` state, which drives `begin_load` + `step_load`
             // incrementally (and applies any spawn-pref override itself), so by
@@ -68,20 +70,25 @@ impl super::GameState {
         let intake = &self.chunk_intake;
         // A column the server pushed (B2a) is never "void" here: it is the
         // server's, exactly as it is, and never regenerated.
+        // Planned unbounded, then filtered, then cut to the budget: a column
+        // that must wait never takes a frame's load slot from one that can go.
         let mut step = plan_stream_step_for(
             &anchors,
             &nearest_to,
-            STREAM_BUDGET,
+            usize::MAX,
             &self.loaded_columns,
             |cx, cz| !intake.holds_pushed((cx, cz)) && is_void_column(world, cx, cz),
         );
         // B2a — never generate a column part-way through its push (the rest
         // of it is on the way), and a push-only joiner (another terrain
-        // generator than the host's) generates nothing at all.
+        // generator than the host's) generates nothing at all. B2b — nor one
+        // the server has yet to decide (push or "local"): generated before
+        // its verdict, a touched column would show pristine terrain.
         if self.joined_push_only {
             step.load.clear();
         } else {
-            step.load.retain(|&col| !intake.holds_pushed(col));
+            step.load.retain(|&col| !intake.holds_pushed(col) && !intake.awaits_verdict(col, rd));
+            step.load.truncate(STREAM_BUDGET);
         }
         // B2a — a part-pushed column (never counted loaded) that has left
         // every anchor's range is let go like a loaded one, so no stray half
@@ -517,6 +524,10 @@ impl super::GameState {
             let pregen: &[i32] = if self.joined_push_only { &[] } else { &[-1, 0, 1] };
             for &dx in pregen {
                 for &dz in pregen {
+                    // B2b — not one the server has yet to decide.
+                    if self.chunk_intake.awaits_verdict((dx, dz), rd) {
+                        continue;
+                    }
                     self.world.generate_column(dx, dz, &self.biome_gen);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, dx, dz, &self.registry);
                     self.loaded_columns.insert((dx, dz));
@@ -671,13 +682,17 @@ impl super::GameState {
         if self.joined_push_only {
             return;
         }
+        let rd = self.graphics.render_distance;
         let np_cx = (pos.x.floor() as i32).div_euclid(cs);
         let np_cz = (pos.z.floor() as i32).div_euclid(cs);
         for dx in -2..=2 {
             for dz in -2..=2 {
                 let cx = np_cx + dx;
                 let cz = np_cz + dz;
-                if !self.loaded_columns.contains(&(cx, cz)) {
+                // B2b — a column the server has yet to decide waits for it.
+                if !self.loaded_columns.contains(&(cx, cz))
+                    && !self.chunk_intake.awaits_verdict((cx, cz), rd)
+                {
                     load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, true);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
                     self.loaded_columns.insert((cx, cz));
@@ -691,44 +706,57 @@ impl super::GameState {
     /// already-loaded neighbours' boundaries (matching `stream_chunks`). Returns
     /// the remaining queue length.
     pub(crate) fn step_load(&mut self, budget: usize) -> usize {
+        let rd = self.graphics.render_distance;
         let mut done = 0;
         while done < budget {
             let Some((cx, cz)) = self.load_queue.pop_front() else { break };
             // B2a — a column the server is pushing is the server's: never
             // generated over, and counted loaded only once whole
-            // (`chunk_intake`), which lights and meshes it.
-            if self.chunk_intake.holds_pushed((cx, cz)) {
+            // (`chunk_intake`), which lights and meshes it. B2b — nor is one
+            // the server has yet to decide: the streamer loads it once it is
+            // told the column is local (the spawn ring: `join_ring_pending`).
+            if self.chunk_intake.holds_pushed((cx, cz)) || self.chunk_intake.awaits_verdict((cx, cz), rd) {
                 done += 1;
                 continue;
             }
-            // Spec 02 §7.5 — restore an evicted column first (it wins over any
-            // world-gen spill a neighbour left); generate only if neither.
-            load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
-            crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
-            self.water.register_column_sources(cx, cz, &self.world);
-            self.lava.register_column_sources(cx, cz, &self.world);
-            self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
-            crate::entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
-            for cy in 0..=MAX_CHUNK_Y {
-                if self.world.has_chunk(cx, cy, cz) {
-                    let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
-                    self.renderer.upload_chunk((cx, cy, cz), &meshes);
-                }
-            }
-            for &(nx, nz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
-                if self.loaded_columns.contains(&(nx, nz)) {
-                    for cy in 0..=MAX_CHUNK_Y {
-                        if self.world.has_chunk(nx, cy, nz) {
-                            let meshes = build_chunk_meshes(nx, cy, nz, &self.world, &self.registry);
-                            self.renderer.upload_chunk((nx, cy, nz), &meshes);
-                        }
-                    }
-                }
-            }
-            self.loaded_columns.insert((cx, cz));
+            self.load_one_column(cx, cz);
             done += 1;
         }
         self.load_queue.len()
+    }
+
+    /// Load one column the way the loading screen does: restore it if
+    /// evicted, else generate it; light it, register its water, lava and
+    /// fire, scatter its wildlife, mesh it and the seams of its loaded
+    /// neighbours, and mark it loaded. Shared by `step_load`, the spawn
+    /// ring's local columns (`join_ring_pending`) and a block change for a
+    /// local column not generated yet (`apply_world_deltas`, B2b).
+    pub(crate) fn load_one_column(&mut self, cx: i32, cz: i32) {
+        // Spec 02 §7.5 — restore an evicted column first (it wins over any
+        // world-gen spill a neighbour left); generate only if neither.
+        load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
+        crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
+        self.water.register_column_sources(cx, cz, &self.world);
+        self.lava.register_column_sources(cx, cz, &self.world);
+        self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
+        crate::entity::scatter_mobs_in_column(&mut self.ecs, cx, cz, &self.world, &self.biome_gen);
+        for cy in 0..=MAX_CHUNK_Y {
+            if self.world.has_chunk(cx, cy, cz) {
+                let meshes = build_chunk_meshes(cx, cy, cz, &self.world, &self.registry);
+                self.renderer.upload_chunk((cx, cy, cz), &meshes);
+            }
+        }
+        for &(nx, nz) in &[(cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+            if self.loaded_columns.contains(&(nx, nz)) {
+                for cy in 0..=MAX_CHUNK_Y {
+                    if self.world.has_chunk(nx, cy, nz) {
+                        let meshes = build_chunk_meshes(nx, cy, nz, &self.world, &self.registry);
+                        self.renderer.upload_chunk((nx, cy, nz), &meshes);
+                    }
+                }
+            }
+        }
+        self.loaded_columns.insert((cx, cz));
     }
 
     /// B2a — apply a joined session's world deltas in arrival order: each
@@ -740,7 +768,7 @@ impl super::GameState {
     /// whole.
     pub(crate) fn apply_world_deltas(
         &mut self,
-        chunks: Vec<(usize, crate::protocol::ChunkDataPacket)>,
+        chunks: Vec<(usize, crate::chunk_intake::StreamItem)>,
         changes: &[crate::protocol::BlockChange],
         relight_budget: usize,
     ) {
@@ -754,8 +782,20 @@ impl super::GameState {
                         &pkt,
                     );
                 }
+                crate::chunk_intake::IntakeStep::Local(col) => {
+                    self.chunk_intake.note_local(col);
+                }
                 crate::chunk_intake::IntakeStep::Changes(range) => {
                     for bc in &changes[range] {
+                        // B2b — a change for a column the server said is
+                        // local but this client has not generated yet: the
+                        // column first (the full load path), then the change
+                        // — never a stray chunk.
+                        if let Some(col) =
+                            self.chunk_intake.generate_before(bc, &self.loaded_columns, &self.world)
+                        {
+                            self.load_one_column(col.0, col.1);
+                        }
                         // A part-pushed column is not loaded yet, but the
                         // server sends changes only to chunks it has pushed.
                         if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z)
@@ -839,7 +879,13 @@ impl super::GameState {
         let mut missing = 0;
         for dx in -r..=r {
             for dz in -r..=r {
-                missing += usize::from(!self.chunk_intake.column_complete((centre.0 + dx, centre.1 + dz)));
+                let col = (centre.0 + dx, centre.1 + dz);
+                // B2b — a ring column the server said is local is generated
+                // here, the moment it is told (the load queue passed it by).
+                if self.chunk_intake.is_local(col) && !self.loaded_columns.contains(&col) {
+                    self.load_one_column(col.0, col.1);
+                }
+                missing += usize::from(!self.chunk_intake.decided(col));
             }
         }
         if missing == 0 {
@@ -878,6 +924,12 @@ pub(crate) const PUSH_RELIGHT_PER_FRAME: usize = 2;
 /// radius before it unloads, so a player pacing along a column border doesn't
 /// thrash load/unload.
 pub(crate) const UNLOAD_HYSTERESIS: i32 = 2;
+
+/// The column `(cx, cz)` holding block `(x, _, z)`.
+pub(crate) fn column_of_block(x: i32, z: i32) -> (i32, i32) {
+    let cs = CHUNK_SIZE as i32;
+    (x.div_euclid(cs), z.div_euclid(cs))
+}
 
 /// The column `(cx, cz)` holding world position `pos`.
 pub(crate) fn column_of(pos: glam::Vec3) -> (i32, i32) {

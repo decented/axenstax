@@ -60,11 +60,15 @@
 //!   dropped chunks pushed again whole, ahead of new ones — those still inside
 //!   `R`; one outside it is pushed again when its column is back in range.
 //!
-//! **Mode** (`--chunk-sync`, [`ChunkSync`]): `all` — push every chunk in
-//! range — is the only mode B2a builds and the default. A joiner whose
+//! **Mode** (`--chunk-sync`, [`ChunkSync`]): `touched` (Phase B2b, the
+//! default) pushes a column only when it differs from generation
+//! (`chunk_verdict`) and sends every other column in range as one
+//! `ColumnLocal` note, numbered and acknowledged like a push, which the
+//! joiner answers by generating the column itself; a column with no verdict
+//! yet waits. `all` pushes every chunk in range (B2a). A joiner whose
 //! terrain generator differs from the host's (`ServerPlayer::
-//! worldgen_mismatch`) always gets everything; Phase B2b adds `touched`
-//! (push only edited chunks; untouched ones generate locally).
+//! worldgen_mismatch`) always gets everything, and so does every joiner of
+//! an owning (`--no-lend`) host (`HostedServer::sends_notes`).
 //!
 //! **What a push carries** ([`build_chunk_packets`]): the blocks and the
 //! player-placed mask (`Chunk::as_bytes`, LZ4), the chunk's `block_meta`, the
@@ -126,8 +130,12 @@ pub const FORGET_SLACK: i32 = 4;
 /// `--chunk-sync`: which chunks a joiner is pushed (Spec 04 §4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ChunkSync {
-    /// Every chunk in range (B2a; the default).
+    /// Only columns that differ from generation (`chunk_verdict`); every
+    /// other column in range is a "local" note the joiner generates itself
+    /// (Phase B2b; the default).
     #[default]
+    Touched,
+    /// Every chunk in range (B2a).
     All,
 }
 
@@ -135,12 +143,9 @@ impl ChunkSync {
     /// Parse a `--chunk-sync` value.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "touched" => Ok(Self::Touched),
             "all" => Ok(Self::All),
-            "touched" => Err(
-                "--chunk-sync touched is not built yet (Phase B2b): this build pushes every chunk (all)"
-                    .to_string(),
-            ),
-            other => Err(format!("unknown --chunk-sync value `{other}` (expected `all`)")),
+            other => Err(format!("unknown --chunk-sync value `{other}` (expected `touched` or `all`)")),
         }
     }
 
@@ -156,14 +161,14 @@ impl ChunkSync {
 /// its own (`server_main`).
 static CHUNK_SYNC: std::sync::OnceLock<ChunkSync> = std::sync::OnceLock::new();
 
-/// The `--chunk-sync` mode this process was started with (`all` unless set).
+/// The `--chunk-sync` mode this process was started with (`touched` unless set).
 pub fn chunk_sync() -> ChunkSync {
     CHUNK_SYNC.get().copied().unwrap_or_default()
 }
 
 /// Read `--chunk-sync <mode>` (or `AXENSTAX_CHUNK_SYNC`) from a host
-/// client's arguments and record it. An unusable value is logged and `all`
-/// kept.
+/// client's arguments and record it. An unusable value is logged and the
+/// default (`touched`) kept.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn configure_from_args(args: &[String]) {
     let value = args
@@ -176,7 +181,7 @@ pub fn configure_from_args(args: &[String]) {
         Ok(mode) => {
             let _ = CHUNK_SYNC.set(mode);
         }
-        Err(why) => log::warn!("{why}; pushing every chunk"),
+        Err(why) => log::warn!("{why}; keeping --chunk-sync touched"),
     }
 }
 
@@ -352,6 +357,20 @@ impl ClientChunkPush {
         }
     }
 
+    /// Record one queued "column is local" note (Phase B2b): every chunk of
+    /// the column counts as sent, from the note's number — the joiner holds
+    /// its own generation of each, so their changes reach it, a drop report
+    /// takes them out, and the note is numbered and acknowledged like a push.
+    fn record_local(&mut self, col: (i32, i32), packet: &[u8]) {
+        let number = self.pushed + 1;
+        for cy in 0..=MAX_CHUNK_Y {
+            self.sent.insert((col.0, cy, col.1), number);
+        }
+        self.pushed = number;
+        self.in_flight.push_back((number, packet.len()));
+        self.in_flight_bytes += packet.len();
+    }
+
     /// Build this tick's pushes for a client whose server body stands in
     /// column `centre`: resyncs first (those inside the radius), then the
     /// unsent chunks of each column within [`Self::radius`], nearest column
@@ -361,16 +380,27 @@ impl ClientChunkPush {
     /// both. `loaded` is the server's loaded-column set; a column outside it
     /// waits (and in the spawn ring, holds back everything farther). A column
     /// the client let go of while inside the radius waits until it has been
-    /// outside it. Returns `(chunk, packets)` in queue order, already recorded
-    /// as sent.
-    pub fn plan(
+    /// outside it. Returns what to queue, in queue order, already recorded as
+    /// sent.
+    ///
+    /// `verdicts` (Phase B2b, `chunk_verdict`): `None` pushes every column (the
+    /// `all` mode, another terrain generator). With verdicts, a `Touched`
+    /// column is pushed whole as above, an `Untouched` one goes as one
+    /// "local" note ([`Planned::Local`]), and one with no verdict yet waits —
+    /// neither pushed nor declared local (in the spawn ring, it holds back
+    /// everything farther, like an unloaded one). A column of which some
+    /// chunks are still sent (an overflow resync deferred out of range) gets
+    /// its other chunks pushed, never a note: the joiner may hold a stale
+    /// copy.
+    pub fn plan_columns(
         &mut self,
         world: &World,
         loaded: &ahash::AHashSet<(i32, i32)>,
         centre: (i32, i32),
         limit: i32,
         room: usize,
-    ) -> Vec<(ChunkCoord, Vec<Vec<u8>>)> {
+        verdicts: Option<&crate::chunk_verdict::Verdicts>,
+    ) -> Vec<Planned> {
         self.forget_far(centre, limit);
         let r = self.radius(limit);
         let within = |(cx, cz): (i32, i32), r: i32| {
@@ -401,21 +431,12 @@ impl ClientChunkPush {
             let packets = build_chunk_packets(world, c);
             planned += packets.iter().map(Vec::len).sum::<usize>();
             self.record(c, &packets);
-            out.push((c, packets));
+            out.push(Planned::Chunk(c, packets));
         }
         // With the window shut only the spawn ring can still go.
         let ring = SPAWN_RING_RADIUS.min(r);
         let reach = if self.window_open() { r } else { ring };
-        let mut columns: Vec<(i64, i32, i32)> =
-            Vec::with_capacity(((2 * reach + 1) * (2 * reach + 1)) as usize);
-        for dx in -reach..=reach {
-            for dz in -reach..=reach {
-                let d = i64::from(dx * dx + dz * dz);
-                columns.push((d, centre.0 + dx, centre.1 + dz));
-            }
-        }
-        columns.sort_unstable();
-        for (_, cx, cz) in columns {
+        for (_, cx, cz) in columns_nearest_first(centre, reach) {
             let in_ring = within((cx, cz), ring);
             if !loaded.contains(&(cx, cz)) {
                 if in_ring {
@@ -432,19 +453,122 @@ impl ClientChunkPush {
             if unsent.is_empty() {
                 continue;
             }
+            let local = match verdicts.map(|v| v.get((cx, cz))) {
+                None | Some(Some(crate::chunk_verdict::Verdict::Touched)) => false,
+                Some(Some(crate::chunk_verdict::Verdict::Untouched)) => {
+                    unsent.len() == (MAX_CHUNK_Y + 1) as usize
+                }
+                Some(None) => {
+                    if in_ring {
+                        break;
+                    }
+                    continue;
+                }
+            };
             if planned >= room || !(in_ring || self.window_open()) {
                 return out;
+            }
+            if local {
+                let note = build_local_note((cx, cz));
+                planned += note.len();
+                self.record_local((cx, cz), &note);
+                out.push(Planned::Local((cx, cz), note));
+                continue;
             }
             for cy in unsent {
                 let c = (cx, cy, cz);
                 let packets = build_chunk_packets(world, c);
                 planned += packets.iter().map(Vec::len).sum::<usize>();
                 self.record(c, &packets);
-                out.push((c, packets));
+                out.push(Planned::Chunk(c, packets));
             }
         }
         out
     }
+
+    /// [`Self::plan_columns`] pushing everything, as `(chunk, packets)`.
+    /// Test-only (the B2a mechanism tests).
+    #[cfg(test)]
+    pub fn plan(
+        &mut self,
+        world: &World,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        centre: (i32, i32),
+        limit: i32,
+        room: usize,
+    ) -> Vec<(ChunkCoord, Vec<Vec<u8>>)> {
+        self.plan_columns(world, loaded, centre, limit, room, None)
+            .into_iter()
+            .map(|p| match p {
+                Planned::Chunk(c, packets) => (c, packets),
+                Planned::Local(..) => unreachable!("no verdicts, no notes"),
+            })
+            .collect()
+    }
+
+    /// The columns within the push radius round `centre`, nearest first, that
+    /// need a verdict before this client can be told anything about them:
+    /// loaded, not held off, not yet sent whole, with none in `verdicts` —
+    /// and, while its credit window is shut, only in the spawn ring (nothing
+    /// else could be sent anyway). At most `max` (Phase B2b;
+    /// `HostedServer::broadcast_state` decides them).
+    pub fn verdict_candidates(
+        &self,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        centre: (i32, i32),
+        limit: i32,
+        verdicts: &crate::chunk_verdict::Verdicts,
+        max: usize,
+    ) -> Vec<(i64, (i32, i32))> {
+        let r = self.radius(limit);
+        let reach = if self.window_open() { r } else { SPAWN_RING_RADIUS.min(r) };
+        let mut out = Vec::new();
+        for (d, cx, cz) in columns_nearest_first(centre, reach) {
+            if out.len() >= max {
+                break;
+            }
+            let col = (cx, cz);
+            if !loaded.contains(&col)
+                || self.held_off.contains(&col)
+                || verdicts.get(col).is_some()
+                || (0..=MAX_CHUNK_Y).all(|cy| self.sent.contains_key(&(cx, cy, cz)))
+            {
+                continue;
+            }
+            out.push((d, col));
+        }
+        out
+    }
+}
+
+/// One planned send for a client ([`ClientChunkPush::plan_columns`]).
+#[derive(Debug)]
+pub enum Planned {
+    /// A chunk's `ChunkData` packet(s).
+    Chunk(ChunkCoord, Vec<Vec<u8>>),
+    /// A column's `ColumnLocal` note (Phase B2b).
+    Local((i32, i32), Vec<u8>),
+}
+
+/// Every column within `r` (Chebyshev) of `centre` as `(d², cx, cz)`, nearest
+/// first (ties in coordinate order).
+fn columns_nearest_first(centre: (i32, i32), r: i32) -> Vec<(i64, i32, i32)> {
+    let mut columns: Vec<(i64, i32, i32)> = Vec::with_capacity(((2 * r + 1) * (2 * r + 1)) as usize);
+    for dx in -r..=r {
+        for dz in -r..=r {
+            columns.push((i64::from(dx * dx + dz * dz), centre.0 + dx, centre.1 + dz));
+        }
+    }
+    columns.sort_unstable();
+    columns
+}
+
+/// The serialized `ColumnLocal` note for column `col` (Phase B2b).
+pub fn build_local_note(col: (i32, i32)) -> Vec<u8> {
+    protocol::serialize_packet(
+        protocol::PacketType::ColumnLocal,
+        &protocol::ColumnLocalPacket { cx: col.0, cz: col.1 },
+    )
 }
 
 /// World position of chunk-local cell `i` (`x + z*16 + y*256`) in `coord`.
@@ -464,11 +588,15 @@ pub fn queue_pushes(
     loaded: &ahash::AHashSet<(i32, i32)>,
     centre: (i32, i32),
     limit: i32,
+    verdicts: Option<&crate::chunk_verdict::Verdicts>,
 ) {
     push.request_resync(outbox.take_chunk_resync_requests());
     let room = QUEUE_AHEAD_BYTES.saturating_sub(outbox.queued_bytes());
-    for (coord, packets) in push.plan(world, loaded, centre, limit, room) {
-        outbox.push_chunk(coord, packets);
+    for planned in push.plan_columns(world, loaded, centre, limit, room, verdicts) {
+        match planned {
+            Planned::Chunk(coord, packets) => outbox.push_chunk(coord, packets),
+            Planned::Local(col, note) => outbox.push_column_note(col, note),
+        }
     }
 }
 
@@ -509,7 +637,7 @@ pub(crate) fn cells_in<V>(
 /// never sent (B2a review LOW-6: an all-air chunk costs no lookup at all).
 /// Walks the map when it is smaller than the chunk's block count, else probes
 /// only the block cells.
-fn block_entries_in<'a, V>(
+pub(crate) fn block_entries_in<'a, V>(
     map: &'a ahash::AHashMap<(i32, i32, i32), V>,
     coord: ChunkCoord,
     chunk: &Chunk,
@@ -1058,13 +1186,51 @@ mod tests {
     }
 
     #[test]
-    fn only_all_is_built() {
+    fn touched_is_the_default_and_a_mismatch_forces_all() {
+        assert_eq!(ChunkSync::default(), ChunkSync::Touched);
         assert_eq!(ChunkSync::parse("all"), Ok(ChunkSync::All));
         assert_eq!(ChunkSync::parse(" ALL "), Ok(ChunkSync::All));
-        assert!(ChunkSync::parse("touched").unwrap_err().contains("B2b"));
+        assert_eq!(ChunkSync::parse("Touched"), Ok(ChunkSync::Touched));
         assert!(ChunkSync::parse("some").is_err());
         assert!(ChunkSync::All.pushes_everything(false));
         assert!(ChunkSync::All.pushes_everything(true));
+        assert!(!ChunkSync::Touched.pushes_everything(false));
+        assert!(ChunkSync::Touched.pushes_everything(true), "another generator gets everything");
+    }
+
+    #[test]
+    fn verdicts_turn_untouched_columns_into_notes_and_hold_back_undecided_ones() {
+        use crate::chunk_verdict::{Verdict, Verdicts};
+        let world = World::new();
+        let mut verdicts = Verdicts::default();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                verdicts.set_for_test((dx, dz), Verdict::Untouched);
+            }
+        }
+        verdicts.touch((0, 0));
+        // Past the ring nothing is decided yet.
+        let mut push = ClientChunkPush::new(2);
+        let out = push.plan_columns(&world, &all_loaded(2), (0, 0), 8, usize::MAX, Some(&verdicts));
+        let chunks: Vec<ChunkCoord> =
+            out.iter().filter_map(|p| if let Planned::Chunk(c, _) = p { Some(*c) } else { None }).collect();
+        let notes: Vec<(i32, i32)> =
+            out.iter().filter_map(|p| if let Planned::Local(c, _) = p { Some(*c) } else { None }).collect();
+        assert_eq!(chunks.len(), MAX_CHUNK_Y as usize + 1, "the touched column, whole");
+        assert!(chunks.iter().all(|c| (c.0, c.2) == (0, 0)));
+        assert_eq!(notes.len(), 8, "each untouched ring column is one note");
+        assert!(push.has_sent((1, 3, 1)), "a note puts the whole column in the sent-set");
+        assert!(!push.has_sent((2, 0, 0)), "an undecided column waits");
+        assert_eq!(push.pushed(), MAX_CHUNK_Y as u32 + 1 + 8, "a note is one numbered packet");
+        if let Planned::Local(_, note) = &out[out.len() - 1] {
+            assert!(note.len() < 16, "a note is tiny ({} bytes)", note.len());
+        }
+        // An undecided ring column holds back everything farther.
+        let mut far_only = Verdicts::default();
+        far_only.set_for_test((2, 0), Verdict::Untouched);
+        let mut push = ClientChunkPush::new(2);
+        let out = push.plan_columns(&world, &all_loaded(2), (0, 0), 8, usize::MAX, Some(&far_only));
+        assert!(out.is_empty(), "the ring goes first: {} planned", out.len());
     }
 
     /// Size distribution of `compress_chunk(Chunk::as_bytes())`.

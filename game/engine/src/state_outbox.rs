@@ -333,6 +333,15 @@ impl ClientOutbox {
         }
     }
 
+    /// Queue a "column is local" note (`ColumnLocal`, Phase B2b) for column
+    /// `col`, in line like a chunk push and counted with them: it is part of
+    /// the numbered chunk stream. No coalescing barrier is needed beyond the
+    /// one `push_chunk` sets: a note goes only for a column none of whose
+    /// chunks was sent, so no change to it is queued before it.
+    pub fn push_column_note(&mut self, col: (i32, i32), note: Vec<u8>) {
+        self.push_chunk((col.0, 0, col.1), vec![note]);
+    }
+
     /// Serialized chunk-push bytes waiting to go out. Test-only.
     #[cfg(test)]
     pub fn queued_chunk_bytes(&self) -> usize {

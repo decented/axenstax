@@ -135,6 +135,18 @@ impl Chunk {
             .map(|(i, &b)| (i as u16, b))
     }
 
+    /// Phase B2b — do `self` and `other` hold the same blocks and the same
+    /// player-placed bits? Light, `persist` and `mesh_dirty` are not content.
+    pub(crate) fn same_content(&self, other: &Chunk) -> bool {
+        self.non_air == other.non_air && self.blocks == other.blocks && self.placed == other.placed
+    }
+
+    /// Phase B2b — all air with no player-placed bit: the same content as an
+    /// absent chunk.
+    pub(crate) fn is_bare(&self) -> bool {
+        self.non_air == 0 && self.placed.iter().all(|&w| w == 0)
+    }
+
     /// Full recount of the non-air cells — the oracle the maintained count is
     /// tested against. Test-only; it bumps [`full_scans_on_this_thread`] so a
     /// test can pin that a code path never calls it.
