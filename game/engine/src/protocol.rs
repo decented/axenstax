@@ -780,6 +780,11 @@ pub enum InteractKind {
     /// Empty hand on the player's OWN pet: sit / follow (wolf, Nostrich) or
     /// the companion's command cycle.
     SitToggle,
+    /// A Lead on the fence post at `post` (review D2b B3): the player's own
+    /// leashed mob nearest the post (within 4 blocks) is tied to it instead,
+    /// and a Lead is used, as in single-player. Names no entity — the
+    /// request's `entity` is ignored; the server picks the mob.
+    LeadToPost { post: [i32; 3] },
 }
 
 /// Client → Server: a one-shot right-click on the server mob `entity`
@@ -830,8 +835,11 @@ pub struct InteractOutcomePacket {
 pub struct KillEventPacket {
     /// The victim's species.
     pub victim: EntityKind,
-    /// How the killing blow landed: [`kill_cause`].
-    pub cause: u8,
+    /// Why the kill was credited to this player: [`kill_reason`]. (A mob
+    /// keeps no record of what dealt its last point of damage — a cow a
+    /// joiner hit may die later in lava — so this names the credit rule,
+    /// not the killing blow; review D2b LOW-6.)
+    pub reason: u8,
     /// Where it died.
     pub x: f32,
     pub y: f32,
@@ -841,10 +849,14 @@ pub struct KillEventPacket {
     pub victim_flags: u8,
 }
 
-/// `KillEventPacket.cause` codes. Wire-stable, append only.
-pub mod kill_cause {
-    /// A melee swing (the primary target or the sweep).
-    pub const MELEE: u8 = 0;
+/// `KillEventPacket.reason` codes. Wire-stable, append only.
+pub mod kill_reason {
+    /// This player's hit was the last any player landed on it (a swing or
+    /// its sweep), whatever finished it off.
+    pub const LAST_HIT: u8 = 0;
+    /// No player hit it: this player was the nearest living one (the
+    /// single-player rule for environment, mob-on-mob and pet kills).
+    pub const NEAREST: u8 = 1;
 }
 
 /// A death cause on the wire (`PlayerEventType::DiedOf`, MP-D2b): the
@@ -1168,6 +1180,11 @@ pub enum PlayerEventType {
     /// per hit (`PlayerSlot::wear_armour`, the single-player rule). Sent to
     /// that player alone, on the tick the hits land.
     ArmourWorn { hits: u8 },
+    /// MP-D2b (v70, review B2) — a baby was born to an animal this player
+    /// fed (`offspring` = its species), so its client fires the
+    /// `BreedAnimals` challenge single-player fires for a breed. Sent to
+    /// that player alone; a host's own players are credited by its client.
+    Bred { offspring: EntityKind },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1565,14 +1582,16 @@ pub struct ServerAnnouncePacket {
 /// - v70 (2026-10-07, MP-D2b): joiners act on the server's mobs. Appended:
 ///   `PacketType::EntityAttack = 58` and `EntityInteract = 59` (C→S: a swing
 ///   or a one-shot right-click — feed, tame, shear, milk, lead on/off, sit —
-///   on an entity named by its `ProtocolId`; the held item is the client's
-///   word), `InteractOutcome = 60` (S→C, to the asker: accepted / items
-///   consumed / a note code; the weapon wears only on an accepted swing) and
-///   `KillEvent = 61` (S→C, to the killer: species, cause, position, flags);
-///   `PlayerEventType::DiedOf { cause }` (the death screen's real cause) and
-///   `ArmourWorn { hits }` (server-landed hits wear the joiner's armour);
-///   `entity_flags::TETHERED`. Kills a joiner makes credit that joiner, never
-///   a host's player.
+///   on an entity named by its `ProtocolId`, or `InteractKind::LeadToPost`, a
+///   Lead on a fence post; the held item is the client's word),
+///   `InteractOutcome = 60` (S→C, to the asker: accepted / items consumed / a
+///   note code; the weapon wears only on an accepted swing) and `KillEvent =
+///   61` (S→C, to the killer: species, why credited — `kill_reason` —,
+///   position, flags); `PlayerEventType::DiedOf { cause }` (the death
+///   screen's real cause), `ArmourWorn { hits }` (server-landed hits wear the
+///   joiner's armour) and `Bred { offspring }` (a baby of an animal this
+///   joiner fed); `entity_flags::TETHERED`. Kills and breeds a joiner makes
+///   credit that joiner, never a host's player nor a later joiner in its slot.
 pub const PROTOCOL_VERSION: u32 = 70;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
@@ -2302,9 +2321,9 @@ mod tests {
         //   continuations, JoinRequest.render_distance, InputPacket.chunk_ack
         //   + chunk_drops + render_distance.
         // v70 (2026-10-07, MP-D2b): `EntityAttack = 58`, `EntityInteract =
-        //   59`, `InteractOutcome = 60`, `KillEvent = 61`,
-        //   `PlayerEventType::{DiedOf, ArmourWorn}`, `entity_flags::TETHERED`
-        //   — joiners act on the server's mobs.
+        //   59` (`InteractKind::LeadToPost` included), `InteractOutcome = 60`,
+        //   `KillEvent = 61`, `PlayerEventType::{DiedOf, ArmourWorn, Bred}`,
+        //   `entity_flags::TETHERED` — joiners act on the server's mobs.
         assert_eq!(PROTOCOL_VERSION, 70);
     }
 
@@ -2446,6 +2465,15 @@ mod tests {
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(ptype, PacketType::EntityInteract);
         assert_eq!(safe_deserialize::<EntityInteractPacket>(payload).unwrap(), interact);
+        // Review D2b B3 — the fence-post transfer carries its post.
+        let to_post = EntityInteractPacket {
+            kind: InteractKind::LeadToPost { post: [-3, 64, 1_000_000] },
+            entity: 0,
+            ..interact.clone()
+        };
+        let bytes = serialize_packet(PacketType::EntityInteract, &to_post);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<EntityInteractPacket>(payload).unwrap(), to_post);
 
         let outcome = InteractOutcomePacket {
             seq: 8,
@@ -2462,7 +2490,7 @@ mod tests {
 
         let kill = KillEventPacket {
             victim: EntityKind::Nostrich,
-            cause: kill_cause::MELEE,
+            reason: kill_reason::LAST_HIT,
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -2493,6 +2521,7 @@ mod tests {
             PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -3.5 },
             PlayerEventType::DiedOf { cause: WireDamageCause::Mob(EntityKind::Shark) },
             PlayerEventType::ArmourWorn { hits: 3 },
+            PlayerEventType::Bred { offspring: EntityKind::Mule },
         ] {
             let pkt = PlayerEventPacket { player_index: 4, event };
             let bytes = serialize_packet(PacketType::PlayerEvent, &pkt);

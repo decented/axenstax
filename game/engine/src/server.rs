@@ -177,6 +177,18 @@ pub struct ServerPlayer {
     /// taken (`EntityInteract`): the server's copy of the client's 8-tick
     /// right-click cooldown, less a little network jitter.
     pub interact_cooldown: u32,
+    /// Review D2b MEDIUM-1 — the generation of the connection holding this
+    /// slot (`GameServer::next_attach_gen`, bumped by every remote attach;
+    /// 0 for a local slot). A joiner's hit stamps it
+    /// (`combat::Attacker::Remote`), so a kill or a breed credited to a slot
+    /// a later joiner now holds credits nobody.
+    pub attach_gen: u32,
+    /// Review D2b LOW-2 — the server tick from which this joiner's next swing
+    /// is due (`hosted_server::land_joiner_swing`): each accepted swing moves
+    /// it a full `combat::ATTACK_COOLDOWN` on, and a swing is taken up to
+    /// `ATTACK_COOLDOWN_JITTER_TICKS` early. Swings may bunch with network
+    /// jitter, but never beat the client's own rate on average.
+    pub next_swing_tick: u64,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -193,16 +205,53 @@ pub fn route_client_kill(
     tamed: bool,
     locals: &[(Vec3, bool)],
 ) -> Option<usize> {
-    match crate::combat::attribute_kill(attacker, pos, locals) {
+    // Review D2b LOW-5 — the nearest-player fallback sees the joiners too.
+    let joiners = server.as_deref().map(GameServer::joiner_bodies).unwrap_or_default();
+    match crate::combat::attribute_kill(attacker, pos, locals, &joiners) {
         crate::combat::KillCredit::Local(idx) => Some(idx),
-        crate::combat::KillCredit::Remote(slot) => {
+        crate::combat::KillCredit::Remote { slot, generation, nearest } => {
             if let Some(server) = server {
-                server.queue_kill_event(slot, kind, pos, tamed);
+                server.queue_kill_event(slot, generation, kind, pos, tamed, nearest);
             }
             None
         }
         crate::combat::KillCredit::Nobody => None,
     }
+}
+
+/// Review D2b B2 — a client breeding step's credit for one baby (single-
+/// player; a host, whose lent world's breeding is its client's until D4):
+/// `feeders` are the two parents' `breeding::InLove::fed_by`. Each joiner
+/// who fed a parent gets one `PlayerEventType::Bred`, queued on the host's
+/// server (`server`; `None` in single-player); a departed joiner's feed
+/// credits nobody. Returns whether this client's own `BreedAnimals`
+/// challenge fires: when one of its players fed a parent, or a parent's
+/// feeder is unknown (an animal put in love before the feeder was
+/// recorded) — never for a breed only joiners fed.
+pub fn route_client_breed(
+    server: Option<&mut GameServer>,
+    feeders: [Option<crate::combat::Attacker>; 2],
+    offspring: crate::mob::MobType,
+) -> bool {
+    use crate::combat::Attacker;
+    let mut credit_here = false;
+    let mut server = server;
+    for (n, feeder) in feeders.iter().enumerate() {
+        match *feeder {
+            None | Some(Attacker::Local(_)) => credit_here = true,
+            Some(Attacker::Departed) => {}
+            Some(Attacker::Remote { slot, generation }) => {
+                // The same joiner fed both parents: one credit.
+                if n == 1 && feeders[0] == *feeder {
+                    continue;
+                }
+                if let Some(server) = server.as_deref_mut() {
+                    server.queue_bred_event(slot, generation, offspring);
+                }
+            }
+        }
+    }
+    credit_here
 }
 
 /// Where `initial_load` centres a world with no player to centre it on (a
@@ -362,6 +411,8 @@ impl ServerPlayer {
             armour_points: 0,
             armour_wear_hits: 0,
             interact_cooldown: 0,
+            attach_gen: 0,
+            next_swing_tick: 0,
         }
     }
 
@@ -747,6 +798,31 @@ pub struct GameServer {
     /// sweep through [`Self::queue_kill_event`]. Drained by `HostedServer`
     /// after each tick.
     pub pending_kill_events: Vec<(usize, crate::protocol::KillEventPacket)>,
+    /// Review D2b B2 — babies born to animals a joiner fed, by server player
+    /// slot (the offspring's wire species), waiting to go out as
+    /// `PlayerEventType::Bred` to that joiner alone. Queued by a lent
+    /// world's breeding step — its host client's — through
+    /// [`Self::queue_bred_event`]. Drained by `HostedServer` after each tick.
+    pub pending_bred_events: Vec<(usize, crate::protocol::EntityKind)>,
+    /// Review D2b MEDIUM-1 — the generation the next remote attach gets
+    /// (`ServerPlayer::attach_gen`; counts from 1, so a local slot's 0 never
+    /// matches a joiner's).
+    pub next_attach_gen: u32,
+    /// Review D2b MEDIUM-1 — joiner slots released since the last tick, with
+    /// the generation that held them: what they stamped on the world's mobs
+    /// is forgotten at the top of the next tick
+    /// ([`Self::forget_released_joiners`]), inside the lend window on a
+    /// lending host (a release can happen outside it — an operator kick).
+    pub released_joiners: Vec<(usize, u32)>,
+    /// Review D2b MEDIUM-2 — is the animal life a joiner's interactions rely
+    /// on simulated on this server's world: breeding (`breeding::tick_breeding`),
+    /// Leads (`tether::tick_tethers`) and pets following, sitting and
+    /// perching (the species dispatch)? Today only a LENDING host's: its
+    /// client runs them on the one world it lends (`HostedServer::start_inner`
+    /// sets this). `GameServer::tick` runs none of them yet (D4), so a
+    /// dedicated or `--no-lend` server refuses feeding, taming, Leads and pet
+    /// commands rather than take the item for nothing.
+    pub animal_life_simulated: bool,
     /// Server-side view radius in chunks (Spec 39 — was the `RENDER_DISTANCE`
     /// const). Defaults to the High preset; in hosted single-player the client
     /// keeps it in sync with the player's render-distance dial.
@@ -803,6 +879,10 @@ impl GameServer {
             pending_block_changes: Vec::new(),
             pending_item_grants: Vec::new(),
             pending_kill_events: Vec::new(),
+            pending_bred_events: Vec::new(),
+            next_attach_gen: 0,
+            released_joiners: Vec::new(),
+            animal_life_simulated: false,
             render_distance: crate::graphics_settings::DEFAULT_RENDER_DISTANCE,
             difficulty: crate::survival::Difficulty::Normal,
         }
@@ -1133,6 +1213,10 @@ impl GameServer {
             !self.lent || (self.column_refill_per_tick == 0 && self.column_streamer.is_none()),
             "a lent world must not be streamed or refilled by its server"
         );
+        // Review D2b MEDIUM-1 — before anything else this tick: a joiner who
+        // left leaves no slot-keyed credit or grudge for its slot's next
+        // occupant (on a lending host this is the host's real ECS).
+        self.forget_released_joiners();
         // Per-world active-tick clock (Goal 1) — mirrors GameState::tick so
         // hosted / headless (TestHost) worlds accrue the same world-clock stat
         // (total_ticks). Source of truth on disk is WorldMeta.
@@ -1599,13 +1683,16 @@ impl GameServer {
                 self.world_time,
             );
             // MP-D2b — the one attribution rule, with no local players: a
-            // joiner's kill goes to that joiner as a `KillEvent`. Kills no
-            // joiner made credit nobody (the server keeps no kill counters).
-            if let crate::combat::KillCredit::Remote(slot) =
-                crate::combat::attribute_kill(attacker, pos, &[])
+            // joiner's kill goes to that joiner as a `KillEvent` (the server
+            // keeps no kill counters).
+            // Review D2b LOW-5 — no player's hit: the nearest living joiner,
+            // as single-player credits its nearest player.
+            let joiners = self.joiner_bodies();
+            if let crate::combat::KillCredit::Remote { slot, generation, nearest } =
+                crate::combat::attribute_kill(attacker, pos, &[], &joiners)
             {
                 let tamed = dying_tamed.iter().any(|p| (*p - pos).abs().max_element() < 0.5);
-                self.queue_kill_event(slot, kind, pos, tamed);
+                self.queue_kill_event(slot, generation, kind, pos, tamed, nearest);
             }
         }
 
@@ -1914,31 +2001,126 @@ impl GameServer {
         landed
     }
 
-    /// MP-D2b — credit joiner `slot` with killing a `kind` at `pos`: a
-    /// `KillEvent` to that joiner alone after the tick (`tamed`: the victim
-    /// was somebody's pet, which spares the killer the Nostrich's Vow). A
-    /// slot that isn't a joiner is ignored.
+    /// Is `slot` held by the joiner connection of generation `generation` — the one
+    /// a stamp names (review D2b MEDIUM-1)? A slot released and re-attached
+    /// since holds another generation; a local slot is never a joiner.
+    pub fn is_joiner_of_gen(&self, slot: usize, generation: u32) -> bool {
+        self.players.get(slot).is_some_and(|sp| sp.server_simulated && sp.attach_gen == generation)
+    }
+
+    /// The living joiners' bodies, for a death sweep's nearest-player
+    /// fallback (`combat::attribute_kill`, review D2b LOW-5).
+    pub fn joiner_bodies(&self) -> Vec<crate::combat::JoinerBody> {
+        self.players
+            .iter()
+            .enumerate()
+            .filter(|(_, sp)| sp.server_simulated && sp.is_present_and_alive())
+            .map(|(slot, sp)| crate::combat::JoinerBody {
+                slot,
+                generation: sp.attach_gen,
+                pos: sp.player.pos,
+            })
+            .collect()
+    }
+
+    /// Review D2b MEDIUM-1 — forget what each joiner released since the last
+    /// tick stamped on the world's mobs, so a later joiner given its slot
+    /// inherits none of it: its hits become `Attacker::Departed` (the kill
+    /// credits nobody and no bee chases it), its feeds likewise
+    /// (`breeding::InLove::fed_by`), and a Bear, Hyena or bee it provoked
+    /// calms down (they keep the slot itself). (A goat's charge needs no
+    /// reset: it lands only on a body still within reach of the goat.) Run at
+    /// the top of [`Self::tick`]: on
+    /// a lending host that is inside the window, on the host's real ECS.
+    pub fn forget_released_joiners(&mut self) {
+        use crate::combat::{Attacker, LastAttacker};
+        if self.released_joiners.is_empty() {
+            return;
+        }
+        let released = std::mem::take(&mut self.released_joiners);
+        let gone = |a: Attacker| {
+            matches!(a, Attacker::Remote { slot, generation } if released.contains(&(slot, generation)))
+        };
+        for (_, la) in self.ecs.query_mut::<&mut LastAttacker>() {
+            if gone(la.0) {
+                la.0 = Attacker::Departed;
+            }
+        }
+        for (_, love) in self.ecs.query_mut::<&mut crate::breeding::InLove>() {
+            if love.fed_by.is_some_and(gone) {
+                love.fed_by = Some(Attacker::Departed);
+            }
+        }
+        let slot_gone = |pidx: usize| released.iter().any(|&(s, _)| s == pidx);
+        for (_, bear) in self.ecs.query_mut::<&mut crate::bear_ai::BearData>() {
+            if let crate::bear_ai::BearAiState::Aggro { attacker_pidx, .. } = bear.state
+                && slot_gone(attacker_pidx)
+            {
+                bear.state = crate::bear_ai::BearAiState::Wander;
+            }
+        }
+        for (_, hyena) in self.ecs.query_mut::<&mut crate::hyena_ai::HyenaData>() {
+            if let crate::hyena_ai::HyenaAiState::Aggro { attacker_pidx, .. } = hyena.state
+                && slot_gone(attacker_pidx)
+            {
+                hyena.state = crate::hyena_ai::HyenaAiState::Lazy;
+            }
+        }
+        // An angry bee keeps its target's slot too, and stings whoever holds
+        // it when its window closes, at any distance: it calms down.
+        for (_, bee) in self.ecs.query_mut::<&mut crate::bee_ai::BeeData>() {
+            if let crate::bee_ai::BeeAiState::Sting { target_id, .. } = bee.state
+                && slot_gone(target_id as usize)
+            {
+                bee.state = crate::bee_ai::BeeAiState::Idle;
+            }
+        }
+    }
+
+    /// MP-D2b — credit joiner `slot` (connection generation `generation`) with
+    /// killing a `kind` at `pos`: a `KillEvent` to that joiner alone after
+    /// the tick (`tamed`: the victim was somebody's pet, which spares the
+    /// killer the Nostrich's Vow; `nearest`: credited as the nearest living
+    /// player, no player's hit). A slot that isn't a joiner, or is held by
+    /// another connection than the one that earned the kill (review D2b
+    /// MEDIUM-1), is ignored.
     pub fn queue_kill_event(
         &mut self,
         slot: usize,
+        generation: u32,
         kind: crate::mob::MobType,
         pos: Vec3,
         tamed: bool,
+        nearest: bool,
     ) {
-        if !self.players.get(slot).is_some_and(|sp| sp.server_simulated) {
+        if !self.is_joiner_of_gen(slot, generation) {
             return;
         }
         self.pending_kill_events.push((
             slot,
             crate::protocol::KillEventPacket {
                 victim: crate::entity_broadcast::wire_kind_for(kind),
-                cause: crate::protocol::kill_cause::MELEE,
+                reason: if nearest {
+                    crate::protocol::kill_reason::NEAREST
+                } else {
+                    crate::protocol::kill_reason::LAST_HIT
+                },
                 x: pos.x,
                 y: pos.y,
                 z: pos.z,
                 victim_flags: if tamed { crate::protocol::entity_flags::TAMED } else { 0 },
             },
         ));
+    }
+
+    /// Review D2b B2 — a `offspring` baby was born to an animal joiner `slot`
+    /// (generation `generation`) fed: `PlayerEventType::Bred` to that joiner alone
+    /// after the tick. Ignored like [`Self::queue_kill_event`].
+    pub fn queue_bred_event(&mut self, slot: usize, generation: u32, offspring: crate::mob::MobType) {
+        if !self.is_joiner_of_gen(slot, generation) {
+            return;
+        }
+        self.pending_bred_events.push((slot, crate::entity_broadcast::wire_kind_for(offspring)));
     }
 
     /// A server-simulated player's client reports it died (MP-A3): its input

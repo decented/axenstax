@@ -437,6 +437,10 @@ pub fn apply_joiner_blast_damage(
                 crate::survival::DamageCause::Explosion,
             )
         {
+            // Review D2b LOW-4 — the armour that soaked it wears, as a blast
+            // on a local player wears its armour (`take_damage_with_armour_from`):
+            // one `ArmourWorn` hit for the joiner's client.
+            sp.armour_wear_hits = sp.armour_wear_hits.saturating_add(1);
             landed.push(i);
         }
     }
@@ -446,6 +450,32 @@ pub fn apply_joiner_blast_damage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review D2b LOW-4 — a blast that lands on a joiner's server body wears
+    /// its armour once (one `ArmourWorn` hit), as a local player's blast
+    /// wears theirs; one that misses (out of range) wears nothing.
+    #[test]
+    fn a_blast_on_a_joiner_wears_its_armour_once() {
+        let world = World::new();
+        let registry = crate::block::BlockRegistry::new();
+        let mut near = crate::server::ServerPlayer::new(glam::Vec3::new(1.5, 64.0, 0.5));
+        near.server_simulated = true;
+        near.armour_points = 8;
+        let mut far = crate::server::ServerPlayer::new(glam::Vec3::new(40.5, 64.0, 0.5));
+        far.server_simulated = true;
+        let mut players = vec![near, far];
+        let landed = apply_joiner_blast_damage(
+            &mut players,
+            &world,
+            &registry,
+            (0, 64, 0),
+            crate::play_mode::PlayMode::Survival,
+        );
+        assert_eq!(landed, vec![0]);
+        assert!(players[0].combat.health < players[0].combat.max_health, "the armour soaked some, not all");
+        assert_eq!(players[0].armour_wear_hits, 1, "the soaking armour wears once");
+        assert_eq!(players[1].armour_wear_hits, 0, "out of range: nothing lands, nothing wears");
+    }
 
     #[test]
     fn bedrock_and_satori_are_immune() {

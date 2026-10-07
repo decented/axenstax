@@ -52,25 +52,38 @@ const INVINCIBILITY_TICKS: u32 = 10;
 
 /// Who landed a hit on a mob — the kill-attribution key (MP-D2b).
 ///
-/// The slot inside either variant is also the index the species AI's player
-/// list uses for that player (a Bear's or Hyena's revenge target): a client
-/// sim lists its own players by slot, and a host lends its server the same
-/// numbering — local slot `i` IS server player `i`, joiners come after.
+/// The slot inside either player variant is also the index the species AI's
+/// player list uses for that player (a Bear's or Hyena's revenge target): a
+/// client sim lists its own players by slot, and a host lends its server the
+/// same numbering — local slot `i` IS server player `i`, joiners come after.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attacker {
     /// A player of the client sim that owns this ECS (single-player, or a
     /// host's own seat): its player slot.
     Local(usize),
-    /// A joiner, by its server player slot (`GameServer::players` index).
-    /// Credited to that joiner through a `KillEvent`; never to a local player.
-    Remote(usize),
+    /// A joiner, by its server player slot (`GameServer::players` index) and
+    /// the generation of the connection that held the slot
+    /// (`ServerPlayer::attach_gen`, bumped on every attach). Credited to that
+    /// joiner through a `KillEvent`, never to a local player — and never to
+    /// a later joiner given the same slot: a generation that no longer
+    /// matches the slot's occupant credits nobody
+    /// (`GameServer::queue_kill_event`, review D2b MEDIUM-1).
+    Remote { slot: usize, generation: u32 },
+    /// A joiner who has since left: its slot was released, so the stamp no
+    /// longer names any slot (`GameServer::forget_released_joiners`). Credits
+    /// nobody — the departed joiner's hit is still the last a player landed,
+    /// so the death is not handed to whoever stands nearest — and no AI
+    /// chases it.
+    Departed,
 }
 
 impl Attacker {
     /// The player's slot: local slot or server slot (see the type doc).
-    pub fn slot(self) -> usize {
+    /// `None` for a departed joiner.
+    pub fn slot(self) -> Option<usize> {
         match self {
-            Attacker::Local(i) | Attacker::Remote(i) => i,
+            Attacker::Local(i) | Attacker::Remote { slot: i, .. } => Some(i),
+            Attacker::Departed => None,
         }
     }
 
@@ -79,8 +92,14 @@ impl Attacker {
     pub fn local_slot(self) -> Option<usize> {
         match self {
             Attacker::Local(i) => Some(i),
-            Attacker::Remote(_) => None,
+            Attacker::Remote { .. } | Attacker::Departed => None,
         }
+    }
+
+    /// A joiner's hit (present or departed): no local player is credited
+    /// for it, and a raid it ends credits no defender.
+    pub fn is_joiner(self) -> bool {
+        matches!(self, Attacker::Remote { .. } | Attacker::Departed)
     }
 }
 
@@ -92,16 +111,27 @@ impl Attacker {
 #[derive(Clone, Copy, Debug)]
 pub struct LastAttacker(pub Attacker);
 
+/// A joiner's server body, as a death sweep's nearest-player fallback sees
+/// it ([`attribute_kill`], review D2b LOW-5): present, alive, and where.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JoinerBody {
+    pub slot: usize,
+    pub generation: u32,
+    pub pos: Vec3,
+}
+
 /// Who a death is credited to ([`attribute_kill`], MP-D2b).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KillCredit {
     /// This client sim's player slot `i`: its kill counter, challenges, the
     /// Vow, reputation.
     Local(usize),
-    /// A joiner's server slot: the sweep queues a `KillEvent` to that joiner
-    /// (`GameServer::queue_kill_event`) and credits nobody here.
-    Remote(usize),
-    /// Nobody (no attacker and no living local player).
+    /// A joiner's server slot and connection generation: the sweep queues a
+    /// `KillEvent` to that joiner (`GameServer::queue_kill_event`) and
+    /// credits nobody here. `nearest` = no player's hit: the joiner was the
+    /// nearest living player (the `KillEvent`'s `reason`).
+    Remote { slot: usize, generation: u32, nearest: bool },
+    /// Nobody (no attacker and no living player; or a departed joiner's hit).
     Nobody,
 }
 
@@ -111,29 +141,46 @@ pub enum KillCredit {
 ///
 /// - A joiner's hit (`Attacker::Remote`) credits that joiner, always: never
 ///   the nearest local player, even when the joiner has since died or left.
+///   A departed joiner's hit (`Attacker::Departed`) credits nobody.
 /// - A local player's hit credits that player if alive and present here.
 /// - Otherwise (no player hit it, or the hitter is dead) the nearest living
-///   local player, as single-player always has (projectile and environment
-///   kills); `locals` is `(position, dead)` per local slot.
-pub fn attribute_kill(attacker: Option<Attacker>, pos: Vec3, locals: &[(Vec3, bool)]) -> KillCredit {
+///   player, as single-player always has (projectile and environment
+///   kills): a local one (`locals`: `(position, dead)` per local slot) or —
+///   review D2b LOW-5 — a joiner (`joiners`: the living joiners' server
+///   bodies), whichever stands nearer. A tie goes to the local player.
+pub fn attribute_kill(
+    attacker: Option<Attacker>,
+    pos: Vec3,
+    locals: &[(Vec3, bool)],
+    joiners: &[JoinerBody],
+) -> KillCredit {
     match attacker {
-        Some(Attacker::Remote(slot)) => return KillCredit::Remote(slot),
+        Some(Attacker::Remote { slot, generation }) => {
+            return KillCredit::Remote { slot, generation, nearest: false };
+        }
+        Some(Attacker::Departed) => return KillCredit::Nobody,
         Some(Attacker::Local(i)) if locals.get(i).is_some_and(|&(_, dead)| !dead) => {
             return KillCredit::Local(i);
         }
         _ => {}
     }
-    let mut nearest: Option<(usize, f32)> = None;
+    let mut nearest: Option<(KillCredit, f32)> = None;
     for (i, &(p, dead)) in locals.iter().enumerate() {
         if dead {
             continue;
         }
         let d = (p - pos).length();
         if nearest.is_none_or(|(_, bd)| d < bd) {
-            nearest = Some((i, d));
+            nearest = Some((KillCredit::Local(i), d));
         }
     }
-    nearest.map_or(KillCredit::Nobody, |(i, _)| KillCredit::Local(i))
+    for j in joiners {
+        let d = (j.pos - pos).length();
+        if nearest.is_none_or(|(_, bd)| d < bd) {
+            nearest = Some((KillCredit::Remote { slot: j.slot, generation: j.generation, nearest: true }, d));
+        }
+    }
+    nearest.map_or(KillCredit::Nobody, |(credit, _)| credit)
 }
 
 /// Health component for entities.
@@ -480,6 +527,22 @@ impl PlayerCombat {
         self.mark_dead();
     }
 
+    /// The server's word that this body died of `cause` (a joiner's
+    /// `PlayerEvent::DiedOf`, MP-D2b): [`Self::die`] if alive. If this
+    /// client's own sim already put it on the death screen without naming a
+    /// cause — its health reached 0 here, from the server's numbers, a moment
+    /// before the server's event arrived — the server's cause replaces that
+    /// generic line (review D2b LOW-7). A cause already named stays.
+    pub fn died_of(&mut self, cause: crate::survival::DamageCause) {
+        if self.dead {
+            if self.last_damage == crate::survival::DamageCause::Generic {
+                self.last_damage = cause;
+            }
+            return;
+        }
+        self.die(cause);
+    }
+
     /// The death transition, shared by a lethal hit and [`Self::die`].
     fn mark_dead(&mut self) {
         self.dead = true;
@@ -786,7 +849,9 @@ pub fn strike(ecs: &mut hecs::World, target_id: hecs::Entity, swing: &Swing) -> 
     if damage_landed {
         let _ = ecs.insert_one(target_id, LastAttacker(attacker));
         spook_if_prey(ecs, target_id);
-        notify_hit_bear_or_hyena(ecs, target_id, attacker.slot());
+        if let Some(slot) = attacker.slot() {
+            notify_hit_bear_or_hyena(ecs, target_id, slot);
+        }
     }
 
     // #23 — sweep attack: every OTHER entity in the swing arc takes reduced
@@ -830,7 +895,9 @@ pub fn strike(ecs: &mut hecs::World, target_id: hecs::Entity, swing: &Swing) -> 
             if landed {
                 let _ = ecs.insert_one(oid, LastAttacker(attacker));
                 spook_if_prey(ecs, oid);
-                notify_hit_bear_or_hyena(ecs, oid, attacker.slot());
+                if let Some(slot) = attacker.slot() {
+                    notify_hit_bear_or_hyena(ecs, oid, slot);
+                }
             }
         }
     }
@@ -1037,6 +1104,56 @@ pub fn tick_mob_attacks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review D2b LOW-7 — a death this client computed itself (generic) is
+    /// named by the server's `DiedOf` arriving after; a named cause stays,
+    /// and an alive body simply dies of it.
+    #[test]
+    fn the_servers_death_cause_names_a_generic_death_screen() {
+        use crate::survival::DamageCause;
+        let mut c = PlayerCombat::new();
+        c.die(DamageCause::Generic);
+        c.died_of(DamageCause::Mob(crate::mob::MobType::Brigand));
+        assert!(c.dead);
+        assert_eq!(c.last_damage, DamageCause::Mob(crate::mob::MobType::Brigand));
+        c.died_of(DamageCause::Lava);
+        assert_eq!(c.last_damage, DamageCause::Mob(crate::mob::MobType::Brigand), "a named cause stays");
+        let mut alive = PlayerCombat::new();
+        alive.died_of(DamageCause::Fall);
+        assert!(alive.dead);
+        assert_eq!(alive.last_damage, DamageCause::Fall);
+    }
+
+    /// MP-D2b + review D2b MEDIUM-1 / LOW-5 — the one attribution rule.
+    #[test]
+    fn kill_attribution_credits_the_hitter_and_otherwise_the_nearest_living_player() {
+        let at = Vec3::ZERO;
+        let host = [(Vec3::new(3.0, 0.0, 0.0), false)];
+        let joiner = [JoinerBody { slot: 2, generation: 7, pos: Vec3::new(1.0, 0.0, 0.0) }];
+        // A joiner's hit is that joiner's, however near the host stands.
+        assert_eq!(
+            attribute_kill(Some(Attacker::Remote { slot: 2, generation: 7 }), at, &host, &[]),
+            KillCredit::Remote { slot: 2, generation: 7, nearest: false }
+        );
+        // A departed joiner's hit credits nobody — not the host beside it,
+        // not a joiner beside it.
+        assert_eq!(attribute_kill(Some(Attacker::Departed), at, &host, &joiner), KillCredit::Nobody);
+        // No player's hit: the nearest living player — here the joiner.
+        assert_eq!(
+            attribute_kill(None, at, &host, &joiner),
+            KillCredit::Remote { slot: 2, generation: 7, nearest: true }
+        );
+        // …and the host's player when it stands nearer.
+        let near_host = [(Vec3::new(0.5, 0.0, 0.0), false)];
+        assert_eq!(attribute_kill(None, at, &near_host, &joiner), KillCredit::Local(0));
+        // A dead local hitter falls back the same way.
+        let dead_host = [(Vec3::new(0.5, 0.0, 0.0), true)];
+        assert_eq!(
+            attribute_kill(Some(Attacker::Local(0)), at, &dead_host, &joiner),
+            KillCredit::Remote { slot: 2, generation: 7, nearest: true }
+        );
+        assert_eq!(attribute_kill(None, at, &dead_host, &[]), KillCredit::Nobody);
+    }
     use crate::entity::{self, MobKind, Position};
     use crate::mob::MobType;
 

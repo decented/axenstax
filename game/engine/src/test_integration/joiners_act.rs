@@ -6,14 +6,15 @@
 //! Every test drives a REAL `HostedServer` over the in-process transport —
 //! a dedicated server (0 local slots: it owns its world and runs its own
 //! death sweep), or a lending host (`sim_lend::OwnedSimParts` standing in
-//! for the host client, whose death sweep is the host client's) — and reads
-//! what each joiner is actually sent.
+//! for the host client, whose death sweep and breeding step are the host
+//! client's) — and reads what each joiner is actually sent.
 
 use glam::Vec3;
 
 use crate::block;
 use crate::crafting::{Tool, ToolMaterial, ToolType};
 use crate::hosted_server::{HostedServer, RemoteTransport};
+use crate::sim_lend::OwnedSimParts;
 use crate::item::{Item, MaterialId};
 use crate::mob::MobType;
 use crate::mob_interact::InteractNote;
@@ -21,6 +22,7 @@ use crate::protocol::{self, InteractKind, PlayerEventType, WireDamageCause};
 use crate::transport::{ChannelClientTransport, ClientTransport};
 
 use super::joiner_authority::join_guest;
+use super::lent_world::{join_guest_lent, start_lent};
 
 /// A valid x-only public key (secp256k1's generator point), so the joiner's
 /// pet-owner key is a real bech32 npub.
@@ -124,6 +126,10 @@ impl Joiner {
         self.seq
     }
 
+    fn leave(&self) {
+        self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Disconnect, &()));
+    }
+
     fn interact(&mut self, entity: u32, kind: InteractKind, held: Option<&Item>) -> u32 {
         self.seq += 1;
         let (held_kind, held_id, held_full) = held_wire(held);
@@ -144,7 +150,9 @@ impl Joiner {
 }
 
 /// Stand `slot`'s server body on a stone floor at (40, 80, 40), on the
-/// ground (no critical hits) and at rest.
+/// ground (no critical hits), at rest, and looking along +z (yaw π), where
+/// these tests put the mobs it acts on (a joiner's target must be ahead of
+/// its server body, review D2b LOW-2).
 fn floor_and_stand(world: &mut crate::world::World, hs: &mut HostedServer, slot: usize) -> Vec3 {
     let (fx, fy, fz) = (40, 80, 40);
     for x in fx - 8..=fx + 8 {
@@ -156,7 +164,10 @@ fn floor_and_stand(world: &mut crate::world::World, hs: &mut HostedServer, slot:
         }
     }
     let at = Vec3::new(fx as f32 + 0.5, fy as f32, fz as f32 + 0.5);
-    let p = &mut hs.server.players[slot].player;
+    let sp = &mut hs.server.players[slot];
+    sp.yaw = std::f32::consts::PI;
+    sp.pitch = 0.0;
+    let p = &mut sp.player;
     p.pos = at;
     p.velocity = Vec3::ZERO;
     p.on_ground = true;
@@ -164,16 +175,22 @@ fn floor_and_stand(world: &mut crate::world::World, hs: &mut HostedServer, slot:
     at
 }
 
-/// A dedicated server with joiners standing on a floor, mobs cleared.
+/// A server with joiners standing on a floor, mobs cleared: a dedicated
+/// server (`host: None` — it owns its world, ECS and death sweep) or a
+/// lending host (`host`: the host client's world and ECS, lent to the server
+/// for each tick; its death sweep and breeding step are run by hand, as the
+/// host client runs them).
 struct Rig {
     hs: HostedServer,
+    host: Option<OwnedSimParts>,
     joiners: Vec<Joiner>,
     at: Vec3,
 }
 
 impl Rig {
+    /// A dedicated server.
     fn new(tag: &str, joiners: usize) -> Self {
-        let mut hs = HostedServer::start(
+        let hs = HostedServer::start(
             0,
             format!("joiners-act-{tag}-{}", std::process::id()),
             42,
@@ -181,41 +198,103 @@ impl Rig {
             RemoteTransport::WebSocket { port: 0 },
         )
         .expect("dedicated server starts");
-        let mut list = Vec::new();
+        Self::seat(hs, None, joiners)
+    }
+
+    /// A `--no-lend` host: one local seat, and a server that owns its own
+    /// copy of the world (`HostWorld::Owned`) and runs its own death sweep.
+    fn new_no_lend(tag: &str, joiners: usize) -> Self {
+        let hs = HostedServer::start(
+            1,
+            format!("joiners-act-{tag}-{}", std::process::id()),
+            42,
+            0,
+            RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("--no-lend host starts");
+        Self::seat(hs, None, joiners)
+    }
+
+    /// A lending host (one local seat, slot 0, whose world the server ticks).
+    fn new_lent(tag: &str, joiners: usize) -> Self {
+        let (hs, host) = start_lent(&format!("joiners-act-{tag}"));
+        Self::seat(hs, Some(host), joiners)
+    }
+
+    fn seat(hs: HostedServer, host: Option<OwnedSimParts>, joiners: usize) -> Self {
+        let mut rig = Rig { hs, host, joiners: Vec::new(), at: Vec3::ZERO };
         for n in 0..joiners {
-            let (client, slot) = join_guest(&mut hs, &format!("J{n}"));
-            list.push(Joiner { client, slot, inbox: Inbox::default(), seq: 0 });
+            rig.join(&format!("J{n}"));
         }
-        let mut world = std::mem::replace(&mut hs.server.world, crate::world::World::new());
-        let mut at = Vec3::ZERO;
-        for j in &list {
-            at = floor_and_stand(&mut world, &mut hs, j.slot);
-        }
-        hs.server.world = world;
-        hs.server.column_streamer = None;
-        hs.server.column_refill_per_tick = 0;
-        hs.server.difficulty = crate::survival::Difficulty::Peaceful;
-        crate::remote_mobs::purge_private_mobs(&mut hs.server.ecs);
-        let mut rig = Rig { hs, joiners: list, at };
+        rig.hs.server.column_streamer = None;
+        rig.hs.server.column_refill_per_tick = 0;
+        rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        crate::remote_mobs::purge_private_mobs(rig.ecs_mut());
         rig.tick(1);
         rig
     }
 
+    /// A guest joins and stands on the floor; returns its index in `joiners`.
+    fn join(&mut self, name: &str) -> usize {
+        let (client, slot) = match self.host.as_mut() {
+            Some(host) => join_guest_lent(&mut self.hs, host, name),
+            None => join_guest(&mut self.hs, name),
+        };
+        let mut world = match self.host.as_mut() {
+            Some(host) => std::mem::replace(&mut host.world, crate::world::World::new()),
+            None => std::mem::replace(&mut self.hs.server.world, crate::world::World::new()),
+        };
+        self.at = floor_and_stand(&mut world, &mut self.hs, slot);
+        match self.host.as_mut() {
+            Some(host) => host.world = world,
+            None => self.hs.server.world = world,
+        }
+        self.joiners.push(Joiner { client, slot, inbox: Inbox::default(), seq: 0 });
+        self.joiners.len() - 1
+    }
+
     fn tick(&mut self, n: u32) {
         for _ in 0..n {
-            self.hs.tick();
+            match self.host.as_mut() {
+                Some(host) => host.lend_tick(&mut self.hs),
+                None => self.hs.tick(),
+            }
             for j in &mut self.joiners {
                 j.inbox.drain(&j.client, j.slot);
             }
         }
     }
 
+    /// The ECS the server's mobs live in (outside a lend window: the host's).
+    fn ecs(&self) -> &hecs::World {
+        self.host.as_ref().map_or(&self.hs.server.ecs, |h| &h.ecs)
+    }
+
+    fn ecs_mut(&mut self) -> &mut hecs::World {
+        match self.host.as_mut() {
+            Some(host) => &mut host.ecs,
+            None => &mut self.hs.server.ecs,
+        }
+    }
+
+    fn world_mut(&mut self) -> &mut crate::world::World {
+        match self.host.as_mut() {
+            Some(host) => &mut host.world,
+            None => &mut self.hs.server.world,
+        }
+    }
+
+    fn tick_counter(&self) -> u64 {
+        self.host.as_ref().map_or(self.hs.server.tick_counter, |h| h.clock.tick_counter)
+    }
+
     /// A `kind` at `offset` from the joiners, broadcast once (so it has a
     /// wire id). Returns (entity, wire id).
     fn spawn(&mut self, kind: MobType, offset: Vec3) -> (hecs::Entity, u32) {
-        let e = crate::entity::spawn_mob(&mut self.hs.server.ecs, kind, self.at + offset);
+        let at = self.at + offset;
+        let e = crate::entity::spawn_mob(self.ecs_mut(), kind, at);
         self.tick(1);
-        let id = self.hs.server.ecs.get::<&crate::entity::ProtocolId>(e).expect("broadcast").0;
+        let id = self.ecs().get::<&crate::entity::ProtocolId>(e).expect("broadcast").0;
         (e, id)
     }
 
@@ -223,12 +302,12 @@ impl Rig {
     /// next is read before this tick's mob AI moves it.
     fn place(&mut self, e: hecs::Entity, offset: Vec3) {
         let at = self.at + offset;
-        self.hs.server.ecs.get::<&mut crate::entity::Position>(e).unwrap().0 = at;
-        self.hs.server.ecs.get::<&mut crate::entity::Velocity>(e).unwrap().0 = Vec3::ZERO;
+        self.ecs_mut().get::<&mut crate::entity::Position>(e).unwrap().0 = at;
+        self.ecs_mut().get::<&mut crate::entity::Velocity>(e).unwrap().0 = Vec3::ZERO;
     }
 
     fn health(&self, e: hecs::Entity) -> f32 {
-        self.hs.server.ecs.get::<&crate::combat::Health>(e).unwrap().current
+        self.ecs().get::<&crate::combat::Health>(e).unwrap().current
     }
 
     fn sign_in(&mut self, j: usize) -> String {
@@ -238,6 +317,16 @@ impl Rig {
         assert!(key.starts_with("npub1"), "a pet's owner is the verified npub, never hex: {key}");
         key
     }
+
+    /// The `Attacker` joiner `j` stamps: its slot and connection generation.
+    fn attacker(&self, j: usize) -> crate::combat::Attacker {
+        let slot = self.joiners[j].slot;
+        crate::combat::Attacker::Remote { slot, generation: self.hs.server.players[slot].attach_gen }
+    }
+}
+
+fn note(out: &protocol::InteractOutcomePacket) -> InteractNote {
+    InteractNote::from_wire(out.note)
 }
 
 #[test]
@@ -252,14 +341,16 @@ fn a_joiner_swing_in_reach_damages_knocks_back_and_names_the_joiner() {
     let out = rig.joiners[0].inbox.outcome(seq);
     assert!(out.accepted && out.kind.is_none(), "a valid swing is confirmed (the weapon wears)");
     assert_eq!(rig.health(cow), max - sword().attack_damage(), "the sword's damage, no crit on the ground");
-    let la = rig.hs.server.ecs.get::<&crate::combat::LastAttacker>(cow).expect("stamped").0;
-    assert_eq!(la, crate::combat::Attacker::Remote(rig.joiners[0].slot));
-    let y = rig.hs.server.ecs.get::<&crate::entity::Position>(cow).unwrap().0.y;
+    let la = rig.ecs().get::<&crate::combat::LastAttacker>(cow).expect("stamped").0;
+    assert_eq!(la, rig.attacker(0));
+    let y = rig.ecs().get::<&crate::entity::Position>(cow).unwrap().0.y;
     assert!(y > y0, "the hit's knockback pops the cow off the floor ({y} > {y0})");
 }
 
+/// Out of reach, behind the body (review D2b LOW-2) or a perched parrot
+/// (review D2b LOW-3): refused, and nothing changes.
 #[test]
-fn an_out_of_reach_or_over_rate_swing_is_refused_and_changes_nothing() {
+fn an_out_of_reach_behind_or_perched_target_is_refused_and_changes_nothing() {
     let mut rig = Rig::new("refuse", 1);
     let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 7.0));
     let max = rig.health(cow);
@@ -268,86 +359,309 @@ fn an_out_of_reach_or_over_rate_swing_is_refused_and_changes_nothing() {
     rig.tick(1);
     assert!(!rig.joiners[0].inbox.outcome(far).accepted, "7 blocks is out of reach");
     assert_eq!(rig.health(cow), max);
-    assert!(rig.hs.server.ecs.get::<&crate::combat::LastAttacker>(cow).is_err());
+    assert!(rig.ecs().get::<&crate::combat::LastAttacker>(cow).is_err());
 
-    // Two swings in one tick: the second is inside the server's cooldown.
-    rig.tick(crate::combat::ATTACK_COOLDOWN);
-    rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+    // Two blocks BEHIND the body (it looks along +z): in reach, not ahead.
+    rig.place(cow, Vec3::new(0.0, 0.0, -2.0));
+    let behind = rig.joiners[0].attack(id, Some(&sword()), false);
+    rig.tick(1);
+    assert!(!rig.joiners[0].inbox.outcome(behind).accepted, "a mob behind the body is refused");
+    assert_eq!(rig.health(cow), max);
+
+    // A parrot perched on someone's shoulder is no target for any gesture.
+    let (parrot, pid) = rig.spawn(MobType::Parrot, Vec3::new(0.0, 0.0, 1.5));
+    let parrot_max = rig.health(parrot);
+    rig.ecs_mut().get::<&mut crate::companion::CompanionData>(parrot).unwrap().state =
+        crate::companion::CompanionState::Perch;
+    rig.place(parrot, Vec3::new(0.0, 0.0, 1.5));
+    let swing = rig.joiners[0].attack(pid, Some(&sword()), true);
+    rig.tick(1);
+    assert!(!rig.joiners[0].inbox.outcome(swing).accepted, "a perched parrot is refused");
+    assert_eq!(rig.health(parrot), parrot_max);
+}
+
+/// Review D2b LOW-2 — the server's swing schedule: a second swing in one
+/// tick is refused, one 6 ticks after the first is too early even with the
+/// 3-tick jitter allowance and one 7 ticks after is taken; and the schedule
+/// moves a full cooldown per swing, so a client swinging every 7 ticks is
+/// held to the client's average (the next at +7 again is refused, at +10
+/// taken).
+#[test]
+fn the_server_holds_a_joiners_swings_to_the_clients_rate() {
+    let mut rig = Rig::new("rate", 1);
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    let max = rig.health(cow);
+    // Invulnerability frames are the cow's business, not the schedule's:
+    // cleared before each swing so every accepted one lands.
+    let swing_at = |rig: &mut Rig| -> bool {
+        rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+        rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().invincible_timer = 0;
+        let seq = rig.joiners[0].attack(id, None, false);
+        rig.tick(1);
+        rig.joiners[0].inbox.outcome(seq).accepted
+    };
+    // Each `swing_at` is read in the tick it ticks; `tick(n)` moves the
+    // clock between them.
+    let t0 = rig.tick_counter();
     let first = rig.joiners[0].attack(id, None, false);
-    let second = rig.joiners[0].attack(id, None, false);
+    let same_tick = rig.joiners[0].attack(id, None, false);
+    rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
     rig.tick(1);
     assert!(rig.joiners[0].inbox.outcome(first).accepted);
-    assert!(!rig.joiners[0].inbox.outcome(second).accepted, "over the rate: refused, no wear");
-    assert_eq!(rig.health(cow), max - 1.0, "one fist's worth, once");
+    assert!(!rig.joiners[0].inbox.outcome(same_tick).accepted, "a second swing in the same tick");
+    rig.tick(5); // read at t0 + 6
+    assert_eq!(rig.tick_counter(), t0 + 6);
+    assert!(!swing_at(&mut rig), "+6: too early, even with the jitter allowance");
+    assert!(swing_at(&mut rig), "+7: the cooldown less the jitter");
+    rig.tick(6); // read at t0 + 14: 7 after the last
+    assert!(!swing_at(&mut rig), "+7 again: the schedule moved a full cooldown, not 7");
+    rig.tick(2); // read at t0 + 17
+    assert!(swing_at(&mut rig), "+10 after the scheduled time it was due");
+    assert_eq!(rig.health(cow), max - 3.0, "three fists, no more");
 }
 
 #[test]
 fn a_dedicated_servers_kill_goes_to_the_killer_alone_and_drops_loot() {
     let mut rig = Rig::new("kill-dedicated", 2);
     let (chicken, id) = rig.spawn(MobType::Chicken, Vec3::new(0.0, 0.0, 2.0));
-    rig.hs.server.ecs.get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
+    rig.ecs_mut().get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
     rig.place(chicken, Vec3::new(0.0, 0.0, 2.0));
     rig.joiners[0].attack(id, Some(&sword()), false);
     rig.tick(1);
-    assert!(rig.hs.server.ecs.get::<&crate::combat::Health>(chicken).is_err(), "dead and swept");
+    assert!(rig.ecs().get::<&crate::combat::Health>(chicken).is_err(), "dead and swept");
     let kills = &rig.joiners[0].inbox.kills;
     assert_eq!(kills.len(), 1, "the killer is told, once");
     assert_eq!(kills[0].victim, protocol::EntityKind::Chicken);
-    assert_eq!(kills[0].cause, protocol::kill_cause::MELEE);
+    assert_eq!(kills[0].reason, protocol::kill_reason::LAST_HIT);
     assert!(rig.joiners[1].inbox.kills.is_empty(), "nobody else is credited");
-    let items = rig.hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().count();
+    let items = rig.ecs().query::<&crate::entity::ItemEntity>().iter().count();
     assert!(items > 0, "the kill's loot drops as world items");
+}
+
+/// Review D2b LOW-5 — a death no player's hit caused (lava, a fall, another
+/// mob) goes to the nearest living player, as in single-player — and on a
+/// server with joiners that may be a joiner: here the only one.
+#[test]
+fn an_unstamped_death_beside_a_joiner_is_that_joiners_as_the_nearest_player() {
+    let mut rig = Rig::new("kill-nearest", 1);
+    let (cow, _) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
+    rig.tick(1);
+    let kills = &rig.joiners[0].inbox.kills;
+    assert_eq!(kills.len(), 1);
+    assert_eq!(kills[0].reason, protocol::kill_reason::NEAREST, "credited as the nearest, not the hitter");
 }
 
 #[test]
 fn a_lent_hosts_kill_by_a_joiner_goes_to_that_joiner_and_never_to_the_host() {
-    use super::lent_world::{join_guest_lent, start_lent};
-    let (mut hs, mut host) = start_lent("d2b-kill");
-    let (client, slot) = join_guest_lent(&mut hs, &mut host, "Joiner");
-    let mut world = std::mem::replace(&mut host.world, crate::world::World::new());
-    let at = floor_and_stand(&mut world, &mut hs, slot);
-    host.world = world;
-    crate::remote_mobs::purge_private_mobs(&mut host.ecs);
-    let chicken = crate::entity::spawn_mob(&mut host.ecs, MobType::Chicken, at + Vec3::new(0.0, 0.0, 2.0));
-    host.ecs.get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
-    host.lend_tick(&mut hs);
-    let id = host.ecs.get::<&crate::entity::ProtocolId>(chicken).expect("broadcast").0;
-    let mut joiner = Joiner { client, slot, inbox: Inbox::default(), seq: 0 };
-    joiner.attack(id, Some(&sword()), false);
-    host.lend_tick(&mut hs);
-    joiner.inbox.drain(&joiner.client, slot);
+    let mut rig = Rig::new_lent("d2b-kill", 1);
+    let slot = rig.joiners[0].slot;
+    let (chicken, id) = rig.spawn(MobType::Chicken, Vec3::new(0.0, 0.0, 2.0));
+    rig.ecs_mut().get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
+    rig.place(chicken, Vec3::new(0.0, 0.0, 2.0));
+    rig.joiners[0].attack(id, Some(&sword()), false);
+    rig.tick(1);
 
     // The host client's death sweep (a lent world's is the client's): the
     // host's own player stands right beside the body, nearer than anyone.
-    let host_player = (at + Vec3::new(0.3, 0.0, 2.0), false);
-    let deaths = crate::combat::despawn_dead(&mut host.ecs);
+    let host_player = (rig.at + Vec3::new(0.3, 0.0, 2.0), false);
+    let deaths = crate::combat::despawn_dead(rig.ecs_mut());
     assert_eq!(deaths.len(), 1);
     let (kind, pos, attacker) = deaths[0];
-    assert_eq!(attacker, Some(crate::combat::Attacker::Remote(slot)));
+    assert_eq!(attacker, Some(rig.attacker(0)));
     let credited =
-        crate::server::route_client_kill(Some(&mut hs.server), attacker, kind, pos, false, &[host_player]);
+        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_player]);
     assert_eq!(credited, None, "the host's player is not credited with the joiner's kill");
 
-    host.lend_tick(&mut hs);
-    joiner.inbox.drain(&joiner.client, slot);
-    assert_eq!(joiner.inbox.kills.len(), 1, "the KillEvent rides the next tick to the joiner");
-    assert_eq!(joiner.inbox.kills[0].victim, protocol::EntityKind::Chicken);
+    rig.tick(1);
+    assert_eq!(rig.joiners[0].inbox.kills.len(), 1, "the KillEvent rides the next tick to the joiner");
+    assert_eq!(rig.joiners[0].inbox.kills[0].victim, protocol::EntityKind::Chicken);
+    assert_eq!(slot, rig.joiners[0].slot);
 
-    // Nobody's hit: the nearest local player, as ever.
+    // Nobody's hit: the nearest living player — the host's, beside it.
     assert_eq!(
-        crate::server::route_client_kill(Some(&mut hs.server), None, kind, pos, false, &[host_player]),
+        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, pos, false, &[host_player]),
         Some(0)
+    );
+    // …and the joiner when the host's player is far off (review D2b LOW-5).
+    let far_host = (rig.at + Vec3::new(400.0, 0.0, 0.0), false);
+    assert_eq!(
+        crate::server::route_client_kill(Some(&mut rig.hs.server), None, kind, pos, false, &[far_host]),
+        None
+    );
+    rig.tick(1);
+    assert_eq!(rig.joiners[0].inbox.kills.len(), 2);
+    assert_eq!(rig.joiners[0].inbox.kills[1].reason, protocol::kill_reason::NEAREST);
+}
+
+/// Review D2b MEDIUM-1 — a joiner hits a cow and provokes a Bear, then
+/// leaves; the next joiner is given the same slot. The cow later dies with
+/// no other player's hit: NOBODY is credited (not the new joiner, not by the
+/// nearest-player fallback either — the departed joiner's hit was the last).
+/// The Bear's and an angry bee's grudges against the slot are dropped. And
+/// the generation tag catches a stamp the release never reached (a kick
+/// outside the lend window): it credits nobody either.
+#[test]
+fn a_reused_slot_inherits_no_kill_credit_and_no_grudge() {
+    let mut rig = Rig::new("reuse", 1);
+    let slot = rig.joiners[0].slot;
+    let first = rig.attacker(0);
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.joiners[0].attack(id, Some(&sword()), false);
+    rig.tick(1);
+    assert!(rig.health(cow) > 0.0, "hit, not killed");
+    assert_eq!(rig.ecs().get::<&crate::combat::LastAttacker>(cow).unwrap().0, first);
+    let (bear, _) = rig.spawn(MobType::Bear, Vec3::new(6.0, 0.0, 6.0));
+    rig.ecs_mut().get::<&mut crate::bear_ai::BearData>(bear).unwrap().state =
+        crate::bear_ai::BearAiState::Aggro { ticks_remaining: 500, attacker_pidx: slot };
+    let (bee, _) = rig.spawn(MobType::Bee, Vec3::new(-6.0, 1.0, 6.0));
+    let sting_until = rig.tick_counter() + 1_000;
+    rig.ecs_mut().get::<&mut crate::bee_ai::BeeData>(bee).unwrap().state =
+        crate::bee_ai::BeeAiState::Sting { target_id: slot as u64, until_tick: sting_until };
+
+    rig.joiners[0].leave();
+    rig.tick(1);
+    assert!(rig.hs.slot_is_free(slot));
+    let b = rig.join("B");
+    assert_eq!(rig.joiners[b].slot, slot, "the freed slot is reused");
+    assert_ne!(rig.attacker(b), first, "a new connection, a new generation");
+
+    assert_eq!(
+        rig.ecs().get::<&crate::combat::LastAttacker>(cow).unwrap().0,
+        crate::combat::Attacker::Departed,
+        "the departed joiner's stamp names no slot"
+    );
+    assert_eq!(
+        rig.ecs().get::<&crate::bear_ai::BearData>(bear).unwrap().state,
+        crate::bear_ai::BearAiState::Wander,
+        "the Bear forgets the slot's old occupant"
+    );
+    assert_eq!(
+        rig.ecs().get::<&crate::bee_ai::BeeData>(bee).unwrap().state,
+        crate::bee_ai::BeeAiState::Idle,
+        "so does an angry bee"
+    );
+
+    rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
+    rig.tick(1);
+    assert!(rig.ecs().get::<&crate::combat::Health>(cow).is_err(), "the cow died and was swept");
+    assert!(rig.joiners[b].inbox.kills.is_empty(), "the slot's new joiner is not credited");
+
+    // A stamp still naming the old generation (released where the forget
+    // pass couldn't reach it): the generation no longer matches.
+    let (chicken, _) = rig.spawn(MobType::Chicken, Vec3::new(1.0, 0.0, 2.0));
+    rig.ecs_mut().insert_one(chicken, crate::combat::LastAttacker(first)).unwrap();
+    rig.ecs_mut().get::<&mut crate::combat::Health>(chicken).unwrap().current = 0.0;
+    rig.tick(2);
+    assert!(rig.ecs().get::<&crate::combat::Health>(chicken).is_err());
+    assert!(rig.joiners[b].inbox.kills.is_empty(), "an old generation's kill credits nobody");
+}
+
+/// Review D2b MEDIUM-1 on a lending host: the departed joiner's cow dies in
+/// the host client's sweep with the host's own player beside it — the host
+/// is not credited either.
+#[test]
+fn a_departed_joiners_kill_credits_neither_the_host_nor_the_slots_next_joiner() {
+    let mut rig = Rig::new_lent("reuse-lent", 1);
+    let slot = rig.joiners[0].slot;
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.joiners[0].attack(id, Some(&sword()), false);
+    rig.tick(1);
+    rig.joiners[0].leave();
+    rig.tick(1);
+    let b = rig.join("B");
+    assert_eq!(rig.joiners[b].slot, slot);
+
+    rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().current = 0.0;
+    let deaths = crate::combat::despawn_dead(rig.ecs_mut());
+    let (kind, pos, attacker) = deaths[0];
+    assert_eq!(attacker, Some(crate::combat::Attacker::Departed));
+    let host_beside = (pos + Vec3::new(0.3, 0.0, 0.0), false);
+    assert_eq!(
+        crate::server::route_client_kill(Some(&mut rig.hs.server), attacker, kind, pos, false, &[host_beside]),
+        None,
+        "the host's player is not credited"
+    );
+    rig.tick(1);
+    assert!(rig.joiners[b].inbox.kills.is_empty(), "nor the slot's new joiner");
+}
+
+/// Review D2b MEDIUM-2 — a dedicated server runs no breeding, Leads or pet
+/// AI (D4), so feeding, taming, a Lead on a mob or a post and a pet command
+/// are refused with "not on this server", and nothing is used or changed.
+/// No baby ever comes of it.
+#[test]
+fn a_dedicated_server_refuses_what_it_does_not_simulate_and_takes_nothing() {
+    refuses_what_it_does_not_simulate(Rig::new("not-here", 1));
+}
+
+/// Review D2b MEDIUM-2 — likewise a `--no-lend` host: its server owns a
+/// second copy of the world, whose animals nothing breeds, leashes or walks
+/// (the host client runs those systems on its own copy).
+#[test]
+fn a_no_lend_host_refuses_what_its_server_does_not_simulate_and_takes_nothing() {
+    let rig = Rig::new_no_lend("not-here-owned", 1);
+    assert!(!rig.hs.server.animal_life_simulated);
+    refuses_what_it_does_not_simulate(rig);
+    assert!(Rig::new_lent("here-lent", 0).hs.server.animal_life_simulated, "a lending host's world has it");
+}
+
+fn refuses_what_it_does_not_simulate(mut rig: Rig) {
+    let key = rig.sign_in(0);
+    let (a, ida) = rig.spawn(MobType::Cow, Vec3::new(1.0, 0.0, 1.0));
+    let (b, idb) = rig.spawn(MobType::Cow, Vec3::new(-1.0, 0.0, 1.0));
+    let (wolf, wolf_id) = rig.spawn(MobType::Wolf, Vec3::new(0.0, 0.0, 1.5));
+    let (pet, pet_id) = rig.spawn(MobType::Wolf, Vec3::new(1.5, 0.0, 1.5));
+    rig.ecs_mut().get::<&mut crate::wolf::WolfData>(pet).unwrap().ownership.owner_pubkey = key;
+    let post = [rig.at.x as i32 + 2, rig.at.y as i32, rig.at.z as i32];
+    rig.world_mut().set_block(post[0], post[1], post[2], block::OAK_FENCE_POST);
+    let wheat = mat(MaterialId::Wheat);
+    let cows_before = rig.ecs().query::<&crate::entity::MobKind>().iter().filter(|(_, k)| k.0 == MobType::Cow).count();
+    let asks: [(hecs::Entity, u32, InteractKind, Option<Item>, Vec3); 6] = [
+        (a, ida, InteractKind::Feed, Some(wheat.clone()), Vec3::new(1.0, 0.0, 1.0)),
+        (b, idb, InteractKind::Feed, Some(wheat), Vec3::new(-1.0, 0.0, 1.0)),
+        (wolf, wolf_id, InteractKind::Tame, Some(mat(MaterialId::Bone)), Vec3::new(0.0, 0.0, 1.5)),
+        (a, ida, InteractKind::LeadAttach, Some(mat(MaterialId::Lead)), Vec3::new(1.0, 0.0, 1.0)),
+        (pet, pet_id, InteractKind::SitToggle, None, Vec3::new(1.5, 0.0, 1.5)),
+        (a, 0, InteractKind::LeadToPost { post }, Some(mat(MaterialId::Lead)), Vec3::new(1.0, 0.0, 1.0)),
+    ];
+    for (e, id, kind, held, at) in asks {
+        rig.place(e, at);
+        let s = rig.joiners[0].interact(id, kind, held.as_ref());
+        rig.tick(1);
+        let out = rig.joiners[0].inbox.outcome(s);
+        assert!(!out.accepted, "{kind:?} is refused");
+        assert_eq!(out.consume_held, 0, "{kind:?} takes nothing");
+        assert_eq!(note(out), InteractNote::NotOnThisServer, "{kind:?} says why");
+    }
+    for cow in [a, b] {
+        assert!(rig.ecs().get::<&crate::breeding::InLove>(cow).is_err());
+        assert!(rig.ecs().get::<&crate::tether::Tethered>(cow).is_err());
+    }
+    assert!(crate::tameable::pet_owner_of(rig.ecs(), wolf).is_none(), "still wild");
+    assert_ne!(rig.ecs().get::<&crate::wolf::WolfData>(pet).unwrap().state, crate::wolf::WolfAiState::Sit);
+    rig.tick(40);
+    let cows_after = rig.ecs().query::<&crate::entity::MobKind>().iter().filter(|(_, k)| k.0 == MobType::Cow).count();
+    assert_eq!(cows_after, cows_before, "no baby");
+    assert_eq!(
+        InteractNote::NotOnThisServer.toast(None, false).map(|t| t.0).as_deref(),
+        Some("This server doesn't support that yet.")
     );
 }
 
+/// On a lending host (whose client breeds the lent world's animals) a
+/// joiner's feeding takes: two fed cows breed in the host client's breeding
+/// step, and — review D2b B2 — the breed is the FEEDER's: a `Bred` event to
+/// the joiner, and no `BreedAnimals` for the host's players.
 #[test]
-fn feeding_two_cows_puts_them_in_love_and_they_breed() {
-    let mut rig = Rig::new("feed", 1);
+fn feeding_two_cows_on_a_lending_host_breeds_and_credits_the_feeder() {
+    let mut rig = Rig::new_lent("feed", 1);
     let (a, ida) = rig.spawn(MobType::Cow, Vec3::new(1.0, 0.0, 1.0));
     let (b, idb) = rig.spawn(MobType::Cow, Vec3::new(-1.0, 0.0, 1.0));
     let wheat = mat(MaterialId::Wheat);
     rig.place(a, Vec3::new(1.0, 0.0, 1.0));
-    rig.place(b, Vec3::new(-1.0, 0.0, 1.0));
     let s1 = rig.joiners[0].interact(ida, InteractKind::Feed, Some(&wheat));
     rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
     rig.place(b, Vec3::new(-1.0, 0.0, 1.0));
@@ -357,17 +671,36 @@ fn feeding_two_cows_puts_them_in_love_and_they_breed() {
         let out = rig.joiners[0].inbox.outcome(s);
         assert!(out.accepted);
         assert_eq!(out.consume_held, 1, "one wheat each");
-        assert_eq!(InteractNote::from_wire(out.note), InteractNote::Fed);
+        assert_eq!(note(out), InteractNote::Fed);
     }
+    let feeder = rig.attacker(0);
     for cow in [a, b] {
-        assert!(rig.hs.server.ecs.get::<&crate::breeding::InLove>(cow).is_ok());
+        let love = *rig.ecs().get::<&crate::breeding::InLove>(cow).expect("in love");
+        assert_eq!(love.fed_by, Some(feeder), "the feeder is recorded");
     }
-    // Pull them together: the breeding rule pairs them.
+    // The host client's breeding step — `breeding::client_step`, the call
+    // `GameState::tick` makes on the world it lends: the two fed adults pair
+    // and the baby is born there.
     rig.place(a, Vec3::new(0.5, 0.0, 1.0));
     rig.place(b, Vec3::new(-0.5, 0.0, 1.0));
-    let tick = rig.hs.server.tick_counter;
-    let babies = crate::breeding::tick_breeding(&mut rig.hs.server.ecs, tick);
-    assert_eq!(babies.len(), 1, "two fed adults breed");
+    let tick = rig.tick_counter();
+    let host = rig.host.as_mut().unwrap();
+    let born = crate::breeding::client_step(&mut host.ecs, tick, Some(&mut rig.hs.server));
+    assert_eq!(born.len(), 1, "two fed adults breed");
+    assert_eq!(born[0].kind, MobType::Cow);
+    assert!(rig.ecs().get::<&crate::breeding::Baby>(born[0].entity).is_ok(), "the calf is in the lent world");
+    assert!(!born[0].credit_here, "a joiner's breed is never the host's");
+    rig.tick(1);
+    assert!(
+        rig.joiners[0].inbox.events.contains(&PlayerEventType::Bred { offspring: protocol::EntityKind::Cow }),
+        "the feeder is told"
+    );
+    // A host player's own feed is the host's.
+    assert!(crate::server::route_client_breed(
+        Some(&mut rig.hs.server),
+        [Some(crate::combat::Attacker::Local(0)), Some(feeder)],
+        MobType::Cow
+    ));
 }
 
 #[test]
@@ -381,7 +714,7 @@ fn shearing_drops_wool_the_joiner_picks_up_and_takes_nothing_from_the_hand() {
     let out = rig.joiners[0].inbox.outcome(seq);
     assert!(out.accepted);
     assert_eq!(out.consume_held, 0, "shears are not used up");
-    assert_eq!(InteractNote::from_wire(out.note), InteractNote::Sheared);
+    assert_eq!(note(out), InteractNote::Sheared);
     rig.tick(60);
     assert!(rig.joiners[0].inbox.granted(MaterialId::Wool) >= 1, "the wool arrives as an InventoryGrant");
     // Shorn: a second go is refused until it regrows, and takes nothing.
@@ -390,7 +723,7 @@ fn shearing_drops_wool_the_joiner_picks_up_and_takes_nothing_from_the_hand() {
     rig.tick(1);
     let out = rig.joiners[0].inbox.outcome(again);
     assert!(!out.accepted);
-    assert_eq!(InteractNote::from_wire(out.note), InteractNote::WoolGrowing);
+    assert_eq!(note(out), InteractNote::WoolGrowing);
 }
 
 #[test]
@@ -408,7 +741,7 @@ fn milking_swaps_the_bucket_for_a_milk_bucket() {
 
 #[test]
 fn a_signed_in_joiner_tames_to_its_npub_and_a_guest_cannot() {
-    let mut rig = Rig::new("tame", 2);
+    let mut rig = Rig::new_lent("tame", 2);
     let key = rig.sign_in(0);
     let (cat, id) = rig.spawn(MobType::Cat, Vec3::new(0.0, 0.0, 1.5));
     let treat = mat(MaterialId::CatTreat);
@@ -420,8 +753,8 @@ fn a_signed_in_joiner_tames_to_its_npub_and_a_guest_cannot() {
     let out = rig.joiners[1].inbox.outcome(s);
     assert!(!out.accepted);
     assert_eq!(out.consume_held, 0, "a refused interaction consumes nothing");
-    assert_eq!(InteractNote::from_wire(out.note), InteractNote::SignInToTame);
-    assert!(crate::tameable::pet_owner_of(&rig.hs.server.ecs, cat).is_none());
+    assert_eq!(note(out), InteractNote::SignInToTame);
+    assert!(crate::tameable::pet_owner_of(rig.ecs(), cat).is_none());
 
     rig.place(cat, Vec3::new(0.0, 0.0, 1.5));
     let s = rig.joiners[0].interact(id, InteractKind::Tame, Some(&treat));
@@ -429,45 +762,39 @@ fn a_signed_in_joiner_tames_to_its_npub_and_a_guest_cannot() {
     let out = rig.joiners[0].inbox.outcome(s);
     assert!(out.accepted);
     assert_eq!(out.consume_held, 1);
-    assert_eq!(InteractNote::from_wire(out.note), InteractNote::Tamed);
-    assert_eq!(crate::tameable::pet_owner_of(&rig.hs.server.ecs, cat), Some(key));
+    assert_eq!(note(out), InteractNote::Tamed);
+    assert_eq!(crate::tameable::pet_owner_of(rig.ecs(), cat), Some(key));
 }
 
 #[test]
 fn sit_toggle_works_on_the_joiners_own_pet_only() {
-    let mut rig = Rig::new("sit", 1);
+    let mut rig = Rig::new_lent("sit", 1);
     let key = rig.sign_in(0);
     let (mine, my_id) = rig.spawn(MobType::Wolf, Vec3::new(1.0, 0.0, 1.5));
     let (theirs, their_id) = rig.spawn(MobType::Wolf, Vec3::new(-1.0, 0.0, 1.5));
-    rig.hs.server.ecs.get::<&mut crate::wolf::WolfData>(mine).unwrap().ownership.owner_pubkey = key;
-    rig.hs.server.ecs.get::<&mut crate::wolf::WolfData>(theirs).unwrap().ownership.owner_pubkey =
+    rig.ecs_mut().get::<&mut crate::wolf::WolfData>(mine).unwrap().ownership.owner_pubkey = key;
+    rig.ecs_mut().get::<&mut crate::wolf::WolfData>(theirs).unwrap().ownership.owner_pubkey =
         "npub1someoneelse".into();
     rig.place(mine, Vec3::new(1.0, 0.0, 1.5));
     let s = rig.joiners[0].interact(my_id, InteractKind::SitToggle, None);
     rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
     let out = rig.joiners[0].inbox.outcome(s);
     assert!(out.accepted);
-    assert_eq!(InteractNote::from_wire(out.note), InteractNote::Sat);
-    assert_eq!(
-        rig.hs.server.ecs.get::<&crate::wolf::WolfData>(mine).unwrap().state,
-        crate::wolf::WolfAiState::Sit
-    );
+    assert_eq!(note(out), InteractNote::Sat);
+    assert_eq!(rig.ecs().get::<&crate::wolf::WolfData>(mine).unwrap().state, crate::wolf::WolfAiState::Sit);
 
     rig.place(theirs, Vec3::new(-1.0, 0.0, 1.5));
     let s = rig.joiners[0].interact(their_id, InteractKind::SitToggle, None);
     rig.tick(1);
     let out = rig.joiners[0].inbox.outcome(s);
     assert!(!out.accepted);
-    assert_eq!(InteractNote::from_wire(out.note), InteractNote::NotYourPet);
-    assert_ne!(
-        rig.hs.server.ecs.get::<&crate::wolf::WolfData>(theirs).unwrap().state,
-        crate::wolf::WolfAiState::Sit
-    );
+    assert_eq!(note(out), InteractNote::NotYourPet);
+    assert_ne!(rig.ecs().get::<&crate::wolf::WolfData>(theirs).unwrap().state, crate::wolf::WolfAiState::Sit);
 }
 
 #[test]
 fn a_lead_goes_on_to_the_joiners_body_and_comes_back_off() {
-    let mut rig = Rig::new("lead", 1);
+    let mut rig = Rig::new_lent("lead", 1);
     let slot = rig.joiners[0].slot;
     let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 1.5));
     rig.place(cow, Vec3::new(0.0, 0.0, 1.5));
@@ -476,7 +803,7 @@ fn a_lead_goes_on_to_the_joiners_body_and_comes_back_off() {
     let out = rig.joiners[0].inbox.outcome(s);
     assert!(out.accepted);
     assert_eq!(out.consume_held, 1, "the Lead is used");
-    let tether = rig.hs.server.ecs.get::<&crate::tether::Tethered>(cow).unwrap().target;
+    let tether = rig.ecs().get::<&crate::tether::Tethered>(cow).unwrap().target;
     assert_eq!(tether, crate::tether::TetherTarget::Player(slot), "fastened to the joiner");
 
     rig.place(cow, Vec3::new(0.0, 0.0, 1.5));
@@ -485,13 +812,58 @@ fn a_lead_goes_on_to_the_joiners_body_and_comes_back_off() {
     let out = rig.joiners[0].inbox.outcome(s);
     assert!(out.accepted);
     assert_eq!(out.consume_held, 0);
-    assert!(rig.hs.server.ecs.get::<&crate::tether::Tethered>(cow).is_err());
+    assert!(rig.ecs().get::<&crate::tether::Tethered>(cow).is_err());
     assert_eq!(rig.joiners[0].inbox.granted(MaterialId::Lead), 1, "the Lead comes back");
 }
 
+/// Review D2b B3 — a joiner's Lead on a fence post ties its own leashed mob
+/// to the post (a Lead used), as in single-player; with no leashed mob near,
+/// or the post out of reach, nothing happens and nothing is used.
+#[test]
+fn a_joiners_lead_on_a_fence_post_ties_its_leashed_mob_there() {
+    let mut rig = Rig::new_lent("post", 1);
+    let lead = mat(MaterialId::Lead);
+    let post = [rig.at.x as i32 + 2, rig.at.y as i32, rig.at.z as i32 + 1];
+    rig.world_mut().set_block(post[0], post[1], post[2], block::OAK_FENCE_POST);
+
+    // Nothing leashed yet: refused, nothing used.
+    let s = rig.joiners[0].interact(0, InteractKind::LeadToPost { post }, Some(&lead));
+    rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
+    let out = rig.joiners[0].inbox.outcome(s);
+    assert!(!out.accepted && out.consume_held == 0, "no mob of ours to tie");
+
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 1.5));
+    rig.place(cow, Vec3::new(0.0, 0.0, 1.5));
+    let s = rig.joiners[0].interact(id, InteractKind::LeadAttach, Some(&lead));
+    rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
+    assert!(rig.joiners[0].inbox.outcome(s).accepted);
+
+    rig.place(cow, Vec3::new(1.0, 0.0, 1.5));
+    let s = rig.joiners[0].interact(0, InteractKind::LeadToPost { post }, Some(&lead));
+    rig.tick(crate::hosted_server::INTERACT_COOLDOWN_TICKS);
+    let out = rig.joiners[0].inbox.outcome(s);
+    assert!(out.accepted, "tied to the post");
+    assert_eq!(out.consume_held, 1, "a Lead is used, as in single-player");
+    assert_eq!(out.kind, Some(InteractKind::LeadToPost { post }));
+    assert_eq!(
+        rig.ecs().get::<&crate::tether::Tethered>(cow).unwrap().target,
+        crate::tether::TetherTarget::Post(post)
+    );
+
+    // A post far out of reach of the joiner's server body: refused.
+    let far = [post[0] + 12, post[1], post[2]];
+    rig.world_mut().set_block(far[0], far[1], far[2], block::OAK_FENCE_POST);
+    let s = rig.joiners[0].interact(0, InteractKind::LeadToPost { post: far }, Some(&lead));
+    rig.tick(1);
+    let out = rig.joiners[0].inbox.outcome(s);
+    assert!(!out.accepted && out.consume_held == 0, "out of reach");
+}
+
+/// On a lending host, where feeding is simulated, so the refusals here are
+/// reach and the cooldown alone.
 #[test]
 fn an_interaction_out_of_reach_or_too_soon_is_refused_and_takes_nothing() {
-    let mut rig = Rig::new("interact-refuse", 1);
+    let mut rig = Rig::new_lent("interact-refuse", 1);
     let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 8.0));
     rig.place(cow, Vec3::new(0.0, 0.0, 8.0));
     let wheat = mat(MaterialId::Wheat);
@@ -499,7 +871,7 @@ fn an_interaction_out_of_reach_or_too_soon_is_refused_and_takes_nothing() {
     rig.tick(1);
     let out = rig.joiners[0].inbox.outcome(far);
     assert!(!out.accepted && out.consume_held == 0);
-    assert!(rig.hs.server.ecs.get::<&crate::breeding::InLove>(cow).is_err());
+    assert!(rig.ecs().get::<&crate::breeding::InLove>(cow).is_err());
 
     rig.place(cow, Vec3::new(0.0, 0.0, 1.5));
     let first = rig.joiners[0].interact(id, InteractKind::Milk, Some(&mat(MaterialId::Bucket)));

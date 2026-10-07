@@ -35,12 +35,17 @@ impl HeadlessGame {
         state.mode = GameMode::Loading(crate::loading_screen::LoadingState::new(
             world_name.to_string(),
         ));
+        // Bounded by wall-clock time, not a frame count: the loading screen
+        // stays up for `loading_screen::MIN_DISPLAY_SECS` of real time, and
+        // headless frames with nothing to paint can run past 4,000 a second,
+        // so a 20,000-frame cap flaked on a fast frame rate.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let mut frames = 0u32;
         while !matches!(state.mode, GameMode::Playing) {
             state.update_and_render();
             frames += 1;
             assert!(
-                frames < 20_000,
+                std::time::Instant::now() < deadline,
                 "world load never reached Playing (mode stuck after {frames} frames)"
             );
         }
@@ -553,5 +558,249 @@ mod tests {
         }
         let hp = hg.state.players[0].combat.health;
         assert!((10.0..=11.5).contains(&hp), "the joiner shows the server's health, got {hp}");
+    }
+
+    /// Review D2b LOW-8 — a joiner's swing through its REAL client: the
+    /// request leaves `send_entity_attack`, the server lands it, and the
+    /// client applies the answers in `network_receive` — the accepted
+    /// `InteractOutcome` wears its sword (`apply_interact_outcome`) and the
+    /// `KillEvent` runs its kill attribution (`apply_kill_event` →
+    /// `credit_kill`: the kill counter).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_swing_wears_its_sword_and_its_kill_is_counted() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-swing");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-swing-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Swinger", 0),
+            None,
+        ));
+        let step = |server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame| {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        };
+        for _ in 0..5 {
+            step(&mut server, &mut hg);
+        }
+        let sword = crate::item::Item::Tool(crate::crafting::Tool::new(
+            crate::crafting::ToolType::Sword,
+            crate::crafting::ToolMaterial::Iron,
+        ));
+        let hot = hg.state.players[0].hotbar_slot;
+        hg.state.players[0]
+            .inventory
+            .set_slot(hot, Some(crate::item::ItemStack { item: sword, count: 1 }));
+        let durability = |hg: &HeadlessGame| match &hg.state.players[0].inventory.hotbar_slot(hot).unwrap().item {
+            crate::item::Item::Tool(t) => t.durability,
+            _ => unreachable!(),
+        };
+        let before = durability(&hg);
+
+        // A chicken one hit from death, right in front of the joiner's body.
+        let sp = server.server.players.last().expect("the joiner is seated");
+        let ahead = crate::camera::forward_from(sp.yaw, 0.0);
+        let at = sp.player.pos + ahead * 1.5;
+        let chicken = crate::entity::spawn_mob(&mut server.server.ecs, crate::mob::MobType::Chicken, at);
+        server.server.ecs.get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
+        step(&mut server, &mut hg);
+        let id = server.server.ecs.get::<&crate::entity::ProtocolId>(chicken).expect("broadcast").0;
+        server.server.ecs.get::<&mut crate::entity::Position>(chicken).unwrap().0 = at;
+        hg.state.send_entity_attack(
+            0,
+            crate::remote_mobs::MirrorTarget {
+                id,
+                kind: crate::mob::MobType::Chicken,
+                tamed: false,
+                baby: false,
+                tethered: false,
+            },
+            false,
+            false,
+        );
+        for _ in 0..4 {
+            step(&mut server, &mut hg);
+        }
+        assert_eq!(durability(&hg), before - 1, "the confirmed swing wore the sword");
+        assert_eq!(
+            hg.state.players[0].kill_counter.get(&crate::mob::MobType::Chicken).copied(),
+            Some(1),
+            "the server's KillEvent ran the joiner's kill attribution"
+        );
+    }
+
+    /// Review D2b LOW-8 — the lending host's REAL death sweep, breeding step
+    /// and species dispatch (`GameState::tick`, where they run while the host
+    /// lends): a mob a joiner hit dies beside the host's own player and the
+    /// kill goes to the joiner as a `KillEvent`, not to the host; two cows a
+    /// joiner fed breed and the joiner is told (`Bred`); and a bee whose sting
+    /// is due at the joiner's slot lands on its server body (the
+    /// `species_bodies` index and the `target_slot >= num_local` routing).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_lending_hosts_sweep_and_breeding_credit_the_joiner() {
+        use crate::transport::ClientTransport;
+        isolate_saves();
+        let name = "harness-lend-credit";
+        let mut hg = HeadlessGame::boot_into_world(name);
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let seed = hg.state.biome_gen.seed;
+        let hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            name.to_string(),
+            seed,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Lent,
+        )
+        .expect("lending host starts");
+        hg.state.hosted_server = Some(hs);
+        let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Visitor", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(
+            crate::protocol::PacketType::JoinRequest,
+            &req,
+        ));
+        hg.hosted_ticks(8);
+        let server = &hg.state.hosted_server.as_ref().unwrap().server;
+        let slot = server.players.len() - 1;
+        let joiner = crate::combat::Attacker::Remote {
+            slot,
+            generation: server.players[slot].attach_gen,
+        };
+
+        // A chicken the joiner hit dies right beside the host's own player.
+        let host = hg.state.players[0].player.pos;
+        let chicken = crate::entity::spawn_mob(
+            &mut hg.state.ecs,
+            crate::mob::MobType::Chicken,
+            host + glam::Vec3::new(0.5, 0.0, 0.0),
+        );
+        hg.state.ecs.insert_one(chicken, crate::combat::LastAttacker(joiner)).unwrap();
+        hg.state.ecs.get::<&mut crate::combat::Health>(chicken).unwrap().current = 0.0;
+        // Two cows the joiner fed, side by side.
+        for dx in [2.0, 2.5] {
+            let cow = crate::entity::spawn_mob(
+                &mut hg.state.ecs,
+                crate::mob::MobType::Cow,
+                host + glam::Vec3::new(dx, 0.0, 2.0),
+            );
+            hg.state
+                .ecs
+                .insert_one(cow, crate::breeding::InLove { until_tick: u64::MAX, fed_by: Some(joiner) })
+                .unwrap();
+        }
+        // A bee whose sting at the joiner's slot is due now.
+        hg.state.difficulty = "normal".to_string();
+        let bee = crate::entity::spawn_mob(
+            &mut hg.state.ecs,
+            crate::mob::MobType::Bee,
+            host + glam::Vec3::new(-3.0, 1.0, 0.0),
+        );
+        hg.state.ecs.get::<&mut crate::bee_ai::BeeData>(bee).unwrap().state =
+            crate::bee_ai::BeeAiState::Sting { target_id: slot as u64, until_tick: 0 };
+        let joiner_hp = hg.state.hosted_server.as_ref().unwrap().server.players[slot].combat.health;
+        let before = hg.state.players[0].kill_counter.get(&crate::mob::MobType::Chicken).copied();
+        hg.hosted_ticks(3);
+        assert!(hg.state.ecs.get::<&crate::bee_ai::BeeData>(bee).is_err(), "the bee stung and died");
+        assert!(
+            hg.state.hosted_server.as_ref().unwrap().server.players[slot].combat.health < joiner_hp,
+            "the sting landed on the joiner's server body"
+        );
+        assert!(hg.state.ecs.get::<&crate::combat::Health>(chicken).is_err(), "swept");
+        assert_eq!(
+            hg.state.players[0].kill_counter.get(&crate::mob::MobType::Chicken).copied(),
+            before,
+            "the host's player is not credited with the joiner's kill"
+        );
+        let (mut kills, mut bred) = (0, false);
+        while let Some(pkt) = client.try_recv_from_server() {
+            let Some((ptype, payload)) = crate::protocol::deserialize_header(&pkt) else { continue };
+            match ptype {
+                crate::protocol::PacketType::KillEvent => kills += 1,
+                crate::protocol::PacketType::PlayerEvent => {
+                    let e: crate::protocol::PlayerEventPacket =
+                        crate::protocol::safe_deserialize(payload).unwrap();
+                    bred |= matches!(e.event, crate::protocol::PlayerEventType::Bred { .. });
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(kills, 1, "the joiner is told of its kill");
+        assert!(bred, "the joiner is told of the breed it fed");
+    }
+
+    /// Review D2b B1 — through the REAL per-frame player loop: a bucket held
+    /// with a ready cow in the crosshair for many frames WITHOUT a right-click
+    /// milks nothing (before the fix it milked on the first such frame), and
+    /// companion food held on a wild cat rolls no tame and is never eaten. One
+    /// right-click then milks the cow — so it really was in reach all along.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_milking_and_companion_taming_wait_for_a_right_click() {
+        use crate::item::{ItemStack, MaterialId};
+        use crate::mob::MobType;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-b1-click");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        hg.state.players[0].camera.yaw = 0.0;
+        hg.state.players[0].camera.pitch = 0.0;
+        // Held 1.5 blocks straight ahead of the player, at its feet, every
+        // frame (mob AI would walk it out of the crosshair).
+        let pin = |hg: &mut HeadlessGame, e: hecs::Entity| {
+            let slot = &hg.state.players[0];
+            let at = slot.player.pos + slot.camera.forward() * 1.5;
+            hg.state.ecs.get::<&mut crate::entity::Position>(e).unwrap().0 = at;
+            hg.state.ecs.get::<&mut crate::entity::Velocity>(e).unwrap().0 = glam::Vec3::ZERO;
+        };
+        let count = |hg: &HeadlessGame, m: MaterialId| hg.state.players[0].inventory.count_material(m);
+        let hot = hg.state.players[0].hotbar_slot;
+        hg.state.input.right_held = false;
+
+        hg.state.players[0].inventory.set_slot(hot, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        let cow = crate::entity::spawn_mob(&mut hg.state.ecs, MobType::Cow, glam::Vec3::ZERO);
+        for _ in 0..120 {
+            pin(&mut hg, cow);
+            hg.frames(1);
+        }
+        assert_eq!(count(&hg, MaterialId::Bucket), 1, "no click: the bucket stays");
+        assert_eq!(count(&hg, MaterialId::MilkBucket), 0, "no click: no milk");
+
+        hg.state.players[0].inventory.set_slot(hot, Some(ItemStack::new_material(MaterialId::RawFish, 16)));
+        let _ = hg.state.ecs.despawn(cow);
+        let cat = crate::entity::spawn_mob(&mut hg.state.ecs, MobType::Cat, glam::Vec3::ZERO);
+        for _ in 0..120 {
+            pin(&mut hg, cat);
+            hg.frames(1);
+        }
+        assert_eq!(count(&hg, MaterialId::RawFish), 16, "no click: no food eaten");
+        assert!(crate::tameable::pet_owner_of(&hg.state.ecs, cat).is_none(), "and no tame");
+
+        // The control: one right-click milks a cow held where the first was.
+        let _ = hg.state.ecs.despawn(cat);
+        hg.state.players[0].inventory.set_slot(hot, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        let cow = crate::entity::spawn_mob(&mut hg.state.ecs, MobType::Cow, glam::Vec3::ZERO);
+        pin(&mut hg, cow);
+        hg.state.players[0].place_cooldown = 0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.right_held = true;
+        hg.frames(1);
+        hg.state.input.right_held = false;
+        assert_eq!(count(&hg, MaterialId::MilkBucket), 1, "the click milks it");
+        assert_eq!(count(&hg, MaterialId::Bucket), 0);
     }
 }

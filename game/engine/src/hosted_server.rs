@@ -36,10 +36,12 @@ use crate::transport::{self, ChannelClientTransport, ServerTransport};
 /// tick), plus the body's own prediction error (a snap only past 1 block).
 pub const ATTACK_REACH_TOLERANCE: f32 = 1.5;
 
-/// MP-D2b — the server's cooldown between a joiner's swings: the client's
-/// `combat::ATTACK_COOLDOWN` less this much network jitter, so two swings
-/// the client spaced a full cooldown apart are never refused for arriving a
-/// tick or two closer together. A second swing in the same tick always is.
+/// MP-D2b — how early a joiner's swing may arrive on the server's schedule
+/// (`ServerPlayer::next_swing_tick`, review D2b LOW-2): two swings the client
+/// spaced a full `combat::ATTACK_COOLDOWN` apart are never refused for
+/// arriving a tick or two closer together, but each accepted swing moves the
+/// schedule a full cooldown on, so the long-run rate is the client's. A
+/// second swing in the same tick is always refused.
 pub const ATTACK_COOLDOWN_JITTER_TICKS: u32 = 3;
 
 /// MP-D2b — the server's cooldown between a joiner's one-shot interactions
@@ -51,6 +53,13 @@ pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
 /// tick (their own budget, not the block-change one's); the rest are dropped
 /// unanswered.
 const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
+
+/// Review D2b LOW-2 — how far ahead of a joiner's server body a target must
+/// be for its swing or right-click: `dot(look, to-target) >= 0`, the half
+/// space ahead. Lenient on purpose (single-player's pick wants 0.5, 60°): the
+/// server holds the look of the joiner's last input, which may lag a quick
+/// turn by a round trip.
+pub const JOINER_MIN_FACING_DOT: f32 = 0.0;
 
 /// D1 — where a hosted server's world lives (`crate::sim_lend`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +549,9 @@ impl HostedServer {
         // WebSocket dedicated path) starts with 0. A lent world's machines
         // are the host client's, so this is never set on a lending server.
         server.simulates_block_machines = num_local_players == 0;
+        // Review D2b MEDIUM-2 — breeding, Leads and pets following run only
+        // in a host client's sim, so only on the world a host lends.
+        server.animal_life_simulated = host_world == HostWorld::Lent;
         assign_column_loading(&mut server, num_local_players, host_world);
         match host_world {
             // A world on disk that fails to load is refused here — before the
@@ -935,6 +947,7 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn set_host_world_for_test(&mut self, host_world: HostWorld) {
         self.host_world = host_world;
+        self.server.animal_life_simulated = host_world == HostWorld::Lent;
         assign_column_loading(&mut self.server, self.num_local_players, host_world);
     }
 
@@ -1474,6 +1487,13 @@ impl HostedServer {
             sp.connected = false;
             sp.pending_intent = None;
             sp.intent_queue.clear();
+            // Review D2b MEDIUM-1 — what this connection stamped on the
+            // world's mobs (its hits, its feeds, a Bear's grudge) is forgotten
+            // at the top of the next server tick, before the slot's next
+            // occupant can act.
+            if sp.server_simulated {
+                self.server.released_joiners.push((i, sp.attach_gen));
+            }
         }
         if i >= self.num_local_players {
             if let Some(reason) = tell_client {
@@ -1594,6 +1614,17 @@ impl HostedServer {
             let pkt = protocol::serialize_packet(protocol::PacketType::KillEvent, &kill);
             self.send_to_joined_slot(slot, &pkt);
         }
+        // Review D2b B2 — babies born to animals a joiner fed.
+        for (slot, offspring) in std::mem::take(&mut self.server.pending_bred_events) {
+            let pkt = protocol::serialize_packet(
+                protocol::PacketType::PlayerEvent,
+                &protocol::PlayerEventPacket {
+                    player_index: slot as u32,
+                    event: protocol::PlayerEventType::Bred { offspring },
+                },
+            );
+            self.send_to_joined_slot(slot, &pkt);
+        }
     }
 
     /// MP-D2b — the server's own entity `id` (its `ProtocolId`) as joiner
@@ -1601,7 +1632,11 @@ impl HostedServer {
     /// `combat::ATTACK_REACH` + [`ATTACK_REACH_TOLERANCE`] of the eye of the
     /// body the server holds for `i`, which must itself be a present, living
     /// joiner. The entity is looked up now (it may have died since the
-    /// client saw it).
+    /// client saw it). Review D2b LOW-2 — and in front of the body (the
+    /// server's last look direction for it, leniently: anywhere in the half
+    /// space ahead, for the look that changed in flight); single-player's
+    /// pick wants it within 60°. Review D2b LOW-3 — never a perched parrot,
+    /// which single-player's pick skips for every gesture.
     fn joiner_target(&self, i: usize, id: u32) -> Option<(hecs::Entity, crate::mob::MobType)> {
         let sp = self.server.players.get(i)?;
         if !sp.server_simulated || !sp.is_present_and_alive() {
@@ -1617,11 +1652,20 @@ impl HostedServer {
         if ecs.get::<&crate::combat::Health>(e).ok()?.is_dead() {
             return None;
         }
+        if ecs
+            .get::<&crate::companion::CompanionData>(e)
+            .is_ok_and(|d| d.state == crate::companion::CompanionState::Perch)
+        {
+            return None;
+        }
         let pos = ecs.get::<&crate::entity::Position>(e).ok()?.0;
         let height = ecs.get::<&crate::entity::Hitbox>(e).map_or(0.0, |h| h.height);
         let centre = pos + glam::Vec3::new(0.0, height * 0.5, 0.0);
         let reach = crate::combat::ATTACK_REACH + ATTACK_REACH_TOLERANCE;
-        ((centre - sp.player.eye_pos()).length() <= reach).then_some((e, kind))
+        let to_target = centre - sp.player.eye_pos();
+        let ahead = to_target.normalize_or_zero().dot(crate::camera::forward_from(sp.yaw, sp.pitch))
+            >= JOINER_MIN_FACING_DOT;
+        (to_target.length() <= reach && ahead).then_some((e, kind))
     }
 
     /// MP-D2b — joiner `i` swings at `req.entity`. Validated (a living mob in
@@ -1650,11 +1694,13 @@ impl HostedServer {
             return false;
         }
         let sp = &mut self.server.players[i];
-        if !sp.combat.can_attack() {
+        // Review D2b LOW-2 — on the server's schedule: up to the jitter
+        // early, and each swing moves it a full cooldown on (never banking
+        // swings an idle client didn't make).
+        if tick + u64::from(ATTACK_COOLDOWN_JITTER_TICKS) < sp.next_swing_tick {
             return false;
         }
-        sp.combat.attack_cooldown =
-            crate::combat::ATTACK_COOLDOWN.saturating_sub(ATTACK_COOLDOWN_JITTER_TICKS);
+        sp.next_swing_tick = sp.next_swing_tick.max(tick) + u64::from(crate::combat::ATTACK_COOLDOWN);
         // BRIDGE: possession check — replace when phase C makes joiner
         // inventories server-authoritative. The held item is the client's
         // word (as a block placement's is, `validate_block_edit`): it sets
@@ -1669,7 +1715,7 @@ impl HostedServer {
             &mut self.server.ecs,
             target,
             &crate::combat::Swing {
-                attacker: crate::combat::Attacker::Remote(i),
+                attacker: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
                 owner_key: &key,
                 eye,
                 look_dir,
@@ -1725,7 +1771,18 @@ impl HostedServer {
         i: usize,
         req: &protocol::EntityInteractPacket,
     ) -> Option<crate::mob_interact::Interaction> {
+        // Review D2b B3 — a Lead on a fence post names a block, not a mob.
+        if let protocol::InteractKind::LeadToPost { post } = req.kind {
+            return self.run_joiner_lead_to_post(i, req, post);
+        }
         let (target, kind) = self.joiner_target(i, req.entity)?;
+        // Review D2b MEDIUM-2 — what this world doesn't simulate (breeding,
+        // Leads, pets following) is refused, not taken for nothing.
+        if !self.server.animal_life_simulated && crate::mob_interact::needs_animal_life(req.kind) {
+            return Some(crate::mob_interact::Interaction::refused(
+                crate::mob_interact::InteractNote::NotOnThisServer,
+            ));
+        }
         let tick = self.server.tick_counter;
         let sp = &mut self.server.players[i];
         if sp.interact_cooldown > 0 {
@@ -1741,6 +1798,7 @@ impl HostedServer {
         let actor = crate::mob_interact::Actor {
             owner_key: key.as_deref(),
             tether: crate::tether::TetherTarget::Player(i),
+            who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
         };
         crate::mob_interact::run(
             &mut self.server.ecs,
@@ -1752,6 +1810,49 @@ impl HostedServer {
             &actor,
             tick,
         )
+    }
+
+    /// Review D2b B3 — joiner `i` puts a Lead on the fence post at `post`:
+    /// `mob_interact::lead_to_post`, the single-player rule, with the
+    /// joiner's own leashed mobs (`TetherTarget::Player(i)`). The post must
+    /// be within block reach of the server body's eye (the reach a joiner's
+    /// block edit gets) and the server must run the Leads (MEDIUM-2); the
+    /// interaction cooldown applies.
+    fn run_joiner_lead_to_post(
+        &mut self,
+        i: usize,
+        req: &protocol::EntityInteractPacket,
+        post: [i32; 3],
+    ) -> Option<crate::mob_interact::Interaction> {
+        let sp = self.server.players.get(i)?;
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            return None;
+        }
+        let centre = glam::Vec3::new(post[0] as f32 + 0.5, post[1] as f32 + 0.5, post[2] as f32 + 0.5);
+        // A joiner's block-edit reach: the held item is its word, so no
+        // reach bonus.
+        if !block_change_within_reach((centre - sp.player.eye_pos()).length_squared(), 0, 0, true) {
+            return None;
+        }
+        if !self.server.animal_life_simulated {
+            return Some(crate::mob_interact::Interaction::refused(
+                crate::mob_interact::InteractNote::NotOnThisServer,
+            ));
+        }
+        let sp = &mut self.server.players[i];
+        if sp.interact_cooldown > 0 {
+            return None;
+        }
+        sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
+        // BRIDGE: possession check — the Lead in hand is the client's word
+        // (see `run_joiner_interaction`).
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        let actor = crate::mob_interact::Actor {
+            owner_key: None,
+            tether: crate::tether::TetherTarget::Player(i),
+            who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
+        };
+        crate::mob_interact::lead_to_post(&mut self.server.ecs, &self.server.world, post, held.as_ref(), &actor)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1963,6 +2064,10 @@ impl HostedServer {
         let mut remote = crate::server::ServerPlayer::new(self.join_spawn());
         // Remote players run server-simulated physics (Task 1d).
         remote.server_simulated = true;
+        // Review D2b MEDIUM-1 — a fresh generation per connection, so nothing
+        // credited to an earlier occupant of a reused slot reaches this one.
+        self.server.next_attach_gen = self.server.next_attach_gen.wrapping_add(1).max(1);
+        remote.attach_gen = self.server.next_attach_gen;
         // Not in the world until the join handshake completes: no survival
         // damage, no pickups, no mob targeting (`ServerPlayer::awaiting_join`).
         remote.awaiting_join = true;

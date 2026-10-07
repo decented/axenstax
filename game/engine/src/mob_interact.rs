@@ -35,6 +35,10 @@ pub struct Actor<'a> {
     /// What a Lead this actor attaches (or a freshly tamed pet's auto-leash)
     /// is fastened to: the actor's player slot.
     pub tether: TetherTarget,
+    /// Who the actor is, as a kill or a breed credits it: a local player's
+    /// slot, or a joiner's slot + connection generation. Recorded on an
+    /// animal it feeds (`breeding::InLove::fed_by`, review D2b B2).
+    pub who: crate::combat::Attacker,
 }
 
 /// What the player is told about an interaction. Wire-stable codes
@@ -59,6 +63,9 @@ pub enum InteractNote {
     CompanionPerch = 14,
     SignInToTame = 15,
     NotYourPet = 16,
+    /// Review D2b MEDIUM-2 — the server does not simulate what this needs
+    /// (breeding, Leads, pets following): refused, nothing used.
+    NotOnThisServer = 17,
 }
 
 impl InteractNote {
@@ -86,19 +93,20 @@ impl InteractNote {
             14 => CompanionPerch,
             15 => SignInToTame,
             16 => NotYourPet,
+            17 => NotOnThisServer,
             _ => None,
         }
     }
 
-    /// The toast for this note on a `kind` mob, and how long it shows
-    /// (seconds); `first_tame_hint` = this is the session's first tame, whose
-    /// toast teaches the pet-command gesture. UK English; the single-player
-    /// wording, verbatim.
-    pub fn toast(self, kind: MobType, first_tame_hint: bool) -> Option<(String, u64)> {
+    /// The toast for this note on a `kind` mob (`None`: no mob — a Lead on a
+    /// fence post), and how long it shows (seconds); `first_tame_hint` = this
+    /// is the session's first tame, whose toast teaches the pet-command
+    /// gesture. UK English; the single-player wording, verbatim.
+    pub fn toast(self, kind: Option<MobType>, first_tame_hint: bool) -> Option<(String, u64)> {
         use InteractNote::*;
-        let wolf = kind == MobType::Wolf;
-        let nostrich = kind == MobType::Nostrich;
-        let name = &crate::mob::mob_def(kind).name;
+        let wolf = kind == Some(MobType::Wolf);
+        let nostrich = kind == Some(MobType::Nostrich);
+        let name: &str = kind.map_or("It", |k| &crate::mob::mob_def(k).name);
         let s = |t: &str, secs: u64| Some((t.to_string(), secs));
         match self {
             None => Option::None,
@@ -129,6 +137,7 @@ impl InteractNote {
             CompanionPerch => Some((format!("{name}: Perch (hops to your shoulder)"), 2)),
             SignInToTame => s("Sign in to tame animals in someone else's world.", 3),
             NotYourPet => s("That's not your pet.", 2),
+            NotOnThisServer => s("This server doesn't support that yet.", 3),
         }
     }
 
@@ -171,7 +180,7 @@ impl Interaction {
         Self { done: true, consume, give: Vec::new(), note, challenge: None, tamed: false }
     }
 
-    fn refused(note: InteractNote) -> Self {
+    pub fn refused(note: InteractNote) -> Self {
         Self { done: false, consume: 0, give: Vec::new(), note, challenge: None, tamed: false }
     }
 }
@@ -200,13 +209,15 @@ fn settle_new_pet(ecs: &mut hecs::World, target: hecs::Entity, tether: Option<Te
 /// P5 — an adult's breeding food puts it in love mode (two in-love adults of
 /// a species pair into a baby on the breeding tick). The horse family only
 /// while sneaking (plain right-click mounts it). Not a baby, not on its
-/// breeding cooldown, not already in love.
+/// breeding cooldown, not already in love. `fed_by` is recorded on the
+/// animal, so the baby credits its feeder (review D2b B2).
 pub fn feed(
     ecs: &mut hecs::World,
     target: hecs::Entity,
     kind: MobType,
     held: Option<&Item>,
     sneak: bool,
+    fed_by: crate::combat::Attacker,
     tick: u64,
 ) -> Option<Interaction> {
     let mat = held_material(held)?;
@@ -220,7 +231,10 @@ pub fn feed(
     }
     let _ = ecs.insert_one(
         target,
-        crate::breeding::InLove { until_tick: tick + crate::breeding::LOVE_DURATION_TICKS },
+        crate::breeding::InLove {
+            until_tick: tick + crate::breeding::LOVE_DURATION_TICKS,
+            fed_by: Some(fed_by),
+        },
     );
     Some(Interaction::done(1, InteractNote::Fed))
 }
@@ -530,8 +544,63 @@ pub fn lead_detach(
     Some(done)
 }
 
-/// A joiner's `EntityInteract` of kind `action`, by the same rules
-/// (`None` = it does not apply: refused).
+/// Spec 36 — a Lead on a fence post: the actor's leashed mob nearest the
+/// post (within [`POST_TRANSFER_RADIUS`] blocks, horizontally) is tied to
+/// the post instead, and the Lead is used. `None` when `post` isn't a fence
+/// post, the hand holds no Lead, or no mob of the actor's is near enough.
+/// Single-player's right-click and a joiner's `LeadToPost` (review D2b B3).
+pub fn lead_to_post(
+    ecs: &mut hecs::World,
+    world: &crate::world::World,
+    post: [i32; 3],
+    held: Option<&Item>,
+    actor: &Actor,
+) -> Option<Interaction> {
+    if held_material(held) != Some(MaterialId::Lead)
+        || !crate::block::is_fence_post(world.get_block(post[0], post[1], post[2]))
+    {
+        return None;
+    }
+    let anchor = glam::Vec3::new(post[0] as f32 + 0.5, post[1] as f32 + 1.0, post[2] as f32 + 0.5);
+    let mut best: Option<(hecs::Entity, f32)> = None;
+    for (id, (pos, tether)) in ecs.query::<(&Position, &Tethered)>().iter() {
+        if tether.target != actor.tether {
+            continue;
+        }
+        let dist = glam::Vec2::new(pos.0.x - anchor.x, pos.0.z - anchor.z).length();
+        if dist <= POST_TRANSFER_RADIUS && best.is_none_or(|(_, d)| dist < d) {
+            best = Some((id, dist));
+        }
+    }
+    let (mob, _) = best?;
+    let _ = ecs.insert_one(mob, Tethered { target: TetherTarget::Post(post) });
+    Some(Interaction::done(1, InteractNote::None))
+}
+
+/// How far (horizontally, in blocks) from a fence post a leashed mob may be
+/// for a Lead on the post to tie it there ([`lead_to_post`]).
+pub const POST_TRANSFER_RADIUS: f32 = 4.0;
+
+/// Does a joiner's interaction `action` need animal life the server may not
+/// simulate (`GameServer::animal_life_simulated`, review D2b MEDIUM-2)?
+/// Breeding food needs the breeding step; a tame needs the pet to follow
+/// (and a wolf's or Nostrich's auto-leash, the Leads); a Lead on a mob or a
+/// post needs the Leads; a pet command needs the pets' AI. Shearing, milking
+/// and taking a Lead off need nothing that runs over time.
+pub fn needs_animal_life(action: InteractKind) -> bool {
+    match action {
+        InteractKind::Feed
+        | InteractKind::Tame
+        | InteractKind::LeadAttach
+        | InteractKind::SitToggle
+        | InteractKind::LeadToPost { .. } => true,
+        InteractKind::Shear | InteractKind::Milk | InteractKind::LeadDetach => false,
+    }
+}
+
+/// A joiner's `EntityInteract` of kind `action` on the mob `target`, by the
+/// same rules (`None` = it does not apply: refused). `LeadToPost` names no
+/// mob and is [`lead_to_post`]'s.
 pub fn run(
     ecs: &mut hecs::World,
     target: hecs::Entity,
@@ -543,13 +612,14 @@ pub fn run(
     tick: u64,
 ) -> Option<Interaction> {
     match action {
-        InteractKind::Feed => feed(ecs, target, kind, held, sneak, tick),
+        InteractKind::Feed => feed(ecs, target, kind, held, sneak, actor.who, tick),
         InteractKind::Tame => tame(ecs, target, kind, held, actor, tick),
         InteractKind::Shear => shear(ecs, target, kind, held, tick),
         InteractKind::Milk => milk(ecs, target, kind, held, tick),
         InteractKind::LeadAttach => lead_attach(ecs, target, kind, held, actor),
         InteractKind::LeadDetach => lead_detach(ecs, target, held),
         InteractKind::SitToggle => sit_toggle(ecs, target, kind, held, actor),
+        InteractKind::LeadToPost { .. } => None,
     }
 }
 
@@ -559,7 +629,11 @@ mod tests {
     use glam::Vec3;
 
     fn actor(key: Option<&str>) -> Actor<'_> {
-        Actor { owner_key: key, tether: TetherTarget::Player(0) }
+        Actor {
+            owner_key: key,
+            tether: TetherTarget::Player(0),
+            who: crate::combat::Attacker::Local(0),
+        }
     }
 
     fn mat(m: MaterialId) -> Item {
@@ -568,7 +642,7 @@ mod tests {
 
     #[test]
     fn notes_round_trip_the_wire_and_unknown_codes_read_as_nothing() {
-        for code in 0..=16u8 {
+        for code in 0..=17u8 {
             assert_eq!(InteractNote::from_wire(code).to_wire(), code);
         }
         assert_eq!(InteractNote::from_wire(200), InteractNote::None);
@@ -598,6 +672,36 @@ mod tests {
         let r = sit_toggle(&mut ecs, wolf, MobType::Wolf, None, &actor(Some("npub1owner"))).unwrap();
         assert!(r.done);
         assert_eq!(r.note, InteractNote::Sat);
+    }
+
+    /// Review D2b B3 — the fence-post transfer (single-player's Path B and
+    /// a joiner's `LeadToPost`): the actor's OWN leashed mob nearest the post
+    /// within 4 blocks is tied to it, a Lead used; someone else's leashed mob
+    /// and a mob too far off are left alone; no post, no Lead: nothing.
+    #[test]
+    fn a_lead_on_a_fence_post_ties_the_actors_nearest_leashed_mob() {
+        let mut ecs = hecs::World::new();
+        let mut world = crate::world::World::new();
+        let post = [10, 64, 10];
+        let lead = mat(MaterialId::Lead);
+        let me = actor(Some("k"));
+        let other = Actor { tether: TetherTarget::Player(1), ..me };
+        let at = |x: f32| Vec3::new(10.5 + x, 64.0, 10.5);
+        let near = crate::entity::spawn_mob(&mut ecs, MobType::Cow, at(1.0));
+        let nearer_but_theirs = crate::entity::spawn_mob(&mut ecs, MobType::Cow, at(0.5));
+        let far = crate::entity::spawn_mob(&mut ecs, MobType::Cow, at(6.0));
+        for (mob, who) in [(near, &me), (nearer_but_theirs, &other), (far, &me)] {
+            ecs.insert_one(mob, Tethered { target: who.tether }).unwrap();
+        }
+        assert!(lead_to_post(&mut ecs, &world, post, Some(&lead), &me).is_none(), "no post there yet");
+        world.set_block(post[0], post[1], post[2], crate::block::OAK_FENCE_POST);
+        assert!(lead_to_post(&mut ecs, &world, post, None, &me).is_none(), "no Lead in hand");
+        let r = lead_to_post(&mut ecs, &world, post, Some(&lead), &me).expect("tied");
+        assert!(r.done);
+        assert_eq!(r.consume, 1);
+        assert_eq!(ecs.get::<&Tethered>(near).unwrap().target, TetherTarget::Post(post));
+        assert_eq!(ecs.get::<&Tethered>(nearer_but_theirs).unwrap().target, TetherTarget::Player(1));
+        assert_eq!(ecs.get::<&Tethered>(far).unwrap().target, TetherTarget::Player(0));
     }
 
     #[test]

@@ -6021,39 +6021,31 @@ impl super::GameState {
         }
 
         // P5 — animal breeding: pair in-love adults into babies + grow
-        // juveniles. Returns baby (species, pos) to spawn; the spawn happens
-        // here so entity creation stays out of the breeding query borrow.
-        let new_babies = crate::breeding::tick_breeding(&mut self.ecs, self.tick_counter);
-        // Task 19 — fire one event per baby, carrying its species, so a
-        // species-filtered trial (e.g. "breed a Mule") can tell a hybrid
-        // foal apart from an everyday same-species baby.
-        for spec in &new_babies {
-            self.fire_challenge(crate::scenario::ChallengeEvent::BreedAnimals {
-                offspring: Some(spec.kind),
-            });
-        }
-        for spec in new_babies {
-            let baby = crate::entity::spawn_mob(&mut self.ecs, spec.kind, spec.pos);
-            let _ = self.ecs.insert_one(baby, crate::breeding::Baby {
-                adult_at_tick: self.tick_counter + crate::breeding::BABY_GROW_TICKS,
-            });
-            // A newborn can't itself breed until it's grown.
-            let _ = self.ecs.insert_one(baby, crate::breeding::BreedCooldown {
-                until_tick: self.tick_counter + crate::breeding::BABY_GROW_TICKS,
-            });
-            // Wave 1A — the baby inherits its parents' genetics (overwrites the
-            // wild-genetics spawn_mob attached, which is the right call: a bred
-            // baby's traits come from its parents, not the wild distribution).
-            let _ = self.ecs.insert_one(baby, spec.genetics);
+        // juveniles, and spawn the babies (`breeding::client_step`, the
+        // GPU-free step a test drives on a lent world).
+        let server = self.hosted_server.as_mut().map(|hs| &mut hs.server);
+        let born = crate::breeding::client_step(&mut self.ecs, self.tick_counter, server);
+        for baby in born {
+            // Task 19 — one event per baby, carrying its species, so a
+            // species-filtered trial (e.g. "breed a Mule") can tell a hybrid
+            // foal apart from an everyday same-species baby. Review D2b B2 —
+            // only when this client's player fed a parent: a joiner's feed is
+            // that joiner's breed (a `PlayerEventType::Bred` through the
+            // host's server), never this client's players'.
+            if baby.credit_here {
+                self.fire_challenge(crate::scenario::ChallengeEvent::BreedAnimals {
+                    offspring: Some(baby.kind),
+                });
+            }
             // UX polish sweep Task 1 — baby-born was 100% silent; a green
             // poof + toast so the moment actually reads to the player.
             self.particles.poof_green(
-                spec.pos,
+                baby.pos,
                 6,
-                self.tick_counter ^ (baby.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                self.tick_counter ^ (baby.entity.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
             );
             self.toast = Some((
-                format!("A baby {} was born!", crate::mob::mob_def(spec.kind).name),
+                format!("A baby {} was born!", crate::mob::mob_def(baby.kind).name),
                 Instant::now() + Duration::from_secs(3),
             ));
         }
@@ -6488,8 +6480,9 @@ impl super::GameState {
             Option<&crate::combat::LastAttacker>,
         )>().iter() {
             if health.is_dead() {
-                let by_joiner =
-                    last.is_some_and(|l| matches!(l.0, crate::combat::Attacker::Remote(_)));
+                // A departed joiner's hit is still a joiner's: no defender
+                // here takes the credit for it (Spec 04 §4.2d).
+                let by_joiner = last.is_some_and(|l| l.0.is_joiner());
                 dying_raid_kills.push((rm.raid_id, pos.0, by_joiner));
             }
         }
@@ -12510,6 +12503,28 @@ impl super::GameState {
                 continue;
             }
 
+            // Review D2b B3 — a Lead on a fence post while joined: the mob it
+            // holds lives in the server's world, under our server slot, so the
+            // transfer is the server's (`InteractKind::LeadToPost`); the Lead
+            // comes out of the hand only when it accepts.
+            if intent.place_block
+                && intent.cursor_captured
+                && self.players[pidx].place_cooldown == 0
+                && self.joined()
+                && let Some(pos) = self.players[pidx].target_block
+                && crate::block::is_fence_post(self.world.get_block(pos[0], pos[1], pos[2]))
+                && self.players[pidx]
+                    .inventory
+                    .hotbar_slot(self.players[pidx].hotbar_slot)
+                    .is_some_and(|s| {
+                        s.item == crate::item::Item::Material(crate::item::MaterialId::Lead)
+                    })
+            {
+                self.players[pidx].place_cooldown = 8;
+                self.send_lead_to_post(pidx, [pos[0], pos[1], pos[2]], intent.sneak);
+                continue;
+            }
+
             let mut lead_consumed = false;
             if intent.place_block
                 && intent.cursor_captured
@@ -12535,6 +12550,7 @@ impl super::GameState {
                     let actor = crate::mob_interact::Actor {
                         owner_key: Some(&key),
                         tether: crate::tether::TetherTarget::Player(pidx),
+                        who: crate::combat::Attacker::Local(pidx),
                     };
                     if let Some((target, Some(kind))) =
                         crate::combat::find_attack_target(&self.ecs, eye, look_dir)
@@ -12553,61 +12569,25 @@ impl super::GameState {
                             lead_consumed = true;
                         }
                     // Path B — targeting a FENCE_POST → transfer the closest
-                    // player-tethered mob (within reach) to a post anchor.
+                    // player-tethered mob (within reach) to a post anchor
+                    // (`mob_interact::lead_to_post`, shared with a joiner's
+                    // `LeadToPost` on the server, review D2b B3).
                     if !lead_consumed
-                        && let Some(pos) = self.players[pidx].target_block {
-                            let target_blk = self.world.get_block(pos[0], pos[1], pos[2]);
-                            if crate::block::is_fence_post(target_blk) {
-                                let post = [pos[0], pos[1], pos[2]];
-                                // Find the player's tethered mob nearest the post
-                                // (within 4 blocks horizontal). Scoped read-only
-                                // so we don't borrow mut while querying.
-                                let mut best: Option<(hecs::Entity, f32)> = None;
-                                {
-                                    let anchor = glam::Vec3::new(
-                                        post[0] as f32 + 0.5,
-                                        post[1] as f32 + 1.0,
-                                        post[2] as f32 + 0.5,
-                                    );
-                                    for (id, (mob_pos, tether)) in self
-                                        .ecs
-                                        .query::<(&crate::entity::Position, &crate::tether::Tethered)>()
-                                        .iter()
-                                    {
-                                        if !matches!(
-                                            tether.target,
-                                            crate::tether::TetherTarget::Player(p) if p == pidx
-                                        ) {
-                                            continue;
-                                        }
-                                        let dxz = glam::Vec3::new(
-                                            mob_pos.0.x - anchor.x,
-                                            0.0,
-                                            mob_pos.0.z - anchor.z,
-                                        );
-                                        let dist = dxz.length();
-                                        if dist > 4.0 { continue; }
-                                        if best.is_none_or(|(_, d)| dist < d) {
-                                            best = Some((id, dist));
-                                        }
-                                    }
-                                }
-                                if let Some((mob_id, _)) = best {
-                                    let _ = self.ecs.remove_one::<crate::tether::Tethered>(mob_id);
-                                    let _ = self.ecs.insert_one(
-                                        mob_id,
-                                        crate::tether::Tethered {
-                                            target: crate::tether::TetherTarget::Post(post),
-                                        },
-                                    );
-                                    let hot = self.players[pidx].hotbar_slot;
-                                    let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
-                                    self.audio.play_place();
-                                    self.players[pidx].place_cooldown = 8;
-                                    lead_consumed = true;
-                                }
-                            }
-                        }
+                        && let Some(pos) = self.players[pidx].target_block
+                        && crate::mob_interact::lead_to_post(
+                            &mut self.ecs,
+                            &self.world,
+                            [pos[0], pos[1], pos[2]],
+                            held.as_ref(),
+                            &actor,
+                        )
+                        .is_some()
+                    {
+                        let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
+                        self.audio.play_place();
+                        self.players[pidx].place_cooldown = 8;
+                        lead_consumed = true;
+                    }
                 }
             }
             if lead_consumed {
@@ -12649,6 +12629,7 @@ impl super::GameState {
                             kind,
                             Some(&held),
                             intent.sneak,
+                            crate::combat::Attacker::Local(pidx),
                             self.tick_counter,
                         )
                         .is_some()
@@ -12681,136 +12662,85 @@ impl super::GameState {
             // Animals Wave 2 — cow milking + sheep shearing. Right-click an
             // animal with the matching tool; AnimalProductState gates re-use
             // (cows lactate / sheep regrow wool on a cooldown). Finishes the
-            // half-built animal_products path.
-            let mut harvested = false;
+            // half-built animal_products path. `local_mob_click::harvest`
+            // (`mob_interact::milk` / `shear`, shared with a joiner's
+            // `EntityInteract`): on a real right-click only (review D2b B1 —
+            // it used to fire every frame the crosshair rested on the cow).
+            let clicked = crate::local_mob_click::right_click_ready(intent, &self.players[pidx]);
+            let tick = self.tick_counter;
+            if let Some(click) =
+                crate::local_mob_click::harvest(&mut self.ecs, &mut self.players[pidx], clicked, tick)
             {
-                let hot = self.players[pidx].hotbar_slot;
-                let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| s.item.clone());
-                let look_dir = self.players[pidx].camera.forward();
-                let eye = self.players[pidx].player.eye_pos();
-                // `mob_interact::milk` / `shear` — shared with a joiner's
-                // `EntityInteract` on the server (MP-D2b).
-                if let Some((target, Some(kind))) =
-                    crate::combat::find_attack_target(&self.ecs, eye, look_dir)
-                {
-                    let tick = self.tick_counter;
-                    let result = crate::mob_interact::milk(&mut self.ecs, target, kind, held.as_ref(), tick)
-                        .or_else(|| {
-                            crate::mob_interact::shear(&mut self.ecs, target, kind, held.as_ref(), tick)
-                        });
-                    if let Some(r) = result {
-                        harvested = true;
-                        if r.done {
-                            if r.consume > 0
-                                && let Some(crate::item::Item::Material(m)) = held
-                            {
-                                self.players[pidx].inventory.consume_one_material(hot, m);
-                            }
-                            for stack in r.give {
-                                if let Some(leftover) = self.players[pidx].inventory.add_item(stack) {
-                                    let p = self.players[pidx].player.pos;
-                                    crate::entity::spawn_item(&mut self.ecs, p, leftover, tick as u32);
-                                }
-                            }
-                            self.audio.play_place();
-                            self.players[pidx].place_cooldown = 8;
-                            if let Some(ev) = r.challenge {
-                                self.fire_challenge(ev);
-                            }
-                            // UX polish sweep Task 1 — small white-ish puff on
-                            // top of the existing toast.
-                            if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
-                                let salt: u64 = if kind == crate::mob::MobType::Cow {
-                                    668_265_263
-                                } else {
-                                    374_761_393
-                                };
-                                self.particles.puff(
-                                    p.0,
-                                    glam::Vec3::Y,
-                                    3,
-                                    tick ^ (target.id() as u64).wrapping_mul(salt),
-                                );
-                            }
-                        }
-                        if pidx == 0
-                            && let Some((msg, secs)) = r.note.toast(kind, false)
-                        {
-                            self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
-                        }
+                let (target, kind, r) = (click.target, click.kind, click.interaction);
+                if r.done {
+                    self.audio.play_place();
+                    self.players[pidx].place_cooldown = 8;
+                    if let Some(ev) = r.challenge {
+                        self.fire_challenge(ev);
+                    }
+                    // UX polish sweep Task 1 — small white-ish puff on
+                    // top of the existing toast.
+                    if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
+                        let salt: u64 = if kind == crate::mob::MobType::Cow {
+                            668_265_263
+                        } else {
+                            374_761_393
+                        };
+                        self.particles.puff(
+                            p.0,
+                            glam::Vec3::Y,
+                            3,
+                            tick ^ (target.id() as u64).wrapping_mul(salt),
+                        );
                     }
                 }
-            }
-            if harvested {
+                if pidx == 0
+                    && let Some((msg, secs)) = r.note.toast(Some(kind), false)
+                {
+                    self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
+                }
                 continue;
             }
 
             // Companions wave — tame a Cat / Parrot / Fox by right-clicking it
             // with its food (raw fish / seeds / berries). On success it becomes
             // your companion + follows you (dispatch_companions); it's no longer
-            // wild so it survives chunk-unload.
-            let mut companion_tamed = false;
-            {
-                let hot = self.players[pidx].hotbar_slot;
-                let held_mat = self.players[pidx].inventory.hotbar_slot(hot).and_then(|s| {
-                    match &s.item {
-                        crate::item::Item::Material(m) => Some(*m),
-                        _ => None,
-                    }
-                });
-                if let Some(mat) = held_mat {
-                    let look_dir = self.players[pidx].camera.forward();
-                    let eye = self.players[pidx].player.eye_pos();
-                    if let Some((target, Some(kind))) =
-                        crate::combat::find_attack_target(&self.ecs, eye, look_dir)
-                    {
-                        // Pets wave Task 9 — a Cat Treat is a guaranteed tame
-                        // (Cat only); otherwise the species' food rolls.
-                        // `mob_interact::tame_companion`, shared with a
-                        // joiner's `EntityInteract` (MP-D2b).
-                        let key = crate::tameable::local_owner_key(pidx);
-                        let actor = crate::mob_interact::Actor {
-                            owner_key: Some(&key),
-                            tether: crate::tether::TetherTarget::Player(pidx),
-                        };
-                        let held = crate::item::Item::Material(mat);
-                        if let Some(r) = crate::mob_interact::tame_companion(
-                            &mut self.ecs,
-                            target,
-                            kind,
-                            Some(&held),
-                            &actor,
-                            self.tick_counter,
-                        ) {
-                            self.players[pidx].inventory.consume_one_material(hot, mat);
-                            companion_tamed = true;
-                            if let Some(ev) = r.challenge {
-                                self.fire_challenge(ev);
-                            }
-                            // UX polish sweep Task 2 — the FIRST tame of the
-                            // session carries the command-gesture hint IN the
-                            // tame toast (single shared toast field).
-                            let hint = r.tamed && hint_should_fire(&mut self.hints_shown, Hint::PetCommand);
-                            if let Some((msg, secs)) = r.note.toast(kind, hint) {
-                                self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
-                            }
-                            // UX polish sweep Task 1 — green poof on tame
-                            // success (mirrors wolf/nostrich below).
-                            if r.tamed
-                                && let Ok(p) = self.ecs.get::<&crate::entity::Position>(target)
-                            {
-                                let seed = self
-                                    .tick_counter
-                                    .wrapping_mul(374_761_393)
-                                    .wrapping_add(target.id() as u64 * 668_265_263);
-                                self.particles.poof_green(p.0, 6, seed);
-                            }
-                            self.players[pidx].place_cooldown = 8;
-                        }
-                    }
+            // wild so it survives chunk-unload. Pets wave Task 9 — a Cat Treat
+            // is a guaranteed tame (Cat only); otherwise the species' food
+            // rolls. `local_mob_click::tame_companion`
+            // (`mob_interact::tame_companion`, shared with a joiner's
+            // `EntityInteract`): on a real right-click only (review D2b B1 —
+            // it used to roll, and eat the food, every frame).
+            if let Some(click) = crate::local_mob_click::tame_companion(
+                &mut self.ecs,
+                &mut self.players[pidx],
+                pidx,
+                clicked,
+                tick,
+            ) {
+                let (target, kind, r) = (click.target, click.kind, click.interaction);
+                if let Some(ev) = r.challenge {
+                    self.fire_challenge(ev);
                 }
-            }
-            if companion_tamed {
+                // UX polish sweep Task 2 — the FIRST tame of the session
+                // carries the command-gesture hint IN the tame toast (single
+                // shared toast field).
+                let hint = r.tamed && hint_should_fire(&mut self.hints_shown, Hint::PetCommand);
+                if let Some((msg, secs)) = r.note.toast(Some(kind), hint) {
+                    self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
+                }
+                // UX polish sweep Task 1 — green poof on tame success
+                // (mirrors wolf/nostrich below).
+                if r.tamed
+                    && let Ok(p) = self.ecs.get::<&crate::entity::Position>(target)
+                {
+                    let seed = self
+                        .tick_counter
+                        .wrapping_mul(374_761_393)
+                        .wrapping_add(target.id() as u64 * 668_265_263);
+                    self.particles.poof_green(p.0, 6, seed);
+                }
+                self.players[pidx].place_cooldown = 8;
                 continue;
             }
 
@@ -13200,6 +13130,7 @@ impl super::GameState {
                         let actor = crate::mob_interact::Actor {
                             owner_key: Some(&key),
                             tether: crate::tether::TetherTarget::Player(pidx),
+                            who: crate::combat::Attacker::Local(pidx),
                         };
                         let tick = self.tick_counter;
                         let tamed = match kind {
@@ -13229,7 +13160,7 @@ impl super::GameState {
                             // UX polish sweep Task 2 — the first tame's toast
                             // teaches the command gesture.
                             let hint = r.tamed && hint_should_fire(&mut self.hints_shown, Hint::PetCommand);
-                            if let Some((msg, secs)) = r.note.toast(kind, hint) {
+                            if let Some((msg, secs)) = r.note.toast(Some(kind), hint) {
                                 self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
                             }
                             // UX polish sweep Task 1 — tame success poof.
@@ -21744,8 +21675,17 @@ impl super::GameState {
                     // death-screen line.
                     crate::remote_client::OwnLifeEvent::Died(cause) => {
                         if !self.is_creative {
-                            self.players[0].combat.die(cause);
+                            // Review D2b LOW-7 — names the cause even when our
+                            // own sim reached the death screen first.
+                            self.players[0].combat.died_of(cause);
                         }
+                    }
+                    // Review D2b B2 — a baby born to an animal we fed: the
+                    // breed challenge single-player fires for its feeder.
+                    crate::remote_client::OwnLifeEvent::Bred(offspring) => {
+                        self.fire_challenge(crate::scenario::ChallengeEvent::BreedAnimals {
+                            offspring: Some(offspring),
+                        });
                     }
                     // MP-D2b — the hits the server landed wear our armour,
                     // one durability per worn piece per hit, as a hit landed
@@ -21945,11 +21885,11 @@ impl super::GameState {
 
     /// MP-D2b — swing at the server's mob `target` (a joiner): the server
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
-    fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
+    pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         let seq = self.joiner_actions.record(crate::joiner_actions::Pending {
             kind: None,
-            mob: target.kind,
+            mob: Some(target.kind),
             hotbar_slot: hot,
             held,
         });
@@ -21975,17 +21915,41 @@ impl super::GameState {
         kind: crate::protocol::InteractKind,
         sneak: bool,
     ) {
+        self.send_interaction(pidx, Some(target.kind), target.id, kind, sneak);
+    }
+
+    /// Review D2b B3 — ask the server to tie our leashed mob nearest the fence
+    /// post at `post` to it (`InteractKind::LeadToPost`, a joiner); the Lead
+    /// comes out of the hand only on an accepted outcome.
+    fn send_lead_to_post(&mut self, pidx: usize, post: [i32; 3], sneak: bool) {
+        self.send_interaction(pidx, None, 0, crate::protocol::InteractKind::LeadToPost { post }, sneak);
+    }
+
+    /// One `EntityInteract` with what the hand holds. Review D2b LOW-1 — not
+    /// sent while the item it would use is already claimed by requests still
+    /// in flight (one bucket can't milk two cows on a slow link).
+    fn send_interaction(
+        &mut self,
+        pidx: usize,
+        mob: Option<crate::mob::MobType>,
+        entity: u32,
+        kind: crate::protocol::InteractKind,
+        sneak: bool,
+    ) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        if !self.joiner_actions.can_afford(&self.players[pidx].inventory, Some(kind), held.as_ref()) {
+            return;
+        }
         let seq = self.joiner_actions.record(crate::joiner_actions::Pending {
             kind: Some(kind),
-            mob: target.kind,
+            mob,
             hotbar_slot: hot,
             held,
         });
         if let Some(client) = self.remote_client.as_mut() {
             client.send_entity_interact(&crate::protocol::EntityInteractPacket {
                 seq,
-                entity: target.id,
+                entity,
                 kind,
                 held_kind,
                 held_id,
@@ -22022,7 +21986,7 @@ impl super::GameState {
                 }
                 // Single-player fires TameMob for a wolf or a companion,
                 // not for a Nostrich.
-                Some(InteractKind::Tame) if tamed && request.mob != crate::mob::MobType::Nostrich => {
+                Some(InteractKind::Tame) if tamed && request.mob != Some(crate::mob::MobType::Nostrich) => {
                     Some(crate::scenario::ChallengeEvent::TameMob)
                 }
                 _ => None,

@@ -697,6 +697,16 @@ impl Inventory {
     /// percentages to drive low-durability warnings or break toasts.
     pub fn use_hotbar_tool(&mut self, slot: usize) -> Option<ToolUseInfo> {
         if slot >= 9 { return None; }
+        self.use_tool_at(slot)
+    }
+
+    /// [`Self::use_hotbar_tool`] for any of the 36 slots: wear the tool in
+    /// slot `index` (removed if it breaks). A joiner's swing the server
+    /// confirms after the sword moved out of the hotbar still wears it
+    /// (`joiner_actions::apply_outcome`, review D2b LOW-1).
+    pub fn use_tool_at(&mut self, index: usize) -> Option<ToolUseInfo> {
+        let slot = index;
+        if slot >= 36 { return None; }
         let stack = self.slots[slot].as_mut()?;
         let tool = stack.item.as_tool_mut()?;
         let max = crate::crafting::Tool::new(tool.tool_type, tool.material).durability as f32;

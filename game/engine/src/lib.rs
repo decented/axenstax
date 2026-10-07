@@ -359,6 +359,7 @@ mod remote_mobs;
 mod health_sync;
 mod joiner_actions;
 mod mob_interact;
+mod local_mob_click;
 // WebSocket transport — the dedicated-server pipe that BOTH the browser PWA and
 // the native client speak (browsers can't do QUIC). Native half here; the
 // browser half is `ws_transport_web` (wasm32-only).

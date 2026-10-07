@@ -43,6 +43,11 @@ pub const BABY_RENDER_SCALE: f32 = 0.6;
 #[derive(Clone, Copy, Debug)]
 pub struct InLove {
     pub until_tick: u64,
+    /// Review D2b B2 — the player who fed it (`mob_interact::feed`), so the
+    /// baby's `BreedAnimals` credit goes to the feeder: a local player, a
+    /// joiner (by slot + connection generation) or a joiner since departed.
+    /// `None` = unknown.
+    pub fed_by: Option<crate::combat::Attacker>,
 }
 
 /// Recently bred (or just born) — can't breed until `until_tick`.
@@ -114,6 +119,9 @@ pub struct NewBaby {
     pub kind: MobType,
     pub pos: Vec3,
     pub genetics: crate::genetics::Genetics,
+    /// Who fed each parent (their `InLove::fed_by`) — who the breed credits
+    /// (`server::route_client_breed`, review D2b B2).
+    pub feeders: [Option<crate::combat::Attacker>; 2],
 }
 
 pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
@@ -153,21 +161,22 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     //    re-check). Greedily pair same-species lovers within radius.
     // Snapshot lovers WITH their genetics (Wave 1A) — an animal with no
     // Genetics component breeds as the baseline, so legacy/wild stock still works.
-    let lovers: Vec<(hecs::Entity, MobType, Vec3, crate::genetics::Genetics)> = ecs
+    type Lover = (hecs::Entity, MobType, Vec3, crate::genetics::Genetics, Option<crate::combat::Attacker>);
+    let lovers: Vec<Lover> = ecs
         .query::<(&Position, &MobKind, &InLove, Option<&crate::genetics::Genetics>)>()
         .iter()
-        .map(|(id, (p, k, _, g))| (id, k.0, p.0, g.copied().unwrap_or_default()))
+        .map(|(id, (p, k, love, g))| (id, k.0, p.0, g.copied().unwrap_or_default(), love.fed_by))
         .collect();
 
     let mut used: Vec<hecs::Entity> = Vec::new();
     let mut babies: Vec<NewBaby> = Vec::new();
     let mut parents: Vec<hecs::Entity> = Vec::new();
     for i in 0..lovers.len() {
-        let (id_a, kind_a, pos_a, gen_a) = lovers[i];
+        let (id_a, kind_a, pos_a, gen_a, fed_a) = lovers[i];
         if used.contains(&id_a) {
             continue;
         }
-        for &(id_b, kind_b, pos_b, gen_b) in lovers.iter().skip(i + 1) {
+        for &(id_b, kind_b, pos_b, gen_b, fed_b) in lovers.iter().skip(i + 1) {
             if used.contains(&id_b) || !pair_allowed(kind_a, kind_b) {
                 continue;
             }
@@ -183,7 +192,12 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
                 ^ (mid.x as i32 as u32).wrapping_mul(40_503)
                 ^ (mid.z as i32 as u32).wrapping_mul(73_856_093);
             let genetics = crate::genetics::breed(&gen_a, &gen_b, seed);
-            babies.push(NewBaby { kind: offspring_kind(kind_a, kind_b), pos: mid, genetics });
+            babies.push(NewBaby {
+                kind: offspring_kind(kind_a, kind_b),
+                pos: mid,
+                genetics,
+                feeders: [fed_a, fed_b],
+            });
             parents.push(id_a);
             parents.push(id_b);
             break;
@@ -202,6 +216,46 @@ pub fn tick_breeding(ecs: &mut hecs::World, tick: u64) -> Vec<NewBaby> {
     }
 
     babies
+}
+
+/// One baby born in a [`client_step`]: the new entity, its species, where,
+/// and whether the sim's own players are credited with the breed.
+#[derive(Clone, Copy, Debug)]
+pub struct Born {
+    pub entity: hecs::Entity,
+    pub kind: MobType,
+    pub pos: Vec3,
+    /// Fire this sim's `BreedAnimals` challenge (`server::route_client_breed`):
+    /// one of its own players fed a parent, or a feeder is unknown.
+    pub credit_here: bool,
+}
+
+/// A client sim's breeding step (single-player, or a host, whose lent
+/// world's breeding is its client's until D4): [`tick_breeding`], each baby's
+/// credit routed to whoever fed its parents (`server::route_client_breed`: a
+/// joiner's feed queues a `PlayerEventType::Bred` on the host's `server`,
+/// review D2b B2), and the babies spawned (grow timer, breed cooldown, the
+/// parents' genetics). Toasts, particles and the challenge event stay with
+/// the caller (`GameState::tick`), which owns them.
+pub fn client_step(
+    ecs: &mut hecs::World,
+    tick: u64,
+    mut server: Option<&mut crate::server::GameServer>,
+) -> Vec<Born> {
+    let mut born = Vec::new();
+    for spec in tick_breeding(ecs, tick) {
+        let credit_here = crate::server::route_client_breed(server.as_deref_mut(), spec.feeders, spec.kind);
+        let baby = crate::entity::spawn_mob(ecs, spec.kind, spec.pos);
+        let _ = ecs.insert_one(baby, Baby { adult_at_tick: tick + BABY_GROW_TICKS });
+        // A newborn can't itself breed until it's grown.
+        let _ = ecs.insert_one(baby, BreedCooldown { until_tick: tick + BABY_GROW_TICKS });
+        // Wave 1A — the baby inherits its parents' genetics (overwrites the
+        // wild genetics spawn_mob attached: a bred baby's traits come from its
+        // parents, not the wild distribution).
+        let _ = ecs.insert_one(baby, spec.genetics);
+        born.push(Born { entity: baby, kind: spec.kind, pos: spec.pos, credit_here });
+    }
+    born
 }
 
 #[cfg(test)]
@@ -264,8 +318,8 @@ mod tests {
         let mut ecs = hecs::World::new();
         let a = entity::spawn_mob(&mut ecs, MobType::Horse, Vec3::new(0.0, 64.0, 0.0));
         let b = entity::spawn_mob(&mut ecs, MobType::Donkey, Vec3::new(2.0, 64.0, 0.0));
-        let _ = ecs.insert_one(a, InLove { until_tick: 1000 });
-        let _ = ecs.insert_one(b, InLove { until_tick: 1000 });
+        let _ = ecs.insert_one(a, InLove { until_tick: 1000, fed_by: None });
+        let _ = ecs.insert_one(b, InLove { until_tick: 1000, fed_by: None });
         let babies = tick_breeding(&mut ecs, 10);
         assert_eq!(babies.len(), 1);
         assert_eq!(babies[0].kind, MobType::Mule);
@@ -285,8 +339,8 @@ mod tests {
         let mut ecs = hecs::World::new();
         let a = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         let b = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(2.0, 64.0, 0.0));
-        let _ = ecs.insert_one(a, InLove { until_tick: 1000 });
-        let _ = ecs.insert_one(b, InLove { until_tick: 1000 });
+        let _ = ecs.insert_one(a, InLove { until_tick: 1000, fed_by: None });
+        let _ = ecs.insert_one(b, InLove { until_tick: 1000, fed_by: None });
         let babies = tick_breeding(&mut ecs, 10);
         assert_eq!(babies.len(), 1, "one baby from the pair");
         assert_eq!(babies[0].kind, MobType::Cow);
@@ -302,8 +356,8 @@ mod tests {
         let mut ecs = hecs::World::new();
         let a = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         let b = entity::spawn_mob(&mut ecs, MobType::Pig, Vec3::new(1.0, 64.0, 0.0));
-        let _ = ecs.insert_one(a, InLove { until_tick: 1000 });
-        let _ = ecs.insert_one(b, InLove { until_tick: 1000 });
+        let _ = ecs.insert_one(a, InLove { until_tick: 1000, fed_by: None });
+        let _ = ecs.insert_one(b, InLove { until_tick: 1000, fed_by: None });
         assert!(tick_breeding(&mut ecs, 10).is_empty());
     }
 
@@ -312,8 +366,8 @@ mod tests {
         let mut ecs = hecs::World::new();
         let a = entity::spawn_mob(&mut ecs, MobType::Sheep, Vec3::new(0.0, 64.0, 0.0));
         let b = entity::spawn_mob(&mut ecs, MobType::Sheep, Vec3::new(50.0, 64.0, 0.0));
-        let _ = ecs.insert_one(a, InLove { until_tick: 1000 });
-        let _ = ecs.insert_one(b, InLove { until_tick: 1000 });
+        let _ = ecs.insert_one(a, InLove { until_tick: 1000, fed_by: None });
+        let _ = ecs.insert_one(b, InLove { until_tick: 1000, fed_by: None });
         assert!(tick_breeding(&mut ecs, 10).is_empty());
     }
 
@@ -322,8 +376,8 @@ mod tests {
         let mut ecs = hecs::World::new();
         let a = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         let b = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(1.0, 64.0, 0.0));
-        let _ = ecs.insert_one(a, InLove { until_tick: 5 });
-        let _ = ecs.insert_one(b, InLove { until_tick: 5 });
+        let _ = ecs.insert_one(a, InLove { until_tick: 5, fed_by: None });
+        let _ = ecs.insert_one(b, InLove { until_tick: 5, fed_by: None });
         // tick 10 is past the until_tick → love expired before pairing.
         assert!(tick_breeding(&mut ecs, 10).is_empty());
         assert!(ecs.get::<&InLove>(a).is_err());
@@ -350,8 +404,8 @@ mod tests {
         let mut ecs = hecs::World::new();
         let a = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         let b = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(1.0, 64.0, 0.0));
-        let _ = ecs.insert_one(a, InLove { until_tick: 9999 });
-        let _ = ecs.insert_one(b, InLove { until_tick: 9999 });
+        let _ = ecs.insert_one(a, InLove { until_tick: 9999, fed_by: None });
+        let _ = ecs.insert_one(b, InLove { until_tick: 9999, fed_by: None });
         let _ = tick_breeding(&mut ecs, 10);
         let cd = ecs.get::<&BreedCooldown>(a).expect("cooldown set");
         assert_eq!(cd.until_tick, 10 + BREED_COOLDOWN_TICKS);

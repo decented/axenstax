@@ -248,6 +248,9 @@ pub enum OwnLifeEvent {
     /// MP-D2b — this many hits the server landed on our body wear our armour
     /// (`PlayerSlot::wear_armour` once per hit).
     ArmourWorn(u8),
+    /// Review D2b B2 — a baby of this species was born to an animal we fed
+    /// (the `BreedAnimals` challenge).
+    Bred(crate::mob::MobType),
 }
 
 /// MP-D2b — the death cause a `DiedOf` names, as the death screen reads it.
@@ -878,6 +881,17 @@ impl RemoteClient {
                                         && self.pending_life_events.len() < 16
                                     {
                                         self.pending_life_events.push(OwnLifeEvent::ArmourWorn(*hits));
+                                        changed = true;
+                                    }
+                                }
+                                // Review D2b B2 — an unknown species (a newer
+                                // server) is ignored.
+                                protocol::PlayerEventType::Bred { offspring } => {
+                                    if self.player_index() == Some(event.player_index)
+                                        && self.pending_life_events.len() < 16
+                                        && let Some(kind) = crate::remote_mobs::mob_type_for(*offspring)
+                                    {
+                                        self.pending_life_events.push(OwnLifeEvent::Bred(kind));
                                         changed = true;
                                     }
                                 }
@@ -2387,7 +2401,7 @@ mod tests {
         srv.send_to_client(&protocol::serialize_packet(PacketType::InteractOutcome, &out));
         let kill = protocol::KillEventPacket {
             victim: protocol::EntityKind::Cow,
-            cause: protocol::kill_cause::MELEE,
+            reason: protocol::kill_reason::LAST_HIT,
             x: 1.0,
             y: 64.0,
             z: 2.0,

@@ -26,7 +26,7 @@
 - **Hosted mode: the host lends its world (2026-10-06, D1, NO wire change — still v67).** A LAN / online host's embedded server no longer keeps a second copy of the world: the host client lends it its `World` + ECS + fluid/fire/leaf systems for each tick (`sim_lend::LentSim`), so every joiner's `StateUpdate` is diffed from the host's real world and entities, and each shared sim system runs once (an ownership table + a per-world tally tripwire). The host's own edits are broadcast without the joiner budget/validation; `mirror_host_world_state` survives only on the `--no-lend` path. Review fixes the same day: the host client's streamer keeps every joiner's columns loaded (they anchor it at the server's sim distance), split-screen seats get server slots, and one owner per system per mode is pinned by a GPU-free table test. Why no bump: no packet shape changed, and a joiner cannot tell a lending host from an owning one except that what it is sent now matches what the host sees. `--no-lend` keeps the old owning server for one release. See "Hosted mode — the host lends its world" in the Phase 1 implementation notes.
 - **v68** (2026-10-07, MP-D2a): **Joiners see the server's mobs and are hurt by them.** `EntityUpdate` gains trailing `vx`/`vy`/`vz` (blocks/tick) and `flags` (`protocol::entity_flags`: hurt flash, baby, tamed, Satoshi) and is now sent **changed-only**; every entity event is filtered **per client** by an interest radius round a joiner's body (`entity_broadcast`), which also replaces the late-joiner backfill. `InputPacket` gains trailing `armour_points: u8` and `health_delta: f32`: the server lands hostile melee and lava/fire contact on a joiner's body, and a joiner's health is the server's (its client reports only the changes it still owns). A joiner runs no mobs of its own and draws the server's from a render-only mirror (`remote_mobs`). Packet shapes changed, hence the bump. See §4.2c and §5.3.2.
 - **v69** (2026-10-07, Phase B2a): **Chunk push.** The server sends joiners the world itself: `ChunkDataPacket` (tag 3 — decoded by clients since the first wire, never sent until now) gains its side data (`meta: Vec<(u16, u8)>`, render-visible `entities: Vec<PushedBlockEntity>`, face `attachments: Vec<PushedFaceAttachment>`) and continuation packets (empty `compressed_blocks`); `JoinRequestPacket` gains trailing `render_distance: u8`; `InputPacket` gains trailing `chunk_ack: u32` (cumulative chunk packets taken in — the push's credit window), `chunk_drops: Vec<ChunkDrop { cx, cz, as_of }>` (columns the client let go of) and `render_distance: u8` (its current render distance; `0` = unchanged). Server block changes now reach a joiner only for chunks it has been sent (its sent-set). Bumped because three packet shapes changed. See §4.1 "As built".
-- **v70** (2026-10-07, MP-D2b): **Joiners act on the server's mobs.** Appended, no existing shape changed: `PacketType::EntityAttack = 58` and `EntityInteract = 59` (C→S: a swing, or a one-shot right-click — `InteractKind` feed, tame, shear, milk, Lead on, Lead off, sit toggle — on the entity named by its `ProtocolId`; the held item is the client's word), `InteractOutcome = 60` (S→C, to the asker: accepted, items to take from the hand, a note code) and `KillEvent = 61` (S→C, to the killer alone: species, cause, position, flags); `PlayerEventType::DiedOf { cause: WireDamageCause }` (sent instead of `Died`: the death screen's real cause) and `ArmourWorn { hits }` (server-landed hits wear the joiner's armour); `entity_flags::TETHERED = 16`. A joiner's kill credits that joiner and never a host's player. Bumped because a v69 peer can't decode the new variants. See §4.2d.
+- **v70** (2026-10-07, MP-D2b): **Joiners act on the server's mobs.** Appended, no existing shape changed: `PacketType::EntityAttack = 58` and `EntityInteract = 59` (C→S: a swing, or a one-shot right-click — `InteractKind` feed, tame, shear, milk, Lead on, Lead off, sit toggle — on the entity named by its `ProtocolId`, or `LeadToPost { post }`, a Lead on a fence post; the held item is the client's word), `InteractOutcome = 60` (S→C, to the asker: accepted, items to take from the hand, a note code — 17 `NotOnThisServer` where the server doesn't simulate breeding, Leads or pets) and `KillEvent = 61` (S→C, to the killer alone: species, why it was credited — `kill_reason::LAST_HIT` / `NEAREST` — position, flags); `PlayerEventType::DiedOf { cause: WireDamageCause }` (sent instead of `Died`: the death screen's real cause), `ArmourWorn { hits }` (server-landed hits, keg blasts included, wear the joiner's armour) and `Bred { offspring }` (a baby born to an animal this joiner fed); `entity_flags::TETHERED = 16`. A joiner's kill or breed credits that joiner and never a host's player, nor a later joiner given its slot. Bumped because a v69 peer can't decode the new variants. See §4.2d.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -514,9 +514,9 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x38 | `DeviceInteract` | C->S | Reliable | Client asks the server to apply one right-click to the power device in a named cell: `{ pos: (i32, i32, i32) }`, 12 bytes. **Implemented tag** (`PacketType::DeviceInteract = 56`, protocol v62). |
 | 0x39 | `Respawn` | C->S | Reliable | The joiner chose Respawn on its death screen. Empty payload — it asserts the wish only; the server respawns the player only if it holds them dead, at the spawn point it holds, and answers `PlayerEvent { Respawned { x, y, z } }`. **Implemented tag** (`PacketType::Respawn = 57`, protocol v67). See §4.2b. |
 | 0x3A | `EntityAttack` | C->S | Reliable | A joiner swings at a server entity: `{ seq: u32, entity: u32, held_kind: u8, held_id: u16, held_full: WireItem, sprint, sneak }`. **Implemented tag** (`PacketType::EntityAttack = 58`, protocol v70). See §4.2d. |
-| 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob: `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak }`. **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
+| 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak }`. **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8 }`. **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
-| 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, cause: u8, x, y, z, victim_flags: u8 }`. **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
+| 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
 > discriminants live in `game/engine/src/protocol.rs` and are the wire-stable
@@ -964,7 +964,11 @@ broadcast) — that is how a joiner whose server copy died unseen reaches its
 death screen (`OwnLifeEvent::Died` → `PlayerCombat::die`). Since v70 it sends
 `DiedOf { cause }` instead, naming the body's recorded cause for the death
 screen (§4.2c), and a client drops either while its own `Respawn` is
-unanswered (§5.3.2, review D2a-verify N1). A reported death is not
+unanswered (§5.3.2, review D2a-verify N1). A client whose own sim reached the
+death screen first (health 0 from the server's numbers, a moment before the
+event) names no cause then; the `DiedOf` arriving after replaces that generic
+line (`PlayerCombat::died_of`, review D2b LOW-7) — a cause already named
+stays. A reported death is not
 echoed: the reporting client already knows, and an echo landing after a quick
 Respawn click (the pointer is freed on the button) would kill it a second time
 while the server held it alive. While dead the body runs
@@ -1136,8 +1140,9 @@ alive and not in a flying mode:
   (melee, contact, a species attack) counts in `ServerPlayer.armour_wear_hits`,
   and `HostedServer` sends `PlayerEvent::ArmourWorn { hits }` to that joiner
   the same tick; its client runs `PlayerSlot::wear_armour` once per hit — the
-  single-player rule (one durability per worn piece per landed hit). (The keg
-  blast wears none, as in single-player.)
+  single-player rule (one durability per worn piece per landed hit). A keg
+  blast that lands wears it too (review D2b LOW-4), as a blast on a local
+  player does (`PlayerSlot::take_damage_with_armour_from`).
 - A lethal hit leaves `just_died`, which `HostedServer` turns into
   `PlayerEvent::DiedOf { cause }` (§4.2b; v70 — the `Died` it replaces carried
   no cause), naming the body's recorded `DamageCause` (the mob's species, lava,
@@ -1149,9 +1154,11 @@ alive and not in a flying mode:
   joiner's slot at `species_ai::ABSENT_PLAYER`, far outside the world): a bee
   sting, goat charge or shark bite aimed at a joiner lands on its server body
   through `GameServer::land_hit_on_joiner` (armour-soaked, worn, a lethal one
-  sends `DiedOf`), a Bear or Hyena a joiner provoked charges that joiner, a
-  joiner's pet follows it and a Lead it fastened pulls toward it. A dedicated
-  server runs no species AI at all (CLAUDE.md known debt, D4).
+  sends `DiedOf`), a Bear or Hyena a joiner provoked charges that joiner (and
+  calms down when it leaves, §4.2d), a joiner's pet follows it and a Lead it
+  fastened pulls toward it. A dedicated server runs no species AI at all
+  (CLAUDE.md known debt, D4), so it refuses the interactions that need it
+  (§4.2d).
 
 ### 4.2d Joiners act on the server's mobs (as built, protocol v70, MP-D2b)
 
@@ -1169,11 +1176,23 @@ changes — unless:
   `hosted_server::ATTACK_REACH_TOLERANCE` (1.5) blocks of the eye of the body
   the **server** holds (the round trip between where the client drew the mob
   and where the server has it, plus the body's own prediction error);
-- the server's cooldown has run out (`PlayerCombat::can_attack` on the
-  server's copy): it is set to `ATTACK_COOLDOWN` (10) less
-  `ATTACK_COOLDOWN_JITTER_TICKS` (3) per accepted swing, so swings the client
-  spaced a full cooldown apart are never refused for arriving bunched, and a
-  second swing in one tick always is;
+- the target is **ahead** of that body: `dot(look, to-target) >=
+  JOINER_MIN_FACING_DOT` (0), the look being the server's copy of the
+  joiner's camera (`camera::forward_from(yaw, pitch)`, from its latest
+  input). Deliberately lenient — single-player's pick wants 60° (dot 0.5) —
+  because the server's look can lag a quick turn by a round trip (review D2b
+  LOW-2);
+- it is not a parrot perched on someone's shoulder
+  (`CompanionState::Perch`), which single-player's pick skips for every
+  gesture (review D2b LOW-3);
+- the swing is due on the server's schedule (`ServerPlayer::next_swing_tick`,
+  review D2b LOW-2): a swing is taken up to `ATTACK_COOLDOWN_JITTER_TICKS` (3)
+  early, and each accepted swing moves the schedule to
+  `max(schedule, now) + ATTACK_COOLDOWN` (10). Swings the client spaced a full
+  cooldown apart are never refused for arriving bunched, a second swing in one
+  tick always is, and the long-run rate can't beat the client's (a fixed
+  7-tick cooldown, before, let a modified client swing 43% faster); an idle
+  client banks nothing;
 - it isn't the joiner's own pet hit without sneaking (single-player's
   no-friendly-fire target pick).
 
@@ -1182,33 +1201,51 @@ single-player's `player_attack` runs: damage from the claimed held item
 (`Item::attack_damage`), ×1.5 if the **server's** body is airborne (the packet
 carries no crit claim), knockback (plus sprint), the #23 sweep (sparing the
 joiner's own pets unless sneaking), prey bolt, a Bear or Hyena provoked, and
-`LastAttacker(Attacker::Remote(slot))`. Then `combat::after_swing`, the rest of
-single-player's melee arm: the joiner's own wolves rally onto the target
-(never against its own pet), a deliberate sneak-hit on its own pet is marked so
-the Pet Bed lets it stick, and a Nostrich kicks back at the joiner's server
-body. The look direction for the sweep is the server's copy of the joiner's
-camera (`camera::forward_from(yaw, pitch)`). **Tool wear:** the outcome's
-`accepted` is the hit confirm — the swing was valid and spent, which is when
-single-player wears the weapon (any swing that found a target, invulnerability
-frames or not); the joiner wears it then (`joiner_actions::apply_outcome`),
-never on a refused swing.
+`LastAttacker(Attacker::Remote { slot, generation })` (the slot and the
+connection's generation, see "Kill attribution"). Then `combat::after_swing`,
+the rest of single-player's melee arm: the joiner's own wolves rally onto the
+target (never against its own pet), a deliberate sneak-hit on its own pet is
+marked so the Pet Bed lets it stick, and a Nostrich kicks back at the joiner's
+server body. The look direction for the sweep is the server's copy of the
+joiner's camera. **Tool wear:** the outcome's `accepted` is the hit confirm —
+the swing was valid and spent, which is when single-player wears the weapon
+(any swing that found a target, invulnerability frames or not); the joiner
+wears it then (`joiner_actions::apply_outcome`), never on a refused swing.
 
 **One-shot interactions (`EntityInteract` → `handle_entity_interact`).** The
-same target validation, plus the server's interaction cooldown
-(`INTERACT_COOLDOWN_TICKS` = 6: the client's 8-tick right-click cooldown less
-jitter). Then `mob_interact::run` — the functions single-player's right-click
-branches now call — as the joiner (`mob_interact::Actor`: its pet-owner key is
-its verified npub; a Lead it fastens anchors to `TetherTarget::Player(slot)`):
+same target validation (reach, facing, no perched parrot), plus the server's
+interaction cooldown (`INTERACT_COOLDOWN_TICKS` = 6: the client's 8-tick
+right-click cooldown less jitter). Then `mob_interact::run` — the functions
+single-player's right-click branches call — as the joiner
+(`mob_interact::Actor`: its pet-owner key is its verified npub; a Lead it
+fastens anchors to `TetherTarget::Player(slot)`; `who` is its
+`Attacker::Remote { slot, generation }`):
 
 | `InteractKind` | Rule (`mob_interact`) | Outcome |
 |---|---|---|
-| `Feed` | breeding food on an adult not a baby, not on cooldown, not in love (horse family only sneaking) → `InLove` | consume 1 |
+| `Feed` | breeding food on an adult not a baby, not on cooldown, not in love (horse family only sneaking) → `InLove { fed_by: who }` | consume 1 |
 | `Tame` | Bone on a wolf, Mixed Berries on a Nostrich, companion food / a Cat Treat on a companion — the species' tame roll; success leashes a wolf or Nostrich to its owner and drops `Scattered` | consume 1 (an already-tamed mob takes nothing) |
 | `Shear` | shears on a sheep: 1–3 wool (+0–3 for a high-yield sheep) drop at the sheep as a world item | consume 0; the wool reaches the joiner by its pickup (`InventoryGrant`) |
 | `Milk` | a bucket on a cow | consume 1 + an `InventoryGrant` of one milk bucket |
 | `LeadAttach` | a Lead on a passive mob → `Tethered` to the joiner | consume 1 |
 | `LeadDetach` | anything but a Lead on a tethered mob (anyone's) | consume 0 + an `InventoryGrant` of the Lead |
 | `SitToggle` | empty hand on the joiner's **own** pet: wolf / Nostrich sit ↔ follow, a companion's command cycle | consume 0; someone else's pet: refused, "That's not your pet." |
+| `LeadToPost { post }` (review D2b B3) | a Lead on the fence post at `post` (`mob_interact::lead_to_post`, single-player's Path B): the joiner's own leashed mob (`Tethered { Player(slot) }`) nearest the post, within `POST_TRANSFER_RADIUS` (4) blocks horizontally, is tied to the post. Names no entity (`entity` is ignored): validated as a block — the post within the block-edit reach of the server body's eye (`block_change_within_reach`, no item bonus), and a fence post in the server's world | consume 1 (as single-player); no mob of the joiner's near the post: refused, nothing taken |
+
+**What the server doesn't simulate is refused (review D2b MEDIUM-2).**
+Breeding (`breeding::tick_breeding`), Leads (`tether::tick_tethers`) and pets
+following, sitting and perching (the species dispatch) run only in a host
+client's sim — on a lending host, the one world it lends. `GameServer::tick`
+runs none of them yet (D4). So `GameServer::animal_life_simulated` is set only
+on a lending host (`HostedServer::start_inner`: `host_world == Lent`), and
+where it is clear — a dedicated server, a `--no-lend` host — `Feed`, `Tame`,
+`LeadAttach`, `SitToggle` and `LeadToPost` (`mob_interact::needs_animal_life`)
+are refused with `InteractNote::NotOnThisServer` ("This server doesn't support
+that yet."): nothing is used and nothing changes. Before, they were accepted
+and charged — the wheat taken, the Lead taken, a tame landed — and nothing
+ever came of it (no baby, a Lead that never pulled, a pet that never
+followed). `Shear`, `Milk` and `LeadDetach` need nothing that runs over time
+and work everywhere.
 
 **Pets.** A tame sets the pet's owner (`OwnershipData.owner_pubkey`) to the
 joiner's verified npub (bech32, `ServerPlayer::pet_owner_key`); local seats
@@ -1224,52 +1261,123 @@ npub → server-slot table, to that joiner's server body.
 **The held item is the client's word** (`// BRIDGE: possession check`, beside
 the block-placement one): the server holds no joiner inventory until phase C,
 so a modified client can claim a sword or a bone it doesn't hold. Everything
-else — the target, its liveness, reach, cooldowns, the outcome — is the
-server's. The client owns its inventory too, so it takes `consume_held` from
-the held stack ONLY on an accepted outcome, and only if the hotbar slot it
-asked from still holds that item (`joiner_actions`: requests are kept by
-`seq`, at most 64 outstanding). Products ride `InventoryGrant`; a bucket →
-milk swap is "consume 1 + grant 1". The note code (`mob_interact::InteractNote`)
-is shown with single-player's wording; the client fires the challenge event
-single-player fires for the same interaction (`ShearOrMilk`, `TameMob` — not
-for a Nostrich, as in single-player).
+else — the target, its liveness, reach, facing, cooldowns, the outcome — is
+the server's. The client owns its inventory too (`joiner_actions`; requests
+are kept by `seq`, at most 64 outstanding):
+- it takes `consume_held` ONLY on an accepted outcome, and the outcome is
+  **owed** (review D2b LOW-1): taken from the hotbar slot the request was made
+  from if that slot still holds the item, otherwise from wherever the item now
+  is (all 36 slots; a weapon's wear likewise, `Inventory::use_tool_at`). Only
+  an item no longer in the inventory at all goes unpaid. Before, a stack
+  dragged to another slot while the request was in flight was never charged,
+  so a bucket could be kept AND earn its milk;
+- an item can't be spent twice: a request that would use one
+  (`joiner_actions::uses` — Feed, Tame, Milk, LeadAttach, LeadToPost) is sent
+  only while the inventory holds more of it than the requests in flight
+  already claim (`JoinerActions::can_afford`). One bucket can't milk two cows
+  on a link slower than the 8-tick right-click cooldown. A request the server
+  dropped unanswered (past its per-tick budget) stops claiming once a later
+  one is answered: the server reads requests in the order sent and answers
+  each at once on the same ordered stream, so it never will be
+  (`JoinerActions::take` forgets every earlier entry still waiting).
+Products ride `InventoryGrant`; a bucket → milk swap is "consume 1 + grant 1".
+The note code (`mob_interact::InteractNote`, 17 = `NotOnThisServer` since the
+review fixes) is shown with single-player's wording; the client fires the
+challenge event single-player fires for the same interaction (`ShearOrMilk`,
+`TameMob` — not for a Nostrich, as in single-player).
 
 **Per-tick budget.** `EntityAttack` + `EntityInteract` share
 `MAX_ENTITY_REQUESTS_PER_TICK` = 4 per client per tick (inside the general
 10-packet budget); the rest are dropped unanswered.
 
-**Kill attribution — one rule (`combat::attribute_kill`).**
-`LastAttacker` names `Attacker::Local(slot)` (a player of the client sim that
-owns the ECS) or `Attacker::Remote(server slot)` (a joiner). The slot is also
-the index the species AI's player list uses (a Bear's revenge target, a bee's
-attacker), because a lending host's local slot `i` IS server player `i`.
-`attribute_kill` returns `KillCredit::Local(i) | Remote(slot) | Nobody`:
-a joiner's hit credits that joiner, always (never the nearest local player,
-even if the joiner has died or left since); a local hit credits that player
-if alive; otherwise the nearest living local player, as single-player always
-has.
+**Kill attribution — one rule (`combat::attribute_kill`).** `LastAttacker`
+names one of:
+- `Attacker::Local(slot)` — a player of the client sim that owns the ECS;
+- `Attacker::Remote { slot, generation }` — a joiner: its server slot and the
+  generation of the connection holding it (`ServerPlayer::attach_gen`, a fresh
+  number from `GameServer::next_attach_gen` on every remote attach; 0 for a
+  local slot);
+- `Attacker::Departed` — a joiner who has since left (below).
+
+The slot is also the index the species AI's player list uses (a Bear's revenge
+target, a bee's attacker), because a lending host's local slot `i` IS server
+player `i`. `attribute_kill(attacker, pos, locals, joiners)` returns
+`KillCredit::Local(i) | Remote { slot, generation, nearest } | Nobody`:
+- a joiner's hit credits that joiner, always (never the nearest player, even
+  if the joiner has died since);
+- a departed joiner's hit credits **nobody** — its hit was still the last a
+  player landed, so the death is not handed to whoever stands nearest;
+- a local hit credits that player if alive;
+- otherwise (no player's hit — lava, a fall, another mob, a pet wolf — or the
+  hitter is dead) the nearest living player, as single-player always has: a
+  local one or, since review D2b LOW-5, a joiner (`GameServer::joiner_bodies`:
+  present, living joiners' server bodies), whichever stands nearer (a tie goes
+  to the local player). Before, only local players were candidates, so a
+  lending host's own player — at any distance — took the kill counter,
+  `KillMob` and (for a wild Nostrich) the Vow for a death beside a joiner; a
+  dedicated server credited nobody. This inherits single-player's unbounded
+  "nearest living player" rule, Vow included.
+
+**A slot's next occupant inherits nothing (review D2b MEDIUM-1).** Slots are
+reused (the lowest freed remote slot), so a stamp naming only the slot would
+credit whoever holds it later: a cow joiner A hit, dying after A left and B
+was given A's slot, used to send B the kill — and for a wild Nostrich, the
+Vow. Two guards:
+- **Forget on release.** `release_slot` queues `(slot, generation)` on
+  `GameServer::released_joiners`; the next `GameServer::tick` starts with
+  `forget_released_joiners` (on a lending host that is inside the lend window,
+  on the host's real ECS — a release can happen outside it, an operator kick):
+  every `LastAttacker` and `InLove::fed_by` naming that connection becomes
+  `Attacker::Departed` (no slot: it credits nobody, and a bee chases nobody),
+  and a Bear or Hyena in `Aggro` against the slot, or a bee in `Sting`
+  against it, calms down (`Wander` / `Lazy` / `Idle`; they store the slot
+  itself, and a bee's sting lands on whoever holds the slot when its window
+  closes, at any distance). A goat's charge needs no reset: it lands only on
+  a body still within reach of the goat. The stamp is replaced, not removed:
+  removed, the death would fall to the nearest-player fallback — on a lending
+  host, the host's own player.
+- **Generation check.** `GameServer::queue_kill_event` and `queue_bred_event`
+  take the stamp's generation and drop it unless the slot is still held by
+  that connection (`is_joiner_of_gen`) — covering the window between a release
+  and the next tick, and any stamp the forget pass never saw.
+A raider killed by a departed joiner counts the raid down and credits no
+defender, like any joiner's kill (`Attacker::is_joiner`).
+
+Where the sweep runs:
 - **Lending host:** the death sweep is still the host client's (D1 deviation,
   until D4). Its `Remote` branch (`server::route_client_kill`) queues the kill
-  on the host's server (`GameServer::queue_kill_event`) and credits no host
-  player; a raider a joiner killed counts the raid down but credits no
-  defender. The loot drops as world items, which the joiner's server pickup
-  grants.
+  on the host's server and credits no host player; a raider a joiner killed
+  counts the raid down but credits no defender. The loot drops as world items,
+  which the joiner's server pickup grants.
 - **Dedicated server / `--no-lend`:** the server's own sweep
   (`despawn_dead_with_drops`) runs the same rule with no local players: a
-  joiner's kill is queued; any other credits nobody (the server keeps no kill
-  counters).
+  joiner's kill is queued, and so is a death no player's hit caused, to the
+  nearest living joiner (the server keeps no kill counters).
 - `HostedServer` sends each queued kill as `KillEvent` to the killer alone,
-  after the tick. The joiner's client runs `GameState::credit_kill` — the
-  single attribution site's effects, extracted: the kill counter (bounties),
-  the `KillMob` challenge, the smoke puff, the Nostrich's Vow (not for a
-  `TAMED` victim) and the villager-kill reputation penalty.
+  after the tick. `KillEvent.reason` (review D2b LOW-6; it was `cause`, always
+  `MELEE`, though a mob keeps no record of its killing blow) says why the kill
+  was credited: `kill_reason::LAST_HIT` (0, this player's hit was the last a
+  player landed) or `NEAREST` (1, the nearest-player fallback). The joiner's
+  client runs `GameState::credit_kill` — the single attribution site's effects,
+  extracted: the kill counter (bounties), the `KillMob` challenge, the smoke
+  puff, the Nostrich's Vow (not for a `TAMED` victim) and the villager-kill
+  reputation penalty.
+
+**Breeding credit (review D2b B2).** A fed animal records its feeder
+(`breeding::InLove::fed_by`, the `mob_interact::Actor::who` of the feed), and
+`breeding::NewBaby` carries both parents' feeders. The lending host's client
+breeding step (`breeding::client_step`, called from `GameState::tick`: pair,
+credit, spawn) routes each baby through `server::route_client_breed`: every
+joiner who fed a parent gets one `PlayerEvent::Bred { offspring }` (v70,
+appended; queued with the same generation check as a kill), on which its
+client fires `BreedAnimals { offspring }`; the host client fires its own
+`BreedAnimals` only when one of its players fed a parent (or a feeder is
+unknown). A breed only joiners fed never completes the host's trial step.
 
 Not closed (open): a joiner's bow or slingshot shot still flies only in its
-own world and hits nothing of the server's; a fence-post Lead transfer by a
-joiner does nothing; a baby born of a joiner's feed fires `BreedAnimals` on the
-host's challenges, not the joiner's; a dedicated server runs no species AI or
-breeding, so there a fed pair never breeds, a tamed pet never follows and a
-Lead never pulls (D4).
+own world and hits nothing of the server's; a dedicated server runs no species
+AI, breeding or Leads, so feeding, taming, Leads and pet commands are refused
+there (above) until D4 moves those systems into `GameServer::tick`.
 
 ### 4.3 Block Mutations
 

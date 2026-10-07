@@ -275,7 +275,7 @@ pub fn dispatch_bees(
         .iter()
     {
         if kind.0 == MobType::Bee && !generic_owns(&ai.state) {
-            bees.push((id, pos.0, data.clone(), attacker.map(|a| a.0.slot())));
+            bees.push((id, pos.0, data.clone(), attacker.and_then(|a| a.0.slot())));
         }
     }
     let mut stings = Vec::new();

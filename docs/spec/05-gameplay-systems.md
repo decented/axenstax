@@ -1001,6 +1001,15 @@ item carries:
 **Animal products**:
 
 - `Bucket` (item) — crafted 3 iron in V-shape. Right-click on cow → `MilkBucket`.
+  Milking, shearing and offering a companion its taming food act **only on a
+  right-click** (the place gesture pressed, the cursor captured, off the
+  8-tick place cooldown — `local_mob_click::right_click_ready`, the gate every
+  other right-click branch has). Bug fixed 2026-10-07 (review D2b B1): those
+  three ran in the per-frame player loop with no gate, so a bucket or shears
+  held with a ready cow or sheep in the crosshair milked / sheared it with no
+  click, companion food rolled a tame — and was eaten — every frame (~3 rolls
+  a tick) until one landed, and a not-ready cow or shorn sheep in the cone
+  swallowed every later right-click (a bucket couldn't fill at water there).
 - `Egg` — chicken passive lay (timed drop near the chicken).
 - `MilkBucket` — drink restores 4 hunger + clears negative status (matches Minecraft baseline).
 - `WaterBucket` / `LavaBucket` (Buckets MC-parity, 2026-06-22) — an empty
@@ -1561,8 +1570,9 @@ joiner any more (Spec 04 §4.2c).
   reports (`InputPacket.armour_points`, client-asserted). The joiner's own
   client no longer runs either for its body.
 - **Keg blasts hurt joiners server-side too** (`explosion::apply_joiner_blast_damage`,
-  the same falloff and line-of-sight rule, wherever the keg goes off); a joined
-  client lands no blast on itself.
+  the same falloff and line-of-sight rule, wherever the keg goes off), and a
+  blast that lands wears the joiner's armour, as it wears a local player's
+  (review D2b LOW-4); a joined client lands no blast on itself.
 - **The joiner's health is the server's.** It shows the server's value plus the
   changes its own sources made that the server has not applied yet (eating,
   natural regen, starvation, poison — hunger stays client-side), reported per
@@ -1573,8 +1583,9 @@ joiner any more (Spec 04 §4.2c).
   through `PlayerEvent::DiedOf` (v70; `Died` before), which names the cause
   for the death screen ("Killed by a Brigand", "You tried to swim in lava");
   if the client's own sum reaches zero first, zero is dead and it enters the
-  death screen itself (a `Died` arriving after it has pressed Respawn is
-  dropped as stale — Spec 04 §5.3.2).
+  death screen itself, and the server's `DiedOf` arriving a moment later still
+  names the cause on it (review D2b LOW-7; a `Died` arriving after it has
+  pressed Respawn is dropped as stale — Spec 04 §5.3.2).
 - **A joiner can't sleep in a bed** ("Sleeping isn't available when you've
   joined someone else's world yet."): the night, the respawn point and the
   health are the server's, so the heal would be the only part that worked.
@@ -1582,8 +1593,11 @@ joiner any more (Spec 04 §4.2c).
 - **A joiner fights and handles the server's mobs (MP-D2b, Spec 04 §4.2d).**
   Its swing at the mob under the crosshair (in front of the first block, not
   the swing's wide cone) goes to the server as `EntityAttack`; the server
-  checks the mob is alive and within reach of the body IT holds (3 + 1.5
-  blocks), runs its own cooldown, and lands the hit with `combat::strike` —
+  checks the mob is alive, within reach of the body IT holds (3 + 1.5
+  blocks) and ahead of it (never a parrot perched on a shoulder), holds the
+  joiner to the client's swing rate on average (a swing may come up to 3
+  ticks early, but each moves the server's schedule a full 10-tick cooldown
+  on — review D2b LOW-2), and lands the hit with `combat::strike` —
   single-player's melee rule: damage from the held item, ×1.5 if the server's
   body is airborne, knockback, the sweep, the prey bolt, a provoked Bear or
   Hyena, and `LastAttacker` naming the joiner; then `combat::after_swing`
@@ -1592,29 +1606,49 @@ joiner any more (Spec 04 §4.2c).
   at your feet doesn't stop you digging. The single-player villager warning
   ("Careful — that's a villager.") runs on the joiner's client first.
 - **One-shot interactions** — breeding feed, taming, shearing, milking, a
-  Lead on and off, a pet's sit / follow (own pets only) — go to the server as
-  `EntityInteract` and run through `mob_interact`, the same functions
-  single-player's right-click calls; the joiner gives up the food, bucket or
-  Lead only when the server accepts, and products (milk, the Lead back, wool
-  and loot picked up) arrive as `InventoryGrant`s. A pet tamed by a joiner is
-  owned by its verified npub; a guest can't tame ("Sign in to tame animals in
-  someone else's world."). Riding (and a steed's pack) and villager trading
-  are not yet available to a joiner (D2c): "Riding and trading aren't
-  available in someone else's world yet."
+  Lead on and off, a Lead moved onto a fence post (review D2b B3), a pet's
+  sit / follow (own pets only) — go to the server as `EntityInteract` and run
+  through `mob_interact`, the same functions single-player's right-click
+  calls; the joiner gives up the food, bucket or Lead only when the server
+  accepts — from wherever the item has moved meanwhile, and never the same
+  item for two requests in flight (review D2b LOW-1) — and products (milk,
+  the Lead back, wool and loot picked up) arrive as `InventoryGrant`s. A pet
+  tamed by a joiner is owned by its verified npub; a guest can't tame ("Sign
+  in to tame animals in someone else's world."). Riding (and a steed's pack)
+  and villager trading are not yet available to a joiner (D2c): "Riding and
+  trading aren't available in someone else's world yet."
+- **Where the server doesn't simulate it, it's refused** (review D2b
+  MEDIUM-2). Breeding, Leads and pets following run only in a host's own sim,
+  so only a lending LAN / online host takes a joiner's breeding feed, tame,
+  Lead (on a mob or a post) or pet command. A dedicated or `--no-lend` server
+  answers "This server doesn't support that yet." and nothing is used (it
+  used to take the wheat or the Lead and nothing ever came of it). Shearing,
+  milking and taking a Lead off work everywhere.
+- **A breed credits whoever fed the parents** (review D2b B2): a fed animal
+  remembers its feeder, and a baby born of a joiner's feed completes that
+  joiner's "breed animals" step (`PlayerEvent::Bred`), not the host's; the
+  host's `BreedAnimals` fires only when one of its own players fed a parent.
 - **Kills credit the joiner who made them** (`combat::attribute_kill`, the one
   rule): the server tells it with a `KillEvent`, and its client runs the same
   attribution single-player's death sweep runs (kill counter for bounties,
   the KillMob challenge, the Nostrich's Vow, the villager-kill reputation
-  penalty). A host's own player is never credited with a joiner's kill.
+  penalty). A host's own player is never credited with a joiner's kill. A
+  death no player's hit caused (lava, a fall, another mob, a pet wolf) goes to
+  the nearest living player, a joiner included (review D2b LOW-5) — the
+  single-player rule. A joiner who leaves takes its credit with it: a mob it
+  hit that dies later credits nobody — not the next joiner given its slot,
+  not the host — and a Bear, Hyena or bee it provoked calms down (review D2b
+  MEDIUM-1).
 - **Server-landed hits wear the joiner's armour** (v70, `ArmourWorn`): one
-  durability per worn piece per landed hit, the single-player rule. On a
+  durability per worn piece per landed hit (keg blasts included), the
+  single-player rule. On a
   lending host, species-AI attacks (bee sting, goat charge, shark bite) reach
   joiners as well as the host's players, a Bear or Hyena a joiner provoked
   charges it, and a joiner's pet follows it.
 - **Not yet on a joiner:** mob push-out and knockback are not predicted (each
   shows as a position correction); its bow and slingshot shots fly only in its
-  own world; a dedicated server runs no species AI or breeding (a fed pair
-  never breeds there, a tamed pet never follows — D4).
+  own world; a dedicated server runs no species AI, breeding or Leads, so it
+  refuses those interactions (above) until D4.
 
 ### 6.5 Ranged Combat
 
