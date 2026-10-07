@@ -63,12 +63,15 @@ impl super::GameState {
         nearest_to.extend_from_slice(&joiner_cols);
         nearest_to.extend_from_slice(&respawn_cols);
         let world = &self.world;
+        let intake = &self.chunk_intake;
+        // A column the server pushed (B2a) is never "void" here: it is the
+        // server's, exactly as it is, and never regenerated.
         let step = plan_stream_step_for(
             &anchors,
             &nearest_to,
             STREAM_BUDGET,
             &self.loaded_columns,
-            |cx, cz| is_void_column(world, cx, cz),
+            |cx, cz| !intake.holds_pushed((cx, cz)) && is_void_column(world, cx, cz),
         );
         if step.healed > 0 {
             log::warn!(
@@ -118,6 +121,9 @@ impl super::GameState {
             // Reclaims the column's scattered wildlife and evicts / drops its
             // blocks (Spec 02 §7.5) — see `ColumnSims::stream_out`.
             self.column_sims().stream_out(cx, cz);
+            // B2a — a column the server pushed is discarded, never kept
+            // evicted, and the server told: it pushes it afresh on return.
+            self.chunk_intake.let_go(&mut self.world, (cx, cz));
             for cy in 0..=MAX_CHUNK_Y {
                 self.renderer.chunk_meshes.remove(&(cx, cy, cz));
                 self.renderer.water_meshes.remove(&(cx, cy, cz));
@@ -566,6 +572,10 @@ impl super::GameState {
         // T2-9), not at this machine's own fresh-world spawn search.
         if let Some(spawn) = self.pending_join_spawn.take() {
             log::info!("Joined-world spawn from the host at {spawn:?}");
+            // B2a — the loading screen holds until the server has pushed the
+            // ground round the spawn (`step_or_begin_load`).
+            self.join_ring_wait =
+                Some((column_of(spawn), web_time::Instant::now() + JOIN_RING_WAIT_LIMIT));
             self.place_player0_and_pregen(spawn);
             // The server's body starts exactly there (Spec 04 §5.3): no local
             // spawn preference may move ours away from it.
@@ -676,6 +686,123 @@ impl super::GameState {
         self.load_queue.len()
     }
 
+    /// B2a — apply a joined session's world deltas in arrival order: each
+    /// pushed chunk (`chunk_intake`) between the server block changes that
+    /// came before and after it, then light and mesh up to `relight_budget`
+    /// pushed columns. A change for a column this client doesn't hold is
+    /// dropped (Phase B1 review): applying it would conjure a stray chunk
+    /// that its own generation later skips — the push brings such columns
+    /// whole.
+    pub(crate) fn apply_world_deltas(
+        &mut self,
+        chunks: Vec<(usize, crate::protocol::ChunkDataPacket)>,
+        changes: &[crate::protocol::BlockChange],
+        relight_budget: usize,
+    ) {
+        for step in crate::chunk_intake::interleave(chunks, changes.len()) {
+            match step {
+                crate::chunk_intake::IntakeStep::Chunk(pkt) => {
+                    self.chunk_intake.apply(
+                        &mut self.world,
+                        &mut self.loaded_columns,
+                        &self.registry,
+                        &pkt,
+                    );
+                }
+                crate::chunk_intake::IntakeStep::Changes(range) => {
+                    for bc in &changes[range] {
+                        if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z) {
+                            continue;
+                        }
+                        // Task 2b — a joiner asks the host to flip a lever and
+                        // waits for the broadcast, so the latch arrives as a
+                        // metadata bit rather than a local mutation.
+                        // `apply_remote_block_change` folds that bit back into
+                        // the device (it is the shared apply point for this
+                        // loop and the host's loopback loop), or this client's
+                        // own still duplicated power sim would darken the
+                        // host's lit wire the moment anything nearby dirtied
+                        // the network.
+                        if self.world.apply_remote_block_change(bc) {
+                            self.rebuild_chunk_at(bc.x, bc.y, bc.z);
+                        }
+                    }
+                }
+            }
+        }
+        self.finish_pushed_columns(relight_budget);
+    }
+
+    /// B2a — the light pass, fluid/fire rescan and meshing of up to `budget`
+    /// pushed columns (oldest first), and the seams of their loaded
+    /// neighbours — what `step_load` does for a generated column. A pushed
+    /// chunk is in the world (physics stands on it) from the moment it is
+    /// applied; until its column comes up here the previous mesh shows.
+    pub(crate) fn finish_pushed_columns(&mut self, budget: usize) {
+        for (cx, cz) in self.chunk_intake.take_relight(budget) {
+            crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
+            self.water.forget_column(cx, cz);
+            self.water.register_column_sources(cx, cz, &self.world);
+            self.lava.forget_column(cx, cz);
+            self.lava.register_column_sources(cx, cz, &self.world);
+            self.fire.register_column_fires(cx, cz, &self.world, self.tick_counter);
+            for (mx, mz) in [(cx, cz), (cx - 1, cz), (cx + 1, cz), (cx, cz - 1), (cx, cz + 1)] {
+                if (mx, mz) != (cx, cz) && !self.loaded_columns.contains(&(mx, mz)) {
+                    continue;
+                }
+                for cy in 0..=MAX_CHUNK_Y {
+                    if self.world.has_chunk(mx, cy, mz) {
+                        let meshes = build_chunk_meshes(mx, cy, mz, &self.world, &self.registry);
+                        self.renderer.upload_chunk((mx, cy, mz), &meshes);
+                    }
+                }
+            }
+        }
+    }
+
+    /// B2a — a joined session's loading screen: take in what the server has
+    /// pushed so far and answer how many of the spawn ring's columns
+    /// (`join_ring_wait`) are still incomplete — `0` once all are, or once the
+    /// wait passes [`JOIN_RING_WAIT_LIMIT`] (logged: the player then lands on
+    /// its own generation, and the push catches up in play).
+    pub(crate) fn join_ring_pending(&mut self) -> usize {
+        let Some((centre, deadline)) = self.join_ring_wait else {
+            return 0;
+        };
+        let Some(client) = self.remote_client.as_mut() else {
+            self.join_ring_wait = None;
+            return 0;
+        };
+        client.poll();
+        if !client.is_connected() {
+            // The link went: stop waiting; play's own handling takes it from here.
+            self.join_ring_wait = None;
+            return 0;
+        }
+        let chunks = std::mem::take(&mut client.chunk_queue);
+        let changes = std::mem::take(&mut client.pending_block_changes);
+        self.apply_world_deltas(chunks, &changes, crate::loading_screen::LOAD_BUDGET_PER_FRAME);
+        let r = crate::chunk_push::SPAWN_RING_RADIUS;
+        let mut missing = 0;
+        for dx in -r..=r {
+            for dz in -r..=r {
+                missing += usize::from(!self.chunk_intake.column_complete((centre.0 + dx, centre.1 + dz)));
+            }
+        }
+        if missing == 0 {
+            self.join_ring_wait = None;
+        } else if web_time::Instant::now() >= deadline {
+            log::warn!(
+                "The server pushed {} of the 9 spawn columns in {:?}; entering the world anyway",
+                9 - missing,
+                JOIN_RING_WAIT_LIMIT
+            );
+            self.join_ring_wait = None;
+            missing = 0;
+        }
+        missing
+    }
+
 }
 
 // ── Column-streaming policy (shared: client + dedicated server) ─────────────
@@ -685,6 +812,14 @@ impl super::GameState {
 // the dedicated server's `GameServer::stream_columns` (`server_stream.rs`;
 // anchors = every connected player + the world spawn, radius = `--sim-distance`,
 // `SERVER_STREAM_BUDGET` per tick). Spec 01 §4.1.2.
+
+/// B2a — the longest a joined session's loading screen waits for the
+/// server to push the ground round its spawn ([`super::GameState::join_ring_pending`]).
+pub(crate) const JOIN_RING_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// B2a — pushed columns a joined session lights and meshes per frame in play
+/// (`finish_pushed_columns`); its own streamer does `STREAM_BUDGET` more.
+pub(crate) const PUSH_RELIGHT_PER_FRAME: usize = 2;
 
 /// Extra columns (Chebyshev) a loaded column may sit beyond the streaming
 /// radius before it unloads, so a player pacing along a column border doesn't

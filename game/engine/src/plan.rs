@@ -227,6 +227,32 @@ pub struct PlanData {
 fn default_authored_in() -> String { "survival".to_string() }
 
 impl PlanData {
+    /// What a joiner holds for a blueprint the host laid on a wall (Phase
+    /// B2a chunk push): an empty plan with only the develop state the wall's
+    /// texture shows. The plan itself stays the host's — a push carries the
+    /// render stub alone (`protocol::PushedAttachment::Blueprint`).
+    pub fn render_stub(developed: bool) -> Self {
+        PlanData {
+            version: 1,
+            name: "Blueprint".to_string(),
+            author_npub: String::new(),
+            license: PlanLicense::default(),
+            derivation_chain: Vec::new(),
+            is_master: false,
+            width: 0,
+            depth: 0,
+            height: 0,
+            cells: Vec::new(),
+            authored_in: default_authored_in(),
+            develop_state: if developed {
+                DevelopState::Developed
+            } else {
+                DevelopState::Latent { exposure_ticks: 0 }
+            },
+            kind: PlanKind::Building,
+        }
+    }
+
     /// Stub used by `/give debug_plan` (Phase 14) + tests. 3×3 footprint,
     /// 1 stone block in each cell at y=0.
     pub fn debug_3x3_stone() -> Self {

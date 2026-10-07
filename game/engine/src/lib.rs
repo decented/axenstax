@@ -338,6 +338,10 @@ mod hosted_server;
 mod sim_lend;
 // T1-5 — per-client bounded StateUpdate queue (split, budget, coalesce, resync).
 mod state_outbox;
+// B2a — server → joiner chunk push (sent-sets, pacing, chunk snapshots).
+mod chunk_push;
+// B2a — a joiner taking in pushed chunks (ordered apply, budgeted relight).
+mod chunk_intake;
 #[cfg(not(target_arch = "wasm32"))]
 mod network;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1327,6 +1331,15 @@ pub(crate) struct GameState {
     /// Set by the join gate just before `begin_load`, which moves player 0
     /// there and builds the load queue around it. `None` otherwise.
     pub(crate) pending_join_spawn: Option<glam::Vec3>,
+    /// B2a — the chunks a joined session's server pushes: applied in order
+    /// with its block changes, lit and meshed a few columns a frame, never
+    /// generated over or evicted, acknowledged on every input
+    /// (`chunk_intake`). Idle unless `remote_client` is set.
+    pub(crate) chunk_intake: crate::chunk_intake::ChunkIntake,
+    /// B2a — a joined session's loading screen waits until the 3×3 columns
+    /// round this one (its spawn column) are pushed, or until the deadline.
+    /// `None` outside that wait.
+    pub(crate) join_ring_wait: Option<((i32, i32), web_time::Instant)>,
     /// One-shot: the next `begin_load` is a RESUME whose world + players were
     /// already restored (the WASM poll branch unpacks the IndexedDB blob and
     /// restores everything before entering `GameMode::Loading`). Gates
@@ -1633,6 +1646,8 @@ impl GameState {
         {
             let saved = crate::graphics_settings::GraphicsSettings::load();
             audio.set_master(saved.master_volume, saved.audio_muted);
+            // B2a — every JoinRequest announces this machine's render distance.
+            crate::remote_client::set_join_render_distance(saved.render_distance);
         }
 
         // Create a single PlayerSlot for player 0
@@ -1851,6 +1866,8 @@ impl GameState {
             sats_policy: crate::economy::ServerSatsPolicy::default(),
             pending_spawn_pref: crate::spawn_pref::SpawnPref::Default,
             pending_join_spawn: None,
+            chunk_intake: crate::chunk_intake::ChunkIntake::default(),
+            join_ring_wait: None,
             world_preloaded: false,
             pending_workshop_reset: false,
             pending_scenario_launch: None,
@@ -2744,6 +2761,8 @@ pub fn run() {
         hosted_server::set_no_lend(true);
         log::warn!("--no-lend: hosting keeps a second copy of the world (pre-D1 behaviour)");
     }
+    // B2a — `--chunk-sync <mode>`: which chunks a host pushes to its joiners.
+    chunk_push::configure_from_args(&args);
 
     // Headless dedicated server (Docker). Runs the authoritative simulation +
     // WebSocket accept loop with NO window/renderer, then returns. Everything

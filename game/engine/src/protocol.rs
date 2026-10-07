@@ -160,9 +160,15 @@ pub struct JoinRequestPacket {
     /// and the server re-normalises it, checks it against its `--public-host`
     /// list and signs its identity proof over the same origin. Empty on
     /// QUIC / in-process joins, where it is ignored. Untrusted: a lie only
-    /// makes the signature (or the proof) fail. APPEND-ONLY: stays last.
+    /// makes the signature (or the proof) fail.
     #[serde(default)]
     pub ws_host: String,
+    /// The joiner's render distance in columns (v69, Phase B2a). The server
+    /// pushes chunks out to `min(this, its own limit)` round the joiner's
+    /// body (`chunk_push`). `0` = not said: the server's limit applies.
+    /// Read once, at join. APPEND-ONLY: stays last.
+    #[serde(default)]
+    pub render_distance: u8,
 }
 
 /// Server accepts a join request.
@@ -502,6 +508,31 @@ pub struct InputPacket {
     /// see `armour_points`.
     #[serde(default)]
     pub health_delta: f32,
+    /// v69 (Phase B2a) — how many `ChunkData` packets this client has taken
+    /// in since it joined, cumulative. The server's chunk-push credit window
+    /// (`chunk_push`) counts a push as in flight until this passes it.
+    #[serde(default)]
+    pub chunk_ack: u32,
+    /// v69 — columns this client let go of since its last input (unloaded,
+    /// discarded), each with its `chunk_ack` count at that moment. The server
+    /// takes them out of its sent-set so it stops sending their changes and
+    /// pushes them again when they are back in range. Bounded per packet
+    /// ([`MAX_CHUNK_DROPS_PER_INPUT`]); the rest go in the next.
+    #[serde(default)]
+    pub chunk_drops: Vec<ChunkDrop>,
+}
+
+/// Most [`ChunkDrop`]s one `InputPacket` carries (12 bytes each).
+pub const MAX_CHUNK_DROPS_PER_INPUT: usize = 512;
+
+/// A column a joiner discarded (v69, Phase B2a). `as_of` is its `chunk_ack`
+/// count when it did: every `ChunkData` packet up to that count that touched
+/// the column is gone from the client; anything pushed after it is held.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkDrop {
+    pub cx: i32,
+    pub cz: i32,
+    pub as_of: u32,
 }
 
 // ─── State sync (Server → Client, every tick, unreliable datagram) ───
@@ -868,19 +899,75 @@ pub struct StateUpdatePacket {
 
 // ─── Chunk data (Server → Client, reliable stream) ───
 
-/// A full chunk sent to a client (initial load or entering new area).
-/// The block data is LZ4-compressed before network transmission.
+/// One chunk the server pushes to a joiner (Phase B2a, v69; Spec 04 §4.1).
+/// A snapshot at its place in the client's ordered stream: the client
+/// REPLACES whatever it holds there (its own generation included) and
+/// applies every later block change on top.
+///
+/// A chunk whose side data does not fit one packet goes as several: the
+/// first carries the blocks (and replaces the chunk and its side data); each
+/// CONTINUATION (empty `compressed_blocks`) adds more side data to it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChunkDataPacket {
     pub cx: i32,
     pub cy: i32,
     pub cz: i32,
-    /// LZ4-compressed `Chunk::as_bytes()` — 8192 bytes of u16 block IDs plus
-    /// the 512-byte player-placed mask = 8704 bytes uncompressed (Spec 6 §2.2).
-    /// When the send path is wired, use `chunk.as_bytes()` (which includes the
-    /// mask), not a hand-built block-only array. `from_bytes` accepts both the
-    /// legacy 8192 and current 8704 lengths.
+    /// LZ4-compressed `Chunk::as_bytes()` ([`compress_chunk`]) — 8192 bytes
+    /// of u16 block IDs plus the 512-byte player-placed mask = 8704 bytes
+    /// uncompressed (Spec 6 §2.2). An all-air chunk is sent too (about 50
+    /// bytes): it is how a dug-out chunk reaches the client. EMPTY = a
+    /// continuation packet (see the type docs).
     pub compressed_blocks: Vec<u8>,
+    /// Per-block metadata in this chunk (`World.block_meta`: shape, facing,
+    /// device latch, water depth), `(cell, meta)`, `cell` the chunk-local
+    /// index `x + z*16 + y*256`. Zero entries are not sent.
+    pub meta: Vec<(u16, u8)>,
+    /// The render-visible block entities in this chunk — never a
+    /// container's contents, an escrow or a plan.
+    pub entities: Vec<PushedBlockEntity>,
+    /// Face attachments (wallpaper, blueprints) in this chunk, render stubs.
+    pub attachments: Vec<PushedFaceAttachment>,
+}
+
+/// A render-visible block entity in a pushed chunk (v69). `cell` as in
+/// [`ChunkDataPacket::meta`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PushedBlockEntity {
+    pub cell: u16,
+    pub entity: PushedEntity,
+}
+
+/// What a joiner sees of a block entity (v69). APPEND-ONLY enum.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PushedEntity {
+    /// A sign's text (read on look; at most `sign::SIGN_MAX_CHARS`).
+    Sign { text: String },
+    /// An item frame's shown item, as the held-item `(kind, id)` pair plus
+    /// [`WireItem`] fidelity (a framed plan shows as an empty frame), and
+    /// its rotation.
+    ItemFrame { item_kind: u8, item_id: u16, full_item: WireItem, rotation: u8 },
+    /// A campfire's burn state (the lit/smoke pillar and the raid-warning
+    /// smoke tint) — not what is cooking on it.
+    Campfire { fuel_ticks: u32, smoke_ticks: u32, smoulder_ticks: u32, raid_warning: bool },
+}
+
+/// One face attachment in a pushed chunk (v69). `face` is
+/// `mesh::Face::index` (0..6).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PushedFaceAttachment {
+    pub cell: u16,
+    pub face: u8,
+    pub attachment: PushedAttachment,
+}
+
+/// The render stub of a face attachment (v69). A blueprint travels as its
+/// develop state only: the mesher reads nothing else, and the plan is the
+/// host's. APPEND-ONLY enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushedAttachment {
+    Wallpaper(u16),
+    BlueprintBlank,
+    Blueprint { developed: bool },
 }
 
 // ─── Player events ───
@@ -1292,7 +1379,15 @@ pub struct ServerAnnouncePacket {
 ///   server's (it lands mob and lava/fire hits server-side), and the client
 ///   reports only the changes it still owns (eating, regen, poison,
 ///   starvation). Packet shapes CHANGED, hence the bump.
-pub const PROTOCOL_VERSION: u32 = 68;
+/// - v69 (2026-10-07, Phase B2a): the server pushes chunks to joiners.
+///   `ChunkDataPacket` (tag 3, until now decoded but never sent) gains its
+///   side data (`meta`, render-visible `entities`, face `attachments`) and
+///   continuation packets; `JoinRequestPacket` gains trailing
+///   `render_distance: u8`; `InputPacket` gains trailing `chunk_ack: u32`
+///   (the push's credit window) and `chunk_drops: Vec<ChunkDrop>` (columns the
+///   client let go of). Server block changes reach a joiner only for chunks
+///   it has been sent. See `chunk_push` and Spec 04 §4.1.
+pub const PROTOCOL_VERSION: u32 = 69;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1382,11 +1477,10 @@ pub fn safe_deserialize<'a, T: Deserialize<'a>>(payload: &'a [u8]) -> Result<T, 
         .deserialize(payload)
 }
 
-/// Compress block data with LZ4 for chunk transmission. `decompress_chunk`
-/// (below) IS live — game_loop.rs decompresses inbound chunk packets — but
-/// nothing on the send side calls this yet to actually produce
-/// `compressed_blocks` for a real remote client; round-trip tested here.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Compress block data with LZ4 for chunk transmission (the server's chunk
+/// push, `chunk_push`). Measured over real saves and fresh terrain
+/// (2026-10-07): a terrain chunk is about 2.3 KB (max about 4.4 KB), an
+/// all-air one about 50 bytes.
 pub fn compress_chunk(block_data: &[u8]) -> Vec<u8> {
     lz4_flex::compress_prepend_size(block_data)
 }
@@ -1455,7 +1549,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 68);
+        assert_eq!(super::PROTOCOL_VERSION, 69);
     }
 
     #[test]
@@ -1644,9 +1738,13 @@ mod tests {
             block_changes: vec![BlockChange { x: 0, y: 64, z: 0, new_block: 3, meta: 0 }],
             armour_points: 11,
             health_delta: -1.5,
+            chunk_ack: 77,
+            chunk_drops: vec![ChunkDrop { cx: -3, cz: 9, as_of: 70 }],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
+        assert_eq!(back.chunk_ack, 77);
+        assert_eq!(back.chunk_drops, pkt.chunk_drops);
         assert_eq!(back.tick, pkt.tick);
         // MP-D2a (v68) — the trailing vitals survive the round-trip.
         assert_eq!(back.armour_points, 11);
@@ -1972,7 +2070,10 @@ mod tests {
         //   goes changed-only behind a per-client interest radius;
         //   `InputPacket` gains `armour_points` + `health_delta` (a joiner's
         //   health is the server's).
-        assert_eq!(PROTOCOL_VERSION, 68);
+        // v69 (2026-10-07, B2a): chunk push — ChunkData side data +
+        //   continuations, JoinRequest.render_distance, InputPacket.chunk_ack
+        //   + chunk_drops.
+        assert_eq!(PROTOCOL_VERSION, 69);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2120,6 +2221,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -2184,6 +2286,7 @@ mod tests {
             client_nonce_hex: "abc123".to_string(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: "play.example.org:6767".to_string(),
+            render_distance: 0,
         };
         let bytes = serialize_packet(PacketType::JoinRequest, &req);
         let (_ptype, payload) = deserialize_header(&bytes).unwrap();

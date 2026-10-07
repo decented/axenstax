@@ -30,13 +30,42 @@ pub(super) fn send_guest_join(client: &ChannelClientTransport, name: &str) {
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
 }
 
-/// Attach + join a guest; returns (client, slot).
+/// Attach + join a guest; returns (client, slot). The join's chunk push is
+/// settled ([`settle_chunk_push`]): the ground round the joiner is its own,
+/// so changes there reach it, as they do a real joiner once it has loaded.
 pub(super) fn join_guest(hs: &mut HostedServer, name: &str) -> (ChannelClientTransport, usize) {
     let client = hs.attach_test_remote();
     send_guest_join(&client, name);
     hs.tick();
     let slot = accepted_index(&client).expect("guest join accepted");
+    settle_chunk_push(hs, &client, HostedServer::tick);
     (client, slot)
+}
+
+/// B2a — tick (with `tick`, e.g. `HostedServer::tick` or a lend window)
+/// until a tick brings `client` no chunk push. The test client acknowledges
+/// nothing, so the push stops at its credit window: the 3×3 columns round
+/// the joiner (which go first) and a little more. Everything `client`
+/// receives meanwhile is discarded.
+pub(super) fn settle_chunk_push<T>(
+    target: &mut T,
+    client: &ChannelClientTransport,
+    mut tick: impl FnMut(&mut T),
+) {
+    for _ in 0..32 {
+        let mut pushed = false;
+        while let Some(pkt) = client.try_recv_from_server() {
+            pushed |= matches!(
+                protocol::deserialize_header(&pkt),
+                Some((protocol::PacketType::ChunkData, _))
+            );
+        }
+        if !pushed {
+            return;
+        }
+        tick(target);
+    }
+    panic!("the chunk push never settled");
 }
 
 /// Attach + join a guest; returns (client, slot, the `JoinAccept` it got).
@@ -49,6 +78,7 @@ pub(super) fn join_guest_accept(
     hs.tick();
     let accept = accepted(&client).expect("guest join accepted");
     let slot = accept.player_index as usize;
+    settle_chunk_push(hs, &client, HostedServer::tick);
     (client, slot, accept)
 }
 

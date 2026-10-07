@@ -194,7 +194,10 @@ fn protocol_version_is_the_pinned_value() {
     //   sent changed-only behind a per-client interest radius; `InputPacket`
     //   gains `armour_points` + `health_delta` (a joiner's health is the
     //   server's).
-    assert_eq!(protocol::PROTOCOL_VERSION, 68);
+    // v69 (2026-10-07, B2a): the chunk push — ChunkData side data and
+    //   continuations, JoinRequest.render_distance, InputPacket.chunk_ack +
+    //   chunk_drops.
+    assert_eq!(protocol::PROTOCOL_VERSION, 69);
 }
 
 #[test]
@@ -208,6 +211,7 @@ fn join_request_round_trips_bincode() {
         client_nonce_hex: String::new(),
         worldgen_version: crate::world::worldgen_fingerprint(),
         ws_host: String::new(),
+        render_distance: 0,
     };
     let pkt = protocol::serialize_packet(protocol::PacketType::JoinRequest, &req);
     let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();

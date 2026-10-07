@@ -42,6 +42,8 @@ pub(super) fn join_guest_lent(
     send_guest_join(&client, name);
     host.lend_tick(hs);
     let slot = accepted(&client).expect("guest join accepted").player_index as usize;
+    // B2a — settle the join's chunk push (`joiner_authority::settle_chunk_push`).
+    super::joiner_authority::settle_chunk_push(hs, &client, |hs| host.lend_tick(hs));
     (client, slot)
 }
 

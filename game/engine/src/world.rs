@@ -986,6 +986,18 @@ impl World {
         keep
     }
 
+    /// Drop a column outright — its live chunks and any evicted copy — with
+    /// nothing kept. For a joiner letting go of a column its server pushed
+    /// (Phase B2a, `chunk_intake`): the server pushes it afresh on return, so
+    /// a stale copy must never be restored. Side tables are the caller's.
+    pub fn discard_column(&mut self, cx: i32, cz: i32) {
+        self.evicted_columns.remove(&(cx, cz));
+        for cy in 0..=MAX_CHUNK_Y {
+            self.chunks.remove(&(cx, cy, cz));
+            self.evicted.remove(&(cx, cy, cz));
+        }
+    }
+
     /// Spec 02 §7.5 — bring an evicted column back into `chunks`. Returns true
     /// if any evicted chunk was present; the caller must then NOT run
     /// `generate_column` for it (it would refill dug-out empty chunks). An

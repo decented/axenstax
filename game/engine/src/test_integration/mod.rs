@@ -56,6 +56,8 @@ pub mod joiner_death;
 pub mod position_truth;
 // Phase B1 — the dedicated server streams columns around every player.
 pub mod server_streaming;
+// Phase B2a — the server pushes chunks to joiners; joiners take them in.
+pub mod chunk_push;
 
 // Online play by contact — the rendezvous end to end over an in-memory relay.
 #[cfg(not(target_arch = "wasm32"))]

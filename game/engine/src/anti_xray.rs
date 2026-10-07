@@ -11,8 +11,11 @@
 //! server** (the §5.2.2 guarantee). It is the foundation the networked spectator
 //! (design Phase 3) and real remote-multiplayer chunk streaming both build on.
 //!
-//! Built + tested, not yet wired into the live chunk-stream send path (that
-//! integration point lands with real remote-multiplayer streaming).
+//! Built + tested, NOT wired. The live chunk send path exists since Phase B2a
+//! (`chunk_push::build_chunk_packets` is the seam), but obfuscating there only
+//! hides anything once the world seed stops shipping to joiners: today a
+//! joiner gets the seed in `JoinAccept` and can regenerate every natural ore
+//! from it. Wiring it is an owner decision (Spec 04 §4.1 "As built").
 
 // Module-scoped (not crate-wide) — this file's own doc comment above already
 // establishes the whole module as tested-but-unwired, so a per-item

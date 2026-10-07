@@ -1542,6 +1542,9 @@ impl super::GameState {
         if let Some(hs) = self.hosted_server.as_mut() {
             hs.server.render_distance = self.graphics.render_distance;
         }
+        // B2a — the render distance the next JoinRequest announces (a joined
+        // session keeps the push radius it joined with).
+        crate::remote_client::set_join_render_distance(self.graphics.render_distance);
         Self::sync_display_settings(&mut self.renderer, &self.graphics);
         // Master volume + mute (audio.rs) — both targets, applied live.
         self.audio.set_master(self.graphics.master_volume, self.graphics.audio_muted);
@@ -2589,14 +2592,17 @@ impl super::GameState {
                 // notice. Nothing to build, and no Loading state to update.
                 return 0;
             }
-            let total = self.load_queue.len();
+            // B2a — a joined session also counts the spawn ring it waits for.
+            let total = self.load_queue.len() + 9 * usize::from(self.join_ring_wait.is_some());
             if let GameMode::Loading(ref mut st) = self.mode {
                 st.setup_done = true;
                 st.total = total;
             }
             total
         } else {
-            self.step_load(crate::loading_screen::LOAD_BUDGET_PER_FRAME)
+            // B2a — and a joined session isn't done until the server has
+            // pushed the ground round its spawn (`join_ring_pending`).
+            self.step_load(crate::loading_screen::LOAD_BUDGET_PER_FRAME) + self.join_ring_pending()
         }
     }
 
@@ -2668,7 +2674,8 @@ impl super::GameState {
             for dz in -rd..=rd {
                 let (cx, cz) = (pcx + dx, pcz + dz);
                 let floor = self.world.get_block(cx * cs + 8, 0, cz * cs + 8);
-                if floor != crate::block::BEDROCK {
+                // B2a — a column the server pushed is the server's, as it is.
+                if floor != crate::block::BEDROCK && !self.chunk_intake.holds_pushed((cx, cz)) {
                     if (0..=crate::world::MAX_CHUNK_Y).any(|cy| self.world.has_chunk(cx, cy, cz)) {
                         had_chunk += 1;
                     }
@@ -2991,6 +2998,8 @@ impl super::GameState {
         self.map_screen = crate::minimap::MapScreen::default();
         self.loaded_columns.clear();
         self.pending_join_spawn = None;
+        self.chunk_intake = crate::chunk_intake::ChunkIntake::default();
+        self.join_ring_wait = None;
         self.own_prediction.reset();
         self.mission_idx = 0;
         self.mission_note.clear();
@@ -21772,7 +21781,7 @@ impl super::GameState {
         // Phase 1: Collect raw packets from transport (borrows hosted_server or remote_client)
         let mut host_packets: Vec<Vec<u8>> = Vec::new();
         let mut client_state: Option<crate::protocol::StateUpdatePacket> = None;
-        let mut client_chunks: Vec<crate::protocol::ChunkDataPacket> = Vec::new();
+        let mut client_chunks: Vec<(usize, crate::protocol::ChunkDataPacket)> = Vec::new();
         let mut my_idx: u32 = 0;
 
         if let Some(ref server) = self.hosted_server
@@ -21941,27 +21950,16 @@ impl super::GameState {
             }
         }
 
-        // Client: apply received chunks
-        for chunk_data in client_chunks {
-            match crate::protocol::decompress_chunk(&chunk_data.compressed_blocks) {
-                Ok(decompressed) => {
-                    if let Some(chunk) = crate::chunk::Chunk::from_bytes(&decompressed) {
-                        self.world.insert_chunk(
-                            chunk_data.cx, chunk_data.cy, chunk_data.cz, chunk,
-                        );
-                        let meshes = build_chunk_meshes(
-                            chunk_data.cx, chunk_data.cy, chunk_data.cz,
-                            &self.world, &self.registry,
-                        );
-                        self.renderer.upload_chunk(
-                            (chunk_data.cx, chunk_data.cy, chunk_data.cz),
-                            &meshes,
-                        );
-                    }
-                }
-                Err(e) => log::warn!("Chunk decompress error: {e}"),
-            }
-        }
+        // Client: the server's world deltas, in arrival order (B2a) — each
+        // pushed chunk between the block changes around it — and a couple of
+        // pushed columns lit and meshed. Before the state update, so our own
+        // position reconciles against the world the server holds. Empty on
+        // the host/single-player path, so a no-op there.
+        self.apply_world_deltas(
+            client_chunks,
+            &pending_block_changes,
+            crate::chunk_stream::PUSH_RELIGHT_PER_FRAME,
+        );
 
         // Client: apply state update
         if let Some(state) = client_state {
@@ -22053,31 +22051,6 @@ impl super::GameState {
             // One day/night cycle for everyone: the joiner's sky follows the
             // host's clock instead of starting its own at 7500 on join.
             self.world_time = state.world_time % 24000;
-        }
-        // Client: apply the accumulated deltas. These come from the
-        // RemoteClient accumulators (every StateUpdate since last frame),
-        // not latest_state — a batched packet loses nothing. Empty vecs on
-        // the host/single-player path, so this is a no-op there.
-        for bc in &pending_block_changes {
-            // Phase B1 review — drop a change for a column this joiner has not
-            // loaded: applying it conjured a stray chunk that its own
-            // generation later skipped (a 16³ hole). The server's chunk push
-            // (Phase B2) delivers such columns whole (Spec 04 §4.1).
-            if !crate::chunk_stream::remote_change_is_loaded(
-                &self.loaded_columns, &self.world, bc.x, bc.z,
-            ) {
-                continue;
-            }
-            // Task 2b — a joiner asks the host to flip a lever and waits for
-            // the broadcast, so the latch arrives as a metadata bit rather than
-            // a local mutation. `apply_remote_block_change` folds that bit back
-            // into the device (it is the shared apply point for this loop and
-            // the host's loopback loop above), or this client's own still
-            // duplicated power sim would darken the host's lit wire the moment
-            // anything nearby dirtied the network.
-            if self.world.apply_remote_block_change(bc) {
-                self.rebuild_chunk_at(bc.x, bc.y, bc.z);
-            }
         }
         // Fold the server's entity diff in, one StateUpdate at a time in
         // arrival order (review D2a MEDIUM-2): death-drops phase 2b's
@@ -22297,6 +22270,9 @@ impl super::GameState {
             block_changes: std::mem::take(&mut self.pending_block_changes),
             armour_points: slot.total_armour_points(),
             health_delta,
+            // Set on the joined path below; the host's loopback has no push.
+            chunk_ack: 0,
+            chunk_drops: Vec::new(),
         };
 
         // Serialize once, send to whichever transport is active
@@ -22320,11 +22296,18 @@ impl super::GameState {
             // the server simulates rides — it goes out with no movement, so
             // the server's body stays where the ride began, and getting off
             // puts us back on that body (`OwnPrediction::send`).
+            // B2a — acknowledge the chunks taken in and report the columns let
+            // go of, so the server's push window reopens and its sent-set
+            // matches what this client holds.
+            let mut joined_input = input.clone();
+            joined_input.chunk_ack = self.chunk_intake.applied();
+            joined_input.chunk_drops =
+                self.chunk_intake.take_drops(crate::protocol::MAX_CHUNK_DROPS_PER_INPUT);
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
             let seq = self.own_prediction.send(
                 client,
-                &input,
+                &joined_input,
                 &mut slot.player,
                 riding,
                 &self.world,

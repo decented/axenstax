@@ -134,6 +134,9 @@ fn stand_on_floor(hs: &mut HostedServer, slot: usize) -> Vec3 {
     p.pos = at;
     p.velocity = Vec3::ZERO;
     p.reset_fall();
+    // B2a — as if it had walked here: its client holds this column, so the
+    // server's changes in it (a refused edit sent back) reach it.
+    hs.hold_column_for_test(slot, crate::chunk_stream::column_of(at));
     at
 }
 

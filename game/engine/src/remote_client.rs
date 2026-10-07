@@ -259,8 +259,14 @@ pub struct RemoteClient {
     tick: u64,
     /// Latest state update from the server (consumed by game loop each frame).
     pub latest_state: Option<protocol::StateUpdatePacket>,
-    /// Queued chunk data packets (consumed by game loop each frame).
-    pub chunk_queue: Vec<protocol::ChunkDataPacket>,
+    /// Chunk pushes received since the game loop last drained them (Phase
+    /// B2a), each with the length `pending_block_changes` had when it
+    /// arrived: the snapshot sits between those changes and the later ones,
+    /// and is applied there (`chunk_intake::apply_in_order`) — a later
+    /// change applied first would be overwritten by the older snapshot.
+    /// Never trimmed: the server's credit window bounds it, and a server past
+    /// [`MAX_QUEUED_CHUNK_PACKETS`] ends the session loudly instead.
+    pub chunk_queue: Vec<(usize, protocol::ChunkDataPacket)>,
     /// Spawn position from JoinAccept.
     pub spawn_pos: Option<(f32, f32, f32)>,
     /// Play mode received in the JoinAccept packet. Consumed once by the game
@@ -350,6 +356,30 @@ pub struct RemoteClient {
     pub pending_chat: Vec<protocol::ChatDeliverPacket>,
 }
 
+/// Most chunk packets [`RemoteClient::chunk_queue`] holds before the game
+/// loop drains it. The server keeps at most `chunk_push::CHUNK_WINDOW_PACKETS`
+/// unacknowledged, so an honest server never comes near this.
+pub const MAX_QUEUED_CHUNK_PACKETS: usize = 4096;
+
+/// This machine's render distance (columns), announced in every JoinRequest
+/// so the server pushes chunks that far (Phase B2a). Kept in step with the
+/// graphics settings by the game loop (`sync_graphics_to_engine`); `0` until
+/// then, which the server reads as "use your own limit".
+static JOIN_RENDER_DISTANCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Record the render distance a JoinRequest announces (clamped to `u8`).
+pub fn set_join_render_distance(columns: i32) {
+    JOIN_RENDER_DISTANCE.store(
+        columns.clamp(0, i32::from(u8::MAX)) as u8,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The render distance a JoinRequest announces.
+fn join_render_distance() -> u8 {
+    JOIN_RENDER_DISTANCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Build a guest JoinRequest (no Signet auth) — cross-platform (native + wasm),
 /// so the WebSocket join path (browser + native) shares it. Accepted only by an
 /// open (non-sign-in) server; a sign-in-required host rejects a guest join.
@@ -363,6 +393,7 @@ pub fn build_join_request_guest(player_name: &str, skin_key: u64) -> protocol::J
         client_nonce_hex: random_nonce_hex(),
         worldgen_version: crate::world::worldgen_fingerprint(),
         ws_host: String::new(),
+        render_distance: join_render_distance(),
     }
 }
 
@@ -410,6 +441,7 @@ pub fn build_join_request(
         client_nonce_hex: random_nonce_hex(),
         worldgen_version: crate::world::worldgen_fingerprint(),
         ws_host: String::new(),
+        render_distance: join_render_distance(),
     }
 }
 
@@ -734,13 +766,23 @@ impl RemoteClient {
                         }
                     }
                     PacketType::ChunkData => {
-                        if let Ok(chunk) = protocol::safe_deserialize::<protocol::ChunkDataPacket>(payload) {
-                            // Cap chunk queue to prevent memory exhaustion from
-                            // server flooding or slow client consumption.
-                            if self.chunk_queue.len() < 256 {
-                                self.chunk_queue.push(chunk);
+                        match protocol::safe_deserialize::<protocol::ChunkDataPacket>(payload) {
+                            Ok(chunk) if self.chunk_queue.len() < MAX_QUEUED_CHUNK_PACKETS => {
+                                self.chunk_queue.push((self.pending_block_changes.len(), chunk));
                                 changed = true;
                             }
+                            Ok(_) => {
+                                // A server past its own credit window: never
+                                // drop part of the world silently — end it.
+                                log::error!(
+                                    "Server sent over {MAX_QUEUED_CHUNK_PACKETS} undrained chunk packets; leaving"
+                                );
+                                self.state = ConnectionState::Failed(
+                                    "The server sent more world data than this game can take in.".to_string(),
+                                );
+                                changed = true;
+                            }
+                            Err(e) => log::warn!("Undecodable chunk packet: {e}"),
                         }
                     }
                     PacketType::PlayerEvent => {
@@ -852,7 +894,7 @@ impl RemoteClient {
                             protocol::InventoryGrantPacket,
                         >(payload)
                         {
-                            // Bounded like chunk_queue: a hostile server can't
+                            // Bounded: a hostile server can't
                             // grow this without limit between frames.
                             if self.pending_grants.len() < 256 {
                                 self.pending_grants.push(grant);
@@ -2283,6 +2325,70 @@ mod tests {
             rc.pending_life_events,
             vec![OwnLifeEvent::Respawned(glam::Vec3::new(25.5, 64.0, -40.5))],
             "an ordinary respawn still goes through"
+        );
+    }
+
+    // ── B2a: pushed chunks ──────────────────────────────────────────────
+
+    fn chunk_pkt(cx: i32) -> Vec<u8> {
+        let p = protocol::ChunkDataPacket {
+            cx,
+            cy: 0,
+            cz: 0,
+            compressed_blocks: vec![1],
+            meta: Vec::new(),
+            entities: Vec::new(),
+            attachments: Vec::new(),
+        };
+        protocol::serialize_packet(PacketType::ChunkData, &p)
+    }
+
+    #[test]
+    fn every_pushed_chunk_is_queued_in_line_with_the_block_changes() {
+        let (srv, client) = channel_pair();
+        let mut rc =
+            RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
+        let state = |xs: &[i32]| protocol::StateUpdatePacket {
+            tick: 1,
+            players: Vec::new(),
+            block_changes: xs.iter().map(|&x| protocol::BlockChange::with_meta(x, 0, 0, 1, 0)).collect(),
+            world_time: 0,
+            last_acked_input: 0,
+            entity_spawns: Vec::new(),
+            entity_updates: Vec::new(),
+            entity_despawns: Vec::new(),
+            reserve_richness: 1.0,
+            reserve_target_sats: 0,
+            reserve_current_sats: 0,
+            rain_ticks_left: 0,
+            storm_ticks_left: 0,
+        };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[1, 2])));
+        // More than the old 256-packet cap, which dropped the rest silently.
+        for cx in 0..300 {
+            srv.send_to_client(&chunk_pkt(cx));
+        }
+        srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[3])));
+        rc.poll();
+        assert_eq!(rc.chunk_queue.len(), 300, "nothing dropped");
+        assert!(rc.chunk_queue.iter().all(|(before, _)| *before == 2), "each after the first two changes");
+        assert_eq!(rc.pending_block_changes.len(), 3);
+        assert!(!matches!(rc.state, ConnectionState::Failed(_)));
+    }
+
+    #[test]
+    fn a_server_past_any_credit_window_ends_the_session_loudly() {
+        let (srv, client) = channel_pair();
+        let mut rc =
+            RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
+        for cx in 0..=MAX_QUEUED_CHUNK_PACKETS as i32 {
+            srv.send_to_client(&chunk_pkt(cx));
+        }
+        rc.poll();
+        assert_eq!(rc.chunk_queue.len(), MAX_QUEUED_CHUNK_PACKETS, "what was taken in is kept");
+        assert!(
+            matches!(&rc.state, ConnectionState::Failed(why) if why.contains("more world data")),
+            "the session ends with a reason instead of losing part of the world"
         );
     }
 }

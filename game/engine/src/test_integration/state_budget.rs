@@ -29,9 +29,16 @@ const MARK_X: i32 = 1_000_000;
 
 /// WebSocket + 0 remote slots: no accept thread, no sockets, and the open
 /// (guest) join policy. The world name must not exist on disk.
+///
+/// These pin the outbox on its own, so the B2a chunk push is off: no pushes
+/// share the budget, every change reaches the joiner (the push's sent-set
+/// filter is pinned in `chunk_push`), and an overflow's resync requests stay
+/// readable here.
 fn start_open_server(world: &str) -> HostedServer {
-    HostedServer::start(1, world.to_string(), 42, 0, RemoteTransport::WebSocket { port: 0 })
-        .expect("hosted server starts")
+    let mut hs = HostedServer::start(1, world.to_string(), 42, 0, RemoteTransport::WebSocket { port: 0 })
+        .expect("hosted server starts");
+    hs.without_chunk_push_for_test();
+    hs
 }
 
 /// Attach a remote and complete a guest join. Returns the client half and the

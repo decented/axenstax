@@ -49,6 +49,9 @@ struct ServerConfig {
     /// `--sim-distance` / `AXENSTAX_SIM_DISTANCE`: columns (radius) the server
     /// keeps loaded around each connected player + the spawn (Phase B1).
     sim_distance: i32,
+    /// `--chunk-sync` / `AXENSTAX_CHUNK_SYNC` (Phase B2a): which chunks each
+    /// joiner is pushed. `all` (the default, and the only mode built).
+    chunk_sync: crate::chunk_push::ChunkSync,
 }
 
 /// `--key value` CLI lookup (overrides env). Returns the value following `--key`.
@@ -96,6 +99,17 @@ fn parse_config(args: &[String]) -> ServerConfig {
             .unwrap_or(crate::server_stream::DEFAULT_SIM_DISTANCE),
     );
 
+    let chunk_sync = crate::chunk_push::ChunkSync::parse(&resolve(
+        args,
+        "--chunk-sync",
+        "AXENSTAX_CHUNK_SYNC",
+        "all",
+    ))
+    .unwrap_or_else(|why| {
+        log::warn!("{why}; pushing every chunk");
+        crate::chunk_push::ChunkSync::All
+    });
+
     ServerConfig {
         world,
         seed,
@@ -108,6 +122,7 @@ fn parse_config(args: &[String]) -> ServerConfig {
         server_name,
         autosave_secs,
         sim_distance,
+        chunk_sync,
     }
 }
 
@@ -845,6 +860,8 @@ pub fn run(args: &[String]) {
     // (boot warmed the default render distance around spawn; the streamer
     // trims / extends to it from the first tick).
     hs.server.set_sim_distance(cfg.sim_distance);
+    // Phase B2a — which chunks joiners are pushed (out to the sim distance).
+    hs.set_chunk_sync(cfg.chunk_sync);
 
     // Persist the freshly-generated world immediately so `world.dat` exists from
     // tick 0 (a crash before the first autosave doesn't lose the generation).
@@ -859,6 +876,7 @@ pub fn run(args: &[String]) {
     log::info!("  max players: {}", cfg.max_players);
     log::info!("  ws port    : {}", cfg.ws_port);
     log::info!("  sim dist.  : {} columns", cfg.sim_distance);
+    log::info!("  chunk sync : {:?}", cfg.chunk_sync);
     match classify_boot_identity(identity.as_ref(), nostr::Timestamp::now()) {
         BootIdentity::Verified(npub) => log::info!("  identity   : VERIFIED ({npub})"),
         BootIdentity::Expired => {
@@ -1238,6 +1256,16 @@ mod tests {
         assert_eq!(cfg(&["--sim-distance", "12"]).sim_distance, 12);
         assert_eq!(cfg(&["--sim-distance", "0"]).sim_distance, crate::server_stream::MIN_SIM_DISTANCE);
         assert_eq!(cfg(&["--sim-distance", "99"]).sim_distance, crate::server_stream::MAX_SIM_DISTANCE);
+    }
+
+    #[test]
+    fn parse_config_reads_the_chunk_sync_mode() {
+        let cfg = |a: &[&str]| parse_config(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        use crate::chunk_push::ChunkSync;
+        assert_eq!(cfg(&["--chunk-sync", "all"]).chunk_sync, ChunkSync::All);
+        // Not built yet / unknown: logged, and every chunk is pushed.
+        assert_eq!(cfg(&["--chunk-sync", "touched"]).chunk_sync, ChunkSync::All);
+        assert_eq!(cfg(&["--chunk-sync", "junk"]).chunk_sync, ChunkSync::All);
     }
 
     #[test]

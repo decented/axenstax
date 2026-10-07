@@ -37,9 +37,16 @@
 //!   points at it.
 //! - **Overflow resyncs.** Past [`CLIENT_QUEUE_MAX_BYTES`] the queued block
 //!   changes are dropped and their chunks recorded in a "needs resync" set,
-//!   read through [`ClientOutbox::take_chunk_resync_requests`]. That set is the
-//!   seam the late-joiner chunk push (Phase B) consumes; until it lands the
-//!   overflow is only logged.
+//!   read through [`ClientOutbox::take_chunk_resync_requests`]; the chunk
+//!   push (`chunk_push`, Phase B2a) sends each of them whole again.
+//! - **Chunk pushes share the queue** (Phase B2a). A pushed chunk is a whole
+//!   `ChunkData` packet queued in line with the deltas
+//!   ([`ClientOutbox::push_chunk`]) and sent as its own packet, inside the
+//!   same per-tick budget, so changes queued after it apply on top of it on
+//!   the client. It is a snapshot at its place in line, so no later change
+//!   may be folded into one queued before it: a queued chunk is a coalescing
+//!   barrier for its own cells. Overflow keeps queued chunks (their bytes are
+//!   bounded by the push's credit window, not counted against the bound).
 //!
 //! The host's own in-process loopback (a local slot) has no wire to protect:
 //! its outbox is unbudgeted — it drains in full every tick, split under the
@@ -88,9 +95,14 @@ const OVERFLOW_LOG_INTERVAL_TICKS: u64 = 100;
 pub type ChunkCoord = (i32, i32, i32);
 
 /// Chunk holding block `(x, y, z)`.
-fn chunk_of(b: &BlockChange) -> ChunkCoord {
+pub(crate) fn chunk_of_cell((x, y, z): (i32, i32, i32)) -> ChunkCoord {
     let cs = crate::chunk::CHUNK_SIZE as i32;
-    (b.x.div_euclid(cs), b.y.div_euclid(cs), b.z.div_euclid(cs))
+    (x.div_euclid(cs), y.div_euclid(cs), z.div_euclid(cs))
+}
+
+/// Chunk a block change lands in.
+pub(crate) fn chunk_of(b: &BlockChange) -> ChunkCoord {
+    chunk_of_cell((b.x, b.y, b.z))
 }
 
 /// May `newer` overwrite the still-queued `queued` change to the same cell?
@@ -118,6 +130,8 @@ enum Delta {
     Block(BlockChange),
     Spawn(EntitySpawn),
     Despawn(u32),
+    /// One whole serialized `ChunkData` packet (tag included) for `coord`.
+    Chunk { coord: ChunkCoord, packet: Vec<u8> },
 }
 
 #[derive(Debug)]
@@ -140,6 +154,9 @@ pub struct ClientOutbox {
     queued_bytes: usize,
     /// The block-change share of `queued_bytes`.
     queued_block_bytes: usize,
+    /// The chunk-push share of `queued_bytes` (bounded by the push's credit
+    /// window; never counted against [`CLIENT_QUEUE_MAX_BYTES`]).
+    queued_chunk_bytes: usize,
     /// Backlog mode: cell → seq of its (single) queued change. `Some` only
     /// while backlogged; every queued block change is indexed while it is.
     coalesce_index: Option<HashMap<(i32, i32, i32), u64>>,
@@ -174,6 +191,7 @@ impl ClientOutbox {
             next_seq: 0,
             queued_bytes: 0,
             queued_block_bytes: 0,
+            queued_chunk_bytes: 0,
             coalesce_index: None,
             updates: BTreeMap::new(),
             update_cursor: 0,
@@ -186,8 +204,7 @@ impl ClientOutbox {
         }
     }
 
-    /// Serialized bytes of reliable deltas waiting to go out.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Serialized bytes of reliable deltas (and chunk pushes) waiting to go out.
     pub fn queued_bytes(&self) -> usize {
         self.queued_bytes
     }
@@ -226,8 +243,10 @@ impl ClientOutbox {
         };
         if let Some(e) = self.queue.remove(at) {
             self.queued_bytes -= e.size;
-            if matches!(e.delta, Delta::Block(_)) {
-                self.queued_block_bytes -= e.size;
+            match e.delta {
+                Delta::Block(_) => self.queued_block_bytes -= e.size,
+                Delta::Chunk { .. } => self.queued_chunk_bytes -= e.size,
+                Delta::Spawn(_) | Delta::Despawn(_) => {}
             }
         }
     }
@@ -256,7 +275,9 @@ impl ClientOutbox {
         }
         for b in blocks {
             self.push_block(b);
-            if self.tick_budget.is_some() && self.queued_bytes > CLIENT_QUEUE_MAX_BYTES {
+            if self.tick_budget.is_some()
+                && self.queued_bytes - self.queued_chunk_bytes > CLIENT_QUEUE_MAX_BYTES
+            {
                 self.overflow(now);
             }
         }
@@ -269,23 +290,35 @@ impl ClientOutbox {
 
     /// Chunks whose queued block changes were dropped because this client
     /// fell more than [`CLIENT_QUEUE_MAX_BYTES`] behind, sorted, and cleared.
-    ///
-    /// **Phase B seam.** The late-joiner chunk push consumes this: send each
-    /// listed chunk whole. Enqueue that push on this same FIFO, so block
-    /// changes queued after the overflow still apply on top of the snapshot,
-    /// in order. Until Phase B lands nothing calls this and the overflow is
-    /// only logged (rate-limited).
-    ///
-    /// **Phase B rule.** A chunk push is a snapshot at its place in the queue,
-    /// so no later change may be folded into a change queued *before* it —
-    /// that would apply the newer value ahead of the snapshot, and the
-    /// snapshot would then overwrite it with older state. When Phase B queues
-    /// a chunk push it must therefore remove that chunk's cells from
-    /// `coalesce_index` (every cell with `chunk_of == the chunk`), so a newer
-    /// change to one of them appends after the snapshot instead. Today nothing
-    /// queues a push, so nothing can be coalesced past one.
+    /// The chunk push (`chunk_push`) sends each listed chunk whole again, on
+    /// this same FIFO, so block changes queued after it still apply on top of
+    /// the snapshot, in order.
     pub fn take_chunk_resync_requests(&mut self) -> Vec<ChunkCoord> {
         std::mem::take(&mut self.resync).into_iter().collect()
+    }
+
+    /// Queue a chunk push: the serialized `ChunkData` packet(s) of chunk
+    /// `coord`, in line after everything queued so far.
+    ///
+    /// **The Phase B rule.** A chunk push is a snapshot at its place in the
+    /// queue, so no later change may be folded into a change queued *before*
+    /// it — that would apply the newer value ahead of the snapshot, and the
+    /// snapshot would then overwrite it with older state. So the chunk's
+    /// cells leave the coalescing index here: a newer change to one of them
+    /// appends after the snapshot instead.
+    pub fn push_chunk(&mut self, coord: ChunkCoord, packets: Vec<Vec<u8>>) {
+        if let Some(index) = &mut self.coalesce_index {
+            index.retain(|&cell, _| chunk_of_cell(cell) != coord);
+        }
+        for packet in packets {
+            self.push_entry(Delta::Chunk { coord, packet });
+        }
+    }
+
+    /// Serialized chunk-push bytes waiting to go out. Test-only.
+    #[cfg(test)]
+    pub fn queued_chunk_bytes(&self) -> usize {
+        self.queued_chunk_bytes
     }
 
     fn push_entry(&mut self, delta: Delta) {
@@ -293,9 +326,12 @@ impl ClientOutbox {
             Delta::Block(b) => wire_size(b),
             Delta::Spawn(s) => wire_size(s),
             Delta::Despawn(id) => wire_size(id),
+            Delta::Chunk { packet, .. } => packet.len(),
         };
-        if matches!(delta, Delta::Block(_)) {
-            self.queued_block_bytes += size;
+        match delta {
+            Delta::Block(_) => self.queued_block_bytes += size,
+            Delta::Chunk { .. } => self.queued_chunk_bytes += size,
+            _ => {}
         }
         self.queued_bytes += size;
         self.queue.push_back(Entry { seq: self.next_seq, size, delta });
@@ -336,6 +372,12 @@ impl ClientOutbox {
         let mut latest: HashMap<usize, BlockChange> = HashMap::new();
         let mut dead = vec![false; self.queue.len()];
         for (i, e) in self.queue.iter().enumerate() {
+            // A queued chunk push is a barrier for its cells: nothing after
+            // it folds into a change before it (the Phase B rule).
+            if let Delta::Chunk { coord, .. } = &e.delta {
+                newest.retain(|&cell, _| chunk_of_cell(cell) != *coord);
+                continue;
+            }
             if let Delta::Block(b) = &e.delta {
                 let cell = (b.x, b.y, b.z);
                 match newest.get(&cell) {
@@ -368,22 +410,28 @@ impl ClientOutbox {
         });
         self.queued_bytes -= freed;
         self.queued_block_bytes -= freed;
-        // Later entries overwrite earlier ones in the collect, so each cell
-        // maps to its NEWEST queued change.
-        let index = self
-            .queue
-            .iter()
-            .filter_map(|e| match &e.delta {
-                Delta::Block(b) => Some(((b.x, b.y, b.z), e.seq)),
-                _ => None,
-            })
-            .collect();
+        // Walked in order, so each cell maps to its NEWEST queued change —
+        // unless a chunk push of its chunk is queued after that change: then
+        // it maps to nothing, and a repeat appends after the snapshot.
+        let mut index = HashMap::new();
+        for e in &self.queue {
+            match &e.delta {
+                Delta::Block(b) => {
+                    index.insert((b.x, b.y, b.z), e.seq);
+                }
+                Delta::Chunk { coord, .. } => {
+                    index.retain(|&cell, _| chunk_of_cell(cell) != *coord);
+                }
+                _ => {}
+            }
+        }
         self.coalesce_index = Some(index);
     }
 
     /// Too far behind: drop every queued block change, remember its chunk.
-    /// Spawns and despawns stay — the client needs them in order, and they
-    /// are bounded by the entity population, not by block churn.
+    /// Spawns, despawns and chunk pushes stay — the client needs them in
+    /// order, and they are bounded by the entity population and the push's
+    /// credit window, not by block churn.
     fn overflow(&mut self, now: u64) {
         let mut dropped = 0usize;
         let mut freed = 0usize;
@@ -404,7 +452,7 @@ impl ClientOutbox {
         if now >= self.next_overflow_log {
             log::warn!(
                 "StateUpdate queue for a client passed {CLIENT_QUEUE_MAX_BYTES} bytes: dropped \
-                 {} block change(s); {} chunk(s) now need a resync (no chunk push yet — Phase B)",
+                 {} block change(s); {} chunk(s) will be pushed again whole",
                 self.dropped_since_log,
                 self.resync.len()
             );
@@ -432,6 +480,26 @@ impl ClientOutbox {
         let mut spent = 0usize;
         let mut out: Vec<Vec<u8>> = Vec::new();
         loop {
+            // A queued chunk push goes as its own packet, in line — never
+            // first (the first packet of a tick carries the player positions)
+            // and never past the budget (it waits for the next tick).
+            if !out.is_empty()
+                && let Some(Entry { size, delta: Delta::Chunk { .. }, .. }) = self.queue.front()
+            {
+                if spent + size > budget {
+                    break;
+                }
+                let Some(Entry { size, delta: Delta::Chunk { packet, .. }, .. }) =
+                    self.queue.pop_front()
+                else {
+                    unreachable!("the front is a chunk push");
+                };
+                self.queued_bytes -= size;
+                self.queued_chunk_bytes -= size;
+                spent += size;
+                out.push(packet);
+                continue;
+            }
             let room = STATE_UPDATE_MAX_BYTES.min(budget.saturating_sub(spent));
             if !out.is_empty() && room <= base {
                 break;
@@ -456,6 +524,9 @@ impl ClientOutbox {
             debug_assert_eq!(bytes.len(), size, "measured size is the real size");
             spent += bytes.len();
             out.push(bytes);
+            if matches!(self.queue.front(), Some(Entry { delta: Delta::Chunk { .. }, .. })) {
+                continue;
+            }
             if (queue_drained && updates_drained) || !carried {
                 break;
             }
@@ -464,11 +535,12 @@ impl ClientOutbox {
     }
 
     /// Move reliable deltas, oldest first, into `pkt` while they fit under
-    /// `limit`. Returns whether the queue is now empty. Leaves backlog mode
-    /// once no block change is left queued.
+    /// `limit`, stopping at a queued chunk push (it goes as its own packet).
+    /// Returns whether the queue is now empty. Leaves backlog mode once no
+    /// block change is left queued.
     fn fill_reliable(&mut self, pkt: &mut StateUpdatePacket, size: &mut usize, limit: usize) -> bool {
         while let Some(front) = self.queue.front() {
-            if *size + front.size > limit {
+            if *size + front.size > limit || matches!(front.delta, Delta::Chunk { .. }) {
                 break;
             }
             let e = self.queue.pop_front().expect("front exists");
@@ -500,6 +572,7 @@ impl ClientOutbox {
                     self.despawn_queued.remove(&id);
                     pkt.entity_despawns.push(id);
                 }
+                Delta::Chunk { .. } => unreachable!("a chunk push is never folded into a StateUpdate"),
             }
         }
         if self.queued_block_bytes == 0 {
@@ -977,5 +1050,159 @@ mod tests {
         assert!(ob.take_chunk_resync_requests().is_empty());
         let got: usize = tick(&mut ob, false).iter().map(|s| s.block_changes.len()).sum();
         assert_eq!(got, n + 1, "every change, repeats included, in one tick");
+    }
+
+    // ── B2a: chunk pushes in the queue ──────────────────────────────────
+
+    /// What one drained packet was.
+    #[derive(Debug, PartialEq)]
+    enum Out {
+        State(Vec<i32>),
+        Chunk(ChunkCoord),
+    }
+
+    /// A serialized `ChunkData` packet for `coord`, padded to about `bytes`.
+    fn chunk_packet(coord: ChunkCoord, bytes: usize) -> Vec<u8> {
+        let pkt = protocol::ChunkDataPacket {
+            cx: coord.0,
+            cy: coord.1,
+            cz: coord.2,
+            compressed_blocks: vec![7; bytes],
+            meta: Vec::new(),
+            entities: Vec::new(),
+            attachments: Vec::new(),
+        };
+        protocol::serialize_packet(protocol::PacketType::ChunkData, &pkt)
+    }
+
+    /// Drain one tick into what each packet carried (block-change xs, or the
+    /// pushed chunk), checking the cap and the remote budget.
+    fn drain_mixed(ob: &mut ClientOutbox) -> Vec<Out> {
+        let raw = ob.drain_packets(&template());
+        assert!(raw.iter().map(Vec::len).sum::<usize>() <= CLIENT_TICK_BUDGET_BYTES);
+        raw.iter()
+            .map(|p| {
+                let (t, payload) = protocol::deserialize_header(p).unwrap();
+                assert!(p.len() <= STATE_UPDATE_MAX_BYTES);
+                match t {
+                    protocol::PacketType::StateUpdate => {
+                        let s: StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
+                        Out::State(s.block_changes.iter().map(|b| b.x).collect())
+                    }
+                    protocol::PacketType::ChunkData => {
+                        let c: protocol::ChunkDataPacket = protocol::safe_deserialize(payload).unwrap();
+                        Out::Chunk((c.cx, c.cy, c.cz))
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chunk_push_goes_as_its_own_packet_in_line_with_the_deltas() {
+        let mut ob = ClientOutbox::new(true);
+        ob.push_tick(0, &[], &[], &[bc(1, 1), bc(2, 1)], &[]);
+        ob.push_chunk((0, 0, 0), vec![chunk_packet((0, 0, 0), 100)]);
+        ob.push_tick(0, &[], &[], &[bc(3, 1)], &[]);
+        let out = drain_mixed(&mut ob);
+        assert_eq!(
+            out,
+            vec![Out::State(vec![1, 2]), Out::Chunk((0, 0, 0)), Out::State(vec![3])],
+            "the snapshot sits between the changes before and after it"
+        );
+        assert_eq!(ob.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn a_tick_starts_with_the_snapshot_and_chunks_wait_for_the_budget() {
+        let mut ob = ClientOutbox::new(true);
+        for i in 0..8 {
+            ob.push_chunk((i, 0, 0), vec![chunk_packet((i, 0, 0), 10_000)]);
+        }
+        let first = drain_mixed(&mut ob);
+        assert!(matches!(first[0], Out::State(_)), "positions first, always");
+        let chunks_first = first.iter().filter(|o| matches!(o, Out::Chunk(_))).count();
+        assert!((1..8).contains(&chunks_first), "the budget holds the rest back: {chunks_first}");
+        let mut all: Vec<ChunkCoord> = first
+            .into_iter()
+            .filter_map(|o| match o {
+                Out::Chunk(c) => Some(c),
+                Out::State(_) => None,
+            })
+            .collect();
+        for _ in 0..4 {
+            all.extend(drain_mixed(&mut ob).into_iter().filter_map(|o| match o {
+                Out::Chunk(c) => Some(c),
+                Out::State(_) => None,
+            }));
+        }
+        assert_eq!(all, (0..8).map(|i| (i, 0, 0)).collect::<Vec<_>>(), "all of them, in order");
+        assert_eq!(ob.queued_chunk_bytes(), 0);
+    }
+
+    #[test]
+    fn a_change_after_a_queued_push_is_never_folded_ahead_of_it() {
+        let mut ob = ClientOutbox::new(true);
+        // Backlogged: cell x=5 (chunk (0,0,0)) has a queued change …
+        let mut blocks = vec![bc(5, 10)];
+        blocks.extend((100..5_000).map(|i| bc(i * 16, 1))); // other chunks
+        ob.push_tick(0, &[], &[], &blocks, &[]);
+        // … then a push of its chunk, then a newer change to the same cell.
+        ob.push_chunk((0, 0, 0), vec![chunk_packet((0, 0, 0), 50)]);
+        ob.push_tick(1, &[], &[], &[bc(5, 11)], &[]);
+        let mut order = Vec::new();
+        for _ in 0..10 {
+            for o in drain_mixed(&mut ob) {
+                match o {
+                    Out::Chunk(c) => order.push(format!("chunk{c:?}")),
+                    Out::State(xs) => order.extend(xs.into_iter().filter(|&x| x == 5).map(|_| "x5".to_string())),
+                }
+            }
+        }
+        assert_eq!(order, ["x5", "chunk(0, 0, 0)", "x5"], "the newer change comes after the snapshot");
+    }
+
+    #[test]
+    fn entering_backlog_treats_a_queued_push_as_a_barrier() {
+        let mut ob = ClientOutbox::new(true);
+        // Not yet backlogged: change, push, change — all queued as written.
+        ob.push_tick(0, &[], &[], &[bc(5, 10)], &[]);
+        ob.push_chunk((0, 0, 0), vec![chunk_packet((0, 0, 0), 50)]);
+        ob.push_tick(0, &[], &[], &[bc(5, 11)], &[]);
+        // Now a backlog forms; the fold must not merge 11 into 10's slot.
+        let filler: Vec<BlockChange> = (100..5_000).map(|i| bc(i * 16, 1)).collect();
+        ob.push_tick(0, &[], &[], &filler, &[]);
+        ob.push_tick(1, &[], &[], &[bc(5, 12)], &[]);
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            let raw = ob.drain_packets(&template());
+            for p in raw {
+                let (t, payload) = protocol::deserialize_header(&p).unwrap();
+                if t == protocol::PacketType::ChunkData {
+                    seen.push(-1);
+                } else {
+                    let s: StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
+                    seen.extend(s.block_changes.iter().filter(|b| b.x == 5).map(|b| i32::from(b.new_block)));
+                }
+            }
+        }
+        assert_eq!(seen, [10, -1, 12], "after the push the cell keeps its latest value, behind the push");
+    }
+
+    #[test]
+    fn an_overflow_keeps_queued_pushes_and_does_not_count_them() {
+        let mut ob = ClientOutbox::new(true);
+        ob.push_chunk((9, 0, 9), vec![chunk_packet((9, 0, 9), 40_000)]);
+        let blocks: Vec<BlockChange> =
+            (0..(CLIENT_QUEUE_MAX_BYTES / 15 - 1000) as i32).map(|i| bc(i, 1)).collect();
+        ob.push_tick(0, &[], &[], &blocks, &[]);
+        assert!(ob.queued_bytes() > CLIENT_QUEUE_MAX_BYTES, "the push's bytes don't trip the bound");
+        assert!(ob.take_chunk_resync_requests().is_empty(), "no overflow yet");
+        ob.push_tick(1, &[], &[], &(0..2_000).map(|i| bc(-i - 1, 1)).collect::<Vec<_>>(), &[]);
+        assert!(!ob.take_chunk_resync_requests().is_empty(), "now it overflowed");
+        assert!(ob.queued_chunk_bytes() > 0, "the queued push survived");
+        let out = drain_mixed(&mut ob);
+        assert!(out.contains(&Out::Chunk((9, 0, 9))));
     }
 }

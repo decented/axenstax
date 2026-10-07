@@ -202,6 +202,17 @@ pub struct HostedServer {
     /// overflow into chunk-resync requests (`take_chunk_resync_requests`).
     /// Reset whenever a slot is attached or released.
     outboxes: Vec<crate::state_outbox::ClientOutbox>,
+    /// Per-slot chunk push (Phase B2a, `chunk_push`), indexed like
+    /// `outboxes` and reset with them: the chunks each remote client has been
+    /// sent, its credit window and its pending resyncs. Local slots carry an
+    /// idle one (they share the host's world; nothing is pushed or filtered).
+    chunk_pushes: Vec<crate::chunk_push::ClientChunkPush>,
+    /// `--chunk-sync`: which chunks a joiner is pushed (`all` in B2a).
+    chunk_sync: crate::chunk_push::ChunkSync,
+    /// Test-only: the pre-B2a delivery (no pushes, every block change to
+    /// every client), for the tests that pin the outbox on its own.
+    #[cfg(test)]
+    chunk_push_off: bool,
     /// Monotonic server tick counter sent with every StateUpdate.
     server_tick: u64,
     /// MP-D2a — the server-wide half of the entity broadcast: `ProtocolId`
@@ -646,6 +657,12 @@ impl HostedServer {
             outboxes: (0..num_local_players)
                 .map(|_| crate::state_outbox::ClientOutbox::new(false))
                 .collect(),
+            chunk_pushes: (0..num_local_players)
+                .map(|_| crate::chunk_push::ClientChunkPush::default())
+                .collect(),
+            chunk_sync: crate::chunk_push::chunk_sync(),
+            #[cfg(test)]
+            chunk_push_off: false,
             server_tick: 0,
             entity_broadcast: crate::entity_broadcast::EntityBroadcast::new(),
             entity_interest: (0..num_local_players).map(|_| Default::default()).collect(),
@@ -885,6 +902,7 @@ impl HostedServer {
         self.attached_tick.push(self.server_tick);
         self.outboxes.push(crate::state_outbox::ClientOutbox::new(false));
         self.entity_interest.push(Default::default());
+        self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
         self.num_local_players += 1;
     }
 
@@ -1457,9 +1475,11 @@ impl HostedServer {
                 }
             }
             self.transports[i] = Box::new(transport::ClosedTransport);
-            // Nothing queued for the old connection reaches the next one.
+            // Nothing queued for the old connection reaches the next one, and
+            // nothing it was sent counts as sent to the next (B2a).
             self.outboxes[i] = crate::state_outbox::ClientOutbox::new(true);
             self.entity_interest[i] = Default::default();
+            self.chunk_pushes[i] = crate::chunk_push::ClientChunkPush::default();
         }
         log::info!("Slot {i} released");
         was_joined.then(|| {
@@ -1731,6 +1751,7 @@ impl HostedServer {
                 self.attached_tick[j] = self.server_tick;
                 self.outboxes[j] = crate::state_outbox::ClientOutbox::new(true);
                 self.entity_interest[j] = Default::default();
+                self.chunk_pushes[j] = crate::chunk_push::ClientChunkPush::default();
                 j
             }
             None => {
@@ -1741,6 +1762,7 @@ impl HostedServer {
                 self.attached_tick.push(self.server_tick);
                 self.outboxes.push(crate::state_outbox::ClientOutbox::new(true));
                 self.entity_interest.push(Default::default());
+                self.chunk_pushes.push(crate::chunk_push::ClientChunkPush::default());
                 self.transports.len() - 1
             }
         };
@@ -2058,6 +2080,11 @@ impl HostedServer {
                         let (join_name, join_npub): (String, String) =
                             (req.player_name.clone(), String::new());
 
+                        // B2a — the chunk push starts afresh for this join,
+                        // out to the render distance it announced.
+                        self.chunk_pushes[i] =
+                            crate::chunk_push::ClientChunkPush::new(req.render_distance);
+
                         // Record the joining client's announced skin reference
                         // on its (already-created, at transport-accept time)
                         // ServerPlayer. `collect_player_state` rebroadcasts it on
@@ -2219,6 +2246,15 @@ impl HostedServer {
                             || !input.move_right.is_finite()
                         {
                             continue;
+                        }
+                        // B2a — the chunk push's credit window and the columns
+                        // the client let go of. Cumulative / as-of, so a stale
+                        // or replayed packet can't undo a newer one; taken even
+                        // from a dead joiner, whose moves are ignored below.
+                        if i >= self.num_local_players {
+                            let push = &mut self.chunk_pushes[i];
+                            push.ack(input.chunk_ack);
+                            push.drop_columns(&input.chunk_drops);
                         }
                         let Some(sp) = self.server.players.get_mut(i) else {
                             continue;
@@ -2876,6 +2912,14 @@ impl HostedServer {
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
 
+        // B2a — the chunk push reads the world here, inside `tick` (on a
+        // lending host: inside the lend window, the host client's own world).
+        debug_assert_eq!(
+            self.lends_host_world(),
+            self.server.lent,
+            "the chunk push reads a lent world only inside the lend window"
+        );
+        let push_limit = self.chunk_push_limit();
         for i in 0..self.transports.len() {
             if !self.handshake_done[i] || self.disconnected[i] {
                 continue;
@@ -2885,14 +2929,42 @@ impl HostedServer {
             // joiner's empty interest set doubles as its backfill).
             let anchor = self.entity_interest_anchor(i);
             let entities = self.entity_interest[i].events(&entity_tick, &self.server.ecs, anchor);
+            // B2a — a remote client hears of changes only to chunks it has
+            // been sent (queued counts): the rest arrive inside their push.
+            let filtered: Vec<protocol::BlockChange>;
+            let changes: &[protocol::BlockChange] = if self.filters_changes(i) {
+                let push = &self.chunk_pushes[i];
+                filtered = block_changes
+                    .iter()
+                    .filter(|b| push.has_sent(crate::state_outbox::chunk_of(b)))
+                    .cloned()
+                    .collect();
+                &filtered
+            } else {
+                &block_changes
+            };
+            let push_centre = self.push_centre(i);
             let outbox = &mut self.outboxes[i];
             outbox.push_tick(
                 self.server_tick,
                 &entities.spawns,
                 &entities.despawns,
-                &block_changes,
+                changes,
                 &entities.updates,
             );
+            // B2a — then this tick's chunk pushes, AFTER its deltas: a change
+            // to a chunk queued now was filtered above and is already in the
+            // snapshot, and the tick's deltas never wait behind new chunks.
+            if let Some(centre) = push_centre {
+                crate::chunk_push::queue_pushes(
+                    &mut self.chunk_pushes[i],
+                    outbox,
+                    &self.server.world,
+                    &self.server.loaded_columns,
+                    centre,
+                    push_limit,
+                );
+            }
             // The last input of THIS client's that its server state includes
             // — its prediction drops those and replays the rest (§5.3).
             template.last_acked_input = self
@@ -2906,16 +2978,85 @@ impl HostedServer {
         }
     }
 
-    /// Chunks whose block changes slot `slot` will never receive as deltas:
-    /// its outbound queue passed `state_outbox::CLIENT_QUEUE_MAX_BYTES` and
-    /// the queued changes were dropped. Sorted `(cx, cy, cz)`; cleared by the
-    /// call. Empty for an unknown or local slot.
-    ///
-    /// **The Phase B seam** (late-joiner chunk push): that push sends each
-    /// listed chunk whole, queued on the same outbox so later changes still
-    /// apply on top. Until it lands nothing consumes this and an overflow is
-    /// only logged (rate-limited) — see `state_outbox::ClientOutbox`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Does slot `i`'s block-change stream go through its sent-set? Remote
+    /// slots only (B2a); a local slot shares the host's world.
+    fn filters_changes(&self, i: usize) -> bool {
+        #[cfg(test)]
+        if self.chunk_push_off {
+            return false;
+        }
+        i >= self.num_local_players
+    }
+
+    /// How far round a joiner this server can push (`chunk_push`): as far as
+    /// it keeps columns loaded round one — the dedicated server's sim
+    /// distance, a host's joiner anchor (`LENT_JOINER_SIM_DISTANCE`). Only
+    /// loaded columns are ever pushed, so an owning host (which loads less)
+    /// simply pushes what it has.
+    fn chunk_push_limit(&self) -> i32 {
+        self.server.column_streamer.as_ref().map_or(
+            crate::chunk_stream::LENT_JOINER_SIM_DISTANCE,
+            crate::server_stream::ColumnStreamer::sim_distance,
+        )
+    }
+
+    /// B2a — the column round which slot `i` is pushed chunks (its server
+    /// body's), or `None` when it is pushed nothing: a local slot, a slot not
+    /// (or no longer) joined, a body with no finite position, or a mode that
+    /// pushes this joiner nothing (`chunk_push::ChunkSync`).
+    fn push_centre(&self, i: usize) -> Option<(i32, i32)> {
+        #[cfg(test)]
+        if self.chunk_push_off {
+            return None;
+        }
+        if i < self.num_local_players || !self.handshake_done[i] || self.disconnected[i] {
+            return None;
+        }
+        let sp = self.server.players.get(i)?;
+        let pos = sp.player.pos;
+        (pos.is_finite() && self.chunk_sync.pushes_everything(sp.worldgen_mismatch()))
+            .then(|| crate::chunk_stream::column_of(pos))
+    }
+
+    /// `--chunk-sync` for this server (the dedicated server's flag).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_chunk_sync(&mut self, mode: crate::chunk_push::ChunkSync) {
+        self.chunk_sync = mode;
+    }
+
+    /// Test-only: the pre-B2a delivery — no chunk pushes, every block change
+    /// to every client, outbox overflows left for
+    /// [`Self::take_chunk_resync_requests`] — for the tests that pin the
+    /// outbox on its own.
+    #[cfg(test)]
+    pub(crate) fn without_chunk_push_for_test(&mut self) {
+        self.chunk_push_off = true;
+    }
+
+    /// Test-only: slot `slot`'s joiner already holds every chunk of column
+    /// `col` (see `ClientChunkPush::hold_for_test`) — for a test that moves
+    /// a joiner's body somewhere it never walked.
+    #[cfg(test)]
+    pub(crate) fn hold_column_for_test(&mut self, slot: usize, col: (i32, i32)) {
+        for cy in 0..=crate::world::MAX_CHUNK_Y {
+            self.chunk_pushes[slot].hold_for_test((col.0, cy, col.1));
+        }
+    }
+
+    /// Test-only: slot `slot`'s chunk-push state.
+    #[cfg(test)]
+    pub(crate) fn chunk_push_for_test(&self, slot: usize) -> &crate::chunk_push::ClientChunkPush {
+        &self.chunk_pushes[slot]
+    }
+
+    /// Test-only: chunks whose block changes slot `slot` will never receive
+    /// as deltas — its outbound queue passed
+    /// `state_outbox::CLIENT_QUEUE_MAX_BYTES` and the queued changes were
+    /// dropped. Sorted `(cx, cy, cz)`; cleared by the call. Empty for an
+    /// unknown or local slot. Live, the chunk push consumes these every tick
+    /// and sends each chunk whole again; read here only with the push off
+    /// ([`Self::without_chunk_push_for_test`]).
+    #[cfg(test)]
     pub fn take_chunk_resync_requests(&mut self, slot: usize) -> Vec<(i32, i32, i32)> {
         self.outboxes
             .get_mut(slot)
@@ -4010,6 +4151,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         }
     }
 
@@ -4068,6 +4210,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("missing auth_event"));
@@ -4175,6 +4318,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         let err = verify_join_signet_auth(0, &req, &mut chals, TEST_ORIGIN).unwrap_err();
         assert!(err.contains("signature length invalid"));
@@ -4291,6 +4435,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         let err = resolve_join_identity(0, &req, true, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new).unwrap_err();
         assert!(err.to_lowercase().contains("sign"), "got {err}");
@@ -4308,6 +4453,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4363,6 +4509,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         // require_signin=false, but a non-empty whitelist forces sign-in.
         let allow = vec![xonly_of([0x42; 32])];
@@ -4610,6 +4757,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         let id = resolve_join_identity(0, &req, false, &mut chals, TEST_ORIGIN, &[], &[], &[], Vec::new)
             .expect("open server allows guests");
@@ -4648,6 +4796,7 @@ mod tests {
             client_nonce_hex: String::new(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             ws_host: String::new(),
+            render_distance: 0,
         };
         resolve_join_identity(0, &guest, false, &mut chals, TEST_ORIGIN, &[], &[], &[], loader)
             .expect("guest");
