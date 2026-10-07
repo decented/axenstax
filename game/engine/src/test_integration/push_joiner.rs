@@ -234,6 +234,26 @@ impl Joiner {
         far.len()
     }
 
+    /// The streamer's unload pass for a CLIENT body in column `client_col`
+    /// with render distance `rd` (`stream_chunks`): let go of every pushed or
+    /// local column more than `rd + UNLOAD_HYSTERESIS` from it — except, with
+    /// `keep_near_server` (the B2a verify NEW-1 rule), what
+    /// `ChunkIntake::keeps_near_server_body` keeps. Returns how many.
+    pub fn unload_round(&mut self, client_col: (i32, i32), rd: i32, keep_near_server: bool) -> usize {
+        let keep = rd + crate::chunk_stream::UNLOAD_HYSTERESIS;
+        let mut held: Vec<(i32, i32)> = self.loaded.iter().copied().collect();
+        held.extend(self.intake.part_pushed_columns(&self.loaded));
+        let far: Vec<(i32, i32)> = held
+            .into_iter()
+            .filter(|&(x, z)| (x - client_col.0).abs() > keep || (z - client_col.1).abs() > keep)
+            .filter(|&col| !(keep_near_server && self.intake.keeps_near_server_body(col, rd)))
+            .collect();
+        for &col in &far {
+            self.let_go(col);
+        }
+        far.len()
+    }
+
     /// `ticks` frames of play standing still: input, tick, take in, unload
     /// beyond `keep`. Returns the chunk packets that came.
     pub fn play(&mut self, hs: &mut HostedServer, ticks: usize, keep: i32) -> u32 {

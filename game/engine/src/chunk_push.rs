@@ -52,7 +52,11 @@
 //!   harmless. Those chunks leave the sent-set: their changes stop and any
 //!   resync of them is cancelled. A column dropped while still inside `R` is
 //!   not pushed again until it has left `R` and come back (review MEDIUM-1:
-//!   no push → unload → drop → push churn, whatever the client does). As a
+//!   no push → unload → drop → push churn, whatever the client does), or for
+//!   at most [`HELD_OFF_PLANS`] ticks, or until the client's render distance
+//!   rises (B2a verify NEW-1: a rider's server body stays where the ride
+//!   began, and a hold-off with no end left the columns its client let go of
+//!   round there stale for good). As a
 //!   backstop the server also forgets chunks far beyond anything the client
 //!   keeps ([`FORGET_SLACK`]); the client then holds a stale copy until it
 //!   comes back in range and gets a fresh one.
@@ -90,7 +94,7 @@
 // build never has.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use crate::chunk::{Chunk, CHUNK_SIZE, CHUNK_VOLUME};
 use crate::protocol::{
@@ -121,6 +125,14 @@ pub const QUEUE_AHEAD_BYTES: usize = crate::state_outbox::CLIENT_TICK_BUDGET_BYT
 /// The ring round the joiner's column (Chebyshev) pushed before anything
 /// farther: its loading screen waits for these columns.
 pub const SPAWN_RING_RADIUS: i32 = 1;
+
+/// How many plans (server ticks: 5 s) a column a client let go of inside the
+/// push radius is held off before it is pushed again anyway (B2a verify
+/// NEW-1). A hold-off only stops a push → unload → drop → push churn; it must
+/// never outlive its cause — a rider's server body stays where the ride
+/// began, its client unloaded round the ride and reported it, and getting
+/// off puts it back there.
+pub const HELD_OFF_PLANS: u64 = 100;
 
 /// Columns beyond anything a client keeps (its render distance plus the
 /// client's own unload slack) at which the server forgets a chunk it sent
@@ -205,8 +217,13 @@ pub struct ClientChunkPush {
     /// before any new chunk.
     resync: BTreeSet<ChunkCoord>,
     /// Columns the client let go of that have not been outside the push
-    /// radius since: not pushed again until they have (review MEDIUM-1).
-    held_off: HashSet<(i32, i32)>,
+    /// radius since: not pushed again until they have (review MEDIUM-1), or
+    /// until the hold expires — the plan number it lasts until
+    /// ([`HELD_OFF_PLANS`]; B2a verify NEW-1) — or the client's render
+    /// distance rises.
+    held_off: HashMap<(i32, i32), u64>,
+    /// Plans made for this client so far (one a server tick).
+    plans: u64,
 }
 
 /// A render distance from the wire: `0` stays "not said", anything else is
@@ -226,7 +243,13 @@ impl ClientChunkPush {
     /// unchanged). The push radius follows it from the next plan.
     pub fn set_render_distance(&mut self, render_distance: u8) {
         if render_distance != 0 {
-            self.render_distance = wire_render_distance(render_distance);
+            let rd = wire_render_distance(render_distance);
+            // A rise means the client keeps more again: what it let go of
+            // at the lower one is wanted back now (B2a verify NEW-1).
+            if rd > self.render_distance {
+                self.held_off.clear();
+            }
+            self.render_distance = rd;
         }
     }
 
@@ -311,7 +334,7 @@ impl ClientChunkPush {
                 }
             }
             if took {
-                self.held_off.insert((d.cx, d.cz));
+                self.held_off.insert((d.cx, d.cz), self.plans + HELD_OFF_PLANS);
             }
         }
     }
@@ -406,8 +429,11 @@ impl ClientChunkPush {
         let within = |(cx, cz): (i32, i32), r: i32| {
             (cx - centre.0).abs() <= r && (cz - centre.1).abs() <= r
         };
-        // A held-off column is released once it is outside the radius.
-        self.held_off.retain(|&col| within(col, r));
+        // A held-off column is released once it is outside the radius, or
+        // once its hold has run out.
+        self.plans += 1;
+        let now = self.plans;
+        self.held_off.retain(|&col, &mut until| within(col, r) && now < until);
         let mut out = Vec::new();
         let mut planned = 0usize;
         if room == 0 {
@@ -445,7 +471,7 @@ impl ClientChunkPush {
                 }
                 continue;
             }
-            if self.held_off.contains(&(cx, cz)) {
+            if self.held_off.contains_key(&(cx, cz)) {
                 continue;
             }
             let unsent: Vec<i32> =
@@ -529,7 +555,7 @@ impl ClientChunkPush {
             }
             let col = (cx, cz);
             if !loaded.contains(&col)
-                || self.held_off.contains(&col)
+                || self.held_off.contains_key(&col)
                 || verdicts.get(col).is_some()
                 || (0..=MAX_CHUNK_Y).all(|cy| self.sent.contains_key(&(cx, cy, cz)))
             {
@@ -1111,6 +1137,37 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_off_expires_and_ends_when_the_render_distance_rises() {
+        // B2a verify NEW-1: a rider's server body stays put while its client
+        // lets go of the columns round it; a hold with no end left them stale.
+        let world = World::new();
+        let loaded = all_loaded(12);
+        let settle = |push: &mut ClientChunkPush| {
+            while !push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty() {
+                push.ack(push.pushed());
+            }
+        };
+        let mut push = ClientChunkPush::new(8);
+        settle(&mut push);
+        push.drop_columns(&[ChunkDrop { cx: 3, cz: 0, as_of: push.pushed() }]);
+        for _ in 0..HELD_OFF_PLANS - 1 {
+            assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty(), "held off for now");
+        }
+        let again = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        assert!(!again.is_empty() && again.iter().all(|(c, _)| (c.0, c.2) == (3, 0)), "the hold ran out");
+        push.ack(push.pushed());
+        // A rise in render distance ends every hold at once.
+        push.set_render_distance(4);
+        push.drop_columns(&[ChunkDrop { cx: 2, cz: 1, as_of: push.pushed() }]);
+        assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty(), "held at 4");
+        push.set_render_distance(4);
+        assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty(), "the same 4: still held");
+        push.set_render_distance(6);
+        let back = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        assert!(back.iter().any(|(c, _)| (c.0, c.2) == (2, 1)), "the rise released it");
+    }
+
+    #[test]
     fn the_radius_follows_the_clients_current_render_distance() {
         let mut push = ClientChunkPush::new(10);
         assert_eq!(push.radius(8), 8);
@@ -1140,10 +1197,14 @@ mod tests {
         let planned = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
         assert!(planned.is_empty(), "no stray chunk of a let-go or out-of-range column: {planned:?}");
         assert!(push.resync.is_empty());
-        // Back to 3: column 3's chunk goes again with its column's turn.
+        // Back to 3: column 3's chunk goes again with its column's turn, and
+        // the rise ends the hold on column 2 (B2a verify NEW-1), which goes
+        // whole, nearer first.
         push.set_render_distance(3);
         let planned = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
-        assert_eq!(planned.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [(3, 1, 0)]);
+        let mut expect: Vec<ChunkCoord> = (0..=MAX_CHUNK_Y).map(|cy| (2, cy, 0)).collect();
+        expect.push((3, 1, 0));
+        assert_eq!(planned.iter().map(|(c, _)| *c).collect::<Vec<_>>(), expect);
     }
 
     #[test]

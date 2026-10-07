@@ -93,18 +93,16 @@ impl super::GameState {
         // B2a — a part-pushed column (never counted loaded) that has left
         // every anchor's range is let go like a loaded one, so no stray half
         // column outlives the push that started it.
-        let stray =
+        let mut stray =
             columns_outside_anchors(&intake.part_pushed_columns(&self.loaded_columns), &anchors, UNLOAD_HYSTERESIS);
+        // B2a verify NEW-1 — never let go of what the server keeps sending:
+        // its push radius follows the SERVER body, which a ride leaves
+        // behind (`ChunkIntake::keeps_near_server_body`).
+        stray.retain(|&col| !intake.keeps_near_server_body(col, rd));
+        step.unload.retain(|&col| !intake.keeps_near_server_body(col, rd));
         for col in stray {
             self.chunk_intake.let_go(&mut self.world, col);
-            for cy in 0..=MAX_CHUNK_Y {
-                self.renderer.chunk_meshes.remove(&(col.0, cy, col.1));
-                self.renderer.water_meshes.remove(&(col.0, cy, col.1));
-                self.renderer.plant_meshes.remove(&(col.0, cy, col.1));
-                self.renderer.decal_meshes.remove(&(col.0, cy, col.1));
-                self.renderer.micro_meshes.remove(&(col.0, cy, col.1));
-                self.renderer.micro_billboard_meshes.remove(&(col.0, cy, col.1));
-            }
+            self.drop_column_meshes(col);
         }
         if step.healed > 0 {
             log::warn!(
@@ -157,17 +155,7 @@ impl super::GameState {
             // B2a — a column the server pushed is discarded, never kept
             // evicted, and the server told: it pushes it afresh on return.
             self.chunk_intake.let_go(&mut self.world, (cx, cz));
-            for cy in 0..=MAX_CHUNK_Y {
-                self.renderer.chunk_meshes.remove(&(cx, cy, cz));
-                self.renderer.water_meshes.remove(&(cx, cy, cz));
-                self.renderer.plant_meshes.remove(&(cx, cy, cz));
-                self.renderer.decal_meshes.remove(&(cx, cy, cz));
-                // Owner-inbox #18 — shed this chunk's per-type micro-model
-                // instance buffers + far-LOD billboards too (else they leak +
-                // render stale once flowers register).
-                self.renderer.micro_meshes.remove(&(cx, cy, cz));
-                self.renderer.micro_billboard_meshes.remove(&(cx, cy, cz));
-            }
+            self.drop_column_meshes((cx, cz));
         }
     }
 
@@ -821,7 +809,27 @@ impl super::GameState {
                 }
             }
         }
+        // B2a verify NEW-2 — a column given up on (a chunk that did not
+        // decode) loses its meshes with its blocks.
+        for col in self.chunk_intake.take_discarded() {
+            self.drop_column_meshes(col);
+        }
         self.finish_pushed_columns(relight_budget);
+    }
+
+    /// Remove every mesh of column `col` from the renderer.
+    fn drop_column_meshes(&mut self, col: (i32, i32)) {
+        for cy in 0..=MAX_CHUNK_Y {
+            let key = (col.0, cy, col.1);
+            self.renderer.chunk_meshes.remove(&key);
+            self.renderer.water_meshes.remove(&key);
+            self.renderer.plant_meshes.remove(&key);
+            self.renderer.decal_meshes.remove(&key);
+            // Owner-inbox #18 — the per-type micro-model instance buffers and
+            // far-LOD billboards too (else they leak and render stale).
+            self.renderer.micro_meshes.remove(&key);
+            self.renderer.micro_billboard_meshes.remove(&key);
+        }
     }
 
     /// B2a — the light pass, fluid/fire rescan and meshing of up to `budget`

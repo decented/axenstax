@@ -111,6 +111,9 @@ pub struct ChunkIntake {
     /// first, each with the sequence number of the first input that carried
     /// it (`None` = not sent yet).
     drops: Vec<(ChunkDrop, Option<u64>)>,
+    /// Columns discarded by [`Self::apply`] (a chunk that did not decode),
+    /// whose meshes the game loop drops ([`Self::take_discarded`]).
+    discarded: Vec<(i32, i32)>,
     /// Phase B2b — `JoinAccept.chunk_note_radius`: how far round its server
     /// body this client is told about every column (`0` = no notes).
     note_radius: i32,
@@ -240,6 +243,23 @@ impl ChunkIntake {
         cols
     }
 
+    /// Must this client keep column `col` although its streamer would unload
+    /// it (B2a verify NEW-1)? Yes for a column the server pushed or said is
+    /// local while it lies within `render_distance + UNLOAD_HYSTERESIS` of
+    /// the server body's column: that is where the server keeps sending it,
+    /// and a rider's client body (whose inputs go out with no movement, so
+    /// the server body stays where the ride began) moves away from there.
+    /// Letting such columns go made the server hold them off and left them
+    /// stale or void when the rider got off. Unloading only: nothing is
+    /// loaded or generated round the server body.
+    pub fn keeps_near_server_body(&self, col: (i32, i32), render_distance: i32) -> bool {
+        let Some(centre) = self.server_centre else { return false };
+        let keep = render_distance + crate::chunk_stream::UNLOAD_HYSTERESIS;
+        (self.holds_pushed(col) || self.local.contains(&col))
+            && (col.0 - centre.0).abs() <= keep
+            && (col.1 - centre.1).abs() <= keep
+    }
+
     /// Phase B2b — has the server decided column `col` for this client:
     /// pushed it whole, or said it is local?
     pub fn decided(&self, col: (i32, i32)) -> bool {
@@ -281,8 +301,15 @@ impl ChunkIntake {
         {
             Some(c) => c,
             None => {
-                log::warn!("Pushed chunk {coord:?} does not decode; ignored");
-                return false;
+                // B2a verify NEW-2 — the server holds this chunk as sent, so
+                // ignoring it left a hole it never fills. Let the whole
+                // column go and report it: the server pushes it again (once
+                // the hold-off on a column dropped inside its radius ends).
+                log::warn!("Pushed chunk {coord:?} does not decode; letting its column go to be pushed again");
+                self.discard(world, col, true);
+                loaded.remove(&col);
+                self.discarded.push(col);
+                return true;
             }
         };
         // A column this client evicted (its own edits, kept while out of
@@ -314,6 +341,12 @@ impl ChunkIntake {
         }
     }
 
+    /// Columns [`Self::apply`] discarded since the last call (B2a verify
+    /// NEW-2): their meshes must go too.
+    pub fn take_discarded(&mut self) -> Vec<(i32, i32)> {
+        std::mem::take(&mut self.discarded)
+    }
+
     /// Up to `budget` columns for the light pass and meshing, oldest first.
     /// A column let go of since it was queued is skipped.
     pub fn take_relight(&mut self, budget: usize) -> Vec<(i32, i32)> {
@@ -334,8 +367,14 @@ impl ChunkIntake {
     /// queue the report to the server. No-op for a column the server told
     /// this client nothing about.
     pub fn let_go(&mut self, world: &mut World, col: (i32, i32)) {
+        self.discard(world, col, false);
+    }
+
+    /// Discard column `col` (chunks, side data, any evicted copy) and queue
+    /// its drop report — if the server sent it anything, or `always`.
+    fn discard(&mut self, world: &mut World, col: (i32, i32), always: bool) {
         let was_local = self.local.remove(&col);
-        if self.pushed_per_column.remove(&col).is_none() && !was_local {
+        if self.pushed_per_column.remove(&col).is_none() && !was_local && !always {
             return;
         }
         for cy in 0..=MAX_CHUNK_Y {
@@ -827,5 +866,99 @@ mod tests {
         assert_eq!(intake.applied(), 3);
         intake.let_go(&mut world, (0, 0));
         assert_eq!(intake.drops_for_input(1, 8), vec![ChunkDrop { cx: 0, cz: 0, as_of: 3 }]);
+    }
+
+    #[test]
+    fn a_chunk_that_does_not_decode_gives_up_its_column_to_be_pushed_again() {
+        // B2a verify NEW-2: counted but never inserted, it left the column
+        // part-pushed — never generated, never complete — for as long as the
+        // joiner stayed near it.
+        let host = World::new();
+        let mut world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (4, 0, 4)));
+        let mut bad = packet_of(&host, (4, 1, 4));
+        bad.compressed_blocks = vec![0xFF; 12];
+        assert!(intake.apply(&mut world, &mut loaded, &reg(), &bad));
+        assert!(!intake.holds_pushed((4, 4)), "the column is given up whole");
+        assert!(!world.has_chunk(4, 0, 4));
+        assert_eq!(intake.take_discarded(), vec![(4, 4)], "its meshes go too");
+        assert_eq!(
+            intake.drops_for_input(1, 8),
+            vec![ChunkDrop { cx: 4, cz: 4, as_of: 2 }],
+            "reported, as of the bad packet"
+        );
+        // Even the first chunk of a column it holds nothing of.
+        intake.confirm_drops(1);
+        let mut first = packet_of(&host, (9, 0, 9));
+        first.compressed_blocks = vec![1, 2, 3];
+        intake.apply(&mut world, &mut loaded, &reg(), &first);
+        assert_eq!(intake.drops_for_input(2, 8), vec![ChunkDrop { cx: 9, cz: 9, as_of: 3 }]);
+    }
+
+    /// Measurement (B2a review LOW-6): what `clear_side_data` costs per
+    /// pushed chunk when every side table is past a chunk's 4,096 cells (a
+    /// mature, heavily built world: the probing case, the worst there is).
+    /// `cargo test --lib measure_clear_side_data -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_clear_side_data() {
+        let mut world = World::new();
+        let mut n = 0u32;
+        'fill: for x in -64..64 {
+            for z in -64..64 {
+                for y in [40, 41, 70] {
+                    world.block_meta.insert((x, y, z), 3);
+                    world.face_attachments.insert((x, y, z), {
+                        let mut f: crate::world::FaceAttachments = Default::default();
+                        f[0] = Some(FaceAttachment::Wallpaper(block::GLASS));
+                        f
+                    });
+                    world.insert_sign((x, y + 1, z), crate::sign::SignData::new());
+                    n += 1;
+                    if n == 20_000 {
+                        break 'fill;
+                    }
+                }
+            }
+        }
+        let coords: Vec<ChunkCoord> =
+            (-4..4).flat_map(|x| (0..=MAX_CHUNK_Y).map(move |y| (x, y, x))).collect();
+        let t = web_time::Instant::now();
+        let rounds = 20;
+        for _ in 0..rounds {
+            for &c in &coords {
+                clear_side_data(&mut world, c);
+            }
+        }
+        let per = t.elapsed() / (rounds * coords.len() as u32);
+        println!(
+            "clear_side_data: {:.3} ms per chunk with {} meta / {} entities / {} faces",
+            per.as_secs_f64() * 1e3,
+            world.block_meta.len(),
+            world.block_entities.len(),
+            world.face_attachments.len()
+        );
+    }
+
+    #[test]
+    fn pushed_and_local_columns_near_the_server_body_are_kept() {
+        // B2a verify NEW-1: a rider's server body stays where the ride began.
+        let host = World::new();
+        let mut world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        for cy in 0..=MAX_CHUNK_Y {
+            intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (5, cy, 0)));
+        }
+        intake.note_local((-6, 6));
+        let rd = 4;
+        assert!(intake.keeps_near_server_body((5, 0), rd), "pushed, within 4 + 2");
+        assert!(intake.keeps_near_server_body((-6, 6), rd), "local, within 4 + 2");
+        assert!(!intake.keeps_near_server_body((1, 1), rd), "not the server's to keep");
+        intake.set_server_centre((20, 0));
+        assert!(!intake.keeps_near_server_body((5, 0), rd), "the body moved on: free to go");
     }
 }

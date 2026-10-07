@@ -25,6 +25,7 @@ use super::push_joiner::{
 };
 use crate::block;
 use crate::chunk::CHUNK_SIZE;
+use crate::hosted_server::HostedServer;
 use crate::protocol::{self, BlockChange};
 use crate::remote_client::build_join_request_guest;
 use crate::state_outbox::CLIENT_TICK_BUDGET_BYTES;
@@ -429,5 +430,67 @@ fn an_outbox_overflow_is_healed_by_pushing_the_chunks_again() {
         for cy in 0..=MAX_CHUNK_Y {
             assert_chunk_matches(&hs.server.world, &j.world, (col.0, cy, col.1));
         }
+    }
+}
+
+/// A ride along +x: the joiner's inputs carry no movement (`hold_still`), so
+/// its SERVER body stays at the start while its client body goes 21 columns
+/// and back, its streamer unloading round the client body every tick.
+/// Returns the columns it let go of.
+fn ride(hs: &mut HostedServer, j: &mut Joiner, rd: i32, keep_near_server: bool) -> usize {
+    let start = j.column(hs);
+    let mut dropped = 0;
+    let legs = (0..=21).chain((0..21).rev());
+    for step in legs {
+        for _ in 0..2 {
+            let mut input = j.input();
+            crate::prediction::hold_still(&mut input);
+            j.rc.send_input(&input).expect("connected");
+            hs.tick();
+            j.take_in();
+            dropped += j.unload_round((start.0 + step, start.1), rd, keep_near_server);
+        }
+    }
+    assert_eq!(j.column(hs), start, "the server body never moved");
+    dropped
+}
+
+#[test]
+fn a_ride_never_lets_go_of_what_the_server_keeps_sending() {
+    // B2a verify NEW-1, client half: the push follows the server body, which
+    // a ride leaves at the start. The client keeps what lies near it.
+    let mut hs = start_host("ride-keep");
+    let mut j = Joiner::join(&mut hs, 6, false);
+    j.settle(&mut hs);
+    let start = j.column(&hs);
+    let sent = hs.chunk_push_for_test(j.slot).sent_len();
+    assert_eq!(ride(&mut hs, &mut j, 6, true), 0, "nothing near the server body was let go of");
+    assert_eq!(hs.chunk_push_for_test(j.slot).sent_len(), sent);
+    for col in columns_within(start, 6) {
+        assert!(j.intake.column_complete(col), "column {col:?} kept");
+    }
+}
+
+#[test]
+fn columns_let_go_of_during_a_ride_come_back_once_the_hold_runs_out() {
+    // B2a verify NEW-1, server half: a client that did let go of them (an
+    // older one) found them held off for good — stale or void round the
+    // start once it got off. The hold now runs out.
+    let mut hs = start_host("ride-expire");
+    let mut j = Joiner::join(&mut hs, 6, false);
+    j.settle(&mut hs);
+    let start = j.column(&hs);
+    assert!(ride(&mut hs, &mut j, 6, false) > 0, "the old client let go round the start");
+    let missing = |j: &Joiner| columns_within(start, 6).into_iter().filter(|&c| !j.intake.column_complete(c)).count();
+    assert!(missing(&j) > 0, "back at the start, with holes");
+    let budget = crate::chunk_push::HELD_OFF_PLANS as usize + 40;
+    for tick in 0..=budget {
+        if missing(&j) == 0 {
+            return;
+        }
+        assert!(tick < budget, "{} columns still missing {tick} ticks after getting off", missing(&j));
+        j.ack();
+        hs.tick();
+        j.take_in();
     }
 }
