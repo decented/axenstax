@@ -276,6 +276,53 @@ fn a_local_column_let_go_of_is_decided_afresh_on_return() {
 }
 
 #[test]
+fn a_lending_host_notes_untouched_columns_and_its_own_edits_touch_them() {
+    // The LAN / online host: its server reads the host client's own world,
+    // lent each tick, and the host's edits land there BETWEEN the windows.
+    let (mut hs, mut host) = super::lent_world::start_lent("touched");
+    let mut j = Joiner::join_with(&mut hs, 2, false, |hs| host.lend_tick(hs));
+    assert!(j.intake.server_decides(), "a lending host sends notes");
+    let me = j.column(&hs);
+    for _ in 0..500 {
+        if columns_within(me, 2).iter().all(|&c| j.intake.decided(c)) {
+            break;
+        }
+        j.ack();
+        host.lend_tick(&mut hs);
+        j.take_in();
+    }
+    j.settle_with(&mut hs, |hs| host.lend_tick(hs));
+    for col in columns_within(me, 2) {
+        assert!(j.intake.is_local(col), "column {col:?}: untouched, noted local");
+        for cy in 0..=MAX_CHUNK_Y {
+            assert_chunk_matches(&host.world, &j.world, (col.0, cy, col.1));
+        }
+    }
+    // The host builds in its own world between two windows — no broadcast,
+    // only the edit tracking on the lent world can see it.
+    let col = (me.0 + 1, me.1 + 1);
+    let pushed = hs.chunk_push_for_test(j.slot).pushed();
+    let cs = CHUNK_SIZE as i32;
+    host.world.set_block(col.0 * cs + 4, 90, col.1 * cs + 4, block::GLASS);
+    host.lend_tick(&mut hs);
+    assert_eq!(hs.verdicts_for_test().get(col), Some(Verdict::Touched), "the lent world tracked the edit");
+    j.settle_with(&mut hs, |hs| host.lend_tick(hs));
+    assert_eq!(hs.chunk_push_for_test(j.slot).pushed(), pushed, "already local: never pushed for it");
+    // A joiner arriving now is pushed that column, with the edit in it.
+    let mut late = Joiner::join_with(&mut hs, 2, false, |hs| host.lend_tick(hs));
+    for _ in 0..500 {
+        if late.intake.decided(col) {
+            break;
+        }
+        late.ack();
+        host.lend_tick(&mut hs);
+        late.take_in();
+    }
+    assert!(late.intake.column_complete(col), "touched: pushed to a late joiner");
+    assert_eq!(late.world.get_block(col.0 * cs + 4, 90, col.1 * cs + 4), block::GLASS);
+}
+
+#[test]
 fn a_dedicated_server_tells_a_matching_joiner_its_note_radius() {
     let mut hs = dedicated("radius");
     let j = Joiner::join(&mut hs, SIM as u8, false);

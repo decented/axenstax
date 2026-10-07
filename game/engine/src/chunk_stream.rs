@@ -95,6 +95,13 @@ impl super::GameState {
         // column outlives the push that started it.
         let mut stray =
             columns_outside_anchors(&intake.part_pushed_columns(&self.loaded_columns), &anchors, UNLOAD_HYSTERESIS);
+        // B2b — likewise a column noted local whose turn to be generated
+        // never came before this client moved away.
+        stray.extend(columns_outside_anchors(
+            &intake.local_not_loaded(&self.loaded_columns),
+            &anchors,
+            UNLOAD_HYSTERESIS,
+        ));
         // B2a verify NEW-1 — never let go of what the server keeps sending:
         // its push radius follows the SERVER body, which a ride leaves
         // behind (`ChunkIntake::keeps_near_server_body`).

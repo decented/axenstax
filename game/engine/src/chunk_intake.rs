@@ -235,6 +235,15 @@ impl ChunkIntake {
         .then_some(col)
     }
 
+    /// Phase B2b — columns the server said are local that are not loaded:
+    /// noted but not generated yet. One whose turn never came before its
+    /// joiner moved away must still be let go of (and reported), or it would
+    /// stay "local" here while the server forgot it, and on return be
+    /// generated before the server decided it again.
+    pub fn local_not_loaded(&self, loaded: &ahash::AHashSet<(i32, i32)>) -> ahash::AHashSet<(i32, i32)> {
+        self.local.iter().filter(|c| !loaded.contains(*c)).copied().collect()
+    }
+
     /// Phase B2b — the columns the server said are local. Test-only.
     #[cfg(test)]
     pub fn local_columns(&self) -> Vec<(i32, i32)> {
@@ -940,6 +949,20 @@ mod tests {
             world.block_entities.len(),
             world.face_attachments.len()
         );
+    }
+
+    #[test]
+    fn a_local_column_never_generated_is_still_one_to_let_go_of() {
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        intake.note_local((3, 3));
+        intake.note_local((1, 1));
+        let mut loaded = ahash::AHashSet::new();
+        loaded.insert((1, 1));
+        assert_eq!(intake.local_not_loaded(&loaded).into_iter().collect::<Vec<_>>(), vec![(3, 3)]);
+        intake.let_go(&mut World::new(), (3, 3));
+        assert_eq!(intake.pending_drops(), 1, "reported, so the server decides it again");
+        assert!(intake.awaits_verdict((3, 3), 8), "and it waits for that verdict");
     }
 
     #[test]
