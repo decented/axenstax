@@ -718,6 +718,13 @@ pub struct World {
     /// that both the host client and the server ran in one tick shows up as a
     /// double count. Diagnostic only; never persisted.
     pub sim_tally: crate::sim_lend::SimTally,
+    /// Spec 06 §2.2c.3 — when mining first exposed each pure-deepslate cell
+    /// (the tick of the break beside it), the Satori roll's exposure clock
+    /// (`break_drops`). A cell never exposed by mining (a cave wall) is
+    /// absent: fully decayed. On the world, not the client, so it travels
+    /// with a host's lend and a host's breaks and its joiners' (which the
+    /// server rolls, C1) share one clock. Transient; never persisted.
+    pub pop_exposure: AHashMap<(i32, i32, i32), u64>,
 }
 
 /// #19 Rig Studio — one placed authored rig: where it stands, which way it
@@ -815,6 +822,7 @@ impl World {
             hostile_acts: crate::hostile_acts::HostileActLedger::new(),
             rigs: Vec::new(),
             sim_tally: crate::sim_lend::SimTally::default(),
+            pop_exposure: AHashMap::new(),
         }
     }
 
@@ -1638,6 +1646,7 @@ impl World {
         self.satoshi = crate::satoshi::SatoshiState::default();
         self.plots.clear();
         self.market_hubs.clear();
+        self.pop_exposure.clear();
         // Plan registry deliberately preserved — engine-bundled
         // content is constant across world resets.
     }

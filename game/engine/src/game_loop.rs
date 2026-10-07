@@ -2218,73 +2218,6 @@ impl super::GameState {
         });
     }
 
-    /// Strike-time check: should mining a pure-deepslate block at `(x,y,z)`
-    /// drop a Satori? Combines:
-    ///   1. Depth gate (Spec 6 §2.2c.1 — must be at or below Y_DP - 21).
-    ///   2. Pickaxe tier gate (must be diamond+).
-    ///   3. Vein membership (Spec 6 §2.2c.2 — dual-hash algorithm).
-    ///   4. Exposure decay (Spec 6 §2.2c.3 — multiplier from exposed_at age).
-    ///   5. Hash-byte exposure check (`hash[12]` against scaled multiplier).
-    ///
-    /// Returns `Some(stack)` if a Satori should drop, `None` otherwise. The
-    /// returned stack is always exactly one Satori. Satori is a chance drop
-    /// and carries NO sats value anywhere (`economy::is_chance_drop`).
-    fn maybe_gem_drop(
-        &self,
-        block_id: crate::block::BlockId,
-        x: i32,
-        y: i32,
-        z: i32,
-        pickaxe_tier_idx: u8,
-    ) -> Option<crate::item::ItemStack> {
-        use crate::biome::Y_DP;
-        use crate::crafting::{tier_index, ToolMaterial};
-        use crate::proof_of_play::{
-            block_is_vein_member, exposure_decay_multiplier, passes_exposure_check,
-            proof_hash, EXPOSURE_DECAY_DURATION_TICKS,
-        };
-        // Spec 16 Phase 3 — Satori vein eligibility accepts ANY pure-
-        // deepslate-family block (variants share the canonical's
-        // mining identity). is_pure_deepslate_family matches only
-        // PURE_DEEPSLATE until Phase 3b registers the variants.
-        if !crate::block::is_pure_deepslate_family(block_id) {
-            return None;
-        }
-        if y > Y_DP - 21 {
-            return None;
-        }
-        if pickaxe_tier_idx < tier_index(ToolMaterial::Diamond) {
-            return None;
-        }
-        let world_seed = self.biome_gen.seed as u64;
-        let secret = &self.pop_server_secret;
-        let epoch = self.pop_epoch_id;
-        if !block_is_vein_member(secret, world_seed, epoch, x, y, z) {
-            return None;
-        }
-        let multiplier = match self.pop_exposure_map.get(&(x, y, z)) {
-            Some(&exposed_at) => {
-                let age = self.tick_counter.saturating_sub(exposed_at).min(u32::MAX as u64) as u32;
-                exposure_decay_multiplier(age, EXPOSURE_DECAY_DURATION_TICKS)
-            }
-            // Naturally exposed (cave-found) → fully decayed. Player must
-            // mine adjacent stone/deepslate to refresh the exposure clock,
-            // per Spec 6 §2.2c.3 design intent.
-            None => 0.0,
-        };
-        if multiplier <= 0.0 {
-            return None;
-        }
-        let hash = proof_hash(secret, world_seed, epoch, x, y, z);
-        if !passes_exposure_check(&hash, multiplier) {
-            return None;
-        }
-        Some(crate::item::ItemStack::new_material(
-            crate::item::MaterialId::Satori,
-            1,
-        ))
-    }
-
     /// Has the Genesis Block — the first Satori in this world — already
     /// been claimed? Reads from `WorldMeta` (with a
     /// graceful fallback to false if the world's meta can't be loaded).
@@ -2337,30 +2270,6 @@ impl super::GameState {
             // given save errors are themselves a logged regression).
         }
         true
-    }
-
-    /// Mark all face-neighbours of `(x,y,z)` that are pure deepslate as
-    /// freshly exposed at the current tick — but only if they aren't
-    /// already in the map. This preserves the original exposure clock for
-    /// blocks revealed by an earlier mining action; cave-natural exposures
-    /// never enter the map and stay treated as "fully decayed".
-    fn mark_pure_deepslate_neighbours_exposed(&mut self, x: i32, y: i32, z: i32) {
-        let neighbours = [
-            (x + 1, y, z),
-            (x - 1, y, z),
-            (x, y + 1, z),
-            (x, y - 1, z),
-            (x, y, z + 1),
-            (x, y, z - 1),
-        ];
-        let now = self.tick_counter;
-        for (nx, ny, nz) in neighbours {
-            // Spec 16 Phase 3 — exposure decay tracking applies to ALL
-            // pure-deepslate-family variants (they share mining identity).
-            if crate::block::is_pure_deepslate_family(self.world.get_block(nx, ny, nz)) {
-                self.pop_exposure_map.entry((nx, ny, nz)).or_insert(now);
-            }
-        }
     }
 
     /// Reset tick timing to prevent speed-up after pause/menu/focus loss.
@@ -3067,7 +2976,7 @@ impl super::GameState {
         self.scenario = None;
         self.world.total_work = 0;
         self.world.total_ticks = 0;
-        self.pop_exposure_map.clear();
+        self.world.pop_exposure.clear();
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.pending_block_changes.clear();
@@ -4215,6 +4124,18 @@ impl super::GameState {
     /// lava/fire, fall, drowning) are the server's.
     pub(crate) fn joined(&self) -> bool {
         self.remote_client.is_some()
+    }
+
+    /// This client's world's Proof-of-Play keys (`break_drops::PopKeys`), for
+    /// the break arm's Satori roll. A joined client never rolls with them:
+    /// its world is someone else's, and the server rolls a joiner's breaks on
+    /// that world's secret (C1).
+    pub(crate) fn pop_keys(&self) -> crate::break_drops::PopKeys<'_> {
+        crate::break_drops::PopKeys {
+            secret: &self.pop_server_secret,
+            world_seed: self.biome_gen.seed as u64,
+            epoch: self.pop_epoch_id,
+        }
     }
 
     /// D1 — does this client's tick run the shared world-sim `system`?
@@ -11672,18 +11593,10 @@ impl super::GameState {
                                         _ => None,
                                     });
                                 let break_time = crate::crafting::break_time_ticks(blk, tool);
-                                // Compute drop-eligibility BEFORE the inventory
-                                // mutations below so the `tool` immutable borrow
-                                // doesn't overlap them.
-                                let can_drop = crate::crafting::can_harvest(blk, tool);
-                                // Pickaxe tier index for the Orange-Gem drop
-                                // gate (Spec 6 §2.2c.1 condition 3). Non-
-                                // pickaxe tools index as 0 so they fail the
-                                // diamond+ check.
-                                let pickaxe_tier_idx = tool
-                                    .filter(|t| t.tool_type == crate::crafting::ToolType::Pickaxe)
-                                    .map(|t| crate::crafting::tier_index(t.material))
-                                    .unwrap_or(0);
+                                // Copy the tool out (it is `Copy`) so the yield
+                                // below can read it after the inventory
+                                // mutations, without holding the borrow.
+                                let tool: Option<crate::crafting::Tool> = tool.copied();
 
                                 // Check if still mining the same block.
                                 // Only increment on tick frames (ticks_run > 0) so break
@@ -11716,8 +11629,29 @@ impl super::GameState {
                                     // placed flag BEFORE the block is cleared.
                                     let was_placed =
                                         self.world.is_placed(pos[0], pos[1], pos[2]);
-                                    let pop_work =
-                                        crate::crafting::break_work(blk, can_drop, was_placed);
+                                    // C1 — the break's yield, by the rules the
+                                    // server runs for a joiner's break
+                                    // (`break_drops`): crop harvest, tool-tier
+                                    // mine drop + bonus, and the Satori roll on
+                                    // this world's Proof-of-Play secret. Read
+                                    // BEFORE the block leaves the world: the
+                                    // roll keys on the broken block and its
+                                    // cell's exposure, a crop on what it stands
+                                    // on.
+                                    let break_yield = crate::break_drops::break_yield(
+                                        &self.world,
+                                        &self.registry,
+                                        blk,
+                                        (pos[0], pos[1], pos[2]),
+                                        tool.as_ref(),
+                                        self.tick_counter,
+                                        &self.pop_keys(),
+                                    );
+                                    let pop_work = crate::crafting::break_work(
+                                        blk,
+                                        break_yield.harvestable,
+                                        was_placed,
+                                    );
                                     self.world.add_work(pop_work);
                                     if let Some(scenario) = &mut self.scenario {
                                         scenario.on_block_broken(pop_work);
@@ -11732,42 +11666,10 @@ impl super::GameState {
                                             );
                                         }
                                     }
-                                    // Crops (Spec 16 Phase 7) — bypass the
-                                    // standard mine_drop path. Mature crops
-                                    // reset to TILLED_SOIL so the player can
-                                    // re-plant immediately; immature crops
-                                    // break to AIR with no drops.
-                                    // #16 — wild flower on grass breaks to AIR;
-                                    // farmed flower on tilled soil resets to soil.
-                                    let on_tilled = self.world.get_block(pos[0], pos[1] - 1, pos[2])
-                                        == block::TILLED_SOIL;
-                                    let crop_result = crate::growth::crop_break(
-                                        blk,
-                                        self.tick_counter
-                                            ^ ((pos[0] as u64).wrapping_mul(73856093))
-                                            ^ ((pos[1] as u64).wrapping_mul(19349663))
-                                            ^ ((pos[2] as u64).wrapping_mul(83492791)),
-                                        on_tilled,
-                                    );
-                                    // Evaluate the Satori drop BEFORE setting
-                                    // the block to air, so the
-                                    // proof-of-play helpers see the world
-                                    // state at strike-time + the exposure
-                                    // map still keys the broken block.
-                                    // Spec 06 §2.2 — a player-placed block yields
-                                    // no hash-driven drop either (no place→break
-                                    // gem/Bitcoin farming).
-                                    let gem_drop = if was_placed {
-                                        None
-                                    } else {
-                                        self.maybe_gem_drop(
-                                            blk, pos[0], pos[1], pos[2], pickaxe_tier_idx,
-                                        )
-                                    };
-                                    let replacement = crop_result
-                                        .as_ref()
-                                        .map(|r| r.replacement)
-                                        .unwrap_or(block::AIR);
+                                    // Crops (Spec 16 Phase 7): a mature crop
+                                    // resets to TILLED_SOIL so the player can
+                                    // re-plant at once (`break_yield`).
+                                    let replacement = break_yield.replacement;
                                     self.world.set_block(pos[0], pos[1], pos[2], replacement);
                                     // F1 Wave 2 — breaking one door half removes the
                                     // other (no dupe / no orphan).
@@ -12008,50 +11910,28 @@ impl super::GameState {
                                         self.rebuild_chunk_at(sx, sy, sz);
                                     }
                                     self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
-                                    if let Some(result) = crop_result {
-                                        // Crop drops bypass the standard
-                                        // mine_drop. The drops Vec is
-                                        // already shaped per spec.
-                                        let mut any_lost = false;
-                                        for stack in result.drops {
-                                            if self.players[pidx].inventory.add_item(stack).is_some() {
-                                                any_lost = true;
-                                            }
-                                        }
-                                        if any_lost {
-                                            // The mine_drop path at line ~1450 has
-                                            // the same silent-loss pattern for ore /
-                                            // Satori drops — not fixed here per
-                                            // review N-2. Crops surface it loudly
-                                            // because players repeat-harvest.
-                                            self.toast = Some((
-                                                "Inventory full — harvest lost".to_string(),
-                                                Instant::now() + Duration::from_secs(3),
-                                            ));
-                                        }
-                                    } else if can_drop {
-                                        // Drops: ores → raw materials, everything
-                                        // else → block-as-item. Tier-gated blocks
-                                        // (stone, iron ore, diamond ore, …) only
-                                        // drop when the held tool meets the tier
-                                        // requirement; otherwise the block is
-                                        // broken but no item drops. Chance-drops
-                                        // (gravel → flint) consult
-                                        // mine_drop_with_seed seeded by tick +
-                                        // position so a replay produces the same
-                                        // drop sequence.
-                                        let seed = self.tick_counter
-                                            ^ ((pos[0] as u64).wrapping_mul(73856093))
-                                            ^ ((pos[1] as u64).wrapping_mul(19349663))
-                                            ^ ((pos[2] as u64).wrapping_mul(83492791));
-                                        let drop = self.registry.mine_drop_with_seed(blk, seed);
-                                        self.players[pidx].inventory.add_item(drop);
-                                        // Optional bonus stack — currently only
-                                        // SALT_PATH uses this (1 Dirt always + 0-1
-                                        // Salt at 30 %).
-                                        if let Some(bonus) = self.registry.bonus_mine_drop(blk, seed) {
-                                            self.players[pidx].inventory.add_item(bonus);
-                                        }
+                                    // C1 — the yield into the breaker's
+                                    // inventory: the drops (a crop's harvest,
+                                    // or the tier-gated mine drop + bonus),
+                                    // then any Satori. A JOINED client takes
+                                    // nothing: the server yields its break
+                                    // with the world's secret and grants it
+                                    // (`InventoryGrant`) — taking it here too
+                                    // would double it. Ore / Satori stacks
+                                    // that don't fit are lost silently (review
+                                    // N-2); a crop harvest says so, because
+                                    // players repeat-harvest.
+                                    let joined = self.joined();
+                                    let taken = crate::break_drops::take_yield(
+                                        &mut self.players[pidx].inventory,
+                                        &break_yield,
+                                        joined,
+                                    );
+                                    if taken.crop_lost {
+                                        self.toast = Some((
+                                            "Inventory full — harvest lost".to_string(),
+                                            Instant::now() + Duration::from_secs(3),
+                                        ));
                                     }
                                     // Satori — dropped ALONGSIDE cobbled
                                     // deepslate when the vein / exposure /
@@ -12063,23 +11943,17 @@ impl super::GameState {
                                     // pickup celebration. Singular per world,
                                     // mirroring Bitcoin's block-0 usage of
                                     // the term.
-                                    if let Some(gem) = gem_drop {
+                                    if let Some(gem_material) = taken.gem {
                                         // Goal 1 — arm scenario objectives on the
                                         // gained material (Satori Rush ends on the
-                                        // first Satori). Capture the material
-                                        // before the stack moves into add_item.
-                                        let gem_material = match &gem.item {
-                                            crate::item::Item::Material(m) => Some(*m),
-                                            _ => None,
-                                        };
-                                        self.players[pidx].inventory.add_item(gem);
-                                        if let (Some(m), Some(scenario)) =
-                                            (gem_material, &mut self.scenario)
-                                        {
-                                            scenario.on_material_gained(m);
+                                        // first Satori).
+                                        if let Some(scenario) = &mut self.scenario {
+                                            scenario.on_material_gained(gem_material);
                                             // Phase 3 — coverage-challenge GainMaterial event.
                                             scenario.on_event(
-                                                crate::scenario::ChallengeEvent::GainMaterial { material: m },
+                                                crate::scenario::ChallengeEvent::GainMaterial {
+                                                    material: gem_material,
+                                                },
                                             );
                                         }
                                         if self.maybe_claim_genesis_block() {
@@ -12104,9 +11978,17 @@ impl super::GameState {
                                     // face-neighbours that are now pure deep-
                                     // slate (and weren't already exposed) get
                                     // the current tick as their exposure clock.
-                                    self.mark_pure_deepslate_neighbours_exposed(
-                                        pos[0], pos[1], pos[2],
-                                    );
+                                    // A joiner's client skips it: the server
+                                    // keeps the world's clock for its breaks.
+                                    if !self.joined() {
+                                        crate::break_drops::mark_exposed_neighbours(
+                                            &mut self.world,
+                                            pos[0],
+                                            pos[1],
+                                            pos[2],
+                                            self.tick_counter,
+                                        );
+                                    }
                                     let hs = self.players[pidx].hotbar_slot;
                                     let info = self.players[pidx].inventory.use_hotbar_tool(hs);
                                     self.handle_tool_use(info);

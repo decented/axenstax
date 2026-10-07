@@ -315,6 +315,7 @@ mod reserve;
 // Proof of Play — the per-strike HMAC-SHA256 hash + Satori vein algorithm
 // (Spec 6 §2, §2.2c). Pure, deterministic, server-side.
 mod proof_of_play;
+mod break_drops;
 
 // Gamepad + local-join coordination — cross-platform after spec 15.
 // Native uses gilrs; WASM uses `navigator.getGamepads()`.
@@ -981,12 +982,6 @@ pub(crate) struct GameState {
     /// Proof-of-Play epoch id. Always 0 in alpha; rotates per Spec 6 §2.6
     /// when seasonal commitment scheme is wired.
     pub(crate) pop_epoch_id: u32,
-    /// Sparse "block-was-exposed-at-tick" map for pure-deepslate. Populated
-    /// when a player mines a block face-adjacent to pure deepslate (Spec 6
-    /// §2.2c.3). Absent entries are treated as "naturally exposed → fully
-    /// decayed" so cave-found gems return nothing; players must mine into
-    /// solid deepslate to refresh the exposure clock.
-    pub(crate) pop_exposure_map: ahash::AHashMap<(i32, i32, i32), u64>,
     /// Chat overlay state (input field, log, history). Single-player only in v1.
     pub(crate) chat: chat_ui::ChatState,
     /// Spec 40 — the Workshop face-painter panel (the 16×16 paint-grid UI). Opened
@@ -1746,7 +1741,6 @@ impl GameState {
             world_time_step: 1,
             tick_counter: 0,
             pop_epoch_id: 0,
-            pop_exposure_map: ahash::AHashMap::new(),
             chat: chat_ui::ChatState::new(),
             challenge_board_open: false,
             controls_card_open: false,
