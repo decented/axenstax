@@ -1838,7 +1838,15 @@ outputs that didn't fit, in the summary line logged when the player leaves.
 *BRIDGE: `ItemAction::Craft` and its client send site are replaced when C3a
 mirrors the craft grid as window state (the result click becomes a window
 op); `judge_craft`'s rule (recipe, 2×2 vs table, table reach) carries over as
-a standalone pure function.*
+a standalone pure function.* Since C3a-1 (2026-10-07) the client's window
+rules agree with it (Spec 05 §3.6): the player's 2×2 never crafts a recipe
+bigger than 2×2 and "Fill from bag" refuses one there; a grid holding a tool,
+armour piece or Plan crafts nothing; the result click re-matches the grid
+rather than a cached result; and a table's screen closes once its cell is no
+longer a crafting table or leaves `cell_in_reach` of the body. So an honest
+joiner no longer meets `NeedsTable`, `BadIngredient`, a stale-result
+`NoRecipe`, or a screen-left-open `NotATable`/`TableTooFar` (a Reach Claw
+holder's screen closes at the server's reach, which has no Claw bonus).
 
 **Drop (C2b).** Q (or D-pad down) drops one of the held hotbar item. It is
 edge-triggered — one drop per press, winit key repeats ignored — so before

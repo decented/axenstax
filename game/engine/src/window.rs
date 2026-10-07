@@ -186,6 +186,15 @@ pub fn recipe_output(grid: &CraftGrid, station: Station) -> Option<ItemStack> {
     crafting::match_recipe(&cells)
 }
 
+/// L3 (C2b verify) — may a crafting table's screen stay open? Only while
+/// `cell` still holds a crafting table (`block_at_cell`) within the block
+/// reach of the player's body (eye at `eye`), by the rule the server judges
+/// a joiner's table craft with (`item_actions::cell_in_reach`). Minecraft
+/// closes the screen the same way.
+pub fn table_in_reach(block_at_cell: crate::block::BlockId, cell: [i32; 3], eye: glam::Vec3) -> bool {
+    block_at_cell == crate::block::CRAFTING_TABLE && crate::item_actions::cell_in_reach(eye, cell)
+}
+
 /// M3 — `example` as it is laid at `station`: unchanged when it fits where
 /// it is, moved to the top-left corner when it fits the grid but not there,
 /// and `None` when it is bigger than the grid (a 3×3 recipe at the player's
@@ -1355,6 +1364,27 @@ mod tests {
             assert_eq!(w.click(WindowClick::Result), ClickResult::Refused);
             assert_eq!(w.grid[2][2], Some(odd), "never destroyed");
             assert_eq!(w.total(block::OAK_PLANKS), 4);
+        }
+    }
+
+    // ── The table's screen (L3) ─────────────────────────────────────────
+
+    #[test]
+    fn a_table_screen_stays_open_only_while_its_table_is_in_reach() {
+        let cell = [0, 64, 0];
+        let near = glam::Vec3::new(0.5, 65.6, 2.5);
+        assert!(table_in_reach(block::CRAFTING_TABLE, cell, near));
+        assert!(!table_in_reach(block::AIR, cell, near), "the table was broken");
+        assert!(!table_in_reach(block::STONE, cell, near), "something else stands there");
+        let far = glam::Vec3::new(0.5, 65.6, 12.5);
+        assert!(!table_in_reach(block::CRAFTING_TABLE, cell, far), "walked or knocked out of reach");
+        // The same line the server draws for a joiner's table craft.
+        for z in 0..12 {
+            let eye = glam::Vec3::new(0.5, 65.6, 0.5 + z as f32);
+            assert_eq!(
+                table_in_reach(block::CRAFTING_TABLE, cell, eye),
+                crate::item_actions::cell_in_reach(eye, cell),
+            );
         }
     }
 

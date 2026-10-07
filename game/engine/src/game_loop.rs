@@ -21169,6 +21169,23 @@ impl super::GameState {
         // (`window::apply`, via `CraftingUi::apply_click`) over the player's
         // inventory + armour and the screen's grid + cursor.
         let creative = self.is_creative;
+        // L3 (C2b verify) — a crafting table's screen closes when its table
+        // stops being a crafting table or leaves the player's reach, as in
+        // Minecraft (`window::table_in_reach`: the server's reach rule, from
+        // the body's eye). The grid goes back as on any close.
+        for p in self.players.iter_mut() {
+            if p.crafting_ui.open
+                && p.crafting_ui.is_table
+                && let Some(cell) = p.crafting_ui.table
+                && !crate::window::table_in_reach(
+                    self.world.get_block(cell[0], cell[1], cell[2]),
+                    cell,
+                    p.player.eye_pos(),
+                )
+            {
+                p.crafting_ui.close(&mut p.inventory);
+            }
+        }
         for (pidx, click_target) in craft_clicks {
             match click_target {
                 crate::craft_ui::ClickTarget::ResultSlot => {
