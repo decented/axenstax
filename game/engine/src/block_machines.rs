@@ -133,6 +133,14 @@ impl GameServer {
                 pos,
             );
             self.pending_block_changes.extend(blast.changes);
+            // MP-D2a — and on every joiner in reach: their health is ours.
+            crate::explosion::apply_joiner_blast_damage(
+                &mut self.players,
+                &self.world,
+                &self.registry,
+                pos,
+                self.play_mode,
+            );
         }
     }
 

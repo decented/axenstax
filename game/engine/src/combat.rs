@@ -169,8 +169,10 @@ pub const HUNGER_DRAIN_INTERVAL_TICKS: u32 = 600;
 /// Hunger level above which passive health regen kicks in (Wave 24).
 /// MC equivalent threshold.
 pub const HUNGER_THRESHOLD_FOR_REGEN: u8 = 18;
-/// Ticks between passive +1 HP regen events (4 seconds at 20 TPS).
+/// Ticks between passive regen events (4 seconds at 20 TPS).
 pub const HEALTH_REGEN_INTERVAL_TICKS: u32 = 80;
+/// HP one passive regen event restores.
+pub const HEALTH_REGEN_AMOUNT: f32 = 1.0;
 /// Ticks between starvation -1 HP events when hunger is empty.
 pub const STARVATION_INTERVAL_TICKS: u32 = 80;
 
@@ -183,6 +185,25 @@ pub const POISON_DAMAGE_INTERVAL_TICKS: u32 = 20; // 1s
 pub const POISON_DAMAGE_PER_TICK: f32 = 1.0;
 /// Health floor under poison-only damage. Other sources can still kill.
 pub const POISON_HEALTH_FLOOR: f32 = 0.5;
+
+/// MP-D2a (review LOW-1) — the most one joiner input's reported change
+/// (`InputPacket.health_delta`) may RAISE its server-held health: the largest
+/// heal a client can legitimately make between two inputs. A client sends one
+/// input per tick, and in one tick it can eat once (eating sets the place
+/// cooldown) and take one regen pulse, so the cap is the best food in the
+/// food table (`Item::food_value` over every material) plus
+/// [`HEALTH_REGEN_AMOUNT`]. Derived, so a new, richer food raises it. No
+/// other heal reaches a joiner: there are no potions, `/heal` is op-only (a
+/// joiner is never op in someone else's world) and a joiner can't sleep
+/// there (`world_exit::JOINED_SLEEP_REFUSED`). A loss is never capped.
+pub static MAX_REPORTED_HEAL_PER_INPUT: std::sync::LazyLock<f32> =
+    std::sync::LazyLock::new(|| {
+        let best_food = crate::inventory_explorer::ALL_MATERIAL_IDS
+            .iter()
+            .filter_map(|&m| crate::item::Item::Material(m).food_value())
+            .fold(0.0, f32::max);
+        best_food + HEALTH_REGEN_AMOUNT
+    });
 
 impl PlayerCombat {
     pub fn new() -> Self {
@@ -274,7 +295,7 @@ impl PlayerCombat {
             self.regen_ticks = self.regen_ticks.saturating_add(1);
             if self.regen_ticks >= HEALTH_REGEN_INTERVAL_TICKS {
                 self.regen_ticks = 0;
-                self.health = (self.health + 1.0).min(self.max_health);
+                self.health = (self.health + HEALTH_REGEN_AMOUNT).min(self.max_health);
                 // Each regen pulse costs hunger — matches MC's saturation
                 // model loosely (no separate saturation buffer here).
                 if self.hunger > 0 { self.hunger -= 1; }
@@ -341,19 +362,26 @@ impl PlayerCombat {
     }
 
     /// MP-D2a — apply a joiner's reported change to its own health (the
-    /// sources its client still owns: eating, regen, poison, starvation,
-    /// sleeping, `/heal`; `InputPacket.health_delta`). A heal is clamped to
-    /// max health. A loss takes no hit-invulnerability window and records no
-    /// cause (it is not a hit). Nothing for the dead: only a Respawn revives,
-    /// and a report never kills twice. Returns whether this report killed
-    /// the player — its client already knows (it reported the loss), so the
-    /// caller clears the `just_died` one-shot rather than echo a `Died`.
+    /// sources its client still owns: eating, regen, poison and starvation;
+    /// `InputPacket.health_delta`). A heal is clamped to max health. A loss
+    /// takes no hit-invulnerability window and records no cause (it is not a
+    /// hit). Nothing for the dead: only a Respawn revives, and a report never
+    /// kills twice. Returns whether this report killed the player.
+    ///
+    /// A loss that kills goes through the ordinary death transition, and its
+    /// `just_died` one-shot STAYS SET, so `HostedServer` tells the joiner with
+    /// `PlayerEventType::Died`. Its client does not know: a client that
+    /// computes its own death reports it as `InputPacket.health <= 0`, never
+    /// as a delta (its `pending` change is zero while dead), so a delta only
+    /// kills a body the server holds lower than its client knew — a hit the
+    /// server landed is still on its way to it (review D2a HIGH-1).
     pub fn apply_reported_change(&mut self, delta: f32) -> bool {
         if self.dead || !delta.is_finite() || delta == 0.0 {
             return false;
         }
         self.health = (self.health + delta).clamp(0.0, self.max_health);
         if self.health <= 0.0 {
+            self.health = 0.0;
             self.mark_dead();
             return true;
         }

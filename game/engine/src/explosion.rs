@@ -401,6 +401,48 @@ pub fn apply_player_blast_damage(
     landed
 }
 
+/// MP-D2a (review D2a LOW-3) — a blast's hits on the joiners' server-held
+/// bodies: every server-simulated player present and alive takes the same
+/// distance falloff and line-of-sight reduction a local player does, soaked
+/// by the armour points its input reports. A joiner's health is the server's,
+/// so the server lands these, wherever the keg went off (a dedicated server's
+/// block machines, or a host client's keg sweep) — and a joined client lands
+/// no blast on itself (`GameState::apply_blast_damage`), so nothing counts
+/// twice. A lethal hit leaves `just_died` for `HostedServer` to send as
+/// `PlayerEventType::Died`. Flying modes are immune, as with every other hazard
+/// the server lands. `world` is the world the blast happened in (a lent host's
+/// is its client's). Returns the indices whose hit landed.
+pub fn apply_joiner_blast_damage(
+    players: &mut [crate::server::ServerPlayer],
+    world: &World,
+    registry: &crate::block::BlockRegistry,
+    center: (i32, i32, i32),
+    mode: crate::play_mode::PlayMode,
+) -> Vec<usize> {
+    let mut landed = Vec::new();
+    if mode.flies() {
+        return landed;
+    }
+    let c = (center.0 as f32 + 0.5, center.1 as f32 + 0.5, center.2 as f32 + 0.5);
+    for (i, sp) in players.iter_mut().enumerate() {
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            continue;
+        }
+        let ep = (sp.player.pos.x, sp.player.pos.y, sp.player.pos.z);
+        let los = line_of_sight_factor(c, ep, |x, y, z| registry.is_solid(world.get_block(x, y, z)));
+        let raw = blast_damage(c, ep, BLAST_RADIUS, KEG_BLAST_DAMAGE, los);
+        if raw > 0.0
+            && sp.combat.take_damage_from(
+                crate::armour::damage_after_armour(raw, sp.armour_points),
+                crate::survival::DamageCause::Explosion,
+            )
+        {
+            landed.push(i);
+        }
+    }
+    landed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -551,3 +551,31 @@ fn sync_local_slots_never_moves_slot_zero_or_a_joiner() {
     assert_eq!(hs.server.players[slot].player.pos, joiner);
     assert!(hs.server.players[slot].is_present_and_alive(), "the joiner is untouched");
 }
+
+/// Review D2a MEDIUM-1 — a host's local slot is health-trusted: its client
+/// writes the health every frame, and nothing on the server may kill its
+/// copy. Its hunger is never on the wire, so a server-side metabolism starves
+/// the copy within ten minutes of hosting; on Hard (starvation floor 0) the
+/// next pulse against a host at 1 HP then kills it for good — nothing revives
+/// a local slot's copy — and spawning and plate power stop seeing that player
+/// (both anchor on `is_present_and_alive`).
+#[test]
+fn a_hosts_local_slot_never_dies_on_its_server_copy() {
+    let (mut hs, mut host) = start_lent("local-starve");
+    hs.server.difficulty = crate::survival::Difficulty::Hard;
+    let p0 = hs.server.players[0].player.pos;
+    // Seat 1 (split screen) at 1 HP, written through the local path.
+    let seats = [(p0, 0.0, 0.0, 20.0), (p0, 0.0, 0.0, 1.0)];
+    hs.sync_local_slots(&seats);
+    for sp in &mut hs.server.players {
+        // Ten minutes of hosting: the copies' hunger is gone.
+        sp.combat.hunger = 0;
+    }
+    for _ in 0..2 * crate::combat::STARVATION_INTERVAL_TICKS {
+        hs.sync_local_slots(&seats);
+        host.lend_tick(&mut hs);
+    }
+    assert!(hs.server.players[1].is_present_and_alive(), "the seat's copy is alive");
+    assert_eq!(hs.server.players[1].combat.health, 1.0, "its client's health, untouched");
+    assert!(hs.server.players[0].is_present_and_alive());
+}

@@ -338,6 +338,18 @@ pub(crate) fn self_teleport_allowed(joined: bool) -> bool {
     !joined
 }
 
+/// What a joiner is told when it tries to sleep in a bed: in someone else's
+/// world the night, the respawn point and the player's health are the
+/// server's (Spec 04 §5.3.2), and the server takes no sleep from a client yet.
+pub(crate) const JOINED_SLEEP_REFUSED: &str =
+    "Sleeping isn't available when you've joined someone else's world yet.";
+
+/// May this machine's player sleep in a bed (skip the night, set their spawn,
+/// heal)? Not in someone else's world (see [`JOINED_SLEEP_REFUSED`]).
+pub(crate) fn sleep_allowed(joined: bool) -> bool {
+    !joined
+}
+
 /// Is the pause menu's "Switch to Creative" locked? During a creative-locked
 /// scenario, and always in someone else's world — the host owns the mode, and
 /// `/gamemode` is already refused there (review W3 S1).
@@ -859,6 +871,15 @@ mod tests {
         assert!(!self_teleport_allowed(true));
         assert!(self_teleport_allowed(false));
         assert!(JOINED_TELEPORT_REFUSED.contains("joined someone else's world"));
+    }
+
+    #[test]
+    fn a_joiner_cannot_sleep_its_health_back() {
+        // Review D2a LOW-1: a joiner's bed heal would be the only part of a
+        // sleep that "worked" (the server owns the night and the spawn).
+        assert!(!sleep_allowed(true));
+        assert!(sleep_allowed(false));
+        assert!(JOINED_SLEEP_REFUSED.contains("joined someone else's world"));
     }
 
     #[test]

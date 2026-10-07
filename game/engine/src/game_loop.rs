@@ -15589,7 +15589,19 @@ impl super::GameState {
                         let (_, brightness) = crate::camera::compute_sun(
                             self.world.effective_world_time(self.world_time),
                         );
-                        if brightness < 0.3 {
+                        if !crate::world_exit::sleep_allowed(self.joined()) {
+                            // In someone else's world the night, the respawn
+                            // point and the health are the server's: the skip
+                            // would snap back, the spawn would be ignored,
+                            // and the full heal would be the one thing that
+                            // "worked" — again each night click (review D2a
+                            // LOW-1).
+                            self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
+                            self.toast = Some((
+                                crate::world_exit::JOINED_SLEEP_REFUSED.to_string(),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
+                        } else if brightness < 0.3 {
                             // Per camera::compute_sun: world_time 0 = midnight,
                             // 12000 = noon. So 7000 lands shortly after sunrise
                             // — past the brightness > 0.3 daylight threshold,
@@ -21963,9 +21975,10 @@ impl super::GameState {
                 current_sats: state.reserve_current_sats,
             };
             // Our own body as the server holds it (Spec 04 §5.3): its
-            // position, and (MP-D2a) its health — the server lands every hit
-            // the world deals us; `own_health` keeps our own reported changes
-            // (eating, regen, …) on top until the server has applied them.
+            // position, and (MP-D2a) its health — the server lands the
+            // world's hits on us (Spec 04 §5.3.2); `own_health` keeps our own
+            // reported changes (eating, regen, …) on top until the server has
+            // applied them.
             let own_server = state.players.iter().find(|p| p.player_index == my_idx);
             let own_server_pos = own_server
                 .map(|p| glam::Vec3::new(p.x, p.y, p.z))
@@ -21987,6 +22000,12 @@ impl super::GameState {
                 if applied.hurt {
                     // The hit's flash + red vignette, as a local hit shows.
                     slot.combat.flash_timer = crate::combat::PLAYER_HURT_FLASH_TICKS;
+                }
+                if applied.died {
+                    // Zero is dead (review D2a HIGH-2): the death screen, and
+                    // our next input reports it; the server's copy dies from
+                    // the same changes and waits for our Respawn (MP-A3).
+                    slot.combat.die(crate::survival::DamageCause::Generic);
                 }
             }
             self.remote_players = state.players.into_iter()

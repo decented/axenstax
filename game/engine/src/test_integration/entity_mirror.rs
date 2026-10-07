@@ -38,6 +38,7 @@ struct Inbox {
     /// `(last_acked_input, own health)` per StateUpdate, in order.
     own: Vec<(u64, f32)>,
     died: usize,
+    respawned: usize,
 }
 
 impl Inbox {
@@ -62,9 +63,12 @@ impl Inbox {
                 protocol::PacketType::PlayerEvent => {
                     if let Ok(e) = protocol::safe_deserialize::<protocol::PlayerEventPacket>(payload)
                         && e.player_index as usize == slot
-                        && matches!(e.event, protocol::PlayerEventType::Died)
                     {
-                        self.died += 1;
+                        match e.event {
+                            protocol::PlayerEventType::Died => self.died += 1,
+                            protocol::PlayerEventType::Respawned { .. } => self.respawned += 1,
+                            _ => {}
+                        }
                     }
                 }
                 _ => {}
@@ -145,18 +149,31 @@ impl Rig {
     }
 
     fn send_input(&self, seq: u64, health_delta: f32, armour_points: u8) {
+        self.send_input_reporting(seq, self.server_health(), health_delta, armour_points);
+    }
+
+    /// An input whose `health` is what the client shows (not the server's).
+    fn send_input_reporting(&self, seq: u64, health: f32, health_delta: f32, armour_points: u8) {
         let input = protocol::InputPacket {
             tick: seq,
             x: self.at.x,
             y: self.at.y,
             z: self.at.z,
-            health: self.server_health(),
+            health,
             health_delta,
             armour_points,
             ..Default::default()
         };
         self.client
             .send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    }
+
+    fn send_respawn(&self) {
+        self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Respawn, &()));
+    }
+
+    fn dead(&self) -> bool {
+        self.hs.server.players[self.slot].combat.dead
     }
 }
 
@@ -339,4 +356,120 @@ fn peaceful_hostiles_do_not_bite_and_creative_takes_no_contact_damage() {
     rig.hs.server.world.set_block(x, y, z, block::LAVA);
     rig.tick(25);
     assert_eq!(rig.server_health(), 20.0, "creative is immune");
+}
+
+/// Review D2a HIGH-1. The body is at 1 HP — a hit the server landed, still on
+/// its way to the client, which shows 4 — and the client's own poison tick
+/// takes it from 4 to 3 and reports −1. That loss kills the body. The client
+/// never computed a death, so the server must tell it (`Died`); swallowing
+/// it left the joiner alive on its screen, every input dropped, for good.
+#[test]
+fn a_reported_loss_that_kills_tells_the_joiner_it_died() {
+    let mut rig = Rig::new("reported-loss-kills");
+    // Nothing but the report touches the health.
+    rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    rig.hs.server.players[rig.slot].combat.health = 1.0;
+    rig.send_input_reporting(1, 3.0, -1.0, 0);
+    rig.tick(2);
+    assert!(rig.dead(), "the reported loss took the body to zero");
+    assert_eq!(rig.inbox.died, 1, "the joiner is told it died");
+}
+
+/// Review D2a HIGH-2. The same race, seen from the client: the server's
+/// value (1) plus our in-flight poison (−1) plus a second, unsent poison
+/// tick (−1) is zero. Zero is dead on the client — its death screen — and
+/// the server's body dies too, from that same in-flight loss, so the
+/// Respawn the death screen sends is honoured (MP-A3). Before the fix the
+/// client stood at 0 HP with no death screen, and its zero-health input
+/// killed the body with the `Died` swallowed: no way back.
+#[test]
+fn a_client_whose_health_sums_to_zero_dies_and_can_respawn() {
+    use crate::health_sync::OwnHealth;
+    let mut rig = Rig::new("sums-to-zero");
+    rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    const MAX: f32 = 20.0;
+
+    // In sync at 4 HP: input 1 acknowledged.
+    rig.hs.server.players[rig.slot].combat.health = 4.0;
+    let mut own = OwnHealth::new();
+    rig.send_input_reporting(1, 4.0, 0.0, 0);
+    own.sent(1, 0.0, 4.0, false);
+    rig.tick(1);
+
+    // The server lands a hit (4 → 1) and broadcasts it, while our poison
+    // ticks 4 → 3, reported with input 2, which has not reached it yet.
+    rig.hs.server.players[rig.slot].combat.health = 1.0;
+    rig.tick(1);
+    let (acked, server_hp) = *rig.inbox.own.last().unwrap();
+    assert_eq!((acked, server_hp), (1, 1.0));
+    own.sent(2, -1.0, 3.0, false);
+    // A second poison tick (3 → 2) before the StateUpdate arrives.
+    let applied = own.apply_server(server_hp, acked, 2.0, MAX, false);
+    assert_eq!(applied.health, 0.0);
+    assert!(applied.died, "zero is a death on the client: its death screen");
+
+    // Dead now: our next input reports zero health and no change.
+    let delta = own.pending(0.0, true);
+    assert_eq!(delta, 0.0);
+    own.sent(3, delta, 0.0, true);
+    rig.send_input_reporting(2, 3.0, -1.0, 0);
+    rig.send_input_reporting(3, 0.0, delta, 0);
+    rig.tick(1);
+    assert!(rig.dead(), "the server holds the body dead too");
+    assert_eq!(
+        rig.inbox.died, 1,
+        "a body reported at zero by `health_delta` (input 2, still queued behind the \
+         zero-health report) dies through the path that sends `Died`"
+    );
+
+    // The death screen's Respawn is honoured once the server's minimum
+    // has passed: back at full health.
+    rig.tick(crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN);
+    rig.send_respawn();
+    rig.tick(1);
+    assert!(!rig.dead());
+    assert_eq!(rig.inbox.respawned, 1);
+    assert_eq!(rig.server_health(), MAX);
+}
+
+/// Review D2a LOW-1 — a reported heal is capped per input at the largest
+/// heal a client can make in one (the best food plus a regen pulse): a
+/// modified client reporting `+max` every input no longer shrugs off every
+/// hit short of a one-shot.
+#[test]
+fn a_reported_heal_is_capped_at_the_largest_legitimate_one() {
+    let mut rig = Rig::new("heal-cap");
+    rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    let cap = *crate::combat::MAX_REPORTED_HEAL_PER_INPUT;
+    assert!(cap > 1.0 && cap < 20.0, "cap {cap}: a meal and a pulse, not a full heal");
+    rig.hs.server.players[rig.slot].combat.health = 1.0;
+    rig.send_input(1, 19.0, 0);
+    rig.tick(1);
+    assert_eq!(rig.server_health(), 1.0 + cap);
+    // A loss is never capped.
+    rig.send_input(2, -(cap - 0.5), 0);
+    rig.tick(1);
+    assert_eq!(rig.server_health(), 1.5);
+}
+
+/// Review D2a LOW-3 — a keg that goes off beside a joiner hurts its body on
+/// the server (its health is the server's); the joiner's own client lands
+/// no blast on itself, so nothing counts twice.
+#[test]
+fn a_keg_blast_beside_a_joiner_lands_on_its_server_body() {
+    let mut rig = Rig::new("keg");
+    rig.hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+    let keg = (rig.at.x.floor() as i32 + 2, rig.at.y as i32, rig.at.z.floor() as i32);
+    rig.hs.server.world.set_block(keg.0, keg.1, keg.2, block::BLASTING_KEG);
+    rig.hs.server.world.insert_power_device(
+        keg,
+        crate::power::PowerDeviceData::new(
+            crate::power::PowerDeviceKind::BlastingKeg,
+            crate::meta::Facing::Up,
+        ),
+    );
+    rig.hs.server.world.power_device_at_mut(keg).expect("the keg").charge = 1;
+    rig.tick(8);
+    assert_eq!(rig.hs.server.world.get_block(keg.0, keg.1, keg.2), block::AIR, "it went off");
+    assert!(rig.server_health() < 20.0, "the blast landed on the joiner's body");
 }

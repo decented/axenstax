@@ -678,7 +678,10 @@ Rules:
   `composter::tick_all`, `power::tick_keg_fuses` + `explosion::detonate_keg_core`,
   `hopper::tick_hoppers`. The client adds only presentation (remesh, particles,
   audio) and per-`PlayerSlot` work (player blast damage, the furnace
-  Proof-of-Play trickle).
+  Proof-of-Play trickle). Blast damage on joiners' bodies is the server's on
+  both sides (`explosion::apply_joiner_blast_damage`: after the dedicated
+  server's detonation, and from a host client's on its server's joiners;
+  MP-D2a).
 - **Cadence matches the client.** Everything except hoppers runs inside the
   4-tick (5 Hz) falling-block block, in the client's order (hives → growth →
   dispensers → pistons → furnaces → composters → kegs); hoppers gate on

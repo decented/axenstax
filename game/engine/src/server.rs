@@ -402,16 +402,29 @@ pub struct QueuedInput {
 }
 
 impl QueuedInput {
-    /// The server's form of a client's `InputPacket`.
+    /// The server's form of a client's `InputPacket`. Its reported health
+    /// change is sanitised here, per input, before any merging: a non-finite
+    /// one is dropped, and a heal is capped at
+    /// [`crate::combat::MAX_REPORTED_HEAL_PER_INPUT`] (review D2a LOW-1).
     pub fn from_packet(pkt: &crate::protocol::InputPacket) -> Self {
         Self {
             seq: pkt.tick,
             yaw: pkt.yaw,
             pitch: pkt.pitch,
             intent: crate::player_intent::PlayerIntent::from_input_packet(pkt),
-            health_delta: if pkt.health_delta.is_finite() { pkt.health_delta } else { 0.0 },
+            health_delta: sanitise_reported_health_change(pkt.health_delta),
         }
     }
+}
+
+/// A joiner's reported health change as the server takes it: zero if not
+/// finite, a heal capped at [`crate::combat::MAX_REPORTED_HEAL_PER_INPUT`],
+/// a loss as sent (only ever believed downward: the body takes it).
+pub fn sanitise_reported_health_change(delta: f32) -> f32 {
+    if !delta.is_finite() {
+        return 0.0;
+    }
+    delta.min(*crate::combat::MAX_REPORTED_HEAL_PER_INPUT)
 }
 
 impl ServerPlayer {
@@ -1461,14 +1474,16 @@ impl GameServer {
                     &mut player.velocity,
                 );
             }
-            // MP-D2a — a joiner's metabolism (hunger, regen, starvation,
-            // poison) is its client's: it arrives as `health_delta`. Only the
-            // hit timers tick here, or regen and starvation would count twice.
-            if self.players[i].server_simulated {
-                self.players[i].combat.tick_timers();
-            } else {
-                self.players[i].combat.tick();
-            }
+            // MP-D2a — no body's metabolism (hunger, regen, starvation,
+            // poison) runs here. A joiner's is its client's and arrives as
+            // `health_delta` (running it here too would count regen and
+            // starvation twice). A host's local slot is health-trusted: its
+            // client writes the health every input, and its hunger is never
+            // sent, so a server-side drain would starve the copy and, on Hard,
+            // kill it for good (nothing revives a local slot's copy) — then
+            // spawning and plate power stop seeing that player (review D2a
+            // MEDIUM-1). Only the hit timers tick.
+            self.players[i].combat.tick_timers();
         }
 
         // MP-D2a — hostile melee and lava/fire contact on every joiner's
@@ -1594,9 +1609,12 @@ impl GameServer {
                 sp.last_applied_input = sp.last_applied_input.max(input.seq);
                 // MP-D2a — and the health change its client reported (eating,
                 // regen, poison, …), in the same acknowledged step. A loss
-                // that kills is a death the client already knows about.
+                // that kills is NOT one its client knows about (it reports its
+                // own deaths as `health <= 0`): the body was lower than the
+                // client knew, a hit landed here still in flight to it. Its
+                // `just_died` stays, so `HostedServer` sends `Died` (review
+                // D2a HIGH-1).
                 if sp.combat.apply_reported_change(input.health_delta) {
-                    sp.combat.just_died = false;
                     sp.dead_ticks = 0;
                     // A dead body takes no step and keeps no backlog (MP-A3).
                     sp.pending_intent = None;
@@ -1722,14 +1740,9 @@ impl GameServer {
     /// (`survival::tick_player_survival`). Its own pass, so a tick with no
     /// queued intent (a dropped packet) still advances breath.
     fn tick_player_survival(&mut self) {
-        // A joiner's metabolism (and so its starvation) is its client's, which
-        // applies the difficulty's floor and reports the loss as
-        // `health_delta` (MP-D2a); the server runs no hunger for it. The
-        // floor set here is for a local slot's copy, whose health its input
-        // overwrites anyway.
-        let starvation_floor = self.difficulty.rules().starvation_floor;
+        // No starvation here: every body's metabolism is its client's (see
+        // the combat-timer pass in `tick`; MP-D2a).
         for sp in &mut self.players {
-            sp.combat.starvation_floor = starvation_floor;
             if !sp.server_simulated {
                 continue;
             }
@@ -1798,13 +1811,21 @@ impl GameServer {
     }
 
     /// A server-simulated player's client reports it died (MP-A3): its input
-    /// carries zero health — a mob, lava, anything its own sim ran. The server
-    /// takes the death (only ever downward: a report of health coming BACK is
-    /// never believed — only `respawn_player` revives). The `just_died`
-    /// one-shot is consumed here: the reporting client already knows, so no
-    /// `PlayerEventType::Died` is echoed to it — an echo landing after a quick
-    /// Respawn click would kill it a second time. Returns whether this was a
-    /// new death.
+    /// carries zero health — starvation on Hard, anything its own sim ran. The
+    /// server takes the death (only ever downward: a report of health coming
+    /// BACK is never believed — only `respawn_player` revives). The
+    /// `just_died` one-shot is consumed here: the reporting client already
+    /// knows, so no `PlayerEventType::Died` is echoed to it — an echo landing
+    /// after a quick Respawn click would kill it a second time.
+    ///
+    /// One exception (review D2a HIGH-2): when the health changes this
+    /// client reported earlier, still queued behind this report, would
+    /// themselves take the body to zero, the death is theirs — a body
+    /// reported at zero by `health_delta` — and goes through the one death
+    /// path that tells the joiner: `just_died` stays and `Died` is sent.
+    /// This report runs at receive time, ahead of those queued inputs, so
+    /// without the check it would swallow the `Died` they owe. Returns
+    /// whether this was a new death.
     pub fn report_player_death(&mut self, idx: usize) -> bool {
         let Some(sp) = self.players.get_mut(idx) else {
             return false;
@@ -1812,8 +1833,17 @@ impl GameServer {
         if !sp.server_simulated || sp.combat.dead || self.play_mode.is_creative() {
             return false;
         }
+        let queued_change: f32 = sp
+            .pending_intent
+            .iter()
+            .chain(sp.intent_queue.iter())
+            .map(|q| q.health_delta)
+            .sum();
+        let killed_by_reported_changes = sp.combat.health + queued_change <= 0.0;
         sp.combat.die(crate::survival::DamageCause::Generic);
-        sp.combat.just_died = false;
+        if !killed_by_reported_changes {
+            sp.combat.just_died = false;
+        }
         sp.dead_ticks = 0;
         sp.pending_intent = None;
         sp.intent_queue.clear();

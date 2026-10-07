@@ -1065,7 +1065,14 @@ alive and not in a flying mode:
   not attack (Peaceful).
 - **Lava / fire contact** — `survival::contact_hazard`, the client's rule
   (lava at the feet or head 2 HP, else fire 1 HP, every 10 ticks).
-- Both are reduced by `ServerPlayer.armour_points`, taken from the joiner's
+- **Keg blasts** — `explosion::apply_joiner_blast_damage`, the client's
+  blast rule (distance falloff from `BLAST_RADIUS`, line-of-sight reduction),
+  run wherever a keg goes off: a dedicated server's block machines, or a host
+  client's keg sweep (`GameState::detonate_keg`, on its server's joiners,
+  against the host's world). A joined client lands no blast on itself
+  (`apply_blast_damage` returns early while joined), so a keg its own power
+  sim also detonates is not counted twice.
+- All three are reduced by `ServerPlayer.armour_points`, taken from the joiner's
   latest `InputPacket.armour_points` (client-asserted, like `held_kind`;
   armour lives in the client-held inventory). Armour **durability** does not
   wear for these hits (the server holds no armour) — until inventory
@@ -1218,24 +1225,57 @@ Not reconciled / known divergence (each shows as a correction, which is the hone
 
 #### 5.3.2 As built: a joiner's own health (MP-D2a, protocol v68)
 
-A joiner's health is the server's. The server lands every hit the world deals
-its body — fall and drowning (`tick_player_survival`, as before), hostile melee
-and lava/fire contact (§4.2c) — and sends the result in the joiner's own
-`PlayerState.health`. The joiner's client no longer applies those hits: it
-still runs `survival::survival_hits` on its predicted body (breath, for the
-bubbles) but drops the hits, and skips its own lava/fire and hostile passes.
+A joiner's health is the server's, and every source that can change it is
+either landed on the server-held body or reported by the client — never both:
+
+| Source | Who applies it to a joiner |
+|---|---|
+| Fall, drowning | Server (`tick_player_survival`, as before) |
+| Hostile melee (`Hostile` contact), lava / fire contact | Server (`tick_player_hazards`, §4.2c) |
+| Keg blast | Server (`explosion::apply_joiner_blast_damage`, §4.2c) |
+| Natural regen, starvation, poison, eating | Client, reported as `InputPacket.health_delta` |
+| Bee sting, goat charge, shark bite (species AI) | Nobody yet: host-client-only, reach only the host's local players (open: D4) |
+| Nostrich kick-back | Nobody: it answers a melee hit, which a joiner can't land (§4.2c) |
+| Sleeping | Nobody: a joiner can't sleep (`world_exit::JOINED_SLEEP_REFUSED`) — the night, the respawn point and the health are the server's |
+| `/kill`, `/heal` | Nobody: op-only, and a joiner is never op in someone else's world (`local_command_op_level`) |
+
+The server sends the result in the joiner's own `PlayerState.health`. The
+joiner's client no longer applies the server's hits: it still runs
+`survival::survival_hits` on its predicted body (breath, for the bubbles) but
+drops the hits, and skips its own lava/fire, hostile and blast passes.
 
 Hunger stays client-side, so the joiner's client still owns **natural regen,
-starvation, poison, eating, sleeping and `/heal`**. Their net change since the
-previous input rides `InputPacket.health_delta`; the server adds it to its copy
-(clamped to max health; a loss takes no i-frames and records no cause) when it
+starvation, poison and eating**. Their net change since the previous input
+rides `InputPacket.health_delta`; the server adds it to its copy (clamped to
+max health; a loss takes no i-frames and records no cause) when it
 **simulates** that input (`tick_player_physics`), so the `StateUpdate`
-acknowledging the input (`last_acked_input`) already contains it. A dropped
-input's delta is carried into the next queued one (like its flight toggle). A
-reported loss that kills is a death its client already knows: no `Died` is
-echoed. The server runs only the hit timers (`PlayerCombat::tick_timers`) for a
-joiner — no hunger, regen or starvation of its own, which retired the
-non-lethal starvation-floor BRIDGE.
+acknowledging the input (`last_acked_input`) already contains it. A heal is
+capped per input, on receipt, at `combat::MAX_REPORTED_HEAL_PER_INPUT`: the
+best food's `food_value` plus one regen pulse (`HEALTH_REGEN_AMOUNT`) — a
+client sends one input a tick and can eat once and pulse once in a tick
+(15 HP today; derived, so a richer food raises it). A loss is never capped. A
+dropped input's delta is carried into the next queued one (like its flight
+toggle).
+
+**A reported loss that kills sends `Died`.** A client that computes its own
+death reports it as `InputPacket.health <= 0` (below), never as a delta: its
+pending change is zero while dead. So a delta only kills a body the server
+holds **lower than its client knew** — a hit the server landed is still on its
+way to the client (a zombie bite, then the client's own poison tick before
+the bite's `StateUpdate` arrives). That death keeps its `just_died` one-shot
+and `HostedServer` sends `Died` (§4.2b); swallowing it left the joiner alive
+on its own screen with every input dropped (review D2a HIGH-1). The same
+race can make a non-lethal source (Normal's starvation, poison) the last
+straw after a server hit — the death is the hit's and the report's together.
+
+**No body's metabolism runs on the server** (`PlayerCombat::tick_timers` only,
+for every slot): a joiner's is its client's (counting it here too would double
+regen and starvation), and a host's local slot is health-trusted — its client
+writes the health with every input, and its hunger is never sent, so a
+server-side drain would starve the copy within minutes and, on Hard, kill it
+for good (nothing revives a local slot's copy), after which mob spawning and
+plate power, which anchor on `is_present_and_alive`, stop seeing that player
+(review D2a MEDIUM-1). This retired the non-lethal starvation-floor BRIDGE.
 
 **Client bookkeeping (`health_sync::OwnHealth`, `network_send_input` /
 `network_receive`):** each reported change is kept under the sequence number
@@ -1244,17 +1284,35 @@ plus the unacknowledged changes, plus anything changed since the last send
 (eating happens in frame-time input handling, between a tick's send and the
 next frame's apply). A server value below what the client showed flashes the
 hurt vignette. A server value of **zero is never applied** and nothing changes
-while the client is dead: death and revival are `Died` / `Respawned` (§4.2b)
-only — after a local Respawn the server still reports the dead body's zero for
-a round trip, and taking it would make the next input report a death and kill
-the respawned body. `Respawned` and a death reset the bookkeeping, so a
-respawn's jump to full health is never reported as a heal.
+while the client is dead: the server's own deaths and revivals arrive as
+`Died` / `Respawned` (§4.2b) — after a local Respawn the server still reports
+the dead body's zero for a round trip, and taking it would make the next input
+report a death and kill the respawned body. `Respawned` and a death reset the
+bookkeeping, so a respawn's jump to full health is never reported as a heal.
+
+**Zero is dead (review D2a HIGH-2).** A positive server value plus the
+client's own unapplied losses can sum to zero (the race above, seen from the
+client). `apply_server` then reports `died`, and the client enters its death
+screen (`PlayerCombat::die`) rather than standing at 0 HP alive — a living
+client never holds zero health, so the zero its next input reports is always
+a death it knows. The server's copy dies too, consistent with the MP-A3 flow
+(dead on the server until `PacketType::Respawn`): either from the in-flight
+loss (with a `Died`, which a dead client ignores) or from that zero-health
+report. **Server-side guard:** `report_player_death` runs when the packet is
+received, ahead of the inputs still queued; when the health changes queued
+behind it would themselves take the body to zero, the death is theirs — a
+body reported at zero by `health_delta` — and it keeps `just_died`, so it goes
+through the one death path that sends `Died`. Only a death the client's own
+sim computed (Hard starvation from a body the server holds above zero) is
+taken silently.
 
 Not closed: the death screen shows a generic cause for a server-side death
 (`Died` carries none); armour durability does not wear from server-landed hits
-(§4.2c); a modified client can report heals (and armour) it never earned — no
-worse than before v68, when its health was wholly its own; closing it needs
-server-side hunger and inventory (Phase C).
+(§4.2c); a modified client can still report heals it never earned, up to
+`MAX_REPORTED_HEAL_PER_INPUT` an input, and armour it doesn't wear (armour
+reduction is capped at 80%, `armour::damage_after_armour`) — no worse than
+before v68, when its health was wholly its own; closing it needs server-side
+hunger and inventory (Phase C).
 
 ### 5.4 Block Prediction
 

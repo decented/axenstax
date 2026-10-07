@@ -395,6 +395,17 @@ impl super::GameState {
         #[cfg(not(target_arch = "wasm32"))]
         self.pending_block_changes.extend(blast.changes);
         self.apply_blast_damage(pos);
+        // MP-D2a — a hosting player's keg also catches its joiners: their
+        // bodies (and health) are its server's (review D2a LOW-3).
+        if let Some(hs) = self.hosted_server.as_mut() {
+            crate::explosion::apply_joiner_blast_damage(
+                &mut hs.server.players,
+                &self.world,
+                &self.registry,
+                pos,
+                self.play_mode,
+            );
+        }
         // Particles (2026-07-05): the debris + smoke pass this module's doc
         // deferred "until the engine grows a particle framework" — it has one.
         let centre = glam::Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
@@ -413,6 +424,12 @@ impl super::GameState {
     /// Computes against immutable borrows first, then applies, to keep the borrow
     /// checker happy.
     fn apply_blast_damage(&mut self, center: (i32, i32, i32)) {
+        // MP-D2a — a joiner's health is the server's, which lands a blast on
+        // its body itself (`explosion::apply_joiner_blast_damage`): landing it
+        // here too would count it twice, once through `health_delta`.
+        if self.joined() {
+            return;
+        }
         let c = (
             center.0 as f32 + 0.5,
             center.1 as f32 + 0.5,

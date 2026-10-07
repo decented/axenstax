@@ -1497,12 +1497,14 @@ impl HostedServer {
     }
 
     /// MP-A3 — turn this tick's server-originated joiner deaths (the
-    /// `just_died` one-shot: a fall or drowning in `GameServer::tick`) into
+    /// `just_died` one-shot: a fall, drowning, a mob, lava or fire, a blast,
+    /// or — MP-D2a — a reported `health_delta` that took a body the server
+    /// held lower than its client knew to zero) into
     /// `PlayerEventType::Died`, sent to the dead player alone (nobody else has
     /// a use for it, and it names where someone is not safe). That is how a
     /// joiner whose server copy died — when its own sim didn't see it — reaches
     /// its death screen, and with it the Respawn button the server is waiting
-    /// on. A death the joiner's input REPORTED sets no
+    /// on. A death the joiner's input REPORTED (`health <= 0`) sets no
     /// one-shot (`GameServer::report_player_death`): its client already knows,
     /// and an echo arriving after a quick Respawn would kill it a second time.
     fn announce_joiner_deaths(&mut self) {
