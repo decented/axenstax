@@ -1396,17 +1396,20 @@ so the server learns every gain and consume, smallest first). Applies to every
 server-simulated player (joiners and guests); a host's own local slots are
 unchanged (their client decides, as in single-player).
 
-**A joined client is native.** What follows assumes the joiner's client
-sends its edits and their `mined` tags, and only the native client does: the
-web build is an offline taster with no multiplayer (the as-built banner
-above), and its edits are never queued for a server (`game_loop`'s break arm
-pushes them on native only). One web join path is still in code: the
-dedicated server's Docker guest-boot page (`index.dedicated.html` sets
-`window.AXENSTAX_DEDICATED_WS`, the wasm menu auto-joins it;
-`tools/dedicated-server/README.md`). A browser joined that way sends no edits
-and no tags, so the server yields it nothing, and it takes nothing itself:
-survival play there is not supported (review C1 MEDIUM-2, documented rather
-than fixed; whether to keep that auto-join is an owner call).
+**Only a native joiner's edits reach the server.** What follows assumes the
+joiner's client sends its edits and their `mined` tags, and only the native
+client does (L-web-edit): `game_loop`'s break arm queues them
+(`pending_block_changes`, `pending_mined`) on native only. One web join path
+is still in code: the dedicated server's Docker guest-boot page
+(`index.dedicated.html` sets `window.AXENSTAX_DEDICATED_WS`, the wasm menu
+auto-joins it; `tools/dedicated-server/README.md`). A browser joined that way
+sends no edits and no tags, so the server yields it nothing; its edits stay in
+its own copy of the world, and it keeps its client-side break drops exactly as
+before C1 (`GameState::edits_reach_server()` is false there, so the break arm
+still runs `take_yield` and the exposure clock for it). Survival mining on the
+browser-join path therefore works, but only against the browser's own copy of
+the world. (Review C1 MEDIUM-2.) Whether to keep that auto-join is an owner
+call.
 
 **Break drops are the server's.** A joined client's survival break arm still
 breaks the block in its own world and sends the `BlockChange`, and now tags

@@ -100,6 +100,9 @@ Design: `docs/superpowers/specs/2026-06-21-server-setup-wizard-design.md`.
   web build has no sign-in, so browser players can only join a server that
   admits guests (`AXENSTAX_ALLOW_GUESTS=1`); otherwise they are turned away
   with "sign-in required".
+  A browser joiner's block edits never reach the server (L-web-edit), so it
+  keeps its own client-side break drops and its edits stay in its own copy of
+  the world (Spec 04 §4.2e).
 - **Native:** in the lobby choose **Join Game** and enter `ws://BOX:6767`
   (the native Join dialog accepts `ws://`/`wss://` URLs as well as the legacy
   `ip:port` QUIC form).

@@ -4127,6 +4127,17 @@ impl super::GameState {
         self.remote_client.is_some()
     }
 
+    /// Does this client's block edit (and its `mined` tag) reach the server it
+    /// joined? True only when joined AND native: a joined client's edits and
+    /// mined tags are queued for the server on native only (L-web-edit, the
+    /// `#[cfg(not(target_arch = "wasm32"))]` push sites in the break arm), so
+    /// a web joiner's breaks stay client-side and it keeps its own break drops
+    /// as before C1. The break arm skips its self-grant and exposure clock
+    /// only when this holds. Keep in step with those push sites.
+    pub(crate) fn edits_reach_server(&self) -> bool {
+        crate::break_drops::edits_reach_server(self.joined(), cfg!(target_arch = "wasm32"))
+    }
+
     /// This client's world's Proof-of-Play keys (`break_drops::PopKeys`), for
     /// the break arm's Satori roll. A joined client never rolls with them:
     /// its world is someone else's, and the server rolls a joiner's breaks on
@@ -11905,6 +11916,9 @@ impl super::GameState {
                                             k as u32 * 6529,
                                         );
                                     }
+                                    // Native only (L-web-edit): keep in step with
+                                    // `edits_reach_server()`, which gates the
+                                    // self-grant below.
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
                                         self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], replacement));
@@ -11937,11 +11951,13 @@ impl super::GameState {
                                     // nothing: the server yields its break
                                     // with the world's secret and grants it
                                     // (`InventoryGrant`) — taking it here too
-                                    // would double it. Ore / Satori stacks
+                                    // would double it. A WEB joiner's edits
+                                    // never reach the server (L-web-edit), so
+                                    // it still takes its own drops. Ore / Satori stacks
                                     // that don't fit are lost silently (review
                                     // N-2); a crop harvest says so, because
                                     // players repeat-harvest.
-                                    let joined = self.joined();
+                                    let joined = self.edits_reach_server();
                                     let taken = crate::break_drops::take_yield(
                                         &mut self.players[pidx].inventory,
                                         &break_yield,
@@ -11998,9 +12014,11 @@ impl super::GameState {
                                     // face-neighbours that are now pure deep-
                                     // slate (and weren't already exposed) get
                                     // the current tick as their exposure clock.
-                                    // A joiner's client skips it: the server
-                                    // keeps the world's clock for its breaks.
-                                    if !self.joined() {
+                                    // A joiner whose edits reach the server
+                                    // skips it: the server keeps the world's
+                                    // clock for its breaks (a web joiner's
+                                    // don't reach it, so it keeps its own).
+                                    if !self.edits_reach_server() {
                                         crate::break_drops::mark_exposed_neighbours(
                                             &mut self.world,
                                             pos[0],

@@ -178,6 +178,14 @@ pub fn break_yield(
     BreakYield { replacement, drops, gem, crop: is_crop, harvestable }
 }
 
+/// Whether a joined client's block edits and `mined` tags reach its server:
+/// only when joined and not the web build (L-web-edit). `GameState::
+/// edits_reach_server` is this on the real values; the break arm skips its own
+/// yield only then, because only then does the server yield the break.
+pub fn edits_reach_server(joined: bool, web: bool) -> bool {
+    joined && !web
+}
+
 /// What [`take_yield`] took.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Taken {
@@ -189,8 +197,10 @@ pub struct Taken {
 
 /// The break arm's own grant of `y` to the breaker: the drops, then the
 /// Satori, into `inv` — what single-player and a host's own players get. A
-/// JOINED client (`joined`) takes nothing: the server yields the same break
-/// and grants it by `InventoryGrant` (C1); taking it here too would double it.
+/// client whose edits reach the server (`joined`, i.e. [`edits_reach_server`])
+/// takes nothing: the server yields the same break and grants it by
+/// `InventoryGrant` (C1); taking it here too would double it. A web joiner's
+/// edits never arrive, so it passes `false` and keeps its own drops.
 /// What doesn't fit is lost, as it always was for the break arm (only a crop
 /// harvest says so).
 pub fn take_yield(inv: &mut crate::inventory::Inventory, y: &BreakYield, joined: bool) -> Taken {
@@ -324,6 +334,30 @@ mod tests {
         assert_eq!(w.pop_exposure.get(&(5, 5, 5)), Some(&10), "an earlier exposure keeps its clock");
         assert_eq!(w.pop_exposure.get(&(5, 6, 6)), Some(&10));
         assert_eq!(w.pop_exposure.len(), 2, "only pure deepslate is tracked");
+    }
+
+    #[test]
+    fn a_web_joiner_keeps_its_own_drops_a_native_one_does_not() {
+        // The break arm passes `edits_reach_server(joined, web)` as
+        // `take_yield`'s `joined` argument (the arm itself needs a GPU).
+        assert!(edits_reach_server(true, false), "native joiner: the server yields");
+        assert!(!edits_reach_server(true, true), "web joiner: its edits never arrive");
+        assert!(!edits_reach_server(false, false));
+        assert!(!edits_reach_server(false, true));
+        let y = BreakYield {
+            replacement: block::AIR,
+            drops: vec![ItemStack::new_block(block::COBBLESTONE, 1)],
+            gem: None,
+            crop: false,
+            harvestable: true,
+        };
+        let mut web = crate::inventory::Inventory::new();
+        let taken = take_yield(&mut web, &y, edits_reach_server(true, true));
+        assert_eq!(taken, Taken::default());
+        assert_eq!(web.slot(0).map(|s| s.item.clone()), Some(Item::Block(block::COBBLESTONE)));
+        let mut native = crate::inventory::Inventory::new();
+        take_yield(&mut native, &y, edits_reach_server(true, false));
+        assert!(native.slots_iter().all(|s| s.is_none()));
     }
 
     #[test]
