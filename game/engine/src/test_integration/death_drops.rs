@@ -6,7 +6,7 @@
 //! both simulation sides.
 //!
 //! (These tests pin the server-authoritative half. The wire half shipped as
-//! death-drops phase 2 — `diff_entities` broadcasts item spawns with stack
+//! death-drops phase 2 — the entity diff (`entity_broadcast`) sends item spawns with stack
 //! payload, and `test_integration/late_join.rs` covers the late-joiner
 //! backfill of those spawns.)
 

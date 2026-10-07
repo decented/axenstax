@@ -894,7 +894,7 @@ events on the host (`fire_power_challenges`); carts advanced inside the window
 re-pin their riders (`apply_riding_follow`). Lighting is not recomputed for a
 joiner's edit on the host (it never was on the old loopback path either).
 
-**Entities.** `diff_entities` numbers the host's own ECS (`ProtocolId`
+**Entities.** The entity diff (`entity_broadcast`) numbers the host's own ECS (`ProtocolId`
 components land on host entities; save queries ignore them). The first lend of
 a server strips any `ProtocolId` an earlier server left, since ids are
 numbered per `HostedServer`. Joiners therefore see the host's real

@@ -903,7 +903,7 @@ second sim. On a lending host (D1, "Hosted mode — the host lends its world"
 below) that sim's ECS is the one the server diffs, so joiners see the host's
 own arrows in flight through this same `EntityKind::Projectile` channel.
 
-`diff_entities` gives each `ProjectileEntity` a `ProtocolId` on first sight
+The entity diff (`entity_broadcast::EntityBroadcast::diff`, §4.2c) gives each `ProjectileEntity` a `ProtocolId` on first sight
 and broadcasts it as `EntityKind::Projectile = 39`: one `EntitySpawn`
 (position; `yaw` = `(-vx).atan2(-vz)`, the heading the arrow renderer uses;
 health and item fields zero), an `EntityUpdate` every tick of the flight

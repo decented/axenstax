@@ -12,7 +12,7 @@
 //! function pattern as `spawning::tick_mob_spawning` and
 //! `falling_blocks::tick_falling_blocks` (Tasks 1b/1c).
 //!
-//! On the wire since phase 2 (2026-07-11, v57/v58): `diff_entities`
+//! On the wire since phase 2 (2026-07-11, v57/v58): the entity diff (`entity_broadcast`)
 //! broadcasts these drops as `EntityKind::Item` spawns, the server runs
 //! lifetimes + pickup for server-simulated players (`InventoryGrant`), and
 //! late joiners get the pre-existing drops backfilled at join-accept

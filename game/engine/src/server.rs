@@ -1361,7 +1361,7 @@ impl GameServer {
         // place (after entity physics, before item lifetimes), wherever the
         // server owns the machines that fire them (a dispenser's arrows). Hits
         // land on mobs through `combat::Health` and `despawn_dead` below, the
-        // server's ordinary damage path; `diff_entities` (hosted_server.rs)
+        // server's ordinary damage path; the entity diff (`entity_broadcast`)
         // broadcasts the flight. Shooter-sneak map empty: every server-fired
         // projectile today is ownerless, so no friendly-fire shield applies.
         // A LAN host's projectiles live in its CLIENT sim — a second tick here
@@ -1513,7 +1513,7 @@ impl GameServer {
         // NOTHING (no loot table, no wolf routing, no cargo-pack spill).
         // Snapshot ownership/cargo state first, then run the same
         // `death_drops` routing the client-side sweep uses. (Phase 2 closed
-        // the wire: `diff_entities` broadcasts these drops to remote clients,
+        // the wire: the entity diff (`entity_broadcast`) sends these drops to remote clients,
         // and the pickup pass above grants them via InventoryGrant. Kill
         // attribution / bounty / Vow stay client-side pending the dual-sim
         // rework.)

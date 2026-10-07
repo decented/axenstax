@@ -537,7 +537,7 @@ pub fn apply_breach(
             crate::entity::spawn_item(ecs, drop_pos, stack, (k as u32).wrapping_mul(7919) ^ 0xCA4);
         }
     }
-    // Despawn the cart. `diff_entities` (hosted_server.rs) drops its ProtocolId
+    // Despawn the cart. The entity diff (`entity_broadcast`) drops its ProtocolId
     // out of the alive-set on the next tick → emits exactly one despawn delta,
     // the same path a dead mob takes.
     let _ = ecs.despawn(entity);

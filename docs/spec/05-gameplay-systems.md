@@ -2176,8 +2176,8 @@ Dismount on arrival or jump. `PlayerSlot.riding` is transient (not persisted).
 survives save/load via `WorldSave.carts: Vec<SavedCart>` (trailing `#[serde(default)]`
 field; old saves load with `carts == []`). Track blocks persist via normal chunk data.
 
-**Multiplayer broadcast** — carts emit as `EntityKind::Cart` (= 26) via `diff_entities`
-(spawn-once, then updates). `PROTOCOL_VERSION` bumped to **45** for this addition.
+**Multiplayer broadcast** — carts emit as `EntityKind::Cart` (= 26) via the entity diff
+(`entity_broadcast` since v68: spawn when a joiner's interest takes it in, then changed-only updates). `PROTOCOL_VERSION` bumped to **45** for this addition.
 Two-client visual rendering from the receive path = playtest boundary (same systemic
 deferred gap as mob remote rendering).
 
