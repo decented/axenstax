@@ -20,11 +20,9 @@ impl super::GameState {
         // Use player 0 for initial load centre
         let (pcx0, pcz0) = player_cols[0];
 
-        if self.loaded_columns.is_empty() && !self.joined_push_only && !self.chunk_intake.server_decides() {
+        if self.loaded_columns.is_empty() && !self.joined_push_only {
             // (A push-only joiner (B2a) holds only what its server has
-            // pushed, and a joiner the server tells about every column near it
-            // (B2b) only what it has been told, so "nothing loaded" is not
-            // "never loaded" there.)
+            // pushed, so "nothing loaded" is not "never loaded" there.)
             // Fallback path only: the normal world entry runs through the
             // `GameMode::Loading` state, which drives `begin_load` + `step_load`
             // incrementally (and applies any spawn-pref override itself), so by
@@ -81,13 +79,14 @@ impl super::GameState {
         );
         // B2a — never generate a column part-way through its push (the rest
         // of it is on the way), and a push-only joiner (another terrain
-        // generator than the host's) generates nothing at all. B2b — nor one
-        // the server has yet to decide (push or "local"): generated before
-        // its verdict, a touched column would show pristine terrain.
+        // generator than the host's) generates nothing at all. B2b fix D1 —
+        // a column the server has yet to decide IS generated, as a
+        // single-player client would: a note confirms it, a push replaces it
+        // whole (so a touched column may show pristine terrain until then).
         if self.joined_push_only {
             step.load.clear();
         } else {
-            step.load.retain(|&col| !intake.holds_pushed(col) && !intake.awaits_verdict(col, rd));
+            step.load.retain(|&col| !intake.holds_pushed(col));
             step.load.truncate(STREAM_BUDGET);
         }
         // B2a — a part-pushed column (never counted loaded) that has left
@@ -126,6 +125,11 @@ impl super::GameState {
             // evicted column. The rest mirrors the save-load path (light,
             // fluid/fire rescan, mesh).
             self.column_sims().stream_in(cx, cz);
+            // B2b — a column noted local is checked against its note now,
+            // before anything lands on it; one that does not match is gone.
+            if self.verify_local_column((cx, cz)) {
+                continue;
+            }
 
             // Mesh new chunks in this column
             for cy in 0..=MAX_CHUNK_Y {
@@ -159,11 +163,29 @@ impl super::GameState {
             // Reclaims the column's scattered wildlife and evicts / drops its
             // blocks (Spec 02 §7.5) — see `ColumnSims::stream_out`.
             self.column_sims().stream_out(cx, cz);
-            // B2a — a column the server pushed is discarded, never kept
-            // evicted, and the server told: it pushes it afresh on return.
+            // B2a — a column the server pushed (or, B2b, said is local) is
+            // discarded, never kept evicted, and the server told: it pushes
+            // or decides it afresh on return. One this client generated
+            // before any verdict is not the server's: `stream_out` kept or
+            // dropped it like a single-player column, and nothing is told.
             self.chunk_intake.let_go(&mut self.world, (cx, cz));
             self.drop_column_meshes((cx, cz));
         }
+    }
+
+    /// Phase B2b — check column `col`, which this client holds, against its
+    /// "local" note's hash if it has one not yet checked
+    /// (`ChunkIntake::verify_local`). On a mismatch the column is gone —
+    /// discarded and reported, unloaded (wildlife, fluids, loaded mark) and
+    /// its meshes dropped — and every input from now on asks for everything
+    /// to be pushed. Returns whether it went.
+    fn verify_local_column(&mut self, col: (i32, i32)) -> bool {
+        if !self.chunk_intake.verify_local(&mut self.world, col) {
+            return false;
+        }
+        self.column_sims().stream_out(col.0, col.1);
+        self.drop_column_meshes(col);
+        true
     }
 
     /// The world-side state a column stream-in / stream-out touches, borrowed
@@ -519,10 +541,6 @@ impl super::GameState {
             let pregen: &[i32] = if self.joined_push_only { &[] } else { &[-1, 0, 1] };
             for &dx in pregen {
                 for &dz in pregen {
-                    // B2b — not one the server has yet to decide.
-                    if self.chunk_intake.awaits_verdict((dx, dz), rd) {
-                        continue;
-                    }
                     self.world.generate_column(dx, dz, &self.biome_gen);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, dx, dz, &self.registry);
                     self.loaded_columns.insert((dx, dz));
@@ -677,17 +695,13 @@ impl super::GameState {
         if self.joined_push_only {
             return;
         }
-        let rd = self.graphics.render_distance;
         let np_cx = (pos.x.floor() as i32).div_euclid(cs);
         let np_cz = (pos.z.floor() as i32).div_euclid(cs);
         for dx in -2..=2 {
             for dz in -2..=2 {
                 let cx = np_cx + dx;
                 let cz = np_cz + dz;
-                // B2b — a column the server has yet to decide waits for it.
-                if !self.loaded_columns.contains(&(cx, cz))
-                    && !self.chunk_intake.awaits_verdict((cx, cz), rd)
-                {
+                if !self.loaded_columns.contains(&(cx, cz)) {
                     load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, true);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
                     self.loaded_columns.insert((cx, cz));
@@ -701,16 +715,14 @@ impl super::GameState {
     /// already-loaded neighbours' boundaries (matching `stream_chunks`). Returns
     /// the remaining queue length.
     pub(crate) fn step_load(&mut self, budget: usize) -> usize {
-        let rd = self.graphics.render_distance;
         let mut done = 0;
         while done < budget {
             let Some((cx, cz)) = self.load_queue.pop_front() else { break };
             // B2a — a column the server is pushing is the server's: never
             // generated over, and counted loaded only once whole
-            // (`chunk_intake`), which lights and meshes it. B2b — nor is one
-            // the server has yet to decide: the streamer loads it once it is
-            // told the column is local (the spawn ring: `join_ring_pending`).
-            if self.chunk_intake.holds_pushed((cx, cz)) || self.chunk_intake.awaits_verdict((cx, cz), rd) {
+            // (`chunk_intake`), which lights and meshes it. (B2b fix D1: one
+            // the server has yet to decide is generated like any other.)
+            if self.chunk_intake.holds_pushed((cx, cz)) {
                 done += 1;
                 continue;
             }
@@ -724,12 +736,18 @@ impl super::GameState {
     /// evicted, else generate it; light it, register its water, lava and
     /// fire, scatter its wildlife, mesh it and the seams of its loaded
     /// neighbours, and mark it loaded. Shared by `step_load`, the spawn
-    /// ring's local columns (`join_ring_pending`) and a block change for a
-    /// local column not generated yet (`apply_world_deltas`, B2b).
+    /// ring's local columns (`join_ring_pending`) and a block change or a
+    /// pushed chunk for a local column not generated yet
+    /// (`apply_world_deltas`, B2b). A local column is checked against its
+    /// note before anything else touches it: one that does not match is not
+    /// loaded at all.
     pub(crate) fn load_one_column(&mut self, cx: i32, cz: i32) {
         // Spec 02 §7.5 — restore an evicted column first (it wins over any
         // world-gen spill a neighbour left); generate only if neither.
         load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
+        if self.verify_local_column((cx, cz)) {
+            return;
+        }
         crate::lighting::run_initial_pass_for_column(&mut self.world, cx, cz, &self.registry);
         self.water.register_column_sources(cx, cz, &self.world);
         self.lava.register_column_sources(cx, cz, &self.world);
@@ -770,6 +788,14 @@ impl super::GameState {
         for step in crate::chunk_intake::interleave(chunks, changes.len()) {
             match step {
                 crate::chunk_intake::IntakeStep::Chunk(pkt) => {
+                    // B2b fix D3 (review MEDIUM-1) — a chunk pushed into a
+                    // column noted local but not generated yet (an overflow
+                    // resync) overlays the generated column, never a void.
+                    if let Some(col) =
+                        self.chunk_intake.generate_before_chunk(&pkt, &self.loaded_columns, &self.world)
+                    {
+                        self.load_one_column(col.0, col.1);
+                    }
                     self.chunk_intake.apply(
                         &mut self.world,
                         &mut self.loaded_columns,
@@ -777,8 +803,13 @@ impl super::GameState {
                         &pkt,
                     );
                 }
-                crate::chunk_intake::IntakeStep::Local(col) => {
-                    self.chunk_intake.note_local(col);
+                crate::chunk_intake::IntakeStep::Local(col, hash) => {
+                    // B2b — a note confirms a column: one already generated
+                    // is checked now, one not generated yet when it is.
+                    self.chunk_intake.note_local(col, hash);
+                    if self.loaded_columns.contains(&col) {
+                        self.verify_local_column(col);
+                    }
                 }
                 crate::chunk_intake::IntakeStep::Changes(range) => {
                     for bc in &changes[range] {
@@ -790,6 +821,12 @@ impl super::GameState {
                             self.chunk_intake.generate_before(bc, &self.loaded_columns, &self.world)
                         {
                             self.load_one_column(col.0, col.1);
+                        }
+                        // A local column still unchecked (held through some
+                        // other path) is checked before the change lands.
+                        let col = column_of_block(bc.x, bc.z);
+                        if self.loaded_columns.contains(&col) {
+                            self.verify_local_column(col);
                         }
                         // A part-pushed column is not loaded yet, but the
                         // server sends changes only to chunks it has pushed.

@@ -32,12 +32,24 @@
 //!   touched` mode tells this joiner, for every column within
 //!   `R = min(render distance, JoinAccept.chunk_note_radius)` of its SERVER
 //!   body, either the column (a push, as above) or "this column is local"
-//!   (`ColumnLocal`, numbered and acknowledged with the pushes). Inside `R`
-//!   the client generates a column only once it has been told it is local
-//!   ([`ChunkIntake::awaits_verdict`]), never before, so a touched column
-//!   never flashes pristine terrain; outside `R` it generates as before. A
-//!   local column is let go like a pushed one (discarded and reported), so
-//!   the server decides it afresh on return.
+//!   (`ColumnLocal`, numbered and acknowledged with the pushes). The client
+//!   generates its own terrain everywhere a single-player client would,
+//!   inside `R` too, before any verdict (B2b fix D1: waiting left a void
+//!   moat round every join). A note CONFIRMS a column: one already
+//!   generated is just marked local, one not generated yet is generated as
+//!   usual. A push REPLACES it whole. So a touched column can show its
+//!   pristine generation until its push lands. A local column is let go
+//!   like a pushed one (discarded and reported), so the server decides it
+//!   afresh on return; a column generated before any verdict (neither noted
+//!   nor pushed) is none of the server's business: it unloads like a
+//!   single-player column and is never reported.
+//! - **The column check** ([`ChunkIntake::verify_local`]). A note carries the
+//!   hash of the server's live column (`chunk_verdict::column_hash`). The
+//!   client hashes its own generation — at the note when it already has the
+//!   column, else as soon as it generates it, before any server change lands
+//!   on it — and on a mismatch lets the column go (reported) and asks, in
+//!   every input from then on, for everything to be pushed
+//!   ([`ChunkIntake::column_mismatch`], `InputPacket::column_mismatch`).
 //!
 //! Renderer-free (the game loop meshes what [`ChunkIntake::take_relight`]
 //! hands it), so it is unit-tested on a bare `World`.
@@ -46,7 +58,7 @@ use std::collections::VecDeque;
 
 use crate::chunk::Chunk;
 use crate::chunk_push::{cell_pos, cells_in};
-use crate::protocol::{ChunkDataPacket, ChunkDrop, PushedAttachment, PushedEntity};
+use crate::protocol::{ChunkDataPacket, ChunkDrop, ColumnMismatch, PushedAttachment, PushedEntity};
 use crate::state_outbox::ChunkCoord;
 use crate::world::{FaceAttachment, World, MAX_CHUNK_Y};
 
@@ -56,8 +68,9 @@ use crate::world::{FaceAttachment, World, MAX_CHUNK_Y};
 pub enum StreamItem {
     /// A pushed chunk (`ChunkData`).
     Chunk(ChunkDataPacket),
-    /// "Column `(cx, cz)` is local" (`ColumnLocal`, Phase B2b).
-    Local((i32, i32)),
+    /// "Column `(cx, cz)` is local" (`ColumnLocal`, Phase B2b), with the
+    /// hash of the server's column.
+    Local((i32, i32), u32),
 }
 
 /// One step of a frame's world intake, in arrival order (see [`interleave`]).
@@ -65,8 +78,8 @@ pub enum StreamItem {
 pub enum IntakeStep {
     /// Apply one pushed chunk packet.
     Chunk(Box<ChunkDataPacket>),
-    /// Take in a "column is local" note (Phase B2b).
-    Local((i32, i32)),
+    /// Take in a "column is local" note (Phase B2b), with its hash.
+    Local((i32, i32), u32),
     /// Apply these block changes (indices into the frame's
     /// `pending_block_changes`).
     Changes(std::ops::Range<usize>),
@@ -86,7 +99,7 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
         }
         steps.push(match item {
             StreamItem::Chunk(chunk) => IntakeStep::Chunk(Box::new(chunk)),
-            StreamItem::Local(col) => IntakeStep::Local(col),
+            StreamItem::Local(col, hash) => IntakeStep::Local(col, hash),
         });
     }
     if changes > done {
@@ -124,6 +137,13 @@ pub struct ChunkIntake {
     /// Phase B2b — columns the server said are local, held (generated or to
     /// be generated) and not let go of.
     local: ahash::AHashSet<(i32, i32)>,
+    /// Phase B2b — local columns whose generation is not checked yet, each
+    /// with the hash its note carried ([`Self::verify_local`]).
+    unverified: ahash::AHashMap<(i32, i32), u32>,
+    /// Phase B2b — the first local column whose generation did not hash as
+    /// its note said: once set, every input asks for everything to be
+    /// pushed, for the rest of the session.
+    mismatch: Option<ColumnMismatch>,
 }
 
 impl ChunkIntake {
@@ -185,38 +205,63 @@ impl ChunkIntake {
     }
 
     /// Phase B2b — take in a `ColumnLocal` note: the server said column
-    /// `col` is local. It counts towards the ack like a push (it is a
-    /// numbered packet of the same stream). Ignored otherwise for a column
+    /// `col` is local, and its column hashes as `hash`. It counts towards the
+    /// ack like a push (it is a numbered packet of the same stream). Ignored
+    /// otherwise in a session that expects no notes (B2b review LOW-2: a
+    /// push-only joiner must never generate a column on one) and for a column
     /// this client holds pushed chunks of: those are the server's own data,
-    /// never replaced by a generation.
-    pub fn note_local(&mut self, col: (i32, i32)) {
+    /// never replaced by a generation. The column waits for
+    /// [`Self::verify_local`] — now if the caller has it, else once
+    /// generated.
+    pub fn note_local(&mut self, col: (i32, i32), hash: u32) {
         self.applied = self.applied.wrapping_add(1);
+        if !self.server_decides() {
+            log::debug!("Local note for {col:?} in a session that expects none; ignored");
+            return;
+        }
         if self.holds_pushed(col) {
             log::debug!("Local note for pushed column {col:?}; keeping the pushed copy");
             return;
         }
         self.local.insert(col);
+        self.unverified.insert(col, hash);
+    }
+
+    /// Phase B2b — check this client's generation of local column `col`
+    /// against its note's hash, if it has not checked it yet. Call it only
+    /// while this client holds the column — right after generating it, or at
+    /// the note for one already held — and before any server change lands on
+    /// it, or the change itself would read as a mismatch. On a mismatch the
+    /// column is let go of (discarded and reported) and
+    /// [`Self::column_mismatch`] is set for the rest of the session (the
+    /// first one is kept). Returns whether it let the column go: the caller
+    /// then unloads what else it holds of it (loaded mark, meshes, fluids,
+    /// wildlife).
+    pub fn verify_local(&mut self, world: &mut World, col: (i32, i32)) -> bool {
+        let Some(server_hash) = self.unverified.remove(&col) else { return false };
+        let client_hash = crate::chunk_verdict::column_hash(world, col);
+        if client_hash == server_hash {
+            return false;
+        }
+        log::warn!(
+            "Local column {col:?} does not match the server's (hash {client_hash:#010x}, server {server_hash:#010x}); \
+             letting it go and asking for every column to be pushed"
+        );
+        self.mismatch.get_or_insert(ColumnMismatch { cx: col.0, cz: col.1, server_hash, client_hash });
+        self.discard(world, col, true);
+        true
+    }
+
+    /// Phase B2b — the first local column whose generation did not match its
+    /// note (`InputPacket::column_mismatch`, sent in every input once set).
+    pub fn column_mismatch(&self) -> Option<ColumnMismatch> {
+        self.mismatch
     }
 
     /// Phase B2b — has the server said column `col` is local (and this
     /// client not let go of it since)?
     pub fn is_local(&self, col: (i32, i32)) -> bool {
         self.local.contains(&col)
-    }
-
-    /// Phase B2b — must column `col` wait for the server before this client
-    /// generates it? Yes when it lies within `min(render_distance,
-    /// note_radius)` of the server body and the server has not yet said it is
-    /// local or pushed any of it. Outside that radius a column is generated
-    /// as before; so is every column of a session the server sends no notes.
-    pub fn awaits_verdict(&self, col: (i32, i32), render_distance: i32) -> bool {
-        let Some(centre) = self.server_centre else { return false };
-        let r = render_distance.min(self.note_radius);
-        self.note_radius > 0
-            && (col.0 - centre.0).abs() <= r
-            && (col.1 - centre.1).abs() <= r
-            && !self.local.contains(&col)
-            && !self.holds_pushed(col)
     }
 
     /// Phase B2b — the column a server block change `bc` lands in, when it
@@ -232,6 +277,29 @@ impl ChunkIntake {
         let col = crate::chunk_stream::column_of_block(bc.x, bc.z);
         (self.local.contains(&col)
             && !crate::chunk_stream::remote_change_is_loaded(loaded, world, bc.x, bc.z))
+        .then_some(col)
+    }
+
+    /// B2b fix D3 (review MEDIUM-1) — must column `pkt` lands in be
+    /// generated before the pushed chunk `pkt` is applied? Yes for a chunk
+    /// (not a continuation) of a column the server said is local that this
+    /// client has neither generated nor holds evicted: an overflow resync can
+    /// push one chunk of such a column with no change before it, and applied
+    /// alone it would leave the column part-pushed and never generated (a
+    /// shaft of void), every later change to its other chunks conjuring a
+    /// stray one. Generated first — the full load path — the push overlays
+    /// a whole column.
+    pub fn generate_before_chunk(
+        &self,
+        pkt: &ChunkDataPacket,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        world: &World,
+    ) -> Option<(i32, i32)> {
+        let col = (pkt.cx, pkt.cz);
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        (!pkt.compressed_blocks.is_empty()
+            && self.local.contains(&col)
+            && !crate::chunk_stream::remote_change_is_loaded(loaded, world, col.0 * cs, col.1 * cs))
         .then_some(col)
     }
 
@@ -327,6 +395,8 @@ impl ChunkIntake {
         if !loaded.contains(&col) {
             world.restore_column(col.0, col.1);
         }
+        // The column now holds server data: nothing left to check it by.
+        self.unverified.remove(&col);
         world.insert_chunk(pkt.cx, pkt.cy, pkt.cz, chunk);
         clear_side_data(world, coord);
         apply_side_data(world, registry, coord, pkt);
@@ -374,7 +444,10 @@ impl ChunkIntake {
     /// range): discard it — chunks and side data, never into the evicted
     /// store, since the server pushes it afresh or decides it again — and
     /// queue the report to the server. No-op for a column the server told
-    /// this client nothing about.
+    /// this client nothing about — one it generated before any verdict
+    /// included: that is not in the server's sent-set, so it unloads like a
+    /// single-player column (evicted or dropped by the caller) and is never
+    /// reported.
     pub fn let_go(&mut self, world: &mut World, col: (i32, i32)) {
         self.discard(world, col, false);
     }
@@ -382,6 +455,7 @@ impl ChunkIntake {
     /// Discard column `col` (chunks, side data, any evicted copy) and queue
     /// its drop report — if the server sent it anything, or `always`.
     fn discard(&mut self, world: &mut World, col: (i32, i32), always: bool) {
+        self.unverified.remove(&col);
         let was_local = self.local.remove(&col);
         if self.pushed_per_column.remove(&col).is_none() && !was_local && !always {
             return;
@@ -549,14 +623,14 @@ mod tests {
         let world = World::new();
         let c = |x| StreamItem::Chunk(packet_of(&world, (x, 0, 0)));
         let steps = interleave(
-            vec![(0, c(1)), (2, c(2)), (2, StreamItem::Local((7, 7))), (2, c(3)), (5, c(4))],
+            vec![(0, c(1)), (2, c(2)), (2, StreamItem::Local((7, 7), 0)), (2, c(3)), (5, c(4))],
             6,
         );
         let shape: Vec<String> = steps
             .iter()
             .map(|s| match s {
                 IntakeStep::Chunk(p) => format!("C{}", p.cx),
-                IntakeStep::Local(col) => format!("L{}", col.0),
+                IntakeStep::Local(col, _) => format!("L{}", col.0),
                 IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
             })
             .collect();
@@ -713,7 +787,7 @@ mod tests {
                 IntakeStep::Chunk(p) => {
                     intake.apply(&mut joiner, &mut loaded, &reg(), &p);
                 }
-                IntakeStep::Local(_) => unreachable!(),
+                IntakeStep::Local(..) => unreachable!(),
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         joiner.apply_remote_block_change(bc);
@@ -760,22 +834,83 @@ mod tests {
     }
 
     #[test]
-    fn inside_the_note_radius_a_column_waits_for_its_verdict() {
+    fn a_note_marks_its_column_local_only_in_a_session_that_expects_notes() {
+        // B2b fix D1 replaced "a column inside the note radius waits for its
+        // verdict" (`awaits_verdict`, gone): the joiner generates there
+        // anyway, and a note confirms the column.
         let mut intake = ChunkIntake::default();
-        assert!(!intake.awaits_verdict((0, 0), 10), "no notes: generate as before");
+        // B2b review LOW-2: a session that expects no notes (a push-only
+        // joiner) counts one, for the ack, and takes nothing from it.
+        intake.note_local((1, 1), 7);
+        assert_eq!(intake.applied(), 1, "counted");
+        assert!(!intake.is_local((1, 1)) && !intake.decided((1, 1)), "but ignored");
         intake.expect_notes(3, (10, 10));
         assert!(intake.server_decides());
-        assert!(intake.awaits_verdict((13, 7), 10), "inside min(rd 10, radius 3) of the server body");
-        assert!(!intake.awaits_verdict((14, 10), 10), "outside it: generated as before");
-        assert!(!intake.awaits_verdict((12, 10), 1), "the render distance caps it too");
-        intake.note_local((13, 7));
-        assert_eq!(intake.applied(), 1, "a note counts towards the ack");
-        assert!(!intake.awaits_verdict((13, 7), 10), "told it is local: generate it");
-        assert!(intake.decided((13, 7)) && !intake.decided((12, 12)));
-        // The centre follows the server body.
-        intake.set_server_centre((20, 10));
-        assert!(!intake.awaits_verdict((12, 12), 10), "out of range now");
-        assert!(intake.awaits_verdict((22, 12), 10));
+        intake.note_local((13, 7), 7);
+        assert_eq!(intake.applied(), 2, "a note counts towards the ack");
+        assert!(intake.is_local((13, 7)) && intake.decided((13, 7)), "told it is local");
+        assert!(!intake.decided((12, 12)), "not told anything yet");
+    }
+
+    #[test]
+    fn a_column_generated_before_any_verdict_is_let_go_of_without_a_report() {
+        // B2b fix D1: the joiner's own speculative generation is not in the
+        // server's sent-set, so its unload is none of the server's business.
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        let mut joiner = World::new();
+        joiner.generate_column(2, 2, &crate::biome::BiomeGenerator::new(42));
+        intake.let_go(&mut joiner, (2, 2));
+        assert_eq!(intake.pending_drops(), 0, "never reported");
+        assert!(joiner.has_chunk(2, 0, 2), "left to the streamer's own unload (evict or drop)");
+    }
+
+    #[test]
+    fn a_local_columns_generation_is_checked_against_its_notes_hash() {
+        let biome = crate::biome::BiomeGenerator::new(42);
+        let mut world = World::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        // Generated before the note (speculatively): checked at the note.
+        world.generate_column(1, 0, &biome);
+        let good = crate::chunk_verdict::column_hash(&world, (1, 0));
+        intake.note_local((1, 0), good);
+        assert!(!intake.verify_local(&mut world, (1, 0)), "it matches");
+        assert!(intake.is_local((1, 0)) && intake.column_mismatch().is_none());
+        // Noted before it is generated: nothing to check until it is.
+        intake.note_local((2, 0), 0xBAD);
+        world.generate_column(2, 0, &biome);
+        let got = crate::chunk_verdict::column_hash(&world, (2, 0));
+        assert!(intake.verify_local(&mut world, (2, 0)), "a mismatch lets it go");
+        assert!(!world.has_chunk(2, 0, 0) && !intake.is_local((2, 0)), "discarded");
+        assert_eq!(intake.drops_for_input(1, 8), vec![ChunkDrop { cx: 2, cz: 0, as_of: 2 }], "reported");
+        let first = ColumnMismatch { cx: 2, cz: 0, server_hash: 0xBAD, client_hash: got };
+        assert_eq!(intake.column_mismatch(), Some(first), "the switch is set");
+        // Checked once: a later call (a change landing on it) never re-checks.
+        assert!(!intake.verify_local(&mut world, (1, 0)));
+        // Sticky: the first mismatch is the one kept.
+        intake.note_local((3, 0), 0xBAD);
+        world.generate_column(3, 0, &biome);
+        assert!(intake.verify_local(&mut world, (3, 0)));
+        assert_eq!(intake.column_mismatch(), Some(first));
+    }
+
+    #[test]
+    fn a_pushed_chunk_for_a_local_column_not_generated_yet_generates_it_first() {
+        // B2b fix D3 (review MEDIUM-1).
+        let host = World::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        let world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let pkt = packet_of(&host, (1, 2, -1));
+        assert_eq!(intake.generate_before_chunk(&pkt, &loaded, &world), None, "not local");
+        intake.note_local((1, -1), 0);
+        assert_eq!(intake.generate_before_chunk(&pkt, &loaded, &world), Some((1, -1)));
+        let cont = ChunkDataPacket { compressed_blocks: Vec::new(), ..pkt.clone() };
+        assert_eq!(intake.generate_before_chunk(&cont, &loaded, &world), None, "a continuation adds side data only");
+        loaded.insert((1, -1));
+        assert_eq!(intake.generate_before_chunk(&pkt, &loaded, &world), None, "already generated");
     }
 
     #[test]
@@ -786,7 +921,7 @@ mod tests {
         let mut loaded = ahash::AHashSet::new();
         let bc = BlockChange::with_meta(20, 70, -5, block::GLASS, 0); // column (1, -1)
         assert_eq!(intake.generate_before(&bc, &loaded, &world), None, "not local: not ours to make");
-        intake.note_local((1, -1));
+        intake.note_local((1, -1), 0);
         assert_eq!(intake.generate_before(&bc, &loaded, &world), Some((1, -1)));
         loaded.insert((1, -1));
         assert_eq!(intake.generate_before(&bc, &loaded, &world), None, "already generated");
@@ -798,7 +933,7 @@ mod tests {
         intake.expect_notes(8, (0, 0));
         let mut joiner = World::new();
         let biome = crate::biome::BiomeGenerator::new(42);
-        intake.note_local((1, 2));
+        intake.note_local((1, 2), 0);
         joiner.generate_column(1, 2, &biome);
         joiner.set_block(20, 90, 40, block::GLASS); // a server change applied on top
         assert!(joiner.evict_column(1, 2), "edited: the streamer's stream-out keeps it");
@@ -955,14 +1090,14 @@ mod tests {
     fn a_local_column_never_generated_is_still_one_to_let_go_of() {
         let mut intake = ChunkIntake::default();
         intake.expect_notes(8, (0, 0));
-        intake.note_local((3, 3));
-        intake.note_local((1, 1));
+        intake.note_local((3, 3), 0);
+        intake.note_local((1, 1), 0);
         let mut loaded = ahash::AHashSet::new();
         loaded.insert((1, 1));
         assert_eq!(intake.local_not_loaded(&loaded).into_iter().collect::<Vec<_>>(), vec![(3, 3)]);
         intake.let_go(&mut World::new(), (3, 3));
         assert_eq!(intake.pending_drops(), 1, "reported, so the server decides it again");
-        assert!(intake.awaits_verdict((3, 3), 8), "and it waits for that verdict");
+        assert!(!intake.is_local((3, 3)) && !intake.decided((3, 3)), "and it is undecided again");
     }
 
     #[test]
@@ -976,7 +1111,7 @@ mod tests {
         for cy in 0..=MAX_CHUNK_Y {
             intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (5, cy, 0)));
         }
-        intake.note_local((-6, 6));
+        intake.note_local((-6, 6), 0);
         let rd = 4;
         assert!(intake.keeps_near_server_body((5, 0), rd), "pushed, within 4 + 2");
         assert!(intake.keeps_near_server_body((-6, 6), rd), "local, within 4 + 2");

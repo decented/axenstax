@@ -32,12 +32,23 @@
 //!   column's unload, because its saved content cannot change while it is
 //!   unloaded (a write-through to an evicted column still marks it). Verdicts
 //!   are not persisted across restarts.
-//! - **The budget** ([`VERDICT_BUDGET`]). Verdicts are computed lazily on
-//!   the server tick, nearest first round each joiner's server body, at most
-//!   [`VERDICTS_PER_TICK`] a tick. The server stops starting new ones once
-//!   [`VERDICT_TIME_PER_TICK`] has gone, but always does at least one. It
-//!   runs inside a lending host's own frame, so the budget stays small. A
-//!   column with no verdict yet is neither pushed nor declared local.
+//! - **The budget** ([`VerdictBudget::for_server`]). Verdicts are computed
+//!   lazily on the server tick, nearest first round each joiner's server
+//!   body, up to a count a tick; the server stops starting new ones once the
+//!   budget's time has gone, but always does at least one. A lending host
+//!   runs them inside its own frame, so its budget is small
+//!   ([`LENDING_VERDICT_BUDGET`]); a server that does not lend (the dedicated
+//!   server, a `--no-lend` host) has no frame to protect and a much larger
+//!   one ([`OWNING_VERDICT_BUDGET`]). A column with no verdict yet is neither
+//!   pushed nor declared local; the joiner shows its own generation there
+//!   meanwhile, so the budget paces how fast touched columns appear, not
+//!   whether terrain exists.
+//! - **The column hash** ([`column_hash`]). A "local" note carries a hash of
+//!   the server's live column (blocks and placed bits; it was just proved
+//!   equal to generation), and the joiner checks its own generation against
+//!   it: a generation that differs despite a matching fingerprint (a
+//!   platform floating-point difference, say) is caught instead of
+//!   diverging silently.
 //!
 //! Untouched columns come from the joiner's own generation, so the anti-X-ray
 //! obfuscation that `chunk_push::build_chunk_packets` could apply to a push
@@ -62,14 +73,8 @@ pub enum Verdict {
     Touched,
 }
 
-/// Most verdicts a server computes in one tick (all joiners together).
-pub const VERDICTS_PER_TICK: usize = 4;
-
-/// After this much of a tick has gone on verdicts, no new one starts. At
-/// least one always runs, so a slow machine still makes progress.
-pub const VERDICT_TIME_PER_TICK: Duration = Duration::from_millis(3);
-
-/// A per-tick verdict budget.
+/// A per-tick verdict budget (all joiners together). At least one verdict
+/// always runs, so a slow machine still makes progress and nothing starves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerdictBudget {
     /// Most verdicts computed in one call.
@@ -78,9 +83,32 @@ pub struct VerdictBudget {
     pub time: Duration,
 }
 
-/// The server's per-tick budget: [`VERDICTS_PER_TICK`] and [`VERDICT_TIME_PER_TICK`].
-pub const VERDICT_BUDGET: VerdictBudget =
-    VerdictBudget { count: VERDICTS_PER_TICK, time: VERDICT_TIME_PER_TICK };
+/// A lending host's budget: its server tick runs inside the host's own frame
+/// (`sim_lend`), so verdicts get 3 ms of it. Measured 1.65 ms a verdict on a
+/// fresh world in the test profile (`opt-level = 1`; a mature world's side
+/// tables cost more), so time governs: about 2 a tick there, a few more in a
+/// release build. The count cap of 8 sits above what 3 ms allows on any
+/// machine we know of, so it only bounds a pathological clock.
+pub const LENDING_VERDICT_BUDGET: VerdictBudget =
+    VerdictBudget { count: 8, time: Duration::from_millis(3) };
+
+/// A server that does not lend (the dedicated server; a `--no-lend` host,
+/// which sends no notes anyway): no frame to protect, only its own 50 ms
+/// tick, whose simulation, streaming and sends fit well inside the other
+/// 38 ms. 12 ms is about 7 verdicts a tick at the test-profile 1.65 ms (140
+/// a second: a joiner's whole R 8 area, 289 columns, in about 2 s), 3-4
+/// times that in release, and still 4 a tick on a mature world at about
+/// 3 ms. The count cap of 32 matches a release build's 12 ms, so time
+/// governs everywhere and the cap only bounds a pathological clock.
+pub const OWNING_VERDICT_BUDGET: VerdictBudget =
+    VerdictBudget { count: 32, time: Duration::from_millis(12) };
+
+impl VerdictBudget {
+    /// The budget for a server that lends its host's world (`lends`) or not.
+    pub fn for_server(lends: bool) -> Self {
+        if lends { LENDING_VERDICT_BUDGET } else { OWNING_VERDICT_BUDGET }
+    }
+}
 
 /// Compare column `col` of `world` against a scratch regeneration of it (see
 /// the module docs). `biome_gen` must be the generator `world` was generated
@@ -132,6 +160,30 @@ pub(crate) fn column_matches(live: &World, pristine: &World, col: (i32, i32)) ->
         }
     }
     true
+}
+
+/// The hash a "local" note carries for column `col` of `world`
+/// (`ColumnLocalPacket.hash`): SHA-256 over its six chunks' block arrays and
+/// player-placed masks (`Chunk::as_bytes`, explicit little-endian), each
+/// preceded by a presence byte, truncated to the first four bytes read as a
+/// little-endian `u32`. Light and side data are not in it. An absent chunk
+/// hashes as one that is all air with no placed bit, as the verdict compares
+/// them. Stable across platforms and builds: no `DefaultHasher`, no
+/// in-memory layout.
+pub fn column_hash(world: &World, col: (i32, i32)) -> u32 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for cy in 0..=MAX_CHUNK_Y {
+        match world.get_chunk(col.0, cy, col.1).filter(|c| !c.is_bare()) {
+            Some(chunk) => {
+                hasher.update([1u8]);
+                hasher.update(chunk.as_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]])
 }
 
 /// The chunk's non-zero metadata on its block cells.
@@ -336,6 +388,46 @@ mod tests {
         let rushed = VerdictBudget { count: 4, time: Duration::ZERO };
         assert_eq!(v.decide(&world, &biome, &cands, rushed), 1);
         assert_eq!(v.get((-1, 0)), Some(Verdict::Untouched));
+    }
+
+    #[test]
+    fn a_lending_host_keeps_a_small_verdict_budget_and_a_dedicated_server_a_large_one() {
+        let lend = VerdictBudget::for_server(true);
+        assert_eq!(lend, VerdictBudget { count: 8, time: Duration::from_millis(3) });
+        let own = VerdictBudget::for_server(false);
+        assert!((12..=15).contains(&own.time.as_millis()), "12-15 ms of the 50 ms tick");
+        assert!(own.count >= 4 * lend.count, "time governs, not a small count");
+    }
+
+    #[test]
+    fn the_column_hash_covers_blocks_and_placed_bits_only_and_is_stable() {
+        let mut world = World::new();
+        // An absent column and one of bare chunks hash the same.
+        let empty = column_hash(&world, (0, 0));
+        for cy in 0..=MAX_CHUNK_Y {
+            world.insert_chunk(0, cy, 0, Chunk::new());
+        }
+        assert_eq!(column_hash(&world, (0, 0)), empty, "bare = absent");
+        world.set_block(1, 2, 3, block::STONE);
+        let stone = column_hash(&world, (0, 0));
+        assert_ne!(stone, empty, "a block changes it");
+        // Light and side data are not in it.
+        world.set_meta((1, 2, 3), 5);
+        world.insert_sign((1, 3, 3), crate::sign::SignData::new());
+        world.set_sky_light_at(4, 4, 4, 9);
+        assert_eq!(column_hash(&world, (0, 0)), stone, "no light, no side data");
+        // A placed bit is.
+        world.set_placed(1, 2, 3, true);
+        assert_ne!(column_hash(&world, (0, 0)), stone, "a placed bit changes it");
+        // Pinned, so a change to the definition (or a platform difference)
+        // fails here, not on a joiner: SHA-256 of six `0` presence bytes.
+        assert_eq!(empty, 0xdc6a_f6b0, "the empty column's hash");
+        // And a generated column hashes the same wherever it is generated.
+        let biome = BiomeGenerator::new(SEED);
+        let a = generated(&biome, (0, 0), 1);
+        let mut b = World::new();
+        b.generate_column(0, 0, &biome);
+        assert_eq!(column_hash(&a, (0, 0)), column_hash(&b, (0, 0)), "order-independent");
     }
 
     /// Measurement (Phase B2b): the false-touched rate on fresh worlds — every

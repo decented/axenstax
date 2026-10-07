@@ -562,6 +562,28 @@ pub struct InputPacket {
     /// the server pushing columns the client unloads (B2a review MEDIUM-1).
     #[serde(default)]
     pub render_distance: u8,
+    /// v71 (Phase B2b) — set once this client found a column it was told is
+    /// local whose own generation does not hash as the server's note said
+    /// (`ColumnLocalPacket::hash`), then sent in EVERY input for the rest of
+    /// the session: a sticky "push me everything" switch (repeating it makes
+    /// it survive a lost or budget-dropped input; the server acts on the
+    /// first and ignores the rest). The server logs it as a determinism bug,
+    /// pushes this client every column it had noted local and notes no more.
+    #[serde(default)]
+    pub column_mismatch: Option<ColumnMismatch>,
+}
+
+/// A local column whose generation differed from the server's (v71, Phase
+/// B2b): which one, the hash the server's note carried and the hash of the
+/// client's own generation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnMismatch {
+    pub cx: i32,
+    pub cz: i32,
+    /// `ColumnLocalPacket::hash`: the server's live column.
+    pub server_hash: u32,
+    /// The same hash over the client's own generation of the column.
+    pub client_hash: u32,
 }
 
 /// Most [`ChunkDrop`]s one `InputPacket` carries (12 bytes each).
@@ -1129,6 +1151,12 @@ pub struct ChunkDataPacket {
 pub struct ColumnLocalPacket {
     pub cx: i32,
     pub cz: i32,
+    /// `chunk_verdict::column_hash` of the server's live column when the note
+    /// was sent (its blocks and placed bits; the verdict had just proved them
+    /// equal to generation). The joiner checks its own generation against it
+    /// and, on a mismatch, lets the column go and asks for everything to be
+    /// pushed ([`InputPacket::column_mismatch`]).
+    pub hash: u32,
 }
 
 /// A render-visible block entity in a pushed chunk (v69). `cell` as in
@@ -1620,10 +1648,14 @@ pub struct ServerAnnouncePacket {
 /// - v71 (2026-10-07, Phase B2b): touched columns. A joiner whose terrain
 ///   generator matches the host's is pushed only the columns that differ from
 ///   generation; for every other column within its push radius the server
-///   sends `PacketType::ColumnLocal = 4` ([`ColumnLocalPacket`] `{ cx, cz }`)
-///   in the same ordered, numbered chunk stream, and the joiner generates it
-///   itself. `JoinAcceptPacket` gains trailing `chunk_note_radius: u8` (the
-///   server's push limit when it sends notes, `0` when it pushes everything).
+///   sends `PacketType::ColumnLocal = 4` ([`ColumnLocalPacket`]
+///   `{ cx, cz, hash }`, the hash of the server's live column) in the same
+///   ordered, numbered chunk stream, and the joiner generates it itself and
+///   checks the hash. `JoinAcceptPacket` gains trailing `chunk_note_radius:
+///   u8` (the server's push limit when it sends notes, `0` when it pushes
+///   everything); `InputPacket` gains trailing `column_mismatch:
+///   Option<ColumnMismatch>` (a sticky "push me everything" switch, set when
+///   a local column's generation did not hash as the note said).
 ///   `--chunk-sync touched` is the default. See `chunk_verdict`, `chunk_push`
 ///   and Spec 04 §4.1.
 pub const PROTOCOL_VERSION: u32 = 71;
@@ -1985,9 +2017,11 @@ mod tests {
             chunk_ack: 77,
             chunk_drops: vec![ChunkDrop { cx: -3, cz: 9, as_of: 70 }],
             render_distance: 6,
+            column_mismatch: Some(ColumnMismatch { cx: 1, cz: 2, server_hash: 3, client_hash: 4 }),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
+        assert_eq!(back.column_mismatch, pkt.column_mismatch);
         assert_eq!(back.chunk_ack, 77);
         assert_eq!(back.render_distance, 6);
         assert_eq!(back.chunk_drops, pkt.chunk_drops);
@@ -2007,8 +2041,9 @@ mod tests {
 
     /// bincode 1 is positional, so `InputPacket`'s trailing fields must sit in
     /// the order each protocol bump appended them: D2a's vitals (v68), then
-    /// B2a's chunk-push feedback (v69). Pinned on the wire bytes, so a merge
-    /// that reorders them fails here rather than on a live join.
+    /// B2a's chunk-push feedback (v69), then B2b's column-mismatch switch
+    /// (v71). Pinned on the wire bytes, so a merge that reorders them fails
+    /// here rather than on a live join.
     #[test]
     fn input_packet_trailing_fields_are_in_append_order() {
         let head = InputPacket { block_changes: Vec::new(), ..Default::default() };
@@ -2018,6 +2053,12 @@ mod tests {
             chunk_ack: 0x0102_0304,
             chunk_drops: vec![ChunkDrop { cx: -1, cz: 7, as_of: 9 }],
             render_distance: 0x5C,
+            column_mismatch: Some(ColumnMismatch {
+                cx: 3,
+                cz: -4,
+                server_hash: 0x1122_3344,
+                client_hash: 0x5566_7788,
+            }),
             ..head.clone()
         };
         let base = bincode::serialize(&head).unwrap();
@@ -2034,11 +2075,20 @@ mod tests {
         }
         tail.extend_from_slice(&9u32.to_le_bytes());
         tail.push(0x5C);
+        // v71 (B2b): column_mismatch (`Some` tag + cx, cz, server_hash,
+        // client_hash).
+        tail.push(1);
+        for v in [3i32, -4] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.extend_from_slice(&0x1122_3344u32.to_le_bytes());
+        tail.extend_from_slice(&0x5566_7788u32.to_le_bytes());
         // Everything before the appended fields is unchanged, and the
-        // appended fields close the packet in append order.
+        // appended fields close the packet in append order (`None` is one
+        // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1)]);
     }
 
     #[test]
@@ -2360,7 +2410,8 @@ mod tests {
         //   `KillEvent = 61`, `PlayerEventType::{DiedOf, ArmourWorn, Bred}`,
         //   `entity_flags::TETHERED` — joiners act on the server's mobs.
         // v71 (2026-10-07, B2b): touched columns — PacketType::ColumnLocal
-        //   (tag 4), JoinAccept.chunk_note_radius.
+        //   (tag 4, with the column's hash), JoinAccept.chunk_note_radius,
+        //   InputPacket.column_mismatch.
         assert_eq!(PROTOCOL_VERSION, 71);
     }
 

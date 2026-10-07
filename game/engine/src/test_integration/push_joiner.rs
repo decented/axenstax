@@ -8,8 +8,11 @@
 //! its inputs. Its world holds only what the server pushed and, in touched
 //! mode, the columns the server said are local, which it generates from the
 //! seed in its `JoinAccept` (`GameState::apply_world_deltas` and the
-//! streamer, mirrored: a change for a local column not generated yet
-//! generates the column first).
+//! streamer, mirrored: a change or a pushed chunk for a local column not
+//! generated yet generates the column first, and a local column is checked
+//! against its note's hash when noted if held, else when generated). A test
+//! may also generate columns before any verdict, as the game's streamer does
+//! ([`Joiner::generate`]).
 
 use crate::biome::BiomeGenerator;
 use crate::block;
@@ -71,6 +74,8 @@ pub(super) struct Joiner {
     pub generated: Vec<(i32, i32)>,
     /// Chunk-stream bytes received (pushes and notes).
     pub stream_bytes: usize,
+    /// `ColumnLocal` notes received.
+    pub notes_received: usize,
 }
 
 impl Joiner {
@@ -80,10 +85,26 @@ impl Joiner {
         Self::join_with(hs, render_distance, mismatch, HostedServer::tick)
     }
 
+    /// [`Self::join`] with [`Self::generate_on_note`] off from the start: the
+    /// notes that come with the join are not generated either.
+    pub fn join_without_generating(hs: &mut HostedServer, render_distance: u8) -> Self {
+        Self::join_inner(hs, render_distance, false, false, HostedServer::tick)
+    }
+
     pub fn join_with(
         hs: &mut HostedServer,
         render_distance: u8,
         mismatch: bool,
+        tick: impl FnMut(&mut HostedServer),
+    ) -> Self {
+        Self::join_inner(hs, render_distance, mismatch, true, tick)
+    }
+
+    fn join_inner(
+        hs: &mut HostedServer,
+        render_distance: u8,
+        mismatch: bool,
+        generate_on_note: bool,
         mut tick: impl FnMut(&mut HostedServer),
     ) -> Self {
         let client = hs.attach_test_remote();
@@ -104,9 +125,10 @@ impl Joiner {
             slot: usize::MAX,
             render_distance,
             biome: None,
-            generate_on_note: true,
+            generate_on_note,
             generated: Vec::new(),
             stream_bytes: 0,
+            notes_received: 0,
         };
         j.take_in();
         j.slot = j.rc.player_index().expect("joined") as usize;
@@ -114,12 +136,33 @@ impl Joiner {
     }
 
     /// Generate column `col` from the host's seed, as the streamer would
-    /// (light and fluids are the renderer's side; not needed here).
+    /// (light and fluids are the renderer's side; not needed here), and
+    /// check it against its "local" note if it has one not checked yet
+    /// (`GameState::verify_local_column`).
     pub fn generate(&mut self, col: (i32, i32)) {
         let biome = self.biome.as_ref().expect("the JoinAccept gave us the seed");
         self.world.generate_column(col.0, col.1, biome);
         self.loaded.insert(col);
         self.generated.push(col);
+        self.verify(col);
+    }
+
+    /// Check held column `col` against its note (`ChunkIntake::verify_local`):
+    /// gone on a mismatch.
+    fn verify(&mut self, col: (i32, i32)) {
+        if self.intake.verify_local(&mut self.world, col) {
+            self.loaded.remove(&col);
+        }
+    }
+
+    /// Generate every column within `r` of `centre` not held yet, as the
+    /// game's streamer does before any verdict (B2b fix D1).
+    pub fn generate_around(&mut self, centre: (i32, i32), r: i32) {
+        for col in columns_within(centre, r) {
+            if !self.loaded.contains(&col) && !self.intake.holds_pushed(col) {
+                self.generate(col);
+            }
+        }
     }
 
     /// Generate every column noted local and not generated yet.
@@ -164,12 +207,18 @@ impl Joiner {
             match step {
                 IntakeStep::Chunk(p) => {
                     self.stream_bytes += protocol::serialize_packet(protocol::PacketType::ChunkData, &*p).len();
+                    if let Some(col) = self.intake.generate_before_chunk(&p, &self.loaded, &self.world) {
+                        self.generate(col);
+                    }
                     self.intake.apply(&mut self.world, &mut self.loaded, &self.registry, &p);
                 }
-                IntakeStep::Local(col) => {
-                    self.stream_bytes += crate::chunk_push::build_local_note(col).len();
-                    self.intake.note_local(col);
-                    if self.generate_on_note && self.intake.is_local(col) && !self.loaded.contains(&col) {
+                IntakeStep::Local(col, hash) => {
+                    self.stream_bytes += crate::chunk_push::build_local_note(col, hash).len();
+                    self.notes_received += 1;
+                    self.intake.note_local(col, hash);
+                    if self.loaded.contains(&col) {
+                        self.verify(col);
+                    } else if self.generate_on_note && self.intake.is_local(col) {
                         self.generate(col);
                     }
                 }
@@ -178,6 +227,10 @@ impl Joiner {
                         self.changes_seen.push(bc.clone());
                         if let Some(col) = self.intake.generate_before(bc, &self.loaded, &self.world) {
                             self.generate(col);
+                        }
+                        let col = crate::chunk_stream::column_of_block(bc.x, bc.z);
+                        if self.loaded.contains(&col) {
+                            self.verify(col);
                         }
                         if crate::chunk_stream::remote_change_is_loaded(
                             &self.loaded, &self.world, bc.x, bc.z,
@@ -201,6 +254,7 @@ impl Joiner {
             chunk_ack: self.intake.applied(),
             chunk_drops: self.intake.drops_for_input(seq, protocol::MAX_CHUNK_DROPS_PER_INPUT),
             render_distance: self.render_distance,
+            column_mismatch: self.intake.column_mismatch(),
             ..Default::default()
         }
     }

@@ -246,8 +246,9 @@ pub struct HostedServer {
     /// still match generation. Read by every joiner's push plan; an edit makes
     /// a column touched for good. Lives as long as this server (never saved).
     verdicts: crate::chunk_verdict::Verdicts,
-    /// Phase B2b — verdicts computed per tick (`chunk_verdict::VERDICT_BUDGET`;
-    /// a test may change it).
+    /// Phase B2b — verdicts computed per tick (`chunk_verdict::VerdictBudget::
+    /// for_server`: small on a lending host's frame, large on a server that
+    /// does not lend; a test may change it).
     verdict_budget: crate::chunk_verdict::VerdictBudget,
     /// Phase B2b — verdicts computed in the last tick. Test-only.
     #[cfg(test)]
@@ -710,13 +711,13 @@ impl HostedServer {
             verdicts: crate::chunk_verdict::Verdicts::default(),
             // Tests count verdicts, never time them: the time cap would make
             // how many a tick decides depend on the machine's load.
-            verdict_budget: if cfg!(test) {
-                crate::chunk_verdict::VerdictBudget {
-                    time: std::time::Duration::MAX,
-                    ..crate::chunk_verdict::VERDICT_BUDGET
+            verdict_budget: {
+                let budget = crate::chunk_verdict::VerdictBudget::for_server(host_world == HostWorld::Lent);
+                if cfg!(test) {
+                    crate::chunk_verdict::VerdictBudget { time: std::time::Duration::MAX, ..budget }
+                } else {
+                    budget
                 }
-            } else {
-                crate::chunk_verdict::VERDICT_BUDGET
             },
             #[cfg(test)]
             verdicts_last_tick: 0,
@@ -3391,10 +3392,54 @@ impl HostedServer {
         if i < self.num_local_players {
             return;
         }
+        // B2b — a column the joiner was told is local did not generate as
+        // ours did. Before the drops: the column it let go of rides in this
+        // same input, and taken out here first it is pushed again at once,
+        // never held off.
+        if let Some(m) = input.column_mismatch {
+            self.column_mismatch(i, m);
+        }
         let Some(push) = self.chunk_pushes.get_mut(i) else { return };
         push.set_render_distance(input.render_distance);
         push.ack(input.chunk_ack);
         push.drop_columns(&input.chunk_drops);
+    }
+
+    /// B2b — slot `i` reports that its generation of a column it was told is
+    /// local does not hash as our note said (`InputPacket::column_mismatch`,
+    /// repeated in every input; only the first does anything). A determinism
+    /// bug with matching worldgen fingerprints (a platform floating-point
+    /// difference, an order dependence): logged loudly, and that joiner is
+    /// pushed everything for the rest of its session — every column it was
+    /// noted is pushed again, since all of them are suspect, and it is noted
+    /// no more (`sends_notes`).
+    fn column_mismatch(&mut self, i: usize, m: protocol::ColumnMismatch) {
+        let Some(push) = self.chunk_pushes.get_mut(i) else { return };
+        if push.pushes_everything() {
+            return;
+        }
+        let repushed = push.push_everything_from_now();
+        let who = self.server.players.get(i).map_or_else(
+            || format!("slot {i}"),
+            |sp| {
+                // Remote players exist only on native builds.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(pk) = &sp.verified_pubkey {
+                    return format!("slot {i} ({}, {})", sp.display_name, pubkey_to_npub(pk));
+                }
+                format!("slot {i} ({})", sp.display_name)
+            },
+        );
+        log::warn!(
+            "Terrain generation differs on joiner {who}: column ({}, {}) hashes {:#010x} there, {:#010x} here, \
+             with the same worldgen fingerprint {:#010x} — a determinism bug, please report it. \
+             Pushing that joiner every column from now on ({repushed} it generated itself will be pushed again).",
+            m.cx,
+            m.cz,
+            m.client_hash,
+            m.server_hash,
+            crate::world::worldgen_fingerprint(),
+        );
     }
 
     /// Does slot `i`'s block-change stream go through its sent-set? For every
@@ -3418,10 +3463,12 @@ impl HostedServer {
     /// (`--no-lend`) host loads only round where hosting began and each
     /// joiner's 3×3, so a column in range might never get a verdict and its
     /// joiner, waiting for one, would show a hole: it pushes everything, as
-    /// in B2a.
+    /// in B2a. Nor a joiner whose generation of a noted column did not match
+    /// ours (`column_mismatch`): pushed everything for the rest of its session.
     fn sends_notes(&self, i: usize) -> bool {
         i >= self.num_local_players
             && (self.lends_host_world() || self.server.column_streamer.is_some())
+            && !self.chunk_pushes.get(i).is_some_and(crate::chunk_push::ClientChunkPush::pushes_everything)
             && self
                 .server
                 .players
@@ -3527,6 +3574,20 @@ impl HostedServer {
         &self.chunk_pushes[slot]
     }
 
+    /// Test-only (B2b): slot `slot`'s notes carry a wrong column hash (a
+    /// forged mismatch).
+    #[cfg(test)]
+    pub(crate) fn forge_note_hashes_for_test(&mut self, slot: usize) {
+        self.chunk_pushes[slot].forge_note_hashes = true;
+    }
+
+    /// Test-only (B2b): push chunk `c` to slot `slot` again, as an outbox
+    /// overflow would (`ClientChunkPush::request_resync`).
+    #[cfg(test)]
+    pub(crate) fn resync_for_test(&mut self, slot: usize, c: crate::state_outbox::ChunkCoord) {
+        self.chunk_pushes[slot].request_resync([c]);
+    }
+
     /// Test-only (B2b): the shared verdict cache.
     #[cfg(test)]
     pub(crate) fn verdicts_for_test(&self) -> &crate::chunk_verdict::Verdicts {
@@ -3537,6 +3598,12 @@ impl HostedServer {
     #[cfg(test)]
     pub(crate) fn verdicts_last_tick_for_test(&self) -> usize {
         self.verdicts_last_tick
+    }
+
+    /// Test-only (B2b): the per-tick verdict budget in force.
+    #[cfg(test)]
+    pub(crate) fn verdict_budget_for_test(&self) -> crate::chunk_verdict::VerdictBudget {
+        self.verdict_budget
     }
 
     /// Test-only (B2b): the per-tick verdict budget.

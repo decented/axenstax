@@ -76,6 +76,12 @@ pub const MIN_JOIN_SPAWN_Y: f32 = -64.0;
 /// (`(world::MAX_CHUNK_Y + 1) * CHUNK_SIZE`, Y 0..=95) plus headroom.
 pub const MAX_JOIN_SPAWN_Y: f32 = ((crate::world::MAX_CHUNK_Y + 1) * crate::chunk::CHUNK_SIZE as i32) as f32 + 64.0;
 
+/// Shown when the host sends world data this game cannot read where it
+/// cannot be skipped (a `ColumnLocal` note that does not decode, B2b review
+/// LOW-1). An honest host of the same version never does.
+pub const HOST_BAD_WORLD_DATA: &str =
+    "The host sent world data this game can't read, so we left. Try joining again.";
+
 /// Shown when the host's `JoinAccept` places us outside any sane world.
 pub const HOST_BAD_SPAWN: &str =
     "The host sent a starting position outside the world, so we didn't join. Try another game.";
@@ -848,7 +854,7 @@ impl RemoteClient {
                             Ok(note) if self.chunk_queue.len() < MAX_QUEUED_CHUNK_PACKETS => {
                                 self.chunk_queue.push((
                                     self.pending_block_changes.len(),
-                                    crate::chunk_intake::StreamItem::Local((note.cx, note.cz)),
+                                    crate::chunk_intake::StreamItem::Local((note.cx, note.cz), note.hash),
                                 ));
                                 changed = true;
                             }
@@ -862,8 +868,14 @@ impl RemoteClient {
                                 changed = true;
                             }
                             Err(e) => {
-                                log::warn!("Undecodable column note: {e}");
-                                self.undecodable_chunks = self.undecodable_chunks.wrapping_add(1);
+                                // B2b review LOW-1 — its column is unknown, so
+                                // it can be neither taken in nor let go of; an
+                                // honest server of this version never sends
+                                // one. End the session with a reason rather
+                                // than wait on a column for good.
+                                log::error!("Undecodable column note: {e}; leaving");
+                                self.state = ConnectionState::Failed(HOST_BAD_WORLD_DATA.to_string());
+                                changed = true;
                             }
                         }
                     }
@@ -2627,7 +2639,7 @@ mod tests {
         let mut rc =
             RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
         srv.send_to_client(&chunk_pkt(1));
-        srv.send_to_client(&crate::chunk_push::build_local_note((5, -6)));
+        srv.send_to_client(&crate::chunk_push::build_local_note((5, -6), 0xABCD));
         srv.send_to_client(&chunk_pkt(2));
         rc.poll();
         let shape: Vec<String> = rc
@@ -2635,10 +2647,26 @@ mod tests {
             .iter()
             .map(|(_, item)| match item {
                 crate::chunk_intake::StreamItem::Chunk(p) => format!("C{}", p.cx),
-                crate::chunk_intake::StreamItem::Local((x, z)) => format!("L{x},{z}"),
+                crate::chunk_intake::StreamItem::Local((x, z), hash) => format!("L{x},{z}#{hash:x}"),
             })
             .collect();
-        assert_eq!(shape, ["C1", "L5,-6", "C2"]);
+        assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);
+    }
+
+    #[test]
+    fn a_column_local_note_that_does_not_decode_ends_the_session() {
+        // B2b review LOW-1: its column is unknown, so it could only leave the
+        // joiner waiting on a column for good.
+        let (srv, client) = channel_pair();
+        let mut rc =
+            RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
+        srv.send_to_client(&chunk_pkt(1));
+        srv.send_to_client(&[PacketType::ColumnLocal as u8, 1, 2, 3]);
+        assert!(rc.poll());
+        assert!(
+            matches!(&rc.state, ConnectionState::Failed(why) if why == HOST_BAD_WORLD_DATA),
+            "the session ends with a reason"
+        );
     }
 
     #[test]

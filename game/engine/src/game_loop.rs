@@ -2676,12 +2676,8 @@ impl super::GameState {
             for dz in -rd..=rd {
                 let (cx, cz) = (pcx + dx, pcz + dz);
                 let floor = self.world.get_block(cx * cs + 8, 0, cz * cs + 8);
-                // B2a — a column the server pushed is the server's, as it is;
-                // B2b — one it has not decided yet is never generated early.
-                if floor != crate::block::BEDROCK
-                    && !self.chunk_intake.holds_pushed((cx, cz))
-                    && !self.chunk_intake.awaits_verdict((cx, cz), rd)
-                {
+                // B2a — a column the server pushed is the server's, as it is.
+                if floor != crate::block::BEDROCK && !self.chunk_intake.holds_pushed((cx, cz)) {
                     if (0..=crate::world::MAX_CHUNK_Y).any(|cy| self.world.has_chunk(cx, cy, cz)) {
                         had_chunk += 1;
                     }
@@ -22120,6 +22116,7 @@ impl super::GameState {
             chunk_ack: 0,
             chunk_drops: Vec::new(),
             render_distance: 0,
+            column_mismatch: None,
         };
 
         // Serialize once, send to whichever transport is active
@@ -22155,6 +22152,9 @@ impl super::GameState {
                 .drops_for_input(client.next_input_seq(), crate::protocol::MAX_CHUNK_DROPS_PER_INPUT);
             joined_input.render_distance =
                 self.graphics.render_distance.clamp(1, i32::from(u8::MAX)) as u8;
+            // B2b — once a local column's generation did not hash as the
+            // server's note said, every input asks for everything pushed.
+            joined_input.column_mismatch = self.chunk_intake.column_mismatch();
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
             let seq = self.own_prediction.send(

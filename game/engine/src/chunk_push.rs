@@ -72,7 +72,11 @@
 //! yet waits. `all` pushes every chunk in range (B2a). A joiner whose
 //! terrain generator differs from the host's (`ServerPlayer::
 //! worldgen_mismatch`) always gets everything, and so does every joiner of
-//! an owning (`--no-lend`) host (`HostedServer::sends_notes`).
+//! an owning (`--no-lend`) host (`HostedServer::sends_notes`). A note
+//! carries the hash of the column (`chunk_verdict::column_hash`); a joiner
+//! whose own generation does not match it is pushed everything for the rest
+//! of its session, every column it was noted included
+//! ([`ClientChunkPush::push_everything_from_now`]).
 //!
 //! **What a push carries** ([`build_chunk_packets`]): the blocks and the
 //! player-placed mask (`Chunk::as_bytes`, LZ4), the chunk's `block_meta`, the
@@ -94,7 +98,7 @@
 // build never has.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::chunk::{Chunk, CHUNK_SIZE, CHUNK_VOLUME};
 use crate::protocol::{
@@ -224,6 +228,17 @@ pub struct ClientChunkPush {
     held_off: HashMap<(i32, i32), u64>,
     /// Plans made for this client so far (one a server tick).
     plans: u64,
+    /// Phase B2b — columns this client was told are local (a `ColumnLocal`
+    /// note) that are still in its sent-set: the joiner holds its own
+    /// generation of them. Kept until the column leaves the sent-set whole.
+    noted: HashSet<(i32, i32)>,
+    /// Phase B2b — this client found a local column whose generation did not
+    /// hash as the note said: for the rest of its session it is pushed
+    /// everything and noted nothing (`HostedServer::sends_notes`).
+    push_everything: bool,
+    /// Test-only: notes carry a wrong hash (a forged mismatch).
+    #[cfg(test)]
+    pub(crate) forge_note_hashes: bool,
 }
 
 /// A render distance from the wire: `0` stays "not said", anything else is
@@ -335,8 +350,52 @@ impl ClientChunkPush {
             }
             if took {
                 self.held_off.insert((d.cx, d.cz), self.plans + HELD_OFF_PLANS);
+                self.forget_noted_if_gone((d.cx, d.cz));
             }
         }
+    }
+
+    /// Stop counting column `col` as noted once none of it is in the sent-set.
+    fn forget_noted_if_gone(&mut self, col: (i32, i32)) {
+        if !(0..=MAX_CHUNK_Y).any(|cy| self.sent.contains_key(&(col.0, cy, col.1))) {
+            self.noted.remove(&col);
+        }
+    }
+
+    /// Phase B2b — is this client pushed everything for the rest of its
+    /// session (a column-hash mismatch, [`Self::push_everything_from_now`])?
+    pub fn pushes_everything(&self) -> bool {
+        self.push_everything
+    }
+
+    /// Phase B2b — this client's generation of a column it was told is local
+    /// did not hash as the note said (`InputPacket::column_mismatch`): every
+    /// column it was noted is suspect, not just that one. From now on it is
+    /// pushed everything and noted nothing; every noted column leaves the
+    /// sent-set (its pending resyncs too), so the next plans push it whole —
+    /// those inside the push radius nearest first, the rest when back in
+    /// range — and no change reaches the joiner's own copy meanwhile (the
+    /// push carries it). Never held off: the joiner kept them. Returns how
+    /// many columns it took out; `0` when already switched (idempotent).
+    pub fn push_everything_from_now(&mut self) -> usize {
+        if self.push_everything {
+            return 0;
+        }
+        self.push_everything = true;
+        let noted: Vec<(i32, i32)> = self.noted.drain().collect();
+        for &(cx, cz) in &noted {
+            for cy in 0..=MAX_CHUNK_Y {
+                self.sent.remove(&(cx, cy, cz));
+                self.resync.remove(&(cx, cy, cz));
+            }
+        }
+        noted.len()
+    }
+
+    /// Columns this client holds as noted local. Test-only.
+    #[cfg(test)]
+    pub fn noted_len(&self) -> usize {
+        self.noted.len()
     }
 
     /// The client's outbox dropped these chunks' changes: push them again,
@@ -368,6 +427,7 @@ impl ClientChunkPush {
         };
         self.sent.retain(|c, _| near(c));
         self.resync.retain(near);
+        self.noted.retain(|&(cx, cz)| near(&(cx, 0, cz)));
     }
 
     /// Record one queued push of `coord` and number its packets.
@@ -389,9 +449,20 @@ impl ClientChunkPush {
         for cy in 0..=MAX_CHUNK_Y {
             self.sent.insert((col.0, cy, col.1), number);
         }
+        self.noted.insert(col);
         self.pushed = number;
         self.in_flight.push_back((number, packet.len()));
         self.in_flight_bytes += packet.len();
+    }
+
+    /// The `ColumnLocal` note for column `col` of `world`, carrying the hash
+    /// of the column as it is now (`chunk_verdict::column_hash`): the live
+    /// column, which its `Untouched` verdict proved equal to generation.
+    fn note_for(&self, world: &World, col: (i32, i32)) -> Vec<u8> {
+        let hash = crate::chunk_verdict::column_hash(world, col);
+        #[cfg(test)]
+        let hash = if self.forge_note_hashes { !hash } else { hash };
+        build_local_note(col, hash)
     }
 
     /// Build this tick's pushes for a client whose server body stands in
@@ -495,7 +566,7 @@ impl ClientChunkPush {
                 return out;
             }
             if local {
-                let note = build_local_note((cx, cz));
+                let note = self.note_for(world, (cx, cz));
                 planned += note.len();
                 self.record_local((cx, cz), &note);
                 out.push(Planned::Local((cx, cz), note));
@@ -589,11 +660,12 @@ fn columns_nearest_first(centre: (i32, i32), r: i32) -> Vec<(i64, i32, i32)> {
     columns
 }
 
-/// The serialized `ColumnLocal` note for column `col` (Phase B2b).
-pub fn build_local_note(col: (i32, i32)) -> Vec<u8> {
+/// The serialized `ColumnLocal` note for column `col` carrying `hash`
+/// (Phase B2b).
+pub fn build_local_note(col: (i32, i32), hash: u32) -> Vec<u8> {
     protocol::serialize_packet(
         protocol::PacketType::ColumnLocal,
-        &protocol::ColumnLocalPacket { cx: col.0, cz: col.1 },
+        &protocol::ColumnLocalPacket { cx: col.0, cz: col.1, hash },
     )
 }
 
@@ -1257,6 +1329,59 @@ mod tests {
         assert!(ChunkSync::All.pushes_everything(true));
         assert!(!ChunkSync::Touched.pushes_everything(false));
         assert!(ChunkSync::Touched.pushes_everything(true), "another generator gets everything");
+    }
+
+    #[test]
+    fn a_note_carries_the_live_columns_hash() {
+        use crate::chunk_verdict::{column_hash, Verdict, Verdicts};
+        let mut world = World::new();
+        world.set_block(20, 5, 3, crate::block::STONE); // column (1, 0)
+        let mut verdicts = Verdicts::default();
+        verdicts.set_for_test((1, 0), Verdict::Untouched);
+        let mut push = ClientChunkPush::new(1);
+        let out = push.plan_columns(&world, &all_loaded(1), (1, 0), 8, usize::MAX, Some(&verdicts));
+        let Some(Planned::Local(col, note)) = out.into_iter().find(|p| matches!(p, Planned::Local(..))) else {
+            panic!("a note");
+        };
+        let (_, payload) = protocol::deserialize_header(&note).unwrap();
+        let pkt: protocol::ColumnLocalPacket = protocol::safe_deserialize(payload).unwrap();
+        assert_eq!((pkt.cx, pkt.cz), col);
+        assert_eq!(pkt.hash, column_hash(&world, (1, 0)));
+    }
+
+    #[test]
+    fn a_column_mismatch_takes_every_noted_column_out_and_notes_no_more() {
+        use crate::chunk_verdict::{Verdict, Verdicts};
+        let world = World::new();
+        let mut verdicts = Verdicts::default();
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                verdicts.set_for_test((dx, dz), Verdict::Untouched);
+            }
+        }
+        let mut push = ClientChunkPush::new(2);
+        let out = push.plan_columns(&world, &all_loaded(2), (0, 0), 8, usize::MAX, Some(&verdicts));
+        assert_eq!(out.len(), 25, "every column one note");
+        assert_eq!(push.noted_len(), 25);
+        // A noted column the client let go of leaves the noted set.
+        push.ack(push.pushed());
+        push.drop_columns(&[ChunkDrop { cx: -2, cz: -2, as_of: push.pushed() }]);
+        assert_eq!(push.noted_len(), 24);
+        push.held_off.clear();
+        // An overflow resync pending on another.
+        push.request_resync([(1, 2, 1)]);
+        assert_eq!(push.push_everything_from_now(), 24);
+        assert!(push.pushes_everything() && push.noted_len() == 0);
+        assert!(!push.has_sent((0, 0, 0)) && !push.has_sent((2, 5, 2)), "noted columns leave the sent-set");
+        assert!(push.resync.is_empty(), "their resyncs too: they go whole");
+        assert_eq!(push.push_everything_from_now(), 0, "idempotent");
+        // The column the client let go of in the same input is not held off.
+        push.drop_columns(&[ChunkDrop { cx: 2, cz: 2, as_of: push.pushed() }]);
+        assert!(push.held_off.is_empty(), "already out: pushed again at once");
+        // The next plan (the server passes no verdicts now) pushes chunks.
+        let out = push.plan_columns(&world, &all_loaded(2), (0, 0), 8, usize::MAX, None);
+        assert!(!out.is_empty() && out.iter().all(|p| matches!(p, Planned::Chunk(..))));
+        assert!(push.has_sent((0, 0, 0)), "the nearest first");
     }
 
     #[test]

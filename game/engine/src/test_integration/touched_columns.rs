@@ -8,12 +8,16 @@
 //! verdict), with the shared joiner harness (`push_joiner`).
 //!
 //! What they pin: a touched-mode join on a fresh world gets notes, not
-//! pushes (and how many bytes that saves over `all`); an edit to a column a
-//! joiner already generated arrives as a change and lands on its own
-//! generation, no hole and no re-push; a pushed column replaces the joiner's
-//! whole column; a joiner with another generator gets everything; the
-//! verdict budget is never exceeded and never starves a far column; and a
-//! local column let go of is decided afresh on return.
+//! pushes (and how many bytes that saves over `all`); a joiner that
+//! generated its range before any verdict keeps it, the notes confirming it
+//! (B2b fix D1); an edit to a column a joiner already generated arrives as a
+//! change and lands on its own generation, no hole and no re-push; a lone
+//! pushed chunk for a noted column not generated yet lands on the generated
+//! column (fix D3); a pushed column replaces the joiner's whole column; a
+//! joiner with another generator gets everything; a column whose generation
+//! does not hash as its note said switches the joiner to everything pushed
+//! (fix D4); the verdict budget is never exceeded and never starves a far
+//! column; and a local column let go of is decided afresh on return.
 
 use super::push_joiner::{assert_chunk_matches, columns_within, move_body, start_dedicated, Joiner};
 use crate::block;
@@ -91,15 +95,132 @@ fn a_touched_mode_join_on_a_fresh_world_gets_notes_not_pushes() {
     assert!(local * 10 >= range * 8, "a fresh world is mostly local: {local}/{range}");
     assert!(touched_bytes * 5 < all_bytes, "{touched_bytes} vs {all_bytes} bytes");
     assert_eq!(j.generated.len(), local, "it generated exactly the columns it was told are local");
+    assert_eq!(j.intake.column_mismatch(), None, "every local column hashed as its note said");
+    assert!(!hs.chunk_push_for_test(j.slot).pushes_everything());
+}
+
+#[test]
+fn a_joiner_that_generated_its_range_before_any_verdict_keeps_it_and_the_notes_confirm_it() {
+    // B2b fix D1: the joiner generates inside R as a single-player client
+    // would — no void moat while the verdicts come — and a note only
+    // confirms a column it already holds.
+    let mut hs = dedicated("speculative");
+    let mut j = Joiner::join(&mut hs, SIM as u8, false);
+    let me = j.column(&hs);
+    j.generate_around(me, SIM + 1);
+    let speculative = j.generated.len();
+    assert_eq!(speculative, columns_within(me, SIM + 1).len(), "the whole range, before any verdict");
+    settle_range(&mut hs, &mut j, SIM);
+    assert_eq!(j.generated.len(), speculative, "nothing generated twice");
+    assert_eq!(j.notes_received, columns_within(me, SIM).len(), "every column noted local");
+    assert_eq!(j.intake.column_mismatch(), None, "matching hashes: no switch");
+    assert!(!hs.chunk_push_for_test(j.slot).pushes_everything());
+    assert_range_matches(&hs, &j, me, SIM);
+    // A column it generated outside R was never decided: letting it go is
+    // none of the server's business.
+    let outside = (me.0 + SIM + 1, me.1);
+    assert!(!j.intake.decided(outside));
+    j.let_go(outside);
+    assert_eq!(j.intake.pending_drops(), 0, "never reported");
+}
+
+#[test]
+fn a_lone_pushed_chunk_for_a_noted_column_not_generated_yet_lands_on_the_generated_column() {
+    // B2b fix D3 (review MEDIUM-1): an overflow resync pushes one chunk of a
+    // column noted local with no change before it. Applied alone it left the
+    // column part-pushed and never generated, every later change conjuring a
+    // stray chunk.
+    let mut hs = dedicated("lone-push");
+    let mut j = Joiner::join_without_generating(&mut hs, SIM as u8);
+    settle_range(&mut hs, &mut j, SIM);
+    let me = j.column(&hs);
+    let col = (me.0 - 2, me.1 + 1);
+    assert!(j.intake.is_local(col) && !j.loaded.contains(&col), "noted, not generated");
+    // The server edits chunk cy 2 (no broadcast) and pushes it again.
+    let cs = CHUNK_SIZE as i32;
+    let cell = (col.0 * cs + 7, 2 * cs + 3, col.1 * cs + 7);
+    hs.server.world.set_block(cell.0, cell.1, cell.2, block::GLASS);
+    hs.resync_for_test(j.slot, (col.0, 2, col.1));
+    j.ack();
+    hs.tick();
+    j.take_in();
+    assert!(j.intake.holds_chunk((col.0, 2, col.1)), "the lone chunk came");
+    assert!(j.loaded.contains(&col), "generated first");
+    assert_eq!(j.world.get_block(cell.0, cell.1, cell.2), block::GLASS, "with the push on top");
+    for cy in 0..=MAX_CHUNK_Y {
+        assert_chunk_matches(&hs.server.world, &j.world, (col.0, cy, col.1));
+    }
+    assert_eq!(j.intake.column_mismatch(), None, "checked as generated, before the push landed");
+    // A later change to another chunk of it writes into a real chunk.
+    let deep = (col.0 * cs + 2, 3, col.1 * cs + 12);
+    hs.server.world.set_block(deep.0, deep.1, deep.2, block::GLASS);
+    hs.server.pending_block_changes.push(BlockChange::with_meta(deep.0, deep.1, deep.2, block::GLASS, 0));
+    j.ack();
+    hs.tick();
+    j.take_in();
+    assert_eq!(j.world.get_block(deep.0, deep.1, deep.2), block::GLASS);
+    assert_chunk_matches(&hs.server.world, &j.world, (col.0, 0, col.1));
+    assert_eq!(j.world.get_block(col.0 * cs + 8, 0, col.1 * cs + 8), block::BEDROCK, "no conjured chunk");
+}
+
+#[test]
+fn a_forged_column_hash_switches_the_joiner_to_every_column_pushed() {
+    // B2b fix D4: a joiner whose generation of a noted column does not hash
+    // as the note said lets it go, reports it and asks for everything; the
+    // server pushes again every column it had noted and notes no more.
+    let mut hs = dedicated("forged");
+    let mut j = Joiner::join(&mut hs, SIM as u8, false);
+    // The spawn ring went out with the join, with true hashes; every note
+    // from now on carries a wrong one.
+    hs.forge_note_hashes_for_test(j.slot);
+    for _ in 0..200 {
+        if j.intake.column_mismatch().is_some() {
+            break;
+        }
+        j.ack();
+        hs.tick();
+        j.take_in();
+    }
+    let m = j.intake.column_mismatch().expect("a forged note was caught");
+    let bad = (m.cx, m.cz);
+    assert_ne!(m.server_hash, m.client_hash);
+    assert!(!j.intake.is_local(bad) && !j.loaded.contains(&bad), "the column was let go of");
+    let noted_before: Vec<(i32, i32)> = j.intake.local_columns();
+    assert!(!noted_before.is_empty(), "the ring at least was noted and kept");
+    // The next input carries the switch (and the drop).
+    j.ack();
+    hs.tick();
+    assert!(hs.chunk_push_for_test(j.slot).pushes_everything(), "the server switched");
+    assert_eq!(hs.chunk_push_for_test(j.slot).noted_len(), 0);
+    j.take_in();
+    let notes_at_switch = j.notes_received;
+    settle_range(&mut hs, &mut j, SIM);
+    let me = j.column(&hs);
+    for col in columns_within(me, SIM) {
+        assert!(j.intake.column_complete(col), "column {col:?} pushed whole");
+        for cy in 0..=MAX_CHUNK_Y {
+            assert_chunk_matches(&hs.server.world, &j.world, (col.0, cy, col.1));
+        }
+    }
+    for col in &noted_before {
+        assert!(j.intake.column_complete(*col), "noted column {col:?} pushed again");
+    }
+    assert!(j.intake.column_complete(bad), "the mismatched one too");
+    // Notes no more: new ground is pushed.
+    move_body(&mut hs, j.slot, 3);
+    settle_range(&mut hs, &mut j, SIM);
+    assert_eq!(j.notes_received, notes_at_switch, "no note after the switch took effect");
+    let me = j.column(&hs);
+    assert!(columns_within(me, SIM).iter().all(|&c| j.intake.column_complete(c)));
+    assert!(j.input().column_mismatch.is_some(), "the switch rides every input");
 }
 
 #[test]
 fn an_edit_to_a_column_a_joiner_generated_arrives_as_a_change_on_its_own_copy() {
     let mut hs = dedicated("edit-local");
-    let mut j = Joiner::join(&mut hs, SIM as u8, false);
     // The streamer does not get to it first: the change finds the column
     // noted but not generated, and must generate it before applying.
-    j.generate_on_note = false;
+    let mut j = Joiner::join_without_generating(&mut hs, SIM as u8);
     settle_range(&mut hs, &mut j, SIM);
     let me = j.column(&hs);
     let col = (me.0 + 2, me.1 - 1);
@@ -184,11 +305,16 @@ fn a_pushed_column_replaces_the_joiners_whole_column() {
             }
         }
     }
+    // The joiner generates that column itself (B2b fix D1: as its streamer
+    // does, before any verdict) before the server gets to it: one verdict a
+    // tick until then, so the join decides no farther than the spawn ring.
+    let budget = hs.verdict_budget_for_test();
+    hs.set_verdict_budget_for_test(VerdictBudget { count: 1, ..budget });
     let mut j = Joiner::join(&mut hs, SIM as u8, false);
-    // The joiner generated that column itself (it was outside its push
-    // radius, say) before the server got to it.
+    assert!(!j.intake.decided(col), "not decided yet");
     j.generate(col);
     assert!(j.world.get_chunk(col.0, top, col.1).is_some_and(|c| !c.is_empty()), "its own copy has blocks there");
+    hs.set_verdict_budget_for_test(budget);
     settle_range(&mut hs, &mut j, SIM);
     assert!(j.intake.column_complete(col), "the touched column was pushed");
     for cy in 0..=MAX_CHUNK_Y {
