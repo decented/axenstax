@@ -21264,12 +21264,14 @@ impl super::GameState {
                         let name = card.name.clone();
                         let p = &mut self.players[pidx];
                         let fill = crate::window::WindowClick::Autofill { example };
-                        let ok = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &fill, creative).ok();
-                        if !ok {
-                            self.toast = Some((
-                                format!("Not enough materials for {name}"),
-                                Instant::now() + Duration::from_secs(2),
-                            ));
+                        let toast = match p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &fill, creative) {
+                            // M3 — a 3×3 recipe can't be laid in the 2×2.
+                            crate::window::ClickResult::NeedsTable => Some("Needs a crafting table".to_string()),
+                            crate::window::ClickResult::Refused => Some(format!("Not enough materials for {name}")),
+                            _ => None,
+                        };
+                        if let Some(text) = toast {
+                            self.toast = Some((text, Instant::now() + Duration::from_secs(2)));
                         }
                     }
                 }

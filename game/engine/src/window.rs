@@ -124,7 +124,9 @@ pub enum WindowClick {
     ToggleLock { slot: usize },
     /// Recipe-book "Fill from bag": return the grid and cursor to the
     /// inventory, then lay `example` from it if the inventory holds every
-    /// item; otherwise take nothing and leave the grid empty.
+    /// item; otherwise take nothing and leave the grid empty. A recipe
+    /// bigger than the player's 2×2 is refused there (`NeedsTable`) before
+    /// anything moves; one that fits is laid in the 2×2's corner.
     Autofill { example: [[CraftSlot; 3]; 3] },
     /// Closing the screen: return the grid and cursor to the inventory.
     /// What doesn't fit stays where it was (and the screen stays open).
@@ -143,28 +145,62 @@ pub enum ClickResult {
     Crafted(ItemStack),
     /// The trash destroyed this stack.
     Binned(ItemStack),
+    /// `Autofill` of a recipe bigger than 2×2 into the player's grid: nothing
+    /// moved (the caller toasts "Needs a crafting table").
+    NeedsTable,
 }
 
 impl ClickResult {
     /// Did the click succeed (the old `bool` the click handlers returned)?
     pub fn ok(&self) -> bool {
-        !matches!(self, ClickResult::Refused)
+        !matches!(self, ClickResult::Refused | ClickResult::NeedsTable)
     }
 }
 
-/// What one craft from `grid` gives: `crafting::match_recipe` over the
-/// grid's items (tools, plans and armour are never ingredients).
-pub fn recipe_output(grid: &CraftGrid) -> Option<ItemStack> {
+/// What one craft from `grid` at `station` gives: `crafting::match_recipe`
+/// over the grid's items (tools, plans and armour are never ingredients).
+///
+/// M3 (C2b verify): an item in a cell the station's grid doesn't have (row
+/// or column 2 of the player's 2×2) crafts nothing, so no path crafts a
+/// table recipe without a table.
+pub fn recipe_output(grid: &CraftGrid, station: Station) -> Option<ItemStack> {
+    let size = station.grid_size();
     let mut cells = [[CraftSlot::Empty; 3]; 3];
-    for (craft_row, grid_row) in cells.iter_mut().zip(grid.iter()) {
-        for (slot, cell) in craft_row.iter_mut().zip(grid_row.iter()) {
-            *slot = match cell {
-                Some(stack) => CraftSlot::from_item(&stack.item),
-                None => CraftSlot::Empty,
-            };
+    for (r, grid_row) in grid.iter().enumerate() {
+        for (c, cell) in grid_row.iter().enumerate() {
+            let Some(stack) = cell else { continue };
+            if r >= size || c >= size {
+                return None;
+            }
+            cells[r][c] = CraftSlot::from_item(&stack.item);
         }
     }
     crafting::match_recipe(&cells)
+}
+
+/// M3 — `example` as it is laid at `station`: unchanged when it fits where
+/// it is, moved to the top-left corner when it fits the grid but not there,
+/// and `None` when it is bigger than the grid (a 3×3 recipe at the player's
+/// 2×2).
+fn fit_example(example: &[[CraftSlot; 3]; 3], station: Station) -> Option<[[CraftSlot; 3]; 3]> {
+    if example.iter().flatten().all(|s| *s == CraftSlot::Empty) {
+        return Some(*example);
+    }
+    let size = station.grid_size();
+    let (min_r, max_r, min_c, max_c) = crafting::grid_bounds(example);
+    if max_r - min_r >= size || max_c - min_c >= size {
+        return None;
+    }
+    if max_r < size && max_c < size {
+        return Some(*example);
+    }
+    let mut laid = [[CraftSlot::Empty; 3]; 3];
+    for r in min_r..=max_r {
+        for c in min_c..=max_c {
+            laid[r - min_r][c - min_c] = example[r][c];
+        }
+    }
+    Some(laid)
 }
 
 /// Apply one click to the window.
@@ -203,7 +239,10 @@ pub fn apply(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx) -> Click
             view.inv.toggle_lock(*slot);
             ClickResult::Done
         }
-        WindowClick::Autofill { example } => done_if(autofill(view, example)),
+        WindowClick::Autofill { example } => match fit_example(example, ctx.station) {
+            Some(laid) => done_if(autofill(view, &laid)),
+            None => ClickResult::NeedsTable,
+        },
         WindowClick::Close => done_if(return_grid_and_cursor(view)),
     }
 }
@@ -697,7 +736,7 @@ mod tests {
         /// Apply `click` at `station`, the grid's craft judged by the matcher
         /// (as the client does).
         fn at(&mut self, station: Station, click: WindowClick) -> ClickResult {
-            let craft = recipe_output(&self.grid);
+            let craft = recipe_output(&self.grid, station);
             self.judged(station, craft, click)
         }
 
@@ -992,7 +1031,7 @@ mod tests {
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 2));
         }
-        let table = recipe_output(&w.grid).expect("four planks make a crafting table");
+        let table = recipe_output(&w.grid, Station::Table).expect("four planks make a crafting table");
         assert_eq!(w.click(WindowClick::Result), ClickResult::Crafted(table.clone()));
         assert_eq!(w.cursor, Some(table));
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
@@ -1009,7 +1048,7 @@ mod tests {
         let mut w = Win::new();
         w.grid[0][0] = Some(ItemStack::new_block(block::OAK_LOG, 1));
         w.cursor = Some(ItemStack::new_block(block::OAK_PLANKS, 62));
-        let planks = recipe_output(&w.grid).expect("a log makes planks");
+        let planks = recipe_output(&w.grid, Station::Table).expect("a log makes planks");
         assert!(w.click(WindowClick::Result).ok());
         assert_eq!(w.cursor_count(), Some(64), "the cursor fills to max");
         let spilled = u32::from(planks.count) - 2;
@@ -1191,7 +1230,7 @@ mod tests {
         w.inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Stick, 2)));
         let ex = example("Iron Pickaxe");
         assert_eq!(w.click(WindowClick::Autofill { example: ex }), ClickResult::Done);
-        assert!(recipe_output(&w.grid).is_some(), "the laid grid crafts");
+        assert!(recipe_output(&w.grid, Station::Table).is_some(), "the laid grid crafts");
         assert_eq!(w.inv.count_material(MaterialId::IronIngot), 0);
         assert_eq!(w.inv.count_material(MaterialId::Stick), 0);
     }
@@ -1231,6 +1270,59 @@ mod tests {
         let ex = example("Crafting Table");
         assert_eq!(w.click(WindowClick::Autofill { example: ex }), ClickResult::Refused);
         assert_eq!(w.grid[0][0], Some(dirt(5)), "nothing destroyed");
+    }
+
+    #[test]
+    fn autofill_of_a_table_recipe_into_the_players_grid_needs_a_table() {
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_material(MaterialId::IronIngot, 3)));
+        w.inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Stick, 2)));
+        w.grid[0][0] = Some(dirt(5));
+        let ex = example("Iron Pickaxe");
+        assert_eq!(w.at(Station::Player, WindowClick::Autofill { example: ex }), ClickResult::NeedsTable);
+        assert!(!ClickResult::NeedsTable.ok());
+        assert_eq!(w.inv.count_material(MaterialId::IronIngot), 3, "nothing taken");
+        assert_eq!(w.grid[0][0], Some(dirt(5)), "nothing moved");
+        // At a table the same fill goes.
+        assert!(w.at(Station::Table, WindowClick::Autofill { example: ex }).ok());
+    }
+
+    #[test]
+    fn every_2x2_card_fills_and_crafts_in_the_players_grid() {
+        use crate::crafting_catalogue::{all_cards, CraftStation};
+        for card in all_cards().iter().filter(|c| c.station == CraftStation::PlayerGrid) {
+            let mut w = Win::new();
+            for slot in card.example_grid.iter().flatten() {
+                let stack = match *slot {
+                    CraftSlot::Block(b) => ItemStack::new_block(b, 1),
+                    CraftSlot::Material(m) => ItemStack::new_material(m, 1),
+                    CraftSlot::Empty => continue,
+                };
+                assert!(w.inv.add_item(stack).is_none());
+            }
+            let fill = WindowClick::Autofill { example: card.example_grid };
+            assert_eq!(w.at(Station::Player, fill), ClickResult::Done, "{} fills the 2×2", card.name);
+            assert!(
+                (0..3).all(|i| w.grid[2][i].is_none() && w.grid[i][2].is_none()),
+                "{} is laid inside the 2×2",
+                card.name
+            );
+            assert!(recipe_output(&w.grid, Station::Player).is_some(), "{} crafts in the 2×2", card.name);
+        }
+    }
+
+    #[test]
+    fn an_item_outside_the_players_2x2_crafts_nothing() {
+        let mut w = Win::new();
+        // Four planks in the bottom-right 2×2: a crafting table at a table,
+        // nothing in the player's grid (those cells aren't on its screen).
+        for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+            w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
+        }
+        assert!(recipe_output(&w.grid, Station::Table).is_some());
+        assert_eq!(recipe_output(&w.grid, Station::Player), None);
+        assert_eq!(w.at(Station::Player, WindowClick::Result), ClickResult::Refused);
+        assert_eq!(w.total(block::OAK_PLANKS), 4, "nothing consumed");
     }
 
     // ── Close ───────────────────────────────────────────────────────────

@@ -205,7 +205,7 @@ impl CraftingUi {
     }
 
     /// Recipe-book auto-fill (`WindowClick::Autofill`). Returns `false` when
-    /// the inventory is short (the caller toasts "not enough materials").
+    /// the inventory is short or the recipe needs a table.
     #[cfg(test)]
     pub fn autofill_from_example(&mut self, example: &[[CraftSlot; 3]; 3], inv: &mut Inventory) -> bool {
         self.apply_bag_click(inv, &WindowClick::Autofill { example: *example }).ok()
@@ -213,7 +213,7 @@ impl CraftingUi {
 
     /// Recompute the result shown from the grid (`window::recipe_output`).
     pub fn update_result(&mut self) {
-        self.result = window::recipe_output(&self.grid);
+        self.result = window::recipe_output(&self.grid, self.station());
     }
 
     /// Click a crafting-grid cell (`WindowClick::Grid`).
