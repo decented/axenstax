@@ -2978,14 +2978,22 @@ impl HostedServer {
         }
     }
 
-    /// Does slot `i`'s block-change stream go through its sent-set? Remote
-    /// slots only (B2a); a local slot shares the host's world.
+    /// Does slot `i`'s block-change stream go through its sent-set? Exactly
+    /// when it is pushed chunks (B2a): a remote slot in a mode that pushes it
+    /// everything. A local slot shares the host's world. (B2b: a joiner that
+    /// generates untouched chunks itself needs their changes too — this is
+    /// the rule to widen.)
     fn filters_changes(&self, i: usize) -> bool {
         #[cfg(test)]
         if self.chunk_push_off {
             return false;
         }
         i >= self.num_local_players
+            && self
+                .server
+                .players
+                .get(i)
+                .is_some_and(|sp| self.chunk_sync.pushes_everything(sp.worldgen_mismatch()))
     }
 
     /// How far round a joiner this server can push (`chunk_push`): as far as
