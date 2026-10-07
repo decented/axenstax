@@ -267,6 +267,12 @@ pub struct RemoteClient {
     /// Never trimmed: the server's credit window bounds it, and a server past
     /// [`MAX_QUEUED_CHUNK_PACKETS`] ends the session loudly instead.
     pub chunk_queue: Vec<(usize, protocol::ChunkDataPacket)>,
+    /// `ChunkData` packets received since the game loop last drained
+    /// [`Self::chunk_queue`] that did not decode. Drained with it into
+    /// `ChunkIntake::count_undecodable`: the server numbered them, so the
+    /// cumulative ack and every drop's `as_of` must count them too (B2a
+    /// review LOW-1).
+    pub undecodable_chunks: u32,
     /// Spawn position from JoinAccept.
     pub spawn_pos: Option<(f32, f32, f32)>,
     /// Play mode received in the JoinAccept packet. Consumed once by the game
@@ -364,7 +370,8 @@ pub const MAX_QUEUED_CHUNK_PACKETS: usize = 4096;
 /// This machine's render distance (columns), announced in every JoinRequest
 /// so the server pushes chunks that far (Phase B2a). Kept in step with the
 /// graphics settings by the game loop (`sync_graphics_to_engine`); `0` until
-/// then, which the server reads as "use your own limit".
+/// then, which the server reads as "use your own limit". A joined session
+/// then sends its current render distance in every `InputPacket`.
 static JOIN_RENDER_DISTANCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Record the render distance a JoinRequest announces (clamped to `u8`).
@@ -600,6 +607,7 @@ impl RemoteClient {
             tick: 1,
             latest_state: None,
             chunk_queue: Vec::new(),
+            undecodable_chunks: 0,
             spawn_pos: None,
             pending_play_mode: None,
             pending_difficulty: None,
@@ -642,6 +650,7 @@ impl RemoteClient {
             tick: 1,
             latest_state: None,
             chunk_queue: Vec::new(),
+            undecodable_chunks: 0,
             spawn_pos: None,
             pending_play_mode: None,
             pending_difficulty: None,
@@ -782,7 +791,10 @@ impl RemoteClient {
                                 );
                                 changed = true;
                             }
-                            Err(e) => log::warn!("Undecodable chunk packet: {e}"),
+                            Err(e) => {
+                                log::warn!("Undecodable chunk packet: {e}");
+                                self.undecodable_chunks = self.undecodable_chunks.wrapping_add(1);
+                            }
                         }
                     }
                     PacketType::PlayerEvent => {
@@ -992,6 +1004,11 @@ impl RemoteClient {
     /// overwritten with this connection's own counter, whatever the caller
     /// put there) — the number the server will acknowledge it by. `None`
     /// when nothing was sent (not connected).
+    /// The sequence number the next [`Self::send_input`] stamps.
+    pub fn next_input_seq(&self) -> u64 {
+        self.tick
+    }
+
     pub fn send_input(&mut self, input: &protocol::InputPacket) -> Option<u64> {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return None;

@@ -1543,7 +1543,7 @@ impl super::GameState {
             hs.server.render_distance = self.graphics.render_distance;
         }
         // B2a — the render distance the next JoinRequest announces (a joined
-        // session keeps the push radius it joined with).
+        // session sends its current one in every input).
         crate::remote_client::set_join_render_distance(self.graphics.render_distance);
         Self::sync_display_settings(&mut self.renderer, &self.graphics);
         // Master volume + mute (audio.rs) — both targets, applied live.
@@ -21782,6 +21782,7 @@ impl super::GameState {
         let mut host_packets: Vec<Vec<u8>> = Vec::new();
         let mut client_state: Option<crate::protocol::StateUpdatePacket> = None;
         let mut client_chunks: Vec<(usize, crate::protocol::ChunkDataPacket)> = Vec::new();
+        let mut client_undecodable = 0u32;
         let mut my_idx: u32 = 0;
 
         if let Some(ref server) = self.hosted_server
@@ -21811,6 +21812,7 @@ impl super::GameState {
             my_idx = client.player_index().unwrap_or(0);
             // Take queued data out of client (moves ownership, no borrow held)
             client_chunks = std::mem::take(&mut client.chunk_queue);
+            client_undecodable = std::mem::take(&mut client.undecodable_chunks);
             client_state = client.latest_state.take();
             pending_mode = client.pending_play_mode.take();
             pending_difficulty = client.pending_difficulty.take();
@@ -21955,6 +21957,7 @@ impl super::GameState {
         // pushed columns lit and meshed. Before the state update, so our own
         // position reconciles against the world the server holds. Empty on
         // the host/single-player path, so a no-op there.
+        self.chunk_intake.count_undecodable(client_undecodable);
         self.apply_world_deltas(
             client_chunks,
             &pending_block_changes,
@@ -21982,6 +21985,8 @@ impl super::GameState {
                 .filter(|p| p.is_finite());
             let own_server_health = own_server.map(|p| p.health);
             let acked = state.last_acked_input;
+            // B2a — drop reports carried by inputs up to `acked` were read.
+            self.chunk_intake.confirm_drops(acked);
             if let Some(server_health) = own_server_health
                 && let Some(slot) = self.players.first_mut()
                 && !self.is_creative
@@ -22273,6 +22278,7 @@ impl super::GameState {
             // Set on the joined path below; the host's loopback has no push.
             chunk_ack: 0,
             chunk_drops: Vec::new(),
+            render_distance: 0,
         };
 
         // Serialize once, send to whichever transport is active
@@ -22296,13 +22302,18 @@ impl super::GameState {
             // the server simulates rides — it goes out with no movement, so
             // the server's body stays where the ride began, and getting off
             // puts us back on that body (`OwnPrediction::send`).
-            // B2a — acknowledge the chunks taken in and report the columns let
-            // go of, so the server's push window reopens and its sent-set
-            // matches what this client holds.
+            // B2a — acknowledge the chunks taken in, report the columns let
+            // go of (repeated until the server has applied an input carrying
+            // the report) and say how far we now keep, so the server's push
+            // window reopens, its sent-set matches what this client holds and
+            // its push radius follows our render distance.
             let mut joined_input = input.clone();
             joined_input.chunk_ack = self.chunk_intake.applied();
-            joined_input.chunk_drops =
-                self.chunk_intake.take_drops(crate::protocol::MAX_CHUNK_DROPS_PER_INPUT);
+            joined_input.chunk_drops = self
+                .chunk_intake
+                .drops_for_input(client.next_input_seq(), crate::protocol::MAX_CHUNK_DROPS_PER_INPUT);
+            joined_input.render_distance =
+                self.graphics.render_distance.clamp(1, i32::from(u8::MAX)) as u8;
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
             let seq = self.own_prediction.send(

@@ -118,12 +118,21 @@ impl Chunk {
         self.non_air == 0
     }
 
-    /// How many cells hold a block other than `AIR`. O(1). Test-only: the
-    /// engine itself only asks the yes/no [`Chunk::is_empty`].
-    #[cfg(test)]
+    /// How many cells hold a block other than `AIR`. O(1).
     #[inline]
     pub(crate) fn non_air_count(&self) -> usize {
         usize::from(self.non_air)
+    }
+
+    /// Every cell holding a block other than `AIR`, as (flat cell index
+    /// `x + z*16 + y*256`, block), in index order. Reads the array only — no
+    /// world lookups (the chunk push's side-data scans, Phase B2a).
+    pub(crate) fn non_air_cells(&self) -> impl Iterator<Item = (u16, BlockId)> + '_ {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b != AIR)
+            .map(|(i, &b)| (i as u16, b))
     }
 
     /// Full recount of the non-air cells — the oracle the maintained count is

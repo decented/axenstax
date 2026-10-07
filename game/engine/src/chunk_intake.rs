@@ -4,10 +4,14 @@
 //!
 //! - **Push wins.** A pushed chunk REPLACES whatever this client holds there —
 //!   its own generation included — with its blocks, metadata, render-visible
-//!   block entities and face attachments ([`ChunkIntake::apply`]). The column
-//!   is marked loaded, so this client's streamer never generates over it, and
-//!   it is never evicted: when this client lets it go it is discarded and the
-//!   server told ([`ChunkIntake::let_go`]), so it is pushed afresh on return.
+//!   block entities and face attachments ([`ChunkIntake::apply`]). A column
+//!   that was not loaded is marked loaded once ALL its chunks have been pushed
+//!   (the server plans whole columns); until then this client's streamer
+//!   neither generates over it nor counts it loaded, and server changes to
+//!   its pushed chunks still apply ([`ChunkIntake::holds_chunk`]). A pushed
+//!   column is never evicted: when this client lets it go — or a part-pushed
+//!   one leaves its range — it is discarded and the server told
+//!   ([`ChunkIntake::let_go`]), so it is pushed afresh on return.
 //! - **In order.** A snapshot sits between the block changes that came
 //!   before it and those after ([`interleave`]); applied out of order, a
 //!   later change would be overwritten by the older snapshot.
@@ -15,8 +19,14 @@
 //!   insert: cheap). Only the light pass and the meshing — the expensive
 //!   part — wait in a queue drained a few columns a frame
 //!   ([`ChunkIntake::take_relight`]).
-//! - **Acknowledged.** Every `ChunkData` packet taken in counts towards the
-//!   cumulative `InputPacket.chunk_ack` that opens the server's credit window.
+//! - **Acknowledged.** Every `ChunkData` packet received counts towards the
+//!   cumulative `InputPacket.chunk_ack` that opens the server's credit window
+//!   — one that does not decode too ([`ChunkIntake::count_undecodable`]), or
+//!   every later ack and drop report would be one short.
+//! - **Drops are repeated until applied.** A let-go report rides every input
+//!   until the server has applied one that carried it (its
+//!   `last_acked_input` echo, [`ChunkIntake::confirm_drops`]); the report's
+//!   `as_of` makes a repeat harmless on the server.
 //!
 //! Renderer-free (the game loop meshes what [`ChunkIntake::take_relight`]
 //! hands it), so it is unit-tested on a bare `World`.
@@ -71,8 +81,10 @@ pub struct ChunkIntake {
     /// Columns waiting for their light pass and meshing, oldest first.
     relight: VecDeque<(i32, i32)>,
     relight_queued: ahash::AHashSet<(i32, i32)>,
-    /// Columns let go of and not yet reported to the server.
-    drops: Vec<ChunkDrop>,
+    /// Columns let go of whose report the server has not yet applied, oldest
+    /// first, each with the sequence number of the first input that carried
+    /// it (`None` = not sent yet).
+    drops: Vec<(ChunkDrop, Option<u64>)>,
 }
 
 impl ChunkIntake {
@@ -84,6 +96,29 @@ impl ChunkIntake {
     /// Does this client hold any pushed chunk of column `col`?
     pub fn holds_pushed(&self, col: (i32, i32)) -> bool {
         self.pushed_per_column.contains_key(&col)
+    }
+
+    /// Does this client hold chunk `coord` as pushed? (The server sends
+    /// changes only for such chunks, so they apply even while their column
+    /// is still part-pushed and not yet loaded.)
+    pub fn holds_chunk(&self, coord: ChunkCoord) -> bool {
+        self.pushed.contains(&coord)
+    }
+
+    /// Columns holding pushed chunks that are not loaded: part-pushed ones,
+    /// waiting for the rest of their column.
+    pub fn part_pushed_columns(
+        &self,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+    ) -> ahash::AHashSet<(i32, i32)> {
+        self.pushed_per_column.keys().filter(|c| !loaded.contains(*c)).copied().collect()
+    }
+
+    /// `ChunkData` packets received that did not decode: they still count
+    /// (the server numbered them), or every later ack and `as_of` would be
+    /// short.
+    pub fn count_undecodable(&mut self, n: u32) {
+        self.applied = self.applied.wrapping_add(n);
     }
 
     /// Has every chunk of column `col` been pushed?
@@ -143,7 +178,12 @@ impl ChunkIntake {
         if self.pushed.insert(coord) {
             *self.pushed_per_column.entry(col).or_insert(0) += 1;
         }
-        loaded.insert(col);
+        // Loaded once whole (a column this client generated itself already
+        // is): a part-pushed column is never counted loaded, so nothing ever
+        // treats a half column at the frontier as complete (review LOW-2/3).
+        if self.column_complete(col) {
+            loaded.insert(col);
+        }
         self.queue_relight(col);
         true
     }
@@ -182,14 +222,35 @@ impl ChunkIntake {
             clear_side_data(world, coord);
         }
         world.discard_column(col.0, col.1);
-        self.drops.push(ChunkDrop { cx: col.0, cz: col.1, as_of: self.applied });
+        self.drops.push((ChunkDrop { cx: col.0, cz: col.1, as_of: self.applied }, None));
     }
 
-    /// Up to `max` drop reports for the next input, oldest first; the rest
-    /// wait for the one after.
-    pub fn take_drops(&mut self, max: usize) -> Vec<ChunkDrop> {
-        let n = self.drops.len().min(max);
-        self.drops.drain(..n).collect()
+    /// The drop reports for input number `seq`: up to `max` of the ones the
+    /// server has not yet applied, oldest first (the rest wait). Each is
+    /// repeated in every input until [`Self::confirm_drops`] retires it.
+    pub fn drops_for_input(&mut self, seq: u64, max: usize) -> Vec<ChunkDrop> {
+        self.drops
+            .iter_mut()
+            .take(max)
+            .map(|(d, first)| {
+                first.get_or_insert(seq);
+                *d
+            })
+            .collect()
+    }
+
+    /// The server has applied every input up to `last_acked_input` — and so
+    /// read the drop reports of every input before it (the stream is
+    /// ordered, and the server reads the reports of every input it receives):
+    /// retire those reports.
+    pub fn confirm_drops(&mut self, last_acked_input: u64) {
+        self.drops.retain(|(_, first)| first.is_none_or(|s| s > last_acked_input));
+    }
+
+    /// Drop reports the server has not yet applied. Test-only.
+    #[cfg(test)]
+    pub fn pending_drops(&self) -> usize {
+        self.drops.len()
     }
 }
 
@@ -276,20 +337,15 @@ fn apply_side_data(
 /// Give every power block in chunk `coord` its device entity, from its block
 /// id and metadata — exactly what `World::apply_remote_block_change` does per
 /// changed cell — and wake it, since this client's (still duplicated) power
-/// sim reads the devices.
+/// sim reads the devices. Reads the chunk's own cells (no world lookups).
 fn rebuild_power_devices(world: &mut World, coord: ChunkCoord) {
     let Some(chunk) = world.get_chunk(coord.0, coord.1, coord.2) else { return };
-    if chunk.is_empty() {
-        return;
-    }
-    let mut devices = Vec::new();
-    for i in 0..crate::chunk::CHUNK_VOLUME as u16 {
-        let pos = cell_pos(coord, i);
-        let block = world.get_block(pos.0, pos.1, pos.2);
-        if let Some(kind) = crate::power::device_kind_for_block(block) {
-            devices.push((pos, kind));
-        }
-    }
+    let devices: Vec<_> = chunk
+        .non_air_cells()
+        .filter_map(|(i, block)| {
+            crate::power::device_kind_for_block(block).map(|kind| (cell_pos(coord, i), kind))
+        })
+        .collect();
     for (pos, kind) in devices {
         let meta = world.meta_at(pos.0, pos.1, pos.2);
         world.insert_power_device(
@@ -371,10 +427,32 @@ mod tests {
         assert_eq!(joiner.meta_at(5, 21, 5), 0, "stale meta cleared");
         assert!(!joiner.block_entities.contains_key(&(6, 22, 6)), "stale entity cleared");
         assert_eq!(joiner.sign_at((4, 20, 4)).map(|s| s.text.as_str()), Some("hello joiner"));
-        assert!(loaded.contains(&(0, 0)), "the column counts as loaded");
+        assert!(!loaded.contains(&(0, 0)), "one chunk of six: not loaded yet");
         assert!(intake.holds_pushed((0, 0)) && !intake.column_complete((0, 0)));
+        assert!(intake.holds_chunk((0, 1, 0)) && !intake.holds_chunk((0, 2, 0)));
         assert_eq!(intake.applied(), 1);
         assert_eq!(intake.take_relight(8), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn a_part_pushed_column_is_loaded_only_once_whole() {
+        // Review LOW-2/3: a half column is never counted loaded.
+        let host = World::new();
+        let mut joiner = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        for cy in 0..MAX_CHUNK_Y {
+            intake.apply(&mut joiner, &mut loaded, &reg(), &packet_of(&host, (4, cy, 4)));
+            assert!(!loaded.contains(&(4, 4)), "cy {cy}: part-pushed");
+        }
+        assert_eq!(intake.part_pushed_columns(&loaded).into_iter().collect::<Vec<_>>(), [(4, 4)]);
+        intake.apply(&mut joiner, &mut loaded, &reg(), &packet_of(&host, (4, MAX_CHUNK_Y, 4)));
+        assert!(loaded.contains(&(4, 4)) && intake.column_complete((4, 4)), "whole: loaded");
+        assert!(intake.part_pushed_columns(&loaded).is_empty());
+        // A column this client generated itself is loaded already and stays so.
+        let mut own = ahash::AHashSet::from_iter([(9, 9)]);
+        intake.apply(&mut joiner, &mut own, &reg(), &packet_of(&host, (9, 0, 9)));
+        assert!(own.contains(&(9, 9)));
     }
 
     #[test]
@@ -398,7 +476,9 @@ mod tests {
             crate::crafting::ToolMaterial::Iron,
         )));
         frame.rotation = 3;
+        host.set_block(2, 2, 2, block::ITEM_FRAME);
         host.insert_item_frame((2, 2, 2), frame.clone());
+        host.set_block(3, 3, 3, block::CAMPFIRE);
         let fire = crate::campfire::CampfireData {
             fuel_ticks: 40,
             raid_warning_active: true,
@@ -486,8 +566,9 @@ mod tests {
         assert!(!joiner.is_column_evicted(2, 3), "never kept in the evicted store");
         assert_eq!(joiner.meta_at(40, 3, 50), 0);
         assert!(!intake.holds_pushed((2, 3)));
-        assert_eq!(intake.take_drops(16), vec![ChunkDrop { cx: 2, cz: 3, as_of: 6 }]);
-        assert!(intake.take_drops(16).is_empty());
+        assert_eq!(intake.drops_for_input(1, 16), vec![ChunkDrop { cx: 2, cz: 3, as_of: 6 }]);
+        intake.confirm_drops(1);
+        assert!(intake.drops_for_input(2, 16).is_empty());
         // A continuation for it arriving after is counted, not applied.
         let cont = ChunkDataPacket {
             cx: 2,
@@ -528,7 +609,44 @@ mod tests {
             intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (x, 0, 0)));
             intake.let_go(&mut world, (x, 0));
         }
-        assert_eq!(intake.take_drops(3).len(), 3);
-        assert_eq!(intake.take_drops(3).len(), 2);
+        assert_eq!(intake.drops_for_input(1, 3).len(), 3);
+        assert_eq!(intake.drops_for_input(2, 3).len(), 3, "repeated until applied");
+        intake.confirm_drops(1);
+        assert_eq!(intake.drops_for_input(3, 3).len(), 2, "the rest");
+    }
+
+    #[test]
+    fn a_drop_report_repeats_until_the_server_has_applied_an_input_carrying_it() {
+        // Review HIGH-2: a report the server never read must not be lost.
+        let host = World::new();
+        let mut world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (1, 0, 1)));
+        intake.let_go(&mut world, (1, 1));
+        let d = ChunkDrop { cx: 1, cz: 1, as_of: 1 };
+        assert_eq!(intake.drops_for_input(10, 8), vec![d], "first carried by input 10");
+        // The server acknowledges input 9 only: 10 may not have been read.
+        intake.confirm_drops(9);
+        assert_eq!(intake.drops_for_input(11, 8), vec![d], "so it goes again");
+        intake.confirm_drops(10);
+        assert!(intake.drops_for_input(12, 8).is_empty(), "applied: retired");
+        assert_eq!(intake.pending_drops(), 0);
+    }
+
+    #[test]
+    fn an_undecodable_chunk_packet_still_counts() {
+        // Review LOW-1: the server numbered it; every later ack and `as_of`
+        // must too.
+        let host = World::new();
+        let mut world = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let mut intake = ChunkIntake::default();
+        intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (0, 0, 0)));
+        intake.count_undecodable(1);
+        intake.apply(&mut world, &mut loaded, &reg(), &packet_of(&host, (0, 1, 0)));
+        assert_eq!(intake.applied(), 3);
+        intake.let_go(&mut world, (0, 0));
+        assert_eq!(intake.drops_for_input(1, 8), vec![ChunkDrop { cx: 0, cz: 0, as_of: 3 }]);
     }
 }

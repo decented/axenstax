@@ -1560,7 +1560,10 @@ the server, which pushes it afresh when it is back in range. A push into a
 column the joiner had evicted (its own edits, kept while away) restores the
 column first, so no block write lands in the stored copy. A pushed column is
 never void-healed or regenerated (its all-air chunks stay air), and is exempt
-from `repair_void_columns_after_load`.
+from `repair_void_columns_after_load`. A column the joiner did not already hold
+counts as loaded only once all six of its chunks are in; until then neither the
+streamer nor `step_load` generates over it, and one that leaves the joiner's
+range half-pushed is dropped the same way (B2a review LOW-2/3).
 
 **Known gaps.** A joined client still generates the columns beyond the server's
 push radius itself (and briefly the ones the push has not reached). The writers that still do not

@@ -66,13 +66,32 @@ impl super::GameState {
         let intake = &self.chunk_intake;
         // A column the server pushed (B2a) is never "void" here: it is the
         // server's, exactly as it is, and never regenerated.
-        let step = plan_stream_step_for(
+        let mut step = plan_stream_step_for(
             &anchors,
             &nearest_to,
             STREAM_BUDGET,
             &self.loaded_columns,
             |cx, cz| !intake.holds_pushed((cx, cz)) && is_void_column(world, cx, cz),
         );
+        // B2a — never generate a column part-way through its push (the rest
+        // of it is on the way).
+        step.load.retain(|&col| !intake.holds_pushed(col));
+        // B2a — a part-pushed column (never counted loaded) that has left
+        // every anchor's range is let go like a loaded one, so no stray half
+        // column outlives the push that started it.
+        let stray =
+            columns_outside_anchors(&intake.part_pushed_columns(&self.loaded_columns), &anchors, UNLOAD_HYSTERESIS);
+        for col in stray {
+            self.chunk_intake.let_go(&mut self.world, col);
+            for cy in 0..=MAX_CHUNK_Y {
+                self.renderer.chunk_meshes.remove(&(col.0, cy, col.1));
+                self.renderer.water_meshes.remove(&(col.0, cy, col.1));
+                self.renderer.plant_meshes.remove(&(col.0, cy, col.1));
+                self.renderer.decal_meshes.remove(&(col.0, cy, col.1));
+                self.renderer.micro_meshes.remove(&(col.0, cy, col.1));
+                self.renderer.micro_billboard_meshes.remove(&(col.0, cy, col.1));
+            }
+        }
         if step.healed > 0 {
             log::warn!(
                 "stream_chunks self-heal: re-generating {} void column(s) \
@@ -656,6 +675,13 @@ impl super::GameState {
         let mut done = 0;
         while done < budget {
             let Some((cx, cz)) = self.load_queue.pop_front() else { break };
+            // B2a — a column the server is pushing is the server's: never
+            // generated over, and counted loaded only once whole
+            // (`chunk_intake`), which lights and meshes it.
+            if self.chunk_intake.holds_pushed((cx, cz)) {
+                done += 1;
+                continue;
+            }
             // Spec 02 §7.5 — restore an evicted column first (it wins over any
             // world-gen spill a neighbour left); generate only if neither.
             load_column_blocks(&mut self.world, cx, cz, &self.biome_gen, false);
@@ -711,7 +737,13 @@ impl super::GameState {
                 }
                 crate::chunk_intake::IntakeStep::Changes(range) => {
                     for bc in &changes[range] {
-                        if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z) {
+                        // A part-pushed column is not loaded yet, but the
+                        // server sends changes only to chunks it has pushed.
+                        if !remote_change_is_loaded(&self.loaded_columns, &self.world, bc.x, bc.z)
+                            && !self
+                                .chunk_intake
+                                .holds_chunk(crate::state_outbox::chunk_of(bc))
+                        {
                             continue;
                         }
                         // Task 2b — a joiner asks the host to flip a lever and
@@ -781,6 +813,8 @@ impl super::GameState {
         }
         let chunks = std::mem::take(&mut client.chunk_queue);
         let changes = std::mem::take(&mut client.pending_block_changes);
+        let undecodable = std::mem::take(&mut client.undecodable_chunks);
+        self.chunk_intake.count_undecodable(undecodable);
         self.apply_world_deltas(chunks, &changes, crate::loading_screen::LOAD_BUDGET_PER_FRAME);
         let r = crate::chunk_push::SPAWN_RING_RADIUS;
         let mut missing = 0;

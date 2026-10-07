@@ -1885,6 +1885,16 @@ impl HostedServer {
                         protocol::PacketType::Respawn | protocol::PacketType::Disconnect
                     )
                 {
+                    // B2a review HIGH-2 — an input's chunk acknowledgement,
+                    // drop reports and render distance are still taken: lost,
+                    // a drop left the server pushing changes into a column the
+                    // joiner had discarded (and never pushing it again).
+                    if ptype == protocol::PacketType::ClientInput
+                        && self.handshake_done[i]
+                        && let Ok(input) = protocol::safe_deserialize::<protocol::InputPacket>(payload)
+                    {
+                        self.take_chunk_feedback(i, &input);
+                    }
                     continue;
                 }
                 match ptype {
@@ -2236,6 +2246,12 @@ impl HostedServer {
                         else {
                             continue;
                         };
+                        // B2a — the chunk push's credit window, the columns the
+                        // client let go of and its render distance. Cumulative /
+                        // as-of / idempotent, so a stale or repeated packet can't
+                        // undo a newer one; taken from EVERY input — one refused
+                        // below (non-finite, stale, from a dead joiner) included.
+                        self.take_chunk_feedback(i, &input);
                         if !input.x.is_finite()
                             || !input.y.is_finite()
                             || !input.z.is_finite()
@@ -2246,15 +2262,6 @@ impl HostedServer {
                             || !input.move_right.is_finite()
                         {
                             continue;
-                        }
-                        // B2a — the chunk push's credit window and the columns
-                        // the client let go of. Cumulative / as-of, so a stale
-                        // or replayed packet can't undo a newer one; taken even
-                        // from a dead joiner, whose moves are ignored below.
-                        if i >= self.num_local_players {
-                            let push = &mut self.chunk_pushes[i];
-                            push.ack(input.chunk_ack);
-                            push.drop_columns(&input.chunk_drops);
                         }
                         let Some(sp) = self.server.players.get_mut(i) else {
                             continue;
@@ -2976,6 +2983,19 @@ impl HostedServer {
                 self.transports[i].send_to_client(&pkt);
             }
         }
+    }
+
+    /// B2a — what a remote client's input tells its chunk push: its
+    /// cumulative acknowledgement, the columns it let go of, and its current
+    /// render distance (`0` = unchanged). A local slot has no push.
+    fn take_chunk_feedback(&mut self, i: usize, input: &protocol::InputPacket) {
+        if i < self.num_local_players {
+            return;
+        }
+        let Some(push) = self.chunk_pushes.get_mut(i) else { return };
+        push.set_render_distance(input.render_distance);
+        push.ack(input.chunk_ack);
+        push.drop_columns(&input.chunk_drops);
     }
 
     /// Does slot `i`'s block-change stream go through its sent-set? Exactly

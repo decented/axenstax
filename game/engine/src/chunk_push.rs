@@ -12,10 +12,15 @@
 //!   `R = min(joiner render distance, server limit)` (Chebyshev, columns) of
 //!   the joiner's SERVER body (S1: the authoritative position), nearest
 //!   first, all six `cy` of a column (an absent chunk goes as an explicit
-//!   all-air chunk: that is how a dug-out chunk reaches the joiner). Only
-//!   columns the server has loaded: the rest wait for the server's streamer.
-//!   The spawn ring (the 3×3 round the body) goes before anything else — a
-//!   joiner's loading screen waits for it.
+//!   all-air chunk: that is how a dug-out chunk reaches the joiner). The
+//!   render distance is the joiner's CURRENT one: its `JoinRequest` gives the
+//!   first, every `InputPacket` the latest, and `R` follows it. Only columns
+//!   the server has loaded: the rest wait for the server's streamer. A column
+//!   is planned whole — all its unsent chunks in one go — so a joiner is never
+//!   left holding half a column at the frontier. The spawn ring (the 3×3
+//!   round the body) goes before anything else and outside the credit window
+//!   — a joiner's loading screen waits for it, and sends no acknowledgement
+//!   until it has it.
 //! - **The sent-set.** A chunk is "sent" from the moment its push is queued.
 //!   The server's block changes reach a client ONLY for chunks in its
 //!   sent-set (`HostedServer::broadcast_state`): a change to a chunk not yet
@@ -32,17 +37,27 @@
 //!   and [`CHUNK_WINDOW_BYTES`] bytes not yet acknowledged. The client
 //!   acknowledges cumulatively, piggybacked on its `InputPacket`
 //!   (`chunk_ack`), so a slow link is never flooded (the transport closes a
-//!   client with 8 MiB queued). The window covers the spawn ring without any
-//!   acknowledgement, so a loading joiner — which sends no input yet — still
-//!   gets the ground it needs.
+//!   client with 8 MiB queued). The window is checked between columns, so
+//!   one column may take it past its bound. The spawn ring is pushed
+//!   whatever the window, so a loading joiner — which sends no input yet —
+//!   still gets the ground it needs, however heavy (B2a review LOW-4).
+//!   Acknowledgement, drops and render distance are read from EVERY input,
+//!   one the server otherwise discards over its per-tick packet budget
+//!   included (review HIGH-2).
 //! - **Letting go.** The client reports every column it discards
-//!   (`InputPacket.chunk_drops`, with its `chunk_ack` count at the time), and
-//!   those chunks leave the sent-set: their changes stop and they are pushed
-//!   again when back in range. As a backstop the server also forgets chunks
-//!   far beyond anything the client keeps ([`FORGET_SLACK`]); the client then
-//!   holds a stale copy until it comes back in range and gets a fresh one.
+//!   (`InputPacket.chunk_drops`, with its `chunk_ack` count at the time),
+//!   repeating the report in every input until the server has applied an
+//!   input that carried it (`last_acked_input`); `as_of` makes a repeat
+//!   harmless. Those chunks leave the sent-set: their changes stop and any
+//!   resync of them is cancelled. A column dropped while still inside `R` is
+//!   not pushed again until it has left `R` and come back (review MEDIUM-1:
+//!   no push → unload → drop → push churn, whatever the client does). As a
+//!   backstop the server also forgets chunks far beyond anything the client
+//!   keeps ([`FORGET_SLACK`]); the client then holds a stale copy until it
+//!   comes back in range and gets a fresh one.
 //! - **Resync.** A client whose outbox overflowed (`state_outbox`) has its
-//!   dropped chunks pushed again whole, ahead of new ones.
+//!   dropped chunks pushed again whole, ahead of new ones — those still inside
+//!   `R`; one outside it is pushed again when its column is back in range.
 //!
 //! **Mode** (`--chunk-sync`, [`ChunkSync`]): `all` — push every chunk in
 //! range — is the only mode B2a builds and the default. A joiner whose
@@ -70,14 +85,14 @@
 // build never has.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::chunk::{Chunk, CHUNK_SIZE, CHUNK_VOLUME};
 use crate::protocol::{
     self, ChunkDataPacket, ChunkDrop, PushedAttachment, PushedBlockEntity, PushedEntity,
     PushedFaceAttachment,
 };
-use crate::state_outbox::{chunk_of_cell, ChunkCoord, STATE_UPDATE_MAX_BYTES};
+use crate::state_outbox::{chunk_of_cell, ChunkCoord, CHUNK_PACKET_MAX_BYTES};
 use crate::world::{BlockEntityData, FaceAttachment, World, MAX_CHUNK_Y};
 
 /// Most chunk packets in flight (queued or sent, not yet acknowledged) to one
@@ -166,7 +181,8 @@ pub fn configure_from_args(args: &[String]) {
 /// One remote client's chunk-push state. See the module docs.
 #[derive(Debug, Default)]
 pub struct ClientChunkPush {
-    /// The client's render distance from its JoinRequest (`0` = not said).
+    /// The client's current render distance (`0` = never said), clamped to
+    /// [`crate::graphics_settings::RENDER_DISTANCE_MAX`].
     render_distance: i32,
     /// Chunks this client holds as pushed → the number of the first packet
     /// of their latest push.
@@ -181,12 +197,30 @@ pub struct ClientChunkPush {
     /// Chunks to push again whole (an outbox overflow dropped their changes),
     /// before any new chunk.
     resync: BTreeSet<ChunkCoord>,
+    /// Columns the client let go of that have not been outside the push
+    /// radius since: not pushed again until they have (review MEDIUM-1).
+    held_off: HashSet<(i32, i32)>,
+}
+
+/// A render distance from the wire: `0` stays "not said", anything else is
+/// clamped to what a client can ask for (a huge one would also switch off
+/// the forget backstop).
+fn wire_render_distance(rd: u8) -> i32 {
+    i32::from(rd).min(crate::graphics_settings::RENDER_DISTANCE_MAX)
 }
 
 impl ClientChunkPush {
     /// A fresh client that announced `render_distance` columns.
     pub fn new(render_distance: u8) -> Self {
-        Self { render_distance: i32::from(render_distance), ..Self::default() }
+        Self { render_distance: wire_render_distance(render_distance), ..Self::default() }
+    }
+
+    /// The client's current render distance, from its latest input (`0` =
+    /// unchanged). The push radius follows it from the next plan.
+    pub fn set_render_distance(&mut self, render_distance: u8) {
+        if render_distance != 0 {
+            self.render_distance = wire_render_distance(render_distance);
+        }
     }
 
     /// Has this client been sent chunk `c` (and not let go of it)?
@@ -198,6 +232,23 @@ impl ClientChunkPush {
     #[cfg(test)]
     pub fn sent_len(&self) -> usize {
         self.sent.len()
+    }
+
+    /// Packets the client has acknowledged. Test-only.
+    #[cfg(test)]
+    pub fn acked(&self) -> u32 {
+        self.acked
+    }
+
+    /// Does every column with a chunk in the sent-set have all of them
+    /// there? Test-only (review LOW-3: never half a column).
+    #[cfg(test)]
+    pub fn sent_columns_are_whole(&self) -> bool {
+        let mut per_column: HashMap<(i32, i32), i32> = HashMap::new();
+        for &(cx, _, cz) in self.sent.keys() {
+            *per_column.entry((cx, cz)).or_default() += 1;
+        }
+        per_column.values().all(|&n| n == MAX_CHUNK_Y + 1)
     }
 
     /// Chunk packets queued so far.
@@ -237,15 +288,23 @@ impl ClientChunkPush {
 
     /// The client let go of these columns: their chunks leave the sent-set
     /// unless pushed again after the client's `as_of` count (that copy it
-    /// holds).
+    /// holds), and any resync of them is cancelled (the client holds nothing
+    /// newer to bring up to date). A column whose chunks this took out is held
+    /// off until it has been outside the push radius ([`Self::plan`]).
+    /// Idempotent: a repeated report changes nothing more.
     pub fn drop_columns(&mut self, drops: &[ChunkDrop]) {
-        for d in drops {
+        for d in drops.iter().take(protocol::MAX_CHUNK_DROPS_PER_INPUT) {
+            let mut took = false;
             for cy in 0..=MAX_CHUNK_Y {
                 let c = (d.cx, cy, d.cz);
+                self.resync.remove(&c);
                 if self.sent.get(&c).is_some_and(|&first| first <= d.as_of) {
                     self.sent.remove(&c);
-                    self.resync.remove(&c);
+                    took = true;
                 }
+            }
+            if took {
+                self.held_off.insert((d.cx, d.cz));
             }
         }
     }
@@ -260,7 +319,7 @@ impl ClientChunkPush {
         }
     }
 
-    /// May another packet be queued?
+    /// May another packet be queued outside the spawn ring?
     fn window_open(&self) -> bool {
         self.pushed - self.acked < CHUNK_WINDOW_PACKETS && self.in_flight_bytes < CHUNK_WINDOW_BYTES
     }
@@ -292,12 +351,16 @@ impl ClientChunkPush {
     }
 
     /// Build this tick's pushes for a client whose server body stands in
-    /// column `centre`: resyncs first, then unsent chunks nearest first
-    /// within [`Self::radius`], while the window is open and until `room`
-    /// bytes are planned (the last push may pass it). `loaded` is the
-    /// server's loaded-column set; a column outside it waits (and in the
-    /// spawn ring, holds back everything farther). Returns `(chunk,
-    /// packets)` in queue order, already recorded as sent.
+    /// column `centre`: resyncs first (those inside the radius), then the
+    /// unsent chunks of each column within [`Self::radius`], nearest column
+    /// first, a column at a time and always whole. A column starts only while
+    /// fewer than `room` bytes are planned and — outside the spawn ring — the
+    /// window is open; once started it finishes, so the last column may pass
+    /// both. `loaded` is the server's loaded-column set; a column outside it
+    /// waits (and in the spawn ring, holds back everything farther). A column
+    /// the client let go of while inside the radius waits until it has been
+    /// outside it. Returns `(chunk, packets)` in queue order, already recorded
+    /// as sent.
     pub fn plan(
         &mut self,
         world: &World,
@@ -307,52 +370,71 @@ impl ClientChunkPush {
         room: usize,
     ) -> Vec<(ChunkCoord, Vec<Vec<u8>>)> {
         self.forget_far(centre, limit);
+        let r = self.radius(limit);
+        let within = |(cx, cz): (i32, i32), r: i32| {
+            (cx - centre.0).abs() <= r && (cz - centre.1).abs() <= r
+        };
+        // A held-off column is released once it is outside the radius.
+        self.held_off.retain(|&col| within(col, r));
         let mut out = Vec::new();
         let mut planned = 0usize;
-        let open = |push: &Self, planned: usize| push.window_open() && planned < room;
-        if !open(self, planned) {
+        if room == 0 {
             return out;
         }
         let resync: Vec<ChunkCoord> = self.resync.iter().copied().collect();
         for c in resync {
-            if !open(self, planned) {
-                return out;
-            }
-            if loaded.contains(&(c.0, c.2)) {
+            if !within((c.0, c.2), r) {
+                // Pushed again with its column once that is back in range.
                 self.resync.remove(&c);
-                let packets = build_chunk_packets(world, c);
-                planned += packets.iter().map(Vec::len).sum::<usize>();
-                self.record(c, &packets);
-                out.push((c, packets));
+                continue;
             }
+            if !loaded.contains(&(c.0, c.2)) {
+                continue;
+            }
+            if !self.window_open() || planned >= room {
+                // Later; the spawn ring may still go below.
+                break;
+            }
+            self.resync.remove(&c);
+            let packets = build_chunk_packets(world, c);
+            planned += packets.iter().map(Vec::len).sum::<usize>();
+            self.record(c, &packets);
+            out.push((c, packets));
         }
-        let r = self.radius(limit);
-        let mut columns: Vec<(i64, i32, i32)> = Vec::with_capacity(((2 * r + 1) * (2 * r + 1)) as usize);
-        for dx in -r..=r {
-            for dz in -r..=r {
+        // With the window shut only the spawn ring can still go.
+        let ring = SPAWN_RING_RADIUS.min(r);
+        let reach = if self.window_open() { r } else { ring };
+        let mut columns: Vec<(i64, i32, i32)> =
+            Vec::with_capacity(((2 * reach + 1) * (2 * reach + 1)) as usize);
+        for dx in -reach..=reach {
+            for dz in -reach..=reach {
                 let d = i64::from(dx * dx + dz * dz);
                 columns.push((d, centre.0 + dx, centre.1 + dz));
             }
         }
         columns.sort_unstable();
         for (_, cx, cz) in columns {
+            let in_ring = within((cx, cz), ring);
             if !loaded.contains(&(cx, cz)) {
-                let ring = (cx - centre.0).abs() <= SPAWN_RING_RADIUS
-                    && (cz - centre.1).abs() <= SPAWN_RING_RADIUS;
-                if ring {
+                if in_ring {
                     // The ground under the body first: wait for it.
                     break;
                 }
                 continue;
             }
-            for cy in 0..=MAX_CHUNK_Y {
+            if self.held_off.contains(&(cx, cz)) {
+                continue;
+            }
+            let unsent: Vec<i32> =
+                (0..=MAX_CHUNK_Y).filter(|&cy| !self.sent.contains_key(&(cx, cy, cz))).collect();
+            if unsent.is_empty() {
+                continue;
+            }
+            if planned >= room || !(in_ring || self.window_open()) {
+                return out;
+            }
+            for cy in unsent {
                 let c = (cx, cy, cz);
-                if self.sent.contains_key(&c) {
-                    continue;
-                }
-                if !open(self, planned) {
-                    return out;
-                }
                 let packets = build_chunk_packets(world, c);
                 planned += packets.iter().map(Vec::len).sum::<usize>();
                 self.record(c, &packets);
@@ -419,12 +501,37 @@ pub(crate) fn cells_in<V>(
     out
 }
 
-/// [`cells_in`] without the world cell.
-fn entries_in<V>(
-    map: &ahash::AHashMap<(i32, i32, i32), V>,
+/// The side-table entries of `map` on the BLOCK cells of `chunk` (at
+/// `coord`), as chunk-local cell index, in cell order. Side data belongs to a
+/// block — metadata, a block entity, a face attachment — so an air cell's is
+/// never sent (B2a review LOW-6: an all-air chunk costs no lookup at all).
+/// Walks the map when it is smaller than the chunk's block count, else probes
+/// only the block cells.
+fn block_entries_in<'a, V>(
+    map: &'a ahash::AHashMap<(i32, i32, i32), V>,
     coord: ChunkCoord,
-) -> Vec<(u16, &V)> {
-    cells_in(map, coord).into_iter().map(|(i, _, v)| (i, v)).collect()
+    chunk: &Chunk,
+) -> Vec<(u16, &'a V)> {
+    if map.is_empty() || chunk.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<(u16, &V)> = if map.len() <= chunk.non_air_count() {
+        cells_in(map, coord)
+            .into_iter()
+            .filter(|&(i, _, _)| {
+                let (i, cs) = (usize::from(i), CHUNK_SIZE);
+                chunk.get(i % cs, i / (cs * cs), (i / cs) % cs) != crate::block::AIR
+            })
+            .map(|(i, _, v)| (i, v))
+            .collect()
+    } else {
+        chunk
+            .non_air_cells()
+            .filter_map(|(i, _)| map.get(&cell_pos(coord, i)).map(|v| (i, v)))
+            .collect()
+    };
+    out.sort_unstable_by_key(|(i, _)| *i);
+    out
 }
 
 /// What a joiner sees of a block entity, if anything.
@@ -478,23 +585,33 @@ enum Side {
 }
 
 /// The serialized `ChunkData` packet(s) for chunk `coord` of `world`, each at
-/// most [`STATE_UPDATE_MAX_BYTES`]: the blocks with as much side data as
-/// fits, then continuations for the rest. An absent chunk is an all-air one.
-/// **The anti-X-ray seam** (see the module docs).
+/// most [`CHUNK_PACKET_MAX_BYTES`]: the blocks with as much side data as
+/// fits, then continuations for the rest. An absent chunk is an all-air one,
+/// and an all-air chunk carries no side data. **The anti-X-ray seam** (see
+/// the module docs).
 pub fn build_chunk_packets(world: &World, coord: ChunkCoord) -> Vec<Vec<u8>> {
     let (cx, cy, cz) = coord;
-    let blocks = match world.get_chunk(cx, cy, cz) {
+    let chunk = world.get_chunk(cx, cy, cz).filter(|c| !c.is_empty());
+    let blocks = match chunk {
         Some(c) => protocol::compress_chunk(&c.as_bytes()),
         None => empty_chunk_bytes().to_vec(),
     };
     let mut side: Vec<Side> = Vec::new();
-    side.extend(entries_in(&world.block_meta, coord).into_iter().filter(|(_, m)| **m != 0).map(|(i, m)| Side::Meta((i, *m))));
-    for (cell, e) in entries_in(&world.block_entities, coord) {
-        if let Some(entity) = pushed_entity(e) {
-            side.push(Side::Entity(PushedBlockEntity { cell, entity }));
+    if let Some(chunk) = chunk {
+        side.extend(
+            block_entries_in(&world.block_meta, coord, chunk)
+                .into_iter()
+                .filter(|(_, m)| **m != 0)
+                .map(|(i, m)| Side::Meta((i, *m))),
+        );
+        for (cell, e) in block_entries_in(&world.block_entities, coord, chunk) {
+            if let Some(entity) = pushed_entity(e) {
+                side.push(Side::Entity(PushedBlockEntity { cell, entity }));
+            }
         }
     }
-    for (cell, faces) in entries_in(&world.face_attachments, coord) {
+    let faces = chunk.map_or_else(Vec::new, |c| block_entries_in(&world.face_attachments, coord, c));
+    for (cell, faces) in faces {
         for (face, slot) in faces.iter().enumerate() {
             if let Some(a) = slot {
                 side.push(Side::Attachment(PushedFaceAttachment {
@@ -526,7 +643,7 @@ pub fn build_chunk_packets(world: &World, coord: ChunkCoord) -> Vec<Vec<u8>> {
             Side::Attachment(a) => bincode::serialized_size(a),
         }
         .expect("sizes") as usize;
-        if size + item_size > STATE_UPDATE_MAX_BYTES {
+        if size + item_size > CHUNK_PACKET_MAX_BYTES {
             packets.push(std::mem::replace(&mut pkt, fresh(Vec::new())));
             size = size_of(&pkt);
         }
@@ -542,7 +659,7 @@ pub fn build_chunk_packets(world: &World, coord: ChunkCoord) -> Vec<Vec<u8>> {
         .iter()
         .map(|p| {
             let bytes = protocol::serialize_packet(protocol::PacketType::ChunkData, p);
-            debug_assert!(bytes.len() <= STATE_UPDATE_MAX_BYTES, "a chunk packet over the cap");
+            debug_assert!(bytes.len() <= CHUNK_PACKET_MAX_BYTES, "a chunk packet over the cap");
             bytes
         })
         .collect()
@@ -589,20 +706,27 @@ mod tests {
         world.set_meta((40, 20, 1), 7); // another chunk
         let mut sign = crate::sign::SignData::new();
         sign.set_text("Welcome");
+        world.set_block(18, 20, 2, block::OAK_SIGN);
         world.insert_sign((18, 20, 2), sign);
         let fire = crate::campfire::CampfireData {
             fuel_ticks: 99,
             raid_warning_active: true,
             ..Default::default()
         };
+        world.set_block(19, 21, 3, block::CAMPFIRE);
         world.insert_campfire((19, 21, 3), fire);
         let mut frame = crate::item_frame::ItemFrameData::new();
         frame.try_insert(crate::item::ItemStack::new_block(block::OAK_PLANKS, 1));
+        world.set_block(20, 22, 4, block::ITEM_FRAME);
         world.insert_item_frame((20, 22, 4), frame);
+        world.set_block(21, 20, 5, block::CHEST);
         world.block_entities.insert(
             (21, 20, 5),
             BlockEntityData::Chest(crate::chest::ChestData::default()),
         );
+        world.set_block(22, 20, 6, block::STONE);
+        // Side data on an AIR cell is never sent: it belongs to no block.
+        world.set_meta((23, 20, 7), 3);
         world.face_attachments.insert((22, 20, 6), {
             let mut f: crate::world::FaceAttachments = Default::default();
             f[2] = Some(FaceAttachment::Wallpaper(block::GLASS));
@@ -649,13 +773,15 @@ mod tests {
         for i in 0..CHUNK_VOLUME as i32 {
             let mut s = crate::sign::SignData::new();
             s.set_text(&"x".repeat(crate::sign::SIGN_MAX_CHARS));
-            world.insert_sign((i % 16, i / 256, (i / 16) % 16), s);
+            let at = (i % 16, i / 256, (i / 16) % 16);
+            world.set_block(at.0, at.1, at.2, block::OAK_SIGN);
+            world.insert_sign(at, s);
         }
         let packets = build_chunk_packets(&world, (0, 0, 0));
         assert!(packets.len() > 1);
         let mut signs = 0;
         for (i, raw) in packets.iter().enumerate() {
-            assert!(raw.len() <= STATE_UPDATE_MAX_BYTES);
+            assert!(raw.len() <= CHUNK_PACKET_MAX_BYTES);
             let p = decode(raw);
             assert_eq!(p.compressed_blocks.is_empty(), i > 0, "only the first carries blocks");
             signs += p.entities.len();
@@ -669,25 +795,95 @@ mod tests {
         let loaded = all_loaded(8);
         let mut push = ClientChunkPush::new(10);
         let planned = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
-        assert_eq!(planned.len(), CHUNK_WINDOW_PACKETS as usize, "the window bounds a tick");
+        let column = MAX_CHUNK_Y as usize + 1;
+        let window = CHUNK_WINDOW_PACKETS as usize;
+        assert!(
+            (window..window + column).contains(&planned.len()),
+            "the window bounds a tick, whole columns: {}",
+            planned.len()
+        );
+        assert_eq!(planned.len() % column, 0, "only whole columns");
         let ring: Vec<_> = planned[..54].iter().map(|(c, _)| (c.0, c.2)).collect();
         assert!(ring.iter().all(|&(x, z)| x.abs() <= 1 && z.abs() <= 1), "the 3×3 first: {ring:?}");
         assert_eq!(planned[0].0, (0, 0, 0), "the body's own column, bottom up");
         // Nothing more until the client acknowledges.
         assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty());
-        push.ack(32);
-        assert_eq!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).len(), 32);
+        push.ack(push.pushed() - 30);
+        let more = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        assert!(((window - 30)..(window - 30 + column)).contains(&more.len()), "{} more", more.len());
+        assert_eq!(more.len() % column, 0);
+    }
+
+    #[test]
+    fn a_column_is_planned_whole_even_past_the_room_or_the_window() {
+        let world = World::new();
+        let mut push = ClientChunkPush::new(8);
+        // Room for about one all-air chunk: its whole column still goes.
+        let planned = push.plan(&world, &all_loaded(8), (0, 0), 8, 1);
+        assert_eq!(planned.len(), MAX_CHUNK_Y as usize + 1, "one whole column, not one chunk");
+        assert!(planned.iter().all(|(c, _)| (c.0, c.2) == (0, 0)));
+        // The window is checked between columns only.
+        let mut push = ClientChunkPush::new(8);
+        let mut total = 0;
+        loop {
+            let got = push.plan(&world, &all_loaded(8), (0, 0), 8, usize::MAX);
+            if got.is_empty() {
+                break;
+            }
+            assert_eq!(got.len() % (MAX_CHUNK_Y as usize + 1), 0, "whole columns, every tick");
+            total += got.len();
+            push.ack(push.pushed() - 5); // a laggard: 5 always unacknowledged
+        }
+        assert_eq!(total, 17 * 17 * (MAX_CHUNK_Y as usize + 1));
+    }
+
+    #[test]
+    fn the_spawn_ring_goes_whatever_the_window() {
+        // A ring needing more packets than the window (heavy side data in
+        // every chunk) still reaches a joiner that has acknowledged nothing.
+        let mut world = World::new();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                for cy in 0..=MAX_CHUNK_Y {
+                    for i in 0..300 {
+                        let at = (cx * 16 + i % 16, cy * 16 + i / 256, cz * 16 + (i / 16) % 16);
+                        let mut s = crate::sign::SignData::new();
+                        s.set_text(&"y".repeat(crate::sign::SIGN_MAX_CHARS));
+                        world.set_block(at.0, at.1, at.2, block::OAK_SIGN);
+                        world.insert_sign(at, s);
+                    }
+                }
+            }
+        }
+        let mut push = ClientChunkPush::new(8);
+        let mut ring_packets = 0usize;
+        for _ in 0..4 {
+            for (c, packets) in push.plan(&world, &all_loaded(8), (0, 0), 8, usize::MAX) {
+                assert!(c.0.abs() <= 1 && c.2.abs() <= 1, "nothing past the ring unacknowledged: {c:?}");
+                ring_packets += packets.len();
+            }
+        }
+        assert!(ring_packets > CHUNK_WINDOW_PACKETS as usize, "{ring_packets} packets: more than the window");
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                assert!((0..=MAX_CHUNK_Y).all(|cy| push.has_sent((cx, cy, cz))), "ring column ({cx}, {cz})");
+            }
+        }
     }
 
     #[test]
     fn a_tick_plans_no_more_than_its_room() {
         let world = World::new();
         let mut push = ClientChunkPush::new(8);
-        let planned = push.plan(&world, &all_loaded(8), (0, 0), 8, 200);
-        // All-air chunks are about 60 bytes: room for four, the fourth passing it.
+        let room = 500;
+        let planned = push.plan(&world, &all_loaded(8), (0, 0), 8, room);
+        // All-air chunks are about 60 bytes, so a column about 360: room for
+        // two columns, the second passing it.
+        let column = MAX_CHUNK_Y as usize + 1;
         let bytes: usize = planned.iter().flat_map(|(_, p)| p).map(Vec::len).sum();
-        assert!(bytes >= 200 && planned.len() >= 2, "{} pushes, {bytes} bytes", planned.len());
-        assert!(bytes - planned.last().unwrap().1[0].len() < 200, "it stops once past the room");
+        assert_eq!(planned.len() % column, 0, "whole columns");
+        let last: usize = planned[planned.len() - column..].iter().flat_map(|(_, p)| p).map(Vec::len).sum();
+        assert!(bytes >= room && bytes - last < room, "it stops once past the room: {bytes} bytes");
         assert!(push.plan(&world, &all_loaded(8), (0, 0), 8, 0).is_empty(), "no room, no pushes");
     }
 
@@ -732,19 +928,92 @@ mod tests {
         let world = World::new();
         let loaded = all_loaded(2);
         let mut push = ClientChunkPush::new(2);
-        push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        while !push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty() {
+            push.ack(push.pushed());
+        }
         assert!(push.has_sent((0, 0, 0)));
         let first_of_origin = 1;
         // Dropped as of a count that covers the origin column's push.
-        push.drop_columns(&[ChunkDrop { cx: 0, cz: 0, as_of: first_of_origin + 5 }]);
+        let drop = ChunkDrop { cx: 0, cz: 0, as_of: first_of_origin + 5 };
+        push.drop_columns(&[drop]);
         assert!(!push.has_sent((0, 0, 0)) && !push.has_sent((0, 5, 0)));
-        // Pushed again (after the ack), then a STALE drop report (as of
-        // before the re-push) arrives: the client holds the new copy.
+        // Dropped inside the radius: held off until it has been outside it.
         push.ack(push.pushed());
-        push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
-        assert!(push.has_sent((0, 0, 0)));
-        push.drop_columns(&[ChunkDrop { cx: 0, cz: 0, as_of: first_of_origin + 5 }]);
+        assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty(), "no churn");
+        push.plan(&world, &loaded, (9, 0), 8, usize::MAX); // the body walks off …
+        push.ack(push.pushed());
+        push.plan(&world, &loaded, (0, 0), 8, usize::MAX); // … and back
+        assert!(push.has_sent((0, 0, 0)), "pushed afresh once back in range");
+        // Then a STALE drop report (as of before the re-push) arrives — a
+        // repeat, say: the client holds the new copy, and nothing is held off.
+        push.drop_columns(&[drop]);
+        push.drop_columns(&[drop]);
         assert!(push.has_sent((0, 0, 0)), "a drop older than the push does not undo it");
+        assert!(push.held_off.is_empty());
+    }
+
+    #[test]
+    fn a_column_dropped_inside_the_radius_waits_until_it_has_left_it() {
+        // Review MEDIUM-1: a client that keeps less than the server pushes
+        // (a stale render distance, a body that drifted) must not churn.
+        let world = World::new();
+        let loaded = all_loaded(12);
+        let mut push = ClientChunkPush::new(8);
+        while !push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty() {
+            push.ack(push.pushed());
+        }
+        let as_of = push.pushed();
+        let outer: Vec<ChunkDrop> =
+            (-8..=8).map(|z| ChunkDrop { cx: 8, cz: z, as_of }).collect();
+        push.drop_columns(&outer);
+        for _ in 0..10 {
+            assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty(), "never pushed again in place");
+        }
+        // One column east and back: (8, z) is at 7, still inside — held.
+        push.plan(&world, &loaded, (1, 0), 8, usize::MAX);
+        push.ack(push.pushed());
+        assert!(push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty());
+        // One column west: (8, z) is at 9, outside — released; back east, it goes.
+        push.plan(&world, &loaded, (-1, 0), 8, usize::MAX);
+        push.ack(push.pushed());
+        let again = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        assert!(again.iter().all(|(c, _)| c.0 == 8) && !again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn the_radius_follows_the_clients_current_render_distance() {
+        let mut push = ClientChunkPush::new(10);
+        assert_eq!(push.radius(8), 8);
+        push.set_render_distance(4);
+        assert_eq!(push.radius(8), 4);
+        push.set_render_distance(0);
+        assert_eq!(push.radius(8), 4, "0 = unchanged");
+        push.set_render_distance(255);
+        assert_eq!(push.radius(64), crate::graphics_settings::RENDER_DISTANCE_MAX, "clamped");
+    }
+
+    #[test]
+    fn a_drop_cancels_a_pending_resync_and_a_resync_respects_the_radius() {
+        // Review LOW-2.
+        let world = World::new();
+        let loaded = all_loaded(4);
+        let mut push = ClientChunkPush::new(3);
+        while !push.plan(&world, &loaded, (0, 0), 8, usize::MAX).is_empty() {
+            push.ack(push.pushed());
+        }
+        // An overflow lists (2, 1, 0) and (3, 1, 0); the client lets go of
+        // column (2, 0) in the same window.
+        push.request_resync([(2, 1, 0), (3, 1, 0)]);
+        push.drop_columns(&[ChunkDrop { cx: 2, cz: 0, as_of: push.pushed() }]);
+        // The client lowers its range: column 3 is now outside the radius.
+        push.set_render_distance(2);
+        let planned = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        assert!(planned.is_empty(), "no stray chunk of a let-go or out-of-range column: {planned:?}");
+        assert!(push.resync.is_empty());
+        // Back to 3: column 3's chunk goes again with its column's turn.
+        push.set_render_distance(3);
+        let planned = push.plan(&world, &loaded, (0, 0), 8, usize::MAX);
+        assert_eq!(planned.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [(3, 1, 0)]);
     }
 
     #[test]

@@ -13,7 +13,12 @@
 //! window; changes to chunks not yet sent never reach the joiner; the
 //! sent-set dies with the connection; a lending host's push reads the host's
 //! own world; a dropped column comes back afresh; and an outbox overflow is
-//! healed by pushing the chunk again.
+//! healed by pushing the chunk again. From the B2a review: a chunk with heavy
+//! side data never wedges the stream (HIGH-1); a hitch of more than ten
+//! inputs in a tick still delivers their acks and drops (HIGH-2); a lowered
+//! render distance never starts a push/drop churn (MEDIUM-1); columns go
+//! whole, even as the body moves (LOW-3); and a spawn ring heavier than the
+//! credit window still arrives before any acknowledgement (LOW-4).
 
 use crate::block;
 use crate::chunk::CHUNK_SIZE;
@@ -49,6 +54,8 @@ struct Joiner {
     /// Every server block change that reached this client.
     changes_seen: Vec<BlockChange>,
     slot: usize,
+    /// The render distance its inputs carry (`InputPacket.render_distance`).
+    render_distance: u8,
 }
 
 impl Joiner {
@@ -80,6 +87,7 @@ impl Joiner {
             registry: crate::block::BlockRegistry::new(),
             changes_seen: Vec::new(),
             slot: usize::MAX,
+            render_distance,
         };
         j.take_in();
         j.slot = j.rc.player_index().expect("joined") as usize;
@@ -93,6 +101,10 @@ impl Joiner {
         self.rc.poll();
         let chunks = std::mem::take(&mut self.rc.chunk_queue);
         let changes = std::mem::take(&mut self.rc.pending_block_changes);
+        self.intake.count_undecodable(std::mem::take(&mut self.rc.undecodable_chunks));
+        if let Some(state) = self.rc.latest_state.take() {
+            self.intake.confirm_drops(state.last_acked_input);
+        }
         let before = self.intake.applied();
         for step in interleave(chunks, changes.len()) {
             match step {
@@ -104,7 +116,8 @@ impl Joiner {
                         self.changes_seen.push(bc.clone());
                         if crate::chunk_stream::remote_change_is_loaded(
                             &self.loaded, &self.world, bc.x, bc.z,
-                        ) {
+                        ) || self.intake.holds_chunk(crate::state_outbox::chunk_of(bc))
+                        {
                             self.world.apply_remote_block_change(bc);
                         }
                     }
@@ -114,16 +127,59 @@ impl Joiner {
         self.intake.applied() - before
     }
 
-    /// Send an idle input carrying the chunk ack and drop reports, as
-    /// `network_send_input` does.
-    fn ack(&mut self) {
-        let input = protocol::InputPacket {
+    /// The idle input `network_send_input` would send now: the chunk ack,
+    /// the drop reports not yet applied and the current render distance.
+    fn input(&mut self) -> protocol::InputPacket {
+        let seq = self.rc.next_input_seq();
+        protocol::InputPacket {
             health: 20.0,
             chunk_ack: self.intake.applied(),
-            chunk_drops: self.intake.take_drops(protocol::MAX_CHUNK_DROPS_PER_INPUT),
+            chunk_drops: self.intake.drops_for_input(seq, protocol::MAX_CHUNK_DROPS_PER_INPUT),
+            render_distance: self.render_distance,
             ..Default::default()
-        };
+        }
+    }
+
+    /// Send that input.
+    fn ack(&mut self) {
+        let input = self.input();
         self.rc.send_input(&input).expect("connected");
+    }
+
+    /// Let go of column `col` as the game loop's streamer does.
+    fn let_go(&mut self, col: (i32, i32)) {
+        self.intake.let_go(&mut self.world, col);
+        self.loaded.remove(&col);
+    }
+
+    /// The streamer's unload pass (`stream_chunks`): let go of every pushed
+    /// column — whole or part-pushed — more than `keep` columns from where
+    /// this client stands. Returns how many.
+    fn unload_beyond(&mut self, hs: &HostedServer, keep: i32) -> usize {
+        let me = self.column(hs);
+        let mut held: Vec<(i32, i32)> = self.loaded.iter().copied().collect();
+        held.extend(self.intake.part_pushed_columns(&self.loaded));
+        let far: Vec<(i32, i32)> = held
+            .into_iter()
+            .filter(|&(x, z)| (x - me.0).abs() > keep || (z - me.1).abs() > keep)
+            .collect();
+        for &col in &far {
+            self.let_go(col);
+        }
+        far.len()
+    }
+
+    /// `ticks` frames of play standing still: input, tick, take in, unload
+    /// beyond `keep`. Returns the chunk packets that came.
+    fn play(&mut self, hs: &mut HostedServer, ticks: usize, keep: i32) -> u32 {
+        let mut got = 0;
+        for _ in 0..ticks {
+            self.ack();
+            hs.tick();
+            got += self.take_in();
+            self.unload_beyond(hs, keep);
+        }
+        got
     }
 
     /// Tick, take in, acknowledge — until three ticks in a row bring no
@@ -235,7 +291,11 @@ fn a_joiner_with_another_generator_gets_every_chunk_in_range_and_nothing_beyond(
         range.len() * (MAX_CHUNK_Y as usize + 1),
         "exactly the joiner's range, every chunk of it"
     );
-    assert!(!j.intake.holds_pushed((me.0 + 4, me.1)), "nothing past its render distance");
+    // This joiner generates nothing: everything it holds was pushed, and it
+    // holds exactly its range — on every side.
+    assert_eq!(j.loaded.len(), range.len());
+    assert!(j.loaded.iter().all(|&(x, z)| (x - me.0).abs() <= 3 && (z - me.1).abs() <= 3));
+    assert!(j.intake.part_pushed_columns(&j.loaded).is_empty(), "no half column anywhere");
 }
 
 #[test]
@@ -264,8 +324,9 @@ fn a_tick_never_sends_past_the_budget_or_the_credit_window() {
             }
         }
         assert!(bytes <= CLIENT_TICK_BUDGET_BYTES, "tick {tick}: {bytes} bytes");
+        // The window is checked between columns: one may pass it.
         assert!(
-            received - acked <= crate::chunk_push::CHUNK_WINDOW_PACKETS,
+            received - acked <= crate::chunk_push::CHUNK_WINDOW_PACKETS + MAX_CHUNK_Y as u32 + 1,
             "tick {tick}: {} chunk packets unacknowledged",
             received - acked
         );
@@ -367,15 +428,199 @@ fn a_column_the_joiner_lets_go_of_is_pushed_afresh() {
     let col = (me.0 + 2, me.1);
     let cs = CHUNK_SIZE as i32;
     let cell = (col.0 * cs + 3, 93, col.1 * cs + 3);
-    j.intake.let_go(&mut j.world, col);
-    j.loaded.remove(&col);
+    j.let_go(col);
     // While it is gone the server changes it; the joiner reports the drop.
     hs.server.world.set_block(cell.0, cell.1, cell.2, block::GLASS);
     // (The change is made with no broadcast: only a fresh push can carry it,
     // and only a drop the server took makes it push the column again.)
     j.settle(&mut hs);
-    assert!(j.intake.column_complete(col), "pushed again: it is still in range");
+    assert!(!hs.chunk_push_for_test(j.slot).has_sent((col.0, 0, col.1)), "the drop was taken");
+    assert!(
+        !j.intake.holds_pushed(col),
+        "let go inside the radius: not pushed straight back (no churn)"
+    );
+    // The body walks off until the column is out of range, and comes back.
+    move_body(&mut hs, j.slot, -5);
+    j.settle(&mut hs);
+    move_body(&mut hs, j.slot, 5);
+    j.settle(&mut hs);
+    assert!(j.intake.column_complete(col), "pushed again once back in range");
     assert_eq!(j.world.get_block(cell.0, cell.1, cell.2), block::GLASS, "with what changed meanwhile");
+}
+
+/// Move slot `slot`'s server body `columns` columns east (west if negative).
+fn move_body(hs: &mut HostedServer, slot: usize, columns: i32) {
+    let p = &mut hs.server.players[slot].player;
+    p.pos.x += (columns * CHUNK_SIZE as i32) as f32;
+    p.velocity = glam::Vec3::ZERO;
+    p.reset_fall();
+}
+
+/// Fill `count` cells of chunk `c` (from its bottom layer up) with signs of
+/// the longest text: about 134 bytes of side data each.
+fn fill_with_signs(world: &mut World, c: ChunkCoord, count: i32) {
+    let cs = CHUNK_SIZE as i32;
+    for i in 0..count {
+        let at = (c.0 * cs + i % cs, c.1 * cs + i / (cs * cs), c.2 * cs + (i / cs) % cs);
+        let mut sign = crate::sign::SignData::new();
+        sign.set_text(&format!("{i:03}{}", "s".repeat(crate::sign::SIGN_MAX_CHARS - 3)));
+        world.set_block(at.0, at.1, at.2, block::OAK_SIGN);
+        world.insert_sign(at, sign);
+    }
+}
+
+#[test]
+fn a_chunk_with_heavy_side_data_never_wedges_the_joiners_stream() {
+    // Review HIGH-1: about 50 KiB of signs in one chunk. It used to go as one
+    // packet that never fitted what was left of a tick, holding back every
+    // change and push behind it for good.
+    let mut hs = start_host("heavy");
+    let host = hs.server.players[0].player.pos;
+    let home = crate::chunk_stream::column_of(host);
+    let heavy = (home.0 + 1, 5, home.1);
+    fill_with_signs(&mut hs.server.world, heavy, 400);
+    let mut j = Joiner::join(&mut hs, 3, false);
+    j.settle(&mut hs);
+    let me = j.column(&hs);
+    for col in columns_within(me, 3) {
+        assert!(j.intake.column_complete(col), "column {col:?}: the push flowed past the heavy chunk");
+    }
+    let cs = CHUNK_SIZE as i32;
+    for i in [0, 199, 399] {
+        let at = (heavy.0 * cs + i % cs, heavy.1 * cs + i / (cs * cs), heavy.2 * cs + (i / cs) % cs);
+        assert!(
+            j.world.sign_at(at).is_some_and(|s| s.text.starts_with(&format!("{i:03}"))),
+            "sign {i} arrived"
+        );
+    }
+    // And later changes still reach it.
+    let far = ((me.0 - 3) * cs + 2, 95, me.1 * cs + 2);
+    hs.server.world.set_block(far.0, far.1, far.2, block::GLASS);
+    hs.server.pending_block_changes.push(BlockChange::with_meta(far.0, far.1, far.2, block::GLASS, 0));
+    hs.tick();
+    j.take_in();
+    assert_eq!(j.world.get_block(far.0, far.1, far.2), block::GLASS);
+}
+
+#[test]
+fn a_hitch_of_more_than_ten_inputs_in_a_tick_still_delivers_acks_and_drops() {
+    // Review HIGH-2: the server reads at most ten packets a tick from a
+    // client; the ack and drops of the ones past that used to be lost.
+    let mut hs = start_host("hitch");
+    let mut j = Joiner::join(&mut hs, 8, false);
+    for _ in 0..5 {
+        hs.tick();
+        j.take_in();
+    }
+    let push = hs.chunk_push_for_test(j.slot);
+    assert!(push.pushed() > push.acked(), "the window is waiting on an ack");
+    let me = j.column(&hs);
+    let col = (me.0 + 1, me.1);
+    assert!(j.intake.column_complete(col));
+    j.let_go(col);
+    // A frame hitch: eleven stale inputs, then the one with the ack and drop.
+    for _ in 0..11 {
+        let input = protocol::InputPacket { health: 20.0, ..Default::default() };
+        j.rc.send_input(&input).expect("connected");
+    }
+    let last = j.input();
+    assert_eq!(last.chunk_drops.len(), 1);
+    j.rc.send_input(&last).expect("connected");
+    hs.tick();
+    let push = hs.chunk_push_for_test(j.slot);
+    assert_eq!(push.acked(), last.chunk_ack, "the twelfth input's ack was taken");
+    assert!(!push.has_sent((col.0, 0, col.1)), "and its drop");
+    assert!(j.take_in() > 0, "the window reopened");
+}
+
+#[test]
+fn a_lowered_render_distance_never_starts_a_push_and_drop_churn() {
+    // Review MEDIUM-1: the push radius followed the JOIN render distance, so
+    // a joiner that lowered its own kept unloading what the server pushed
+    // straight back — push, unload, drop, push — the whole session long.
+    let mut hs = start_host("churn");
+    let mut j = Joiner::join(&mut hs, 6, false);
+    j.settle(&mut hs);
+    assert_eq!(j.unload_beyond(&hs, 6 + crate::chunk_stream::UNLOAD_HYSTERESIS), 0);
+    // First a client that keeps less than it says (a stale render distance:
+    // it still sends 6 but keeps 5): the server holds the columns it lets go
+    // of inside the radius off; it does not push them back.
+    assert!(j.unload_beyond(&hs, 5) > 0);
+    j.play(&mut hs, 5, 5);
+    assert_eq!(j.play(&mut hs, 60, 5), 0, "nothing pushed back: no churn");
+    // Then the real thing: render distance 2, so it keeps 2 + 2. The radius
+    // follows, so nothing comes back either.
+    j.render_distance = 2;
+    let keep = 2 + crate::chunk_stream::UNLOAD_HYSTERESIS;
+    assert!(j.unload_beyond(&hs, keep) > 0);
+    j.play(&mut hs, 5, keep);
+    assert_eq!(j.play(&mut hs, 60, keep), 0, "no churn at the lower radius");
+    assert_eq!(
+        hs.chunk_push_for_test(j.slot).radius(crate::chunk_stream::LENT_JOINER_SIM_DISTANCE),
+        2,
+        "the radius follows the client's current render distance"
+    );
+    assert_eq!(j.intake.pending_drops(), 0, "every report applied and retired");
+    // And raising it again pushes the wider range.
+    j.render_distance = 6;
+    j.play(&mut hs, 60, 6 + crate::chunk_stream::UNLOAD_HYSTERESIS);
+    let me = j.column(&hs);
+    for col in columns_within(me, 6) {
+        assert!(j.intake.column_complete(col), "column {col:?} pushed again at render distance 6");
+    }
+}
+
+#[test]
+fn columns_go_whole_even_while_the_body_moves() {
+    // Review LOW-3: the plan used to stop mid-column, and a column then left
+    // at the frontier stayed half-pushed.
+    let mut hs = start_host("frontier");
+    let mut j = Joiner::join(&mut hs, 4, false);
+    for step in 0..60 {
+        if step % 3 == 0 && step < 30 {
+            move_body(&mut hs, j.slot, 1);
+        }
+        // A slow client: acknowledges every other tick.
+        if step % 2 == 0 {
+            j.ack();
+        }
+        hs.tick();
+        j.take_in();
+        assert!(
+            hs.chunk_push_for_test(j.slot).sent_columns_are_whole(),
+            "step {step}: the server never leaves a half column sent"
+        );
+    }
+    j.settle(&mut hs);
+    assert!(j.intake.part_pushed_columns(&j.loaded).is_empty(), "the joiner holds no half column");
+}
+
+#[test]
+fn a_spawn_ring_heavier_than_the_credit_window_arrives_with_no_ack() {
+    // Review LOW-4: a loading joiner sends no input, so no ack; a ring
+    // needing more than 64 packets used to wait out the 30 s loading limit.
+    let mut hs = start_host("heavy-ring");
+    let host = hs.server.players[0].player.pos;
+    let home = crate::chunk_stream::column_of(host);
+    for col in columns_within(home, 1) {
+        for cy in 0..=MAX_CHUNK_Y {
+            fill_with_signs(&mut hs.server.world, (col.0, cy, col.1), 300);
+        }
+    }
+    let mut j = Joiner::join(&mut hs, 2, false);
+    assert_eq!(j.column(&hs), home, "the joiner stands in the host's column");
+    let mut packets = 0;
+    for _ in 0..200 {
+        hs.tick();
+        packets += j.take_in();
+        if columns_within(j.column(&hs), 1).iter().all(|&c| j.intake.column_complete(c)) {
+            break;
+        }
+    }
+    assert!(packets > crate::chunk_push::CHUNK_WINDOW_PACKETS, "{packets}: more than the window");
+    for col in columns_within(j.column(&hs), 1) {
+        assert!(j.intake.column_complete(col), "ring column {col:?} arrived without an ack");
+    }
 }
 
 #[test]

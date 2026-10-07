@@ -234,7 +234,10 @@ sim distance, whichever is smaller — so everything built or dug there is what
 they see. It travels straight from your server to the player on the game
 connection, paced so play stays smooth: a fresh join at the default distance is
 about 4 MB, and the ground under the player arrives first (their loading screen
-waits for it). As they move, new chunks follow them.
+waits for it). As they move, new chunks follow them, and if they change their
+render distance the server follows that too. Past the sim distance a player
+sees the terrain their own game generates, and builds out there reach them only
+once they come within the sim distance.
 
 ---
 

@@ -40,13 +40,19 @@
 //!   read through [`ClientOutbox::take_chunk_resync_requests`]; the chunk
 //!   push (`chunk_push`, Phase B2a) sends each of them whole again.
 //! - **Chunk pushes share the queue** (Phase B2a). A pushed chunk is a whole
-//!   `ChunkData` packet queued in line with the deltas
-//!   ([`ClientOutbox::push_chunk`]) and sent as its own packet, inside the
-//!   same per-tick budget, so changes queued after it apply on top of it on
-//!   the client. It is a snapshot at its place in line, so no later change
-//!   may be folded into one queued before it: a queued chunk is a coalescing
-//!   barrier for its own cells. Overflow keeps queued chunks (their bytes are
-//!   bounded by the push's credit window, not counted against the bound).
+//!   `ChunkData` packet (at most [`CHUNK_PACKET_MAX_BYTES`]) queued in line
+//!   with the deltas ([`ClientOutbox::push_chunk`]) and sent as its own
+//!   packet, inside the same per-tick budget, so changes queued after it
+//!   apply on top of it on the client. It is a snapshot at its place in line,
+//!   so no later change may be folded into one queued before it: a queued
+//!   chunk is a coalescing barrier for its own cells. Overflow keeps queued
+//!   chunks (their bytes are bounded by the push's credit window, not counted
+//!   against the bound). **Nothing at the head of the queue can wedge it**
+//!   (B2a review HIGH-1): when a chunk is next in line, the tick's first
+//!   packet leaves it room (entity updates beyond the reserve wait), and a
+//!   chunk that is at the head when the tick's drain starts always goes, even
+//!   past the budget — so a tick sends at most the budget, or its first packet
+//!   plus one chunk packet.
 //!
 //! The host's own in-process loopback (a local slot) has no wire to protect:
 //! its outbox is unbudgeted — it drains in full every tick, split under the
@@ -76,6 +82,18 @@ const _: () = assert!(CLIENT_TICK_BUDGET_BYTES <= STATE_UPDATE_MAX_BYTES);
 /// flags); whatever they don't use goes to the queue. Updates are
 /// changed-only (`entity_broadcast`), so an idle herd takes none of it.
 pub const ENTITY_UPDATE_RESERVE_BYTES: usize = 8 * 1024;
+
+/// Largest chunk-push packet (`ChunkData`, tag included) the server builds
+/// (`chunk_push::build_chunk_packets` splits a chunk's side data into
+/// continuations under it). Well under one tick's budget: after the tick's
+/// first packet (snapshot fields plus the entity-update reserve) a queued
+/// chunk packet always fits, so one at the head of the queue never waits more
+/// than a tick (B2a review HIGH-1).
+pub const CHUNK_PACKET_MAX_BYTES: usize = 32 * 1024;
+
+const _: () = assert!(
+    CHUNK_PACKET_MAX_BYTES + ENTITY_UPDATE_RESERVE_BYTES + 8 * 1024 <= CLIENT_TICK_BUDGET_BYTES
+);
 
 /// Hard bound on a remote client's queued reliable bytes. Past it the queued
 /// block changes are dropped and their chunks marked for resync (about
@@ -465,8 +483,10 @@ impl ClientOutbox {
     /// the tick's snapshot fields (tick, players, world time, reserve,
     /// weather) with EMPTY delta vectors; every packet repeats it. Always at
     /// least one packet. Each is at most [`STATE_UPDATE_MAX_BYTES`]; a remote
-    /// client's total is at most [`CLIENT_TICK_BUDGET_BYTES`] (or the one
-    /// packet, if the snapshot alone is bigger).
+    /// client's total is at most [`CLIENT_TICK_BUDGET_BYTES`] — except that
+    /// the first packet always goes (the snapshot alone may be bigger), and
+    /// so does a chunk push at the head of the queue when the drain starts
+    /// (nothing at the head can wedge the queue; see the module docs).
     pub fn drain_packets(&mut self, template: &StateUpdatePacket) -> Vec<Vec<u8>> {
         debug_assert!(
             template.block_changes.is_empty()
@@ -479,16 +499,21 @@ impl ClientOutbox {
         let budget = self.tick_budget.unwrap_or(usize::MAX);
         let mut spent = 0usize;
         let mut out: Vec<Vec<u8>> = Vec::new();
+        // Has anything left the reliable queue this tick?
+        let mut moved = false;
         loop {
             // A queued chunk push goes as its own packet, in line — never
             // first (the first packet of a tick carries the player positions)
-            // and never past the budget (it waits for the next tick).
+            // and past the budget only when it was at the head of the queue
+            // as the drain started: then nothing can hold it back for good
+            // (B2a review HIGH-1). Otherwise it waits for the next tick.
             if !out.is_empty()
                 && let Some(Entry { size, delta: Delta::Chunk { .. }, .. }) = self.queue.front()
             {
-                if spent + size > budget {
+                if moved && spent + size > budget {
                     break;
                 }
+                moved = true;
                 let Some(Entry { size, delta: Delta::Chunk { packet, .. }, .. }) =
                     self.queue.pop_front()
                 else {
@@ -512,7 +537,19 @@ impl ClientOutbox {
                 self.fill_updates(&mut pkt, &mut size, reserve);
             }
             let queue_drained = self.fill_reliable(&mut pkt, &mut size, room);
-            let updates_drained = self.fill_updates(&mut pkt, &mut size, room);
+            moved |= !(pkt.block_changes.is_empty()
+                && pkt.entity_spawns.is_empty()
+                && pkt.entity_despawns.is_empty());
+            // A chunk push next in line keeps its room: entity updates past
+            // the reserve take only what it leaves (else a heavy entity load
+            // would crowd it, and everything behind it, out tick after tick).
+            let update_limit = match self.queue.front() {
+                Some(Entry { size: chunk, delta: Delta::Chunk { .. }, .. }) => {
+                    room.min(budget.saturating_sub(spent.saturating_add(*chunk))).max(size)
+                }
+                _ => room,
+            };
+            let updates_drained = self.fill_updates(&mut pkt, &mut size, update_limit);
             let carried = !(pkt.block_changes.is_empty()
                 && pkt.entity_spawns.is_empty()
                 && pkt.entity_updates.is_empty()
@@ -1204,5 +1241,81 @@ mod tests {
         assert!(ob.queued_chunk_bytes() > 0, "the queued push survived");
         let out = drain_mixed(&mut ob);
         assert!(out.contains(&Out::Chunk((9, 0, 9))));
+    }
+
+    // ── B2a review HIGH-1: nothing at the head of the queue wedges it ───
+
+    /// Drain up to `ticks` ticks (each within the budget); what arrived, in order.
+    fn drain_ticks(ob: &mut ClientOutbox, ticks: usize) -> Vec<Out> {
+        let mut all = Vec::new();
+        for _ in 0..ticks {
+            all.extend(drain_mixed(ob).into_iter().filter(|o| *o != Out::State(Vec::new())));
+        }
+        all
+    }
+
+    #[test]
+    fn a_chunk_that_cannot_fit_behind_a_ticks_changes_goes_next_tick_and_never_wedges() {
+        let mut ob = ClientOutbox::new(true);
+        // About 42 KB of changes, then a full-size chunk packet that can't
+        // fit behind them, then a change, another full-size push, a change.
+        ob.push_tick(0, &[], &[], &(0..2_800).map(|i| bc(i, 1)).collect::<Vec<_>>(), &[]);
+        ob.push_chunk((0, 0, 0), vec![chunk_packet((0, 0, 0), CHUNK_PACKET_MAX_BYTES - 64)]);
+        ob.push_tick(1, &[], &[], &[bc(9_000, 1)], &[]);
+        ob.push_chunk((1, 0, 0), vec![chunk_packet((1, 0, 0), CHUNK_PACKET_MAX_BYTES - 64)]);
+        ob.push_tick(2, &[], &[], &[bc(9_001, 1)], &[]);
+        let got = drain_ticks(&mut ob, 5);
+        let xs: Vec<i32> = got
+            .iter()
+            .flat_map(|o| match o {
+                Out::State(xs) => xs.clone(),
+                Out::Chunk(_) => Vec::new(),
+            })
+            .collect();
+        assert_eq!(xs.len(), 2_802, "every change arrived");
+        let order: Vec<&Out> = got.iter().filter(|o| !matches!(o, Out::State(xs) if xs.len() > 1)).collect();
+        assert_eq!(
+            order,
+            [&Out::Chunk((0, 0, 0)), &Out::State(vec![9_000]), &Out::Chunk((1, 0, 0)), &Out::State(vec![9_001])],
+            "in line: each snapshot between the changes around it"
+        );
+        assert_eq!(ob.queued_bytes(), 0, "the queue emptied");
+    }
+
+    #[test]
+    fn a_chunk_at_the_head_when_the_tick_starts_always_goes_whatever_its_size() {
+        let mut ob = ClientOutbox::new(true);
+        // Bigger than a whole tick's budget (the builder never makes one, but
+        // nothing at the head may ever hold the queue).
+        ob.push_chunk((0, 0, 0), vec![chunk_packet((0, 0, 0), CLIENT_TICK_BUDGET_BYTES)]);
+        ob.push_tick(0, &[], &[], &[bc(1, 1)], &[]);
+        let raw = ob.drain_packets(&template());
+        let kinds: Vec<protocol::PacketType> =
+            raw.iter().map(|p| protocol::deserialize_header(p).unwrap().0).collect();
+        assert_eq!(
+            kinds[..2],
+            [protocol::PacketType::StateUpdate, protocol::PacketType::ChunkData],
+            "positions first, then the oversized chunk"
+        );
+        assert_eq!(drain_mixed(&mut ob), vec![Out::State(vec![1])], "the change behind it next tick");
+        assert_eq!(ob.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn entity_updates_never_crowd_out_a_chunk_next_in_line() {
+        let mut ob = ClientOutbox::new(true);
+        let n = 3_000u32; // about 63 KB of updates a tick: more than the budget
+        ob.push_tick(0, &(0..n).map(spawn).collect::<Vec<_>>(), &[], &[], &[]);
+        for _ in 0..5 {
+            let _ = drain_mixed(&mut ob);
+        }
+        assert_eq!(ob.queued_bytes(), 0, "the spawns are delivered");
+        ob.push_chunk((2, 0, 2), vec![chunk_packet((2, 0, 2), 20_000)]);
+        let ups: Vec<EntityUpdate> = (0..n).map(|id| update(id, 1.0)).collect();
+        ob.push_tick(10, &[], &[], &[bc(5, 1)], &ups);
+        // Within the budget (drain_mixed checks), and the chunk goes now.
+        let out = drain_mixed(&mut ob);
+        assert!(out.contains(&Out::Chunk((2, 0, 2))), "the chunk was not crowded out: {out:?}");
+        assert!(out.contains(&Out::State(vec![5])) || drain_mixed(&mut ob).contains(&Out::State(vec![5])));
     }
 }

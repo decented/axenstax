@@ -513,13 +513,21 @@ pub struct InputPacket {
     /// (`chunk_push`) counts a push as in flight until this passes it.
     #[serde(default)]
     pub chunk_ack: u32,
-    /// v69 — columns this client let go of since its last input (unloaded,
-    /// discarded), each with its `chunk_ack` count at that moment. The server
-    /// takes them out of its sent-set so it stops sending their changes and
-    /// pushes them again when they are back in range. Bounded per packet
+    /// v69 — columns this client let go of (unloaded, discarded), each with
+    /// its `chunk_ack` count at that moment. The server takes them out of its
+    /// sent-set so it stops sending their changes and pushes them again when
+    /// they are back in range. A report is repeated in every input until the
+    /// server has applied one that carried it (`last_acked_input`); `as_of`
+    /// makes a repeat harmless. Bounded per packet
     /// ([`MAX_CHUNK_DROPS_PER_INPUT`]); the rest go in the next.
     #[serde(default)]
     pub chunk_drops: Vec<ChunkDrop>,
+    /// v69 — this client's CURRENT render distance in columns (`0` = not
+    /// said / unchanged). The server's chunk-push radius follows it
+    /// (`min(this, server limit)`), so lowering it mid-session never leaves
+    /// the server pushing columns the client unloads (B2a review MEDIUM-1).
+    #[serde(default)]
+    pub render_distance: u8,
 }
 
 /// Most [`ChunkDrop`]s one `InputPacket` carries (12 bytes each).
@@ -1384,9 +1392,10 @@ pub struct ServerAnnouncePacket {
 ///   side data (`meta`, render-visible `entities`, face `attachments`) and
 ///   continuation packets; `JoinRequestPacket` gains trailing
 ///   `render_distance: u8`; `InputPacket` gains trailing `chunk_ack: u32`
-///   (the push's credit window) and `chunk_drops: Vec<ChunkDrop>` (columns the
-///   client let go of). Server block changes reach a joiner only for chunks
-///   it has been sent. See `chunk_push` and Spec 04 §4.1.
+///   (the push's credit window), `chunk_drops: Vec<ChunkDrop>` (columns the
+///   client let go of) and `render_distance: u8` (its current one). Server
+///   block changes reach a joiner only for chunks it has been sent. See
+///   `chunk_push` and Spec 04 §4.1.
 pub const PROTOCOL_VERSION: u32 = 69;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
@@ -1740,10 +1749,12 @@ mod tests {
             health_delta: -1.5,
             chunk_ack: 77,
             chunk_drops: vec![ChunkDrop { cx: -3, cz: 9, as_of: 70 }],
+            render_distance: 6,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.chunk_ack, 77);
+        assert_eq!(back.render_distance, 6);
         assert_eq!(back.chunk_drops, pkt.chunk_drops);
         assert_eq!(back.tick, pkt.tick);
         // MP-D2a (v68) — the trailing vitals survive the round-trip.
@@ -2072,7 +2083,7 @@ mod tests {
         //   health is the server's).
         // v69 (2026-10-07, B2a): chunk push — ChunkData side data +
         //   continuations, JoinRequest.render_distance, InputPacket.chunk_ack
-        //   + chunk_drops.
+        //   + chunk_drops + render_distance.
         assert_eq!(PROTOCOL_VERSION, 69);
     }
 
