@@ -32,7 +32,7 @@
 - **A client's packets past the per-tick budget wait; they are never dropped (2026-10-07, FU1, NO wire change — still v72).** The server used to read 10 of a client's packets a tick and discard the rest, so the swing or right-click a client made while catching up after a frame hitch (ten inputs a frame, then the action) was lost unanswered. Packets past the budget now wait in a per-client inbound queue for the next tick, in arrival order; only a client past the queue's hard bound (1024 packets or 8 MiB) is disconnected, with a reason. See §11.2a.
 - **v73** (2026-10-07, C2a): **A joiner's hunger, eating and sleep are the server's.** Appended: `PacketType::ItemAction = 62` (C→S, `ItemActionPacket { seq, action: ItemAction }`, `ItemAction` = `Eat { hotbar_slot, held_kind, held_id, held_full }` | `Sleep { bed: [i32; 3] }`, append only — C2b adds `Craft` and `Drop`) and `ItemActionOutcome = 63` (S→C, to the asker: `{ seq, accepted, consume_held, note }`); `StateUpdatePacket` gains trailing `own_hunger: u8` (per client, like `last_acked_input`: the addressed joiner's hunger as the server holds it). The server runs every joiner's metabolism (the client's `PlayerCombat::tick_metabolism`, starvation floor from its own difficulty; Hard starvation is a server death, `DiedOf { Starvation }`); a joined client runs none of its own and eats and sleeps by request; `InputPacket.health_delta` counts **losses only** (a reported heal is zero; `MAX_REPORTED_HEAL_PER_INPUT` is gone). A joiner's sleep sets its server spawn point and heals it but never skips the night. Also (no wire change): a request's item claim ends when the server acknowledges the input sent after it, not after FU1's 10 s (FU verify N4). See §4.2f, §5.3.2.
 - **The FU1 verify fixes (2026-10-07, FU3, NO wire change — still v73).** The inbound queue's hard bound is bytes only (8 MiB, each packet charged 64 bytes more): FU1's 1,024-packet bound disconnected every joiner after an honest host stall of about 51 s, because each joiner's bridge thread keeps queueing while the host's game thread is stopped. A client with more than 40 packets waiting is read 64 a tick (catch-up); entity requests and device interactions past their per-kind budgets wait instead of being skipped. Block edits past the 4-a-tick budget wait in a per-client edit queue (with their input's tags and hand) instead of being refused, up to a hard cap of 16,384. The server derives a joiner's campfire smoke itself (`campfire::on_block_edit`), so a campfire action is one edit, and a joiner runs no campfire sweep. A closed connection's slot is freed only after a fill that began after the close. A refused milk or shear skips every later mob arm of that click (it untied a leashed cow), and `entity_flags::PRODUCT_NOT_READY` (bit 32; 0 = ready or unknown, so no bump) lets a joiner's bucket or shears click on an animal that isn't ready go to the block. See §11.2a, §4.1, §4.2d.
-- **v74** (2026-10-07, C2b): **A joiner's crafting and Q-drops are mirrored on the server.** `ItemAction` appends `Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (= 2: the grid as it stood before the craft, row-major `item_to_ref` pairs; the crafting table the 3×3 grid was opened from) and `Drop { hotbar_slot, held_kind, held_id, held_full }` (= 3, `Eat`'s held claim). Both are fire-and-forget: `ItemActionPacket.seq` still moves on, no outcome is sent, no new `PacketType`. The server mirrors a craft on its shadow of the joiner's inventory (`item_actions::judge_craft`: a known recipe from blocks and materials, a recipe bigger than 2×2 only at a crafting table in block reach; one of each input taken, owed; the output added) and spawns a Q-drop as a real ground item thrown from the joiner's server body (full fidelity from `held_full`), paced by a per-joiner token bucket (2, refilled one per `DROP_INTERVAL_TICKS` = 4; a drop it can't pay for waits in the inbound queue). A grant that doesn't fit the shadow spills at the joiner's feet as a real item, and the `InventoryGrant` carries only what landed. On the client, a Q-drop or a craft click that would spend an item a request in flight claims does nothing, and an owed outcome is paid from the 36 slots, then the crafting grid, then the cursor. `ServerPlayer.crafting_ui` (a dead BRIDGE) is gone. See §4.2f, §4.2e, §4.2d.
+- **v74** (2026-10-07, C2b): **A joiner's crafting and Q-drops are mirrored on the server.** `ItemAction` appends `Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (= 2: the grid as it stood before the craft, row-major `item_to_ref` pairs; the crafting table the 3×3 grid was opened from) and `Drop { hotbar_slot, held_kind, held_id, held_full }` (= 3, `Eat`'s held claim). Both are fire-and-forget: `ItemActionPacket.seq` still moves on, no outcome is sent, no new `PacketType`. The server mirrors a craft on its shadow of the joiner's inventory (`item_actions::judge_craft`: a known recipe from blocks and materials, a recipe bigger than 2×2 only at a crafting table in block reach; one of each input taken, owed; the output added) and spawns a Q-drop as a real ground item thrown from the joiner's server body (full fidelity from `held_full`), paced by a per-joiner token bucket (2, refilled one per `DROP_INTERVAL_TICKS` = 4; a drop it can't pay for waits in the inbound queue). (C2b first spilled a grant that didn't fit the shadow; the C2b-fix reversed it: the `InventoryGrant` carries the whole stack and the overflow is tallied, §4.2e.) On the client, a Q-drop or a craft click that would spend an item a request in flight claims does nothing, and an owed outcome is paid from the 36 slots, then the crafting grid, then the cursor. `ServerPlayer.crafting_ui` (a dead BRIDGE) is gone. See §4.2f, §4.2e, §4.2d.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -523,7 +523,7 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak }`. **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8 }`. **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` or `ItemAction::Sleep { bed: [i32; 3] }` (append only). Shares its `seq` with `EntityAttack`/`EntityInteract`. **Implemented tag** (`PacketType::ItemAction = 62`, protocol v73). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` or `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` (append only: Eat=0, Sleep=1, Craft=2, Drop=3). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft and Drop are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
 | 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8 }` (`item_actions::ItemNote`). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
@@ -1562,9 +1562,10 @@ block reappears on the client, nothing is yielded and no drop is lost (the
 strike's tool wear, client-side, stays spent). A tagged edit that doesn't leave what the
 server's yield would (the joiner's copy of the cell disagreed) yields nothing
 and is counted unchecked. Creative yields nothing. Tool durability stays the
-client's. Inventory full: what doesn't fit the SHADOW spills at the server
-body's feet as a real item (C2b, "Grant overflow" below); what doesn't fit
-the CLIENT's inventory it spills at its feet, as for every grant.
+client's. Inventory full: the client is granted the whole yield whatever the SHADOW
+holds, and what the shadow can't hold is tallied (C2b-fix, "Grant overflow"
+below); what doesn't fit the CLIENT's inventory it spills at its feet, as for
+every grant.
 
 **Every block a joiner puts into a cell is player-placed**, whatever the
 edit was classified as below — a plain placement, a fill with a tool claimed
@@ -1590,7 +1591,7 @@ cell, on the server as in single-player (`break_drops::break_yield` gates on
 
 | Change | Source | Shadow |
 |---|---|---|
-| Server-side pickup (mob loot, spilled containers, dispenser drops) | `entity::tick_item_pickups` | gains (as before) |
+| Server-side pickup (mob loot, spilled containers, dispenser drops, a joiner's Q-drop) | `entity::tick_item_pickups_with` | gains; the client gets the whole stack even if the shadow is full (overflow tallied) |
 | A break the joiner mined | `break_drops`, above | gains the yield |
 | An accepted interaction's products (wool, a milk bucket, a Lead back) | D2b, §4.2d | gains |
 | An accepted interaction's `consume_held` | D2b | takes, owed from wherever the item is (`joiner_actions::take_owed`, the client's own rule) |
@@ -1599,17 +1600,32 @@ cell, on the server as in single-player (`break_drops::break_yield` gates on
 | A craft (C2b, `ItemAction::Craft`) | §4.2f | takes one of each input, owed; gains the output (an output that doesn't fit is counted, never spilled: the client holds it) |
 | A Q-drop (C2b, `ItemAction::Drop`) | §4.2f | takes the item, owed; the item becomes a real ground item |
 
-**Grant overflow (C2b).** `HostedServer::grant_to_joiner` (a break's yield,
-an interaction's products) puts each stack into the shadow; the part that
-doesn't fit spills at the server body's feet as a real ground item, through
-the shared spill (`break_drops::spill_at_feet`), which anyone may pick up and
-the joiner's body takes once the shadow has room. The `InventoryGrant`
-carries only what landed in the shadow. The client's own spill when ITS
-inventory is full (`remote_entities::apply_inventory_grant`, a ground item
-only it sees, picked up by its own pickup pass) stays as it was: it is a
-late delivery of an item the shadow already holds, not a duplicate — the
-client catching up with the shadow. Server pickups are unchanged (a partial
-pickup leaves the rest on the ground).
+**Grant overflow (C2b, reversed by the C2b-fix, 2026-10-07; no wire change).**
+`HostedServer::grant_to_joiner` (a break's yield, an interaction's products)
+adds each stack to the shadow and sends the client the WHOLE stack by
+`InventoryGrant`. What the shadow has no room for is tallied as
+`PossessionTally::grant_overflow` and never spilled: the client holds it. C2b
+first spilled the overflow at the server body's feet and granted only what
+landed, on the premise that the shadow frees room; the C2b verify (M1) showed
+it doesn't in ordinary play. The shadow holds MORE than the client after
+container deposits, a worn-out tool (it vanishes on the client but keeps its
+slot in the shadow), armour put on, bucket, seed and hoe consumes and a death
+without retrieval, so it fills by drift, and a spill the joiner's body could
+never pick up was a lost item. A joiner's **server pickups** follow the same
+rule (`entity::tick_item_pickups_with`, `grant_unfit`): a ground item the
+joiner stands on is granted whole and removed, what fits the shadow is added
+and the rest tallied, so a drifted-full shadow never leaves items on the
+floor. The client's own spill when ITS inventory is full
+(`remote_entities::apply_inventory_grant`, a ground item only it sees) is the
+client's own business, not a duplicate.
+BRIDGE: spill the shadow's overflow as a real item once C3d makes the server
+inventory the truth.
+
+**On a `--no-lend` host the host can't see or pick up a joiner's server drop**
+(a Q-drop, C2b): the owning server's ECS is separate from the host client's,
+and a local slot picks up only in its client sim. Not a regression: before
+C2b the drop was joiner-local. (A lending host shares one ECS, so it sees and
+picks up the drop; a dedicated server has no host.)
 
 Everything else is still the client's alone, so the shadow drifts from the
 client's inventory.
@@ -1623,8 +1639,8 @@ bought blocks):
 - the inventory the joiner arrived with (not on the wire);
 - what it takes from chests, furnaces and other containers; client-side
   pickups of what its own client spilled (a bucket's or a purchase's
-  overflow, a death scatter — not a grant's spill, above, which the shadow
-  already holds);
+  overflow, a death scatter); a grant's overflow (above: the client holds
+  what the shadow had no room for, so the shadow holds less);
 - fishing; a beehive's honey (bottle or bucket); keg / aged output; an item
   frame's take and refund; a campfire's cooked pickup; a drying rack's
   withdraw; a wallpaper peel; vendor, auction and market purchases; raid
@@ -1653,7 +1669,7 @@ comes of those, but once the per-npub sidecar step persists the shadow they
 would be duplication. (Eating left this list in C2a: an accepted `Eat` takes
 its food from the shadow by the owed rule, §4.2f. Crafting outputs and
 inputs, Q-drops and grant overflow left the lists in C2b: a craft and a drop
-are mirrored, §4.2f, and a grant's overflow spills as a real item, above.) (A fill carrying a `mined`
+are mirrored, §4.2f, and a grant's overflow is tallied and the client holds it, above.) (A fill carrying a `mined`
 tag, C1's MEDIUM-1 residual, is no longer one: since FU1 it is classified
 like any fill and a plain placement consumes.)
 

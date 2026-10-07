@@ -1,6 +1,6 @@
 //! C2b (2026-10-07, protocol v74) — a joiner's crafting and
-//! Q-drops are mirrored on the server, and a grant that doesn't fit the
-//! server's shadow of its inventory spills as a real item.
+//! Q-drops are mirrored on the server, and a grant the server's shadow of
+//! its inventory has no room for still reaches the client whole (C2b-fix).
 //!
 //! Every test drives a REAL `HostedServer` over the in-process transport — a
 //! dedicated server, or a lending host where the world and ECS are the
@@ -144,6 +144,20 @@ impl Rig {
         joiner.seq += 1;
         let pkt = protocol::ItemActionPacket { seq: joiner.seq, action };
         joiner.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    }
+
+    /// A plain `ClientInput` for joiner `j`, standing where it stands, with
+    /// sequence `tick`.
+    fn send_input(&mut self, j: usize, tick: u64) {
+        let input = protocol::InputPacket {
+            tick,
+            x: self.at.x,
+            y: self.at.y,
+            z: self.at.z,
+            health: 20.0,
+            ..Default::default()
+        };
+        self.joiners[j].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
     }
 
     fn craft(&mut self, j: usize, grid: [(u8, u16); 9], table: Option<[i32; 3]>) {
@@ -462,9 +476,19 @@ fn five_drops_in_one_tick_all_spawn_in_order() {
     for item in &sent {
         rig.drop(0, item);
     }
+    // C2b verify L7 — an input behind the drops waits with them (one ordered
+    // stream): it is read only once the last drop has been.
+    rig.send_input(0, 1);
     let mut seen: Vec<(Item, u32)> = Vec::new();
+    let step = DROP_INTERVAL_TICKS as u32;
     for t in 0..20u32 {
         rig.tick();
+        let read = rig.sp(0).last_input_tick;
+        if t < 3 * step {
+            assert_eq!(read, 0, "tick {t}: the input waits behind the drops still queued");
+        } else {
+            assert_eq!(read, 1, "tick {t}: read right after the last drop");
+        }
         for (_, stack, _) in rig.items() {
             if !seen.iter().any(|(i, _)| *i == stack.item) {
                 seen.push((stack.item, t));
@@ -474,7 +498,6 @@ fn five_drops_in_one_tick_all_spawn_in_order() {
     let order: Vec<Item> = seen.iter().map(|(i, _)| i.clone()).collect();
     assert_eq!(order, sent, "every drop spawned, in the order sent");
     let at: Vec<u32> = seen.iter().map(|(_, t)| *t).collect();
-    let step = DROP_INTERVAL_TICKS as u32;
     assert_eq!(at, vec![0, 0, step, 2 * step, 3 * step], "two at once, then one per interval");
     assert_eq!(rig.tally(0).drops, 5);
 }
@@ -492,6 +515,29 @@ fn a_joiners_drop_on_a_lending_host_lands_in_the_hosts_world() {
     assert_eq!(rig.shadow_count(0, &stick()), 1);
 }
 
+/// C2b verify L7 — the host itself picks up a joiner's drop on a lent world:
+/// its own client's pickup pass (`entity::tick_item_pickups`, over the lent
+/// ECS) takes the stack, with no dropper delay since the dropper is the
+/// joiner's server slot.
+#[test]
+fn the_host_picks_up_a_joiners_drop_on_a_lent_world() {
+    let mut rig = Rig::lent("drop-host-pickup");
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 2));
+    rig.drop(0, &stick());
+    rig.tick();
+    let at = settle(&mut rig);
+    let mut host_inv = crate::inventory::Inventory::new();
+    let host = rig.host.as_mut().unwrap();
+    let picked = {
+        let mut players = [(0usize, at, &mut host_inv)];
+        crate::entity::tick_item_pickups(&mut host.ecs, &mut players, |_| true)
+    };
+    assert_eq!(picked.len(), 1, "the host's own pickup pass took it");
+    assert_eq!(picked[0].1, ItemStack::new_material(MaterialId::Stick, 1));
+    assert_eq!(host_inv.count_material(MaterialId::Stick), 1);
+    assert!(rig.items().is_empty(), "gone from the shared ground");
+}
+
 // ─── Grant overflow (decision 3) ───────────────────────────────────────────
 
 fn fill_shadow(rig: &mut Rig, j: usize) {
@@ -500,32 +546,29 @@ fn fill_shadow(rig: &mut Rig, j: usize) {
     }
 }
 
-/// A grant that only partly fits the shadow: what fits is granted, the rest
-/// spills at the server body's feet as a real item.
+/// C2b-fix (verify M1) — a shadow with no room for a grant still sends the
+/// client the WHOLE stack: the shadow fills by drift, so refusing the rest
+/// would cost the joiner the item. What the shadow couldn't hold is tallied;
+/// nothing spills.
 #[test]
-fn a_grant_spills_what_does_not_fit_the_shadow_and_grants_only_what_landed() {
-    let mut rig = Rig::dedicated("grant-spill", 1);
+fn a_full_shadow_still_grants_the_whole_stack_and_spills_nothing() {
+    let mut rig = Rig::dedicated("grant-full", 1);
     fill_shadow(&mut rig, 0);
     rig.give(0, 7, ItemStack::new_material(MaterialId::Wheat, 60));
     let slot = rig.joiners[0].slot;
     rig.hs.grant_to_joiner(slot, [ItemStack::new_material(MaterialId::Wheat, 10)]);
     rig.tick();
     let wheat = Item::Material(MaterialId::Wheat);
-    assert_eq!(rig.granted(0, &wheat), 4, "the grant carries only what landed");
-    assert_eq!(rig.shadow_count(0, &wheat), 64);
-    let items = rig.items();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].1, ItemStack::new_material(MaterialId::Wheat, 6), "the rest is on the ground");
-    assert_eq!(items[0].2, None, "a spill, not a throw");
-    let feet = rig.hs.server.players[slot].player.pos;
-    assert!((items[0].0 - feet).length() < 1.5, "at the joiner's feet");
+    assert_eq!(rig.granted(0, &wheat), 10, "the client is granted the whole stack");
+    assert_eq!(rig.shadow_count(0, &wheat), 64, "the shadow took what fitted");
+    assert!(rig.items().is_empty(), "nothing is spilled on the ground");
+    assert_eq!(rig.tally(0).grant_overflow, 6, "the rest is tallied");
 }
 
-/// End to end: a break the joiner mines into a full shadow yields nothing to
-/// grant; its drop lies at the joiner's feet for anyone, and the joiner's
-/// body takes it once the shadow has room.
+/// End to end: a break the joiner mines into a full shadow still grants the
+/// whole yield to the client, with nothing spilled.
 #[test]
-fn a_break_into_a_full_shadow_spills_its_drop_and_it_is_picked_up_once_there_is_room() {
+fn a_break_into_a_full_shadow_still_grants_its_whole_yield() {
     let mut rig = Rig::dedicated("grant-break", 1);
     fill_shadow(&mut rig, 0);
     let floor = (rig.at.x.floor() as i32 + 1, rig.at.y as i32 - 1, rig.at.z.floor() as i32);
@@ -554,15 +597,97 @@ fn a_break_into_a_full_shadow_spills_its_drop_and_it_is_picked_up_once_there_is_
     rig.tick();
     assert_eq!(rig.world().get_block(floor.0, floor.1, floor.2), block::AIR);
     assert_eq!(rig.tally(0).breaks, 1);
-    assert_eq!(rig.granted(0, &cobble()), 0, "nothing landed, nothing granted");
-    let items = rig.items();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].1, ItemStack::new_block(block::COBBLESTONE, 1));
-    // Room appears in the shadow: the body standing on the spill takes it.
-    rig.sp(0).inventory.set_slot(35, None);
-    rig.sp(0).player.pos = items[0].0;
-    rig.ticks(15);
-    assert!(rig.items().is_empty());
-    assert_eq!(rig.granted(0, &cobble()), 1);
-    assert_eq!(rig.shadow_count(0, &cobble()), 1);
+    assert_eq!(rig.granted(0, &cobble()), 1, "the whole yield reaches the client");
+    assert!(rig.items().is_empty(), "nothing spilled: the joiner could never pick it up");
+    assert_eq!(rig.tally(0).grant_overflow, 1);
+    assert_eq!(rig.shadow_count(0, &cobble()), 0, "the shadow had no room");
+}
+
+/// C2b-fix (verify M1) — a drifted-full shadow must not stop a joiner
+/// picking things up: the server grants the whole ground item, adds what
+/// fits and tallies the rest.
+#[test]
+fn a_joiner_with_a_full_shadow_still_picks_up_a_ground_item() {
+    let mut rig = Rig::dedicated("pickup-full", 1);
+    fill_shadow(&mut rig, 0);
+    let at = rig.hs.server.players[rig.joiners[0].slot].player.pos;
+    crate::entity::spawn_item(
+        match rig.host.as_mut() {
+            Some(h) => &mut h.ecs,
+            None => &mut rig.hs.server.ecs,
+        },
+        at,
+        ItemStack::new_material(MaterialId::Wheat, 5),
+        0,
+    );
+    // Natural drops wait out their pickup delay.
+    rig.ticks(crate::entity::ITEM_PICKUP_DELAY_TICKS + 3);
+    let wheat = Item::Material(MaterialId::Wheat);
+    assert!(rig.items().is_empty(), "picked up, not left on the ground");
+    assert_eq!(rig.granted(0, &wheat), 5, "the client is granted it");
+    assert_eq!(rig.tally(0).grant_overflow, 5, "the shadow had no room: tallied");
+}
+
+// ─── The drop bucket in client time (C2b verify M4) ────────────────────────
+
+/// After a stall, an honest backlog of 25 drops interleaved with ~100 inputs
+/// drains in a few ticks of catch-up, not at one drop per
+/// `DROP_INTERVAL_TICKS` of server time: each input read credits the bucket
+/// a quarter token. None is lost.
+#[test]
+fn a_stalled_backlog_of_drops_and_inputs_drains_in_catch_up_time() {
+    let mut rig = Rig::dedicated("drop-catch-up", 1);
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 64));
+    let mut tick = 0;
+    for _ in 0..25 {
+        for _ in 0..4 {
+            tick += 1;
+            rig.send_input(0, tick);
+        }
+        rig.drop(0, &stick());
+    }
+    let mut spawned_by = None;
+    for t in 1..=60u32 {
+        rig.tick();
+        if rig.tally(0).drops == 25 && spawned_by.is_none() {
+            spawned_by = Some(t);
+        }
+    }
+    let t = spawned_by.expect("every one of the 25 drops spawned");
+    assert!(t <= 12, "drained in {t} ticks; server time alone would take about 92");
+    assert_eq!(rig.sp(0).last_input_tick, 100, "and every input was read");
+}
+
+/// A client that sends only Drops sends no inputs, so it earns no client-time
+/// credit: it still gets two at once and then one per interval.
+#[test]
+fn a_client_sending_only_drops_earns_no_client_time_credit() {
+    let mut rig = Rig::dedicated("drop-no-credit", 1);
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 64));
+    for _ in 0..50 {
+        rig.drop(0, &stick());
+    }
+    rig.ticks(DROP_INTERVAL_TICKS as u32 * 5);
+    assert!(rig.tally(0).drops <= 2 + 5 + 1, "paced by server time only: {}", rig.tally(0).drops);
+}
+
+/// A closed connection's queued Drops are discarded, not spawned, so the slot
+/// is reaped within a few ticks instead of dribbling items out for hours.
+#[test]
+fn a_closed_connection_holding_a_thousand_drops_is_reaped_and_none_spawn() {
+    let mut rig = Rig::dedicated("drop-closed", 1);
+    let slot = rig.joiners[0].slot;
+    for _ in 0..1000 {
+        rig.drop(0, &stick());
+    }
+    drop(rig.joiners.remove(0).client); // the link just goes
+    let mut freed_at = None;
+    for t in 1..=6u32 {
+        rig.tick();
+        if rig.hs.slot_is_free(slot) && freed_at.is_none() {
+            freed_at = Some(t);
+        }
+    }
+    assert!(freed_at.is_some(), "the slot is reaped within a few ticks");
+    assert!(rig.items().is_empty(), "none of the 1000 drops spawned");
 }

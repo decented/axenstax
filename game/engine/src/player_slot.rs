@@ -498,18 +498,27 @@ impl PlayerSlot {
         self.eat_cooldown = self.eat_cooldown.saturating_sub(1);
     }
 
-    /// A bite was taken (or, joined, asked for): arm the eating cooldown, and
-    /// keep `place_cooldown` up for the bite's length so it still briefly
-    /// blocks placing.
+    /// A bite was taken (or, joined, asked for): arm the eating cooldown.
+    /// `place_cooldown` is lifted to at least 1 so placing is blocked now;
+    /// [`Self::tick_place_cooldown`] then keeps it up for exactly the bite's
+    /// length IN FIXED TICKS (C2b verify M2: counting the block in frames made
+    /// it 0.27 s at 60 fps and 1.07 s at 15 fps).
     pub fn start_eat_cooldown(&mut self) {
         self.eat_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS;
-        self.place_cooldown = crate::item_actions::EAT_COOLDOWN_TICKS;
+        self.place_cooldown = self.place_cooldown.max(1);
     }
 
-    /// Advance the placement cooldown one tick, saturating at 0. Call once
-    /// per game tick for every player, exactly like `tick_break_cooldown`.
+    /// Advance the placement cooldown one tick (frame), saturating at 0. Call
+    /// once per game tick for every player, exactly like
+    /// `tick_break_cooldown`. While a bite's `eat_cooldown` (fixed ticks) is
+    /// still running it never reaches 0, so the post-bite placement block is
+    /// tick-counted whatever the frame rate; ordinary placement pacing stays
+    /// frame-counted.
     pub fn tick_place_cooldown(&mut self) {
         self.place_cooldown = self.place_cooldown.saturating_sub(1);
+        if self.eat_cooldown > 0 {
+            self.place_cooldown = self.place_cooldown.max(1);
+        }
     }
 }
 
@@ -558,6 +567,28 @@ mod tests {
         }
         slot.tick_place_cooldown();
         assert_eq!(slot.place_cooldown, 0, "cooldown of 4 should reach 0 after exactly 4 ticks");
+    }
+
+    /// C2b verify M2 — the block after a bite lasts `EAT_COOLDOWN_TICKS`
+    /// FIXED ticks, however many frames pass meanwhile.
+    #[test]
+    fn the_post_bite_placement_block_is_counted_in_ticks_not_frames() {
+        let mut slot = fresh_slot();
+        slot.start_eat_cooldown();
+        assert!(slot.place_cooldown > 0, "placing is blocked at once");
+        // 100 frames pass but no fixed tick: still blocked.
+        for _ in 0..100 {
+            slot.tick_place_cooldown();
+        }
+        assert!(slot.place_cooldown > 0, "frames alone never end it");
+        // The fixed ticks run it out; the next frame frees placing.
+        for _ in 0..crate::item_actions::EAT_COOLDOWN_TICKS {
+            assert!(slot.place_cooldown > 0);
+            slot.tick_eat_cooldown();
+        }
+        assert_eq!(slot.eat_cooldown, 0);
+        slot.tick_place_cooldown();
+        assert_eq!(slot.place_cooldown, 0);
     }
 
     #[test]

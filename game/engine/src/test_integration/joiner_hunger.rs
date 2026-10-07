@@ -672,13 +672,25 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
 
     // Replay it the way the client does, in arrival order: the claim is
     // PAID (one bread taken), not released unpaid.
+    let mut paid_before_ack = false;
     for (arrived, outcome) in &stream {
         match (arrived, outcome) {
             (Arrived::Outcome { seq }, Some(o)) => {
                 let pending = ja.take(*seq).expect("still waiting for it");
                 assert_eq!(apply_item_outcome(&mut inv, &mut ui, &pending, o), 1);
+                paid_before_ack = true;
             }
-            (Arrived::State { acked }, _) => ja.acknowledged(*acked),
+            (Arrived::State { acked }, _) => {
+                // C2b verify L7: the replay half fails if the outcome arrives
+                // after the ack that would end its claim (`acknowledged`
+                // keeps the entry and `take` would still pay, so only this
+                // ordering check pins it).
+                if *acked >= next_input {
+                    assert!(paid_before_ack, "the ack arrived before the outcome was applied");
+                    assert_eq!(count(&inv), 1, "the food was already paid when the claim ended");
+                }
+                ja.acknowledged(*acked)
+            }
             _ => unreachable!(),
         }
     }

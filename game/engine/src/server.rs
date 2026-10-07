@@ -1608,12 +1608,22 @@ impl GameServer {
             // tools and armour ride `WireItem` on the grant packet. Only
             // `Item::Plan` stays floor-bound: `plan::PlanData` has no wire
             // form, so granting one would mint an empty plan client-side.
-            let grants = crate::entity::tick_item_pickups(
+            // M1 (C2b verify): a joiner's shadow fills by drift, so a stack
+            // it can't hold is still granted whole; the overflow is tallied.
+            let (grants, overflow) = crate::entity::tick_item_pickups_with(
                 &mut self.ecs,
                 &mut eligible_players,
                 |item| !matches!(item, crate::item::Item::Plan(_)),
+                true,
             );
             self.pending_item_grants.extend(grants);
+            drop(eligible_players);
+            for (idx, units) in overflow {
+                if let Some(sp) = self.players.get_mut(idx) {
+                    sp.possession.grant_overflow =
+                        sp.possession.grant_overflow.saturating_add(u32::from(units));
+                }
+            }
         }
 
         // Spec 48 (Electricity) — power & logic sim. Runs AFTER entity physics

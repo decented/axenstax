@@ -168,6 +168,34 @@ pub fn may_eat_now(eat_cooldown: u32, joined: bool, eat_in_flight: bool) -> bool
     eat_cooldown == 0 && !(joined && eat_in_flight)
 }
 
+/// What a right-click does when the held item might be a meal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EatClick {
+    /// Take (or, joined, ask for) a bite.
+    Eat,
+    /// Food in hand and the body wants to eat, but a bite isn't due (the
+    /// cooldown, or a joiner's request in flight): the click is swallowed, so
+    /// holding right-click stays a meal and never falls through to place,
+    /// open or sleep. C2b verify M2.
+    Swallow,
+    /// Not a meal: the click goes on to the rest of the chain (planting a
+    /// carrot on a full stomach, a chest, a bed).
+    Pass,
+}
+
+/// Classify a right-click: `is_food` in hand, `wants_to_eat` (hungry, or hurt
+/// where eating heals), the slot's `eat_cooldown` (fixed ticks) and, joined,
+/// whether an `Eat` is in flight.
+pub fn eat_click(is_food: bool, wants_to_eat: bool, eat_cooldown: u32, joined: bool, eat_in_flight: bool) -> EatClick {
+    if !is_food || !wants_to_eat {
+        EatClick::Pass
+    } else if may_eat_now(eat_cooldown, joined, eat_in_flight) {
+        EatClick::Eat
+    } else {
+        EatClick::Swallow
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +392,20 @@ mod tests {
         assert_eq!(c.hunger, 7, "not joined: ignored");
         apply_own_hunger(&mut c, true, 250);
         assert_eq!(c.hunger, c.max_hunger, "clamped to the body's maximum");
+    }
+
+    /// C2b verify M2 — a held click between bites is swallowed, never passed
+    /// on to the place / open / sleep chain; a full stomach or a non-food
+    /// item still passes.
+    #[test]
+    fn a_held_click_between_bites_is_swallowed_not_passed_to_place() {
+        use EatClick::*;
+        assert_eq!(eat_click(true, true, 0, false, false), Eat);
+        assert_eq!(eat_click(true, true, 7, false, false), Swallow, "mid-cooldown: still a meal");
+        assert_eq!(eat_click(true, true, 7, true, false), Swallow);
+        assert_eq!(eat_click(true, true, 0, true, true), Swallow, "a joiner's bite in flight");
+        assert_eq!(eat_click(true, true, 0, false, true), Eat, "a local slot has no server to wait on");
+        assert_eq!(eat_click(true, false, 0, false, false), Pass, "full and unhurt: plant the carrot");
+        assert_eq!(eat_click(false, true, 0, false, false), Pass, "not food");
     }
 }

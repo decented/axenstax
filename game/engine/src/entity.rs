@@ -1032,8 +1032,27 @@ pub fn tick_item_pickups(
     players: &mut [(usize, Vec3, &mut crate::inventory::Inventory)],
     eligible: impl Fn(&crate::item::Item) -> bool,
 ) -> Vec<(usize, crate::item::ItemStack)> {
+    tick_item_pickups_with(ecs, players, eligible, false).0
+}
+
+/// [`tick_item_pickups`] with the server's joiner rule available.
+///
+/// With `grant_unfit` set, a stack the inventory can't wholly hold is still
+/// picked up and granted whole: what fits is added to the inventory and the
+/// rest is returned as `(real_player_index, units)` overflow for the caller to
+/// tally. The server passes it for a joiner, whose inventory is only a SHADOW
+/// of the client's and fills by drift, so a "full" shadow must not leave the
+/// joiner's own items on the floor.
+// BRIDGE: spill the shadow's overflow as a real item once C3d makes the
+// server inventory the truth — replace when C3d lands.
+pub fn tick_item_pickups_with(
+    ecs: &mut hecs::World,
+    players: &mut [(usize, Vec3, &mut crate::inventory::Inventory)],
+    eligible: impl Fn(&crate::item::Item) -> bool,
+    grant_unfit: bool,
+) -> (Vec<(usize, crate::item::ItemStack)>, Vec<(usize, u8)>) {
     if players.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // First pass: collect actions to take. Borrow checker won't let us
@@ -1080,6 +1099,7 @@ pub fn tick_item_pickups(
 
     // Second pass: apply.
     let mut grants: Vec<(usize, crate::item::ItemStack)> = Vec::new();
+    let mut overflow: Vec<(usize, u8)> = Vec::new();
     let mut to_despawn: Vec<hecs::Entity> = Vec::new();
     for action in actions {
         match action {
@@ -1094,6 +1114,13 @@ pub fn tick_item_pickups(
                 match players[slot].2.add_item(stack) {
                     None => {
                         // Whole stack fit — pick it up.
+                        grants.push((real_idx, offered));
+                        to_despawn.push(id);
+                    }
+                    Some(remainder) if grant_unfit => {
+                        // Joiner shadow: grant the whole stack, tally what
+                        // the shadow couldn't hold.
+                        overflow.push((real_idx, remainder.count));
                         grants.push((real_idx, offered));
                         to_despawn.push(id);
                     }
@@ -1118,7 +1145,7 @@ pub fn tick_item_pickups(
     for id in to_despawn {
         let _ = ecs.despawn(id);
     }
-    grants
+    (grants, overflow)
 }
 
 #[cfg(test)]

@@ -1634,6 +1634,13 @@ joiner any more (Spec 04 §4.2c).
   (one bite per 16 frames, 0.27 s at 60 fps; faster the higher the frame
   rate), so a held right-click now eats at 0.8 s intervals regardless of fps
   (owner's test sheet).
+  **A held click stays a meal (C2b-fix):** the block on placing after a bite
+  is counted in the same fixed ticks (0.8 s, true below 20 fps too), and a
+  right-click with food in hand while the body wants to eat but no bite is due
+  (the cooldown, or a joiner's request in flight) is swallowed. It never falls
+  through to planting a carrot, opening a chest or crafting table, or going
+  to bed between bites. With a full stomach food is not a meal, and the click
+  goes on as before.
 - **A joiner sleeps by asking (C2a).** Right-clicking a bed sends an
   `ItemAction::Sleep`. The server checks the bed is real and in reach, that it
   is night by its clock (the rule the single-player bed uses) and that the

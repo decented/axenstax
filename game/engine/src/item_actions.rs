@@ -50,6 +50,14 @@ use crate::world::World;
 /// eats of one joiner. C2a verify M1: the first cut counted the client's in
 /// frames (`place_cooldown`) and the server's in ticks, so an honest joiner
 /// at 60 fps was refused two bites in three.
+///
+/// The block on PLACING after a bite is counted in the same ticks (C2b verify
+/// M2): `PlayerSlot::tick_place_cooldown` keeps `place_cooldown` up while
+/// `eat_cooldown` runs, so it is 0.8 s at 20 ticks a second whatever the
+/// frame rate, below 20 fps included (it was 16 frames: 1.07 s at 15 fps,
+/// 0.27 s at 60). A held right-click with food in hand between bites is
+/// swallowed (`health_sync::eat_click`), never passed on to plant, open or
+/// sleep.
 pub const EAT_COOLDOWN_TICKS: u32 = 16;
 
 /// How many ticks early the server accepts an eat: it takes one once its
@@ -270,7 +278,7 @@ pub fn cell_in_reach(eye: Vec3, cell: [i32; 3]) -> bool {
 /// `PossessionTally`. The shadow is left as it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CraftRefusal {
-    /// The body is dead or not in the world.
+    /// The body is not in the world (a dead one still crafts: C2b verify L4).
     NotNow = 0,
     /// A cell holds something that is not empty, a block or a material.
     BadIngredient = 1,
@@ -303,7 +311,7 @@ impl CraftRefusal {
     /// The reason in the server log's summary line.
     pub fn label(self) -> &'static str {
         match self {
-            CraftRefusal::NotNow => "dead or away",
+            CraftRefusal::NotNow => "not in the world",
             CraftRefusal::BadIngredient => "bad ingredient",
             CraftRefusal::NoRecipe => "no recipe",
             CraftRefusal::NeedsTable => "needs a table",
@@ -356,23 +364,25 @@ fn decode_craft_grid(
     Ok((cells, inputs))
 }
 
-/// May a joiner's craft from `grid` be mirrored? `alive`: in the world and
-/// alive; `table`: the crafting table the client's 3×3 grid was opened from
+/// May a joiner's craft from `grid` be mirrored? `in_world`: the body is in
+/// the world (dead or alive: like a Drop, a Craft from a body that has just
+/// died is a race the honest client lost, since it acted before it heard of
+/// its death — C2b verify L4); `table`: the crafting table the client's 3×3 grid was opened from
 /// (`None` for the 2×2 player grid); `block_at`: the server's world;
-/// `eye`: the server body's eye. In order: alive, every cell empty, a block
+/// `eye`: the server body's eye. In order: in the world, every cell empty, a block
 /// or a material, a recipe (`crafting::match_recipe`, the client's own
 /// matcher), and — when the recipe's trimmed bounding box
 /// (`crafting::grid_bounds`) is bigger than 2×2 — a crafting table at
 /// `table` within block reach ([`cell_in_reach`], the bed's rule).
 pub fn judge_craft(
-    alive: bool,
+    in_world: bool,
     grid: &[(u8, u16); 9],
     table: Option<[i32; 3]>,
     registry: &crate::block::BlockRegistry,
     block_at: impl Fn([i32; 3]) -> BlockId,
     eye: Vec3,
 ) -> Result<CraftPlan, CraftRefusal> {
-    if !alive {
+    if !in_world {
         return Err(CraftRefusal::NotNow);
     }
     let (cells, inputs) = decode_craft_grid(grid, registry)?;
@@ -432,17 +442,24 @@ pub const DROP_BUCKET_CAPACITY: u8 = 2;
 /// [`DROP_BUCKET_CAPACITY`], refilled one per [`DROP_INTERVAL_TICKS`]. A
 /// drop that finds it empty waits in the client's inbound queue (with
 /// everything sent after it) until a token is back; it is never refused or
-/// dropped. Refilled lazily from the server's tick counter.
+/// dropped. Refilled lazily from the server's tick counter, and (C2b verify
+/// M4) in CLIENT time too: while a client's backlog is being replayed, each
+/// `ClientInput` read is one client tick and credits a quarter of a token
+/// ([`DropBucket::credit_client_input`]), so a catch-up after a stall isn't
+/// slowed to real time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropBucket {
     tokens: u8,
     /// The tick the bucket last refilled at (or was last full at).
     since: u64,
+    /// Client-time credit toward the next token, in quarter-tokens (one per
+    /// `ClientInput` read in a catch-up; [`DROP_INTERVAL_TICKS`] make a token).
+    quarters: u8,
 }
 
 impl Default for DropBucket {
     fn default() -> Self {
-        DropBucket { tokens: DROP_BUCKET_CAPACITY, since: 0 }
+        DropBucket { tokens: DROP_BUCKET_CAPACITY, since: 0, quarters: 0 }
     }
 }
 
@@ -455,6 +472,27 @@ impl DropBucket {
             (DROP_BUCKET_CAPACITY, now)
         } else {
             (tokens as u8, self.since + refills * DROP_INTERVAL_TICKS)
+        }
+    }
+
+    /// C2b verify M4 — credit one `ClientInput` read during a catch-up: one
+    /// client tick, `1 / DROP_INTERVAL_TICKS` of a token, counted in whole
+    /// quarters, capacity [`DROP_BUCKET_CAPACITY`] as ever (a full bucket keeps
+    /// no spare quarters). The server-time refill is unchanged and still
+    /// counts; a client that sends only Drops sends no inputs and gets none of
+    /// this.
+    pub fn credit_client_input(&mut self, now: u64) {
+        let (tokens, since) = self.level(now);
+        self.since = since;
+        self.tokens = tokens;
+        if tokens >= DROP_BUCKET_CAPACITY {
+            self.quarters = 0;
+            return;
+        }
+        self.quarters += 1;
+        if u64::from(self.quarters) >= DROP_INTERVAL_TICKS {
+            self.quarters = 0;
+            self.tokens += 1;
         }
     }
 
@@ -481,6 +519,15 @@ impl DropBucket {
 /// May this server player act at all: a joiner's body, in the world, alive.
 fn can_act(sp: &ServerPlayer) -> bool {
     sp.server_simulated && sp.is_present_and_alive()
+}
+
+/// May this server player's craft or drop be mirrored: a joiner's body in the
+/// world, DEAD OR ALIVE. The client acted before it heard of its death, and
+/// the server has no reason to refuse what the shadow should have followed
+/// (C2b verify L4: a Craft was refused `NotNow` while a Drop from the same
+/// body spawned).
+fn can_mirror(sp: &ServerPlayer) -> bool {
+    sp.server_simulated && sp.is_in_world()
 }
 
 /// The server's `Eat` for joiner `sp`, claiming `held`: judged, and if
@@ -533,7 +580,7 @@ pub fn serve_craft(
     table: Option<[i32; 3]>,
 ) -> Result<CraftApplied, CraftRefusal> {
     let plan = judge_craft(
-        can_act(sp),
+        can_mirror(sp),
         grid,
         table,
         registry,
@@ -564,7 +611,7 @@ pub struct DropServed {
 /// form). A dead body still drops: the client took the item from its hand
 /// before it heard of the death, and the item is not lost.
 pub fn serve_drop(sp: &mut ServerPlayer, hotbar_slot: usize, held: Option<Item>) -> Option<DropServed> {
-    if !(sp.server_simulated && sp.is_in_world()) {
+    if !can_mirror(sp) {
         return None;
     }
     let held = held.filter(|item| !matches!(item, Item::Plan(_)))?;
@@ -814,8 +861,27 @@ mod tests {
         assert!(judge(&corner, None, block::AIR).is_ok());
     }
 
+    /// C2b verify L4 — a craft from a body that has just died is mirrored
+    /// (as a drop from it is): the client crafted before it heard. One not in
+    /// the world is still refused.
     #[test]
-    fn a_craft_is_refused_dead_with_a_bad_ingredient_or_no_recipe() {
+    fn a_dead_body_still_crafts_but_one_not_in_the_world_does_not() {
+        let reg = crate::block::BlockRegistry::new();
+        let world = World::new();
+        let mut sp = ServerPlayer::new(Vec3::new(3.5, 70.0, 3.5));
+        sp.server_simulated = true;
+        sp.connected = true;
+        sp.awaiting_join = false;
+        sp.inventory.set_slot(0, Some(ItemStack::new_block(block::OAK_PLANKS, 4)));
+        sp.combat.dead = true;
+        let applied = serve_craft(&mut sp, &world, &reg, &table_grid(), None).expect("a dead body still crafts");
+        assert!(applied.output.is_some());
+        sp.awaiting_join = true;
+        assert_eq!(serve_craft(&mut sp, &world, &reg, &table_grid(), None).unwrap_err(), CraftRefusal::NotNow);
+    }
+
+    #[test]
+    fn a_craft_is_refused_away_with_a_bad_ingredient_or_no_recipe() {
         let reg = crate::block::BlockRegistry::new();
         assert_eq!(
             judge_craft(false, &table_grid(), None, &reg, |_| block::AIR, EYE),
@@ -920,6 +986,34 @@ mod tests {
         b.take(0);
         assert!(b.take(6), "one back at +4");
         assert!(b.take(8), "and the next at +8");
+    }
+
+    /// C2b verify M4 — client-time credit: four inputs in a catch-up are one
+    /// token, capacity holds, and nothing but inputs earns it.
+    #[test]
+    fn client_inputs_credit_the_bucket_a_quarter_token_each() {
+        let mut b = DropBucket::default();
+        assert!(b.take(0) && b.take(0));
+        assert!(!b.ready(0), "empty");
+        for _ in 0..3 {
+            b.credit_client_input(0);
+        }
+        assert!(!b.ready(0), "three quarters is not a token");
+        b.credit_client_input(0);
+        assert!(b.take(0), "four inputs, one token");
+        assert!(!b.take(0));
+        // Capacity holds, and a full bucket keeps no spare quarters.
+        let mut full = DropBucket::default();
+        for _ in 0..100 {
+            full.credit_client_input(0);
+        }
+        assert!(full.take(0) && full.take(0) && !full.take(0), "still capacity 2");
+        for _ in 0..3 {
+            full.credit_client_input(0);
+        }
+        assert!(!full.ready(0), "no hoarded quarters from the time it was full");
+        // Server time still refills beside it.
+        assert!(full.ready(DROP_INTERVAL_TICKS));
     }
 
     #[test]

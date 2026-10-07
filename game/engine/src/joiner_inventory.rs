@@ -221,6 +221,10 @@ pub struct PossessionTally {
     pub craft_overflow: u32,
     /// C2b — Q-drops spawned as ground items.
     pub drops: u32,
+    /// C2b-fix — units a grant (a break's yield, an interaction's product, a
+    /// server pickup) gave the client that the shadow had no room for. Counted,
+    /// never spilled: the client holds them.
+    pub grant_overflow: u32,
     /// Mismatches since the last warning.
     suppressed: u32,
     /// When the last warning went out.
@@ -259,7 +263,7 @@ impl PossessionTally {
     /// was counted.
     pub fn summary(&self, label: &str) -> Option<String> {
         let refused = self.crafts_refused_total();
-        let c2b = [self.crafts, refused, self.craft_overflow, self.drops];
+        let c2b = [self.crafts, refused, self.craft_overflow, self.drops, self.grant_overflow];
         if [self.breaks, self.matched, self.mismatched, self.unchecked].iter().chain(&c2b).all(|&n| n == 0) {
             return None;
         }
@@ -277,8 +281,8 @@ impl PossessionTally {
             let reasons = if reasons.is_empty() { String::new() } else { format!(" ({})", reasons.join(", ")) };
             line.push_str(&format!(
                 "; {} craft(s) mirrored, {refused} refused{reasons}, {} crafted item(s) didn't fit; \
-                 {} Q-drop(s) spawned",
-                self.crafts, self.craft_overflow, self.drops
+                 {} Q-drop(s) spawned, {} granted unit(s) didn't fit",
+                self.crafts, self.craft_overflow, self.drops, self.grant_overflow
             ));
         }
         Some(line)
@@ -408,11 +412,13 @@ mod tests {
         t.note_craft_refused(CraftRefusal::NoRecipe);
         t.craft_overflow = 1;
         t.drops = 5;
+        t.grant_overflow = 7;
         assert_eq!(t.crafts_refused_total(), 3);
         let line = t.summary("Crafter").unwrap();
         assert!(line.contains("3 craft(s) mirrored, 3 refused (1 no recipe, 2 needs a table)"), "{line}");
         assert!(line.contains("1 crafted item(s) didn't fit"), "{line}");
         assert!(line.contains("5 Q-drop(s) spawned"), "{line}");
+        assert!(line.contains("7 granted unit(s) didn't fit"), "{line}");
     }
 
     /// Review LOW-6 — the shadow starts empty, so a building joiner

@@ -308,6 +308,15 @@ fn waits_for_kind_budget(
     }
 }
 
+/// C2b verify M4 — is `packet` an `ItemAction::Drop`?
+fn is_drop_action(packet: &[u8]) -> bool {
+    matches!(
+        protocol::deserialize_header(packet),
+        Some((protocol::PacketType::ItemAction, payload))
+            if protocol::peek_item_action_variant(payload) == Some(protocol::item_action_variant::DROP)
+    )
+}
+
 /// FU4a (FU3 verify L1) — a request about the world as the client's own
 /// edits left it, so it waits behind those still waiting: `EntityAttack`,
 /// `EntityInteract`, `DeviceInteract`, `ItemAction`. (`Respawn` and
@@ -2656,7 +2665,28 @@ impl HostedServer {
             let mut budget = EditTickBudget::default();
             // FU3 — the edits that waited past last tick's budget go first.
             self.process_waiting_edits(i, &mut budget);
+            // C2b verify M4 — whether this client is replaying a backlog
+            // (more than one ordinary tick's reading waiting after the fill):
+            // each `ClientInput` it reads then credits the joiner's drop
+            // bucket in client time. An honest client in step never has that
+            // many waiting. (Not tied to the catch-up read budget: the tail of
+            // a drain is below that budget's threshold and would otherwise
+            // fall back to server-time pacing.)
+            let catching_up = self.inbound[i].len() > MAX_PACKETS_PER_TICK;
+            // C2b verify M4 — a transport that is closed now (read after the
+            // fill, which has taken every frame it handed over before it closed).
+            let closed_now = closed_before_fill.get(i).copied().unwrap_or(false) || self.transports[i].is_closed();
             loop {
+                // C2b verify M4 — a connection that has closed gets none of
+                // its queued Drops spawned: they are discarded (at no read
+                // budget) so the queue empties and `reap_slots` can free the
+                // slot, rather than the leaver's backlog dribbling out one
+                // item per bucket token for hours.
+                if closed_now && self.inbound[i].front().is_some_and(|p| is_drop_action(p))
+                {
+                    let _ = self.inbound[i].pop();
+                    continue;
+                }
                 // FU1 — defer, don't drop: once the budget is spent, the rest
                 // waits for the next tick, in arrival order. Control packets
                 // (MP-A3: `Respawn`, `Disconnect`) cost no budget, so one at
@@ -3065,6 +3095,11 @@ impl HostedServer {
                         else {
                             continue;
                         };
+                        // C2b verify M4 — in a catch-up, one input is one
+                        // client tick of drop-bucket credit.
+                        if catching_up && let Some(sp) = self.server.players.get_mut(i) {
+                            sp.drop_bucket.credit_client_input(now);
+                        }
                         // B2a — the chunk push's credit window, the columns the
                         // client let go of and its render distance. Cumulative /
                         // as-of / idempotent, so a stale or repeated packet can't
@@ -3717,40 +3752,28 @@ impl HostedServer {
 
     /// C1 — what the server gives joiner `i` (a break's yield, an
     /// interaction's products): into its shadow of the joiner's inventory, and
-    /// to the joiner by `InventoryGrant`. C2b — what doesn't fit the shadow
-    /// spills at the server body's feet as a real ground item
-    /// (`break_drops::spill_at_feet`, the shared spill), which the joiner's
-    /// body picks up once the shadow has room; the `InventoryGrant` carries
-    /// only what landed in the shadow. (The client's own spill when ITS
-    /// inventory is full — `remote_entities::apply_inventory_grant` — is a
-    /// late delivery of an item the shadow already holds, not a duplicate.)
-    /// Plans have no wire form and are never granted.
+    /// to the joiner by `InventoryGrant`. C2b-fix (verify M1) — the client is
+    /// always sent the WHOLE stack, whatever fits the shadow: the shadow fills
+    /// by drift in ordinary play (container deposits, worn-out tools, armour
+    /// put on, consumes), so a "full" shadow must not cost the joiner an item.
+    /// What the shadow can't hold is tallied as `grant_overflow`, never
+    /// spilled. (The client's own spill when ITS inventory is full —
+    /// `remote_entities::apply_inventory_grant` — is the client's, not a
+    /// duplicate.) Plans have no wire form and are never granted.
+    // BRIDGE: spill the shadow's overflow as a real item once C3d makes the
+    // server inventory the truth — replace when C3d lands.
     pub(crate) fn grant_to_joiner(&mut self, i: usize, stacks: impl IntoIterator<Item = crate::item::ItemStack>) {
-        let tick = self.server.tick_counter;
         let Some(sp) = self.server.players.get_mut(i) else { return };
         let mut grants: Vec<(usize, crate::item::ItemStack)> = Vec::new();
-        let mut spill: Vec<crate::item::ItemStack> = Vec::new();
         for stack in stacks {
             if stack.count == 0 || matches!(stack.item, crate::item::Item::Plan(_)) {
                 continue;
             }
-            let landed = match sp.inventory.add_item(stack.clone()) {
-                None => stack.count,
-                Some(rest) => {
-                    let landed = stack.count.saturating_sub(rest.count);
-                    spill.push(rest);
-                    landed
-                }
-            };
-            if landed > 0 {
-                grants.push((i, crate::item::ItemStack { item: stack.item, count: landed }));
+            if let Some(rest) = sp.inventory.add_item(stack.clone()) {
+                sp.possession.grant_overflow =
+                    sp.possession.grant_overflow.saturating_add(u32::from(rest.count));
             }
-        }
-        if !spill.is_empty() {
-            let feet = sp.player.pos;
-            let cell = feet.floor().as_ivec3();
-            let seed = crate::break_drops::drop_seed(tick, cell.x, cell.y, cell.z);
-            crate::break_drops::spill_at_feet(&mut self.server.ecs, feet, &spill, seed);
+            grants.push((i, stack));
         }
         for (slot, pkt) in build_grant_packets(&grants) {
             self.send_to_joined_slot(slot, &pkt);

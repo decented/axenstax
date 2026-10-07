@@ -269,10 +269,12 @@ pub fn uses(kind: Asked) -> u8 {
 }
 
 /// Is `a` the item `b` was, for an outcome's purposes? A tool is the same
-/// tool by type and material (its durability is what wears).
+/// tool by type and material, and an armour piece by slot and material
+/// (durability is what wears; the shadow's copy never does — C2b verify L6).
 fn same_item(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::Tool(a), Item::Tool(b)) => a.tool_type == b.tool_type && a.material == b.material,
+        (Item::Armour(a), Item::Armour(b)) => a.slot == b.slot && a.material == b.material,
         (a, b) => a == b,
     }
 }
@@ -441,6 +443,23 @@ mod tests {
 
     fn sword() -> Item {
         Item::Tool(Tool::new(ToolType::Sword, ToolMaterial::Iron))
+    }
+
+    /// C2b verify L6 — a worn armour piece pays from the unworn shadow copy.
+    #[test]
+    fn a_worn_armour_piece_is_paid_from_the_unworn_shadow_copy() {
+        use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};
+        let fresh = ArmourItem::new(ArmourSlot::Helmet, ArmourMaterial::Iron);
+        let mut worn = fresh;
+        worn.durability = worn.durability.saturating_sub(9);
+        assert_ne!(fresh, worn);
+        let mut inv = inv_with(3, ItemStack { item: Item::Armour(fresh), count: 1 });
+        assert_eq!(take_owed(&mut inv, 0, &Item::Armour(worn), 1), 1, "the worn piece pays from the unworn copy");
+        assert!(inv.slot(3).is_none());
+        // A different slot or material is a different piece.
+        let mut inv = inv_with(3, ItemStack { item: Item::Armour(fresh), count: 1 });
+        let boots = ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron);
+        assert_eq!(take_owed(&mut inv, 0, &Item::Armour(boots), 1), 0);
     }
 
     fn durability(inv: &Inventory, slot: usize) -> u32 {
@@ -773,6 +792,25 @@ mod tests {
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
         assert!(inv.slot(20).is_none());
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(1));
+    }
+
+    /// C2b verify L7 — an `Eat` owed is paid from the crafting grid, the same
+    /// function as the cursor case: the bread was dragged into the grid while
+    /// the request flew.
+    #[test]
+    fn an_eat_owed_is_paid_from_the_grid() {
+        let bread = Item::Material(MaterialId::Bread);
+        let mut inv = Inventory::new();
+        let mut ui = CraftingUi::new();
+        ui.open_player_crafting();
+        ui.grid[0][1] = Some(ItemStack::new_material(MaterialId::Bread, 2));
+        let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
+        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0 };
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
+        assert_eq!(ui.grid[0][1].as_ref().map(|s| s.count), Some(1), "one bite taken from the grid cell");
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
+        assert!(ui.grid[0][1].is_none());
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 0, "then nothing");
     }
 
     /// Decision 5 — paying from the grid recomputes the result shown.

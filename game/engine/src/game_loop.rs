@@ -13383,15 +13383,22 @@ impl super::GameState {
                 // M1), and a joiner has one request in flight at a time: it
                 // asks again only once the last was answered or the server
                 // passed it by (`JoinerActions::eat_in_flight`).
-                let can_eat = is_food
-                    && crate::health_sync::may_eat_now(
-                        self.players[pidx].eat_cooldown,
-                        self.joined(),
-                        self.joiner_actions.eat_in_flight(),
-                    )
-                    && (self.players[pidx].combat.hunger < self.players[pidx].combat.max_hunger
-                        || self.players[pidx].combat.health < self.players[pidx].combat.max_health);
-                if can_eat && self.joined() {
+                let wants_to_eat = self.players[pidx].combat.hunger < self.players[pidx].combat.max_hunger
+                    || self.players[pidx].combat.health < self.players[pidx].combat.max_health;
+                let click = crate::health_sync::eat_click(
+                    is_food,
+                    wants_to_eat,
+                    self.players[pidx].eat_cooldown,
+                    self.joined(),
+                    self.joiner_actions.eat_in_flight(),
+                );
+                let can_eat = click == crate::health_sync::EatClick::Eat;
+                if click == crate::health_sync::EatClick::Swallow {
+                    // C2b verify M2: a held right-click with food, between
+                    // bites, is still a meal — it must not fall through to
+                    // planting, opening a chest or a table, or sleeping.
+                    ate = true;
+                } else if can_eat && self.joined() {
                     // C2a — a joiner's hunger is the server's: ask it. Nothing
                     // is eaten, fed or healed here; an accepted outcome takes
                     // the food (`apply_item_action_outcome`) and the server's
