@@ -4225,19 +4225,22 @@ impl super::GameState {
     /// MP-D2b — the player bodies the host client's species AI, pet follow
     /// and Leads see, indexed by player slot: this client's players first
     /// (their slots ARE their server slots on a lending host), then — on a
-    /// lending host — every further server slot: a present, living joiner's
-    /// body, or `species_ai::ABSENT_PLAYER`. With each slot's look yaw, and
-    /// the pet-owner key (verified npub) → slot of every joiner that has one.
+    /// lending host — every further server slot: the body of a joiner in the
+    /// world (dead or alive, as a dead local player's stays listed), or
+    /// `species_ai::ABSENT_PLAYER` for a slot whose joiner has left or not
+    /// finished joining. With each slot's look yaw, and the pet-owner key
+    /// (verified npub) → slot of every joiner in the world that has one (a
+    /// departed joiner's pets have no owner here to walk to).
     fn species_bodies(&self) -> (Vec<glam::Vec3>, Vec<f32>, Vec<(String, usize)>) {
         let mut bodies: Vec<glam::Vec3> = self.players.iter().map(|s| s.player.pos).collect();
         let mut yaws: Vec<f32> = self.players.iter().map(|s| s.camera.yaw).collect();
         let mut owners = Vec::new();
         if let Some(hs) = self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
             for (slot, sp) in hs.server.players.iter().enumerate().skip(self.players.len()) {
-                let here = sp.server_simulated && sp.is_present_and_alive();
+                let here = sp.server_simulated && sp.is_in_world();
                 bodies.push(if here { sp.player.pos } else { crate::species_ai::ABSENT_PLAYER });
                 yaws.push(sp.yaw);
-                if sp.server_simulated
+                if here
                     && let Some(key) = sp.pet_owner_key()
                 {
                     owners.push((key, slot));

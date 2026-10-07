@@ -206,9 +206,12 @@ impl<'a> OwnerBodies<'a> {
         })
     }
 
-    /// Where the owner keyed `owner_key` stands, if present.
+    /// Where the owner keyed `owner_key` stands, if present (a slot holding
+    /// `species_ai::ABSENT_PLAYER` has nobody in it).
     pub fn position_of(&self, owner_key: &str) -> Option<glam::Vec3> {
-        self.slot_of(owner_key).and_then(|s| self.positions.get(s).copied())
+        self.slot_of(owner_key)
+            .and_then(|s| self.positions.get(s).copied())
+            .filter(|p| *p != crate::species_ai::ABSENT_PLAYER)
     }
 }
 

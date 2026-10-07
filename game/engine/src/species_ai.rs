@@ -102,6 +102,7 @@ fn attacker_or_nearest_player(
 ) -> Option<(f32, f32, f32)> {
     player_positions
         .get(attacker_pidx)
+        .filter(|p| **p != ABSENT_PLAYER)
         .map(|p| (p.x, p.y, p.z))
         .or_else(|| nearest_player(pos, player_positions))
 }
@@ -540,7 +541,7 @@ pub fn dispatch_companions(
     }
     for (id, pos, kind, owner, state) in pets {
         let owner_slot = owners.slot_of(&owner);
-        let owner_pos = owner_slot.and_then(|slot| player_positions.get(slot).copied());
+        let owner_pos = owners.position_of(&owner);
         match state {
             CompanionState::Stay => {
                 if let Ok(mut v) = ecs.get::<&mut Velocity>(id) {
@@ -1357,13 +1358,42 @@ mod tests {
 
     /// MP-D2b — a slot with no body (`ABSENT_PLAYER`) is never anyone's
     /// nearest target, even for an AI that measures horizontal distance only
-    /// and stands at the world's origin.
+    /// and stands at the world's origin; a Bear or Hyena whose attacker has
+    /// left falls back to the nearest body instead of charging off after it.
     #[test]
     fn an_absent_slot_is_never_the_nearest_target() {
         let at_origin = Vec3::new(0.0, 64.0, 0.0);
         let bodies = [ABSENT_PLAYER, Vec3::new(30.0, 64.0, 30.0)];
         assert_eq!(nearest_player_indexed(at_origin, &bodies).map(|t| t.0), Some(1));
         assert_eq!(nearest_player(at_origin, &bodies), Some((30.0, 64.0, 30.0)));
+        assert_eq!(attacker_or_nearest_player(at_origin, &bodies, 0), Some((30.0, 64.0, 30.0)));
+    }
+
+    /// MP-D2b — a pet whose joiner owner has left (its slot holds
+    /// `ABSENT_PLAYER`) has no owner to walk to: it is not dragged off.
+    #[test]
+    fn a_departed_joiners_pet_is_not_dragged_after_the_absent_slot() {
+        use crate::companion::CompanionData;
+        let mut ecs = hecs::World::new();
+        let mut owned = CompanionData::untamed();
+        owned.ownership.owner_pubkey = "npub1gone".to_string();
+        let cat = ecs.spawn((
+            Position(Vec3::new(0.0, 64.0, 0.0)),
+            Velocity(Vec3::ZERO),
+            MobKind(MobType::Cat),
+            MobAi::new(),
+            owned,
+        ));
+        let bodies = [Vec3::new(-10.0, 64.0, 0.0), ABSENT_PLAYER];
+        let owners = crate::tameable::OwnerBodies {
+            positions: &bodies,
+            remote_owners: &[("npub1gone".to_string(), 1)],
+        };
+        assert_eq!(owners.position_of("npub1gone"), None);
+        dispatch_companions(&mut ecs, &bodies, &[0.0, 0.0], 5, &[("npub1gone".to_string(), 1)]);
+        let v = ecs.get::<&Velocity>(cat).unwrap().0;
+        assert!(v.x <= 0.0 && v.x.abs() < 1.0, "no pull toward the absent slot, got vx={}", v.x);
+        assert!(v.z.abs() < 1.0);
     }
 
     #[test]
