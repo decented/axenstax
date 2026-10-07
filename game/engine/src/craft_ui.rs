@@ -165,14 +165,11 @@ impl CraftingUi {
         click: &WindowClick,
         creative: bool,
     ) -> ClickResult {
-        let ctx = ClickCtx { creative, station: self.station(), craft: self.result.clone() };
+        let ctx = ClickCtx { creative, station: self.station() };
         let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
         let out = window::apply(&mut view, click, &ctx);
-        // A close that couldn't return everything has always left the
-        // result as it was.
-        if *click != WindowClick::Close {
-            self.update_result();
-        }
+        // L2 — after every click, a refused close's half-emptied grid too.
+        self.update_result();
         out
     }
 
@@ -1608,11 +1605,15 @@ mod tests {
         // while the cursor holds the SAME item must merge onto the cursor up to
         // max_stack. The old code routed the result to the inventory and left the
         // cursor unchanged (and on a partial inventory fit it duplicated the result
-        // onto the cursor). 60 + 8 → cursor fills to 64.
+        // onto the cursor). 60 + 4 (a log's planks) → cursor fills to 64.
+        // (L2, 2026-10-07: the click crafts what the grid matches, so the
+        // log is in the grid rather than a bare `ui.result`.)
         let mut ui = CraftingUi::new();
         let mut inv = Inventory::new();
         ui.cursor_item = Some(ItemStack::new_block(crate::block::OAK_PLANKS, 60));
-        ui.result = Some(ItemStack::new_block(crate::block::OAK_PLANKS, 8));
+        ui.grid[0][0] = Some(ItemStack::new_block(crate::block::OAK_LOG, 1));
+        ui.update_result();
+        assert_eq!(ui.result.as_ref().map(|s| s.count), Some(4), "a log makes four planks");
         ui.click_result(&mut inv);
         assert_eq!(
             ui.cursor_item.as_ref().unwrap().count,
@@ -1633,8 +1634,9 @@ mod tests {
             let _ = inv.add_item(ItemStack::new_block(crate::block::STONE, 64)); // fill every slot
         }
         ui.cursor_item = Some(ItemStack::new_block(crate::block::STONE, 10));
-        ui.result = Some(ItemStack::new_block(crate::block::OAK_PLANKS, 64));
-        ui.click_result(&mut inv);
+        ui.grid[0][0] = Some(ItemStack::new_block(crate::block::OAK_LOG, 1));
+        ui.update_result();
+        assert!(!ui.click_result(&mut inv), "nowhere for the planks to go");
         let cursor = ui.cursor_item.as_ref().expect("cursor must be preserved");
         assert!(
             matches!(cursor.item, Item::Block(b) if b == crate::block::STONE) && cursor.count == 10,
@@ -1928,6 +1930,28 @@ mod tests {
         assert!(ui.open, "UI stays open so the items aren't stranded");
         assert_eq!(ui.grid[0][0].as_ref().map(|s| s.count), Some(5), "grid item preserved");
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(3), "cursor item preserved");
+    }
+
+    #[test]
+    fn a_refused_close_refreshes_the_result_shown() {
+        // L2: room for one plank only. The close returns one cell, stays
+        // open, and the result shown is the three planks' (not a table).
+        let mut ui = CraftingUi::new();
+        ui.open = true;
+        let mut inv = Inventory::new();
+        for i in 1..36 {
+            inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
+        }
+        inv.set_slot(0, Some(ItemStack::new_block(block::OAK_PLANKS, 63)));
+        for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            ui.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
+        }
+        ui.update_result();
+        let table = ui.result.clone().expect("four planks make a table");
+        assert!(!ui.close(&mut inv));
+        assert!(ui.open);
+        assert_ne!(ui.result, Some(table), "the stale table is gone");
+        assert_eq!(ui.result, window::recipe_output(&ui.grid, ui.station()));
     }
 
     #[test]

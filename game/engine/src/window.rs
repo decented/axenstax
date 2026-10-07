@@ -71,13 +71,9 @@ pub struct ClickCtx {
     /// The player is in creative mode. No rule differs in creative yet.
     #[allow(dead_code)] // carried for C3a-2/C3b, whose server rules may need it.
     pub creative: bool,
-    /// The grid on screen (bounds a [`WindowClick::Grid`] click).
+    /// The grid on screen: bounds a [`WindowClick::Grid`] click, and is what
+    /// the result click's [`recipe_output`] matches against.
     pub station: Station,
-    /// What one craft from the grid gives, as the caller judged it. The client
-    /// passes its matcher's answer (`CraftingUi.result`, from
-    /// [`recipe_output`]); the server will pass `item_actions::judge_craft`'s.
-    /// `None`: the grid crafts nothing, so [`WindowClick::Result`] is refused.
-    pub craft: Option<ItemStack>,
 }
 
 /// A slot a drag gesture paints over.
@@ -104,7 +100,8 @@ pub enum WindowClick {
     /// or equip the cursor's piece if it is for this slot (swapping). Anything
     /// else on the cursor is refused and stays put.
     Armour { slot: usize },
-    /// Click the craft result: one craft lands on the cursor (merged when it
+    /// Click the craft result: one craft of what the grid matches now
+    /// ([`recipe_output`]) lands on the cursor (merged when it
     /// stacks; any overflow, or the whole output under a different cursor
     /// item, must fit the inventory), then one is taken from every non-empty
     /// grid cell. Refused, consuming nothing, when it can't land.
@@ -220,7 +217,7 @@ pub fn apply(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx) -> Click
         WindowClick::Slot { slot, right } => click_slot(view, *slot, *right),
         WindowClick::Grid { row, col, right } => click_grid(view, *row, *col, *right, ctx.station),
         WindowClick::Armour { slot } => click_armour(view, *slot),
-        WindowClick::Result => click_result(view, ctx.craft.as_ref()),
+        WindowClick::Result => click_result(view, ctx.station),
         WindowClick::Trash => match view.cursor.take() {
             Some(stack) => ClickResult::Binned(stack),
             None => ClickResult::Refused,
@@ -506,9 +503,13 @@ fn click_armour(view: &mut WindowMut, armour_slot_idx: usize) -> ClickResult {
     }
 }
 
-/// [`WindowClick::Result`]: one craft of `craft` (the caller's judgement).
-fn click_result(view: &mut WindowMut, craft: Option<&ItemStack>) -> ClickResult {
-    let Some(result) = craft.cloned() else {
+/// [`WindowClick::Result`]: one craft of what the grid makes NOW.
+///
+/// L2 (C2b verify): re-matched from the grid at the click, never a cached
+/// result, so a grid a refused close half-emptied can't craft what it used
+/// to hold.
+fn click_result(view: &mut WindowMut, station: Station) -> ClickResult {
+    let Some(result) = recipe_output(view.grid, station) else {
         return ClickResult::Refused;
     };
     // Plan where the result lands BEFORE consuming anything (audit
@@ -744,19 +745,8 @@ mod tests {
             Win { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() }
         }
 
-        /// Apply `click` at `station`, the grid's craft judged by the matcher
-        /// (as the client does).
+        /// Apply `click` at `station`.
         fn at(&mut self, station: Station, click: WindowClick) -> ClickResult {
-            let craft = recipe_output(&self.grid, station);
-            self.judged(station, craft, click)
-        }
-
-        fn click(&mut self, click: WindowClick) -> ClickResult {
-            self.at(Station::Table, click)
-        }
-
-        /// Apply `click` with an explicit craft judgement.
-        fn judged(&mut self, station: Station, craft: Option<ItemStack>, click: WindowClick) -> ClickResult {
             let mut view = WindowMut {
                 inv: &mut self.inv,
                 armour: &mut self.armour,
@@ -764,7 +754,11 @@ mod tests {
                 grid: &mut self.grid,
                 container: None,
             };
-            apply(&mut view, &click, &ClickCtx { creative: false, station, craft })
+            apply(&mut view, &click, &ClickCtx { creative: false, station })
+        }
+
+        fn click(&mut self, click: WindowClick) -> ClickResult {
+            self.at(Station::Table, click)
         }
 
         fn cursor_count(&self) -> Option<u8> {
@@ -1094,22 +1088,32 @@ mod tests {
     }
 
     #[test]
-    fn result_with_nothing_judged_is_refused() {
+    fn result_of_a_grid_with_no_recipe_is_refused() {
         let mut w = Win::new();
-        w.grid[0][0] = Some(stone(1));
-        assert_eq!(w.judged(Station::Table, None, WindowClick::Result), ClickResult::Refused);
+        w.grid[0][0] = Some(dirt(1));
+        w.grid[2][2] = Some(stone(1));
+        assert_eq!(recipe_output(&w.grid, Station::Table), None, "dirt and stone in opposite corners make nothing");
+        assert_eq!(w.click(WindowClick::Result), ClickResult::Refused);
         assert_eq!(w.cell_count(0, 0), Some(1));
+        assert_eq!(w.cell_count(2, 2), Some(1));
     }
 
     #[test]
-    fn result_gives_what_the_caller_judged() {
-        // The craft is the caller's judgement (the client's cached matcher
-        // answer, later the server's judge_craft), not re-derived here.
+    fn a_refused_close_leaves_a_grid_that_crafts_only_what_it_now_holds() {
+        // L2: four planks, room for just one more plank. The close returns
+        // one cell and is refused; the three planks left craft no table.
         let mut w = Win::new();
-        w.cursor = Some(ItemStack::new_block(block::OAK_PLANKS, 60));
-        let given = ItemStack::new_block(block::OAK_PLANKS, 8);
-        assert_eq!(w.judged(Station::Table, Some(given.clone()), WindowClick::Result), ClickResult::Crafted(given));
-        assert_eq!(w.cursor_count(), Some(64));
+        w.fill_with_pickaxes();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::OAK_PLANKS, 63)));
+        for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
+        }
+        let table = recipe_output(&w.grid, Station::Player).expect("four planks make a table");
+        assert_eq!(w.at(Station::Player, WindowClick::Close), ClickResult::Refused);
+        assert_eq!(w.grid.iter().flatten().flatten().count(), 3, "one plank went back");
+        assert_eq!(w.total(block::OAK_PLANKS), 67, "no plank made or lost");
+        assert_ne!(recipe_output(&w.grid, Station::Player), Some(table.clone()));
+        assert_ne!(w.at(Station::Player, WindowClick::Result), ClickResult::Crafted(table));
     }
 
     // ── Trash ───────────────────────────────────────────────────────────
