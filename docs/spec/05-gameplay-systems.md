@@ -673,6 +673,7 @@ This means **crafting-grid cells can hold more than one item** — fill the grid
 **C2b-verify fixes in the window rules (2026-10-07)** — the server will run them too:
 
 - **The 2×2 stays 2×2 (M3).** At the player's grid an item in row or column 2 crafts nothing (`window::recipe_output`), and "Fill from bag" refuses a recipe bigger than 2×2 with the toast "Needs a crafting table" before anything moves (`ClickResult::NeedsTable`); a smaller one is laid in the 2×2's corner. Fill from bag used to lay a 3×3 recipe into the 2×2's hidden cells, so a player crafted a table recipe with no table.
+- **A non-ingredient blocks a craft (L1).** A tool, armour piece or Plan anywhere in the grid makes the result empty. The matcher used to read it as an empty cell, and the craft destroyed it with the ingredients.
 
 All drag-and-drop actions generate `InventoryAction` events that are sent to the server. The client applies them optimistically. The server validates (e.g., cannot place a helmet in the boot slot; cannot exceed max stack size) and either confirms or reverts.
 

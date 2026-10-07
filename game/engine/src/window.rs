@@ -163,6 +163,11 @@ impl ClickResult {
 /// M3 (C2b verify): an item in a cell the station's grid doesn't have (row
 /// or column 2 of the player's 2×2) crafts nothing, so no path crafts a
 /// table recipe without a table.
+///
+/// L1 (C2b verify): a tool, armour piece or Plan anywhere in the grid
+/// crafts nothing. The matcher reads them as empty cells, and the result
+/// click takes one from every non-empty cell, so a craft used to destroy
+/// one left in the grid.
 pub fn recipe_output(grid: &CraftGrid, station: Station) -> Option<ItemStack> {
     let size = station.grid_size();
     let mut cells = [[CraftSlot::Empty; 3]; 3];
@@ -172,7 +177,13 @@ pub fn recipe_output(grid: &CraftGrid, station: Station) -> Option<ItemStack> {
             if r >= size || c >= size {
                 return None;
             }
-            cells[r][c] = CraftSlot::from_item(&stack.item);
+            let slot = CraftSlot::from_item(&stack.item);
+            if slot == CraftSlot::Empty {
+                // L1 — a non-ingredient blocks the craft (it would be
+                // consumed with the rest).
+                return None;
+            }
+            cells[r][c] = slot;
         }
     }
     crafting::match_recipe(&cells)
@@ -1323,6 +1334,24 @@ mod tests {
         assert_eq!(recipe_output(&w.grid, Station::Player), None);
         assert_eq!(w.at(Station::Player, WindowClick::Result), ClickResult::Refused);
         assert_eq!(w.total(block::OAK_PLANKS), 4, "nothing consumed");
+    }
+
+    #[test]
+    fn a_tool_or_armour_in_the_grid_blocks_the_craft_and_survives() {
+        let pickaxe = ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron));
+        let helmet = ItemStack { item: Item::Armour(piece(ArmourSlot::Helmet)), count: 1 };
+        for odd in [pickaxe, helmet] {
+            let mut w = Win::new();
+            for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
+            }
+            assert!(recipe_output(&w.grid, Station::Table).is_some(), "four planks alone craft");
+            w.grid[2][2] = Some(odd.clone());
+            assert_eq!(recipe_output(&w.grid, Station::Table), None, "{odd:?} blocks the craft");
+            assert_eq!(w.click(WindowClick::Result), ClickResult::Refused);
+            assert_eq!(w.grid[2][2], Some(odd), "never destroyed");
+            assert_eq!(w.total(block::OAK_PLANKS), 4);
+        }
     }
 
     // ── Close ───────────────────────────────────────────────────────────
