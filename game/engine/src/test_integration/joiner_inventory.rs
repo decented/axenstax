@@ -328,6 +328,56 @@ fn a_joiners_satori_is_rolled_on_the_lending_hosts_secret_and_exposure_map() {
     satori_on_the_worlds_secret(Rig::lent("satori-lent"));
 }
 
+/// Review MEDIUM-1 — every block a joiner puts into a cell is player-placed,
+/// whatever the server classifies the edit as. Only a `Place` used to be
+/// flagged, so a modified client could refill a cell that just yielded a
+/// Satori by another accepted path and mine it again: the roll is
+/// deterministic per cell and its exposure entry stands, so it paid every
+/// time. Each fill path below leaves the cell player-placed, and the re-mine
+/// yields no second Satori.
+#[test]
+fn a_refilled_satori_cell_is_player_placed_whatever_the_fill_path() {
+    const SECRET: [u8; 32] = [0x5A; 32];
+    let mut rig = Rig::dedicated("refill");
+    let seed = rig.hs.server.biome_gen.seed as u64;
+    let cell = vein_cell(&SECRET, seed);
+    let (x, y, z) = cell;
+    let diamond = Some(pick(ToolMaterial::Diamond));
+    let satori = Item::Material(MaterialId::Satori);
+    let deepslate = Item::Block(block::PURE_DEEPSLATE);
+    let tool_in_hand = Item::Tool(pick(ToolMaterial::Diamond));
+
+    rig.hs.server.pop_secret = SECRET;
+    let at = rig.clock();
+    ready_vein(&mut rig, cell, at);
+    rig.mine(cell, block::AIR, diamond);
+    assert_eq!(rig.granted(&satori), 1, "the vein cell yields its Satori");
+
+    for path in ["a tool claimed in hand", "a mined tag on the fill", "creative mode"] {
+        let creative = path == "creative mode";
+        if creative {
+            rig.hs.server.set_play_mode(crate::play_mode::PlayMode::Creative);
+        }
+        match path {
+            "a tool claimed in hand" => rig.send(Some(&tool_in_hand), &[(cell, block::PURE_DEEPSLATE)], &[]),
+            "a mined tag on the fill" => {
+                rig.send(Some(&deepslate), &[(cell, block::PURE_DEEPSLATE)], &[mined(cell, diamond)])
+            }
+            _ => rig.send(Some(&deepslate), &[(cell, block::PURE_DEEPSLATE)], &[]),
+        }
+        rig.tick();
+        if creative {
+            rig.hs.server.set_play_mode(crate::play_mode::PlayMode::Survival);
+        }
+        assert_eq!(rig.world().get_block(x, y, z), block::PURE_DEEPSLATE, "{path}: the refill is accepted");
+        assert!(rig.world().is_placed(x, y, z), "{path}: the refilled cell reads player-placed");
+        assert!(rig.world().pop_exposure.contains_key(&cell), "{path}: its exposure still stands");
+        rig.mine(cell, block::AIR, diamond);
+        assert_eq!(rig.world().get_block(x, y, z), block::AIR, "{path}: mined again");
+        assert_eq!(rig.granted(&satori), 1, "{path}: no second Satori");
+    }
+}
+
 #[test]
 fn a_joiners_placement_consumes_from_the_shadow_and_is_flagged_placed() {
     let mut rig = Rig::dedicated("place");

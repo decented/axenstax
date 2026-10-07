@@ -1396,6 +1396,18 @@ so the server learns every gain and consume, smallest first). Applies to every
 server-simulated player (joiners and guests); a host's own local slots are
 unchanged (their client decides, as in single-player).
 
+**A joined client is native.** What follows assumes the joiner's client
+sends its edits and their `mined` tags, and only the native client does: the
+web build is an offline taster with no multiplayer (the as-built banner
+above), and its edits are never queued for a server (`game_loop`'s break arm
+pushes them on native only). One web join path is still in code: the
+dedicated server's Docker guest-boot page (`index.dedicated.html` sets
+`window.AXENSTAX_DEDICATED_WS`, the wasm menu auto-joins it;
+`tools/dedicated-server/README.md`). A browser joined that way sends no edits
+and no tags, so the server yields it nothing, and it takes nothing itself:
+survival play there is not supported (review C1 MEDIUM-2, documented rather
+than fixed; whether to keep that auto-join is an owner call).
+
 **Break drops are the server's.** A joined client's survival break arm still
 breaks the block in its own world and sends the `BlockChange`, and now tags
 the cell in `InputPacket.mined` with the tool it mined with (`WireItem`,
@@ -1426,13 +1438,42 @@ Only a tagged cell is yielded: an edit that empties a cell untagged — a
 bucket scoop, an Eraser on blueprint paper, a lifted Latent Print, a cell the
 joiner's own pistons or kegs cleared — yields nothing (that is why the tag is
 on the wire: the server can't tell them apart from a mined block, and the
-`held_kind`/`held_id` pair carries no tool type). A tag needs its edit in the
-same packet; the client carries a trimmed edit's tag with it
-(`RemoteClient::mined_carry_over`). A tagged edit that doesn't leave what the
+`held_kind`/`held_id` pair carries no tool type). Only a cell a break can
+mine is yielded: a tag on a water, lava, fire, smoke or empty cell yields
+nothing (`joiner_inventory::minable`; the client's raycast never targets
+them, so drops come only from the shared break rules). A tag needs its edit
+in the same packet, and the server reads at most `MAX_MINED_PER_INPUT` (16)
+tags from one input — its DoS guard. The client never sends more: from the
+first tagged cell past the limit its edits wait for the next input, tags and
+all, and an edit trimmed at the packet's byte cap takes its tag along
+(`RemoteClient::send_input`, `mined_carry_over`, oldest first). The carry-over
+is lossless and bounded by the edits' own cap (`INPUT_CARRY_OVER_MAX_CHANGES`:
+a tag is dropped only with its edit), so only a modified client's extra tags
+are ever ignored (review C1 LOW-3: 16 carried-over tags used to go out ahead
+of a new one, which the server never read). An edit past the server's
+4-per-tick edit budget is refused and sent back like any other, tagged or
+not: the block reappears on the client, nothing is yielded and no drop is
+lost (the strike's tool wear, client-side, stays spent). A tagged edit that doesn't leave what the
 server's yield would (the joiner's copy of the cell disagreed) yields nothing
 and is counted unchecked. Creative yields nothing. Tool durability stays the
 client's. Inventory full: the client spills what doesn't fit at its feet, as
 for every grant (a ground item only it sees); the shadow drops it.
+
+**Every block a joiner puts into a cell is player-placed**, whatever the
+edit was classified as below — a plain placement, a fill with a tool claimed
+in hand, a fill carrying a `mined` tag, anything in creative — as the
+client's own placements always are (review C1 MEDIUM-1: only a plain
+placement used to be flagged, so a modified client could refill a cell that
+had just yielded a Satori by another accepted path and mine it again — the
+roll is deterministic per cell and the cell's exposure entry stands — for a
+Satori every two edits). The flag is set at the one point every accepted
+joiner write goes through (`HostedServer`'s apply loop, right after
+`set_block`): a non-air block is player-placed; a break the server yielded
+leaves the cell natural again (AIR, or a harvested crop's tilled soil), as
+single-player's break arm does; any other emptying edit leaves it natural.
+So a Satori, like any seed- or exposure-driven drop, rolls only on a natural
+cell, on the server as in single-player (`break_drops::break_yield` gates on
+`World::is_placed`; Spec 06 §2.2).
 
 **The shadow** (`ServerPlayer.inventory`, `joiner_inventory`). Empty at attach
 (the inventory the joiner arrived with is not on the wire), then fed:
@@ -1445,11 +1486,39 @@ for every grant (a ground item only it sees); the shadow drops it.
 | An accepted interaction's `consume_held` | D2b | takes, owed from wherever the item is (`joiner_actions::take_owed`, the client's own rule) |
 | A plain block placement | the edit, classified below | takes one from the held hotbar slot on a match |
 
-Still the client's alone (the shadow does not see them): crafting, chests,
-furnaces and other containers, Q-drops, eating, tool and armour wear, armour
-equip, client-side pickups, face-attachment and drying-rack recovery on a
-break, bucket / seed / hoe / flint / bone-meal effects, and moving stacks
-between slots. So the shadow drifts from the client's inventory.
+Everything else is still the client's alone, so the shadow drifts from the
+client's inventory.
+
+**Known shadow gaps — must close before C3 turns the check into
+enforcement.** Every source where the shadow holds LESS than the client
+(each would make an enforcing check refuse a legitimate placement or
+interaction; several give placeable blocks — logs, wallpaper, item frames,
+bought blocks):
+
+- the inventory the joiner arrived with (not on the wire);
+- crafting outputs; what it takes from chests, furnaces and other
+  containers; client-side pickups;
+- grant overflow: a server grant that doesn't fit is dropped from the shadow,
+  while the client spills it at its feet and later picks it up client-side;
+- fishing; a beehive's honey (bottle or bucket); keg / aged output; an item
+  frame's take and refund; a campfire's cooked pickup; a drying rack's
+  withdraw; a wallpaper peel; vendor, auction and market purchases; raid
+  rewards; a pack unequip; armour taken off;
+- face-attachment recovery on a break (wallpaper, blueprint paper and Plans
+  go straight into the breaker's inventory; the server spills no
+  attachments, so nothing is granted twice);
+- drying-rack recovery on a break (its logs; likewise no double grant);
+- slot layout: moving stacks between slots, the client's `auto_refill`
+  setting and locked slots (the shadow always auto-refills and locks
+  nothing), and a placement charged to the hotbar slot named in the input (a
+  scroll after a placement within one send window charges the wrong slot).
+  The check keys on the held slot, so layout drift alone mismatches.
+
+The other direction — the shadow holds MORE: crafting inputs, container
+deposits, Q-drops, eating, tool and armour wear, armour put on, and the
+bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
+cells. No refusal comes of those, but once C2 persists the shadow they would
+be duplication.
 
 **Possession check — LOG-ONLY for one release.** An accepted edit that fills
 an empty (or water) cell is a *plain placement* when the hand (the input's
@@ -1458,22 +1527,43 @@ a block no item places (fluids, fire, smoke, crops, a piston arm) needs the
 hand to hold exactly it. The server checks the shadow's held slot
 (`hotbar_placeable_id`) places that block: a match consumes one
 (`take_placeable_from_hotbar`, auto-refill included); a mismatch is counted
-and logged (rate-limited, one line per 5 s per player: name, placed block,
-slot, what the shadow holds there) and **never refused or corrected** — the
-shadow takes nothing. A non-block placement (bucket, seeds, flint, bone meal,
+and logged (name, placed block, slot, what the shadow holds there) and
+**never refused or corrected** — the shadow takes nothing. Each mismatch is a
+`debug` line; at most one a minute per player is a `warn`, carrying the count
+held back since (`MISMATCH_LOG_INTERVAL_TICKS`; review C1 LOW-6: the shadow
+starts empty, so a building joiner mismatches on almost every placement this
+release, and 20 builders made about four warnings a second). A non-block placement (bucket, seeds, flint, bone meal,
 a hoe's tilling, a tool in hand), a meta-only toggle and anything in creative
 is counted unchecked. An interaction outcome the shadow can't pay is also a
-counted, logged mismatch. A plain placement is flagged player-placed
-(`World::place_player_block`), as the client's own is, so re-mining it yields
-no Satori (Spec 06 §2.2). Counters per connection
+counted, logged mismatch. Counters per connection
 (`ServerPlayer.possession`: breaks, matched, mismatched, unchecked); one
-summary line in the server log when the player leaves.
+summary line (`info`) in the server log when the player leaves.
 
 Why log-only: until crafting, containers and the arrival inventory reach the
 server (merges 2 and 3), refusing would refuse legitimate placements. The
 `// BRIDGE: possession check` markers (block placement in
-`validate_block_edit`, `EntityAttack`, `EntityInteract`, `LeadToPost`) stay
+`validate_block_edit`, the mined tool and the hand in
+`classify_joiner_edit`, `EntityAttack`, `EntityInteract`, `LeadToPost`) stay
 until enforcement.
+
+**Known limits (C1).**
+
+- *The tool a break claims is the client's word* (`MinedBlock.tool`, under
+  the possession BRIDGE): a modified client can claim a diamond pickaxe it
+  doesn't hold, which unlocks every tier and the Satori roll. C3's planned
+  enforcement covers placements only; the claimed tool needs its own check
+  against the shadow.
+- *No break-time check yet*: a tagged edit yields at the full edit budget
+  (4 a tick), whatever `break_time_ticks(block, tool)` says. Both this and
+  the tool claim go to C3 / anti-cheat.
+- A tag on a fluid, fire, smoke or empty cell yields nothing (above).
+- *Joiner shadows are written into a dedicated server's `world.dat`*:
+  `GameServer::try_save` serialises every slot's inventory into
+  `WorldSave.players` (phase-c-map decision (h)), and since C1 a shadow holds
+  every break drop and interaction product. A client that opens the world on
+  its own restores the first joiner's shadow as its player 0, and a world
+  export carries other people's inventories. Left until the per-npub sidecar
+  step (C2) replaces them.
 
 ### 4.3 Block Mutations
 

@@ -17,11 +17,13 @@
 //! Still the client's alone (the shadow does not see them): the inventory it
 //! joined with, crafting, chests and furnaces, Q-drops, eating, tool and
 //! armour wear, armour equip, client-side pickups, face-attachment and
-//! drying-rack recovery, and moving stacks between slots. So the shadow
+//! drying-rack recovery, and moving stacks between slots (the full list of
+//! gaps, which must close before enforcement: Spec 04 §4.2e). So the shadow
 //! drifts, and the possession check on placements is LOG-ONLY for one
-//! release ([`PossessionTally`]): it counts and logs a mismatch, never
-//! refuses or corrects. Enforcement waits for the remaining gains to reach
-//! the server (merges 2 and 3).
+//! release ([`PossessionTally`]): it counts and logs a mismatch (debug; a
+//! warning at most once a minute per player), never refuses or corrects.
+//! Enforcement waits for the remaining gains to reach the server (merges 2
+//! and 3).
 
 use crate::block::BlockId;
 use crate::crafting::Tool;
@@ -29,9 +31,12 @@ use crate::inventory::Inventory;
 use crate::item::Item;
 use crate::protocol::MinedBlock;
 
-/// Ticks between two possession-mismatch log lines for one player (5 s at
-/// 20 TPS). Mismatches in between are counted and reported with the next.
-pub const MISMATCH_LOG_INTERVAL_TICKS: u64 = 100;
+/// Ticks between two possession-mismatch WARNINGS for one player (one minute
+/// at 20 TPS; review LOW-6 — the shadow starts empty, so a building joiner
+/// mismatches all the time this release). Every mismatch in between is a
+/// debug line ([`mismatch_log_level`]), counted and reported with the next
+/// warning.
+pub const MISMATCH_LOG_INTERVAL_TICKS: u64 = 60 * 20;
 
 /// What an accepted edit from a server-simulated player is to its inventory.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +62,17 @@ fn side_effect_block(b: BlockId) -> bool {
     crate::block::is_fluid(b)
         || matches!(b, crate::block::FIRE | crate::block::CAMPFIRE_SMOKE | crate::block::PISTON_HEAD)
         || crate::growth::is_crop(b)
+}
+
+/// A block a survival break can mine (review LOW-1): not an empty cell, and
+/// not a fluid, fire or smoke — the client's raycast never targets those, so
+/// a `mined` tag on one is a modified client's, and it yields nothing (no
+/// LAVA, WATER or FIRE items). Drops come only from the shared break rules
+/// (`break_drops`) for a cell a player can actually mine.
+fn minable(b: BlockId) -> bool {
+    b != crate::block::AIR
+        && !crate::block::is_fluid(b)
+        && !matches!(b, crate::block::FIRE | crate::block::CAMPFIRE_SMOKE)
 }
 
 /// The block an item places, if it places one (`Inventory::hotbar_placeable_id`'s rule).
@@ -100,7 +116,8 @@ impl Hand {
 /// input says is in hand; `creative` the world's mode.
 ///
 /// - A tagged cell whose edit empties it (or leaves a harvested crop's
-///   replacement) is a `Break`. Untagged emptying edits are never one: a
+///   replacement) is a `Break` — if the block is one a break can mine
+///   (not a fluid, fire or smoke: [`minable`]). Untagged emptying edits are never one: a
 ///   bucket scoop, an Eraser, a lifted Latent Print, or a cell the client's
 ///   own pistons or kegs cleared would otherwise mint drops.
 /// - An edit filling an empty (or water) cell is a `Place` when the hand
@@ -120,7 +137,7 @@ pub fn classify(
         return JoinerEdit::Unchecked;
     }
     if let Some(m) = mined {
-        if old != AIR && (new == AIR || crate::growth::is_crop(old)) {
+        if minable(old) && (new == AIR || crate::growth::is_crop(old)) {
             let tool = match crate::inventory::item_from_wire_full(&m.tool) {
                 Some(Item::Tool(t)) => Some(t),
                 _ => None,
@@ -163,6 +180,17 @@ pub fn check_placement(inv: &mut Inventory, hotbar_slot: usize, placed: BlockId)
     }
 }
 
+/// The level a possession-mismatch line is logged at, given what
+/// [`PossessionTally::note_mismatch`] said: a warning when one is due (at most
+/// one a minute per player), otherwise a debug line.
+pub fn mismatch_log_level(due: Option<u32>) -> log::Level {
+    if due.is_some() {
+        log::Level::Warn
+    } else {
+        log::Level::Debug
+    }
+}
+
 /// Per-connection counters of the log-only possession check, readable by
 /// tests and summarised in the server log when the player leaves
 /// ([`Self::summary`]).
@@ -178,15 +206,16 @@ pub struct PossessionTally {
     /// Edits not checked: creative, non-block placements, meta toggles, side
     /// effects, a tagged break whose edit didn't match the server's yield.
     pub unchecked: u32,
-    /// Mismatches since the last log line.
+    /// Mismatches since the last warning.
     suppressed: u32,
-    /// When the last log line went out.
+    /// When the last warning went out.
     last_log_tick: Option<u64>,
 }
 
 impl PossessionTally {
-    /// Count a mismatch on tick `now`. `Some(n)` when a log line is due:
-    /// `n` more mismatches were counted (and not logged) since the last one.
+    /// Count a mismatch on tick `now`. `Some(n)` when a warning is due: `n`
+    /// more mismatches were counted (and logged at debug only) since the last
+    /// one.
     pub fn note_mismatch(&mut self, now: u64) -> Option<u32> {
         self.mismatched = self.mismatched.saturating_add(1);
         let due = self
@@ -261,6 +290,19 @@ mod tests {
         assert_eq!(classify(block::STONE, block::AIR, Some(&t), Hand::Empty, true), JoinerEdit::Unchecked);
     }
 
+    /// Review LOW-1 — the client's raycast never targets a fluid, fire or
+    /// smoke, and an empty cell has nothing to mine: a `mined` tag on one is
+    /// no break and yields nothing (no LAVA or FIRE items).
+    #[test]
+    fn a_mined_tag_on_a_fluid_fire_smoke_or_air_cell_is_no_break() {
+        let t = tag(Some(Tool::new(ToolType::Pickaxe, ToolMaterial::Diamond)));
+        for old in [block::WATER, block::LAVA, block::FIRE, block::CAMPFIRE_SMOKE, block::AIR] {
+            assert_eq!(classify(old, block::AIR, Some(&t), Hand::Empty, false), JoinerEdit::Unchecked, "{old}");
+        }
+        // A minable block beside them still is.
+        assert!(matches!(classify(block::STONE, block::AIR, Some(&t), Hand::Empty, false), JoinerEdit::Break { .. }));
+    }
+
     #[test]
     fn a_block_item_filling_an_empty_cell_is_a_placement() {
         let stone = Item::Block(block::STONE);
@@ -308,5 +350,21 @@ mod tests {
         assert_eq!(t.mismatched, 4, "every mismatch is counted");
         assert!(PossessionTally::default().summary("Visitor").is_none());
         assert!(t.summary("Visitor").unwrap().contains("4 mismatched"));
+    }
+
+    /// Review LOW-6 — the shadow starts empty, so a building joiner
+    /// mismatches all the time this release: every mismatch is a debug line,
+    /// and at most one a minute per player is a warning.
+    #[test]
+    fn a_mismatch_warns_at_most_once_a_minute_and_is_otherwise_a_debug_line() {
+        assert_eq!(MISMATCH_LOG_INTERVAL_TICKS, 60 * 20, "one minute at 20 TPS");
+        let mut t = PossessionTally::default();
+        let first = t.note_mismatch(5_000);
+        assert_eq!(mismatch_log_level(first), log::Level::Warn);
+        let soon = t.note_mismatch(5_000 + MISMATCH_LOG_INTERVAL_TICKS - 1);
+        assert_eq!(mismatch_log_level(soon), log::Level::Debug, "still inside the minute");
+        let later = t.note_mismatch(5_000 + MISMATCH_LOG_INTERVAL_TICKS);
+        assert_eq!(mismatch_log_level(later), log::Level::Warn);
+        assert_eq!(later, Some(1), "it reports the one it held back");
     }
 }

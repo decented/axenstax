@@ -1820,18 +1820,14 @@ impl HostedServer {
         let Some(sp) = self.server.players.get_mut(i) else { return };
         let taken =
             crate::joiner_actions::take_owed(&mut sp.inventory, usize::from(req.hotbar_slot), &held, n);
-        if taken < n
-            && let Some(skipped) = sp.possession.note_mismatch(tick)
-        {
-            let more = if skipped > 0 {
-                format!(" (+{skipped} more since the last report)")
-            } else {
-                String::new()
-            };
-            log::warn!(
+        if taken < n {
+            let due = sp.possession.note_mismatch(tick);
+            log::log!(
+                crate::joiner_inventory::mismatch_log_level(due),
                 "possession check (log-only): {} used {n} × {held:?} in an interaction; the \
-                 server's copy of their inventory held {taken}{more} — accepted",
+                 server's copy of their inventory held {taken}{} — accepted",
                 sp.display_name,
+                held_back_note(due),
             );
         }
     }
@@ -2817,14 +2813,20 @@ impl HostedServer {
                             {
                                 self.server.world.release_plot((bc.x, bc.y, bc.z));
                             }
-                            if joiner_edit == Some(crate::joiner_inventory::JoinerEdit::Place) {
-                                // C1 — flagged player-placed, as the client's own
-                                // placement is: re-mining it yields no Satori
-                                // (Spec 06 §2.2), now that the server rolls a
-                                // joiner's breaks.
-                                self.server.world.place_player_block(bc.x, bc.y, bc.z, bc.new_block);
-                            } else {
-                                self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+                            self.server.world.set_block(bc.x, bc.y, bc.z, bc.new_block);
+                            if remote {
+                                // C1 (review MEDIUM-1) — every block a joiner
+                                // puts into a cell is player-placed, whatever
+                                // the edit was classified as (a plain
+                                // placement, a tool claimed in hand, a fill
+                                // carrying a `mined` tag, creative), as the
+                                // client's own placements always are: re-mining
+                                // it yields no Satori (Spec 06 §2.2). A break
+                                // the server yielded leaves the cell natural
+                                // again (AIR, or a harvested crop's tilled
+                                // soil), as single-player's break arm does.
+                                let placed = bc.new_block != crate::block::AIR && break_yield.is_none();
+                                self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
                             }
                             if let Some(edit) = joiner_edit {
                                 self.settle_joiner_edit(i, bc, edit, break_yield);
@@ -3026,8 +3028,9 @@ impl HostedServer {
 
     /// C1 — what slot `i`'s accepted edit `old → bc.new_block` is to its
     /// inventory (`joiner_inventory::classify`): a break if its input tagged
-    /// the cell as mined (`InputPacket.mined`, first [`protocol::MAX_MINED_PER_INPUT`]),
-    /// a plain placement by what its input says is in hand, else unchecked.
+    /// the cell as mined (`InputPacket.mined`, first [`protocol::MAX_MINED_PER_INPUT`]
+    /// — the DoS guard, which an honest client never exceeds), a plain
+    /// placement by what its input says is in hand, else unchecked.
     fn classify_joiner_edit(
         &self,
         i: usize,
@@ -3071,11 +3074,12 @@ impl HostedServer {
         (bc.new_block == crate::block::AIR || bc.new_block == y.replacement).then_some(y)
     }
 
-    /// C1 — slot `i`'s accepted edit is in the world; settle it with the
-    /// server's shadow of its inventory (`joiner_inventory`). A break: the
-    /// cell is natural again and exposes its deepslate neighbours (what the
-    /// client's break arm does), and the yield goes to the shadow and to the
-    /// client by `InventoryGrant`. A plain placement: the log-only possession
+    /// C1 — slot `i`'s accepted edit is in the world (its placed flag set:
+    /// every fill player-placed, a yielded break natural again); settle it
+    /// with the server's shadow of its inventory (`joiner_inventory`). A
+    /// break exposes its deepslate neighbours (what the client's break arm
+    /// does), and the yield goes to the shadow and to the client by
+    /// `InventoryGrant`. A plain placement: the log-only possession
     /// check, consuming one from the shadow's held slot on a match. Anything
     /// else is counted unchecked.
     fn settle_joiner_edit(
@@ -3090,7 +3094,6 @@ impl HostedServer {
         match (edit, break_yield) {
             (JoinerEdit::Break { .. }, Some(y)) => {
                 let world = &mut self.server.world;
-                world.set_placed(bc.x, bc.y, bc.z, false);
                 crate::break_drops::mark_exposed_neighbours(world, bc.x, bc.y, bc.z, tick);
                 self.server.players[i].possession.breaks += 1;
                 self.grant_to_joiner(i, y.drops.into_iter().chain(y.gem));
@@ -3101,21 +3104,17 @@ impl HostedServer {
                 match crate::joiner_inventory::check_placement(&mut sp.inventory, slot, bc.new_block) {
                     PlaceCheck::Matched => sp.possession.matched += 1,
                     PlaceCheck::Mismatched { held } => {
-                        if let Some(skipped) = sp.possession.note_mismatch(tick) {
-                            let registry = &self.server.registry;
-                            let held = held.map_or("nothing placeable", |b| registry.get(b).name);
-                            let more = if skipped > 0 {
-                                format!(" (+{skipped} more since the last report)")
-                            } else {
-                                String::new()
-                            };
-                            log::warn!(
-                                "possession check (log-only): {} placed {} from hotbar slot {slot}; \
-                                 the server's copy of that slot holds {held}{more} — accepted",
-                                sp.display_name,
-                                registry.get(bc.new_block).name,
-                            );
-                        }
+                        let due = sp.possession.note_mismatch(tick);
+                        let registry = &self.server.registry;
+                        let held = held.map_or("nothing placeable", |b| registry.get(b).name);
+                        log::log!(
+                            crate::joiner_inventory::mismatch_log_level(due),
+                            "possession check (log-only): {} placed {} from hotbar slot {slot}; \
+                             the server's copy of that slot holds {held}{} — accepted",
+                            sp.display_name,
+                            registry.get(bc.new_block).name,
+                            held_back_note(due),
+                        );
                     }
                 }
             }
@@ -4510,6 +4509,15 @@ fn current_unix_ts() -> u32 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0)
+}
+
+/// C1 — the tail of a possession-mismatch WARNING: how many mismatches went
+/// to the debug log only since the previous one (`PossessionTally::note_mismatch`).
+fn held_back_note(due: Option<u32>) -> String {
+    match due {
+        Some(n) if n > 0 => format!(" (+{n} more since the last warning, logged at debug)"),
+        _ => String::new(),
+    }
 }
 
 /// Serialize this tick's server-side pickup grants (death-drops phase 2b)

@@ -583,7 +583,9 @@ pub struct InputPacket {
     /// and is sampled after the strike wore the tool (the strike that breaks
     /// a pickaxe still yields). The tool is the client's word, like every held
     /// item (BRIDGE: possession check). Only for an edit in `block_changes`;
-    /// the server reads at most [`MAX_MINED_PER_INPUT`].
+    /// the server reads at most [`MAX_MINED_PER_INPUT`], and the client never
+    /// sends more: edits past the limit wait for its next input with their
+    /// tags (`RemoteClient::send_input`).
     #[serde(default)]
     pub mined: Vec<MinedBlock>,
 }
@@ -602,7 +604,10 @@ pub struct ColumnMismatch {
 }
 
 /// Most [`MinedBlock`]s the server reads from one `InputPacket` (a survival
-/// break takes at least a tick, so one is the norm).
+/// break takes at least a tick, so one is the norm) — its DoS guard. An
+/// honest client never sends more (it holds the edits past the limit back for
+/// its next input, tags and all), so only a modified client's extra tags are
+/// ever ignored.
 pub const MAX_MINED_PER_INPUT: usize = 16;
 
 /// A block a joiner mined (v72, C1): its cell and the tool in hand for the

@@ -1161,7 +1161,9 @@ impl GameServer {
         self.explosives_enabled = meta.explosives_enabled;
         // C1 — the world's own secret rolls its joiners' Satori drops. A meta
         // without one (saved before per-world secrets) keeps this run's random
-        // one; `server_main` writes it back for a dedicated server.
+        // one. This read is before the world opens: a dedicated server settles
+        // the secret against the disk once it has (`server_main::settle_pop_secret`
+        // writes this one back, or adopts the one a torn-meta repair wrote).
         if let Some(secret) = meta.pop_secret {
             self.pop_secret = secret;
         }

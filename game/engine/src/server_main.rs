@@ -758,6 +758,36 @@ pub fn run_show_connect(args: &[String]) {
 }
 
 /// Entry point dispatched from `main()` when `--server` is present.
+/// C1 — this server rolls its joiners' Satori drops on the world's secret,
+/// and from its first tick that is the secret ON DISK. Called once the world
+/// has opened, before the first tick (Spec 02 §8.4); the client's
+/// `GameState::persist_pop_secret_if_missing` does the same.
+///
+/// - The meta has one: adopt it. The server read the meta before the world
+///   opened, read-only, so a secret the open's torn-meta repair had to
+///   generate is only known from here (review LOW-2: the first run after the
+///   repair rolled on a secret that died with it, and the veins moved once).
+/// - It has none (saved before per-world secrets): write back this run's,
+///   so the veins stay put across restarts.
+fn settle_pop_secret(world: &str, server: &mut crate::server::GameServer) {
+    let mut meta = match crate::save::try_load_world_meta(world) {
+        Ok(meta) => meta,
+        Err(e) => {
+            log::error!("reading the world's Proof-of-Play secret failed: {e}");
+            return;
+        }
+    };
+    match meta.pop_secret {
+        Some(secret) => server.pop_secret = secret,
+        None => {
+            meta.pop_secret = Some(server.pop_secret);
+            if let Err(e) = crate::save::save_world_meta(world, &meta) {
+                log::error!("saving the world's new Proof-of-Play secret failed: {e}");
+            }
+        }
+    }
+}
+
 pub fn run(args: &[String]) {
     // A malformed `--allow-guests` / `AXENSTAX_ALLOW_GUESTS` value must be loud:
     // refuse to boot rather than guess whether the operator meant to open the
@@ -863,17 +893,7 @@ pub fn run(args: &[String]) {
     hs.server.set_sim_distance(cfg.sim_distance);
     // Phase B2a — which chunks joiners are pushed (out to the sim distance).
     hs.set_chunk_sync(cfg.chunk_sync);
-    // C1 — this server rolls its joiners' Satori drops on the world's secret.
-    // A world saved before per-world secrets has none in its meta: write back
-    // the one the server generated for this run, so its veins stay put across
-    // restarts. Reached only once the world opened (Spec 02 §8.4).
-    let mut meta = crate::save::load_world_meta(&cfg.world);
-    if meta.pop_secret.is_none() {
-        meta.pop_secret = Some(hs.server.pop_secret);
-        if let Err(e) = crate::save::save_world_meta(&cfg.world, &meta) {
-            log::error!("saving the world's new Proof-of-Play secret failed: {e}");
-        }
-    }
+    settle_pop_secret(&cfg.world, &mut hs.server);
 
     // Persist the freshly-generated world immediately so `world.dat` exists from
     // tick 0 (a crash before the first autosave doesn't lose the generation).
@@ -1612,5 +1632,57 @@ mod tests {
             BootIdentity::Expired
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved world named `name` (seed 77) under the test's worlds root.
+    fn saved_world(name: &str, meta: &crate::save::WorldMeta) -> std::path::PathBuf {
+        let mut w = crate::world::World::new();
+        w.set_block(3, 64, 5, crate::block::BEDROCK);
+        crate::save::write_world_folder(name, meta, &crate::save::minimal_world_save_for_tests(77), &w)
+            .unwrap();
+        crate::save::world_dir(name)
+    }
+
+    fn start(name: &str) -> HostedServer {
+        HostedServer::start(0, name.to_string(), 77, 0, RemoteTransport::WebSocket { port: 0 })
+            .expect("the dedicated server starts")
+    }
+
+    fn secret_on_disk(name: &str) -> [u8; 32] {
+        crate::save::try_load_world_meta(name).unwrap().pop_secret.expect("the meta holds a secret")
+    }
+
+    /// Review LOW-2 — a torn meta whose secret can't be salvaged is rebuilt
+    /// with a fresh secret when the world OPENS, after the server had already
+    /// read the (read-only) meta and kept its own random one. The server must
+    /// roll on the secret now on disk from its first tick, not on a secret
+    /// that dies with the run (the veins would move once at the restart).
+    #[test]
+    fn after_a_torn_meta_is_rebuilt_the_server_rolls_on_the_secret_on_disk() {
+        let _g = crate::save::WorldsRootGuard::new("srvmain_torn_secret");
+        let dir = saved_world("w", &crate::save::WorldMeta::new("w"));
+        std::fs::write(dir.join("world_meta.json"), b"{ torn").unwrap();
+        let mut hs = start("w");
+        let disk = secret_on_disk("w");
+        settle_pop_secret("w", &mut hs.server);
+        assert_eq!(hs.server.pop_secret, disk, "the secret the repair wrote is the one rolled on");
+        assert_eq!(secret_on_disk("w"), disk, "and the disk keeps it");
+    }
+
+    /// A world saved before per-world secrets has none: the server's own is
+    /// written back, so its veins stay put across restarts.
+    #[test]
+    fn a_meta_without_a_secret_is_given_the_servers() {
+        let _g = crate::save::WorldsRootGuard::new("srvmain_no_secret");
+        let mut meta = crate::save::WorldMeta::new("w");
+        meta.pop_secret = None;
+        saved_world("w", &meta);
+        let mut hs = start("w");
+        settle_pop_secret("w", &mut hs.server);
+        let secret = hs.server.pop_secret;
+        assert_eq!(secret_on_disk("w"), secret);
+        drop(hs);
+        // A restart reads it back.
+        assert_eq!(start("w").server.pop_secret, secret);
     }
 }

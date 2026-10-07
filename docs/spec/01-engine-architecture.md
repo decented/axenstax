@@ -955,7 +955,11 @@ and weather, as before D1, with the host→server block-entity mirror
 (`HostedServer::mirror_host_world_state`, called each tick on that path only)
 keeping its chests, plots and vendors live — so a joiner's chest break there
 spills the live contents once instead of load-time ones (review fix 2). BRIDGE:
-the mirror goes with `--no-lend`. Single-player runs no server at all (D3 will
+the mirror goes with `--no-lend`, and so does that path's second Proof-of-Play
+state (C1 review LOW-5, accepted): the owning copy keeps its own exposure map
+(`World::pop_exposure` travels only with a lend), so a cell the host exposed
+reads unexposed to a joiner's break there and the other way round, and the host's
+own placements reach it unflagged. Single-player runs no server at all (D3 will
 lend there too); the dedicated server always owns its world. Native only: the
 web build never hosts.
 

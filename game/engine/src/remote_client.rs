@@ -396,9 +396,11 @@ pub struct RemoteClient {
     /// could never refuse and un-ghost it on this client). At most
     /// [`INPUT_CARRY_OVER_MAX_CHANGES`].
     input_carry_over: Vec<protocol::BlockChange>,
-    /// C1 — the `mined` tags of edits still in [`Self::input_carry_over`]:
-    /// the server yields a mined cell only when the tag rides with its edit,
-    /// so a trimmed edit's tag rides again with it in the next packet.
+    /// C1 — the `mined` tags of edits still in [`Self::input_carry_over`],
+    /// oldest first: the server yields a mined cell only when the tag rides
+    /// with its edit, so a held-back edit's tag rides again with it in the
+    /// next packet. Never more than the edits waiting (a tag whose edit is
+    /// dropped at [`INPUT_CARRY_OVER_MAX_CHANGES`] goes with it).
     mined_carry_over: Vec<protocol::MinedBlock>,
     /// World chat (Phase 2) — lines the server delivered to us this poll,
     /// drained by the game loop each frame into `ChatState`. Bounded like
@@ -1176,12 +1178,17 @@ impl RemoteClient {
             edits.append(&mut input.block_changes);
             input.block_changes = edits;
         }
-        if !self.mined_carry_over.is_empty() {
-            let mut mined = std::mem::take(&mut self.mined_carry_over);
-            mined.append(&mut input.mined);
-            input.mined = mined;
-        }
+        // C1 — and so do their `mined` tags, ahead of this input's.
+        let mut tags = std::mem::take(&mut self.mined_carry_over);
+        tags.append(&mut input.mined);
+        // C1 (review LOW-3) — the server reads at most MAX_MINED_PER_INPUT
+        // tags from one input (its DoS guard), and a tag counts only beside
+        // its edit: the edits from the first tagged cell past that limit wait
+        // for the next packet, with their tags.
+        let mut held_back = hold_back_past_tag_limit(&mut input.block_changes, &tags);
+        input.mined = tags_beside(&input.block_changes, &tags);
         let (packet, mut trimmed) = serialize_input_within_cap(&mut input);
+        trimmed.append(&mut held_back);
         if trimmed.len() > INPUT_CARRY_OVER_MAX_CHANGES {
             let drop = trimmed.len() - INPUT_CARRY_OVER_MAX_CHANGES;
             log::warn!(
@@ -1190,14 +1197,13 @@ impl RemoteClient {
             );
             trimmed.drain(..drop);
         }
-        // C1 — a mined cell whose edit was trimmed is tagged again with it.
-        self.mined_carry_over = input
-            .mined
-            .iter()
-            .filter(|m| trimmed.iter().any(|bc| (bc.x, bc.y, bc.z) == (m.x, m.y, m.z)))
-            .copied()
-            .take(protocol::MAX_MINED_PER_INPUT)
-            .collect();
+        // C1 — every tag of an edit still waiting rides again with it, oldest
+        // first: lossless, and bounded by the edits' own cap above (a tag
+        // goes only with its edit).
+        let waiting: std::collections::HashSet<(i32, i32, i32)> =
+            trimmed.iter().map(|bc| (bc.x, bc.y, bc.z)).collect();
+        tags.retain(|m| waiting.contains(&(m.x, m.y, m.z)));
+        self.mined_carry_over = tags;
         self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
         Some(seq)
@@ -1377,7 +1383,49 @@ fn serialize_input_within_cap(
         input.block_changes.len()
     );
     let trimmed = input.block_changes.split_off(keep);
+    // C1 — a trimmed edit's `mined` tag goes with it (`RemoteClient::send_input`).
+    let kept: std::collections::HashSet<(i32, i32, i32)> =
+        input.block_changes.iter().map(|bc| (bc.x, bc.y, bc.z)).collect();
+    input.mined.retain(|m| kept.contains(&(m.x, m.y, m.z)));
     (protocol::serialize_packet(PacketType::ClientInput, &*input), trimmed)
+}
+
+/// C1 (review LOW-3) — cut `edits` before the first edit whose tagged cell
+/// would be the (`MAX_MINED_PER_INPUT` + 1)th distinct one in this packet, and
+/// return the cut-off tail (empty when it all fits). The server reads no more
+/// tags than that from one input, so an honest client never sends more: what
+/// is past the limit goes in the next packet, in order, tags and all.
+fn hold_back_past_tag_limit(
+    edits: &mut Vec<protocol::BlockChange>,
+    tags: &[protocol::MinedBlock],
+) -> Vec<protocol::BlockChange> {
+    if tags.is_empty() {
+        return Vec::new();
+    }
+    let tagged: std::collections::HashSet<(i32, i32, i32)> = tags.iter().map(|m| (m.x, m.y, m.z)).collect();
+    let mut cells = std::collections::HashSet::new();
+    for (i, bc) in edits.iter().enumerate() {
+        let cell = (bc.x, bc.y, bc.z);
+        if tagged.contains(&cell) && cells.insert(cell) && cells.len() > protocol::MAX_MINED_PER_INPUT {
+            return edits.split_off(i);
+        }
+    }
+    Vec::new()
+}
+
+/// C1 — the tags to send beside `edits`: the first (oldest) tag of each
+/// edited cell, in order. The server matches a tag to an edit by its cell, so
+/// a second tag for the same cell in one packet adds nothing.
+fn tags_beside(edits: &[protocol::BlockChange], tags: &[protocol::MinedBlock]) -> Vec<protocol::MinedBlock> {
+    if tags.is_empty() {
+        return Vec::new();
+    }
+    let edited: std::collections::HashSet<(i32, i32, i32)> = edits.iter().map(|bc| (bc.x, bc.y, bc.z)).collect();
+    let mut seen = std::collections::HashSet::new();
+    tags.iter()
+        .filter(|m| edited.contains(&(m.x, m.y, m.z)) && seen.insert((m.x, m.y, m.z)))
+        .copied()
+        .collect()
 }
 
 #[cfg(test)]
@@ -1872,12 +1920,16 @@ mod tests {
 
     /// The block-change x's of the next `ClientInput` the server end holds.
     fn next_input_xs(srv: &dyn ServerTransport) -> Vec<i32> {
+        next_input(srv).block_changes.iter().map(|b| b.x).collect()
+    }
+
+    /// The next `ClientInput` the server end holds, decoded.
+    fn next_input(srv: &dyn ServerTransport) -> protocol::InputPacket {
         let pkt = srv.try_recv_from_client().expect("an input packet was sent");
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (ptype, payload) = protocol::deserialize_header(&pkt).unwrap();
         assert_eq!(ptype, PacketType::ClientInput);
-        let input: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
-        input.block_changes.iter().map(|b| b.x).collect()
+        protocol::safe_deserialize(payload).unwrap()
     }
 
     fn input_with(xs: impl IntoIterator<Item = i32>) -> protocol::InputPacket {
@@ -1938,6 +1990,54 @@ mod tests {
         }
         assert!(tagged_with_edit, "the tag went out in the packet carrying its edit");
         assert!(rc.mined_carry_over.is_empty(), "and stopped riding once the edit went");
+    }
+
+    /// Review LOW-3 — the server reads at most `MAX_MINED_PER_INPUT` tags
+    /// from one input, and a tag counts only in the packet that carries its
+    /// edit. 16 carried-over tags plus a new one used to go out together, so
+    /// the new one was never read and its drop was lost. Now no packet carries
+    /// more tagged cells than the server reads: the edits past the limit wait
+    /// for the next packet with their tags, and every tag goes out exactly
+    /// once, beside its edit.
+    #[test]
+    fn carried_over_and_new_mined_tags_each_go_out_once_beside_their_edit() {
+        let (srv, mut rc) = connected_client();
+        let tag = |x: i32| protocol::MinedBlock { x, y: 64, z: 0, tool: protocol::WireItem::None };
+        let max = protocol::MAX_MINED_PER_INPUT as i32;
+        // A burst too big for one packet, its last 16 edits mined.
+        let n = 10_000;
+        let mut input = input_with(0..n);
+        input.mined = (n - max..n).map(tag).collect();
+        let mut packets = vec![{
+            rc.send_input(&input);
+            next_input(&*srv)
+        }];
+        assert_eq!(rc.mined_carry_over.len(), max as usize, "16 tags carried over with their edits");
+        // The next input mines one more cell.
+        let mut next = input_with([50_000]);
+        next.mined = vec![tag(50_000)];
+        rc.send_input(&next);
+        packets.push(next_input(&*srv));
+        for _ in 0..6 {
+            rc.send_input(&protocol::InputPacket::default());
+            packets.push(next_input(&*srv));
+        }
+        let mut sent = Vec::new();
+        for p in &packets {
+            assert!(p.mined.len() <= protocol::MAX_MINED_PER_INPUT, "{} tags in one packet", p.mined.len());
+            for m in &p.mined {
+                assert!(p.block_changes.iter().any(|b| b.x == m.x), "tag {} rides beside its edit", m.x);
+                sent.push(m.x);
+            }
+        }
+        let mut expect: Vec<i32> = (n - max..n).collect();
+        expect.push(50_000);
+        assert_eq!(sent, expect, "every tag goes out exactly once, oldest first");
+        let edits: Vec<i32> = packets.iter().flat_map(|p| p.block_changes.iter().map(|b| b.x)).collect();
+        let mut all: Vec<i32> = (0..n).collect();
+        all.push(50_000);
+        assert_eq!(edits, all, "and every edit once, in order");
+        assert!(rc.mined_carry_over.is_empty() && rc.input_carry_over.is_empty());
     }
 
     #[test]
