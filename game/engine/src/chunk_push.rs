@@ -32,7 +32,8 @@
 //!   state, and a tick's deltas never wait behind its own new chunks.
 //! - **Pacing.** Pushes are queued on the client's `state_outbox` FIFO, in
 //!   line with its deltas and inside its per-tick byte budget, never more
-//!   than about one tick's budget ahead ([`QUEUE_AHEAD_BYTES`]), and a credit
+//!   than about one tick's budget ahead ([`QUEUE_AHEAD_BYTES`]) plus the rest
+//!   of the column that passed it (columns go whole), and a credit
 //!   window bounds what is in flight: at most [`CHUNK_WINDOW_PACKETS`] packets
 //!   and [`CHUNK_WINDOW_BYTES`] bytes not yet acknowledged. The client
 //!   acknowledges cumulatively, piggybacked on its `InputPacket`
@@ -107,9 +108,10 @@ pub const CHUNK_WINDOW_PACKETS: u32 = 64;
 pub const CHUNK_WINDOW_BYTES: usize = 512 * 1024;
 
 /// Most queued bytes (deltas and pushes) a client's outbox may hold before
-/// this tick's pushes are planned: about one tick's budget, so the queue
-/// never holds more chunk data than one tick drains and the next tick's
-/// deltas never wait behind a pile of chunks.
+/// this tick's pushes are planned: about one tick's budget, so the next
+/// tick's deltas wait behind at most that much chunk data plus the rest of
+/// the one column that passed it (a column is planned whole; a heavy one —
+/// signs, wallpaper — can hold them a few ticks).
 pub const QUEUE_AHEAD_BYTES: usize = crate::state_outbox::CLIENT_TICK_BUDGET_BYTES;
 
 /// The ring round the joiner's column (Chebyshev) pushed before anything
