@@ -2658,7 +2658,9 @@ impl super::GameState {
     /// playtest), and repair it by running the normal generate+light+mesh path.
     /// Normal terrain only — flat/Workshop floor at other Ys.
     fn repair_void_columns_after_load(&mut self) {
-        if self.world.is_workshop || self.world.has_flat_floor() {
+        // A push-only joiner (B2a) generates nothing: a column it lacks is
+        // one the server has not pushed yet.
+        if self.world.is_workshop || self.world.has_flat_floor() || self.joined_push_only {
             return;
         }
         let cs = crate::chunk::CHUNK_SIZE as i32;
@@ -3000,6 +3002,7 @@ impl super::GameState {
         self.pending_join_spawn = None;
         self.chunk_intake = crate::chunk_intake::ChunkIntake::default();
         self.join_ring_wait = None;
+        self.joined_push_only = false;
         self.own_prediction.reset();
         self.mission_idx = 0;
         self.mission_note.clear();
@@ -3166,6 +3169,9 @@ impl super::GameState {
         self.apply_world_seed(crate::remote_client::JOINED_WORLD_FOLDER, &mut meta);
         self.apply_world_rules(&meta);
         self.pending_join_spawn = joined.spawn;
+        // B2a review — another generator's terrain is never shown: the server
+        // pushes such a joiner every column in range, and that is all it sees.
+        self.joined_push_only = joined.worldgen_mismatch_notice().is_some();
         log::info!(
             "Joined world: seed {}, type '{}', worldgen {:#010x} (ours {:#010x})",
             joined.seed,

@@ -1566,7 +1566,9 @@ streamer nor `step_load` generates over it, and one that leaves the joiner's
 range half-pushed is dropped the same way (B2a review LOW-2/3).
 
 **Known gaps.** A joined client still generates the columns beyond the server's
-push radius itself (and briefly the ones the push has not reached). The writers that still do not
+push radius itself (and briefly the ones the push has not reached) — unless its
+terrain generator differs from the host's: such a joiner generates nothing and
+shows only pushed columns (Spec 04 §4.1). The writers that still do not
 check `is_column_present_at` can create a stray chunk in a dropped or
 never-loaded column at the loaded edge: pistons, dispensers (placed fluid or
 fire), `FireSystem::ignite` (flint and steel) and keg blasts. A blast writes

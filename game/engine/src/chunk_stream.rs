@@ -20,7 +20,9 @@ impl super::GameState {
         // Use player 0 for initial load centre
         let (pcx0, pcz0) = player_cols[0];
 
-        if self.loaded_columns.is_empty() {
+        if self.loaded_columns.is_empty() && !self.joined_push_only {
+            // (A push-only joiner (B2a) holds only what its server has
+            // pushed, so "nothing loaded" is not "never loaded" there.)
             // Fallback path only: the normal world entry runs through the
             // `GameMode::Loading` state, which drives `begin_load` + `step_load`
             // incrementally (and applies any spawn-pref override itself), so by
@@ -74,8 +76,13 @@ impl super::GameState {
             |cx, cz| !intake.holds_pushed((cx, cz)) && is_void_column(world, cx, cz),
         );
         // B2a — never generate a column part-way through its push (the rest
-        // of it is on the way).
-        step.load.retain(|&col| !intake.holds_pushed(col));
+        // of it is on the way), and a push-only joiner (another terrain
+        // generator than the host's) generates nothing at all.
+        if self.joined_push_only {
+            step.load.clear();
+        } else {
+            step.load.retain(|&col| !intake.holds_pushed(col));
+        }
         // B2a — a part-pushed column (never counted loaded) that has left
         // every anchor's range is let go like a loaded one, so no stray half
         // column outlives the push that started it.
@@ -505,8 +512,11 @@ impl super::GameState {
             // can be placed on real ground. Lighting too, so the first mesh built
             // for these columns isn't dark. The rest of the render distance is
             // generated + meshed by `step_load` from the queue.
-            for dx in -1..=1 {
-                for dz in -1..=1 {
+            // (A push-only joiner (B2a) generates nothing: its spawn is the
+            // host's, and its ground is what the host pushes.)
+            let pregen: &[i32] = if self.joined_push_only { &[] } else { &[-1, 0, 1] };
+            for &dx in pregen {
+                for &dz in pregen {
                     self.world.generate_column(dx, dz, &self.biome_gen);
                     crate::lighting::run_initial_pass_for_column(&mut self.world, dx, dz, &self.registry);
                     self.loaded_columns.insert((dx, dz));
@@ -639,6 +649,11 @@ impl super::GameState {
             let dz = cz - fpz;
             dx * dx + dz * dz
         });
+        // A push-only joiner (B2a) builds nothing itself: its loading screen
+        // waits for the pushed spawn ring instead (`join_ring_pending`).
+        if self.joined_push_only {
+            cols.clear();
+        }
         self.load_queue = cols.into();
         true
     }
@@ -646,12 +661,16 @@ impl super::GameState {
     /// Move player 0 to `pos` (at rest) and pre-generate + light the 5×5
     /// columns around it, so they don't drop into void before the load queue
     /// fills the rest in. Shared by the joined-world spawn and the spawn-pref
-    /// override in `begin_load`.
+    /// override in `begin_load`. A push-only joiner (B2a) only moves: its
+    /// ground is what the server pushes.
     fn place_player0_and_pregen(&mut self, pos: glam::Vec3) {
         let cs = CHUNK_SIZE as i32;
         self.players[0].player.pos = pos;
         self.players[0].player.velocity = glam::Vec3::ZERO;
         self.players[0].player.reset_fall();
+        if self.joined_push_only {
+            return;
+        }
         let np_cx = (pos.x.floor() as i32).div_euclid(cs);
         let np_cz = (pos.z.floor() as i32).div_euclid(cs);
         for dx in -2..=2 {

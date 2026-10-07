@@ -1340,6 +1340,11 @@ pub(crate) struct GameState {
     /// round this one (its spawn column) are pushed, or until the deadline.
     /// `None` outside that wait.
     pub(crate) join_ring_wait: Option<((i32, i32), web_time::Instant)>,
+    /// B2a review — a joined session whose terrain generator differs from
+    /// the host's (`JoinedWorld::worldgen_mismatch_notice`) generates NOTHING
+    /// itself: it shows only the columns the server pushes (which is every
+    /// column within the push radius), never its own wrong terrain.
+    pub(crate) joined_push_only: bool,
     /// One-shot: the next `begin_load` is a RESUME whose world + players were
     /// already restored (the WASM poll branch unpacks the IndexedDB blob and
     /// restores everything before entering `GameMode::Loading`). Gates
@@ -1868,6 +1873,7 @@ impl GameState {
             pending_join_spawn: None,
             chunk_intake: crate::chunk_intake::ChunkIntake::default(),
             join_ring_wait: None,
+            joined_push_only: false,
             world_preloaded: false,
             pending_workshop_reset: false,
             pending_scenario_launch: None,
