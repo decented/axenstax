@@ -285,6 +285,9 @@ fn collect_live(ecs: &hecs::World) -> BTreeMap<u32, LiveEntity> {
         if satoshi.is_some() {
             flags |= entity_flags::SATOSHI;
         }
+        if ecs.get::<&crate::tether::Tethered>(e).is_ok() {
+            flags |= entity_flags::TETHERED;
+        }
         let update = EntityUpdate {
             id: pid.0,
             x: pos.0.x,
@@ -567,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_carry_hurt_baby_tamed_and_satoshi() {
+    fn flags_carry_hurt_baby_tamed_satoshi_and_tethered() {
         let (mut ecs, mut b) = fresh();
         let calf = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         ecs.insert_one(calf, crate::breeding::Baby { adult_at_tick: 99 }).unwrap();
@@ -578,6 +581,12 @@ mod tests {
             "npub-owner".to_string();
         let guide = entity::spawn_mob(&mut ecs, MobType::Villager, Vec3::new(6.0, 64.0, 0.0));
         ecs.insert_one(guide, crate::satoshi::SatoshiMarker).unwrap();
+        let leashed = entity::spawn_mob(&mut ecs, MobType::Sheep, Vec3::new(8.0, 64.0, 0.0));
+        ecs.insert_one(
+            leashed,
+            crate::tether::Tethered { target: crate::tether::TetherTarget::Player(0) },
+        )
+        .unwrap();
 
         let tick = b.diff(&mut ecs);
         let flags = |e: hecs::Entity| {
@@ -588,6 +597,7 @@ mod tests {
         assert_eq!(flags(hurt), entity_flags::HURT);
         assert_eq!(flags(pup), entity_flags::TAMED);
         assert_eq!(flags(guide), entity_flags::SATOSHI);
+        assert_eq!(flags(leashed), entity_flags::TETHERED);
 
         // The flash ending is a change: one update clears the HURT bit.
         for _ in 0..crate::combat::DAMAGE_FLASH_TICKS {

@@ -65,7 +65,8 @@ impl Inbox {
                         && e.player_index as usize == slot
                     {
                         match e.event {
-                            protocol::PlayerEventType::Died => self.died += 1,
+                            protocol::PlayerEventType::Died
+                            | protocol::PlayerEventType::DiedOf { .. } => self.died += 1,
                             protocol::PlayerEventType::Respawned { .. } => self.respawned += 1,
                             _ => {}
                         }
@@ -416,6 +417,10 @@ fn a_client_whose_health_sums_to_zero_dies_and_can_respawn() {
     rig.send_input_reporting(3, 0.0, delta, 0);
     rig.tick(1);
     assert!(rig.dead(), "the server holds the body dead too");
+    // The server still sends it (a client that missed the death needs it);
+    // a client that has already pressed Respawn drops it as stale — its
+    // `Respawn` is unanswered (review D2a-verify N1,
+    // `remote_client::a_stale_died_before_respawned_is_ignored_and_a_new_death_after_it_is_not`).
     assert_eq!(
         rig.inbox.died, 1,
         "a body reported at zero by `health_delta` (input 2, still queued behind the \

@@ -24,12 +24,14 @@
 //! mob pushing a wall (same position, same velocity, so no update) drifts at
 //! most that far.
 //!
-//! **Interactions** (attack, tame, feed, breed, ride, trade) need the server
-//! to act on its own entity: until D2b they are refused on the joiner with a
-//! toast. [`RemoteMobs::ray_target`] tells the caller a click landed on a
-//! mirrored mob (the crosshair ray, clamped to the first block), and
-//! [`MirrorTarget::right_click_interacts`] whether a right-click with what is
-//! in hand would have done something to it.
+//! **Interactions** need the server to act on its own entity (MP-D2b): a
+//! swing goes to it as an `EntityAttack`, a right-click that would do
+//! something to the mob as an `EntityInteract`, and the server decides.
+//! [`RemoteMobs::ray_target`] tells the caller a click landed on a mirrored
+//! mob (the crosshair ray, clamped to the first block), and
+//! [`MirrorTarget::right_click_action`] what a right-click with what is in
+//! hand asks for. Riding and villager trading stay refused with a toast
+//! (D2c).
 //!
 //! **No private mobs.** [`purge_private_mobs`] removes any mob that appeared
 //! in a joiner's own sim ECS (chunk scatter, a spawn egg, a command): the
@@ -84,47 +86,91 @@ pub struct MirrorTarget {
     pub kind: MobType,
     pub tamed: bool,
     pub baby: bool,
+    /// On a Lead (`entity_flags::TETHERED`, v70).
+    pub tethered: bool,
+}
+
+/// What a joiner's right-click on a mirrored mob means (MP-D2b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MirrorClick {
+    /// Ask the server for this interaction (`EntityInteract`).
+    Interact(crate::protocol::InteractKind),
+    /// Riding (and a steed's pack) or villager trading: not yet for a joiner
+    /// (D2c) — refused here with [`JOINED_INTERACTION_TOAST`].
+    NotYet,
 }
 
 impl MirrorTarget {
-    /// Would a right-click holding `held` (`None` = empty hand) on this mob
-    /// do something TO the mob in single-player — so on a mirrored mob it is
-    /// an interaction the server has to perform, refused until D2b (review
-    /// D2a LOW-2)? The same predicates `game_loop`'s right-click branches
-    /// apply, in their order: talk to a villager and mount a steed with
-    /// anything in hand; a Lead on a passive mob; breeding food (horse
-    /// family only while sneaking, never a baby); a bucket on a cow, shears
-    /// on a sheep; taming food (companion food, a Cat Treat on a cat, a
-    /// Bone on a wolf, Berries on a Nostrich); and an empty hand on a tamed
-    /// pet (sit / follow — the mirror doesn't know whose). Everything else —
-    /// eating, a bow, a bucket at water, a block beside a cow — is the
-    /// item's own use and goes ahead.
-    pub fn right_click_interacts(&self, held: Option<&crate::item::Item>, sneak: bool) -> bool {
+    /// What a right-click holding `held` (`None` = empty hand) on this mob
+    /// asks for, in single-player's own order of right-click branches (so a
+    /// joiner's click means what it would mean in single-player): a Lead on
+    /// a passive mob; breeding food (horse family only while sneaking,
+    /// never a baby); a bucket on a cow, shears on a sheep; companion food
+    /// (a Cat Treat on a cat); a steed (anything in hand: pack or mount —
+    /// D2c); a Lead taken off a tethered mob (anything but a Lead in hand);
+    /// a villager (talk / trade — D2c); a Bone on a wolf (Mixed Berries on a
+    /// Nostrich never get there: it is a steed, mounted first, as in
+    /// single-player); an empty hand on a tamed pet (sit / follow — the
+    /// server checks it is ours). `None`: the item's own use goes ahead — eating, a
+    /// bow, a bucket at water, a block beside a cow (review D2a LOW-2).
+    pub fn right_click_action(
+        &self,
+        held: Option<&crate::item::Item>,
+        sneak: bool,
+    ) -> Option<MirrorClick> {
         use crate::item::{Item, MaterialId};
+        use crate::protocol::InteractKind;
         let kind = self.kind;
-        if matches!(kind, MobType::Villager | MobType::Peddler) || crate::mob::is_rideable(kind) {
-            return true;
+        let mat = match held {
+            Some(Item::Material(m)) => Some(*m),
+            _ => None,
+        };
+        let ask = |k| Some(MirrorClick::Interact(k));
+        if mat == Some(MaterialId::Lead)
+            && crate::mob::mob_def(kind).category == crate::mob::MobCategory::Passive
+        {
+            return ask(InteractKind::LeadAttach);
         }
-        match held {
-            None => self.tamed,
-            Some(Item::Material(m)) => {
-                let m = *m;
-                (m == MaterialId::Lead
-                    && crate::mob::mob_def(kind).category == crate::mob::MobCategory::Passive)
-                    || (!self.baby
-                        && crate::breeding::breeding_food(kind) == Some(m)
-                        && crate::breeding::breeding_feed_allowed(kind, sneak))
-                    || (kind == MobType::Cow && m == MaterialId::Bucket)
-                    || crate::companion::tame_food(kind) == Some(m)
-                    || (kind == MobType::Cat && m == MaterialId::CatTreat)
-                    || (kind == MobType::Wolf && m == MaterialId::Bone)
-                    || (kind == MobType::Nostrich && m == MaterialId::Berries)
-            }
-            Some(Item::Tool(t)) => {
-                kind == MobType::Sheep && t.tool_type == crate::crafting::ToolType::Shears
-            }
-            Some(_) => false,
+        if let Some(m) = mat
+            && !self.baby
+            && crate::breeding::breeding_food(kind) == Some(m)
+            && crate::breeding::breeding_feed_allowed(kind, sneak)
+        {
+            return ask(InteractKind::Feed);
         }
+        if kind == MobType::Cow && mat == Some(MaterialId::Bucket) {
+            return ask(InteractKind::Milk);
+        }
+        if kind == MobType::Sheep
+            && matches!(held, Some(Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears)
+        {
+            return ask(InteractKind::Shear);
+        }
+        if let Some(m) = mat
+            && !self.tamed
+            && ((kind == MobType::Cat && m == MaterialId::CatTreat)
+                || crate::companion::tame_food(kind) == Some(m))
+        {
+            return ask(InteractKind::Tame);
+        }
+        if crate::mob::is_rideable(kind) {
+            return Some(MirrorClick::NotYet);
+        }
+        if self.tethered && mat != Some(MaterialId::Lead) {
+            return ask(InteractKind::LeadDetach);
+        }
+        if matches!(kind, MobType::Villager | MobType::Peddler) {
+            return Some(MirrorClick::NotYet);
+        }
+        if (kind == MobType::Wolf && mat == Some(MaterialId::Bone))
+            || (kind == MobType::Nostrich && mat == Some(MaterialId::Berries))
+        {
+            return ask(InteractKind::Tame);
+        }
+        if held.is_none() && self.tamed {
+            return ask(InteractKind::SitToggle);
+        }
+        None
     }
 }
 
@@ -299,6 +345,7 @@ impl RemoteMobs {
             kind,
             tamed: m.flags & entity_flags::TAMED != 0,
             baby: m.flags & entity_flags::BABY != 0,
+            tethered: m.flags & entity_flags::TETHERED != 0,
         })
     }
 
@@ -411,10 +458,11 @@ pub fn purge_private_mobs(ecs: &mut hecs::World) -> usize {
     mobs.len()
 }
 
-/// The toast a joiner sees when it tries to attack, tame, feed, breed, ride
-/// or trade with a mirrored mob (until D2b).
+/// The toast a joiner sees when it tries to ride a steed (or fit its pack)
+/// or talk to a villager on someone else's world: riding needs a server-side
+/// mount with prediction, trading an offer-list flow (D2c).
 pub const JOINED_INTERACTION_TOAST: &str =
-    "Not available when you've joined someone else's world yet.";
+    "Riding and trading aren't available in someone else's world yet.";
 
 #[cfg(test)]
 mod tests {
@@ -609,7 +657,10 @@ mod tests {
         let eye = Vec3::new(0.0, 64.5, 0.0);
         let look = Vec3::new(0.0, 0.0, -1.0);
         let hit = m.ray_target(eye, look, 5.0).expect("the crosshair is on the wolf");
-        assert_eq!(hit, MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, baby: false });
+        assert_eq!(
+            hit,
+            MirrorTarget { id: 11, kind: MobType::Wolf, tamed: true, baby: false, tethered: false }
+        );
         assert_eq!(m.ray_target(eye, Vec3::new(1.0, 0.0, 0.0), 5.0), None, "looking away misses");
         assert_eq!(m.ray_target(eye, look, 1.0), None, "out of reach (or behind a block)");
     }
@@ -632,37 +683,51 @@ mod tests {
     }
 
     fn target(kind: MobType) -> MirrorTarget {
-        MirrorTarget { id: 1, kind, tamed: false, baby: false }
+        MirrorTarget { id: 1, kind, tamed: false, baby: false, tethered: false }
     }
 
-    /// Review D2a LOW-2 — only what would do something to the mob is
-    /// refused on a mirror; the item's own use goes ahead.
+    /// MP-D2b — a right-click on a mirror asks the server for what it would
+    /// do in single-player; only riding and trading stay refused (D2c), and
+    /// the item's own use goes ahead (review D2a LOW-2).
     #[test]
-    fn only_a_real_mob_interaction_is_refused() {
+    fn a_right_click_asks_for_the_single_player_interaction() {
         use crate::crafting::{ToolMaterial, ToolType};
         use crate::item::{Item, MaterialId};
+        use crate::protocol::InteractKind::*;
         let mat = |m| Item::Material(m);
+        let ask = |k| Some(MirrorClick::Interact(k));
         let cow = target(MobType::Cow);
-        assert!(cow.right_click_interacts(Some(&mat(MaterialId::Wheat)), false), "breed");
-        assert!(cow.right_click_interacts(Some(&mat(MaterialId::Bucket)), false), "milk");
-        assert!(cow.right_click_interacts(Some(&mat(MaterialId::Lead)), false), "leash");
-        assert!(!cow.right_click_interacts(Some(&mat(MaterialId::Bread)), false), "eat");
-        assert!(!cow.right_click_interacts(Some(&Item::Block(crate::block::STONE)), false), "build");
-        assert!(!cow.right_click_interacts(None, false), "an empty hand on a wild cow");
+        assert_eq!(cow.right_click_action(Some(&mat(MaterialId::Wheat)), false), ask(Feed));
+        assert_eq!(cow.right_click_action(Some(&mat(MaterialId::Bucket)), false), ask(Milk));
+        assert_eq!(cow.right_click_action(Some(&mat(MaterialId::Lead)), false), ask(LeadAttach));
+        assert_eq!(cow.right_click_action(Some(&mat(MaterialId::Bread)), false), None, "eat");
+        assert_eq!(cow.right_click_action(Some(&Item::Block(crate::block::STONE)), false), None);
+        assert_eq!(cow.right_click_action(None, false), None, "an empty hand on a wild cow");
         let calf = MirrorTarget { baby: true, ..cow };
-        assert!(!calf.right_click_interacts(Some(&mat(MaterialId::Wheat)), false));
+        assert_eq!(calf.right_click_action(Some(&mat(MaterialId::Wheat)), false), None);
+        let leashed = MirrorTarget { tethered: true, ..cow };
+        assert_eq!(leashed.right_click_action(None, false), ask(LeadDetach));
+        assert_eq!(leashed.right_click_action(Some(&mat(MaterialId::Bread)), false), ask(LeadDetach));
+        assert_eq!(leashed.right_click_action(Some(&mat(MaterialId::Wheat)), false), ask(Feed));
         let shears = Item::Tool(crate::crafting::Tool::new(ToolType::Shears, ToolMaterial::Iron));
-        assert!(target(MobType::Sheep).right_click_interacts(Some(&shears), false));
-        assert!(!target(MobType::Chicken).right_click_interacts(Some(&shears), false));
-        assert!(target(MobType::Wolf).right_click_interacts(Some(&mat(MaterialId::Bone)), false));
+        assert_eq!(target(MobType::Sheep).right_click_action(Some(&shears), false), ask(Shear));
+        assert_eq!(target(MobType::Chicken).right_click_action(Some(&shears), false), None);
+        assert_eq!(target(MobType::Wolf).right_click_action(Some(&mat(MaterialId::Bone)), false), ask(Tame));
+        // A Nostrich is a steed: single-player mounts it on any right-click
+        // before its berry-tame branch is reached, so a joiner's is D2c too.
+        assert_eq!(
+            target(MobType::Nostrich).right_click_action(Some(&mat(MaterialId::Berries)), false),
+            Some(MirrorClick::NotYet)
+        );
+        assert_eq!(target(MobType::Cat).right_click_action(Some(&mat(MaterialId::CatTreat)), false), ask(Tame));
         let pet = MirrorTarget { tamed: true, ..target(MobType::Wolf) };
-        assert!(pet.right_click_interacts(None, false), "sit / follow");
-        // Talking and riding take anything in hand.
+        assert_eq!(pet.right_click_action(None, false), ask(SitToggle), "sit / follow");
+        // Riding and trading: D2c.
         let stone = Item::Block(crate::block::STONE);
-        assert!(target(MobType::Villager).right_click_interacts(Some(&stone), false));
-        assert!(target(MobType::Horse).right_click_interacts(None, false));
+        assert_eq!(target(MobType::Villager).right_click_action(Some(&stone), false), Some(MirrorClick::NotYet));
+        assert_eq!(target(MobType::Horse).right_click_action(None, false), Some(MirrorClick::NotYet));
         // A bucket aimed past a fish scoops water, as in single-player.
-        assert!(!target(MobType::Fish).right_click_interacts(Some(&mat(MaterialId::Bucket)), false));
+        assert_eq!(target(MobType::Fish).right_click_action(Some(&mat(MaterialId::Bucket)), false), None);
     }
 
     #[test]

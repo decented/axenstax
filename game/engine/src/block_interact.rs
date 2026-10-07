@@ -186,7 +186,7 @@ impl super::GameState {
     /// for tamed wolves; untamed wolves are left to wander. Task 8 wires
     /// `WolfAction::AttackTarget` into real movement + contact damage via
     /// `tick_wolf_attack`; a resting/idle companion still just holds position.
-    pub(crate) fn tick_wolf_companions(&mut self, player_positions: &[glam::Vec3]) {
+    pub(crate) fn tick_wolf_companions(&mut self, owners: &crate::tameable::OwnerBodies) {
         use crate::entity::{MobKind, Position, Velocity};
         use crate::wolf::{self, WolfAction, WolfData};
         let tick = self.tick_counter;
@@ -205,9 +205,9 @@ impl super::GameState {
         }
         let speed = crate::mob::mob_def(crate::mob::MobType::Wolf).speed / 20.0;
         for (id, pos, data) in wolves {
-            let owner_pos = wolf::owner_slot_from_pubkey(data.owner_pubkey())
-                .and_then(|slot| player_positions.get(slot).copied())
-                .map(|v| (v.x, v.y, v.z));
+            // MP-D2b — a joiner's wolf (owner key = its npub) follows that
+            // joiner's body, listed at its server slot on a lending host.
+            let owner_pos = owners.position_of(data.owner_pubkey()).map(|v| (v.x, v.y, v.z));
             let (next, action) =
                 wolf::tick_wolf(&data, (pos.x, pos.y, pos.z), owner_pos, tick);
             if let Ok(mut d) = self.ecs.get::<&mut WolfData>(id) {

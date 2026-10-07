@@ -169,6 +169,40 @@ pub struct ServerPlayer {
     /// inventory (known debt); the server only needs the total to soak the
     /// mob and lava/fire hits it lands on the body. 0 for a local slot.
     pub armour_points: u8,
+    /// MP-D2b — hits the server landed on this joiner's body since the last
+    /// `PlayerEventType::ArmourWorn` (each wears its client-held armour once,
+    /// the single-player rule). Drained by `HostedServer` every tick.
+    pub armour_wear_hits: u8,
+    /// MP-D2b — ticks until this joiner's next one-shot mob interaction is
+    /// taken (`EntityInteract`): the server's copy of the client's 8-tick
+    /// right-click cooldown, less a little network jitter.
+    pub interact_cooldown: u32,
+}
+
+/// MP-D2b — a client death sweep's kill attribution (single-player, or a
+/// host, whose lent world's sweep is its client's until D4):
+/// `combat::attribute_kill` over this client's players (`locals`:
+/// `(position, dead)` per slot). A joiner's kill is queued as a `KillEvent`
+/// on the host's server (`server`; `None` in single-player, where no joiner
+/// exists) and credits nobody here. Returns the local player to credit.
+pub fn route_client_kill(
+    server: Option<&mut GameServer>,
+    attacker: Option<crate::combat::Attacker>,
+    kind: crate::mob::MobType,
+    pos: Vec3,
+    tamed: bool,
+    locals: &[(Vec3, bool)],
+) -> Option<usize> {
+    match crate::combat::attribute_kill(attacker, pos, locals) {
+        crate::combat::KillCredit::Local(idx) => Some(idx),
+        crate::combat::KillCredit::Remote(slot) => {
+            if let Some(server) = server {
+                server.queue_kill_event(slot, kind, pos, tamed);
+            }
+            None
+        }
+        crate::combat::KillCredit::Nobody => None,
+    }
 }
 
 /// Where `initial_load` centres a world with no player to centre it on (a
@@ -326,7 +360,17 @@ impl ServerPlayer {
             dead_ticks: 0,
             awaiting_join: false,
             armour_points: 0,
+            armour_wear_hits: 0,
+            interact_cooldown: 0,
         }
+    }
+
+    /// MP-D2b — this player's pet-owner key: the verified npub (bech32) for a
+    /// signed-in joiner; `None` for a guest, who cannot tame. A local slot's
+    /// key is `tameable::local_owner_key`, which a local seat's own client
+    /// uses — never this.
+    pub fn pet_owner_key(&self) -> Option<String> {
+        crate::hosted_server::verified_npub(self.verified_pubkey)
     }
 
     /// Does this player's client generate terrain differently from this
@@ -357,6 +401,7 @@ impl ServerPlayer {
         self.combat.respawn();
         self.combat.just_died = false;
         self.dead_ticks = 0;
+        self.armour_wear_hits = 0;
         self.player.reset_fall();
     }
 }
@@ -696,6 +741,12 @@ pub struct GameServer {
     /// inventories are client-authoritative until the dual-sim rework, so the
     /// packet is what actually lands the stack in front of the player.
     pub pending_item_grants: Vec<(usize, crate::item::ItemStack)>,
+    /// MP-D2b — kills credited to joiners, by server player slot, waiting to
+    /// go out as `KillEvent`s: queued by this server's own death sweep, or —
+    /// on a lent world, whose sweep is its host client's until D4 — by that
+    /// sweep through [`Self::queue_kill_event`]. Drained by `HostedServer`
+    /// after each tick.
+    pub pending_kill_events: Vec<(usize, crate::protocol::KillEventPacket)>,
     /// Server-side view radius in chunks (Spec 39 — was the `RENDER_DISTANCE`
     /// const). Defaults to the High preset; in hosted single-player the client
     /// keeps it in sync with the player's render-distance dial.
@@ -751,6 +802,7 @@ impl GameServer {
             is_creative: false,
             pending_block_changes: Vec::new(),
             pending_item_grants: Vec::new(),
+            pending_kill_events: Vec::new(),
             render_distance: crate::graphics_settings::DEFAULT_RENDER_DISTANCE,
             difficulty: crate::survival::Difficulty::Normal,
         }
@@ -1484,6 +1536,8 @@ impl GameServer {
             // spawning and plate power stop seeing that player (review D2a
             // MEDIUM-1). Only the hit timers tick.
             self.players[i].combat.tick_timers();
+            let sp = &mut self.players[i];
+            sp.interact_cooldown = sp.interact_cooldown.saturating_sub(1);
         }
 
         // MP-D2a — hostile melee and lava/fire contact on every joiner's
@@ -1533,8 +1587,9 @@ impl GameServer {
         // attribution / bounty / Vow stay client-side pending the dual-sim
         // rework.)
         let drop_snaps = crate::death_drops::snapshot_before_despawn(&self.ecs);
+        let dying_tamed = crate::death_drops::dying_tamed_positions(&self.ecs);
         let deaths = crate::combat::despawn_dead(&mut self.ecs);
-        for (kind, pos, _attacker) in deaths {
+        for (kind, pos, attacker) in deaths {
             crate::death_drops::spawn_drops_for_death(
                 &mut self.ecs,
                 &self.world,
@@ -1543,6 +1598,15 @@ impl GameServer {
                 pos,
                 self.world_time,
             );
+            // MP-D2b — the one attribution rule, with no local players: a
+            // joiner's kill goes to that joiner as a `KillEvent`. Kills no
+            // joiner made credit nobody (the server keeps no kill counters).
+            if let crate::combat::KillCredit::Remote(slot) =
+                crate::combat::attribute_kill(attacker, pos, &[])
+            {
+                let tamed = dying_tamed.iter().any(|p| (*p - pos).abs().max_element() < 0.5);
+                self.queue_kill_event(slot, kind, pos, tamed);
+            }
         }
 
         // HP-3 — apply the population decrements after despawn.
@@ -1787,9 +1851,12 @@ impl GameServer {
             if !sp.server_simulated || !sp.is_present_and_alive() {
                 continue;
             }
+            // MP-D2b — every hit that lands wears the joiner's armour once
+            // (reported as `ArmourWorn`), the single-player rule
+            // (`combat::tick_mob_attacks`, `take_damage_with_armour_from`).
             if hostiles_attack {
                 let pos = sp.player.pos;
-                crate::combat::hostile_melee_tick(
+                let landed = crate::combat::hostile_melee_tick(
                     &self.ecs,
                     pos,
                     &mut sp.player.velocity,
@@ -1797,6 +1864,7 @@ impl GameServer {
                     sp.armour_points,
                     self.difficulty,
                 );
+                sp.armour_wear_hits = sp.armour_wear_hits.saturating_add(landed.len() as u8);
             }
             if let Some((raw, cause)) = crate::survival::contact_hazard(
                 &self.world,
@@ -1805,9 +1873,72 @@ impl GameServer {
                 self.play_mode,
             ) {
                 let damage = crate::armour::damage_after_armour(raw, sp.armour_points);
-                sp.combat.take_damage_from(damage, cause);
+                if sp.combat.take_damage_from(damage, cause) {
+                    sp.armour_wear_hits = sp.armour_wear_hits.saturating_add(1);
+                }
             }
         }
+    }
+
+    /// MP-D2b — a hit the world deals a joiner's body from outside this
+    /// tick's own hazard pass: a species attack (bee sting, goat charge,
+    /// shark bite) that a lent world's host client runs, a Nostrich's
+    /// kick-back. `raw` damage, soaked by the armour the joiner reports and
+    /// wearing it once if it lands (reported as `ArmourWorn`); `knock` added
+    /// to the body's velocity. A lethal hit leaves the `just_died` one-shot
+    /// for `HostedServer` to send as `DiedOf`, naming `cause`. Nothing for a
+    /// local slot (its own client lands its hits), the dead or the absent, or
+    /// in a flying mode. Returns whether the hit landed.
+    pub fn land_hit_on_joiner(
+        &mut self,
+        slot: usize,
+        raw: f32,
+        cause: crate::survival::DamageCause,
+        knock: Vec3,
+    ) -> bool {
+        if self.play_mode.flies() {
+            return false;
+        }
+        let Some(sp) = self.players.get_mut(slot) else {
+            return false;
+        };
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            return false;
+        }
+        let damage = crate::armour::damage_after_armour(raw, sp.armour_points);
+        let landed = sp.combat.take_damage_from(damage, cause);
+        if landed {
+            sp.armour_wear_hits = sp.armour_wear_hits.saturating_add(1);
+            sp.player.velocity += knock;
+        }
+        landed
+    }
+
+    /// MP-D2b — credit joiner `slot` with killing a `kind` at `pos`: a
+    /// `KillEvent` to that joiner alone after the tick (`tamed`: the victim
+    /// was somebody's pet, which spares the killer the Nostrich's Vow). A
+    /// slot that isn't a joiner is ignored.
+    pub fn queue_kill_event(
+        &mut self,
+        slot: usize,
+        kind: crate::mob::MobType,
+        pos: Vec3,
+        tamed: bool,
+    ) {
+        if !self.players.get(slot).is_some_and(|sp| sp.server_simulated) {
+            return;
+        }
+        self.pending_kill_events.push((
+            slot,
+            crate::protocol::KillEventPacket {
+                victim: crate::entity_broadcast::wire_kind_for(kind),
+                cause: crate::protocol::kill_cause::MELEE,
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                victim_flags: if tamed { crate::protocol::entity_flags::TAMED } else { 0 },
+            },
+        ));
     }
 
     /// A server-simulated player's client reports it died (MP-A3): its input

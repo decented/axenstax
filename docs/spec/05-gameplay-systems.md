@@ -1544,7 +1544,7 @@ Each damage type is a tagged enum, allowing armour and enchantments to selective
 - `Standard`: Cooldown-based (default, described above). More strategic.
 - `Custom`: Server/plugin defines custom timing via configuration.
 
-### 6.4.1 Combat for joiners (as built, MP-D2a, protocol v68)
+### 6.4.1 Combat for joiners (as built, MP-D2a v68 + MP-D2b v70)
 
 A player who has joined someone else's world (LAN / online host or dedicated
 server) fights the **server's** mobs — there is no private mob world on a
@@ -1570,27 +1570,51 @@ joiner any more (Spec 04 §4.2c).
   `combat::MAX_REPORTED_HEAL_PER_INPUT` (Spec 04 §5.3.2, which tables every
   source). A lethal server-side hit — or a reported loss that finishes off a
   body the server holds lower than the client knew — reaches the death screen
-  through `PlayerEvent::Died` (MP-A3); if the client's own sum reaches zero
-  first, zero is dead and it enters the death screen itself.
+  through `PlayerEvent::DiedOf` (v70; `Died` before), which names the cause
+  for the death screen ("Killed by a Brigand", "You tried to swim in lava");
+  if the client's own sum reaches zero first, zero is dead and it enters the
+  death screen itself (a `Died` arriving after it has pressed Respawn is
+  dropped as stale — Spec 04 §5.3.2).
 - **A joiner can't sleep in a bed** ("Sleeping isn't available when you've
   joined someone else's world yet."): the night, the respawn point and the
   health are the server's, so the heal would be the only part that worked.
   `/kill` and `/heal` are op-only, never available to a joiner.
-- **Attacking and every other mob interaction (tame, feed, breed, ride, lead,
-  shear, milk, trade, pet commands) is not available to a joiner yet** (D2b):
-  it shows "Not available when you've joined someone else's world yet." and
-  does nothing else. The target is the mob under the crosshair (in front of the
-  first block), not the swing's wide cone. A swing is refused only when it could
-  land (off cooldown) — between swings a held break goes on, so a chicken at
-  your feet doesn't stop you digging; a right-click is refused only when what
-  is in hand would do something to that mob (Spec 04 §4.2c) — eating, a bow or
-  a block placed beside a cow go ahead.
-- **Not yet on a joiner:** armour durability does not wear from server-landed
-  hits (the server holds no armour; Phase C); the death screen's cause line is
-  generic for a server-side death (`Died` carries no cause); species-AI attacks
-  (bee sting, goat charge, shark bite, bear) run only on a host's client and
-  reach only its local players; mob push-out and knockback are not predicted
-  (each shows as a position correction).
+- **A joiner fights and handles the server's mobs (MP-D2b, Spec 04 §4.2d).**
+  Its swing at the mob under the crosshair (in front of the first block, not
+  the swing's wide cone) goes to the server as `EntityAttack`; the server
+  checks the mob is alive and within reach of the body IT holds (3 + 1.5
+  blocks), runs its own cooldown, and lands the hit with `combat::strike` —
+  single-player's melee rule: damage from the held item, ×1.5 if the server's
+  body is airborne, knockback, the sweep, the prey bolt, a provoked Bear or
+  Hyena, and `LastAttacker` naming the joiner; then `combat::after_swing`
+  (its wolves rally, a Nostrich kicks back). The weapon wears only when the
+  server confirms the swing. Between swings a held break goes on, so a chicken
+  at your feet doesn't stop you digging. The single-player villager warning
+  ("Careful — that's a villager.") runs on the joiner's client first.
+- **One-shot interactions** — breeding feed, taming, shearing, milking, a
+  Lead on and off, a pet's sit / follow (own pets only) — go to the server as
+  `EntityInteract` and run through `mob_interact`, the same functions
+  single-player's right-click calls; the joiner gives up the food, bucket or
+  Lead only when the server accepts, and products (milk, the Lead back, wool
+  and loot picked up) arrive as `InventoryGrant`s. A pet tamed by a joiner is
+  owned by its verified npub; a guest can't tame ("Sign in to tame animals in
+  someone else's world."). Riding (and a steed's pack) and villager trading
+  are not yet available to a joiner (D2c): "Riding and trading aren't
+  available in someone else's world yet."
+- **Kills credit the joiner who made them** (`combat::attribute_kill`, the one
+  rule): the server tells it with a `KillEvent`, and its client runs the same
+  attribution single-player's death sweep runs (kill counter for bounties,
+  the KillMob challenge, the Nostrich's Vow, the villager-kill reputation
+  penalty). A host's own player is never credited with a joiner's kill.
+- **Server-landed hits wear the joiner's armour** (v70, `ArmourWorn`): one
+  durability per worn piece per landed hit, the single-player rule. On a
+  lending host, species-AI attacks (bee sting, goat charge, shark bite) reach
+  joiners as well as the host's players, a Bear or Hyena a joiner provoked
+  charges it, and a joiner's pet follows it.
+- **Not yet on a joiner:** mob push-out and knockback are not predicted (each
+  shows as a position correction); its bow and slingshot shots fly only in its
+  own world; a dedicated server runs no species AI or breeding (a fed pair
+  never breeds there, a tamed pet never follows — D4).
 
 ### 6.5 Ranged Combat
 
@@ -3815,7 +3839,7 @@ image files in `worlds/<name>/exhibits/` and places/edits exhibits with the
 
 ## 12.13 Combat sweep attack (#23)
 
-A melee swing hits the primary (crosshair) mob for full damage and **every other mob in the swing arc** for `SWEEP_DAMAGE_FRACTION` (0.4) × damage + half-knockback — the Minecraft-style sweep. `combat::in_swing_arc(to_target, look_dir, reach, min_dot)` is the shared pure cone+reach predicate; `player_attack` collects the other arc targets and applies sweep damage + `LastAttacker` credit. PvP balance is multiplayer-gated; this is the vs-mob model. Swing animation + true swept-volume deferred. Spec: `docs/foundations/2026-06-16-combat-sweep-attack.md`.
+A melee swing hits the primary (crosshair) mob for full damage and **every other mob in the swing arc** for `SWEEP_DAMAGE_FRACTION` (0.4) × damage + half-knockback — the Minecraft-style sweep. `combat::in_swing_arc(to_target, look_dir, reach, min_dot)` is the shared pure cone+reach predicate; `player_attack` picks the target and `combat::strike` (shared with a joiner's server-side swing since MP-D2b) collects the other arc targets and applies sweep damage + `LastAttacker` credit. PvP balance is multiplayer-gated; this is the vs-mob model. Swing animation + true swept-volume deferred. Spec: `docs/foundations/2026-06-16-combat-sweep-attack.md`.
 
 ## 12.12 Accessibility narration (#24)
 

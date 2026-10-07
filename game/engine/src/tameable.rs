@@ -180,6 +180,57 @@ pub fn pet_owner_of(ecs: &hecs::World, target: hecs::Entity) -> Option<String> {
     None
 }
 
+/// The pet-owner key of a local player slot (`OwnershipData.owner_pubkey`
+/// for a pet a single-player or host seat tamed): `"local-player-{slot}"`.
+pub fn local_owner_key(slot: usize) -> String {
+    format!("local-player-{slot}")
+}
+
+/// MP-D2b — the bodies pet owners stand in, for the species AI that walks a
+/// tamed pet to its owner (wolves, companions, Nostriches) and the Lead that
+/// pulls a mob after its holder: `positions[slot]` is player `slot`'s body
+/// (local slots first; on a lending host, every joiner at its server slot),
+/// and `remote_owners` maps a joiner's pet-owner key (its verified npub) to
+/// its slot. A local key (`"local-player-{slot}"`) resolves by its number.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OwnerBodies<'a> {
+    pub positions: &'a [glam::Vec3],
+    pub remote_owners: &'a [(String, usize)],
+}
+
+impl<'a> OwnerBodies<'a> {
+    /// The slot of the player whose pet-owner key is `owner_key`, if present.
+    pub fn slot_of(&self, owner_key: &str) -> Option<usize> {
+        crate::wolf::owner_slot_from_pubkey(owner_key).or_else(|| {
+            self.remote_owners.iter().find(|(k, _)| k == owner_key).map(|&(_, s)| s)
+        })
+    }
+
+    /// Where the owner keyed `owner_key` stands, if present.
+    pub fn position_of(&self, owner_key: &str) -> Option<glam::Vec3> {
+        self.slot_of(owner_key).and_then(|s| self.positions.get(s).copied())
+    }
+}
+
+/// MP-D2b — is `target` a pet/steed owned by the player with pet-owner key
+/// `owner_key` (and, for the slot-keyed kept steed, local slot `local_slot`;
+/// `None` for a joiner, who keeps no steed)? The general form of
+/// [`is_players_own_pet`].
+pub fn is_own_pet(
+    ecs: &hecs::World,
+    target: hecs::Entity,
+    owner_key: &str,
+    local_slot: Option<usize>,
+) -> bool {
+    if let Ok(d) = ecs.get::<&crate::horse_ai::HorseData>(target) {
+        return local_slot.is_some_and(|s| d.kept_by == Some(s as u8));
+    }
+    match pet_owner_of(ecs, target) {
+        Some(owner) => owner == owner_key,
+        None => false,
+    }
+}
+
 /// 1C no-friendly-fire: is `target` a pet/steed owned by this player?
 /// Checked before player melee + projectile damage lands; sneaking bypasses
 /// (deliberate hit). Covers all four ownership shapes: `WolfData` /
@@ -194,13 +245,7 @@ pub fn is_players_own_pet(
     player_pubkey: &str,
     player_slot: usize,
 ) -> bool {
-    if let Ok(d) = ecs.get::<&crate::horse_ai::HorseData>(target) {
-        return d.kept_by == Some(player_slot as u8);
-    }
-    match pet_owner_of(ecs, target) {
-        Some(owner) => owner == player_pubkey,
-        None => false,
-    }
+    is_own_pet(ecs, target, player_pubkey, Some(player_slot))
 }
 
 /// Session-local marker: this entity was deliberately culled by its owner's
@@ -249,10 +294,10 @@ pub fn mark_if_deliberate_pet_cull(
     hit: bool,
     target: hecs::Entity,
     player_pubkey: &str,
-    player_slot: usize,
+    player_slot: Option<usize>,
     now_tick: u64,
 ) {
-    if sneaking && hit && is_players_own_pet(ecs, target, player_pubkey, player_slot) {
+    if sneaking && hit && is_own_pet(ecs, target, player_pubkey, player_slot) {
         let _ = ecs.insert_one(
             target,
             DeliberateCull {
@@ -732,7 +777,7 @@ mod tests {
         wd.ownership.owner_pubkey = "local-player-0".into();
         let _ = ecs.insert_one(wolf, wd);
 
-        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", Some(0), 1_000);
 
         assert!(ecs.get::<&DeliberateCull>(wolf).is_ok(), "sneak-killed own pet must be marked");
     }
@@ -745,7 +790,7 @@ mod tests {
         wd.ownership.owner_pubkey = "local-player-0".into();
         let _ = ecs.insert_one(wolf, wd);
 
-        mark_if_deliberate_pet_cull(&mut ecs, false, true, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, false, true, wolf, "local-player-0", Some(0), 1_000);
 
         assert!(ecs.get::<&DeliberateCull>(wolf).is_err(), "a non-sneak swing never lands on your own pet (skipped in target selection) — must never mark");
     }
@@ -759,7 +804,7 @@ mod tests {
         let _ = ecs.insert_one(wolf, wd);
 
         // player 0 sneak-hits player 1's wolf — not their own pet, so no mark.
-        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", Some(0), 1_000);
 
         assert!(ecs.get::<&DeliberateCull>(wolf).is_err());
     }
@@ -772,7 +817,7 @@ mod tests {
         wd.ownership.owner_pubkey = "local-player-0".into();
         let _ = ecs.insert_one(wolf, wd);
 
-        mark_if_deliberate_pet_cull(&mut ecs, true, false, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, true, false, wolf, "local-player-0", Some(0), 1_000);
 
         assert!(ecs.get::<&DeliberateCull>(wolf).is_err(), "a miss must not mark");
     }
@@ -786,7 +831,7 @@ mod tests {
         let _ = ecs.insert_one(wolf, wd);
 
         // The owner's sneak swing lands the killing blow on their own pet.
-        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", Some(0), 1_000);
 
         // Death sweep runs the very same tick — well within the TTL.
         assert!(
@@ -832,7 +877,7 @@ mod tests {
         // Accidental sneak-tap at tick 1_000 — pet survives (this call site
         // only ever fires on a landed hit, but the mark itself doesn't know
         // or care whether that hit was lethal).
-        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", Some(0), 1_000);
 
         // Pet dies much later to something else entirely — well past the TTL.
         let later_tick = 1_000 + CULL_MARK_TTL_TICKS + 1;
@@ -850,7 +895,7 @@ mod tests {
         wd.ownership.owner_pubkey = "local-player-0".into();
         let _ = ecs.insert_one(wolf, wd);
 
-        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", 0, 1_000);
+        mark_if_deliberate_pet_cull(&mut ecs, true, true, wolf, "local-player-0", Some(0), 1_000);
 
         // Exactly at the TTL boundary — still fresh (inclusive).
         assert!(

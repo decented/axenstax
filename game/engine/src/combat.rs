@@ -50,13 +50,91 @@ const INVINCIBILITY_TICKS: u32 = 10;
 
 // --- Health component for mobs ---
 
+/// Who landed a hit on a mob — the kill-attribution key (MP-D2b).
+///
+/// The slot inside either variant is also the index the species AI's player
+/// list uses for that player (a Bear's or Hyena's revenge target): a client
+/// sim lists its own players by slot, and a host lends its server the same
+/// numbering — local slot `i` IS server player `i`, joiners come after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attacker {
+    /// A player of the client sim that owns this ECS (single-player, or a
+    /// host's own seat): its player slot.
+    Local(usize),
+    /// A joiner, by its server player slot (`GameServer::players` index).
+    /// Credited to that joiner through a `KillEvent`; never to a local player.
+    Remote(usize),
+}
+
+impl Attacker {
+    /// The player's slot: local slot or server slot (see the type doc).
+    pub fn slot(self) -> usize {
+        match self {
+            Attacker::Local(i) | Attacker::Remote(i) => i,
+        }
+    }
+
+    /// The local slot, for the slot-keyed ownership shape (a kept steed's
+    /// `HorseData.kept_by`); `None` for a joiner, who keeps no steed (D2c).
+    pub fn local_slot(self) -> Option<usize> {
+        match self {
+            Attacker::Local(i) => Some(i),
+            Attacker::Remote(_) => None,
+        }
+    }
+}
+
 /// ECS component stamped on a mob the last time a player damaged it.
 /// Read by `despawn_dead` so kill-attribution can credit the actual
 /// last-attacker rather than the nearest-player proximity fallback.
 /// Absent on mobs no player has hit (e.g. a Cow killed by a Hyena);
 /// the caller falls back to nearest-player in that case.
 #[derive(Clone, Copy, Debug)]
-pub struct LastAttacker(pub usize);
+pub struct LastAttacker(pub Attacker);
+
+/// Who a death is credited to ([`attribute_kill`], MP-D2b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillCredit {
+    /// This client sim's player slot `i`: its kill counter, challenges, the
+    /// Vow, reputation.
+    Local(usize),
+    /// A joiner's server slot: the sweep queues a `KillEvent` to that joiner
+    /// (`GameServer::queue_kill_event`) and credits nobody here.
+    Remote(usize),
+    /// Nobody (no attacker and no living local player).
+    Nobody,
+}
+
+/// The ONE kill-attribution rule (MP-D2b), shared by the client's death sweep
+/// (single-player; a host, whose lent world's sweep is its client's until D4)
+/// and a server's own sweep (dedicated, `--no-lend`; `locals` empty).
+///
+/// - A joiner's hit (`Attacker::Remote`) credits that joiner, always: never
+///   the nearest local player, even when the joiner has since died or left.
+/// - A local player's hit credits that player if alive and present here.
+/// - Otherwise (no player hit it, or the hitter is dead) the nearest living
+///   local player, as single-player always has (projectile and environment
+///   kills); `locals` is `(position, dead)` per local slot.
+pub fn attribute_kill(attacker: Option<Attacker>, pos: Vec3, locals: &[(Vec3, bool)]) -> KillCredit {
+    match attacker {
+        Some(Attacker::Remote(slot)) => return KillCredit::Remote(slot),
+        Some(Attacker::Local(i)) if locals.get(i).is_some_and(|&(_, dead)| !dead) => {
+            return KillCredit::Local(i);
+        }
+        _ => {}
+    }
+    let mut nearest: Option<(usize, f32)> = None;
+    for (i, &(p, dead)) in locals.iter().enumerate() {
+        if dead {
+            continue;
+        }
+        let d = (p - pos).length();
+        if nearest.is_none_or(|(_, bd)| d < bd) {
+            nearest = Some((i, d));
+        }
+    }
+    nearest.map_or(KillCredit::Nobody, |(i, _)| KillCredit::Local(i))
+}
 
 /// Health component for entities.
 pub struct Health {
@@ -598,6 +676,9 @@ fn find_attack_target_impl(
 /// in favour of the next-nearest cone candidate rather than cancelling the
 /// whole swing (`game_loop`'s melee arm peeks with the same function so its
 /// villager-grace / wolf-assist / pet-cull logic sees the same target).
+///
+/// The hit itself is [`strike`], which a server also runs for a joiner's
+/// `EntityAttack` (MP-D2b).
 pub fn player_attack(
     ecs: &mut hecs::World,
     player_pos: Vec3,
@@ -613,7 +694,7 @@ pub fn player_attack(
         return false;
     }
 
-    let attacker_key = format!("local-player-{attacker_pidx}");
+    let attacker_key = crate::tameable::local_owner_key(attacker_pidx);
     let Some((target_id, _kind)) = find_attack_target_for_swing(
         ecs,
         player_pos,
@@ -625,15 +706,62 @@ pub fn player_attack(
         return false;
     };
 
-    // Calculate damage
-    let mut damage = base_damage;
-    let is_crit = !on_ground;
-    if is_crit {
-        damage *= CRIT_MULTIPLIER;
-    }
-
     // Cooldown scaling (always full for now since we check can_attack)
     combat.attack_cooldown = ATTACK_COOLDOWN;
+    strike(
+        ecs,
+        target_id,
+        &Swing {
+            attacker: Attacker::Local(attacker_pidx),
+            owner_key: &attacker_key,
+            eye: player_pos,
+            look_dir,
+            crit: !on_ground,
+            sprinting,
+            sneaking,
+            base_damage,
+        },
+    );
+    true
+}
+
+/// One melee swing, as [`strike`] lands it (MP-D2b): who swings, from where,
+/// how hard.
+pub struct Swing<'a> {
+    /// Stamped as the targets' `LastAttacker`.
+    pub attacker: Attacker,
+    /// The swinger's pet-owner key (`tameable::local_owner_key` or a joiner's
+    /// npub) — the sweep spares its own pets unless `sneaking`.
+    pub owner_key: &'a str,
+    /// Eye position (knockback direction; the sweep's arc origin).
+    pub eye: Vec3,
+    /// Look direction (the sweep's arc).
+    pub look_dir: Vec3,
+    /// A critical hit (the swinger airborne): ×[`CRIT_MULTIPLIER`].
+    pub crit: bool,
+    /// Sprinting: extra knockback.
+    pub sprinting: bool,
+    /// Sneaking: a deliberate hit on one's own pet.
+    pub sneaking: bool,
+    /// The held item's damage (`Item::attack_damage`).
+    pub base_damage: f32,
+}
+
+/// Land a swing on `target_id`: damage (×crit), knockback, `LastAttacker`,
+/// the prey/Bear/Hyena reactions, and the #23 sweep over everything else in
+/// the arc. The one melee rule, run by single-player's [`player_attack`] and
+/// by a server for a joiner's validated `EntityAttack` (MP-D2b). Returns
+/// whether the primary target took damage (invulnerability frames can
+/// refuse it; the swing still counts as made).
+pub fn strike(ecs: &mut hecs::World, target_id: hecs::Entity, swing: &Swing) -> bool {
+    let player_pos = swing.eye;
+    let look_dir = swing.look_dir;
+    let attacker = swing.attacker;
+    // Calculate damage
+    let mut damage = swing.base_damage;
+    if swing.crit {
+        damage *= CRIT_MULTIPLIER;
+    }
 
     // Apply damage and knockback
     let mut damage_landed = false;
@@ -644,7 +772,7 @@ pub fn player_attack(
             let kb_dir = (pos.0 - player_pos).normalize_or_zero();
             let kb_dir = Vec3::new(kb_dir.x, 0.0, kb_dir.z).normalize_or_zero();
             let mut kb = KNOCKBACK_BASE;
-            if sprinting {
+            if swing.sprinting {
                 kb += KNOCKBACK_SPRINT;
             }
             vel.0.x += kb_dir.x * kb;
@@ -656,9 +784,9 @@ pub fn player_attack(
     // (i_frames + dead targets skip). Insert is idempotent — replaces
     // any prior LastAttacker so the most recent damaging hit wins.
     if damage_landed {
-        let _ = ecs.insert_one(target_id, LastAttacker(attacker_pidx));
+        let _ = ecs.insert_one(target_id, LastAttacker(attacker));
         spook_if_prey(ecs, target_id);
-        notify_hit_bear_or_hyena(ecs, target_id, attacker_pidx);
+        notify_hit_bear_or_hyena(ecs, target_id, attacker.slot());
     }
 
     // #23 — sweep attack: every OTHER entity in the swing arc takes reduced
@@ -685,8 +813,8 @@ pub fn player_attack(
             // own tamed pet/steed (no damage, no LastAttacker) unless
             // they're sneaking. Mirrors the primary-target selection gate
             // above (`find_attack_target_for_swing`).
-            if !sneaking
-                && crate::tameable::is_players_own_pet(ecs, oid, &attacker_key, attacker_pidx)
+            if !swing.sneaking
+                && crate::tameable::is_own_pet(ecs, oid, swing.owner_key, attacker.local_slot())
             {
                 continue;
             }
@@ -700,14 +828,66 @@ pub fn player_attack(
                     vel.0.z += kb_dir.z * KNOCKBACK_BASE * 0.5;
                 }
             if landed {
-                let _ = ecs.insert_one(oid, LastAttacker(attacker_pidx));
+                let _ = ecs.insert_one(oid, LastAttacker(attacker));
                 spook_if_prey(ecs, oid);
-                notify_hit_bear_or_hyena(ecs, oid, attacker_pidx);
+                notify_hit_bear_or_hyena(ecs, oid, attacker.slot());
             }
         }
     }
 
-    true
+    damage_landed
+}
+
+/// What a swing that found its target does beyond the hit itself (MP-D2b
+/// extraction of single-player's melee arm, so a joiner's swing on the server
+/// runs the same rules): a deliberate sneak-hit on the swinger's own pet is
+/// marked so the Pet Bed won't revive it
+/// (`tameable::mark_if_deliberate_pet_cull`); the swinger's tamed wolves
+/// rally onto the target, unless it is one of the swinger's own pets
+/// (`block_interact::pivot_owner_wolves_to_assist`); and a Nostrich kicks
+/// back at a swinger within 2.5 blocks (`nostrich::on_damaged`). Returns the
+/// kick damage to apply to the swinger, if any.
+pub fn after_swing(
+    ecs: &mut hecs::World,
+    target: hecs::Entity,
+    owner_key: &str,
+    local_slot: Option<usize>,
+    sneaking: bool,
+    eye: Vec3,
+    tick: u64,
+) -> Option<f32> {
+    let target_is_own_pet = crate::tameable::is_own_pet(ecs, target, owner_key, local_slot);
+    // Task 6 (bug-hardening review, 2026-07-07) — the deliberate
+    // sneak-kill bypass on your own pet used to be un-doable within 32
+    // blocks of a Pet Bed: the death sweep's rescue revived it regardless.
+    crate::tameable::mark_if_deliberate_pet_cull(
+        ecs, sneaking, true, target, owner_key, local_slot, tick,
+    );
+    // Task 8b — pets join the fight. The own-pet flag is passed honestly:
+    // a deliberate sneak-hit on your own pet must not rally the pack
+    // against it.
+    crate::block_interact::pivot_owner_wolves_to_assist(
+        ecs,
+        owner_key,
+        target,
+        target_is_own_pet,
+        tick,
+    );
+    // Spec 28d.nostrich v2 — retaliate-kick.
+    let is_nostrich = ecs
+        .get::<&MobKind>(target)
+        .is_ok_and(|k| k.0 == crate::mob::MobType::Nostrich);
+    if !is_nostrich {
+        return None;
+    }
+    let dist = ecs
+        .get::<&Position>(target)
+        .ok()
+        .map(|p| (p.0 - eye).length())
+        .unwrap_or(99.0);
+    let in_melee = dist < 2.5;
+    let mut data = ecs.get::<&mut crate::nostrich::NostrichData>(target).ok()?;
+    crate::nostrich::on_damaged(&mut data, target.id() as u64, in_melee, tick)
 }
 
 /// P2 — when a struck entity is a prey animal ([`mob::flees_when_attacked`]),
@@ -753,10 +933,10 @@ pub(crate) fn notify_hit_bear_or_hyena(ecs: &mut hecs::World, id: hecs::Entity, 
 ///
 /// Non-mob dead entities (anything with `Health` but no `MobKind`) are
 /// still despawned but produce no tuples.
-pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Option<usize>)> {
+pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Option<Attacker>)> {
     // First pass: find dead entities, capture (MobType, Vec3, attacker)
     // where present.
-    let mut dead_with_drops: Vec<(hecs::Entity, crate::mob::MobType, Vec3, Option<usize>)> =
+    let mut dead_with_drops: Vec<(hecs::Entity, crate::mob::MobType, Vec3, Option<Attacker>)> =
         Vec::new();
     let mut dead_other: Vec<hecs::Entity> = Vec::new();
     for (id, h) in ecs.query::<&Health>().iter() {
@@ -773,7 +953,7 @@ pub fn despawn_dead(ecs: &mut hecs::World) -> Vec<(crate::mob::MobType, Vec3, Op
         }
     }
 
-    let mut out: Vec<(crate::mob::MobType, Vec3, Option<usize>)> =
+    let mut out: Vec<(crate::mob::MobType, Vec3, Option<Attacker>)> =
         Vec::with_capacity(dead_with_drops.len());
     for (id, k, p, attacker) in dead_with_drops {
         out.push((k, p, attacker));
@@ -1152,11 +1332,11 @@ mod tests {
         // attribution path.
         let mut ecs = hecs::World::new();
         let cow = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
-        let _ = ecs.insert_one(cow, LastAttacker(3));
+        let _ = ecs.insert_one(cow, LastAttacker(Attacker::Local(3)));
         ecs.get::<&mut Health>(cow).unwrap().current = 0.0;
         let deaths = despawn_dead(&mut ecs);
         assert_eq!(deaths.len(), 1);
-        assert_eq!(deaths[0].2, Some(3), "LastAttacker pidx should propagate");
+        assert_eq!(deaths[0].2, Some(Attacker::Local(3)), "LastAttacker pidx should propagate");
     }
 
     #[test]
@@ -1187,7 +1367,7 @@ mod tests {
         );
         assert!(hit, "should have hit the cow in front");
         let attacker = ecs.get::<&LastAttacker>(cow).expect("LastAttacker should be stamped");
-        assert_eq!(attacker.0, 7);
+        assert_eq!(attacker.0, Attacker::Local(7));
     }
 
     #[test]

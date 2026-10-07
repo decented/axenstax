@@ -502,11 +502,7 @@ impl Camera {
 
     /// Direction the camera is looking (unit vector).
     pub fn forward(&self) -> Vec3 {
-        Vec3::new(
-            -self.yaw.sin() * self.pitch.cos(),
-            self.pitch.sin(),
-            -self.yaw.cos() * self.pitch.cos(),
-        )
+        forward_from(self.yaw, self.pitch)
     }
 
     /// Right vector (horizontal).
@@ -707,6 +703,13 @@ pub fn chunk_in_draw_range(eye: Vec3, cx: i32, cz: i32, max_cols: i32) -> bool {
     );
     let max = max_cols.max(0) as u32;
     cx.abs_diff(ex) <= max && cz.abs_diff(ez) <= max
+}
+
+/// The unit look direction for a camera `yaw` / `pitch` (radians) — what
+/// [`Camera::forward`] returns, for a server that holds only the angles a
+/// joiner's input reports (MP-D2b: the sweep arc of its swing).
+pub fn forward_from(yaw: f32, pitch: f32) -> Vec3 {
+    Vec3::new(-yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos())
 }
 
 #[cfg(test)]

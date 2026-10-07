@@ -4222,6 +4222,46 @@ impl super::GameState {
     /// slot present and alive. Read from the server's player slots, which are
     /// never lent. Empty unless the world is lent. The host's mob AI chases
     /// them (it stays client-side; see the brigand pre-pass in `tick`).
+    /// MP-D2b — the player bodies the host client's species AI, pet follow
+    /// and Leads see, indexed by player slot: this client's players first
+    /// (their slots ARE their server slots on a lending host), then — on a
+    /// lending host — every further server slot: a present, living joiner's
+    /// body, or `species_ai::ABSENT_PLAYER`. With each slot's look yaw, and
+    /// the pet-owner key (verified npub) → slot of every joiner that has one.
+    fn species_bodies(&self) -> (Vec<glam::Vec3>, Vec<f32>, Vec<(String, usize)>) {
+        let mut bodies: Vec<glam::Vec3> = self.players.iter().map(|s| s.player.pos).collect();
+        let mut yaws: Vec<f32> = self.players.iter().map(|s| s.camera.yaw).collect();
+        let mut owners = Vec::new();
+        if let Some(hs) = self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
+            for (slot, sp) in hs.server.players.iter().enumerate().skip(self.players.len()) {
+                let here = sp.server_simulated && sp.is_present_and_alive();
+                bodies.push(if here { sp.player.pos } else { crate::species_ai::ABSENT_PLAYER });
+                yaws.push(sp.yaw);
+                if sp.server_simulated
+                    && let Some(key) = sp.pet_owner_key()
+                {
+                    owners.push((key, slot));
+                }
+            }
+        }
+        (bodies, yaws, owners)
+    }
+
+    /// MP-D2b — a species attack the host client's AI landed on a joiner's
+    /// body (server slot `slot` of a lending host): `GameServer::
+    /// land_hit_on_joiner`, armour-soaked and worn, `DiedOf` on a kill.
+    fn land_hit_on_lent_joiner(
+        &mut self,
+        slot: usize,
+        damage: f32,
+        cause: crate::survival::DamageCause,
+        knock: glam::Vec3,
+    ) {
+        if let Some(hs) = self.hosted_server.as_mut().filter(|hs| hs.lends_host_world()) {
+            hs.server.land_hit_on_joiner(slot, damage, cause, knock);
+        }
+    }
+
     fn lent_joiner_positions(&self) -> Vec<glam::Vec3> {
         match self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
             Some(hs) => hs
@@ -6040,49 +6080,68 @@ impl super::GameState {
                 }
         }
 
+        // MP-D2b — the bodies the species AI, pet follow and the Lead see:
+        // this client's players at their slots and, on a lending host, every
+        // joiner at its server slot (`species_bodies`), so a bee, goat or
+        // shark reaches a joiner, a Bear or Hyena a joiner provoked charges
+        // it, and a joiner's pet follows it and its Lead pulls.
+        let (bodies, body_yaws, remote_owners) = self.species_bodies();
+        let num_local = self.players.len();
+        let owners = crate::tameable::OwnerBodies { positions: &bodies, remote_owners: &remote_owners };
+
         // P3 — tamed-wolf companion follow. Runs after mob_ai (so it wins
         // over the generic wander for tamed wolves) but BEFORE the tether
         // pass, so an explicitly-leashed wolf's tether still takes priority
         // over auto-follow.
-        self.tick_wolf_companions(&player_positions);
+        self.tick_wolf_companions(&owners);
 
         // Living-world species dispatch (species_ai) — wakes the dormant
         // per-species AIs. Runs after mob_ai so it owns locomotion during the
         // generic Idle/Wander states but yields to Flee/Chase/Investigate.
         // Rabbits hop; goats charge and gore a player who's too close.
-        crate::species_ai::dispatch_rabbits(&mut self.ecs, &player_positions, self.tick_counter);
+        crate::species_ai::dispatch_rabbits(&mut self.ecs, &bodies, self.tick_counter);
         // W2 — neutral-mob bites scale with the difficulty table too.
         let difficulty = crate::survival::Difficulty::from_meta_str(&self.difficulty);
         let bee_stings =
-            crate::species_ai::dispatch_bees(&mut self.ecs, &player_positions, self.tick_counter);
+            crate::species_ai::dispatch_bees(&mut self.ecs, &bodies, self.tick_counter);
         for sting in bee_stings {
-            let landed = self.players.get_mut(sting.target_slot).is_some_and(|slot| {
-                slot.take_damage_with_armour_from(
-                    crate::survival::scale_mob_damage(crate::species_ai::BEE_STING_DAMAGE, difficulty),
-                    crate::survival::DamageCause::Mob(crate::mob::MobType::Bee),
-                )
-            });
-            if landed {
-                self.dismount_parrots_on_owner_damage(sting.target_slot);
+            let damage =
+                crate::survival::scale_mob_damage(crate::species_ai::BEE_STING_DAMAGE, difficulty);
+            let cause = crate::survival::DamageCause::Mob(crate::mob::MobType::Bee);
+            if sting.target_slot >= num_local {
+                self.land_hit_on_lent_joiner(sting.target_slot, damage, cause, glam::Vec3::ZERO);
+            } else {
+                let landed = self.players.get_mut(sting.target_slot).is_some_and(|slot| {
+                    slot.take_damage_with_armour_from(damage, cause)
+                });
+                if landed {
+                    self.dismount_parrots_on_owner_damage(sting.target_slot);
+                }
             }
             // The bee dies after stinging (Minecraft parity).
             let _ = self.ecs.despawn(sting.bee);
         }
         let goat_impacts =
-            crate::species_ai::dispatch_goats(&mut self.ecs, &player_positions, self.tick_counter);
+            crate::species_ai::dispatch_goats(&mut self.ecs, &bodies, self.tick_counter);
         for imp in goat_impacts {
+            let damage = crate::survival::scale_mob_damage(crate::goat_ai::CHARGE_DAMAGE, difficulty);
+            let cause = crate::survival::DamageCause::Mob(crate::mob::MobType::Goat);
+            let Some(&p) = bodies.get(imp.target_slot) else { continue };
+            let push = glam::Vec3::new(p.x - imp.goat_pos.x, 0.0, p.z - imp.goat_pos.z)
+                .normalize_or_zero();
+            let knock = glam::Vec3::new(
+                push.x * crate::species_ai::GOAT_KNOCKBACK,
+                crate::species_ai::GOAT_KNOCKBACK_UP,
+                push.z * crate::species_ai::GOAT_KNOCKBACK,
+            );
+            if imp.target_slot >= num_local {
+                self.land_hit_on_lent_joiner(imp.target_slot, damage, cause, knock);
+                continue;
+            }
             let mut landed = false;
             if let Some(slot) = self.players.get_mut(imp.target_slot) {
-                landed = slot.take_damage_with_armour_from(
-                    crate::survival::scale_mob_damage(crate::goat_ai::CHARGE_DAMAGE, difficulty),
-                    crate::survival::DamageCause::Mob(crate::mob::MobType::Goat),
-                );
-                let p = slot.player.pos;
-                let push = glam::Vec3::new(p.x - imp.goat_pos.x, 0.0, p.z - imp.goat_pos.z)
-                    .normalize_or_zero();
-                slot.player.velocity.x += push.x * crate::species_ai::GOAT_KNOCKBACK;
-                slot.player.velocity.z += push.z * crate::species_ai::GOAT_KNOCKBACK;
-                slot.player.velocity.y += crate::species_ai::GOAT_KNOCKBACK_UP;
+                landed = slot.take_damage_with_armour_from(damage, cause);
+                slot.player.velocity += knock;
             }
             if landed {
                 self.dismount_parrots_on_owner_damage(imp.target_slot);
@@ -6095,20 +6154,21 @@ impl super::GameState {
         crate::species_ai::dispatch_horses(&mut self.ecs, self.tick_counter);
         // Task 9 — the perched shoulder anchor needs the owner's yaw to stay
         // pinned in body space (see `companion::shoulder_offset`).
-        let player_yaws: Vec<f32> = self.players.iter().map(|s| s.camera.yaw).collect();
         crate::species_ai::dispatch_companions(
             &mut self.ecs,
-            &player_positions,
-            &player_yaws,
+            &bodies,
+            &body_yaws,
             self.tick_counter,
+            &remote_owners,
         );
         // Wave-hardening backlog (2026-07-11) — the tamed-Nostrich Follow/Sit
         // machine (`nostrich::advance_state`) shipped with Spec 28d.nostrich v2
         // but was never ticked; tamed Nostriches didn't follow at all.
         crate::species_ai::dispatch_nostriches(
             &mut self.ecs,
-            &player_positions,
+            &bodies,
             self.tick_counter,
+            &remote_owners,
         );
         // Pets wave Task 10 — a tamed parrot squawks an alarm when a hostile
         // wanders within PARROT_ALARM_RADIUS, gated by AlarmCooldown so it
@@ -6135,26 +6195,30 @@ impl super::GameState {
             );
         }
         crate::species_ai::dispatch_squids(&mut self.ecs, &self.world, self.tick_counter);
-        crate::species_ai::dispatch_hyenas(&mut self.ecs, &player_positions, self.world_time);
+        crate::species_ai::dispatch_hyenas(&mut self.ecs, &bodies, self.world_time);
         // Aquatic wave — the Shark hunts players in deep water + drips teeth.
         let shark_bites = crate::species_ai::dispatch_sharks(
             &mut self.ecs,
             &self.world,
-            &player_positions,
+            &bodies,
             self.tick_counter,
         );
         for bite in shark_bites {
+            let damage =
+                crate::survival::scale_mob_damage(crate::species_ai::SHARK_BITE_DAMAGE, difficulty);
+            let cause = crate::survival::DamageCause::Mob(crate::mob::MobType::Shark);
+            let Some(&p) = bodies.get(bite.target_slot) else { continue };
+            let push = glam::Vec3::new(p.x - bite.shark_pos.x, 0.0, p.z - bite.shark_pos.z)
+                .normalize_or_zero();
+            let knock = glam::Vec3::new(push.x * 0.4, 0.0, push.z * 0.4);
+            if bite.target_slot >= num_local {
+                self.land_hit_on_lent_joiner(bite.target_slot, damage, cause, knock);
+                continue;
+            }
             let mut landed = false;
             if let Some(slot) = self.players.get_mut(bite.target_slot) {
-                landed = slot.take_damage_with_armour_from(
-                    crate::survival::scale_mob_damage(crate::species_ai::SHARK_BITE_DAMAGE, difficulty),
-                    crate::survival::DamageCause::Mob(crate::mob::MobType::Shark),
-                );
-                let p = slot.player.pos;
-                let push = glam::Vec3::new(p.x - bite.shark_pos.x, 0.0, p.z - bite.shark_pos.z)
-                    .normalize_or_zero();
-                slot.player.velocity.x += push.x * 0.4;
-                slot.player.velocity.z += push.z * 0.4;
+                landed = slot.take_damage_with_armour_from(damage, cause);
+                slot.player.velocity += knock;
             }
             if landed {
                 self.dismount_parrots_on_owner_damage(bite.target_slot);
@@ -6163,7 +6227,7 @@ impl super::GameState {
         let bear_effects = crate::species_ai::dispatch_bears(
             &mut self.ecs,
             &self.world,
-            &player_positions,
+            &bodies,
             self.tick_counter,
         );
         for eff in bear_effects {
@@ -6187,7 +6251,7 @@ impl super::GameState {
         // drop a Lead ItemEntity at the snap site + remove the
         // Tethered component so subsequent ticks don't keep trying
         // to pull a vanished anchor.
-        let snapped = crate::tether::tick_tethers(&mut self.ecs, &player_positions);
+        let snapped = crate::tether::tick_tethers(&mut self.ecs, &bodies);
         for (mob_entity, drop_pos) in snapped {
             let _ = self.ecs.remove_one::<crate::tether::Tethered>(mob_entity);
             crate::entity::spawn_item(
@@ -6411,14 +6475,19 @@ impl super::GameState {
         // we can attribute the kill to the nearest player after
         // `despawn_dead` removes the entity. Pos is also captured for
         // the "is this kill inside the defender radius?" check.
-        let mut dying_raid_kills: Vec<(crate::raid::RaidId, glam::Vec3)> = Vec::new();
-        for (_e, (health, rm, pos)) in self.ecs.query::<(
+        // MP-D2b — a raider a joiner killed counts down the raid but credits
+        // no defender here (the joiner's own client has no raid to settle).
+        let mut dying_raid_kills: Vec<(crate::raid::RaidId, glam::Vec3, bool)> = Vec::new();
+        for (_e, (health, rm, pos, last)) in self.ecs.query::<(
             &crate::combat::Health,
             &crate::raid::RaidMember,
             &crate::entity::Position,
+            Option<&crate::combat::LastAttacker>,
         )>().iter() {
             if health.is_dead() {
-                dying_raid_kills.push((rm.raid_id, pos.0));
+                let by_joiner =
+                    last.is_some_and(|l| matches!(l.0, crate::combat::Attacker::Remote(_)));
+                dying_raid_kills.push((rm.raid_id, pos.0, by_joiner));
             }
         }
         // HP-3 — snapshot HomeHideout anchors for any brigand-family mob
@@ -6502,12 +6571,14 @@ impl super::GameState {
         for home in &dying_brigand_homes {
             crate::brigand_hideout_gen::on_brigand_killed(&mut self.world, *home);
         }
-        for (kind, pos, attacker_pidx) in deaths {
+        let locals: Vec<(glam::Vec3, bool)> =
+            self.players.iter().map(|p| (p.player.pos, p.combat.dead)).collect();
+        for (kind, pos, attacker) in deaths {
             // Loot table + wolf-specific routing + cargo-pack spill +
             // salt-lick bonus — shared with GameServer::tick via
             // `death_drops` (2026-07-11). Deterministic on
-            // (pos.x, pos.z, world_time).
-            let pos_seed = crate::death_drops::death_seed(pos, self.world_time);
+            // (pos.x, pos.z, world_time). A joiner's kill drops its loot
+            // here too, as world items: its server pickup grants them.
             crate::death_drops::spawn_drops_for_death(
                 &mut self.ecs,
                 &self.world,
@@ -6516,102 +6587,23 @@ impl super::GameState {
                 pos,
                 self.world_time,
             );
-            // Kill attribution: prefer the last-attacker stamped on
-            // the mob by `combat::player_attack`. Fall back to nearest
-            // living player only when no player ever damaged the mob
-            // (mob-on-mob kill, environmental death). Projectile kills
-            // (Bow / Slingshot) still fall through to proximity until
-            // the projectile hit path also stamps LastAttacker.
-            let attributed: Option<usize> = attacker_pidx
-                .filter(|&i| i < self.players.len() && !self.players[i].combat.dead)
-                .or_else(|| {
-                    let mut nearest: Option<(usize, f32)> = None;
-                    for (i, p) in self.players.iter().enumerate() {
-                        if p.combat.dead {
-                            continue;
-                        }
-                        let d = (p.player.pos - pos).length();
-                        if nearest.map(|(_, bd)| d < bd).unwrap_or(true) {
-                            nearest = Some((i, d));
-                        }
-                    }
-                    nearest.map(|(i, _)| i)
+            // v2 — a tamed Nostrich's death doesn't bring the Vow. If the
+            // dead Nostrich's position matches one of the pre-despawn
+            // "tamed" snapshots, it was somebody's bird.
+            let was_tamed = kind == crate::mob::MobType::Nostrich
+                && dying_tamed_nostrich_owners.iter().any(|p| {
+                    (p.x - pos.x).abs() < 0.5 && (p.z - pos.z).abs() < 0.5 && (p.y - pos.y).abs() < 0.5
                 });
-            if let Some(idx) = attributed {
-                let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
-                *counter += 1;
-                self.fire_challenge(crate::scenario::ChallengeEvent::KillMob);
-                // UX polish sweep Task 1 — smoke puff on an attributed kill.
-                self.particles.burst_smoke(pos, 6, pos_seed as u64);
-
-                // Spec 28d.nostrich — killing a Nostrich triggers
-                // "The Nostrich's Vow" on the nearest player. Curse
-                // blocks vendor trade + village rep + sats payouts
-                // for VOW_DURATION_TICKS until purified or expired.
-                // Idempotent: re-killing while already cursed
-                // refreshes the duration (deliberate — repeat
-                // offenders get the punishment renewed).
-                //
-                // v2 — tamed Nostriches don't trigger the Vow. If the
-                // dead Nostrich's position matches one of the
-                // pre-despawn "tamed" snapshots, it's the player's
-                // own bird; emotional loss is its own punishment.
-                if kind == crate::mob::MobType::Nostrich {
-                    let was_tamed = dying_tamed_nostrich_owners
-                        .iter()
-                        .any(|p| (p.x - pos.x).abs() < 0.5
-                            && (p.z - pos.z).abs() < 0.5
-                            && (p.y - pos.y).abs() < 0.5);
-                    if was_tamed {
-                        self.toast = Some((
-                            "Your tamed Nostrich is gone. The wild ones say nothing.".to_string(),
-                            Instant::now() + Duration::from_secs(4),
-                        ));
-                    } else {
-                        let tick = self.tick_counter;
-                        self.players[idx].nostrich_vow = Some(
-                            crate::nostrich_vow::NostrichVow::new(
-                                tick,
-                                crate::nostrich_vow::VowReason::KilledNostrich,
-                            ),
-                        );
-                        self.toast = Some((
-                            crate::nostrich_vow::trigger_toast(
-                                crate::nostrich_vow::VowReason::KilledNostrich,
-                            ).to_string(),
-                            Instant::now() + Duration::from_secs(5),
-                        ));
-                    }
-                }
-
-                // Phase 9 — villager-kill reputation penalty (30 s cooldown
-                // so a rage-loop costs rep once, not per-kill).
-                if matches!(
-                    kind,
-                    crate::mob::MobType::Villager
-                        | crate::mob::MobType::Peddler
-                ) {
-                    let now = self.tick_counter;
-                    let last = self.players[idx].last_villager_kill_rep_tick;
-                    let on_cooldown = last
-                        .map(|t| now.saturating_sub(t)
-                            < crate::reputation::VILLAGER_KILL_REP_COOLDOWN_TICKS)
-                        .unwrap_or(false);
-                    if !on_cooldown
-                        && let Some(vid) =
-                            crate::reputation::village_at_position(&self.world, pos)
-                        {
-                            self.players[idx].reputation.adjust(
-                                vid,
-                                crate::reputation::VILLAGER_KILL_PENALTY,
-                            );
-                            self.players[idx].last_villager_kill_rep_tick = Some(now);
-                            self.toast = Some((
-                                "The villagers saw that. Your standing here just dropped.".to_string(),
-                                Instant::now() + Duration::from_secs(3),
-                            ));
-                        }
-                }
+            // Kill attribution — `combat::attribute_kill`, the one rule
+            // (MP-D2b): the last attacker stamped by `combat::strike` (or a
+            // projectile), else the nearest living local player. A joiner's
+            // kill (a lent world's sweep is this client's until D4) goes to
+            // that joiner as a `KillEvent`, and credits no player here.
+            let server = self.hosted_server.as_mut().map(|hs| &mut hs.server);
+            if let Some(idx) =
+                crate::server::route_client_kill(server, attacker, kind, pos, was_tamed, &locals)
+            {
+                self.credit_kill(idx, kind, pos, was_tamed);
             }
         }
 
@@ -6620,7 +6612,8 @@ impl super::GameState {
         // village's defender radius. Decrements `mobs_alive`; the last
         // kill stamps `killing_blow` for the +20 rep bonus on bounty
         // settlement.
-        for (raid_id, mob_pos) in &dying_raid_kills {
+        for &(raid_id, mob_pos, by_joiner) in &dying_raid_kills {
+            let (raid_id, mob_pos) = (&raid_id, &mob_pos);
             // Snapshot the village id + anchor for this raid so we can
             // gate "kill counts only if attacker is inside defender
             // radius" without re-borrowing world.active_raids.
@@ -6640,7 +6633,7 @@ impl super::GameState {
             // radius of the village anchor.
             let mut nearest: Option<(usize, f32)> = None;
             for (i, p) in self.players.iter().enumerate() {
-                if p.combat.dead { continue; }
+                if by_joiner || p.combat.dead { continue; }
                 if (p.player.pos - anchor_pos).length() > crate::raid::DEFENDER_RADIUS_BLOCKS {
                     continue;
                 }
@@ -10888,10 +10881,28 @@ impl super::GameState {
                     intent.sneak,
                 );
 
+                // MP-D2b — a joiner's mobs are the server's mirror: the mob
+                // under the crosshair, in front of the first block, is the
+                // one swung at, and the swing goes to the server as an
+                // `EntityAttack`, which decides it (reach from the body it
+                // holds, cooldown, damage, kill credit). Only a swing that
+                // could land (off cooldown) is sent: that tick is a swing,
+                // not a break; between swings the break goes on, as
+                // single-player mining beside a mob does (review D2a
+                // MEDIUM-3). The weapon wears when the server confirms the
+                // swing (`InteractOutcome`), never on a refused one.
+                let joined_target = if self.joined() {
+                    self.joined_mob_under_crosshair(pidx)
+                } else {
+                    None
+                };
+                let target_kind = match joined_target {
+                    Some(t) => Some(t.kind),
+                    None => peek.and_then(|(_, k)| k),
+                };
                 let villager_grace = matches!(
-                    peek,
-                    Some((_, Some(crate::mob::MobType::Villager)))
-                        | Some((_, Some(crate::mob::MobType::Peddler)))
+                    target_kind,
+                    Some(crate::mob::MobType::Villager) | Some(crate::mob::MobType::Peddler)
                 ) && {
                     let now = self.tick_counter;
                     let last = self.players[pidx].last_villager_warn_tick;
@@ -10901,29 +10912,8 @@ impl super::GameState {
                     }
                 };
 
-                // MP-D2a — a joiner's mobs are the server's mirror: a swing
-                // at one can't land until the server takes attacks (D2b).
-                // Only the mob under the crosshair, in front of the first
-                // block, is swung at, and only a swing that could land (off
-                // cooldown) is refused: that tick is a swing, not a break;
-                // between swings the break goes on, as single-player mining
-                // beside a mob does (review D2a MEDIUM-3). A refused swing
-                // hits nothing, so it wears no tool.
-                let joined_target = if self.joined() {
-                    self.joined_mob_under_crosshair(pidx)
-                } else {
-                    None
-                };
-                let refused_swing = joined_target.is_some() && self.players[pidx].combat.can_attack();
-                let attacked = if joined_target.is_some() {
-                    if refused_swing {
-                        self.players[pidx].combat.attack_cooldown = crate::combat::ATTACK_COOLDOWN;
-                        self.toast = Some((
-                            crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                    }
-                    refused_swing
+                let attacked = if joined_target.is_some() && !self.players[pidx].combat.can_attack() {
+                    false
                 } else if villager_grace {
                     // Consume the attack cooldown so the player feels the
                     // swing, but skip damage. Set the warn timer; the next
@@ -10935,6 +10925,13 @@ impl super::GameState {
                         "Careful — that's a villager. Hit again to attack.".to_string(),
                         Instant::now() + Duration::from_secs(3),
                     ));
+                    true
+                } else if let Some(target) = joined_target {
+                    self.players[pidx].combat.attack_cooldown = crate::combat::ATTACK_COOLDOWN;
+                    if matches!(target.kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
+                        self.players[pidx].last_villager_warn_tick = Some(self.tick_counter);
+                    }
+                    self.send_entity_attack(pidx, target, intent.sprint, intent.sneak);
                     true
                 } else {
                     let hit = crate::combat::player_attack(
@@ -10965,89 +10962,36 @@ impl super::GameState {
                     {
                         self.players[pidx].last_villager_warn_tick = Some(self.tick_counter);
                     }
-                    // Task 8b — pets join the fight: a landed swing rallies
-                    // the attacker's tamed wolves to assist on the same
-                    // target. Decision logic (no friendly fire, Sit holds,
-                    // don't interrupt an active fight) lives in wolf.rs/
-                    // tameable.rs; this only feeds the event. The own-pet
-                    // flag is passed honestly — a deliberate sneak-hit on
-                    // your own pet (which bypasses the swing's own-pet
-                    // exclusion in `find_attack_target_for_swing`) must not
-                    // rally the pack against it.
+                    // Task 8b + Task 6 + Spec 28d.nostrich v2 — what a swing
+                    // that found its target does beyond the hit: wolves
+                    // rally (never against the swinger's own pet), a
+                    // deliberate sneak-hit on one's own pet is marked so the
+                    // Pet Bed lets it stick, and a Nostrich kicks back.
+                    // `combat::after_swing`, shared with a joiner's swing on
+                    // the server (MP-D2b).
                     if hit
-                        && let Some((target, _)) = peek {
-                            let target_is_own_pet = crate::tameable::is_players_own_pet(
-                                &self.ecs,
-                                target,
-                                &format!("local-player-{pidx}"),
-                                pidx,
-                            );
-                            // Task 6 (bug-hardening review, 2026-07-07) — the
-                            // deliberate sneak-kill bypass on your own pet
-                            // (the swing's own-pet exclusion above lets it
-                            // through only when sneaking) used to be
-                            // un-doable within 32 blocks of a Pet Bed: the
-                            // death sweep's rescue
-                            // revived it regardless. Mark it here (unit
-                            // tested in `tameable.rs`) so that sweep
-                            // (`eligible_for_pet_bed_rescue`) lets a
-                            // deliberate cull stick. A hostile's killing blow
-                            // on the same pet never sets `intent.sneak` for
-                            // the attacking player, so it still rescues.
-                            crate::tameable::mark_if_deliberate_pet_cull(
-                                &mut self.ecs,
-                                intent.sneak,
-                                hit,
-                                target,
-                                &format!("local-player-{pidx}"),
-                                pidx,
-                                self.tick_counter,
-                            );
-                            crate::block_interact::pivot_owner_wolves_to_assist(
-                                &mut self.ecs,
-                                &format!("local-player-{pidx}"),
-                                target,
-                                target_is_own_pet,
-                                self.tick_counter,
-                            );
-                        }
-                    // Spec 28d.nostrich v2 — retaliate-kick. If the hit
-                    // target was a Nostrich, run the on_damaged hook
-                    // and apply any returned kick damage to the player.
-                    if hit && matches!(peek, Some((_, Some(crate::mob::MobType::Nostrich))))
-                        && let Some((target, _)) = peek {
-                            let tick = self.tick_counter;
-                            let dist = self.ecs
-                                .get::<&crate::entity::Position>(target)
-                                .ok()
-                                .map(|p| (p.0 - p_eye).length())
-                                .unwrap_or(99.0);
-                            let in_melee = dist < 2.5;
-                            let kick = if let Ok(mut data) = self.ecs
-                                .get::<&mut crate::nostrich::NostrichData>(target)
-                            {
-                                crate::nostrich::on_damaged(
-                                    &mut data,
-                                    target.id() as u64,
-                                    in_melee,
-                                    tick,
-                                )
-                            } else {
-                                None
-                            };
-                            if let Some(kick_dmg) = kick {
-                                let h = self.players[pidx].combat.health;
-                                self.players[pidx].combat.health = (h - kick_dmg).max(0.0);
-                                self.toast = Some((
-                                    "The Nostrich kicks back!".to_string(),
-                                    Instant::now() + Duration::from_secs(2),
-                                ));
-                            }
-                        }
+                        && let Some((target, _)) = peek
+                        && let Some(kick_dmg) = crate::combat::after_swing(
+                            &mut self.ecs,
+                            target,
+                            &crate::tameable::local_owner_key(pidx),
+                            Some(pidx),
+                            intent.sneak,
+                            p_eye,
+                            self.tick_counter,
+                        )
+                    {
+                        let h = self.players[pidx].combat.health;
+                        self.players[pidx].combat.health = (h - kick_dmg).max(0.0);
+                        self.toast = Some((
+                            "The Nostrich kicks back!".to_string(),
+                            Instant::now() + Duration::from_secs(2),
+                        ));
+                    }
                     hit
                 };
 
-                if attacked && !refused_swing {
+                if attacked && joined_target.is_none() {
                     let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                     self.handle_tool_use(info);
                 }
@@ -12525,29 +12469,41 @@ impl super::GameState {
             // consume the Lead from inventory. Runs BEFORE the
             // villager-dialogue branch so the Lead wins over the
             // talk-to-villager interaction when held.
-            // MP-D2a — a right-click ON a mirrored mob (the crosshair is on
-            // it) that would do something to the mob (talk, ride, tame, feed,
-            // breed, lead, shear, milk, a pet command) is an interaction the
-            // server has to perform: refused with a toast until D2b. Anything
-            // else in hand goes ahead with its own use — eating, a bow, a
-            // bucket, building beside a cow (review D2a LOW-2).
+            // MP-D2b — a right-click ON a mirrored mob (the crosshair is on
+            // it) that would do something to the mob in single-player
+            // (feed, tame, shear, milk, a Lead on or off, a pet command) is
+            // an interaction the server performs: sent as an
+            // `EntityInteract`; what it uses comes out of the hand only when
+            // the server accepts it. Riding and trading stay refused with a
+            // toast (D2c). Anything else in hand goes ahead with its own use
+            // — eating, a bow, a bucket, building beside a cow (review D2a
+            // LOW-2).
             if intent.place_block
                 && intent.cursor_captured
                 && self.players[pidx].place_cooldown == 0
                 && self.joined()
-                && self.joined_mob_under_crosshair(pidx).is_some_and(|mob| {
+                && let Some(mob) = self.joined_mob_under_crosshair(pidx)
+                && let Some(click) = {
                     let held = self.players[pidx]
                         .inventory
                         .hotbar_slot(self.players[pidx].hotbar_slot)
                         .map(|s| &s.item);
-                    mob.right_click_interacts(held, intent.sneak)
-                })
+                    mob.right_click_action(held, intent.sneak)
+                }
             {
-                self.players[pidx].place_cooldown = 16;
-                self.toast = Some((
-                    crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
-                    Instant::now() + Duration::from_secs(3),
-                ));
+                match click {
+                    crate::remote_mobs::MirrorClick::Interact(kind) => {
+                        self.players[pidx].place_cooldown = 8;
+                        self.send_entity_interact(pidx, mob, kind, intent.sneak);
+                    }
+                    crate::remote_mobs::MirrorClick::NotYet => {
+                        self.players[pidx].place_cooldown = 16;
+                        self.toast = Some((
+                            crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                    }
+                }
                 continue;
             }
 
@@ -12567,21 +12523,27 @@ impl super::GameState {
                 if holding_lead {
                     let look_dir = self.players[pidx].camera.forward();
                     let eye = self.players[pidx].player.eye_pos();
-                    // Path A — targeting a passive mob → attach.
+                    // Path A — targeting a passive mob → attach
+                    // (`mob_interact::lead_attach`, shared with a joiner's
+                    // `EntityInteract` on the server, MP-D2b).
+                    let hot = self.players[pidx].hotbar_slot;
+                    let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| s.item.clone());
+                    let key = crate::tameable::local_owner_key(pidx);
+                    let actor = crate::mob_interact::Actor {
+                        owner_key: Some(&key),
+                        tether: crate::tether::TetherTarget::Player(pidx),
+                    };
                     if let Some((target, Some(kind))) =
                         crate::combat::find_attack_target(&self.ecs, eye, look_dir)
-                        && crate::mob::mob_def(kind).category
-                            == crate::mob::MobCategory::Passive
+                        && crate::mob_interact::lead_attach(
+                            &mut self.ecs,
+                            target,
+                            kind,
+                            held.as_ref(),
+                            &actor,
+                        )
+                        .is_some()
                         {
-                            // Drop any prior tether on this mob then re-attach.
-                            let _ = self.ecs.remove_one::<crate::tether::Tethered>(target);
-                            let _ = self.ecs.insert_one(
-                                target,
-                                crate::tether::Tethered {
-                                    target: crate::tether::TetherTarget::Player(pidx),
-                                },
-                            );
-                            let hot = self.players[pidx].hotbar_slot;
                             let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -12675,21 +12637,19 @@ impl super::GameState {
                 if let Some(mat) = held_mat {
                     let look_dir = self.players[pidx].camera.forward();
                     let eye = self.players[pidx].player.eye_pos();
+                    let held = crate::item::Item::Material(mat);
                     if let Some((target, Some(kind))) =
                         crate::combat::find_attack_target(&self.ecs, eye, look_dir)
-                        && crate::breeding::breeding_food(kind) == Some(mat)
-                            && crate::breeding::breeding_feed_allowed(kind, intent.sneak)
-                            && self.ecs.get::<&crate::breeding::Baby>(target).is_err()
-                            && self.ecs.get::<&crate::breeding::BreedCooldown>(target).is_err()
-                            && self.ecs.get::<&crate::breeding::InLove>(target).is_err()
+                        && crate::mob_interact::feed(
+                            &mut self.ecs,
+                            target,
+                            kind,
+                            Some(&held),
+                            intent.sneak,
+                            self.tick_counter,
+                        )
+                        .is_some()
                         {
-                            let _ = self.ecs.insert_one(
-                                target,
-                                crate::breeding::InLove {
-                                    until_tick: self.tick_counter
-                                        + crate::breeding::LOVE_DURATION_TICKS,
-                                },
-                            );
                             self.players[pidx].inventory.consume_one_material(hot, mat);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -12722,123 +12682,58 @@ impl super::GameState {
             let mut harvested = false;
             {
                 let hot = self.players[pidx].hotbar_slot;
-                let held = self.players[pidx].inventory.hotbar_slot(hot).cloned();
+                let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| s.item.clone());
                 let look_dir = self.players[pidx].camera.forward();
                 let eye = self.players[pidx].player.eye_pos();
+                // `mob_interact::milk` / `shear` — shared with a joiner's
+                // `EntityInteract` on the server (MP-D2b).
                 if let Some((target, Some(kind))) =
                     crate::combat::find_attack_target(&self.ecs, eye, look_dir)
                 {
-                    let holding_bucket = matches!(
-                        held.as_ref().map(|s| &s.item),
-                        Some(crate::item::Item::Material(crate::item::MaterialId::Bucket))
-                    );
-                    let holding_shears = matches!(
-                        held.as_ref().map(|s| &s.item),
-                        Some(crate::item::Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::Shears
-                    );
-                    let ready = self
-                        .ecs
-                        .get::<&crate::animal_products::AnimalProductState>(target)
-                        .map(|s| crate::animal_products::can_milk(*s, self.tick_counter))
-                        .unwrap_or(false);
-                    if kind == crate::mob::MobType::Cow && holding_bucket {
-                        if ready {
-                            self.players[pidx]
-                                .inventory
-                                .consume_one_material(hot, crate::item::MaterialId::Bucket);
-                            let milk = crate::item::ItemStack::new_material(
-                                crate::item::MaterialId::MilkBucket,
-                                1,
-                            );
-                            if let Some(leftover) = self.players[pidx].inventory.add_item(milk) {
-                                let p = self.players[pidx].player.pos;
-                                crate::entity::spawn_item(&mut self.ecs, p, leftover, self.tick_counter as u32);
-                            }
-                            if let Ok(mut s) = self
-                                .ecs
-                                .get::<&mut crate::animal_products::AnimalProductState>(target)
+                    let tick = self.tick_counter;
+                    let result = crate::mob_interact::milk(&mut self.ecs, target, kind, held.as_ref(), tick)
+                        .or_else(|| {
+                            crate::mob_interact::shear(&mut self.ecs, target, kind, held.as_ref(), tick)
+                        });
+                    if let Some(r) = result {
+                        harvested = true;
+                        if r.done {
+                            if r.consume > 0
+                                && let Some(crate::item::Item::Material(m)) = held
                             {
-                                crate::animal_products::record_action(&mut s, self.tick_counter);
+                                self.players[pidx].inventory.consume_one_material(hot, m);
+                            }
+                            for stack in r.give {
+                                if let Some(leftover) = self.players[pidx].inventory.add_item(stack) {
+                                    let p = self.players[pidx].player.pos;
+                                    crate::entity::spawn_item(&mut self.ecs, p, leftover, tick as u32);
+                                }
                             }
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
-                            harvested = true;
-                            self.fire_challenge(crate::scenario::ChallengeEvent::ShearOrMilk);
-                            if pidx == 0 {
-                                self.toast = Some((
-                                    "Milked the cow.".to_string(),
-                                    Instant::now() + Duration::from_secs(2),
-                                ));
+                            if let Some(ev) = r.challenge {
+                                self.fire_challenge(ev);
                             }
                             // UX polish sweep Task 1 — small white-ish puff on
                             // top of the existing toast.
                             if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
+                                let salt: u64 = if kind == crate::mob::MobType::Cow {
+                                    668_265_263
+                                } else {
+                                    374_761_393
+                                };
                                 self.particles.puff(
                                     p.0,
                                     glam::Vec3::Y,
                                     3,
-                                    self.tick_counter ^ (target.id() as u64).wrapping_mul(668_265_263),
+                                    tick ^ (target.id() as u64).wrapping_mul(salt),
                                 );
                             }
-                        } else if pidx == 0 {
-                            self.toast = Some((
-                                "This cow needs time before it can be milked again.".to_string(),
-                                Instant::now() + Duration::from_secs(2),
-                            ));
-                            harvested = true;
                         }
-                    } else if kind == crate::mob::MobType::Sheep && holding_shears {
-                        if ready {
-                            let pos = self
-                                .ecs
-                                .get::<&crate::entity::Position>(target)
-                                .map(|p| p.0)
-                                .unwrap_or(self.players[pidx].player.pos);
-                            // W1B — genetics payoff: a high-yield_q (selectively
-                            // bred) sheep grows more wool. Baseline (128) → +1,
-                            // champion (255) → +3, poor (<80) → +0.
-                            let yield_q = self
-                                .ecs
-                                .get::<&crate::genetics::Genetics>(target)
-                                .map(|g| g.yield_q)
-                                .unwrap_or(128);
-                            let bonus = (yield_q as u32 / 80) as u8; // 0..=3
-                            let n = 1 + (self.tick_counter as u32 % 3) as u8 + bonus; // 1..=6 wool
-                            let wool =
-                                crate::item::ItemStack::new_material(crate::item::MaterialId::Wool, n);
-                            crate::entity::spawn_item(&mut self.ecs, pos, wool, self.tick_counter as u32);
-                            if let Ok(mut s) = self
-                                .ecs
-                                .get::<&mut crate::animal_products::AnimalProductState>(target)
-                            {
-                                crate::animal_products::record_action(&mut s, self.tick_counter);
-                            }
-                            self.audio.play_place();
-                            self.players[pidx].place_cooldown = 8;
-                            harvested = true;
-                            self.fire_challenge(crate::scenario::ChallengeEvent::ShearOrMilk);
-                            if pidx == 0 {
-                                self.toast = Some((
-                                    "Sheared the sheep.".to_string(),
-                                    Instant::now() + Duration::from_secs(2),
-                                ));
-                            }
-                            // UX polish sweep Task 1 — small white-ish puff on
-                            // top of the existing toast.
-                            if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
-                                self.particles.puff(
-                                    p.0,
-                                    glam::Vec3::Y,
-                                    3,
-                                    self.tick_counter ^ (target.id() as u64).wrapping_mul(374_761_393),
-                                );
-                            }
-                        } else if pidx == 0 {
-                            self.toast = Some((
-                                "This sheep's wool is still growing back.".to_string(),
-                                Instant::now() + Duration::from_secs(2),
-                            ));
-                            harvested = true;
+                        if pidx == 0
+                            && let Some((msg, secs)) = r.note.toast(kind, false)
+                        {
+                            self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
                         }
                     }
                 }
@@ -12866,86 +12761,48 @@ impl super::GameState {
                     if let Some((target, Some(kind))) =
                         crate::combat::find_attack_target(&self.ecs, eye, look_dir)
                     {
-                        // Pets wave Task 9 — Cat Treat is a guaranteed tame
-                        // (Cat only), checked before the generic food roll.
-                        let is_treat = mat == crate::item::MaterialId::CatTreat
-                            && kind == crate::mob::MobType::Cat;
-                        if is_treat || crate::companion::tame_food(kind) == Some(mat) {
-                            let pubkey = format!("local-player-{pidx}");
-                            let seed = self
-                                .tick_counter
-                                .wrapping_mul(374_761_393)
-                                .wrapping_add(target.id() as u64 * 668_265_263);
-                            let outcome = if let Ok(mut data) =
-                                self.ecs.get::<&mut crate::companion::CompanionData>(target)
+                        // Pets wave Task 9 — a Cat Treat is a guaranteed tame
+                        // (Cat only); otherwise the species' food rolls.
+                        // `mob_interact::tame_companion`, shared with a
+                        // joiner's `EntityInteract` (MP-D2b).
+                        let key = crate::tameable::local_owner_key(pidx);
+                        let actor = crate::mob_interact::Actor {
+                            owner_key: Some(&key),
+                            tether: crate::tether::TetherTarget::Player(pidx),
+                        };
+                        let held = crate::item::Item::Material(mat);
+                        if let Some(r) = crate::mob_interact::tame_companion(
+                            &mut self.ecs,
+                            target,
+                            kind,
+                            Some(&held),
+                            &actor,
+                            self.tick_counter,
+                        ) {
+                            self.players[pidx].inventory.consume_one_material(hot, mat);
+                            companion_tamed = true;
+                            if let Some(ev) = r.challenge {
+                                self.fire_challenge(ev);
+                            }
+                            // UX polish sweep Task 2 — the FIRST tame of the
+                            // session carries the command-gesture hint IN the
+                            // tame toast (single shared toast field).
+                            let hint = r.tamed && hint_should_fire(&mut self.hints_shown, Hint::PetCommand);
+                            if let Some((msg, secs)) = r.note.toast(kind, hint) {
+                                self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
+                            }
+                            // UX polish sweep Task 1 — green poof on tame
+                            // success (mirrors wolf/nostrich below).
+                            if r.tamed
+                                && let Ok(p) = self.ecs.get::<&crate::entity::Position>(target)
                             {
-                                if is_treat {
-                                    // Cat Treat — guaranteed tame, no RNG roll.
-                                    crate::tameable::attempt_tame_guaranteed(&mut data.ownership, &pubkey)
-                                } else {
-                                    crate::tameable::attempt_tame_generic(
-                                        &mut data.ownership,
-                                        &pubkey,
-                                        seed,
-                                        crate::companion::TAME_NUMER,
-                                        crate::companion::TAME_DENOM,
-                                    )
-                                }
-                            } else {
-                                crate::tameable::TameAttempt::AlreadyTamed
-                            };
-                            match outcome {
-                                crate::tameable::TameAttempt::Succeeded => {
-                                    self.players[pidx].inventory.consume_one_material(hot, mat);
-                                    let _ = self.ecs.remove_one::<crate::entity::Scattered>(target);
-                                    companion_tamed = true;
-                                    // Task 18 — companion tames were invisible to
-                                    // Trials (only the wolf path fired this).
-                                    // Mirror the wolf tame site so Cat/Parrot/Fox
-                                    // (incl. Cat Treat) count too.
-                                    self.fire_challenge(crate::scenario::ChallengeEvent::TameMob);
-                                    // Un-gated to match the wolf-sit toast
-                                    // convention (:11221-ish) — `self.toast` is a
-                                    // single shared full-screen field (see the
-                                    // village-discovery note above), so this
-                                    // doesn't scope to player 2's viewport, but it
-                                    // no longer silently drops player 2's feedback.
-                                    // UX polish sweep Task 2 — the FIRST tame of
-                                    // the session carries the command-gesture
-                                    // hint IN the tame toast, so teaching it
-                                    // doesn't cost the "Tamed!" confirmation
-                                    // (single shared toast field). Later tames
-                                    // just confirm. `hint_should_fire` borrows
-                                    // only `self.hints_shown`, so it composes
-                                    // with the other disjoint field writes here.
-                                    let (msg, secs) = if hint_should_fire(&mut self.hints_shown, Hint::PetCommand) {
-                                        ("Tamed! Right-click it with an empty hand to set Follow / Stay / Wander.", 5)
-                                    } else {
-                                        ("Tamed! It's your companion now.", 3)
-                                    };
-                                    self.toast = Some((
-                                        msg.to_string(),
-                                        Instant::now() + Duration::from_secs(secs),
-                                    ));
-                                    // UX polish sweep Task 1 — green poof on
-                                    // tame success (mirrors wolf/nostrich below).
-                                    if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
-                                        self.particles.poof_green(p.0, 6, seed);
-                                    }
-                                }
-                                crate::tameable::TameAttempt::Failed => {
-                                    self.players[pidx].inventory.consume_one_material(hot, mat);
-                                    companion_tamed = true;
-                                    self.toast = Some((
-                                        "It sniffs the food, still wary…".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                }
-                                crate::tameable::TameAttempt::AlreadyTamed => {}
+                                let seed = self
+                                    .tick_counter
+                                    .wrapping_mul(374_761_393)
+                                    .wrapping_add(target.id() as u64 * 668_265_263);
+                                self.particles.poof_green(p.0, 6, seed);
                             }
-                            if companion_tamed {
-                                self.players[pidx].place_cooldown = 8;
-                            }
+                            self.players[pidx].place_cooldown = 8;
                         }
                     }
                 }
@@ -13216,49 +13073,37 @@ impl super::GameState {
                 if !holding_lead {
                     let look_dir = self.players[pidx].camera.forward();
                     let eye = self.players[pidx].player.eye_pos();
+                    let held = self.players[pidx]
+                        .inventory
+                        .hotbar_slot(self.players[pidx].hotbar_slot)
+                        .map(|s| s.item.clone());
                     if let Some((target, Some(_kind))) =
                         crate::combat::find_attack_target(&self.ecs, eye, look_dir)
+                        && let Some(r) =
+                            crate::mob_interact::lead_detach(&mut self.ecs, target, held.as_ref())
                     {
-                        let is_tethered = self
+                        // The Lead back into the inventory; if they're full
+                        // (rare), it drops at the mob so it's not lost.
+                        let drop_pos = self
                             .ecs
-                            .get::<&crate::tether::Tethered>(target)
-                            .is_ok();
-                        if is_tethered {
-                            let _ = self.ecs.remove_one::<crate::tether::Tethered>(target);
-                            // Try to add the Lead back to the player's
-                            // inventory. If they're full (rare — Lead
-                            // is a single material slot), drop it as
-                            // an ItemEntity at the mob's position so
-                            // it's not lost entirely.
-                            let lead_stack = crate::item::ItemStack::new_material(
-                                crate::item::MaterialId::Lead,
-                                1,
-                            );
-                            let inserted = self.players[pidx]
-                                .inventory
-                                .add_item(lead_stack.clone()).is_none();
-                            if !inserted {
-                                // Copy the position out first so the
-                                // immutable borrow on `self.ecs` is
-                                // dropped before `spawn_item`'s &mut.
-                                let drop_pos_opt = self
-                                    .ecs
-                                    .get::<&crate::entity::Position>(target)
-                                    .ok()
-                                    .map(|p| p.0 + glam::Vec3::new(0.0, 0.5, 0.0));
-                                if let Some(drop_pos) = drop_pos_opt {
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs,
-                                        drop_pos,
-                                        lead_stack,
-                                        (eye.x as i32 * 31 + eye.z as i32 * 17) as u32,
-                                    );
-                                }
+                            .get::<&crate::entity::Position>(target)
+                            .ok()
+                            .map(|p| p.0 + glam::Vec3::new(0.0, 0.5, 0.0));
+                        for stack in r.give {
+                            if let Some(leftover) = self.players[pidx].inventory.add_item(stack)
+                                && let Some(at) = drop_pos
+                            {
+                                crate::entity::spawn_item(
+                                    &mut self.ecs,
+                                    at,
+                                    leftover,
+                                    (eye.x as i32 * 31 + eye.z as i32 * 17) as u32,
+                                );
                             }
-                            self.audio.play_break();
-                            self.players[pidx].place_cooldown = 8;
-                            detached = true;
                         }
+                        self.audio.play_break();
+                        self.players[pidx].place_cooldown = 8;
+                        detached = true;
                     }
                 }
             }
@@ -13331,284 +13176,74 @@ impl super::GameState {
                                 }
                                 talked = true;
                             }
-                    } else if kind == crate::mob::MobType::Nostrich {
-                        // Spec 28d.nostrich v2 — right-click Nostrich.
-                        // Hold Mixed Berries → tame attempt.
-                        // Empty hand on a tamed-by-you Nostrich → Sit/Stand toggle.
+                    } else if kind == crate::mob::MobType::Nostrich
+                        || kind == crate::mob::MobType::Wolf
+                        || crate::companion::is_companion_species(kind)
+                    {
+                        // Spec 28d.nostrich v2 (Mixed Berries), Spec 28d.wolves
+                        // R5 (a Bone): a tame attempt, auto-leashed on
+                        // success. Empty hand on your own tamed Nostrich or
+                        // wolf: sit / follow; on your own companion (1C): its
+                        // command cycle — this arm runs after the Spec 36
+                        // tether-detach check above, so a freshly-tamed
+                        // (auto-leashed) pet's first empty-hand click takes
+                        // the leash off and only the next one commands it.
+                        // (Companion TAMING is the earlier companion-tame
+                        // block.) All through `mob_interact`, shared with a
+                        // joiner's `EntityInteract` (MP-D2b).
                         let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
-                        let held_material = held.as_ref().and_then(|s| match &s.item {
-                            crate::item::Item::Material(m) => Some(*m),
+                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).map(|s| s.item.clone());
+                        let key = crate::tameable::local_owner_key(pidx);
+                        let actor = crate::mob_interact::Actor {
+                            owner_key: Some(&key),
+                            tether: crate::tether::TetherTarget::Player(pidx),
+                        };
+                        let tick = self.tick_counter;
+                        let tamed = match kind {
+                            crate::mob::MobType::Wolf => crate::mob_interact::tame_wolf(
+                                &mut self.ecs, target, held.as_ref(), &actor, tick,
+                            ),
+                            crate::mob::MobType::Nostrich => crate::mob_interact::tame_nostrich(
+                                &mut self.ecs, target, held.as_ref(), &actor, tick,
+                            ),
                             _ => None,
+                        };
+                        // Someone else's pet: nothing, as ever (no toast in
+                        // single-player — the click falls through).
+                        let result = tamed.or_else(|| {
+                            crate::mob_interact::sit_toggle(&mut self.ecs, target, kind, held.as_ref(), &actor)
+                                .filter(|r| r.note != crate::mob_interact::InteractNote::NotYourPet)
                         });
-                        // Alpha identity — use the local player index as the
-                        // pubkey. When multiplayer-true Signet identity lands,
-                        // swap this for the real npub.
-                        let pubkey = format!("local-player-{pidx}");
-                        let seed = (self.tick_counter)
-                            .wrapping_mul(374761393)
-                            .wrapping_add(target.id() as u64 * 668265263);
-                        // Spec 36 / Spec 28d tameable auto-leash
-                        // (2026-05-28) — set when this interaction
-                        // succeeds in taming the mob; applied below
-                        // OUTSIDE the immutable nostrich-data borrow.
-                        // The nostrich-data read sits inside an explicit
-                        // block so the RefMut drops before the mutable
-                        // ECS borrow is taken further down.
-                        let mut just_tamed_target: Option<hecs::Entity> = None;
-                        {
-                        let nostrich_data_opt = self
-                            .ecs
-                            .get::<&mut crate::nostrich::NostrichData>(target)
-                            .ok();
-                        if let Some(mut data) = nostrich_data_opt {
-                            if held_material == Some(crate::item::MaterialId::Berries) {
-                                let outcome = crate::nostrich::attempt_tame_with_berry(
-                                    &mut data,
-                                    held_material,
-                                    &pubkey,
-                                    seed,
-                                );
-                                // Consume the berry whether or not we tamed
-                                // (failed feeds still cost) — matches wolf-bone
-                                // taming idiom.
-                                if !matches!(
-                                    outcome,
-                                    crate::nostrich::BerryFeedOutcome::AlreadyTamed
-                                        | crate::nostrich::BerryFeedOutcome::NotAFeed
-                                ) {
-                                    self.players[pidx].inventory.consume_one_material(
-                                        hotbar,
-                                        crate::item::MaterialId::Berries,
-                                    );
-                                }
-                                match outcome {
-                                    crate::nostrich::BerryFeedOutcome::Tamed => {
-                                        just_tamed_target = Some(target);
-                                        // UX polish sweep Task 2 — first-tame toast
-                                        // teaches the command gesture without
-                                        // dropping the "Tamed!" confirmation.
-                                        // `hint_should_fire` borrows only
-                                        // `self.hints_shown`, disjoint from the
-                                        // live `data` borrow of `self.ecs`.
-                                        let (msg, secs) = if hint_should_fire(&mut self.hints_shown, Hint::PetCommand) {
-                                            ("Tamed! Right-click it with an empty hand to set Follow / Stay / Wander.", 5)
-                                        } else {
-                                            ("Tamed! The Nostrich is yours.", 4)
-                                        };
-                                        self.toast = Some((
-                                            msg.to_string(),
-                                            Instant::now() + Duration::from_secs(secs),
-                                        ));
-                                        // UX polish sweep Task 1 — tame success poof.
-                                        if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
-                                            self.particles.poof_green(p.0, 6, seed);
-                                        }
-                                    }
-                                    crate::nostrich::BerryFeedOutcome::BerryConsumed => {
-                                        self.toast = Some((
-                                            "The Nostrich eyes you carefully…".to_string(),
-                                            Instant::now() + Duration::from_secs(2),
-                                        ));
-                                    }
-                                    crate::nostrich::BerryFeedOutcome::AlreadyTamed => {
-                                        self.toast = Some((
-                                            "This Nostrich is already tame.".to_string(),
-                                            Instant::now() + Duration::from_secs(2),
-                                        ));
-                                    }
-                                    crate::nostrich::BerryFeedOutcome::NotAFeed => {}
-                                }
-                                self.players[pidx].place_cooldown = 8;
-                                talked = true;
-                            } else if held.is_none() && data.is_owned_by(&pubkey) {
-                                // Empty hand on your own tamed Nostrich →
-                                // toggle Sit/Stand.
-                                crate::nostrich::toggle_sit_follow(&mut data);
-                                let label = match data.state {
-                                    crate::nostrich::NostrichAiState::Sit => "Sit. The Nostrich settles.",
-                                    _ => "Follow. The Nostrich rises.",
-                                };
-                                self.toast = Some((
-                                    label.to_string(),
-                                    Instant::now() + Duration::from_secs(2),
-                                ));
-                                self.players[pidx].place_cooldown = 8;
-                                talked = true;
+                        if let Some(r) = result {
+                            if r.consume > 0
+                                && let Some(crate::item::Item::Material(m)) = held
+                            {
+                                self.players[pidx].inventory.consume_one_material(hotbar, m);
                             }
-                        }
-                        }
-                        // Auto-leash a freshly-tamed mob — runs after
-                        // the immutable nostrich-data borrow above is
-                        // dropped so the mutable `ecs.insert_one` can
-                        // proceed. The player can still detach via the
-                        // empty-hand right-click gesture (Spec 36 detach
-                        // UX) or attach a real Lead with the normal flow.
-                        if let Some(tamed_entity) = just_tamed_target {
-                            let _ = self.ecs.insert_one(
-                                tamed_entity,
-                                crate::tether::Tethered {
-                                    target: crate::tether::TetherTarget::Player(pidx),
-                                },
-                            );
-                            // Animals Wave 2 — a tamed pet is no longer disposable
-                            // wildlife: drop the `Scattered` tag so it survives
-                            // chunk unload (and gets persisted by `tamed_mobs_to_saved`).
-                            let _ = self.ecs.remove_one::<crate::entity::Scattered>(tamed_entity);
-                        }
-                    } else if kind == crate::mob::MobType::Wolf {
-                        // Spec 28d.wolves R5 (2026-05-28) — right-click
-                        // Wolf. Hold Bone → tame attempt via the
-                        // shared `tameable` framework. Auto-leash on
-                        // success (same pattern as Nostrich tame above).
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
-                        let held_material = held.as_ref().and_then(|s| match &s.item {
-                            crate::item::Item::Material(m) => Some(*m),
-                            _ => None,
-                        });
-                        let pubkey = format!("local-player-{pidx}");
-                        let seed = (self.tick_counter)
-                            .wrapping_mul(374761393)
-                            .wrapping_add(target.id() as u64 * 668265263);
-                        let mut just_tamed_target: Option<hecs::Entity> = None;
-                        {
-                        let wolf_data_opt = self
-                            .ecs
-                            .get::<&mut crate::wolf::WolfData>(target)
-                            .ok();
-                        if let Some(mut data) = wolf_data_opt {
-                            if held_material == Some(crate::item::MaterialId::Bone) {
-                                let outcome = crate::wolf::attempt_tame(
-                                    &mut data,
-                                    &pubkey,
-                                    seed,
-                                );
-                                // Consume the bone on real attempts
-                                // (already-tamed wolves don't eat your
-                                // bone) — matches the Nostrich-berry
-                                // idiom from R4.
-                                if !matches!(outcome, crate::wolf::TameOutcome::AlreadyTamed) {
-                                    self.players[pidx].inventory.consume_one_material(
-                                        hotbar,
-                                        crate::item::MaterialId::Bone,
-                                    );
-                                }
-                                match outcome {
-                                    crate::wolf::TameOutcome::Succeeded => {
-                                        just_tamed_target = Some(target);
-                                        // UX polish sweep Task 2 — first-tame toast
-                                        // teaches the command gesture without
-                                        // dropping the "Tamed!" confirmation.
-                                        // `hint_should_fire` borrows only
-                                        // `self.hints_shown`, disjoint from the
-                                        // live `data` borrow of `self.ecs`.
-                                        let (msg, secs) = if hint_should_fire(&mut self.hints_shown, Hint::PetCommand) {
-                                            ("Tamed! Right-click it with an empty hand to set Follow / Stay / Wander.", 5)
-                                        } else {
-                                            ("Tamed! The wolf is yours.", 4)
-                                        };
-                                        self.toast = Some((
-                                            msg.to_string(),
-                                            Instant::now() + Duration::from_secs(secs),
-                                        ));
-                                        // Phase 3 — coverage-challenge TameMob event.
-                                        if let Some(scenario) = &mut self.scenario {
-                                            scenario.on_event(crate::scenario::ChallengeEvent::TameMob);
-                                        }
-                                        // UX polish sweep Task 1 — tame success puff
-                                        // (mirrors the Companion/Nostrich poof above).
-                                        if let Ok(p) = self.ecs.get::<&crate::entity::Position>(target) {
-                                            self.particles.puff(p.0, glam::Vec3::Y, 6, seed);
-                                        }
-                                    }
-                                    crate::wolf::TameOutcome::Failed => {
-                                        self.toast = Some((
-                                            "The wolf takes the bone, eyes wary…".to_string(),
-                                            Instant::now() + Duration::from_secs(2),
-                                        ));
-                                    }
-                                    crate::wolf::TameOutcome::AlreadyTamed => {
-                                        self.toast = Some((
-                                            "This wolf is already yours.".to_string(),
-                                            Instant::now() + Duration::from_secs(2),
-                                        ));
-                                    }
-                                }
-                                self.players[pidx].place_cooldown = 8;
-                                talked = true;
-                            } else if held.is_none() && data.ownership.is_owned_by(&pubkey) {
-                                // 1C command — empty hand on your own tamed
-                                // wolf toggles Sit/Follow (mirrors the
-                                // Nostrich Sit/Stand toggle above).
-                                if let Some(new_state) = data.try_toggle_sit(&pubkey) {
-                                    let label = match new_state {
-                                        crate::wolf::WolfAiState::Sit => "Sit. The wolf settles.",
-                                        _ => "Follow. The wolf rises.",
-                                    };
-                                    self.toast = Some((
-                                        label.to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                    self.players[pidx].place_cooldown = 8;
-                                    talked = true;
+                            if let Some(ev) = r.challenge {
+                                self.fire_challenge(ev);
+                            }
+                            // UX polish sweep Task 2 — the first tame's toast
+                            // teaches the command gesture.
+                            let hint = r.tamed && hint_should_fire(&mut self.hints_shown, Hint::PetCommand);
+                            if let Some((msg, secs)) = r.note.toast(kind, hint) {
+                                self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
+                            }
+                            // UX polish sweep Task 1 — tame success poof.
+                            if r.tamed
+                                && let Ok(p) = self.ecs.get::<&crate::entity::Position>(target)
+                            {
+                                let seed = tick
+                                    .wrapping_mul(374761393)
+                                    .wrapping_add(target.id() as u64 * 668265263);
+                                if kind == crate::mob::MobType::Wolf {
+                                    self.particles.puff(p.0, glam::Vec3::Y, 6, seed);
+                                } else {
+                                    self.particles.poof_green(p.0, 6, seed);
                                 }
                             }
-                        }
-                        }
-                        // Auto-leash a freshly-tamed wolf — runs OUTSIDE
-                        // the immutable wolf-data borrow. Same shape as
-                        // the R4 Nostrich auto-leash hook so wolves get
-                        // the leashed-follow behaviour for free now
-                        // that their tame path is live.
-                        if let Some(tamed_entity) = just_tamed_target {
-                            let _ = self.ecs.insert_one(
-                                tamed_entity,
-                                crate::tether::Tethered {
-                                    target: crate::tether::TetherTarget::Player(pidx),
-                                },
-                            );
-                            // Animals Wave 2 — a tamed pet is no longer disposable
-                            // wildlife: drop the `Scattered` tag so it survives
-                            // chunk unload (and gets persisted by `tamed_mobs_to_saved`).
-                            let _ = self.ecs.remove_one::<crate::entity::Scattered>(tamed_entity);
-                        }
-                    } else if crate::companion::is_companion_species(kind) {
-                        // Companions wave 1C — owner command cycle. Taming
-                        // (right-click with the species' food) is handled by
-                        // the dedicated companion-tame block earlier in this
-                        // function; this arm only covers the empty-hand
-                        // command gesture, and it lives here — after the
-                        // Spec 36 tether-detach check above — so precedence
-                        // matches the Nostrich/Wolf toggles: a freshly-tamed
-                        // (auto-leashed) pet's first empty-hand click detaches
-                        // the leash, and only once untethered does a second
-                        // empty-hand click cycle its command state.
-                        let hotbar = self.players[pidx].hotbar_slot;
-                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
-                        if held.is_none() {
-                            let pubkey = format!("local-player-{pidx}");
-                            if let Ok(mut data) =
-                                self.ecs.get::<&mut crate::companion::CompanionData>(target)
-                                && data.ownership.is_owned_by(&pubkey) {
-                                    let next = crate::companion::cycle_state(
-                                        data.state,
-                                        crate::companion::can_perch(kind),
-                                    );
-                                    data.state = next;
-                                    let name = &crate::mob::mob_def(kind).name;
-                                    let label = if next == crate::companion::CompanionState::Perch {
-                                        format!("{name}: Perch (hops to your shoulder)")
-                                    } else {
-                                        format!("{name}: {}", crate::companion::state_label(next))
-                                    };
-                                    self.toast = Some((
-                                        label,
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                    self.players[pidx].place_cooldown = 8;
-                                    talked = true;
-                                }
+                            self.players[pidx].place_cooldown = 8;
+                            talked = true;
                         }
                     }
                 }
@@ -21805,6 +21440,8 @@ impl super::GameState {
         let mut pending_exhibits = None;
         let mut pending_grants = Vec::new();
         let mut pending_life_events = Vec::new();
+        let mut pending_outcomes = Vec::new();
+        let mut pending_kills = Vec::new();
         let mut pending_entity_batches = Vec::new();
         let mut pending_block_changes = Vec::new();
         // World chat (Phase 2) — lines delivered to us this poll, from
@@ -21827,6 +21464,8 @@ impl super::GameState {
             pending_exhibits = client.pending_exhibits.take();
             pending_grants = std::mem::take(&mut client.pending_grants);
             pending_life_events = std::mem::take(&mut client.pending_life_events);
+            pending_outcomes = std::mem::take(&mut client.pending_outcomes);
+            pending_kills = std::mem::take(&mut client.pending_kills);
             // Deltas accumulated across every StateUpdate since last frame —
             // sourced from the accumulators, NOT latest_state, so a frame
             // hitch that batches two server ticks loses nothing.
@@ -22098,11 +21737,19 @@ impl super::GameState {
         if !self.players.is_empty() {
             for ev in &pending_life_events {
                 match *ev {
-                    crate::remote_client::OwnLifeEvent::Died => {
+                    // MP-D2b — with the cause the server recorded, for the
+                    // death-screen line.
+                    crate::remote_client::OwnLifeEvent::Died(cause) => {
                         if !self.is_creative {
-                            self.players[0]
-                                .combat
-                                .die(crate::survival::DamageCause::Generic);
+                            self.players[0].combat.die(cause);
+                        }
+                    }
+                    // MP-D2b — the hits the server landed wear our armour,
+                    // one durability per worn piece per hit, as a hit landed
+                    // in single-player does.
+                    crate::remote_client::OwnLifeEvent::ArmourWorn(hits) => {
+                        for _ in 0..hits {
+                            self.players[0].wear_armour();
                         }
                     }
                     crate::remote_client::OwnLifeEvent::Respawned(at) => {
@@ -22116,6 +21763,15 @@ impl super::GameState {
                     }
                 }
             }
+        }
+
+        // MP-D2b — the server's word on our swings and right-clicks, then
+        // the kills it credited to us.
+        for out in &pending_outcomes {
+            self.apply_interact_outcome(out);
+        }
+        for kill in &pending_kills {
+            self.apply_kill_event(kill);
         }
 
         // Death-drops phase 2b — stacks the server picked up for us. Decode
@@ -22203,6 +21859,200 @@ impl super::GameState {
         let reach = cast_ray(eye, look, crate::combat::ATTACK_REACH, &self.world, &self.registry)
             .map_or(crate::combat::ATTACK_REACH, |hit| hit.distance);
         self.remote_mobs.ray_target(eye, look, reach)
+    }
+
+    /// A kill credited to local player `idx` — the single attribution site's
+    /// effects (MP-D2b extraction): the kill counter (bounties), the KillMob
+    /// challenge, the smoke puff, the Nostrich's Vow (not for a tamed
+    /// Nostrich: `victim_tamed`), and the villager-kill reputation penalty.
+    /// Run by this client's death sweep for its own players' kills, and by a
+    /// joiner for a `KillEvent` the server credits it with.
+    fn credit_kill(&mut self, idx: usize, kind: crate::mob::MobType, pos: glam::Vec3, victim_tamed: bool) {
+        if idx >= self.players.len() {
+            return;
+        }
+        let pos_seed = crate::death_drops::death_seed(pos, self.world_time);
+        let counter = self.players[idx].kill_counter.entry(kind).or_insert(0);
+        *counter += 1;
+        self.fire_challenge(crate::scenario::ChallengeEvent::KillMob);
+        // UX polish sweep Task 1 — smoke puff on an attributed kill.
+        self.particles.burst_smoke(pos, 6, pos_seed as u64);
+
+        // Spec 28d.nostrich — killing a Nostrich triggers "The Nostrich's
+        // Vow" on the killer. Curse blocks vendor trade + village rep + sats
+        // payouts for VOW_DURATION_TICKS until purified or expired.
+        // Idempotent: re-killing while already cursed refreshes the duration
+        // (deliberate — repeat offenders get the punishment renewed). v2 — a
+        // tamed Nostrich doesn't trigger the Vow; emotional loss is its own
+        // punishment.
+        if kind == crate::mob::MobType::Nostrich {
+            if victim_tamed {
+                self.toast = Some((
+                    "Your tamed Nostrich is gone. The wild ones say nothing.".to_string(),
+                    Instant::now() + Duration::from_secs(4),
+                ));
+            } else {
+                let tick = self.tick_counter;
+                self.players[idx].nostrich_vow = Some(crate::nostrich_vow::NostrichVow::new(
+                    tick,
+                    crate::nostrich_vow::VowReason::KilledNostrich,
+                ));
+                self.toast = Some((
+                    crate::nostrich_vow::trigger_toast(crate::nostrich_vow::VowReason::KilledNostrich)
+                        .to_string(),
+                    Instant::now() + Duration::from_secs(5),
+                ));
+            }
+        }
+
+        // Phase 9 — villager-kill reputation penalty (30 s cooldown so a
+        // rage-loop costs rep once, not per-kill).
+        if matches!(kind, crate::mob::MobType::Villager | crate::mob::MobType::Peddler) {
+            let now = self.tick_counter;
+            let last = self.players[idx].last_villager_kill_rep_tick;
+            let on_cooldown = last
+                .map(|t| now.saturating_sub(t) < crate::reputation::VILLAGER_KILL_REP_COOLDOWN_TICKS)
+                .unwrap_or(false);
+            if !on_cooldown
+                && let Some(vid) = crate::reputation::village_at_position(&self.world, pos)
+            {
+                self.players[idx].reputation.adjust(vid, crate::reputation::VILLAGER_KILL_PENALTY);
+                self.players[idx].last_villager_kill_rep_tick = Some(now);
+                self.toast = Some((
+                    "The villagers saw that. Your standing here just dropped.".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+            }
+        }
+    }
+
+    /// MP-D2b — the item in player `pidx`'s active hotbar slot, and the
+    /// wire form a request claims it with (`ItemRef` pair + full fidelity).
+    fn held_for_request(&self, pidx: usize) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
+        let slot = &self.players[pidx];
+        let hot = slot.hotbar_slot;
+        let held = slot.inventory.hotbar_slot(hot).map(|s| s.item.clone());
+        let (kind, id) = match &held {
+            Some(item) => crate::inventory::item_to_ref(item).to_wire(),
+            None => crate::protocol::ItemRef::Empty.to_wire(),
+        };
+        let full = held.as_ref().map_or(crate::protocol::WireItem::None, crate::inventory::item_to_wire_full);
+        (hot, held, kind, id, full)
+    }
+
+    /// MP-D2b — swing at the server's mob `target` (a joiner): the server
+    /// decides, and the weapon wears when it confirms (`InteractOutcome`).
+    fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let seq = self.joiner_actions.record(crate::joiner_actions::Pending {
+            kind: None,
+            mob: target.kind,
+            hotbar_slot: hot,
+            held,
+        });
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_entity_attack(&crate::protocol::EntityAttackPacket {
+                seq,
+                entity: target.id,
+                held_kind,
+                held_id,
+                held_full,
+                sprint,
+                sneak,
+            });
+        }
+    }
+
+    /// MP-D2b — ask the server for interaction `kind` with its mob `target`
+    /// (a joiner): what the hand holds is taken only on an accepted outcome.
+    fn send_entity_interact(
+        &mut self,
+        pidx: usize,
+        target: crate::remote_mobs::MirrorTarget,
+        kind: crate::protocol::InteractKind,
+        sneak: bool,
+    ) {
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let seq = self.joiner_actions.record(crate::joiner_actions::Pending {
+            kind: Some(kind),
+            mob: target.kind,
+            hotbar_slot: hot,
+            held,
+        });
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_entity_interact(&crate::protocol::EntityInteractPacket {
+                seq,
+                entity: target.id,
+                kind,
+                held_kind,
+                held_id,
+                held_full,
+                hotbar_slot: hot as u8,
+                sneak,
+            });
+        }
+    }
+
+    /// MP-D2b — the server's decision on one of our requests: an accepted
+    /// swing wears the weapon, an accepted interaction takes what it used,
+    /// and the note is shown, with the challenge event single-player fires
+    /// for the same interaction. A refusal changes nothing.
+    fn apply_interact_outcome(&mut self, out: &crate::protocol::InteractOutcomePacket) {
+        let Some(request) = self.joiner_actions.take(out.seq) else {
+            return;
+        };
+        if self.players.is_empty() {
+            return;
+        }
+        let applied =
+            crate::joiner_actions::apply_outcome(&mut self.players[0].inventory, &request, out);
+        if applied.wear.is_some() {
+            self.handle_tool_use(applied.wear);
+        }
+        let note = crate::mob_interact::InteractNote::from_wire(out.note);
+        let tamed = out.accepted && note == crate::mob_interact::InteractNote::Tamed;
+        if out.accepted {
+            use crate::protocol::InteractKind;
+            let challenge = match request.kind {
+                Some(InteractKind::Shear | InteractKind::Milk) => {
+                    Some(crate::scenario::ChallengeEvent::ShearOrMilk)
+                }
+                // Single-player fires TameMob for a wolf or a companion,
+                // not for a Nostrich.
+                Some(InteractKind::Tame) if tamed && request.mob != crate::mob::MobType::Nostrich => {
+                    Some(crate::scenario::ChallengeEvent::TameMob)
+                }
+                _ => None,
+            };
+            if let Some(ev) = challenge {
+                self.fire_challenge(ev);
+            }
+            if request.kind.is_some() {
+                if request.kind == Some(InteractKind::LeadDetach) {
+                    self.audio.play_break();
+                } else {
+                    self.audio.play_place();
+                }
+            }
+        }
+        let hint = tamed && hint_should_fire(&mut self.hints_shown, Hint::PetCommand);
+        if let Some((msg, secs)) = note.toast(request.mob, hint) {
+            self.toast = Some((msg, Instant::now() + Duration::from_secs(secs)));
+        }
+    }
+
+    /// MP-D2b — the server credits us with a kill: the same attribution a
+    /// kill in our own sim runs (`credit_kill`).
+    fn apply_kill_event(&mut self, kill: &crate::protocol::KillEventPacket) {
+        let Some(kind) = crate::remote_mobs::mob_type_for(kill.victim) else {
+            return;
+        };
+        let pos = glam::Vec3::new(kill.x, kill.y, kill.z);
+        if self.players.is_empty() || !pos.is_finite() {
+            return;
+        }
+        let tamed = kill.victim_flags & crate::protocol::entity_flags::TAMED != 0;
+        self.credit_kill(0, kind, pos, tamed);
     }
 
     pub(crate) fn network_send_input(&mut self) {

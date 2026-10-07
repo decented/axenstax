@@ -89,6 +89,26 @@ pub enum PacketType {
     /// per-tick packet budget never drops it, but a request made inside the
     /// first 20 ticks of a death is ignored — see `Respawned`).
     Respawn = 57,
+    /// Client → Server: the player swung at one of the server's entities
+    /// (MP-D2b). Names the entity by its `ProtocolId` and claims the item in
+    /// hand; the server decides everything else (alive, reach from its own
+    /// body, cooldown, damage, knockback, kill credit) and answers with an
+    /// `InteractOutcome`. Sent by a joiner only.
+    EntityAttack = 58,
+    /// Client → Server: a one-shot right-click interaction with one of the
+    /// server's mobs (MP-D2b): feed, tame, shear, milk, lead on/off, sit
+    /// toggle. Same shape of trust as `EntityAttack`; answered with an
+    /// `InteractOutcome`. Riding and villager trading are not on it (D2c).
+    EntityInteract = 59,
+    /// Server → Client: the server's decision on one `EntityAttack` or
+    /// `EntityInteract` (MP-D2b), sent to that player alone. The client owns
+    /// its inventory until phase C, so it takes the consumed items and wears
+    /// its weapon ONLY on an accepted outcome; products ride `InventoryGrant`.
+    InteractOutcome = 60,
+    /// Server → Client: a mob this player killed has died (MP-D2b), sent to
+    /// the killer alone, so its client's kill attribution (kill counters,
+    /// challenges, the Nostrich's Vow, village reputation) runs for the kill.
+    KillEvent = 61,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -709,6 +729,139 @@ pub struct DeviceInteractPacket {
     pub pos: (i32, i32, i32),
 }
 
+// ─── Joiners act on the server's entities (MP-D2b, v70) ───────
+
+/// Client → Server: swing at the server entity `entity` (MP-D2b).
+///
+/// Everything here is the client's word, and the server believes only what it
+/// cannot check yet: the item in hand (`held_*`, BRIDGE until phase C makes a
+/// joiner's inventory server-authoritative). The target must exist and be
+/// alive, its centre within `combat::ATTACK_REACH` +
+/// `hosted_server::ATTACK_REACH_TOLERANCE` of the eye of the body the SERVER
+/// holds, and the swing off the server's cooldown. A critical hit is the
+/// server's call too (its body airborne), so the packet carries no crit flag.
+/// Damage, knockback, the sweep and `LastAttacker` are `combat::strike`, the
+/// code single-player runs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EntityAttackPacket {
+    /// Client request number, echoed in the `InteractOutcome`. Per
+    /// connection, any value; the client matches its own pending list.
+    pub seq: u32,
+    /// The target's `ProtocolId` (from the entity diff).
+    pub entity: u32,
+    /// The held item, `ItemRef` wire pair + full fidelity (`WireItem`), as
+    /// `InventoryGrantPacket` encodes it. Empty hand = `item_kind::EMPTY`.
+    pub held_kind: u8,
+    pub held_id: u16,
+    pub held_full: WireItem,
+    /// Sprinting: the extra knockback.
+    pub sprint: bool,
+    /// Sneaking: a deliberate hit on the player's own pet (no friendly-fire
+    /// shield), as in single-player.
+    pub sneak: bool,
+}
+
+/// What an [`EntityInteractPacket`] asks for (MP-D2b). Wire-stable, append
+/// only. Riding and trading are not here (D2c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InteractKind {
+    /// The species' breeding food on an adult: love mode.
+    Feed,
+    /// Taming food (companion food, a Cat Treat, a Bone, Mixed Berries).
+    Tame,
+    /// Shears on a sheep.
+    Shear,
+    /// A bucket on a cow.
+    Milk,
+    /// A Lead on a passive mob.
+    LeadAttach,
+    /// Take a Lead off a tethered mob (it comes back via `InventoryGrant`).
+    LeadDetach,
+    /// Empty hand on the player's OWN pet: sit / follow (wolf, Nostrich) or
+    /// the companion's command cycle.
+    SitToggle,
+}
+
+/// Client → Server: a one-shot right-click on the server mob `entity`
+/// (MP-D2b). Validated like [`EntityAttackPacket`] (alive, reach from the
+/// server's body, rate), then run through `mob_interact`, the functions
+/// single-player's right-click runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EntityInteractPacket {
+    pub seq: u32,
+    pub entity: u32,
+    pub kind: InteractKind,
+    /// The held item (see [`EntityAttackPacket::held_kind`]).
+    pub held_kind: u8,
+    pub held_id: u16,
+    pub held_full: WireItem,
+    /// The hotbar slot the item is in — echoed so a client can tell which
+    /// stack an accepted outcome consumes from (the server does not read it).
+    pub hotbar_slot: u8,
+    /// Sneaking (the horse family's breeding feed is a sneak gesture).
+    pub sneak: bool,
+}
+
+/// Server → Client: the decision on one attack or interaction (MP-D2b).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InteractOutcomePacket {
+    /// The request's `seq`.
+    pub seq: u32,
+    /// The request's entity.
+    pub entity: u32,
+    /// `None` = an `EntityAttack`'s outcome; otherwise the interaction's kind.
+    pub kind: Option<InteractKind>,
+    /// Attack: the swing was valid and spent (target alive and in reach, off
+    /// cooldown) — the client wears its weapon, as single-player wears it on
+    /// any swing that found a target, invulnerability frames or not.
+    /// Interaction: it happened. A refused request changes nothing.
+    pub accepted: bool,
+    /// Items the client takes from the held stack (accepted only). A
+    /// product (milk, the Lead back) rides `InventoryGrant`: a bucket→milk
+    /// swap is `consume_held = 1` plus one grant.
+    pub consume_held: u8,
+    /// What to tell the player: a `mob_interact::InteractNote` code, 0 =
+    /// nothing. Unknown codes are shown as nothing.
+    pub note: u8,
+}
+
+/// Server → Client: a kill this player made (MP-D2b), to the killer alone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KillEventPacket {
+    /// The victim's species.
+    pub victim: EntityKind,
+    /// How the killing blow landed: [`kill_cause`].
+    pub cause: u8,
+    /// Where it died.
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// [`entity_flags`] of the victim as it died (`TAMED`: it was somebody's
+    /// pet — a tamed Nostrich's death does not bring the Vow).
+    pub victim_flags: u8,
+}
+
+/// `KillEventPacket.cause` codes. Wire-stable, append only.
+pub mod kill_cause {
+    /// A melee swing (the primary target or the sweep).
+    pub const MELEE: u8 = 0;
+}
+
+/// A death cause on the wire (`PlayerEventType::DiedOf`, MP-D2b): the
+/// `survival::DamageCause` the death screen names. Wire-stable, append only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireDamageCause {
+    #[default]
+    Generic,
+    Fall,
+    Drowning,
+    Starvation,
+    Lava,
+    Fire,
+    Explosion,
+    Mob(EntityKind),
+}
+
 /// Entity kind discriminator on the wire. Matches `MobKind` subset the engine
 /// currently spawns. New kinds append; never renumber (wire-stable).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -812,13 +965,17 @@ pub mod entity_flags {
     pub const HURT: u8 = 1;
     /// A juvenile (`breeding::Baby`) — drawn at the baby scale.
     pub const BABY: u8 = 2;
-    /// Somebody's tamed pet or kept steed (`tameable::pet_owner_of`). No
-    /// renderer reads it yet; it is the hook the joiner's pet interactions
-    /// (D2b) and a collar/nameplate will read.
+    /// Somebody's tamed pet or kept steed (`tameable::pet_owner_of`). A
+    /// joiner reads it to offer the sit / follow command on an empty-hand
+    /// right-click (D2b; the server checks the pet is the joiner's own).
     pub const TAMED: u8 = 4;
     /// Satoshi the guide (`satoshi::SatoshiMarker`) — a Villager drawn with
     /// his own hooded model.
     pub const SATOSHI: u8 = 8;
+    /// MP-D2b (v70) — on a Lead (`tether::Tethered`): a right-click that
+    /// isn't feeding, milking, shearing or companion food takes the Lead off,
+    /// as in single-player.
+    pub const TETHERED: u8 = 16;
 }
 
 /// Server → client: an existing entity's position/state changed.
@@ -1002,6 +1159,15 @@ pub enum PlayerEventType {
     /// player ALONE; their own client moves there (if the position is inside
     /// the join-spawn range).
     Respawned { x: f32, y: f32, z: f32 },
+    /// MP-D2b (v70) — `Died`, naming what killed the body (the mob's species,
+    /// lava, a fall …) for the death screen and the client's own records.
+    /// The server sends this instead of `Died`, under the same rules.
+    DiedOf { cause: WireDamageCause },
+    /// MP-D2b (v70) — `hits` hits the server landed on this player's body
+    /// since the last report wear its armour, one durability per worn piece
+    /// per hit (`PlayerSlot::wear_armour`, the single-player rule). Sent to
+    /// that player alone, on the tick the hits land.
+    ArmourWorn { hits: u8 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1396,7 +1562,18 @@ pub struct ServerAnnouncePacket {
 ///   client let go of) and `render_distance: u8` (its current one). Server
 ///   block changes reach a joiner only for chunks it has been sent. See
 ///   `chunk_push` and Spec 04 §4.1.
-pub const PROTOCOL_VERSION: u32 = 69;
+/// - v70 (2026-10-07, MP-D2b): joiners act on the server's mobs. Appended:
+///   `PacketType::EntityAttack = 58` and `EntityInteract = 59` (C→S: a swing
+///   or a one-shot right-click — feed, tame, shear, milk, lead on/off, sit —
+///   on an entity named by its `ProtocolId`; the held item is the client's
+///   word), `InteractOutcome = 60` (S→C, to the asker: accepted / items
+///   consumed / a note code; the weapon wears only on an accepted swing) and
+///   `KillEvent = 61` (S→C, to the killer: species, cause, position, flags);
+///   `PlayerEventType::DiedOf { cause }` (the death screen's real cause) and
+///   `ArmourWorn { hits }` (server-landed hits wear the joiner's armour);
+///   `entity_flags::TETHERED`. Kills a joiner makes credit that joiner, never
+///   a host's player.
+pub const PROTOCOL_VERSION: u32 = 70;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1457,6 +1634,10 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         55 => PacketType::ChatDeliver,
         56 => PacketType::DeviceInteract,
         57 => PacketType::Respawn,
+        58 => PacketType::EntityAttack,
+        59 => PacketType::EntityInteract,
+        60 => PacketType::InteractOutcome,
+        61 => PacketType::KillEvent,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -1558,7 +1739,7 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        assert_eq!(super::PROTOCOL_VERSION, 69);
+        assert_eq!(super::PROTOCOL_VERSION, 70);
     }
 
     #[test]
@@ -2120,7 +2301,11 @@ mod tests {
         // v69 (2026-10-07, B2a): chunk push — ChunkData side data +
         //   continuations, JoinRequest.render_distance, InputPacket.chunk_ack
         //   + chunk_drops + render_distance.
-        assert_eq!(PROTOCOL_VERSION, 69);
+        // v70 (2026-10-07, MP-D2b): `EntityAttack = 58`, `EntityInteract =
+        //   59`, `InteractOutcome = 60`, `KillEvent = 61`,
+        //   `PlayerEventType::{DiedOf, ArmourWorn}`, `entity_flags::TETHERED`
+        //   — joiners act on the server's mobs.
+        assert_eq!(PROTOCOL_VERSION, 70);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2230,6 +2415,73 @@ mod tests {
         assert_eq!(WorldRules::from_meta(&meta), rules);
     }
 
+    /// MP-D2b (v70) — the four appended packets keep their tags and shapes.
+    #[test]
+    fn joiner_action_packets_round_trip() {
+        let attack = EntityAttackPacket {
+            seq: 7,
+            entity: 42,
+            held_kind: item_kind::TOOL,
+            held_id: 3,
+            held_full: WireItem::Tool { tool_type: 1, material: 2, durability: 99 },
+            sprint: true,
+            sneak: false,
+        };
+        let bytes = serialize_packet(PacketType::EntityAttack, &attack);
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::EntityAttack);
+        assert_eq!(safe_deserialize::<EntityAttackPacket>(payload).unwrap(), attack);
+
+        let interact = EntityInteractPacket {
+            seq: 8,
+            entity: 43,
+            kind: InteractKind::SitToggle,
+            held_kind: item_kind::EMPTY,
+            held_id: 0,
+            held_full: WireItem::None,
+            hotbar_slot: 4,
+            sneak: true,
+        };
+        let bytes = serialize_packet(PacketType::EntityInteract, &interact);
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::EntityInteract);
+        assert_eq!(safe_deserialize::<EntityInteractPacket>(payload).unwrap(), interact);
+
+        let outcome = InteractOutcomePacket {
+            seq: 8,
+            entity: 43,
+            kind: Some(InteractKind::Milk),
+            accepted: true,
+            consume_held: 1,
+            note: 2,
+        };
+        let bytes = serialize_packet(PacketType::InteractOutcome, &outcome);
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::InteractOutcome);
+        assert_eq!(safe_deserialize::<InteractOutcomePacket>(payload).unwrap(), outcome);
+
+        let kill = KillEventPacket {
+            victim: EntityKind::Nostrich,
+            cause: kill_cause::MELEE,
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            victim_flags: entity_flags::TAMED,
+        };
+        let bytes = serialize_packet(PacketType::KillEvent, &kill);
+        let (ptype, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(ptype, PacketType::KillEvent);
+        assert_eq!(safe_deserialize::<KillEventPacket>(payload).unwrap(), kill);
+        for (tag, t) in [
+            (58u8, PacketType::EntityAttack),
+            (59, PacketType::EntityInteract),
+            (60, PacketType::InteractOutcome),
+            (61, PacketType::KillEvent),
+        ] {
+            assert_eq!(t as u8, tag, "wire-stable tag");
+        }
+    }
+
     #[test]
     fn respawn_request_and_life_events_round_trip() {
         let bytes = serialize_packet(PacketType::Respawn, &());
@@ -2239,6 +2491,8 @@ mod tests {
         for event in [
             PlayerEventType::Died,
             PlayerEventType::Respawned { x: 1.5, y: 70.0, z: -3.5 },
+            PlayerEventType::DiedOf { cause: WireDamageCause::Mob(EntityKind::Shark) },
+            PlayerEventType::ArmourWorn { hits: 3 },
         ] {
             let pkt = PlayerEventPacket { player_index: 4, event };
             let bytes = serialize_packet(PacketType::PlayerEvent, &pkt);

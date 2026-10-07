@@ -69,6 +69,13 @@ fn generic_owns(state: &AiState) -> bool {
     )
 }
 
+/// MP-D2b — the stand-in position for a player slot with no body in the
+/// world (a lending host lists its joiners at their server slots; a dead or
+/// departed joiner's slot holds this): far outside the world on every axis
+/// (several of these AIs measure horizontal distance only), so none ever
+/// picks it as its nearest target, and a Lead fastened to it snaps.
+pub const ABSENT_PLAYER: Vec3 = Vec3::new(1.0e7, -1.0e6, 1.0e7);
+
 /// Nearest player position to `pos` (xz distance), if any players exist.
 fn nearest_player(pos: Vec3, players: &[Vec3]) -> Option<(f32, f32, f32)> {
     players
@@ -267,7 +274,7 @@ pub fn dispatch_bees(
         .iter()
     {
         if kind.0 == MobType::Bee && !generic_owns(&ai.state) {
-            bees.push((id, pos.0, data.clone(), attacker.map(|a| a.0)));
+            bees.push((id, pos.0, data.clone(), attacker.map(|a| a.0.slot())));
         }
     }
     let mut stings = Vec::new();
@@ -513,7 +520,11 @@ pub fn dispatch_companions(
     player_positions: &[Vec3],
     player_yaws: &[f32],
     _tick: u64,
+    remote_owners: &[(String, usize)],
 ) {
+    // MP-D2b — a joiner's pet (owner key = its npub) follows that joiner's
+    // body, which a lending host lists at its server slot.
+    let owners = crate::tameable::OwnerBodies { positions: player_positions, remote_owners };
     use crate::companion::{self, CompanionData, CompanionState};
 
     let mut pets: Vec<(hecs::Entity, Vec3, MobType, String, CompanionState)> = Vec::new();
@@ -528,7 +539,7 @@ pub fn dispatch_companions(
         return;
     }
     for (id, pos, kind, owner, state) in pets {
-        let owner_slot = crate::wolf::owner_slot_from_pubkey(&owner);
+        let owner_slot = owners.slot_of(&owner);
         let owner_pos = owner_slot.and_then(|slot| player_positions.get(slot).copied());
         match state {
             CompanionState::Stay => {
@@ -597,7 +608,10 @@ pub fn dispatch_nostriches(
     ecs: &mut hecs::World,
     player_positions: &[Vec3],
     tick: u64,
+    remote_owners: &[(String, usize)],
 ) {
+    // MP-D2b — see `dispatch_companions`.
+    let owners = crate::tameable::OwnerBodies { positions: player_positions, remote_owners };
     use crate::nostrich::{self, NostrichAiState, NostrichData};
 
     // Collect first to release the query borrow (same shape as the
@@ -613,8 +627,7 @@ pub fn dispatch_nostriches(
         birds.push((id, pos.0, data.owner_pubkey().to_string(), generic_owns(&ai.state)));
     }
     for (id, pos, owner, generic_reactive) in birds {
-        let owner_pos = crate::wolf::owner_slot_from_pubkey(&owner)
-            .and_then(|slot| player_positions.get(slot).copied());
+        let owner_pos = owners.position_of(&owner);
         let owner_distance = owner_pos.map(|op| (op - pos).length());
 
         // Advance + write back the pure state machine every tick, so Flee
@@ -1014,7 +1027,7 @@ mod tests {
             MobAi::new(),
             BeeData::new(),
             Flying,
-            LastAttacker(0),
+            LastAttacker(crate::combat::Attacker::Local(0)),
         ));
         let players = vec![Vec3::new(2.0, 64.0, 0.0)];
         let mut stung = false;
@@ -1313,11 +1326,44 @@ mod tests {
             CompanionData::untamed(),
         ));
         let players = vec![Vec3::new(0.0, 64.0, 0.0)]; // owner at origin
-        dispatch_companions(&mut ecs, &players, &[0.0], 5);
+        dispatch_companions(&mut ecs, &players, &[0.0], 5, &[]);
         let v = ecs.get::<&Velocity>(cat).unwrap().0;
         assert!(v.x < 0.0, "tamed cat should walk toward its owner at −x, got vx={}", v.x);
         let wv = ecs.get::<&Velocity>(wild).unwrap().0;
         assert_eq!(wv, Vec3::ZERO, "an untamed cat is not dispatched to follow");
+    }
+
+    /// MP-D2b — a joiner's pet (owner key = its npub) follows that joiner's
+    /// body, which a lending host lists at the joiner's server slot.
+    #[test]
+    fn a_joiners_pet_follows_the_joiners_body() {
+        use crate::companion::CompanionData;
+        let mut ecs = hecs::World::new();
+        let mut owned = CompanionData::untamed();
+        owned.ownership.owner_pubkey = "npub1joiner".to_string();
+        let cat = ecs.spawn((
+            Position(Vec3::new(0.0, 64.0, 0.0)),
+            Velocity(Vec3::ZERO),
+            MobKind(MobType::Cat),
+            MobAi::new(),
+            owned,
+        ));
+        // Slot 0 (the host) to the -x; the joiner at slot 1 to the +x.
+        let bodies = [Vec3::new(-10.0, 64.0, 0.0), Vec3::new(10.0, 64.0, 0.0)];
+        dispatch_companions(&mut ecs, &bodies, &[0.0, 0.0], 5, &[("npub1joiner".to_string(), 1)]);
+        let v = ecs.get::<&Velocity>(cat).unwrap().0;
+        assert!(v.x > 0.0, "the cat walks to its owner at slot 1 (+x), got vx={}", v.x);
+    }
+
+    /// MP-D2b — a slot with no body (`ABSENT_PLAYER`) is never anyone's
+    /// nearest target, even for an AI that measures horizontal distance only
+    /// and stands at the world's origin.
+    #[test]
+    fn an_absent_slot_is_never_the_nearest_target() {
+        let at_origin = Vec3::new(0.0, 64.0, 0.0);
+        let bodies = [ABSENT_PLAYER, Vec3::new(30.0, 64.0, 30.0)];
+        assert_eq!(nearest_player_indexed(at_origin, &bodies).map(|t| t.0), Some(1));
+        assert_eq!(nearest_player(at_origin, &bodies), Some((30.0, 64.0, 30.0)));
     }
 
     #[test]
@@ -1329,7 +1375,7 @@ mod tests {
             d.ownership.owner_pubkey = "local-player-0".into();
             d.state = crate::companion::CompanionState::Stay;
         }
-        dispatch_companions(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], &[0.0], 0);
+        dispatch_companions(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], &[0.0], 0, &[]);
         let v = ecs.get::<&crate::entity::Velocity>(cat).unwrap();
         assert_eq!((v.0.x, v.0.z), (0.0, 0.0), "Stay must not chase the owner");
     }
@@ -1345,7 +1391,7 @@ mod tests {
         }
         let owner = Vec3::new(20.0, 70.0, 20.0);
         let yaw = 1.2345_f32; // arbitrary non-zero yaw — exercises the rotation
-        dispatch_companions(&mut ecs, &[owner], &[yaw], 0);
+        dispatch_companions(&mut ecs, &[owner], &[yaw], 0, &[]);
         let p = ecs.get::<&crate::entity::Position>(parrot).unwrap();
         assert!((p.0 - (owner + crate::companion::shoulder_offset(0, yaw))).length() < 0.01);
     }
@@ -1358,7 +1404,7 @@ mod tests {
             let mut d = ecs.get::<&mut crate::companion::CompanionData>(parrot).unwrap();
             d.ownership.owner_pubkey = "local-player-0".into();
         }
-        dispatch_companions(&mut ecs, &[Vec3::new(10.0, 70.0, 0.0)], &[0.0], 0);
+        dispatch_companions(&mut ecs, &[Vec3::new(10.0, 70.0, 0.0)], &[0.0], 0, &[]);
         let v = ecs.get::<&crate::entity::Velocity>(parrot).unwrap();
         assert!(v.0.y > 0.0, "flying follower should climb toward a higher owner");
     }
@@ -1388,12 +1434,12 @@ mod tests {
         );
 
         // Owner beyond the halt guard → steer toward them (+x).
-        dispatch_nostriches(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], 10);
+        dispatch_nostriches(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], 10, &[]);
         let v = ecs.get::<&Velocity>(id).unwrap().0;
         assert!(v.x > 0.0, "Follow must steer toward the owner, got {v:?}");
 
         // Owner within FOLLOW_MIN_DISTANCE → halt (anti-oscillation guard).
-        dispatch_nostriches(&mut ecs, &[Vec3::new(2.0, 64.0, 0.0)], 11);
+        dispatch_nostriches(&mut ecs, &[Vec3::new(2.0, 64.0, 0.0)], 11, &[]);
         let v = ecs.get::<&Velocity>(id).unwrap().0;
         assert!(
             v.x == 0.0 && v.z == 0.0,
@@ -1410,7 +1456,7 @@ mod tests {
         );
         ecs.get::<&mut Velocity>(id).unwrap().0 = Vec3::new(0.4, 0.0, 0.4);
 
-        dispatch_nostriches(&mut ecs, &[Vec3::new(30.0, 64.0, 0.0)], 10);
+        dispatch_nostriches(&mut ecs, &[Vec3::new(30.0, 64.0, 0.0)], 10, &[]);
 
         let v = ecs.get::<&Velocity>(id).unwrap().0;
         assert!(v.x == 0.0 && v.z == 0.0, "Sit means stay put, got {v:?}");
@@ -1426,7 +1472,7 @@ mod tests {
             &mut ecs, Vec3::new(0.0, 64.0, 0.0), NostrichAiState::Idle,
         );
 
-        dispatch_nostriches(&mut ecs, &[Vec3::new(6.0, 64.0, 0.0)], 10);
+        dispatch_nostriches(&mut ecs, &[Vec3::new(6.0, 64.0, 0.0)], 10, &[]);
 
         let d = ecs.get::<&crate::nostrich::NostrichData>(id).unwrap();
         assert_eq!(
@@ -1442,7 +1488,7 @@ mod tests {
         let id = crate::entity::spawn_mob(&mut ecs, MobType::Nostrich, Vec3::new(0.0, 64.0, 0.0));
         ecs.get::<&mut Velocity>(id).unwrap().0 = Vec3::new(0.3, 0.0, 0.0);
 
-        dispatch_nostriches(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], 10);
+        dispatch_nostriches(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], 10, &[]);
 
         let v = ecs.get::<&Velocity>(id).unwrap().0;
         assert_eq!(v.x, 0.3, "an untamed Nostrich keeps the generic wander drive");
@@ -1460,7 +1506,7 @@ mod tests {
         ecs.get::<&mut MobAi>(id).unwrap().state = AiState::Flee { timer: 40 };
         ecs.get::<&mut Velocity>(id).unwrap().0 = Vec3::new(-0.6, 0.0, 0.0);
 
-        dispatch_nostriches(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], 10);
+        dispatch_nostriches(&mut ecs, &[Vec3::new(10.0, 64.0, 0.0)], 10, &[]);
 
         let v = ecs.get::<&Velocity>(id).unwrap().0;
         assert_eq!(v.x, -0.6, "a reactive generic state keeps locomotion (yield rule)");

@@ -357,6 +357,8 @@ mod remote_entities;
 mod entity_broadcast;
 mod remote_mobs;
 mod health_sync;
+mod joiner_actions;
+mod mob_interact;
 // WebSocket transport — the dedicated-server pipe that BOTH the browser PWA and
 // the native client speak (browsers can't do QUIC). Native half here; the
 // browser half is `ws_transport_web` (wasm32-only).
@@ -1278,6 +1280,10 @@ pub(crate) struct GameState {
     /// MP-D2a — a joiner's own health is the server's: the client-owned
     /// changes it reports and has not seen acknowledged (`health_sync`).
     pub(crate) own_health: crate::health_sync::OwnHealth,
+    /// MP-D2b — a joiner's swings and right-clicks on the server's mobs that
+    /// await the server's `InteractOutcome` (`joiner_actions`). Empty unless
+    /// joined.
+    pub(crate) joiner_actions: crate::joiner_actions::JoinerActions,
     /// Block changes made this tick, to be sent to the server. Cross-platform so
     /// `network_send_input` can drain it on both targets. NOTE: the ~30 push
     /// sites stay native-gated for now, so a browser joiner does not yet
@@ -1858,6 +1864,7 @@ impl GameState {
             remote_mobs: crate::remote_mobs::RemoteMobs::default(),
             remote_mobs_clock: None,
             own_health: crate::health_sync::OwnHealth::new(),
+            joiner_actions: crate::joiner_actions::JoinerActions::default(),
             pending_block_changes: Vec::new(),
             touch: crate::touch_input::TouchInput::new(),
             #[cfg(target_arch = "wasm32")]

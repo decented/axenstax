@@ -36,6 +36,18 @@ fn same_spot(a: Vec3, b: Vec3) -> bool {
     (a.x - b.x).abs() < 0.01 && (a.z - b.z).abs() < 0.01
 }
 
+/// MP-D2b — where every dying mob that is somebody's pet stands (any
+/// ownership shape, `tameable::pet_owner_of`). Call before
+/// `combat::despawn_dead`; a server's sweep marks a joiner's kill of one
+/// `TAMED` in its `KillEvent` (a tamed Nostrich brings no Vow).
+pub fn dying_tamed_positions(ecs: &hecs::World) -> Vec<Vec3> {
+    ecs.query::<(&crate::combat::Health, &crate::entity::Position)>()
+        .iter()
+        .filter(|(e, (h, _))| h.is_dead() && crate::tameable::pet_owner_of(ecs, *e).is_some())
+        .map(|(_, (_, p))| p.0)
+        .collect()
+}
+
 /// Capture every dying wolf's `WolfData` (tamed-vs-untamed drop table) and
 /// every dying pack-carrier's cargo `ChestData` (spill instead of destroy).
 /// Call immediately before `combat::despawn_dead`.

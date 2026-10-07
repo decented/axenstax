@@ -241,9 +241,32 @@ pub const RESPAWN_RESEND_TICKS: u64 = 20;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OwnLifeEvent {
     /// The server holds us dead: enter the death screen if not already on it.
-    Died,
+    /// MP-D2b — with the cause the server recorded (the death-screen line).
+    Died(crate::survival::DamageCause),
     /// The server respawned us here (after our `Respawn` request).
     Respawned(glam::Vec3),
+    /// MP-D2b — this many hits the server landed on our body wear our armour
+    /// (`PlayerSlot::wear_armour` once per hit).
+    ArmourWorn(u8),
+}
+
+/// MP-D2b — the death cause a `DiedOf` names, as the death screen reads it.
+/// A species this build doesn't know reads as a generic death.
+pub fn damage_cause_from_wire(cause: protocol::WireDamageCause) -> crate::survival::DamageCause {
+    use crate::survival::DamageCause;
+    use protocol::WireDamageCause as W;
+    match cause {
+        W::Generic => DamageCause::Generic,
+        W::Fall => DamageCause::Fall,
+        W::Drowning => DamageCause::Drowning,
+        W::Starvation => DamageCause::Starvation,
+        W::Lava => DamageCause::Lava,
+        W::Fire => DamageCause::Fire,
+        W::Explosion => DamageCause::Explosion,
+        W::Mob(kind) => {
+            crate::remote_mobs::mob_type_for(kind).map_or(DamageCause::Generic, DamageCause::Mob)
+        }
+    }
 }
 
 /// A remote game client connected to a server.
@@ -327,6 +350,11 @@ pub struct RemoteClient {
     /// respawned us after our `Respawn`, at the spawn point it holds. Other
     /// players' events are not queued. Drained each frame by `network_receive`.
     pub pending_life_events: Vec<OwnLifeEvent>,
+    /// MP-D2b — the server's answers to our `EntityAttack` / `EntityInteract`
+    /// requests, and the kills it credited to us. Drained each frame by
+    /// `network_receive`; bounded like `pending_grants`.
+    pub pending_outcomes: Vec<protocol::InteractOutcomePacket>,
+    pub pending_kills: Vec<protocol::KillEventPacket>,
     /// MP-A3 — the tick (`self.tick`) our last `Respawn` request went out, while
     /// the server has not yet answered with `Respawned`. `send_input` re-sends
     /// every [`RESPAWN_RESEND_TICKS`] until it does: the server drops a
@@ -622,6 +650,8 @@ impl RemoteClient {
             pending_resource_pack: None,
             pending_grants: Vec::new(),
             pending_life_events: Vec::new(),
+            pending_outcomes: Vec::new(),
+            pending_kills: Vec::new(),
             respawn_resend_from: None,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
@@ -665,6 +695,8 @@ impl RemoteClient {
             pending_resource_pack: None,
             pending_grants: Vec::new(),
             pending_life_events: Vec::new(),
+            pending_outcomes: Vec::new(),
+            pending_kills: Vec::new(),
             respawn_resend_from: None,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
@@ -816,11 +848,36 @@ impl RemoteClient {
                                 // MP-A3 — death and respawn are server-held.
                                 // Only our own body's are ours to act on;
                                 // bounded like `pending_grants`.
-                                protocol::PlayerEventType::Died => {
+                                // A `Died` while our own `Respawn` is
+                                // unanswered is about the life we already
+                                // left (review D2a-verify N1): the stream is
+                                // ordered, and the server answers `Respawned`
+                                // before it can kill the new body, so any
+                                // death before that answer is the old one —
+                                // an echo of a death this client took itself.
+                                // Taken, it would kill the respawned client
+                                // a second time.
+                                protocol::PlayerEventType::Died
+                                | protocol::PlayerEventType::DiedOf { .. } => {
+                                    if self.player_index() == Some(event.player_index)
+                                        && self.respawn_resend_from.is_none()
+                                        && self.pending_life_events.len() < 16
+                                    {
+                                        let cause = match event.event {
+                                            protocol::PlayerEventType::DiedOf { cause } => {
+                                                damage_cause_from_wire(cause)
+                                            }
+                                            _ => crate::survival::DamageCause::Generic,
+                                        };
+                                        self.pending_life_events.push(OwnLifeEvent::Died(cause));
+                                        changed = true;
+                                    }
+                                }
+                                protocol::PlayerEventType::ArmourWorn { hits } => {
                                     if self.player_index() == Some(event.player_index)
                                         && self.pending_life_events.len() < 16
                                     {
-                                        self.pending_life_events.push(OwnLifeEvent::Died);
+                                        self.pending_life_events.push(OwnLifeEvent::ArmourWorn(*hits));
                                         changed = true;
                                     }
                                 }
@@ -895,6 +952,25 @@ impl RemoteClient {
                         >(payload)
                         {
                             self.pending_operator_snapshot_json = Some(snap.snapshot_json);
+                            changed = true;
+                        }
+                    }
+                    PacketType::InteractOutcome => {
+                        if let Ok(out) = protocol::safe_deserialize::<
+                            protocol::InteractOutcomePacket,
+                        >(payload)
+                            && self.pending_outcomes.len() < 256
+                        {
+                            self.pending_outcomes.push(out);
+                            changed = true;
+                        }
+                    }
+                    PacketType::KillEvent => {
+                        if let Ok(kill) =
+                            protocol::safe_deserialize::<protocol::KillEventPacket>(payload)
+                            && self.pending_kills.len() < 256
+                        {
+                            self.pending_kills.push(kill);
                             changed = true;
                         }
                     }
@@ -1065,6 +1141,26 @@ impl RemoteClient {
             &protocol::DeviceInteractPacket { pos },
         );
         self.transport.send_to_server(&packet);
+    }
+
+    /// MP-D2b — ask the server to land a swing on one of its entities. No-op
+    /// before the join completes — mirrors `send_input`'s guard.
+    pub fn send_entity_attack(&mut self, pkt: &protocol::EntityAttackPacket) {
+        if !matches!(self.state, ConnectionState::Connected { .. }) {
+            return;
+        }
+        self.transport
+            .send_to_server(&protocol::serialize_packet(PacketType::EntityAttack, pkt));
+    }
+
+    /// MP-D2b — ask the server for a one-shot interaction with one of its
+    /// mobs. No-op before the join completes.
+    pub fn send_entity_interact(&mut self, pkt: &protocol::EntityInteractPacket) {
+        if !matches!(self.state, ConnectionState::Connected { .. }) {
+            return;
+        }
+        self.transport
+            .send_to_server(&protocol::serialize_packet(PacketType::EntityInteract, pkt));
     }
 
     /// Send a chat line to the server (world chat, Phase 2). No-op before
@@ -2216,10 +2312,91 @@ mod tests {
         assert_eq!(
             std::mem::take(&mut rc.pending_life_events),
             vec![
-                OwnLifeEvent::Died,
+                OwnLifeEvent::Died(crate::survival::DamageCause::Generic),
                 OwnLifeEvent::Respawned(glam::Vec3::new(1.5, 70.0, -2.5)),
             ]
         );
+    }
+
+    /// MP-D2b — the server names the cause, and the hits it landed wear our
+    /// armour; another player's events are not ours.
+    #[test]
+    fn a_died_of_names_the_cause_and_armour_wear_is_ours_alone() {
+        let (srv, mut rc) = joined_as(3);
+        life_event(&srv, 3, protocol::PlayerEventType::ArmourWorn { hits: 2 });
+        life_event(&srv, 4, protocol::PlayerEventType::ArmourWorn { hits: 5 });
+        life_event(
+            &srv,
+            3,
+            protocol::PlayerEventType::DiedOf {
+                cause: protocol::WireDamageCause::Mob(protocol::EntityKind::Brigand),
+            },
+        );
+        rc.poll();
+        assert_eq!(
+            std::mem::take(&mut rc.pending_life_events),
+            vec![
+                OwnLifeEvent::ArmourWorn(2),
+                OwnLifeEvent::Died(crate::survival::DamageCause::Mob(crate::mob::MobType::Brigand)),
+            ]
+        );
+    }
+
+    /// Review D2a-verify N1 — a `Died` that arrives while our `Respawn` is
+    /// unanswered is about the life we already left (the server sent it
+    /// before it handled the Respawn, and the stream is ordered): ignored, or
+    /// it would kill the respawned client a second time. A death after the
+    /// server's `Respawned` is a new one, and is taken.
+    #[test]
+    fn a_stale_died_before_respawned_is_ignored_and_a_new_death_after_it_is_not() {
+        let (srv, mut rc) = joined_as(1);
+        life_event(&srv, 1, protocol::PlayerEventType::Died);
+        rc.poll();
+        assert_eq!(std::mem::take(&mut rc.pending_life_events).len(), 1, "the real death");
+        // The death screen's Respawn goes out; the echo of the death we
+        // already took arrives before the server's answer.
+        rc.send_respawn();
+        life_event(&srv, 1, protocol::PlayerEventType::DiedOf { cause: protocol::WireDamageCause::Fall });
+        rc.poll();
+        assert!(rc.pending_life_events.is_empty(), "a stale Died is dropped");
+        // The answer, then a genuine new death.
+        life_event(&srv, 1, protocol::PlayerEventType::Respawned { x: 0.5, y: 70.0, z: 0.5 });
+        life_event(&srv, 1, protocol::PlayerEventType::DiedOf { cause: protocol::WireDamageCause::Lava });
+        rc.poll();
+        assert_eq!(
+            std::mem::take(&mut rc.pending_life_events),
+            vec![
+                OwnLifeEvent::Respawned(glam::Vec3::new(0.5, 70.0, 0.5)),
+                OwnLifeEvent::Died(crate::survival::DamageCause::Lava),
+            ]
+        );
+    }
+
+    /// MP-D2b — outcomes and kill events are queued for the game loop.
+    #[test]
+    fn outcomes_and_kills_are_queued_for_the_game_loop() {
+        let (srv, mut rc) = joined_as(0);
+        let out = protocol::InteractOutcomePacket {
+            seq: 4,
+            entity: 9,
+            kind: Some(protocol::InteractKind::Milk),
+            accepted: true,
+            consume_held: 1,
+            note: 2,
+        };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::InteractOutcome, &out));
+        let kill = protocol::KillEventPacket {
+            victim: protocol::EntityKind::Cow,
+            cause: protocol::kill_cause::MELEE,
+            x: 1.0,
+            y: 64.0,
+            z: 2.0,
+            victim_flags: 0,
+        };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::KillEvent, &kill));
+        rc.poll();
+        assert_eq!(std::mem::take(&mut rc.pending_outcomes), vec![out]);
+        assert_eq!(std::mem::take(&mut rc.pending_kills), vec![kill]);
     }
 
     #[test]

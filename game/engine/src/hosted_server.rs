@@ -29,6 +29,29 @@ use crate::protocol;
 use crate::signet;
 use crate::transport::{self, ChannelClientTransport, ServerTransport};
 
+/// MP-D2b — how far past `combat::ATTACK_REACH` a joiner's swing or
+/// right-click may land, measured from the eye of the body the SERVER holds
+/// to the target's centre. Covers the round trip between where the client
+/// drew the mob and where the server has it now (a mob walks ~0.2 blocks a
+/// tick), plus the body's own prediction error (a snap only past 1 block).
+pub const ATTACK_REACH_TOLERANCE: f32 = 1.5;
+
+/// MP-D2b — the server's cooldown between a joiner's swings: the client's
+/// `combat::ATTACK_COOLDOWN` less this much network jitter, so two swings
+/// the client spaced a full cooldown apart are never refused for arriving a
+/// tick or two closer together. A second swing in the same tick always is.
+pub const ATTACK_COOLDOWN_JITTER_TICKS: u32 = 3;
+
+/// MP-D2b — the server's cooldown between a joiner's one-shot interactions
+/// (`EntityInteract`): the client's 8-tick right-click cooldown less jitter.
+/// Bounds a modified client's tame rolls (the food it claims is its word).
+pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
+
+/// MP-D2b — `EntityAttack` + `EntityInteract` requests read per client per
+/// tick (their own budget, not the block-change one's); the rest are dropped
+/// unanswered.
+const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
+
 /// D1 — where a hosted server's world lives (`crate::sim_lend`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostWorld {
@@ -1534,15 +1557,219 @@ impl HostedServer {
                 continue;
             }
             sp.combat.just_died = false;
+            // MP-D2b — naming the cause the body recorded, for the joiner's
+            // death screen.
+            let cause = damage_cause_to_wire(sp.combat.last_damage);
             let pkt = protocol::serialize_packet(
                 protocol::PacketType::PlayerEvent,
                 &protocol::PlayerEventPacket {
                     player_index: i as u32,
-                    event: protocol::PlayerEventType::Died,
+                    event: protocol::PlayerEventType::DiedOf { cause },
                 },
             );
             self.send_to_joined_slot(i, &pkt);
         }
+    }
+
+    /// MP-D2b — this tick's server-landed hits wear each joiner's armour
+    /// (`PlayerEventType::ArmourWorn`, to that joiner alone), and the kills
+    /// credited to joiners go out as `KillEvent`s, each to its killer alone.
+    fn announce_joiner_hits_and_kills(&mut self) {
+        for i in 0..self.server.players.len() {
+            let sp = &mut self.server.players[i];
+            let hits = std::mem::take(&mut sp.armour_wear_hits);
+            if hits == 0 || !sp.server_simulated {
+                continue;
+            }
+            let pkt = protocol::serialize_packet(
+                protocol::PacketType::PlayerEvent,
+                &protocol::PlayerEventPacket {
+                    player_index: i as u32,
+                    event: protocol::PlayerEventType::ArmourWorn { hits },
+                },
+            );
+            self.send_to_joined_slot(i, &pkt);
+        }
+        for (slot, kill) in std::mem::take(&mut self.server.pending_kill_events) {
+            let pkt = protocol::serialize_packet(protocol::PacketType::KillEvent, &kill);
+            self.send_to_joined_slot(slot, &pkt);
+        }
+    }
+
+    /// MP-D2b — the server's own entity `id` (its `ProtocolId`) as joiner
+    /// `i` may act on it: a living mob whose centre is within
+    /// `combat::ATTACK_REACH` + [`ATTACK_REACH_TOLERANCE`] of the eye of the
+    /// body the server holds for `i`, which must itself be a present, living
+    /// joiner. The entity is looked up now (it may have died since the
+    /// client saw it).
+    fn joiner_target(&self, i: usize, id: u32) -> Option<(hecs::Entity, crate::mob::MobType)> {
+        let sp = self.server.players.get(i)?;
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            return None;
+        }
+        let ecs = &self.server.ecs;
+        let e = ecs
+            .query::<&crate::entity::ProtocolId>()
+            .iter()
+            .find(|(_, p)| p.0 == id)
+            .map(|(e, _)| e)?;
+        let kind = ecs.get::<&crate::entity::MobKind>(e).ok()?.0;
+        if ecs.get::<&crate::combat::Health>(e).ok()?.is_dead() {
+            return None;
+        }
+        let pos = ecs.get::<&crate::entity::Position>(e).ok()?.0;
+        let height = ecs.get::<&crate::entity::Hitbox>(e).map_or(0.0, |h| h.height);
+        let centre = pos + glam::Vec3::new(0.0, height * 0.5, 0.0);
+        let reach = crate::combat::ATTACK_REACH + ATTACK_REACH_TOLERANCE;
+        ((centre - sp.player.eye_pos()).length() <= reach).then_some((e, kind))
+    }
+
+    /// MP-D2b — joiner `i` swings at `req.entity`. Validated (a living mob in
+    /// reach of the server's body, off the server's cooldown), then landed
+    /// by `combat::strike` + `combat::after_swing`, the single-player rule:
+    /// damage from the claimed held item, a critical hit if the server's
+    /// body is airborne, knockback, the sweep, `LastAttacker` naming this
+    /// joiner (its kill is credited to it). Answered with an
+    /// `InteractOutcome`: accepted = the swing was valid and spent, which is
+    /// when the joiner's weapon wears.
+    fn handle_entity_attack(&mut self, i: usize, req: &protocol::EntityAttackPacket) {
+        let accepted = self.land_joiner_swing(i, req);
+        self.send_outcome(i, req.seq, req.entity, None, accepted, 0, 0);
+    }
+
+    fn land_joiner_swing(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> bool {
+        let Some((target, _kind)) = self.joiner_target(i, req.entity) else {
+            return false;
+        };
+        let tick = self.server.tick_counter;
+        // A guest's key is empty: no pet is ever its own.
+        let key = self.server.players[i].pet_owner_key().unwrap_or_default();
+        // 1C no-friendly-fire: the joiner's own pet takes a swing only as a
+        // deliberate (sneaking) hit, as single-player's target pick has it.
+        if !req.sneak && crate::tameable::is_own_pet(&self.server.ecs, target, &key, None) {
+            return false;
+        }
+        let sp = &mut self.server.players[i];
+        if !sp.combat.can_attack() {
+            return false;
+        }
+        sp.combat.attack_cooldown =
+            crate::combat::ATTACK_COOLDOWN.saturating_sub(ATTACK_COOLDOWN_JITTER_TICKS);
+        // BRIDGE: possession check — replace when phase C makes joiner
+        // inventories server-authoritative. The held item is the client's
+        // word (as a block placement's is, `validate_block_edit`): it sets
+        // the damage, so a modified client can claim a better sword than it
+        // holds. Nothing else of the swing is its word.
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        let base_damage = held.as_ref().map_or(1.0, crate::item::Item::attack_damage);
+        let eye = sp.player.eye_pos();
+        let look_dir = crate::camera::forward_from(sp.yaw, sp.pitch);
+        let crit = !sp.player.on_ground;
+        crate::combat::strike(
+            &mut self.server.ecs,
+            target,
+            &crate::combat::Swing {
+                attacker: crate::combat::Attacker::Remote(i),
+                owner_key: &key,
+                eye,
+                look_dir,
+                crit,
+                sprinting: req.sprint,
+                sneaking: req.sneak,
+                base_damage,
+            },
+        );
+        let kick =
+            crate::combat::after_swing(&mut self.server.ecs, target, &key, None, req.sneak, eye, tick);
+        if let Some(kick) = kick {
+            // Spec 28d.nostrich v2 — the kick-back lands on the joiner's body
+            // (no armour, as in single-player).
+            let sp = &mut self.server.players[i];
+            sp.combat.take_damage_from(
+                kick,
+                crate::survival::DamageCause::Mob(crate::mob::MobType::Nostrich),
+            );
+        }
+        true
+    }
+
+    /// MP-D2b — joiner `i` right-clicks `req.entity` for `req.kind`.
+    /// Validated like a swing (a living mob in reach of the server's body)
+    /// plus the server's interaction cooldown, then run through
+    /// `mob_interact::run` — the functions single-player's right-click runs —
+    /// as this joiner: its pet-owner key is its verified npub (a guest can't
+    /// tame) and a Lead it fastens anchors to its body. Answered with an
+    /// `InteractOutcome` (accepted, what to take from the hand, a note);
+    /// products ride `InventoryGrant`.
+    fn handle_entity_interact(&mut self, i: usize, req: &protocol::EntityInteractPacket) {
+        let result = self.run_joiner_interaction(i, req);
+        let (accepted, consume, note) = match &result {
+            Some(r) => (r.done, if r.done { r.consume } else { 0 }, r.note.to_wire()),
+            None => (false, 0, 0),
+        };
+        self.send_outcome(i, req.seq, req.entity, Some(req.kind), accepted, consume, note);
+        if let Some(r) = result
+            && r.done
+            && !r.give.is_empty()
+        {
+            let grants: Vec<(usize, crate::item::ItemStack)> =
+                r.give.into_iter().map(|stack| (i, stack)).collect();
+            for (slot, pkt) in build_grant_packets(&grants) {
+                self.send_to_joined_slot(slot, &pkt);
+            }
+        }
+    }
+
+    fn run_joiner_interaction(
+        &mut self,
+        i: usize,
+        req: &protocol::EntityInteractPacket,
+    ) -> Option<crate::mob_interact::Interaction> {
+        let (target, kind) = self.joiner_target(i, req.entity)?;
+        let tick = self.server.tick_counter;
+        let sp = &mut self.server.players[i];
+        if sp.interact_cooldown > 0 {
+            return None;
+        }
+        sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
+        // BRIDGE: possession check — replace when phase C makes joiner
+        // inventories server-authoritative. The food, bucket, shears or Lead
+        // in hand is the client's word; the client gives up what an accepted
+        // outcome says it used.
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        let key = sp.pet_owner_key();
+        let actor = crate::mob_interact::Actor {
+            owner_key: key.as_deref(),
+            tether: crate::tether::TetherTarget::Player(i),
+        };
+        crate::mob_interact::run(
+            &mut self.server.ecs,
+            target,
+            kind,
+            req.kind,
+            held.as_ref(),
+            req.sneak,
+            &actor,
+            tick,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_outcome(
+        &self,
+        i: usize,
+        seq: u32,
+        entity: u32,
+        kind: Option<protocol::InteractKind>,
+        accepted: bool,
+        consume_held: u8,
+        note: u8,
+    ) {
+        let pkt = protocol::serialize_packet(
+            protocol::PacketType::InteractOutcome,
+            &protocol::InteractOutcomePacket { seq, entity, kind, accepted, consume_held, note },
+        );
+        self.send_to_joined_slot(i, &pkt);
     }
 
     /// MP-A3 — slot `i`'s `Respawn` request. Honoured only for a joined,
@@ -1643,6 +1870,7 @@ impl HostedServer {
         self.reap_slots();
         self.server.tick();
         self.announce_joiner_deaths();
+        self.announce_joiner_hits_and_kills();
         // World chat §4.2 — inbound room lines, delivered under the same
         // hearing rule as an in-world speaker. No-op unless a room is attached.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1862,6 +2090,7 @@ impl HostedServer {
             }
             let mut packets_this_tick = 0usize;
             let mut interacts_this_tick = 0usize;
+            let mut entity_requests_this_tick = 0usize;
             // Per client per TICK, not per packet (audit 2026-09-27: the
             // budget reset for every packet, so 10 packets × 4 edits got in).
             let mut edits_this_tick = 0usize;
@@ -2520,6 +2749,26 @@ impl HostedServer {
                     protocol::PacketType::Respawn => {
                         // MP-A3 — the joiner chose Respawn on its death screen.
                         self.handle_respawn(i);
+                    }
+                    protocol::PacketType::EntityAttack | protocol::PacketType::EntityInteract => {
+                        if !self.handshake_done[i] || self.disconnected[i] {
+                            continue;
+                        }
+                        entity_requests_this_tick += 1;
+                        if entity_requests_this_tick > MAX_ENTITY_REQUESTS_PER_TICK {
+                            continue;
+                        }
+                        if ptype == protocol::PacketType::EntityAttack {
+                            if let Ok(req) =
+                                protocol::safe_deserialize::<protocol::EntityAttackPacket>(payload)
+                            {
+                                self.handle_entity_attack(i, &req);
+                            }
+                        } else if let Ok(req) =
+                            protocol::safe_deserialize::<protocol::EntityInteractPacket>(payload)
+                        {
+                            self.handle_entity_interact(i, &req);
+                        }
                     }
                     // Native-only — the web build carries no chat surface at
                     // all (docs/foundations/2026-09-05-world-chat.md §6); on
@@ -3278,9 +3527,39 @@ pub(crate) enum EditRefusal {
     ForeignPlot,
 }
 
+/// MP-D2b — the item a joiner's request claims to hold: the full-fidelity
+/// form when present (a tool's type, material and durability), else the
+/// `ItemRef` pair; `None` for an empty hand or anything this build can't
+/// decode.
+fn held_item_from_wire(
+    kind: u8,
+    id: u16,
+    full: &protocol::WireItem,
+    registry: &crate::block::BlockRegistry,
+) -> Option<crate::item::Item> {
+    crate::inventory::item_from_wire_full(full)
+        .or_else(|| crate::inventory::item_from_ref(kind, id, registry))
+}
+
+/// MP-D2b — a body's recorded death cause on the wire (`DiedOf`).
+pub(crate) fn damage_cause_to_wire(cause: crate::survival::DamageCause) -> protocol::WireDamageCause {
+    use crate::survival::DamageCause as D;
+    use protocol::WireDamageCause as W;
+    match cause {
+        D::Generic => W::Generic,
+        D::Fall => W::Fall,
+        D::Drowning => W::Drowning,
+        D::Starvation => W::Starvation,
+        D::Lava => W::Lava,
+        D::Fire => W::Fire,
+        D::Explosion => W::Explosion,
+        D::Mob(kind) => W::Mob(crate::entity_broadcast::wire_kind_for(kind)),
+    }
+}
+
 /// The verified npub of a player, bech32 — the form economy owners are stored
 /// in. `None` for a guest (and always on web, which has no remote joiners).
-fn verified_npub(pk: Option<[u8; 32]>) -> Option<String> {
+pub(crate) fn verified_npub(pk: Option<[u8; 32]>) -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         pk.map(|pk| pubkey_to_npub(&pk))

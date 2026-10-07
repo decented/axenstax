@@ -887,7 +887,10 @@ pub fn tick_projectiles(
         // the melee path in `combat::player_attack`. Most-recent
         // damaging hit wins, so this overwrites any prior attacker.
         if let Some(pidx) = owner {
-            let _ = ecs.insert_one(mob_id, crate::combat::LastAttacker(pidx));
+            let _ = ecs.insert_one(
+                mob_id,
+                crate::combat::LastAttacker(crate::combat::Attacker::Local(pidx)),
+            );
             // Task 13 (bug-hardening, 2026-07-07) — an arrow landing on a
             // Bear or Hyena provokes it the same as a melee hit. See
             // `combat::notify_hit_bear_or_hyena` and its wiring in
@@ -1773,7 +1776,11 @@ mod tests {
         tick_projectiles(&mut ecs, &world, &registry, &Default::default());
         let la = ecs.get::<&crate::combat::LastAttacker>(cow_id);
         assert!(la.is_ok(), "projectile hit must stamp LastAttacker");
-        assert_eq!(la.unwrap().0, 3, "must credit the firing player, not proximity");
+        assert_eq!(
+            la.unwrap().0,
+            crate::combat::Attacker::Local(3),
+            "must credit the firing player, not proximity"
+        );
     }
 
     #[test]

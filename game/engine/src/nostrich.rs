@@ -119,10 +119,6 @@ impl NostrichData {
     pub fn owner_pubkey(&self) -> &str {
         &self.ownership.owner_pubkey
     }
-
-    pub fn is_owned_by(&self, pubkey: &str) -> bool {
-        self.ownership.is_owned_by(pubkey)
-    }
 }
 
 /// Outcome of an `attempt_tame_with_berry` call. Drives the toast +

@@ -64,7 +64,10 @@ impl Inbox {
     fn died(&self, slot: usize) -> usize {
         self.events
             .iter()
-            .filter(|(i, e)| *i as usize == slot && matches!(e, PlayerEventType::Died))
+            .filter(|(i, e)| {
+                *i as usize == slot
+                    && matches!(e, PlayerEventType::Died | PlayerEventType::DiedOf { .. })
+            })
             .count()
     }
 
@@ -450,7 +453,9 @@ fn died_and_respawned_go_only_to_the_player_they_are_about() {
     tick_two(&mut hs, (&ca, &mut ia), (&cb, &mut ib), 25);
     assert_eq!(ia.died(a), 1, "A is told it died");
     assert!(
-        ib.events.iter().all(|(_, e)| !matches!(e, PlayerEventType::Died)),
+        ib.events
+            .iter()
+            .all(|(_, e)| !matches!(e, PlayerEventType::Died | PlayerEventType::DiedOf { .. })),
         "B is not sent A's death: {:?}",
         ib.events
     );
