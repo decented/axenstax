@@ -3554,6 +3554,78 @@ mod tests {
         }
     }
 
+    /// C3b-2-fix (L2) — `BlockView::Campfire` and `::DryingRack` carry the
+    /// SAVE types `campfire::CookSlot` and `drying_rack::RackSlot` (and
+    /// `MaterialId` / `LogSpecies` by serde index): a field added to either
+    /// for save reasons would change the wire silently, and a round trip
+    /// within one build can't see it. Pinned here on the full bytes — if this
+    /// fails, the wire changed: bump `PROTOCOL_VERSION` (and the changelog).
+    #[test]
+    fn campfire_and_rack_views_are_pinned_on_the_full_bytes() {
+        use crate::campfire::CookSlot;
+        use crate::drying_rack::{LogSpecies, RackSlot};
+        use crate::item::MaterialId;
+        let le = |n: u32| n.to_le_bytes().to_vec();
+        let cell: Vec<u8> = [le(1), (-2i32).to_le_bytes().to_vec(), le(3)].concat();
+
+        let mut cook: [CookSlot; crate::campfire::CAMPFIRE_SLOTS] = Default::default();
+        cook[2] = CookSlot { item: Some(MaterialId::RawBeef), progress_ticks: 120 };
+        let fire = BlockEntityView {
+            cell: [1, -2, 3],
+            kind: BlockViewKind::Campfire,
+            view: BlockView::Campfire { fuel_ticks: 40, smoke_ticks: 20, smoulder_ticks: 600, raid_warning: true, slots: cook },
+        };
+        let empty_cook = [vec![0u8], le(0)].concat(); // None, progress 0
+        let want_fire: Vec<u8> = [
+            cell.clone(),
+            le(1), // kind: Campfire
+            le(1), // view: Campfire
+            le(40),
+            le(20),
+            le(600),
+            vec![1], // raid_warning
+            empty_cook.clone(),
+            empty_cook.clone(),
+            [vec![1u8], le(5), le(120)].concat(), // Some(RawBeef = MaterialId 5), 120 ticks
+            empty_cook,
+        ]
+        .concat();
+        assert_eq!(bincode::serialize(&fire).unwrap(), want_fire, "the campfire view's bytes changed: bump the protocol");
+
+        let mut rack = [RackSlot::default(); crate::drying_rack::RACK_SLOTS];
+        rack[0] = RackSlot { species: Some(LogSpecies::Oak), seasoning_ticks: 600 };
+        let rack_view = BlockEntityView { cell: [1, -2, 3], kind: BlockViewKind::DryingRack, view: BlockView::DryingRack { slots: rack } };
+        let mut want_rack: Vec<u8> = [cell, le(2), le(2), vec![1u8], le(0), le(600)].concat(); // Some(Oak = 0), 600 ticks
+        for _ in 1..crate::drying_rack::RACK_SLOTS {
+            want_rack.extend([vec![0u8], le(0)].concat());
+        }
+        assert_eq!(bincode::serialize(&rack_view).unwrap(), want_rack, "the rack view's bytes changed: bump the protocol");
+
+        // And that is what a StateUpdate carries, last (`block_views`: its
+        // length, then each view).
+        for (v, want) in [(fire, want_fire), (rack_view, want_rack)] {
+            let pkt = StateUpdatePacket {
+                tick: 1,
+                players: Vec::new(),
+                block_changes: Vec::new(),
+                world_time: 0,
+                last_acked_input: 0,
+                entity_spawns: Vec::new(),
+                entity_updates: Vec::new(),
+                entity_despawns: Vec::new(),
+                reserve_richness: 1.0,
+                reserve_target_sats: 0,
+                reserve_current_sats: 0,
+                rain_ticks_left: 0,
+                storm_ticks_left: 0,
+                own_hunger: 0,
+                block_views: vec![v],
+            };
+            let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
+            assert!(bytes.ends_with(&[1u64.to_le_bytes().to_vec(), want].concat()));
+        }
+    }
+
     /// C3a-2a (v75) — `WindowOp = 64`: every `WireWindowOp` and every
     /// `WindowClick` round-trips, their variant order is pinned on the wire
     /// bytes (both enums are append-only), and a drag's slot list over 45

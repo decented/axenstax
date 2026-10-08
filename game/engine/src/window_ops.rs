@@ -62,7 +62,9 @@
 //!   never believed again; a take that finds nothing is owed against the
 //!   next give of that item (`container_window::CorrectionDebt`).
 //! - A refused op's revert has no server-side effect (C-M2); believed
-//!   deposits are bounded per joiner ([`BelievedBucket`], C-L3).
+//!   deposits are bounded per joiner ([`BelievedBucket`], C-L3). Since
+//!   C3b-2-fix (M2) the same bound pays a block use's believed take
+//!   ([`believe_pay`]).
 //! - C3b-fix-c — that holds for container ops. A phantom spent another way
 //!   (placed, dropped, eaten, crafted) before its correction lands is a real
 //!   item until C3d; the correction's short take shows it
@@ -899,19 +901,47 @@ fn view_correction(sp: &ServerPlayer, real: container_window::ContainerRef, invo
 /// believed (bounded, tallied) instead of paid with a different one.
 fn believed_units(sp: &ServerPlayer, r_gain: &container_window::ItemCounts) -> Vec<(crate::item::Item, u32)> {
     let w = crate::window_events::effective_window(sp);
-    let held = |item: &crate::item::Item| -> u64 {
-        let of = |s: Option<&ItemStack>| s.filter(|s| &s.item == item).map_or(0, |s| u64::from(s.count));
-        let inv: u64 = w.inv.slots_iter().map(of).sum();
-        let grid: u64 = w.grid.iter().flatten().map(|c| of(c.as_ref())).sum();
-        let armour = w.armour.iter().flatten().filter(|p| &crate::item::Item::Armour(**p) == item).count() as u64;
-        inv + grid + of(w.cursor.as_ref()) + armour
-    };
     r_gain
         .iter()
         .filter(|(_, n)| *n < 0)
-        .map(|(item, n)| (item.clone(), n.unsigned_abs().saturating_sub(held(item)).min(u64::from(u32::MAX)) as u32))
+        .map(|(item, n)| (item.clone(), n.unsigned_abs().saturating_sub(held_units(&w, item)).min(u64::from(u32::MAX)) as u32))
         .filter(|(_, n)| *n > 0)
         .collect()
+}
+
+/// Units of `item` window `w` holds by exact identity (`==`) in the places
+/// an owed take can pay from: the 36 slots, the grid, the cursor and the
+/// armour slots ([`believed_units`], [`believe_pay`]).
+fn held_units(w: &crate::window_events::EffectiveWindow, item: &crate::item::Item) -> u64 {
+    let of = |s: Option<&ItemStack>| s.filter(|s| &s.item == item).map_or(0, |s| u64::from(s.count));
+    let inv: u64 = w.inv.slots_iter().map(of).sum();
+    let grid: u64 = w.grid.iter().flatten().map(|c| of(c.as_ref())).sum();
+    let armour = w.armour.iter().flatten().filter(|p| &crate::item::Item::Armour(**p) == item).count() as u64;
+    inv + grid + of(w.cursor.as_ref()) + armour
+}
+
+/// C3b-2-fix (M2) — joiner `sp`'s request pays `n` of `item` (an accepted
+/// block use's take, `HostedServer::serve_block_use`). The part the server's
+/// copy of its window can't cover — counted as [`believed_units`] counts: in
+/// the window as it will be once its waiting events land
+/// (`window_events::effective_window`, so an earlier request's pending take
+/// is already off it), by exact identity — is BELIEVED, charged to the same
+/// per-joiner bound as believed container deposits ([`BelievedBucket`]).
+/// `Ok(believed)` (0 when the copy covers it all); `Err(short)` when the
+/// bound can't pay the `short` units: the caller refuses the request.
+/// BRIDGE: C3d refuses a pay the server's window can't cover — replace when
+/// the flip lands (C3d gate list, design doc).
+pub fn believe_pay(sp: &mut ServerPlayer, item: &crate::item::Item, n: u32, now: u64) -> Result<u32, u32> {
+    let w = crate::window_events::effective_window(sp);
+    let short = u64::from(n).saturating_sub(held_units(&w, item)).min(u64::from(u32::MAX)) as u32;
+    if short == 0 {
+        return Ok(0);
+    }
+    if sp.container_sent.believed.try_take(short, now) {
+        Ok(short)
+    } else {
+        Err(short)
+    }
 }
 
 /// C3b-1 / C3b-fix-a (C-M2, C-L1) — a container op refused before its rule

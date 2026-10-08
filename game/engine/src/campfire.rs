@@ -24,6 +24,12 @@ pub const COOK_TICKS_PER_ITEM: u32 = 200;
 
 /// A single cooking slot on a campfire — either empty or holding a raw
 /// item with its current cook-progress (in ticks).
+///
+/// **This travels on the wire** (`protocol::BlockView::Campfire`, v79) as well
+/// as in the save: any change to its fields, or to how `MaterialId`
+/// serialises, changes the protocol — bump `PROTOCOL_VERSION`
+/// (`protocol::tests::campfire_and_rack_views_are_pinned_on_the_full_bytes`
+/// pins the bytes and fails on any such change: re-pin it with the bump).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CookSlot {
     pub item: Option<MaterialId>,

@@ -112,7 +112,12 @@ impl Client {
                     }
                 }
                 protocol::PacketType::StateUpdate => {
+                    // As the client's world stream: a packet's block changes,
+                    // then its views (`remote_client`, `chunk_stream`).
                     let state: protocol::StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
+                    for bc in &state.block_changes {
+                        self.world.apply_remote_block_change(bc);
+                    }
                     self.changes.extend(state.block_changes);
                     for v in state.block_views {
                         crate::block_views::apply_view(&mut self.world, registry, &v);
@@ -145,6 +150,20 @@ impl Client {
         };
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         true
+    }
+
+    /// A modified client's use: it claims `held` from hotbar slot `hot`
+    /// whatever its window holds, unrecorded (no claim of its own), with
+    /// request number `seq`.
+    fn use_raw(&mut self, seq: u32, cell: [i32; 3], hot: usize, held: &Item) {
+        let (held_kind, held_id) = crate::inventory::item_to_ref(held).to_wire();
+        let held_full = crate::inventory::item_to_wire_full(held);
+        let pkt = protocol::ItemActionPacket {
+            seq,
+            action: protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full },
+            events_applied: self.events,
+        };
+        self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 
     fn count(&self, item: &Item) -> u32 {
@@ -298,11 +317,21 @@ impl Rig {
         }
     }
 
-    /// The cell `dz` blocks ahead of the joiners' feet, holding `b`.
+    /// The cell `dz` blocks ahead of the joiners' feet, holding `b` (in the
+    /// world the server simulates and, as its column's push would, in every
+    /// joiner's world).
     fn place(&mut self, dz: i32, b: block::BlockId) -> [i32; 3] {
         let cell = [self.at.x.floor() as i32, self.at.y as i32, self.at.z.floor() as i32 + dz];
-        self.world().set_block(cell[0], cell[1], cell[2], b);
+        self.set(cell, b);
         cell
+    }
+
+    /// `cell` holds `b`, everywhere (as [`Self::place`]).
+    fn set(&mut self, cell: [i32; 3], b: block::BlockId) {
+        self.world().set_block(cell[0], cell[1], cell[2], b);
+        for c in &mut self.cs {
+            c.world.set_block(cell[0], cell[1], cell[2], b);
+        }
     }
 
     /// Put `count` of `item` in slot `slot` on both sides of joiner `n`'s window.
@@ -644,6 +673,254 @@ fn a_joined_client_runs_no_composter_hive_or_rack_sim() {
         assert!(
             lines[i.saturating_sub(back)..=i].iter().any(|l| l.contains("remote_client.is_none()")),
             "game_loop.rs:{}: `{needle}` runs on a joined client — gate it behind `self.remote_client.is_none()`",
+            i + 1
+        );
+    }
+}
+
+// ─── C3b-2-fix ─────────────────────────────────────────────────────────────
+
+/// M2 — a modified client claims an item it doesn't hold: each use's take is
+/// believed only within the joiner's bound (the believed-deposit bucket, 64
+/// deep, refilled at 4 a second), and past it the use is refused
+/// (`NothingToTake`) and nothing is framed. The items it can make out of
+/// nothing are bounded by 64 + 4 a second, as believed container deposits.
+#[test]
+fn believed_block_use_pays_are_bounded_like_believed_deposits() {
+    let mut rig = Rig::dedicated("believed", 1);
+    let c = [rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32];
+    let mut frames = Vec::new();
+    for y in 0..3 {
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                if (dx, dz) != (0, 0) && frames.len() < 80 {
+                    frames.push([c[0] + dx, c[1] + y, c[2] + dz]);
+                }
+            }
+        }
+    }
+    for &cell in &frames {
+        rig.set(cell, block::ITEM_FRAME);
+    }
+    let diamond = Item::Block(block::DIAMOND_BLOCK);
+    let start = rig.hs.server.tick_counter;
+    for (n, &cell) in frames.iter().enumerate() {
+        rig.cs[0].use_raw(1_000 + n as u32, cell, 0, &diamond);
+    }
+    let mut answered_at = None;
+    for _ in 0..60 {
+        rig.tick();
+        if answered_at.is_none() && rig.cs[0].outcomes.len() == frames.len() {
+            answered_at = Some(rig.hs.server.tick_counter);
+        }
+    }
+    let secs = (answered_at.expect("every use answered") - start).div_ceil(20) as usize;
+    let framed = frames
+        .iter()
+        .filter(|cell| rig.world().item_frame_at((cell[0], cell[1], cell[2])).is_some_and(|f| !f.is_empty()))
+        .count();
+    let refused: Vec<_> = rig.cs[0].outcomes.iter().filter(|o| !o.accepted).collect();
+    assert_eq!(framed + refused.len(), frames.len(), "each use framed one or was refused");
+    assert!(framed >= 64, "the bound's depth is believed: {framed}");
+    assert!(framed <= 64 + 4 * secs + 1, "no more than 64 + 4/s ({secs} s): {framed}");
+    assert!(!refused.is_empty(), "past the bound, refused");
+    assert!(refused.iter().all(|o| ItemNote::from_wire(o.note) == ItemNote::NothingToTake && o.window_event == 0));
+    let sp = &rig.hs.server.players[rig.cs[0].slot];
+    assert_eq!(sp.possession.use_believed as usize, framed, "each framed unit was believed");
+    assert_eq!(sp.possession.use_refused as usize, refused.len());
+    assert_eq!(rig.ground(&diamond), 0, "nothing else made");
+}
+
+/// M2 — a take the server's copy covers (the joiner really holds it) never
+/// touches the believed bound, even with the bound spent; with the bound
+/// spent, a claim the copy can't cover is refused and changes nothing.
+#[test]
+fn a_take_the_servers_copy_covers_never_touches_the_believed_bound() {
+    let mut rig = Rig::dedicated("believed-honest", 1);
+    let frame = rig.place(2, block::ITEM_FRAME);
+    let other = rig.place(-2, block::ITEM_FRAME);
+    rig.give(0, 0, Item::Block(block::DIAMOND_BLOCK), 2);
+    let slot = rig.cs[0].slot;
+    let spend = |rig: &mut Rig| {
+        let now = rig.hs.server.tick_counter + 1;
+        let b = &mut rig.hs.server.players[slot].container_sent.believed;
+        while b.try_take(1, now) {}
+    };
+    spend(&mut rig);
+    accepted(&rig.use_block(0, frame, UseKind::ItemFrame, 0).clone(), 1);
+    assert!(rig.world().item_frame_at((frame[0], frame[1], frame[2])).is_some_and(|f| !f.is_empty()));
+    assert_eq!(rig.hs.server.players[slot].possession.use_believed, 0);
+    rig.assert_lockstep(0, "an honest take");
+    // Iron only the client says it holds, with the bound spent.
+    rig.cs[0].inv.set_slot(1, Some(ItemStack::new_block(block::IRON_BLOCK, 1)));
+    spend(&mut rig);
+    refused(&rig.use_block(0, other, UseKind::ItemFrame, 1).clone(), ItemNote::NothingToTake);
+    assert!(rig.world().item_frame_at((other[0], other[1], other[2])).is_none(), "nothing framed, nothing created");
+    assert_eq!(rig.cs[0].count(&Item::Block(block::IRON_BLOCK)), 1, "the client keeps it");
+    assert_eq!(rig.hs.server.players[slot].possession.use_refused, 1);
+}
+
+/// M3 — on a lending host, a joiner's accepted use is remeshed by the host's
+/// client (`lent_edit_cells`): the framed iron block is drawn on the host's
+/// screen, not only held in its world. A refused use has nothing to redraw.
+#[test]
+fn a_lending_hosts_client_redraws_a_block_a_joiner_used() {
+    let mut rig = Rig::lent("redraw", 1);
+    let frame = rig.place(2, block::ITEM_FRAME);
+    let bin = rig.place(-2, block::COMPOSTER);
+    let _ = rig.hs.take_lent_changes();
+    rig.give(0, 0, Item::Block(block::IRON_BLOCK), 1);
+    accepted(&rig.use_block(0, frame, UseKind::ItemFrame, 0).clone(), 1);
+    let (_, cells) = rig.hs.take_lent_changes();
+    assert!(cells.contains(&(frame[0], frame[1], frame[2])), "the host's client remeshes the filled frame: {cells:?}");
+    refused(&rig.use_block(0, bin, UseKind::Composter, 5).clone(), ItemNote::NothingToTake);
+    let (_, cells) = rig.hs.take_lent_changes();
+    assert!(!cells.contains(&(bin[0], bin[1], bin[2])), "a refusal changed nothing to redraw");
+}
+
+/// M4 (a) — a joiner's break of a filled frame is refused (a plot it doesn't
+/// own): its client had already cleared its copy (the joined break arm), and
+/// the server's send-back restores the block AND, its view forgotten with
+/// the change, the frame's item.
+#[test]
+fn a_refused_break_of_a_filled_frame_gives_the_breaker_its_frame_and_item_back() {
+    let mut rig = Rig::dedicated("refused-break", 1);
+    let cell = rig.place(2, block::ITEM_FRAME);
+    let pos = (cell[0], cell[1], cell[2]);
+    rig.give(0, 0, Item::Block(block::DIAMOND_BLOCK), 1);
+    accepted(&rig.use_block(0, cell, UseKind::ItemFrame, 0).clone(), 1);
+    assert!(rig.cs[0].world.item_frame_at(pos).is_some_and(|f| !f.is_empty()));
+    rig.world().plots.push(crate::plot::PlotData::from_marker(
+        crate::plot::PlotOwner::LocalPlayer(0),
+        cell[0],
+        cell[1] - 5,
+        cell[2],
+    ));
+    // The joined break arm: the block and this copy's frame go at once.
+    let w = &mut rig.cs[0].world;
+    w.set_block(cell[0], cell[1], cell[2], block::AIR);
+    let _ = crate::block_use::take_on_break(w, pos, block::ITEM_FRAME, false);
+    rig.edit(0, pos, block::AIR);
+    rig.ticks(3);
+    assert_eq!(rig.world().get_block(cell[0], cell[1], cell[2]), block::ITEM_FRAME, "refused");
+    assert_eq!(rig.cs[0].world.get_block(cell[0], cell[1], cell[2]), block::ITEM_FRAME, "the send-back restored it");
+    let item = rig.cs[0].world.item_frame_at(pos).and_then(|f| f.item.as_ref().map(|s| s.item.clone()));
+    assert_eq!(item, Some(Item::Block(block::DIAMOND_BLOCK)), "and the view came back after it");
+}
+
+/// M4 (b) — another player breaks a framed frame and re-places an empty
+/// one: the first joiner's copy dropped the frame's entity with the break,
+/// so it draws the new frame empty (the server sends no view for a frame
+/// never used).
+#[test]
+fn a_frame_another_player_breaks_and_replaces_is_shown_empty() {
+    let mut rig = Rig::dedicated("remote-break", 2);
+    let cell = rig.place(2, block::ITEM_FRAME);
+    let pos = (cell[0], cell[1], cell[2]);
+    rig.give(0, 0, Item::Block(block::DIAMOND_BLOCK), 1);
+    accepted(&rig.use_block(0, cell, UseKind::ItemFrame, 0).clone(), 1);
+    assert!(rig.cs[0].world.item_frame_at(pos).is_some_and(|f| !f.is_empty()));
+    rig.edit(1, pos, block::AIR);
+    rig.ticks(3);
+    assert_eq!(rig.cs[0].world.get_block(cell[0], cell[1], cell[2]), block::AIR);
+    rig.edit(1, pos, block::ITEM_FRAME);
+    rig.ticks(3);
+    assert_eq!(rig.cs[0].world.get_block(cell[0], cell[1], cell[2]), block::ITEM_FRAME, "re-placed");
+    assert!(
+        rig.cs[0].world.item_frame_at(pos).is_none_or(|f| f.is_empty()),
+        "drawn empty, never the broken frame's diamond"
+    );
+}
+
+/// L5 — shears on a hive are claimed while the use is in flight (they wear):
+/// with one pair of nearly worn-out shears, a second hive use isn't sent
+/// until the first is answered, so two uses can't both cut honeycomb.
+#[test]
+fn shears_in_flight_are_claimed_so_worn_out_shears_cut_once() {
+    let mut rig = Rig::dedicated("shears-claim", 1);
+    let a = rig.place(2, block::BEE_HIVE);
+    let b = rig.place(-2, block::BEE_HIVE);
+    for cell in [a, b] {
+        rig.world().insert_hive((cell[0], cell[1], cell[2]), crate::bee_hive::HiveData { bees_inside: 0, honey_level: 3 });
+    }
+    let mut worn = Tool::new(ToolType::Shears, ToolMaterial::Iron);
+    worn.durability = 1;
+    rig.give(0, 0, Item::Tool(worn), 1);
+    assert!(rig.cs[0].use_block(a, UseKind::Hive, 0), "the first goes");
+    assert!(!rig.cs[0].use_block(b, UseKind::Hive, 0), "the second would wear the claimed shears: not sent");
+    rig.ticks(3);
+    assert_eq!(rig.cs[0].outcomes.len(), 1);
+    assert_eq!(rig.cs[0].count(&mat(MaterialId::Honeycomb)), 3, "one cut, not two");
+    assert_eq!(rig.world().hive_at((b[0], b[1], b[2])).unwrap().honey_level, 3, "the second hive untouched");
+    assert_eq!(rig.cs[0].count(&Item::Tool(worn)), 0, "the shears wore out");
+    rig.assert_lockstep(0, "after the one cut");
+}
+
+/// L8 — source lint, in the sims-off lint's tradition (the click arms need a
+/// GPU; `TestHost` has no client; the GPU harness drives each one,
+/// `game_harness_a_joiners_click_on_each_of_the_five_blocks_asks_the_server`):
+/// each of the five joined click arms sends its request and then
+/// `continue`s, never falling through to the single-player rule on the
+/// joiner's own copy of the block.
+#[test]
+fn each_joined_block_use_arm_asks_the_server_and_goes_no_further() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("block-use arm lint: cannot read {} ({e})", path.display()));
+    let lines: Vec<&str> = raw.lines().collect();
+    for kind in ["Hive", "Composter", "ItemFrame", "Campfire", "DryingRack"] {
+        let call = format!("crate::block_use::UseKind::{kind});");
+        let hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//") && l.contains("self.send_block_use(pidx,") && l.contains(&call))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "block-use arm lint: one joined {kind} arm expected in game_loop.rs, found {hits:?}");
+        let i = hits[0];
+        assert!(
+            lines[i.saturating_sub(6)..i].iter().any(|l| l.contains("if self.joined()")),
+            "game_loop.rs:{}: the {kind} request must be sent only when joined",
+            i + 1
+        );
+        let after = &lines[i + 1..(i + 5).min(lines.len())];
+        let Some(stop) = after.iter().position(|l| l.trim() == "continue;") else {
+            panic!("game_loop.rs:{}: the joined {kind} arm must `continue` right after asking the server", i + 1)
+        };
+        assert!(
+            after[..stop].iter().all(|l| !l.contains("use_block(")),
+            "game_loop.rs:{}: the joined {kind} arm reaches the single-player rule",
+            i + 1
+        );
+    }
+}
+
+/// M1 — source lint: when joined, every hand spend a block-use claim could
+/// race (a placement, a sown seed or reed, a crop accelerator) first asks
+/// `hand_may_spend` (`JoinerActions::can_spend`, as the Q-drop does), so one
+/// block can't be framed AND placed on a slow link. The real arms are driven
+/// by `game_harness_a_joiners_placement_waits_for_the_claim_of_a_frame_use_in_flight`.
+#[test]
+fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("hand-spend lint: cannot read {} ({e})", path.display()));
+    let lines: Vec<&str> = raw.lines().collect();
+    for needle in [
+        ".take_placeable_from_hotbar(hotbar)",
+        ".consume_one_material(hotbar, seed_id)",
+        ".consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)",
+        ".consume_one_material(hotbar, material)",
+    ] {
+        let hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//") && l.contains(needle))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "hand-spend lint: `{needle}` should appear once in game_loop.rs, found {hits:?}");
+        let i = hits[0];
+        assert!(
+            lines[i.saturating_sub(4)..i].iter().any(|l| l.contains("self.hand_may_spend(pidx)")),
+            "game_loop.rs:{}: `{needle}` spends without asking `hand_may_spend` (a block use in flight may claim it)",
             i + 1
         );
     }

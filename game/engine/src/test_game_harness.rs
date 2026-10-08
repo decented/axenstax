@@ -1773,6 +1773,11 @@ mod tests {
         let pos = (cell[0], cell[1], cell[2]);
         server.server.world.set_block(cell[0], cell[1], cell[2], crate::block::BEE_HIVE);
         server.server.world.insert_hive(pos, crate::bee_hive::HiveData { bees_inside: 0, honey_level: 2 });
+        // The joiner holds the hive block too (as its column's push would
+        // give it: the server's `set_block` above broadcasts nothing). Since
+        // C3b-2-fix (M4) a view applies only where the client's block is its
+        // kind.
+        hg.state.world.set_block(cell[0], cell[1], cell[2], crate::block::BEE_HIVE);
         for _ in 0..6 {
             step(&mut server, &mut hg);
         }
@@ -1791,5 +1796,198 @@ mod tests {
         assert_eq!(count(&hg, MaterialId::Bucket), 0, "the accepted outcome took the bucket");
         assert_eq!(count(&hg, MaterialId::HoneyBottle), 1, "the grant brought the jar");
         assert_eq!(hg.state.world.hive_at(pos).unwrap().honey_level, 1, "and the hive's view came back");
+    }
+
+    // ─── C3b-2-fix ─────────────────────────────────────────────────────────
+
+    /// Aim player 0's camera from its eye at `at` (`camera::forward_from`'s
+    /// convention: yaw 0 looks along -z).
+    fn aim_at(hg: &mut HeadlessGame, at: glam::Vec3) {
+        let d = (at - hg.state.players[0].player.eye_pos()).normalize();
+        let cam = &mut hg.state.players[0].camera;
+        cam.yaw = (-d.x).atan2(-d.z);
+        cam.pitch = d.y.asin();
+    }
+
+    /// Step a joined client and its server until every request it sent is
+    /// answered (at most 20 steps), then two more for the grants behind.
+    fn settle(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame) {
+        for _ in 0..20 {
+            harness_step(server, hg);
+            if hg.state.joiner_actions.len() == 0 {
+                break;
+            }
+        }
+        assert_eq!(hg.state.joiner_actions.len(), 0, "every request answered");
+        harness_step(server, hg);
+        harness_step(server, hg);
+    }
+
+    /// One right-click through the REAL click arms (one frame).
+    fn right_click(hg: &mut HeadlessGame) {
+        hg.state.players[0].place_cooldown = 0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.right_held = true;
+        hg.frames(1);
+        hg.state.input.right_held = false;
+    }
+
+    /// Player 0's feet cell, and a clear stone-floored pad around it in its
+    /// own world (and in `server`'s, when joined).
+    fn clear_pad(hg: &mut HeadlessGame, server: Option<&mut crate::hosted_server::HostedServer>) -> [i32; 3] {
+        let p = hg.state.players[0].player.pos;
+        let feet = [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32];
+        let mut worlds: Vec<&mut crate::world::World> = vec![&mut hg.state.world];
+        if let Some(server) = server {
+            worlds.push(&mut server.server.world);
+        }
+        for w in worlds {
+            for x in feet[0] - 4..=feet[0] + 4 {
+                for z in feet[2] - 4..=feet[2] + 4 {
+                    w.set_block(x, feet[1] - 1, z, crate::block::STONE);
+                    for y in feet[1]..feet[1] + 4 {
+                        w.set_block(x, y, z, crate::block::AIR);
+                    }
+                }
+            }
+        }
+        feet
+    }
+
+    /// C3b-2-fix (M1) — a joiner right-clicks an empty item frame with its
+    /// ONLY diamond block (the REAL frame arm: the request claims it), then,
+    /// inside the round trip, right-clicks the floor with the same slot (the
+    /// REAL place arm): the placement waits for the claim and does nothing.
+    /// The server ends with one diamond block, in the frame. (It used to place
+    /// it too: one diamond in the frame and one in the world.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_placement_waits_for_the_claim_of_a_frame_use_in_flight() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("frame-then-place");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let body = server.server.players[slot].player.pos;
+        assert!(body.distance(hg.state.players[0].player.pos) < 1.0, "the server body stands where the client does");
+        let diamond = crate::item::ItemStack::new_block(crate::block::DIAMOND_BLOCK, 1);
+        hg.state.players[0].inventory.set_slot(0, Some(diamond.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(diamond));
+        hg.state.players[0].hotbar_slot = 0;
+        // An empty frame two blocks to the +x at eye height, in both worlds.
+        let frame = [feet[0] + 2, feet[1] + 1, feet[2]];
+        hg.state.world.set_block(frame[0], frame[1], frame[2], crate::block::ITEM_FRAME);
+        server.server.world.set_block(frame[0], frame[1], frame[2], crate::block::ITEM_FRAME);
+        harness_step(&mut server, &mut hg);
+        // 1. The frame, through the real arm.
+        aim_at(&mut hg, glam::Vec3::new(frame[0] as f32 + 0.5, frame[1] as f32 + 0.5, frame[2] as f32 + 0.5));
+        right_click(&mut hg);
+        // 2. Inside the round trip: the floor two blocks ahead (-z), top face.
+        let place = [feet[0], feet[1], feet[2] - 2];
+        aim_at(&mut hg, glam::Vec3::new(place[0] as f32 + 0.5, place[1] as f32 + 0.02, place[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(place[0], place[1], place[2]), crate::block::AIR, "nothing placed: the diamond is claimed");
+        let diamonds = |inv: &crate::inventory::Inventory| -> u32 {
+            let diamond = crate::item::Item::Block(crate::block::DIAMOND_BLOCK);
+            inv.slots_iter().flatten().filter(|s| s.item == diamond).map(|s| u32::from(s.count)).sum()
+        };
+        assert_eq!(diamonds(&hg.state.players[0].inventory), 1, "still in hand until the frame's outcome");
+        settle(&mut server, &mut hg);
+        let pos = (frame[0], frame[1], frame[2]);
+        let framed = server.server.world.item_frame_at(pos).and_then(|f| f.item.as_ref().map(|s| s.item.clone()));
+        assert_eq!(framed, Some(crate::item::Item::Block(crate::block::DIAMOND_BLOCK)), "the frame has it");
+        assert_eq!(server.server.world.get_block(place[0], place[1], place[2]), crate::block::AIR, "and the world doesn't");
+        assert_eq!(diamonds(&hg.state.players[0].inventory), 0);
+        assert_eq!(diamonds(&server.server.players[slot].inventory), 0);
+    }
+
+    /// C3b-2-fix (L1) — single-player feeds a campfire the last plank of a
+    /// hotbar slot with auto-refill on: the slot is refilled from the bag, as
+    /// it was before C3b-2 (a block fuel is taken as a placement is).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_the_last_plank_fed_to_a_campfire_refills_the_slot() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-campfire-refill");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        let feet = clear_pad(&mut hg, None);
+        let fire = [feet[0], feet[1] + 1, feet[2] - 2];
+        hg.state.world.set_block(fire[0], fire[1], fire[2], crate::block::CAMPFIRE_UNLIT);
+        let inv = &mut hg.state.players[0].inventory;
+        *inv = crate::inventory::Inventory::new();
+        inv.auto_refill = true;
+        inv.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::OAK_PLANKS, 1)));
+        inv.set_slot(20, Some(crate::item::ItemStack::new_block(crate::block::OAK_PLANKS, 10)));
+        hg.state.players[0].hotbar_slot = 0;
+        aim_at(&mut hg, glam::Vec3::new(fire[0] as f32 + 0.5, fire[1] as f32 + 0.3, fire[2] as f32 + 0.5));
+        right_click(&mut hg);
+        let fuel = hg.state.world.campfire_at((fire[0], fire[1], fire[2])).map(|c| c.fuel_ticks);
+        assert!(fuel.is_some_and(|f| f > 0), "the plank burns: {fuel:?}");
+        let inv = &hg.state.players[0].inventory;
+        assert_eq!(inv.slot(0).map(|s| s.count), Some(10), "refilled from the bag");
+        assert!(inv.slot(20).is_none());
+    }
+
+    /// C3b-2-fix (L8) — each of the five blocks right-clicked through a
+    /// joined client's REAL click arm: the arm asks the server and goes no
+    /// further — its own copy of the block changes nothing and the hand pays
+    /// nothing until the outcome — and the server's real block takes the use.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_click_on_each_of_the_five_blocks_asks_the_server() {
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("five-uses");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let cell = [feet[0], feet[1] + 1, feet[2] - 2];
+        let pos = (cell[0], cell[1], cell[2]);
+        let cases = [
+            (crate::block::COMPOSTER, Item::Material(MaterialId::WheatSeeds)),
+            (crate::block::DRYING_RACK, Item::Material(MaterialId::GreenLog)),
+            (crate::block::CAMPFIRE_UNLIT, Item::Material(MaterialId::Coal)),
+            (crate::block::ITEM_FRAME, Item::Material(MaterialId::Stick)),
+            (crate::block::BEE_HIVE, Item::Material(MaterialId::Bucket)),
+        ];
+        for (b, held) in cases {
+            for w in [&mut hg.state.world, &mut server.server.world] {
+                w.set_block(cell[0], cell[1], cell[2], b);
+            }
+            if b == crate::block::BEE_HIVE {
+                server.server.world.insert_hive(pos, crate::bee_hive::HiveData { bees_inside: 0, honey_level: 2 });
+            }
+            let stack = ItemStack { item: held.clone(), count: 2 };
+            hg.state.players[0].inventory.set_slot(0, Some(stack.clone()));
+            server.server.players[slot].inventory.set_slot(0, Some(stack));
+            hg.state.players[0].hotbar_slot = 0;
+            for _ in 0..3 {
+                harness_step(&mut server, &mut hg);
+            }
+            let ours = |hg: &HeadlessGame| {
+                let w = &hg.state.world;
+                (w.composter_at(pos).map(|c| c.input.is_some()), w.drying_racks.get(&pos).map(|r| r.occupied_slots()), w.campfire_at(pos).map(|c| c.fuel_ticks), w.item_frame_at(pos).map(|f| f.is_empty()))
+            };
+            let before = ours(&hg);
+            aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.3, cell[2] as f32 + 0.5));
+            right_click(&mut hg);
+            let held_now = |hg: &HeadlessGame| hg.state.players[0].inventory.slot(0).map_or(0, |s| s.count);
+            assert_eq!(held_now(&hg), 2, "{b}: the hand pays nothing before the server answers");
+            assert_eq!(ours(&hg), before, "{b}: the joiner's own copy is untouched (the arm went no further)");
+            settle(&mut server, &mut hg);
+            let w = &server.server.world;
+            let took = match b {
+                crate::block::COMPOSTER => w.composter_at(pos).is_some_and(|c| c.input.is_some()),
+                crate::block::DRYING_RACK => w.drying_racks.get(&pos).is_some_and(|r| r.occupied_slots() == 1),
+                crate::block::CAMPFIRE_UNLIT => w.campfire_at(pos).is_some_and(|c| c.fuel_ticks > 0),
+                crate::block::ITEM_FRAME => w.item_frame_at(pos).is_some_and(|f| !f.is_empty()),
+                _ => w.hive_at(pos).is_some_and(|h| h.honey_level == 1),
+            };
+            assert!(took, "{b}: the server's real block took the use");
+            assert_eq!(held_now(&hg), 1, "{b}: and the outcome took one from the hand");
+            // Clear the cell for the next case (both worlds).
+            for w in [&mut hg.state.world, &mut server.server.world] {
+                w.set_block(cell[0], cell[1], cell[2], crate::block::AIR);
+                let _ = crate::block_use::take_on_break(w, pos, b, false);
+                w.block_entities.remove(&pos);
+            }
+        }
     }
 }

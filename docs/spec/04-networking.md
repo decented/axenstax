@@ -528,11 +528,11 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak, events_applied: u32 }` (`events_applied` v76). **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop and GrantUnfit are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) or `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop and GrantUnfit are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, UseBlock from v79). See §4.2f. |
 | 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, WireSlot)>, client_ok: bool }` (`events_applied` v76; `touched` and `claims` v77, ≤ 122 each, in that order; `client_ok` v78, the client's own verdict), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3; v77: OpenContainer { cell }=4, Container(ContainerClick)=5). Never answered, except an `OpenContainer` (by `ContainerOpened`) and a `Container` op that earns a correction (by a `WindowSlotSet`). **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
 | 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal>, window_event: u32 }` (`window_event` v78: an opened view is a numbered window event; 0 for a refusal). **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
 | 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named container slots of a joiner's open container, and a correction's item delta: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32, take: Vec<(u8, WireStack)> (≤ 122), give: Vec<WireStack> (≤ 122) }` (`take` and `give` v78) — a correction of a container op, or a push of what changed in the open container. Never a whole window, never a player slot's value (v78). Every set is a numbered window event (v78; v77 numbered only a set of player slots). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
-| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32 }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's take, 0 for none). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
+| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32, wear_held: bool }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's or block use's take, 0 for none; `wear_held` v79: an accepted block use wore the held tool — shears on a hive — as that window event). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
 > discriminants live in `game/engine/src/protocol.rs` and are the wire-stable
@@ -2077,10 +2077,11 @@ joined client any more. `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot:
 u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; the held claim
 is `Eat`'s). One rule per block, `block_use` (`use_composter`,
 `use_drying_rack`, `use_campfire`, `use_item_frame`, `use_hive`, dispatched by
-`use_block`, which creates the block entity if the cell has none, as the
-client's open always did), and every path calls it: single-player and a
-host's own seats from their right-click arms (behaviour unchanged), the
-server for a joiner. Each rule returns what the hand pays (0 or 1 of the held
+`use_block`, which runs the rule on the cell's state — a fresh one if the cell
+has none — and keeps it only when the rule accepts: since C3b-2-fix (L7) a
+refusal creates, marks and streams nothing), and every path calls it:
+single-player and a host's own seats from their right-click arms (behaviour
+unchanged), the server for a joiner. Each rule returns what the hand pays (0 or 1 of the held
 item, or shears' wear), what the player gains, and whether a smouldering
 campfire relit — or the note that says why nothing happened:
 
@@ -2120,9 +2121,26 @@ the gain rides `InventoryGrant`s queued after it, so both copies of the window
 apply them in the client's order. A relit campfire's block goes
 `CAMPFIRE_UNLIT → CAMPFIRE` the way a joiner's own lighting edit lands
 (broadcast, remeshed by a lending host, the smoke pillar raised from the
-server's campfire, `relight_campfire` → `derive_campfire_edit`). **Refused:**
-nothing changes (no entity is created), the outcome carries the note and no
-window event. **The joiner's room is not checked** (BRIDGE until C3d, as every
+server's campfire, `relight_campfire` → `derive_campfire_edit`). On a lent
+world an accepted use's cell is remeshed by the host's client
+(`lent_edit_cells`, C3b-2-fix M3: the host draws a frame a joiner filled).
+**The take is bounded (C3b-2-fix, M2):** before the rule's change is kept
+(`block_use::use_block_admitted`), the pay is judged against the server's copy
+of the joiner's window as it will be once its waiting events land
+(`window_events::effective_window`, so an earlier request's pending take is
+already off it; exact identity, as believed container deposits count). What
+that copy can't cover is BELIEVED, charged to the same per-joiner bound as a
+believed container deposit (`window_ops::believe_pay` → `BelievedBucket`: 64
+units deep, refilled at 4 a second; a creative joiner is unbounded): tallied
+`use_believed`, logged rate-limited, and not owed (no `Take` for that unit:
+the copy never held it). Past the bound the use is refused with
+`NothingToTake` (the existing code: the server takes nothing it can't
+believe; silent, no wire change), tallied `use_refused`, and nothing changes.
+So a modified client that claims an item it doesn't hold can make at most
+64 + 4 a second of it by framing, composting or cooking and then breaking
+the block, as through a shared container (BRIDGE until C3d, gate list).
+**Refused:** nothing changes (no entity is created, L7), the outcome carries
+the note and no window event. **The joiner's room is not checked** (BRIDGE until C3d, as every
 grant's): single-player leaves a seasoned log on the rack and cooked food on
 the fire when they don't fit (`ItemNote::InventoryFull`, single-player only);
 a joiner is given the whole gain, and what its client can't hold comes back
@@ -2133,9 +2151,16 @@ spawned as the instance taken, `window_events::return_unfit`, §4.2g).
 *Client* (`GameState::send_block_use`). Claimed like an eat:
 `Asked::UseBlock { cell, kind, claim }` with `claim = block_use::claim(kind,
 held)` (1 for anything the rule could take — a compostable, a green log, a
-fuel or raw food, anything for a frame, a bucket for a hive; 0 for shears and
-an empty hand), so a use isn't sent while every one in hand is claimed (one
-bucket can't scoop two hives on a slow link). Nothing changes locally until
+fuel or raw food, anything for a frame, a bucket for a hive — or wear: shears
+on a hive since C3b-2-fix L5, so two shears uses in flight on worn-out shears
+can't both cut; 0 for an empty hand), so a use isn't sent while every one in
+hand is claimed (one bucket can't scoop two hives on a slow link). **The
+claim also holds the hand's other spends (C3b-2-fix, M1):** a joined client's
+place arm, its seed and papyrus-reed arms and its crop-accelerator arm ask
+`GameState::hand_may_spend` (`JoinerActions::can_spend`, as the Q-drop asks)
+before taking the item and do nothing while every one held is claimed — a
+diamond block on its way into a frame can't also be placed inside the round
+trip (the server side of that race is C3d gate 1). Nothing changes locally until
 the outcome (`joiner_actions::apply_item_outcome` takes `consume_held` owed;
 `apply_use_wear` wears the tool where it now is) and the grants arrive;
 single-player's sound, toast and `CookAtCampfire` challenge then play
@@ -2177,12 +2202,54 @@ host's own seat shares the world and is sent none. Composter, rack and hive
 views have no renderer yet (no mesh or HUD reads them); they are carried so a
 joiner's world holds the server's state (and its rack toast its progress).
 
+*Stale views are corrected (C3b-2-fix, M4).* A view describes state the
+block's change can clear, so each side ties views to the block:
+- **Client.** A received block change that takes a cell out of one of these
+  five kinds drops the state that kind left there (the entity, or the
+  drying-rack side-table entry; no spill — the server spilled its real one;
+  `block_use::drop_left_state`, run by `World::apply_remote_block_change`; a
+  lit/unlit campfire flip keeps the fire). `apply_view` skips a view whose
+  kind isn't the block the client holds at the cell, so a view from tick T
+  that lands after its block's break at T+k (a backlog packs several ticks
+  into one `StateUpdate`, and a packet's views go after all its changes)
+  puts nothing back on air. A push also clears the chunk's drying racks
+  (`chunk_intake::clear_side_data`).
+- **Server.** `views_in` takes a view only where the block stands as the
+  view's kind (state an old save or a pre-fix host break left behind is
+  never shown), and in `broadcast_state` each joiner's `ViewsSent` forgets
+  every cell whose block change goes out to it that tick
+  (`ViewsSent::forget`) — a refused edit's send-back included — so the view,
+  as it stands, follows the change at once. A joiner's refused break of a
+  filled frame gives it back the frame AND its item; a frame another player
+  broke and re-placed is drawn empty.
+
+*Cost (C3b-2 verify L3, no change).* `views_in` walks every block entity and
+rack once a tick with any joiner attached, and `ViewsSent::take_changed` runs
+per joiner (two map lookups, a compare and a `retain`, about 100 ns a view).
+Campfires and hives are only ever player-placed: a kids' survival world holds
+tens to a few hundred, so about 300 views and 4 joiners cost roughly 0.15 ms a
+tick (0.3 % of 50 ms); 1,000 views and 8 joiners roughly 1 ms (2 %); a
+10,000-frame wall roughly 10 ms (20 %), unrealistic. The fix when it matters:
+a dirty-cell set written by the mutating accessors (`campfire_at_mut` already
+notes edits; `drying_racks`, a raw `pub` map, must be wrapped first), with
+`ahash` for `ViewsSent`; cheaper still, the full scan every 4th tick (views
+are already rounded to 1 s) plus a scan on any tick that served a `UseBlock`
+or queued a push.
+
 *Breaking one.* A joiner's accepted break of a composter, drying rack, item
 frame or hive spills what the SERVER's held (`spill_used_block` →
 `block_use::take_on_break`: the framed item — the frame's "take" — the rack's
 logs, the composter's input and output) as ground items everyone sees; a
 campfire's cooking spills from `derive_campfire_edit` as before. The joined
 client's break arms spill nothing of their own view of those blocks.
+**One break rule for every seat (C3b-2-fix, L6):** single-player and a host's
+own seats call the same `take_on_break` from their break arms (the frame's
+item and a composter's contents drop at the block — new in single-player for
+the composter — and a rack's logs go into the breaker's inventory), and a
+joined client calls it on its own copy and drops what it returns. It always
+removes the state (no stale entity for the next block placed there), and in
+a creative world it discards a rack's logs, single-player's rule — a creative
+joiner's server too.
 
 *Joined-client sims off.* A joined client runs no composter sweep, honey
 accumulation or drying-rack seasoning (`remote_client.is_none()` gates;
@@ -2195,8 +2262,9 @@ cook and its racks don't season; a lending host's client ticks them on the
 lent world. Its composters age on the block-machine cadence. A `--no-lend`
 host's server copy of these blocks is not mirrored from the host
 (`mirror_host_world_state` copies mirrored families only; the flag is
-slated for deletion). The joiner's held claim is believed (log-only until
-C3d). Pinned by `test_integration::block_use`.
+slated for deletion). The joiner's held claim is believed within the
+believed bound (C3b-2-fix M2; refused past it, enforced at C3d). Pinned by
+`test_integration::block_use`.
 
 ### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1; v77, C3b-1)
 

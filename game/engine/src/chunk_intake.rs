@@ -766,9 +766,14 @@ impl ChunkIntake {
     }
 }
 
-/// Remove the side data (`block_meta`, block entities, face attachments) of
-/// every cell of chunk `coord`: a push replaces it whole.
+/// Remove the side data (`block_meta`, block entities, face attachments,
+/// drying racks — C3b-2-fix) of every cell of chunk `coord`: a push replaces
+/// it whole (a rack that stands comes back as its view, after the push).
 fn clear_side_data(world: &mut World, coord: ChunkCoord) {
+    let racks: Vec<_> = cells_in(&world.drying_racks, coord).into_iter().map(|(_, c, _)| c).collect();
+    for c in racks {
+        world.drying_racks.remove(&c);
+    }
     let meta: Vec<_> = cells_in(&world.block_meta, coord).into_iter().map(|(_, c, _)| c).collect();
     for c in meta {
         world.block_meta.remove(&c);
@@ -1076,6 +1081,20 @@ mod tests {
             joiner.face_attachment_at((1, 1, 1), 2),
             Some(&FaceAttachment::Wallpaper(block::GLASS))
         );
+    }
+
+    /// C3b-2-fix (M4) — a push replaces a chunk's side data whole, the
+    /// drying racks' side table included: a rack the pushed chunk no longer
+    /// has isn't left behind (the rack's view follows the push if it stands).
+    #[test]
+    fn a_push_clears_the_chunks_drying_racks() {
+        let host = World::new();
+        let mut joiner = World::new();
+        joiner.drying_racks.insert((2, 2, 2), crate::drying_rack::DryingRackData::default());
+        joiner.drying_racks.insert((40, 2, 2), crate::drying_rack::DryingRackData::default());
+        ChunkIntake::default().apply(&mut joiner, &mut ahash::AHashSet::new(), &reg(), &packet_of(&host, (0, 0, 0)));
+        assert!(!joiner.drying_racks.contains_key(&(2, 2, 2)), "the pushed chunk's rack is gone");
+        assert!(joiner.drying_racks.contains_key(&(40, 2, 2)), "another chunk's stays");
     }
 
     #[test]

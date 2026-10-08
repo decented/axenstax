@@ -4127,6 +4127,23 @@ impl super::GameState {
         self.remote_client.is_some()
     }
 
+    /// C3b-2-fix (M1) — may player `pidx`'s hand spend one of what its
+    /// selected hotbar slot holds (a placement, a sown seed or reed, a crop
+    /// accelerator)? Always, unless joined and every one its window holds is
+    /// claimed by a request in flight (`JoinerActions::can_spend`, as the
+    /// Q-drop asks): an item frame, rack or fire the joiner just asked to take
+    /// the block from must get it, so one block can't be framed AND placed
+    /// on a slow link. An empty slot spends nothing, so it may.
+    pub(crate) fn hand_may_spend(&self, pidx: usize) -> bool {
+        if !self.joined() {
+            return true;
+        }
+        let p = &self.players[pidx];
+        p.inventory
+            .hotbar_slot(p.hotbar_slot)
+            .is_none_or(|s| self.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &s.item, 1))
+    }
+
     /// Does this client's block edit (and its `mined` tag) reach the server it
     /// joined? True only when joined AND native: a joined client's edits and
     /// mined tags are queued for the server on native only (L-web-edit, the
@@ -11561,13 +11578,31 @@ impl super::GameState {
                                 // Drop any block-entity state + clear smoke
                                 // pillar so a future replacement starts fresh.
                                 // Spec 17 dupe-regression + Spec 18 smoke
-                                // pillar lifecycle. Wave 29 — also clean
-                                // up any drying-rack state (spilled green
-                                // logs are dropped on the floor in creative
-                                // by being added to the player's inventory).
-                                let _rack_spill = crate::drying_rack::cleanup_drying_rack(
-                                    &mut self.world, pos[0], pos[1], pos[2],
+                                // pillar lifecycle.
+                                // C3b-2-fix (L6) — a composter, drying rack,
+                                // item frame or hive: one break rule for every
+                                // seat (`block_use::take_on_break`, the server's
+                                // for a joiner). Its state always goes; the
+                                // frame's item and the composter's contents
+                                // drop at the block (a creative break discards
+                                // a rack's logs). A joined client's copy is the
+                                // server's view: the server spills the real one.
+                                let used_spill = crate::block_use::take_on_break(
+                                    &mut self.world,
+                                    (pos[0], pos[1], pos[2]),
+                                    _prev,
+                                    self.is_creative,
                                 );
+                                if !self.edits_reach_server() {
+                                    for (k, stack) in used_spill.into_iter().enumerate() {
+                                        crate::entity::spawn_item(
+                                            &mut self.ecs,
+                                            glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
+                                            stack,
+                                            5381 + k as u32 * 7349,
+                                        );
+                                    }
+                                }
                                 // Spec 21 Phase 7 — owner-mine spill
                                 // returns slot stock + escrow to inventory.
                                 // Anti-grief gate already prevented non-
@@ -11702,26 +11737,8 @@ impl super::GameState {
                                         }
                                     }
                                 }
-                                // Wave 2c — Item Frame break drops the framed item
-                                // (if any), then removes the frame entity.
-                                if let Some(frame) =
-                                    self.world.item_frame_at_mut((pos[0], pos[1], pos[2]))
-                                {
-                                    let framed = frame.take();
-                                    self.world.block_entities.remove(&(pos[0], pos[1], pos[2]));
-                                    // C3b-2 — a joined client's frame is the server's
-                                    // view: the server spills the real item.
-                                    if let Some(stack) = framed
-                                        && !self.edits_reach_server()
-                                    {
-                                        crate::entity::spawn_item(
-                                            &mut self.ecs,
-                                            glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                            stack,
-                                            5381,
-                                        );
-                                    }
-                                }
+                                // (Wave 2c — an Item Frame's framed item drops
+                                // with `take_on_break` above, C3b-2-fix L6.)
                                 // FU4b (FU3 verify L5) — a joined client whose edits
                                 // reach the server leaves the smoke pillar to it:
                                 // the server clears the pillar (`on_block_edit`)
@@ -11969,17 +11986,30 @@ impl super::GameState {
                                     }
                                     // Drop any block-entity state + clear smoke
                                     // pillar so a replacement starts fresh.
-                                    // Wave 29: also clean up any drying-rack
-                                    // state at this cell + spill its green
-                                    // logs into the breaker's inventory.
-                                    let rack_spill = crate::drying_rack::cleanup_drying_rack(
-                                        &mut self.world, pos[0], pos[1], pos[2],
+                                    // C3b-2-fix (L6) — a composter, drying rack,
+                                    // item frame or hive: one break rule for
+                                    // every seat (`block_use::take_on_break`, the
+                                    // server's for a joiner). Its state always
+                                    // goes; a rack's green logs go into the
+                                    // breaker's inventory (Wave 29; what doesn't
+                                    // fit drops at the block), the frame's item
+                                    // and the composter's contents drop at the
+                                    // block. A joined client's copy is the
+                                    // server's view: the server spills the real one.
+                                    let used_spill = crate::block_use::take_on_break(
+                                        &mut self.world,
+                                        (pos[0], pos[1], pos[2]),
+                                        blk,
+                                        self.is_creative,
                                     );
-                                    // C3b-2 — a joined client's rack is the server's
-                                    // view: the server spills the real logs.
                                     if !self.edits_reach_server() {
-                                        for stack in rack_spill {
-                                            self.players[pidx].inventory.add_item(stack);
+                                        let centre = glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5);
+                                        let rack = blk == block::DRYING_RACK;
+                                        for (k, stack) in used_spill.into_iter().enumerate() {
+                                            let rest = if rack { self.players[pidx].inventory.add_item(stack) } else { Some(stack) };
+                                            if let Some(rest) = rest {
+                                                crate::entity::spawn_item(&mut self.ecs, centre, rest, 5381 + k as u32 * 7349);
+                                            }
                                         }
                                     }
                                     // HP-2 — Chest break: spill contents as
@@ -12030,25 +12060,8 @@ impl super::GameState {
                                             }
                                         }
                                     }
-                                    // Wave 2c — Item Frame break drops the framed item.
-                                    if let Some(frame) =
-                                        self.world.item_frame_at_mut((pos[0], pos[1], pos[2]))
-                                    {
-                                        let framed = frame.take();
-                                        self.world.block_entities.remove(&(pos[0], pos[1], pos[2]));
-                                        // C3b-2 — a joined client's frame is the server's
-                                        // view: the server spills the real item.
-                                        if let Some(stack) = framed
-                                            && !self.edits_reach_server()
-                                        {
-                                            crate::entity::spawn_item(
-                                                &mut self.ecs,
-                                                glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                                stack,
-                                                5381,
-                                            );
-                                        }
-                                    }
+                                    // (Wave 2c — an Item Frame's framed item drops
+                                    // with `take_on_break` above, C3b-2-fix L6.)
                                     // Spec 34 — Tip Jar break spills escrow
                                     // back to the owner (toast-only on alpha;
                                     // BRIDGE until a real wallet). This is the
@@ -14638,8 +14651,17 @@ impl super::GameState {
                                 );
                                 match used {
                                     Ok(used) => {
+                                        // C3b-2-fix (L1) — a block fuel (planks,
+                                        // a log, leaves) is taken as a placement
+                                        // is, so auto-refill pulls the next stack
+                                        // in when the slot empties.
                                         if used.pay > 0 {
-                                            let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
+                                            let inv = &mut self.players[pidx].inventory;
+                                            if matches!(held.as_ref().map(|s| &s.item), Some(crate::item::Item::Block(_))) {
+                                                let _ = inv.take_block_from_hotbar(hotbar);
+                                            } else {
+                                                let _ = inv.take_one_from_hotbar(hotbar);
+                                            }
                                         }
                                         // Spec 30 — a smouldering campfire + fuel =
                                         // instant relight: flip the block back to
@@ -14934,6 +14956,7 @@ impl super::GameState {
                             let above_blk = self.world.get_block(above[0], above[1], above[2]);
                             if self.play_mode.can_edit_world()
                                 && above_blk == block::AIR
+                                && self.hand_may_spend(pidx)
                                 && self.players[pidx]
                                     .inventory
                                     .consume_one_material(hotbar, seed_id)
@@ -14999,6 +15022,7 @@ impl super::GameState {
                             )
                         };
                         if let Some(next) = next
+                            && self.hand_may_spend(pidx)
                             && self.players[pidx]
                                 .inventory
                                 .consume_one_material(hotbar, material)
@@ -15038,6 +15062,7 @@ impl super::GameState {
                         let hotbar = self.players[pidx].hotbar_slot;
                         if self.play_mode.can_edit_world()
                             && crate::papyrus::is_valid_planting_base(&self.world, pos[0], pos[1], pos[2])
+                            && self.hand_may_spend(pidx)
                             && self.players[pidx]
                                 .inventory
                                 .consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)
@@ -15511,10 +15536,14 @@ impl super::GameState {
                                 // OAK_LOG without needing a 1:1 crafting-table
                                 // conversion. Existing block-items go through
                                 // the same path with no behaviour change.
+                                // C3b-2-fix (M1) — a joiner places nothing a
+                                // request in flight claims (`hand_may_spend`).
                                 let block_to_place = if self.is_creative {
                                     self.players[pidx].inventory.hotbar_placeable_id(hotbar)
-                                } else {
+                                } else if self.hand_may_spend(pidx) {
                                     self.players[pidx].inventory.take_placeable_from_hotbar(hotbar)
+                                } else {
+                                    None
                                 };
                                 if let Some(block_to_place) = block_to_place {
                                     if existing == block::WATER {

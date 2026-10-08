@@ -1874,6 +1874,11 @@ impl World {
             // (`HostedServer::spill_container_on_change`), so spilling again
             // would duplicate the contents (audit 2026-09-27, review B1).
             self.drop_orphaned_family_entity(pos, old_block, bc.new_block);
+            // C3b-2-fix (M4) — and a composter, drying rack, campfire, item
+            // frame or hive leaves no state behind either (no spill: the
+            // server spilled its real one), so the next such block placed
+            // here starts empty.
+            crate::block_use::drop_left_state(self, pos, old_block, bc.new_block);
             if old_block == block::PLOT_MARKER && bc.new_block != block::PLOT_MARKER {
                 self.release_plot(pos);
             }
@@ -3097,6 +3102,49 @@ mod tests {
             Some(7),
             "a lit/unlit twin swap is the same kind — the device is left alone"
         );
+    }
+
+    /// C3b-2-fix (M4 b) — a broadcast that takes a composter, drying rack,
+    /// campfire, item frame or hive out of its kind drops the entity it left
+    /// (and a rack's side-table entry): a frame re-placed there later is
+    /// drawn empty, not with the old framed item. A lit/unlit campfire flip
+    /// keeps the fire's state.
+    #[test]
+    fn apply_remote_block_change_drops_a_block_use_entity_its_block_left() {
+        use crate::block;
+        let mut w = World::new();
+        let frame = (1, 64, 1);
+        w.set_block(frame.0, frame.1, frame.2, block::ITEM_FRAME);
+        let mut data = crate::item_frame::ItemFrameData::new();
+        data.try_insert(crate::item::ItemStack::new_block(block::DIAMOND_BLOCK, 1));
+        w.insert_item_frame(frame, data);
+        let bin = (2, 64, 1);
+        w.set_block(bin.0, bin.1, bin.2, block::COMPOSTER);
+        w.insert_composter(bin, crate::workstation::WorkstationState::new());
+        let hive = (3, 64, 1);
+        w.set_block(hive.0, hive.1, hive.2, block::BEE_HIVE);
+        w.insert_hive(hive, crate::bee_hive::HiveData { bees_inside: 0, honey_level: 3 });
+        let rack = (4, 64, 1);
+        w.set_block(rack.0, rack.1, rack.2, block::DRYING_RACK);
+        w.drying_racks.insert(rack, crate::drying_rack::DryingRackData::default());
+        let fire = (5, 64, 1);
+        w.set_block(fire.0, fire.1, fire.2, block::CAMPFIRE_UNLIT);
+        w.insert_campfire(fire, crate::campfire::CampfireData { fuel_ticks: 400, ..Default::default() });
+
+        let to = |(x, y, z): (i32, i32, i32), b| crate::protocol::BlockChange::with_meta(x, y, z, b, 0);
+        assert!(w.apply_remote_block_change(&to(fire, block::CAMPFIRE)));
+        assert_eq!(w.campfire_at(fire).map(|c| c.fuel_ticks), Some(400), "a relight keeps the fire");
+        for cell in [frame, bin, hive, rack, fire] {
+            assert!(w.apply_remote_block_change(&to(cell, block::AIR)));
+        }
+        assert!(w.item_frame_at(frame).is_none(), "the frame's entity went with its block");
+        assert!(w.composter_at(bin).is_none());
+        assert!(w.hive_at(hive).is_none());
+        assert!(!w.drying_racks.contains_key(&rack), "and a rack's side-table entry");
+        assert!(w.campfire_at(fire).is_none());
+        // Re-placed: an empty frame.
+        assert!(w.apply_remote_block_change(&to(frame, block::ITEM_FRAME)));
+        assert!(w.item_frame_at(frame).is_none_or(|f| f.is_empty()), "drawn empty, never the old item");
     }
 
     #[test]

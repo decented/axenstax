@@ -97,12 +97,16 @@ pub fn rack_view(r: &crate::drying_rack::DryingRackData) -> BlockView {
 }
 
 /// Every view in `world`: its item frames, campfires, composters and hives
-/// (`block_entities`) and its drying racks (`drying_racks`).
+/// (`block_entities`) and its drying racks (`drying_racks`) — C3b-2-fix
+/// (M4): only where the block stands as the view's kind, so state a broken
+/// block left behind (an old save, a host's break before C3b-2-fix) is
+/// never shown.
 pub fn views_in(world: &World) -> Vec<BlockEntityView> {
     let entities = world.block_entities.iter().filter_map(|(&cell, e)| view_of(e).map(|view| (cell, view)));
     let racks = world.drying_racks.iter().map(|(&cell, r)| (cell, rack_view(r)));
     entities
         .chain(racks)
+        .filter(|(cell, view)| crate::block_use::UseKind::of_view(view.kind()).stands_at(world, *cell))
         .map(|((x, y, z), view)| BlockEntityView { cell: [x, y, z], kind: view.kind(), view })
         .collect()
 }
@@ -147,6 +151,17 @@ impl ViewsSent {
         out
     }
 
+    /// C3b-2-fix (M4) — forget what was shown at `cells`: block changes
+    /// for them were just sent (a break, a re-placement, a refused edit's
+    /// send-back), so each one's view as it stands now is sent again right
+    /// after the change ([`Self::take_changed`]) — a send-back restores the
+    /// frame AND its item.
+    pub fn forget(&mut self, cells: impl IntoIterator<Item = (i32, i32, i32)>) {
+        for cell in cells {
+            self.sent.remove(&cell);
+        }
+    }
+
     /// Cells it holds a record of. Test-only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -160,11 +175,16 @@ impl ViewsSent {
 /// pillar) must be remeshed: a frame's item is drawn, and so is the tint.
 /// A view whose `kind` isn't its own kind (a malformed packet) changes
 /// nothing.
+///
+/// C3b-2-fix (M4) — nor does a view for a cell whose block, in this world,
+/// isn't the view's kind: a packet's views land after all its block changes,
+/// so a view from tick T can follow its block's break at T+k (a backlog
+/// packs several ticks), and it must not put state back on air.
 pub fn apply_view(world: &mut World, registry: &crate::block::BlockRegistry, v: &BlockEntityView) -> bool {
-    if v.kind != v.view.kind() {
+    let cell = (v.cell[0], v.cell[1], v.cell[2]);
+    if v.kind != v.view.kind() || !crate::block_use::UseKind::of_view(v.kind).stands_at(world, cell) {
         return false;
     }
-    let cell = (v.cell[0], v.cell[1], v.cell[2]);
     match &v.view {
         BlockView::ItemFrame { item_kind, item_id, full_item, rotation } => {
             let item = crate::inventory::item_from_wire_full(full_item)
@@ -217,6 +237,15 @@ mod tests {
     use crate::item::{ItemStack, MaterialId};
     use crate::protocol::BlockViewKind;
 
+    /// The fixtures' blocks: a frame, a lit fire, a composter, a hive and a
+    /// rack at x = 1..=5 (a view applies, and is taken, only where its block
+    /// stands).
+    fn stand(w: &mut World) {
+        for (x, b) in [(1, block::ITEM_FRAME), (2, block::CAMPFIRE), (3, block::COMPOSTER), (4, block::BEE_HIVE), (5, block::DRYING_RACK)] {
+            w.set_block(x, 70, 1, b);
+        }
+    }
+
     fn cell_view(views: &[BlockEntityView], cell: [i32; 3]) -> &BlockView {
         &views.iter().find(|v| v.cell == cell).expect("a view at the cell").view
     }
@@ -248,11 +277,13 @@ mod tests {
     #[test]
     fn views_in_finds_the_five_kinds_and_nothing_else() {
         let mut w = World::new();
+        stand(&mut w);
         w.insert_item_frame((1, 70, 1), crate::item_frame::ItemFrameData::new());
         w.insert_campfire((2, 70, 1), CampfireData::default());
         w.insert_composter((3, 70, 1), crate::workstation::WorkstationState::new());
         w.insert_hive((4, 70, 1), crate::bee_hive::HiveData { bees_inside: 1, honey_level: 3 });
         w.drying_racks.insert((5, 70, 1), DryingRackData::default());
+        w.set_block(6, 70, 1, block::CHEST);
         w.insert_chest((6, 70, 1), crate::chest::ChestData::for_tier(crate::chest::ChestTier::Wood));
         let views = views_in(&w);
         assert_eq!(views.len(), 5, "not the chest");
@@ -281,12 +312,95 @@ mod tests {
         assert_eq!(sent.take_changed(&[v(2)], covered(9)), vec![v(2)], "and shown again when it comes back");
     }
 
+    /// C3b-2-fix (M4 d) — a view is applied only where the client's block is
+    /// the view's kind: a composter view for a cell holding something else
+    /// (a stale server entity, a block changed since) is skipped and leaves
+    /// whatever is there alone.
+    #[test]
+    fn a_view_for_a_cell_holding_another_block_is_skipped() {
+        let reg = BlockRegistry::new();
+        let mut w = World::new();
+        let cell = (1, 70, 1);
+        w.set_block(cell.0, cell.1, cell.2, block::ITEM_FRAME);
+        w.insert_item_frame(cell, crate::item_frame::ItemFrameData::new());
+        let mut bin = crate::workstation::WorkstationState::new();
+        bin.input = Some(ItemStack::new_material(MaterialId::Wheat, 4));
+        let view = view_of(&BlockEntityData::Composter(bin)).unwrap();
+        let v = BlockEntityView { cell: [1, 70, 1], kind: view.kind(), view };
+        assert!(!apply_view(&mut w, &reg, &v));
+        assert!(w.composter_at(cell).is_none(), "a frame's cell takes no composter view");
+        assert!(w.item_frame_at(cell).is_some(), "the frame's own entity stays");
+        let air = BlockEntityView { cell: [2, 70, 1], ..v.clone() };
+        assert!(!apply_view(&mut w, &reg, &air));
+        assert!(w.composter_at((2, 70, 1)).is_none(), "nor does air");
+        w.set_block(3, 70, 1, block::COMPOSTER);
+        assert!(!apply_view(&mut w, &reg, &BlockEntityView { cell: [3, 70, 1], ..v }));
+        assert_eq!(w.composter_at((3, 70, 1)).and_then(|c| c.input.as_ref()).map(|s| s.count), Some(4), "its own block: applied");
+    }
+
+    /// C3b-2-fix (M4 c) — a backlogged `StateUpdate` packs several ticks: its
+    /// block changes go into the world stream before its views, so a frame's
+    /// view from tick T lands after its break at T+k. The break drops the
+    /// entity, and the late view finds air and is skipped: nothing is left
+    /// on the air cell for the next frame placed there to draw.
+    #[test]
+    fn a_view_older_than_the_break_it_rides_with_leaves_nothing_on_air() {
+        let reg = BlockRegistry::new();
+        let mut w = World::new();
+        let cell = (1, 70, 1);
+        w.set_block(cell.0, cell.1, cell.2, block::ITEM_FRAME);
+        let mut framed = crate::item_frame::ItemFrameData::new();
+        framed.try_insert(ItemStack::new_block(block::DIAMOND_BLOCK, 1));
+        let old_view = view_of(&BlockEntityData::ItemFrame(framed.clone())).unwrap();
+        w.insert_item_frame(cell, framed);
+        // The packet: [break at T+k], then [view from T].
+        w.apply_remote_block_change(&crate::protocol::BlockChange::with_meta(1, 70, 1, block::AIR, 0));
+        let v = BlockEntityView { cell: [1, 70, 1], kind: old_view.kind(), view: old_view };
+        assert!(!apply_view(&mut w, &reg, &v));
+        assert!(w.item_frame_at(cell).is_none(), "no entity on air");
+        // Someone places a frame there again: drawn empty.
+        w.apply_remote_block_change(&crate::protocol::BlockChange::with_meta(1, 70, 1, block::ITEM_FRAME, 0));
+        assert!(w.item_frame_at(cell).is_none_or(|f| f.is_empty()));
+    }
+
+    /// C3b-2-fix (M4) — the server shows only what stands: an entity whose
+    /// block is no longer its kind (a composter or hive the host broke before
+    /// C3b-2-fix, an old save) is not a view.
+    #[test]
+    fn views_in_skips_an_entity_whose_block_is_another_kind() {
+        let mut w = World::new();
+        w.set_block(1, 70, 1, block::STONE);
+        w.insert_composter((1, 70, 1), crate::workstation::WorkstationState::new());
+        w.insert_hive((2, 70, 1), crate::bee_hive::HiveData { bees_inside: 0, honey_level: 2 });
+        w.drying_racks.insert((3, 70, 1), DryingRackData::default());
+        w.set_block(4, 70, 1, block::CAMPFIRE);
+        w.insert_campfire((4, 70, 1), CampfireData::default());
+        let views = views_in(&w);
+        assert_eq!(views.iter().map(|v| v.cell).collect::<Vec<_>>(), vec![[4, 70, 1]], "only the fire stands");
+    }
+
+    /// C3b-2-fix (M4 a) — a cell's view is forgotten when a block change for
+    /// it is sent, so it is shown again right after the change (a refused
+    /// break's send-back restores the frame AND its item).
+    #[test]
+    fn a_block_change_sent_for_a_cell_resends_its_view() {
+        let mut sent = ViewsSent::default();
+        let v = BlockEntityView { cell: [1, 70, 1], kind: BlockViewKind::Hive, view: BlockView::Hive { honey_level: 2 } };
+        let covered = |_: ChunkCoord| Some(1);
+        assert_eq!(sent.take_changed(std::slice::from_ref(&v), covered).len(), 1);
+        assert!(sent.take_changed(std::slice::from_ref(&v), covered).is_empty(), "unchanged");
+        sent.forget([(1, 70, 1), (9, 9, 9)]);
+        assert_eq!(sent.take_changed(std::slice::from_ref(&v), covered), vec![v], "forgotten: shown again");
+    }
+
     #[test]
     fn a_joined_client_takes_in_each_view() {
         let reg = BlockRegistry::new();
         let mut w = World::new();
+        stand(&mut w);
         let views = {
             let mut s = World::new();
+            stand(&mut s);
             let mut frame = crate::item_frame::ItemFrameData::new();
             frame.try_insert(ItemStack::new_block(block::STONE, 1));
             frame.rotate();

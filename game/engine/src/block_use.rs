@@ -53,6 +53,60 @@ impl UseKind {
     }
 }
 
+impl UseKind {
+    /// The kind a block view shows.
+    pub fn of_view(kind: crate::protocol::BlockViewKind) -> Self {
+        use crate::protocol::BlockViewKind as V;
+        match kind {
+            V::ItemFrame => UseKind::ItemFrame,
+            V::Campfire => UseKind::Campfire,
+            V::DryingRack => UseKind::DryingRack,
+            V::Composter => UseKind::Composter,
+            V::Hive => UseKind::Hive,
+        }
+    }
+
+    /// The kind a block entity is the state of, if one of these (a drying
+    /// rack's state lives in `World::drying_racks`, never here).
+    fn of_entity(e: &crate::world::BlockEntityData) -> Option<Self> {
+        use crate::world::BlockEntityData as E;
+        match e {
+            E::ItemFrame(_) => Some(UseKind::ItemFrame),
+            E::Campfire(_) => Some(UseKind::Campfire),
+            E::Composter(_) => Some(UseKind::Composter),
+            E::Hive(_) => Some(UseKind::Hive),
+            _ => None,
+        }
+    }
+
+    /// Does the block at `cell` in `world` stand as this kind?
+    pub fn stands_at(self, world: &World, cell: (i32, i32, i32)) -> bool {
+        UseKind::of_block(world.get_block(cell.0, cell.1, cell.2)) == Some(self)
+    }
+}
+
+/// C3b-2-fix (M4) — the block at `cell` went `old → new`: when that took it
+/// out of its kind (a composter, drying rack, campfire, item frame or hive
+/// broken or replaced), drop the state the kind left there — no spill (the
+/// world holding the real state spills it: [`take_on_break`], or a
+/// campfire's `campfire::on_block_edit`). A lit/unlit campfire flip is the
+/// same kind and keeps the fire. Run by every received block change
+/// (`World::apply_remote_block_change`), so a joiner never keeps a framed
+/// item for the next frame placed in that cell to draw.
+pub fn drop_left_state(world: &mut World, cell: (i32, i32, i32), old: BlockId, new: BlockId) {
+    let Some(kind) = UseKind::of_block(old) else { return };
+    if UseKind::of_block(new) == Some(kind) {
+        return;
+    }
+    if kind == UseKind::DryingRack {
+        if world.drying_racks.remove(&cell).is_some() {
+            world.mark_edited(cell);
+        }
+    } else if world.block_entities.get(&cell).and_then(UseKind::of_entity) == Some(kind) {
+        world.remove_block_entity(cell);
+    }
+}
+
 /// What one use did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Effect {
@@ -236,9 +290,11 @@ pub fn use_hive(hive: &mut crate::bee_hive::HiveData, held: Option<&ItemStack>) 
     }
 }
 
-/// Use the `kind` block at `cell` in `world` with `held`: its state is
-/// created if it has none yet (as the client's open always did), then its
-/// rule runs. The caller has checked the block is `kind` and applies
+/// Use the `kind` block at `cell` in `world` with `held`: its rule runs on
+/// the cell's state (a fresh one if it has none yet), and the state is kept
+/// only when the rule accepts — a refusal (`NothingToTake`, `HiveEmpty`,
+/// `NotReady`, `RackFull`, `FireFull`, …) creates, marks and streams nothing
+/// (C3b-2-fix, L7). The caller has checked the block is `kind` and applies
 /// [`Used::relit`]'s block change.
 pub fn use_block(
     world: &mut World,
@@ -247,34 +303,54 @@ pub fn use_block(
     held: Option<&ItemStack>,
     room: &dyn Fn(&ItemStack) -> bool,
 ) -> UseResult {
+    use_block_admitted(world, cell, kind, held, room, &mut |_| Ok(()))
+}
+
+/// [`use_block`], with `admit` shown what an accepted rule would do before
+/// anything is kept: an `Err` from it refuses the use with that note, and the
+/// cell's state stays exactly as it was. The server's believed-pay bound
+/// (C3b-2-fix, M2: `HostedServer::serve_block_use`) is such a check.
+pub fn use_block_admitted(
+    world: &mut World,
+    cell: (i32, i32, i32),
+    kind: UseKind,
+    held: Option<&ItemStack>,
+    room: &dyn Fn(&ItemStack) -> bool,
+    admit: &mut dyn FnMut(&Used) -> Result<(), ItemNote>,
+) -> UseResult {
+    let mut judged = |r: UseResult| r.and_then(|used| admit(&used).map(|()| used));
     match kind {
         UseKind::Composter => {
-            if world.composter_at(cell).is_none() {
-                world.insert_composter(cell, crate::workstation::WorkstationState::new());
-            }
-            let state = world.composter_at_mut(cell).expect("just ensured");
-            use_composter(state, held)
+            let mut state = world.composter_at(cell).cloned().unwrap_or_else(crate::workstation::WorkstationState::new);
+            let used = judged(use_composter(&mut state, held))?;
+            world.insert_composter(cell, state);
+            Ok(used)
         }
         UseKind::DryingRack => {
+            let mut rack = world.drying_racks.get(&cell).cloned().unwrap_or_default();
+            let used = judged(use_drying_rack(&mut rack, held, room))?;
             // A raw side table: the edit is noted by hand (Phase B2b).
             world.mark_edited(cell);
-            let rack = world.drying_racks.entry(cell).or_default();
-            use_drying_rack(rack, held, room)
+            world.drying_racks.insert(cell, rack);
+            Ok(used)
         }
-        UseKind::Campfire => use_campfire(world.campfire_at_mut_or_default(cell), held, room),
+        UseKind::Campfire => {
+            let mut fire = world.campfire_at(cell).cloned().unwrap_or_default();
+            let used = judged(use_campfire(&mut fire, held, room))?;
+            world.insert_campfire(cell, fire);
+            Ok(used)
+        }
         UseKind::ItemFrame => {
-            if world.item_frame_at(cell).is_none() {
-                world.insert_item_frame(cell, crate::item_frame::ItemFrameData::new());
-            }
-            let frame = world.item_frame_at_mut(cell).expect("just ensured");
-            use_item_frame(frame, held)
+            let mut frame = world.item_frame_at(cell).cloned().unwrap_or_else(crate::item_frame::ItemFrameData::new);
+            let used = judged(use_item_frame(&mut frame, held))?;
+            world.insert_item_frame(cell, frame);
+            Ok(used)
         }
         UseKind::Hive => {
-            if world.hive_at(cell).is_none() {
-                world.insert_hive(cell, crate::bee_hive::HiveData::default());
-            }
-            let hive = world.hive_at_mut(cell).expect("just ensured");
-            use_hive(hive, held)
+            let mut hive = world.hive_at(cell).copied().unwrap_or_default();
+            let used = judged(use_hive(&mut hive, held))?;
+            world.insert_hive(cell, hive);
+            Ok(used)
         }
     }
 }
@@ -321,8 +397,9 @@ pub fn rack_note_toast(note: ItemNote, rack: Option<&crate::drying_rack::DryingR
 /// client claims while its request is in flight (`JoinerActions::can_afford`),
 /// so one bucket can't scoop two hives on a slow link. 1 for anything the
 /// rule could take (a compostable, a green log, a fuel or raw food, anything
-/// for a frame, a bucket for a hive); 0 for shears (they wear) and an empty
-/// hand.
+/// for a frame, a bucket for a hive) or wear (shears on a hive, C3b-2-fix L5:
+/// two shears uses in flight on worn-out shears can't both pay); 0 for an
+/// empty hand.
 pub fn claim(kind: UseKind, held: Option<&Item>) -> u8 {
     let Some(item) = held else { return 0 };
     let stack = ItemStack { item: item.clone(), count: 1 };
@@ -338,19 +415,29 @@ pub fn claim(kind: UseKind, held: Option<&Item>) -> u8 {
             crate::campfire::fuel_value(m, b).is_some() || m.is_some_and(crate::campfire::is_raw_cookable)
         }
         UseKind::ItemFrame => true,
-        UseKind::Hive => matches!(item, Item::Material(MaterialId::Bucket)),
+        UseKind::Hive => {
+            matches!(item, Item::Material(MaterialId::Bucket))
+                || matches!(item, Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Shears)
+        }
     };
     u8::from(takes)
 }
 
 /// Clear what a broken composter, drying rack or item frame at `cell` held
 /// from `world` and return it to spill: an item frame's framed item (its
-/// "take"), a rack's logs (as green logs, `drying_rack::cleanup_drying_rack`)
-/// and a composter's input and output. A hive holds no items; a campfire's
-/// cooking is `campfire::on_block_edit`'s. Run by the server for a joiner's
-/// accepted break (`HostedServer`), from the real state, so a joined client
-/// spills nothing of its own view of it.
-pub fn take_on_break(world: &mut World, cell: (i32, i32, i32), old: BlockId) -> Vec<ItemStack> {
+/// "take"), a rack's logs (as green logs, `drying_rack::cleanup_drying_rack`;
+/// none in `creative`, single-player's creative rule) and a composter's input
+/// and output. A hive holds no items; a campfire's cooking is
+/// `campfire::on_block_edit`'s. The state always goes, so the next such block
+/// placed in that cell starts empty.
+///
+/// C3b-2-fix (L6) — one break rule for every seat: the server runs it for a
+/// joiner's accepted break (`HostedServer::spill_used_block`, ground items at
+/// the block), single-player and a host's own seats from their break arms
+/// (the frame's item and a composter's contents at the block, a rack's logs
+/// into the breaker's inventory), and a joined client on its own copy, which
+/// spills nothing of its view (the server spills the real one).
+pub fn take_on_break(world: &mut World, cell: (i32, i32, i32), old: BlockId, creative: bool) -> Vec<ItemStack> {
     let mut spill = Vec::new();
     match UseKind::of_block(old) {
         Some(UseKind::ItemFrame) => {
@@ -360,7 +447,10 @@ pub fn take_on_break(world: &mut World, cell: (i32, i32, i32), old: BlockId) -> 
             world.remove_block_entity(cell);
         }
         Some(UseKind::DryingRack) => {
-            spill.extend(crate::drying_rack::cleanup_drying_rack(world, cell.0, cell.1, cell.2));
+            let logs = crate::drying_rack::cleanup_drying_rack(world, cell.0, cell.1, cell.2);
+            if !creative {
+                spill.extend(logs);
+            }
         }
         Some(UseKind::Composter) => {
             if let Some(c) = world.composter_at_mut(cell) {
@@ -516,20 +606,75 @@ mod tests {
 
     // ── Dispatch, claims, breaks ──
 
+    /// C3b-2-fix (L7) — an accepted use creates the state it needs (as the
+    /// client's open always did); a refused one leaves nothing behind, so
+    /// nothing is marked edited or streamed to joiners as a view.
     #[test]
-    fn use_block_creates_the_state_it_needs() {
+    fn a_use_keeps_the_state_only_when_its_rule_accepts() {
         let mut w = World::new();
+        w.track_edited_columns();
         let cell = (4, 70, 4);
         assert_eq!(use_block(&mut w, cell, UseKind::Composter, None, &room), Err(ItemNote::NothingToTake));
-        assert!(w.composter_at(cell).is_some(), "created, as the client's open always did");
+        assert!(w.composter_at(cell).is_none(), "NothingToTake: no composter left behind");
+        assert_eq!(use_block(&mut w, (7, 70, 4), UseKind::Hive, None, &room), Err(ItemNote::HiveEmpty));
+        assert!(w.hive_at((7, 70, 4)).is_none(), "HiveEmpty: no hive left behind");
+        assert_eq!(use_block(&mut w, (5, 70, 4), UseKind::DryingRack, None, &room), Err(ItemNote::NotReady));
+        assert!(!w.drying_racks.contains_key(&(5, 70, 4)), "NotReady: no rack left behind");
+        assert_eq!(use_block(&mut w, (8, 70, 4), UseKind::Campfire, None, &room), Err(ItemNote::NothingToTake));
+        assert!(w.campfire_at((8, 70, 4)).is_none(), "nothing cooked: no fire left behind");
+        assert_eq!(use_block(&mut w, (6, 70, 4), UseKind::ItemFrame, None, &room), Err(ItemNote::NothingToTake));
+        assert!(w.item_frame_at((6, 70, 4)).is_none(), "an empty hand on no frame: nothing left behind");
+        assert!(w.take_edited_columns().is_empty(), "no refusal marked an edit");
+        // Accepted: created and kept.
         assert!(use_block(&mut w, (5, 70, 4), UseKind::DryingRack, Some(&mat(MaterialId::GreenLog)), &room).is_ok());
         assert_eq!(w.drying_racks[&(5, 70, 4)].occupied_slots(), 1);
         assert!(use_block(&mut w, (6, 70, 4), UseKind::ItemFrame, Some(&mat(MaterialId::Stick)), &room).is_ok());
         assert!(w.item_frame_at((6, 70, 4)).is_some_and(|f| !f.is_empty()));
-        assert_eq!(use_block(&mut w, (7, 70, 4), UseKind::Hive, None, &room), Err(ItemNote::HiveEmpty));
-        assert!(w.hive_at((7, 70, 4)).is_some());
         assert!(use_block(&mut w, (8, 70, 4), UseKind::Campfire, Some(&mat(MaterialId::Coal)), &room).is_ok());
         assert_eq!(w.campfire_at((8, 70, 4)).unwrap().fuel_ticks, 240 * 20);
+        assert!(use_block(&mut w, cell, UseKind::Composter, Some(&mat(MaterialId::Wheat)), &room).is_ok());
+        assert_eq!(w.composter_at(cell).and_then(|c| c.input.as_ref()).map(|s| s.count), Some(1));
+        // A full rack's refusal leaves the rack as it was.
+        for _ in 1..RACK_SLOTS {
+            use_block(&mut w, (5, 70, 4), UseKind::DryingRack, Some(&mat(MaterialId::GreenLog)), &room).unwrap();
+        }
+        let before = w.drying_racks[&(5, 70, 4)].clone();
+        assert_eq!(
+            use_block(&mut w, (5, 70, 4), UseKind::DryingRack, Some(&mat(MaterialId::GreenLog)), &room),
+            Err(ItemNote::RackFull)
+        );
+        assert_eq!(w.drying_racks[&(5, 70, 4)].slots, before.slots);
+    }
+
+    /// C3b-2-fix (M2) — what `admit` refuses changes nothing: the frame
+    /// stays empty, and the note is the admit's.
+    #[test]
+    fn an_admit_check_sees_the_pay_and_its_refusal_changes_nothing() {
+        let mut w = World::new();
+        let frame = (1, 70, 1);
+        w.insert_item_frame(frame, ItemFrameData::new());
+        let mut seen = Vec::new();
+        let r = use_block_admitted(
+            &mut w,
+            frame,
+            UseKind::ItemFrame,
+            Some(&ItemStack::new_block(block::DIAMOND_BLOCK, 1)),
+            &room,
+            &mut |u| {
+                seen.push(u.pay);
+                Err(ItemNote::NothingToTake)
+            },
+        );
+        assert_eq!(r, Err(ItemNote::NothingToTake));
+        assert_eq!(seen, vec![1], "shown the pay before anything was kept");
+        assert!(w.item_frame_at(frame).unwrap().is_empty(), "the frame took nothing");
+        // A rule refusal never reaches `admit`.
+        let r = use_block_admitted(&mut w, (2, 70, 1), UseKind::Hive, None, &room, &mut |_| panic!("not asked"));
+        assert_eq!(r, Err(ItemNote::HiveEmpty));
+        // Admitted: kept.
+        let r = use_block_admitted(&mut w, frame, UseKind::ItemFrame, Some(&mat(MaterialId::Stick)), &room, &mut |_| Ok(()));
+        assert!(r.is_ok());
+        assert!(!w.item_frame_at(frame).unwrap().is_empty());
     }
 
     #[test]
@@ -545,7 +690,12 @@ mod tests {
     fn a_claim_covers_what_the_rule_could_take() {
         let bucket = Item::Material(MaterialId::Bucket);
         assert_eq!(claim(UseKind::Hive, Some(&bucket)), 1);
-        assert_eq!(claim(UseKind::Hive, Some(&shears().item)), 0, "shears wear, they aren't taken");
+        assert_eq!(
+            claim(UseKind::Hive, Some(&shears().item)),
+            1,
+            "shears wear: claimed, so two uses in flight on worn-out shears can't both pay (C3b-2-fix L5)"
+        );
+        assert_eq!(claim(UseKind::Hive, Some(&Item::Material(MaterialId::Stick))), 0, "nothing the hive takes");
         assert_eq!(claim(UseKind::Campfire, Some(&Item::Material(MaterialId::RawBeef))), 1);
         assert_eq!(claim(UseKind::Campfire, Some(&Item::Block(block::OAK_LOG))), 1);
         assert_eq!(claim(UseKind::Campfire, None), 0);
@@ -561,15 +711,29 @@ mod tests {
         let frame = (1, 70, 1);
         w.set_block(frame.0, frame.1, frame.2, block::ITEM_FRAME);
         use_block(&mut w, frame, UseKind::ItemFrame, Some(&ItemStack::new_block(block::STONE, 1)), &room).unwrap();
-        assert_eq!(take_on_break(&mut w, frame, block::ITEM_FRAME), vec![ItemStack::new_block(block::STONE, 1)]);
+        assert_eq!(take_on_break(&mut w, frame, block::ITEM_FRAME, false), vec![ItemStack::new_block(block::STONE, 1)]);
         assert!(w.item_frame_at(frame).is_none(), "the frame's state is gone");
         let rack = (2, 70, 1);
         use_block(&mut w, rack, UseKind::DryingRack, Some(&mat(MaterialId::GreenLog)), &room).unwrap();
-        assert_eq!(take_on_break(&mut w, rack, block::DRYING_RACK).len(), 1);
+        assert_eq!(take_on_break(&mut w, rack, block::DRYING_RACK, false).len(), 1);
         assert!(!w.drying_racks.contains_key(&rack));
         let bin = (3, 70, 1);
         use_block(&mut w, bin, UseKind::Composter, Some(&mat(MaterialId::Wheat)), &room).unwrap();
-        assert_eq!(take_on_break(&mut w, bin, block::COMPOSTER), vec![ItemStack::new_material(MaterialId::Wheat, 1)]);
-        assert!(take_on_break(&mut w, (9, 9, 9), block::STONE).is_empty());
+        assert_eq!(take_on_break(&mut w, bin, block::COMPOSTER, false), vec![ItemStack::new_material(MaterialId::Wheat, 1)]);
+        assert!(w.composter_at(bin).is_none(), "the composter's state is gone");
+        assert!(take_on_break(&mut w, (9, 9, 9), block::STONE, false).is_empty());
+        // C3b-2-fix (L6) — creative: a rack's logs are discarded (single-
+        // player's rule), a frame's item and a composter's contents still
+        // spill, and every state goes.
+        use_block(&mut w, rack, UseKind::DryingRack, Some(&mat(MaterialId::GreenLog)), &room).unwrap();
+        assert!(take_on_break(&mut w, rack, block::DRYING_RACK, true).is_empty(), "creative discards rack logs");
+        assert!(!w.drying_racks.contains_key(&rack));
+        use_block(&mut w, bin, UseKind::Composter, Some(&mat(MaterialId::Wheat)), &room).unwrap();
+        w.composter_at_mut(bin).unwrap().output = Some(ItemStack::new_material(MaterialId::Compost, 2));
+        assert_eq!(take_on_break(&mut w, bin, block::COMPOSTER, true).len(), 2, "input and output, in every mode");
+        let hive = (4, 70, 1);
+        w.insert_hive(hive, HiveData { bees_inside: 1, honey_level: 2 });
+        assert!(take_on_break(&mut w, hive, block::BEE_HIVE, true).is_empty());
+        assert!(w.hive_at(hive).is_none(), "a hive's state goes too: the next hive here starts empty");
     }
 }

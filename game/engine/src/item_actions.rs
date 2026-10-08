@@ -108,6 +108,9 @@ pub enum ItemNote {
     NotThatBlock = 11,
     /// C3b-2 — a block use did nothing: nothing to collect, nothing to put
     /// in, or an item it doesn't take. Silent, as single-player's click is.
+    /// C3b-2-fix (M2) — also a use whose take the server's copy of the
+    /// joiner's window can't cover, past the believed bound
+    /// (`window_ops::believe_pay`): the server takes nothing it can't believe.
     NothingToTake = 12,
     /// C3b-2 — a log for a drying rack with every slot taken.
     RackFull = 13,

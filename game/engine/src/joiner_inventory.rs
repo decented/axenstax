@@ -275,6 +275,14 @@ pub struct PossessionTally {
     /// deposits (BRIDGE until C3d; a locally fished item, unmirrored until
     /// C3c, is the honest case).
     pub container_believed: u32,
+    /// C3b-2-fix (M2) — units an accepted block use (`ItemAction::UseBlock`)
+    /// took that the server's copy of the joiner's window didn't hold:
+    /// believed within the joiner's bound (`window_ops::believe_pay`; BRIDGE
+    /// until C3d).
+    pub use_believed: u32,
+    /// C3b-2-fix (M2) — block uses refused because their believed take went
+    /// past the joiner's bound.
+    pub use_refused: u32,
     /// C3b-fix-c (B-M1) — units a container op's correction took short from
     /// the server's copy of the window: the phantom had already gone some
     /// other way (placed, dropped, eaten, crafted) before the correction
@@ -345,7 +353,14 @@ impl PossessionTally {
     pub fn summary(&self, label: &str) -> Option<String> {
         let window = [self.window_ops, self.window_noop, self.window_refused, self.window_mismatch];
         let c2b = [self.drops, self.grant_overflow];
-        let c3b = [self.container_refused, self.container_corrected, self.container_believed, self.correction_short];
+        let c3b = [
+            self.container_refused,
+            self.container_corrected,
+            self.container_believed,
+            self.correction_short,
+            self.use_believed,
+            self.use_refused,
+        ];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
             .chain(&window)
@@ -377,8 +392,14 @@ impl PossessionTally {
         if c3b.iter().any(|&n| n > 0) {
             line.push_str(&format!(
                 "; {} container op(s) refused, {} container correction(s) sent, {} unit(s) deposited believed, \
-                 {} unit(s) a container correction took short",
-                self.container_refused, self.container_corrected, self.container_believed, self.correction_short
+                 {} unit(s) a container correction took short; {} unit(s) a block use took believed, \
+                 {} block use(s) refused past the believed bound",
+                self.container_refused,
+                self.container_corrected,
+                self.container_believed,
+                self.correction_short,
+                self.use_believed,
+                self.use_refused
             ));
         }
         if c2b.iter().any(|&n| n > 0) {
@@ -523,8 +544,11 @@ mod tests {
         t.drops = 5;
         t.grant_overflow = 7;
         t.correction_short = 4;
+        t.use_believed = 6;
+        t.use_refused = 2;
         let line = t.summary("Crafter").unwrap();
         assert!(line.contains("4 unit(s) a container correction took short"), "{line}");
+        assert!(line.contains("6 unit(s) a block use took believed, 2 block use(s) refused past the believed bound"), "{line}");
         assert!(
             line.contains(
                 "12 window op(s) mirrored, 3 no-op(s) both rules refused, 2 refused by the server alone, \

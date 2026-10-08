@@ -2134,20 +2134,54 @@ impl HostedServer {
     /// it fuelled relights ([`Self::relight_campfire`]). Refused: nothing
     /// changes; the note says why. Every joiner sees the block's new state
     /// through its view (`block_views`, sent from [`Self::broadcast_state`]).
+    ///
+    /// C3b-2-fix (M2) — the take is judged before the rule's change is kept
+    /// (`block_use::use_block_admitted`): what the server's copy of the
+    /// joiner's window can't cover is believed within the joiner's bound
+    /// (`window_ops::believe_pay`, the believed-deposit bucket), and past it
+    /// the use is refused (`NothingToTake`: the server takes nothing it can't
+    /// believe; silent, as the client's own "takes nothing" is). A creative
+    /// joiner is unbounded, as its container deposits are. (M3) An accepted
+    /// use on a lent world is remeshed by the host's client
+    /// (`lent_edit_cells`: a frame's item is drawn).
     fn serve_block_use(&mut self, i: usize, seq: u32, cell: [i32; 3], hotbar_slot: u8, held: Option<crate::item::Item>) {
         use crate::item_actions::ItemNote;
         let pos = (cell[0], cell[1], cell[2]);
         let stack = held.clone().map(|item| crate::item::ItemStack { item, count: 1 });
+        let creative = self.server.play_mode.is_creative();
+        let now = self.server.tick_counter;
+        let (mut believed, mut over_bound) = (0u32, 0u32);
         let used = self.judge_block_use(i, cell).and_then(|kind| {
+            let server = &mut self.server;
+            let Some(sp) = server.players.get_mut(i) else { return Err(ItemNote::NotNow) };
+            let mut admit = |u: &crate::block_use::Used| -> Result<(), ItemNote> {
+                let Some(item) = held.as_ref().filter(|_| u.pay > 0 && !creative) else { return Ok(()) };
+                match crate::window_ops::believe_pay(sp, item, u32::from(u.pay), now) {
+                    Ok(n) => {
+                        believed = n;
+                        Ok(())
+                    }
+                    Err(n) => {
+                        over_bound = n;
+                        Err(ItemNote::NothingToTake)
+                    }
+                }
+            };
             // BRIDGE: the joiner's room is not checked — replace when C3d makes
             // the server window the truth (then a gain that doesn't fit the
             // server's window is refused, as single-player leaves it in place).
-            crate::block_use::use_block(&mut self.server.world, pos, kind, stack.as_ref(), &|_| true)
+            crate::block_use::use_block_admitted(&mut server.world, pos, kind, stack.as_ref(), &|_| true, &mut admit)
         });
+        if believed > 0 || over_bound > 0 {
+            self.note_believed_use(i, believed, over_bound, now);
+        }
         let (used, note) = match used {
             Ok(used) => (Some(used), ItemNote::None),
             Err(note) => (None, note),
         };
+        if used.is_some() && self.lends_host_world() {
+            self.lent_edit_cells.push(pos);
+        }
         if used.as_ref().is_some_and(|u| u.relit) {
             self.relight_campfire(pos);
         }
@@ -2159,8 +2193,11 @@ impl HostedServer {
                 .players
                 .get(i)
                 .map_or(0, |sp| if hotbar_slot < 9 { usize::from(hotbar_slot) } else { sp.hotbar_slot });
-            if pay > 0 {
-                window_event = self.shadow_take_owed(i, slot, held, pay, "on a block");
+            // M2 — a believed unit is tallied, not owed: the server's copy
+            // never held it (as a believed container deposit's).
+            let owed = pay.saturating_sub(u8::try_from(believed).unwrap_or(u8::MAX));
+            if owed > 0 {
+                window_event = self.shadow_take_owed(i, slot, held, owed, "on a block");
             } else if wear
                 && let crate::item::Item::Tool(tool) = held
                 && let Some(sp) = self.server.players.get_mut(i)
@@ -2185,6 +2222,28 @@ impl HostedServer {
         if let Some(used) = used {
             self.grant_to_joiner(i, used.gain);
         }
+    }
+
+    /// C3b-2-fix (M2) — joiner `i`'s block use took `believed` units its
+    /// server copy didn't hold (within the bound), or was refused for
+    /// `over_bound` units past it: tallied (`use_believed`, `use_refused`)
+    /// and logged, rate-limited, as a believed container deposit is.
+    fn note_believed_use(&mut self, i: usize, believed: u32, over_bound: u32, now: u64) {
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        sp.possession.use_believed = sp.possession.use_believed.saturating_add(believed);
+        if over_bound > 0 {
+            sp.possession.use_refused = sp.possession.use_refused.saturating_add(1);
+        }
+        let due = sp.possession.note_mismatch(now);
+        let verdict = if over_bound > 0 { "past the believed bound — refused" } else { "believed" };
+        log::log!(
+            crate::joiner_inventory::mismatch_log_level(due),
+            "possession check (log-only): {} used a block with {} item(s) the server's copy of their inventory \
+             didn't hold — {verdict}{}",
+            sp.display_name,
+            believed.max(over_bound),
+            held_back_note(due),
+        );
     }
 
     /// C3b-2 — may joiner `i` use the block at `cell`, and what is it? In the
@@ -4042,13 +4101,16 @@ impl HostedServer {
     /// (`block_use::take_on_break`), where everyone sees it; the joined
     /// client spills nothing of its own view of it. Before C3b-2 nothing
     /// spilled here and the server's state stayed behind the broken block.
+    /// C3b-2-fix (L6) — the rule every seat runs: a creative world discards a
+    /// rack's logs, as single-player's creative break always has.
     fn spill_used_block(&mut self, cell: (i32, i32, i32), old: crate::block::BlockId, new: crate::block::BlockId) {
         let kind = crate::block_use::UseKind::of_block(old);
         if kind.is_none() || kind == crate::block_use::UseKind::of_block(new) {
             return;
         }
         let at = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.5, cell.2 as f32 + 0.5);
-        for (k, stack) in crate::block_use::take_on_break(&mut self.server.world, cell, old).into_iter().enumerate() {
+        let creative = self.server.play_mode.is_creative();
+        for (k, stack) in crate::block_use::take_on_break(&mut self.server.world, cell, old, creative).into_iter().enumerate() {
             crate::entity::spawn_item(&mut self.server.ecs, at, stack, k as u32 * 7349);
         }
     }
@@ -4677,9 +4739,14 @@ impl HostedServer {
             // this tick's pushes, so a view lands after the snapshot it
             // updates, and once more after each new push of its chunk. A
             // host's own seat shares the world and is sent none.
+            // C3b-2-fix (M4) — a cell whose block change goes out to this
+            // joiner now (a break, a re-placement, a refused edit's send-back)
+            // has its view, as it stands, sent again right after the change:
+            // the change may have cleared the joiner's copy of that state.
             if i >= self.num_local_players
                 && let Some(sp) = self.server.players.get_mut(i)
             {
+                sp.block_views.forget(changes.iter().map(|b| (b.x, b.y, b.z)));
                 let push = &self.chunk_pushes[i];
                 let changed = sp.block_views.take_changed(&views, |c| if filters { push.push_number(c) } else { Some(0) });
                 outbox.push_views(&changed);
