@@ -36,7 +36,7 @@
 - **v75** (2026-10-08, C3a-2a): **The server mirrors a joiner's inventory window, click for click.** Appended: `PacketType::WindowOp = 64` (C→S, `WindowOpPacket { op_seq: u32, op: WireWindowOp, digest: u32 }`; `WireWindowOp` = `Click(window::WindowClick)` | `OpenPlayer` | `OpenTable { cell: [i32; 3] }` | `SetAutoRefill { on: bool }`, append only), never answered. `window::WindowClick` (Slot = 0 … Close = 10), `window::WindowSlot` and `crafting::CraftSlot` become wire data, append only; a drag's slot list over 45 doesn't decode. The client sends one op for every window transition it applies, with its window digest after it; the server applies the same `window::apply` to its copy of the joiner's window (36 slots, armour, cursor, craft grid, station) behind the client's edits, at most `MAX_WINDOW_OPS_PER_TICK` = 8 a tick (the rest wait), and tallies digest mismatches (log-only). `ItemAction::Craft` (= 2) is unused — the craft is the result click — and a v75 server ignores and tallies it. The server's owed payment searches its 36 slots, then its grid, then its cursor (the client's search); a server-landed hit wears its copy of the armour; an accepted swing wears the weapon where it now is (`joiner_actions::where_now`, shared). See §4.2g.
 - **v76** (2026-10-08, C3a-fix-1): **A joiner's window stays in lockstep: ordered server window events, one ordered send path, per-edit hands.** The server numbers every change it makes to a joiner's window — a grant (a pickup's too), an accepted request's owed take (an eat, a D2b interaction), an armour-wear hit, a swing's weapon wear — as a window event (1, 2, 3… per connection), queues it and applies it to its copy only once the client reports it applied it too, so both sides apply it at the same point among the client's ops and edits (the content is the server's; only the order follows the client; no replay). Appended, in this order: `InventoryGrantPacket`, `InteractOutcomePacket`, `ItemActionOutcomePacket` and `PlayerEventPacket` gain trailing `window_event: u32` (0 = changes nothing; on `PlayerEvent` only `ArmourWorn` sets it); `InputPacket` gains trailing `events_applied: u32` then `edit_hands: Vec<(u8 slot, u8 held_kind, u16 held_id)>` (parallel to `block_changes`); `WindowOpPacket`, `ItemActionPacket` and `EntityInteractPacket` gain trailing `events_applied: u32`; `EntityAttackPacket` gains trailing `hotbar_slot: u8` then `events_applied: u32`; `ItemAction` appends `GrantUnfit { event: u32, count: u8 }` (= 4, fire-and-forget). `window::digest` now covers the session locks and the station. The client applies a grant's unfit part nowhere: it reports it (`GrantUnfit`) and the server spawns it as a real ground item at the joiner's feet. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `joiner_action_packets_round_trip`, `item_action_packets_round_trip`, `window_op_packets_round_trip`, `respawn_request_and_life_events_round_trip`, `inventory_grant_roundtrip`). See §4.2g.
 - **v77** (2026-10-08, C3b-1): **Shared chests, dispensers and furnaces for joiners.** `WireWindowOp` appends `OpenContainer { cell: [i32; 3] }` (= 4) and `Container(container_window::ContainerClick)` (= 5; `ContainerClick` = `Withdraw { slot, all }` 0, `Deposit { slot, all }` 1, `Sort` 2, `DumpMatching` 3, `Restock` 4, `TakeAll` 5, `Furnace { kind: furnace::SlotKind, mode: furnace::ClickMode, hotbar }` 6, append only; `SlotKind` Input/Fuel/Output = 0/1/2, `ClickMode` Single/Stack = 0/1). `WindowOpPacket` appends, after v76's `events_applied`, `touched: Vec<WireWindowSlot>` (≤ 122: the slots a container op changed on the client) then `claims: Vec<(WireWindowSlot, WireSlot)>` (≤ 122: the client's values before a container op of the player slots it acts on); both empty for every other op. Appended S→C: `ContainerOpened = 65` (`{ cell, kind: container_window::ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal> }`; `ContainerKind` = `Chest { tier }` 0, `Dispenser` 1, `Dropper` 2, `Furnace` 3; `OpenRefusal` = `OutOfReach` 0, `Protected` 1, `NotAContainer` 2, `NotInWorld` 3) and `WindowSlotSet = 66` (`{ op_seq_applied: u32, reason: u8 (Correction 0 | Changed 1), sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32 }`; `WireWindowSlot` = `Inv(u8)` 0, `Armour(u8)` 1, `Cursor` 2, `Grid(u8, u8)` 3, `Container(u8)` 4; `window_event` ≠ 0 when the set changes player slots: a numbered window event, as v76's carriers). `WireSlot` = `Option<WireStack { item_kind, item_id, count, full_item: WireItem }>`; `item_kind::PLAN = 4` is reserved for a Plan placeholder. A container op's window digest covers the container. A player-slot correction is the op re-run over the client's claimed slots and the real container, never the server's drifted copy. Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g.
-- **v78** (2026-10-08, C3b-fix-a): **Container corrections that can't duplicate or lose an item.** Every container view the server sends a joiner is a numbered window event: `ContainerOpenedPacket` appends `window_event: u32` (0 for a refusal), and every `WindowSlotSetPacket`, a push too, is numbered. A set names container slots only; a correction's player part is an item delta, appended after `window_event`: `take: Vec<(u8 hint, WireStack)>` (≤ 122: take `count` of the item, from inventory slot `hint` first, then wherever it is) and `give: Vec<WireStack>` (≤ 122: each added; the part that doesn't fit comes back as `ItemAction::GrantUnfit` naming the event, one report per give, in order). `WindowOpPacket` appends, after `claims`, `client_ok: bool` (the client's own `ClickResult::ok()`). Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g "Shared containers".
+- **v78** (2026-10-08, C3b-fix-a): **Container corrections that can't duplicate or lose an item.** Every container view the server sends a joiner is a numbered window event: `ContainerOpenedPacket` appends `window_event: u32` (0 for a refusal), and every `WindowSlotSetPacket`, a push too, is numbered. A set names container slots only; a correction's player part is an item delta, appended after `window_event`: `take: Vec<(u8 hint, WireStack)>` (≤ 122: take `count` of the item, from inventory slot `hint` first, then wherever it is) and `give: Vec<WireStack>` (≤ 122: each added; the part that doesn't fit comes back as `ItemAction::GrantUnfit` naming the event, one report per give, in order). `WindowOpPacket` appends, after `claims`, `client_ok: bool` (the client's own `ClickResult::ok()`). Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g "Shared containers". C3b-fix-c (no wire change and no protocol bump: it landed on v79, before any v78 or v79 build shipped): a correction's take also searches the armour slots and every owed take prefers an exact match (durability included) in each place it looks — a LOCKSTEP rule client and server share (`joiner_actions::take_owed_search`), so a build from before it must not meet one from after it; the "can't duplicate or lose" invariant holds for container ops, not for a phantom spent another way inside the round trip (§4.2g).
 - **v79** (2026-10-08, C3b-2): **Composters, drying racks, campfires, item frames and bee hives for joiners.** `ItemAction` appends `UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; `Eat`'s held claim): a right-click on one of the five blocks, applied by the server to its REAL block entity by the shared rule (`block_use`) and answered with an `ItemActionOutcome`, which appends `wear_held: bool` after `window_event` (shears on a hive wear instead of being taken; the wear is the outcome's window event). `ItemNote` appends codes 9–18 (`OutOfReach`, `NotHere`, `NotThatBlock`, `NothingToTake`, `RackFull`, `NotReady`, `HiveEmpty`, `HiveNeedsTool`, `FireFull`, `InventoryFull` — the last single-player only). `StateUpdatePacket` appends `block_views: Vec<BlockEntityView { cell: [i32; 3], kind: BlockViewKind, view: BlockView }>` after `own_hunger` (`BlockViewKind` and `BlockView` append only: ItemFrame 0, Campfire 1, DryingRack 2, Composter 3, Hive 4): what joiners are shown of those blocks, reliable and in line with the chunk pushes, sent whenever a view changes (whoever changed it) and after each push of its chunk. No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `block_entity_views_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Block uses".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
@@ -1655,7 +1655,11 @@ spawns only what came back: the grant's overflow (never landed; the pickup
 took that item out of the world) plus what the copy gave up
 (`take_owed_window`), `min(n, (count - landed) + taken)`; a gap (units that
 moved on, say into a chest) spawns nothing and is tallied `unfit_unbacked`,
-so a report cannot make items. The stack is thrown as the joiner's own
+so a report cannot make items. Since C3b-fix-c (A-L4) the take back is the
+one owed search with no hint, an exact match first
+(`joiner_actions::take_owed_search`), and the stack spawned is the instance
+it took (a worn tool comes back worn, never repaired); only the overflow,
+which never landed, is the grant's own instance. The stack is thrown as the joiner's own
 (`window_events::spawn_unfit`, `dropper = Some(joiner)`, the Q-drop pickup
 delay), so it doesn't take it straight back where the server's copy has room
 the client's lacks. That slows the honest-drift loop (pick up, refuse, throw
@@ -2090,7 +2094,8 @@ the block-edit envelope with C3a-fix-2's server slack
 mode and plot rules let it touch the cell (`remote_may_touch`; `NotHere`).
 Then the rule runs on the real entity. **Accepted:** the hand's cost is the
 `ItemActionOutcome`'s window event (§4.2g) — the owed take of one
-(`shadow_take_owed`, `WindowEvent::Take`, `consume_held` = 1), or shears' wear
+(`shadow_take_owed`, `WindowEvent::Take`, `consume_held` = 1; the one owed
+search both sides share, an exact match first since C3b-fix-c), or shears' wear
 (`WindowEvent::WearWeapon`, as an accepted swing's; `wear_held` = true) — and
 the gain rides `InventoryGrant`s queued after it, so both copies of the window
 apply them in the client's order. A relit campfire's block goes
@@ -2102,7 +2107,9 @@ window event. **The joiner's room is not checked** (BRIDGE until C3d, as every
 grant's): single-player leaves a seasoned log on the rack and cooked food on
 the fire when they don't fit (`ItemNote::InventoryFull`, single-player only);
 a joiner is given the whole gain, and what its client can't hold comes back
-to the world as a ground item at its feet (`ItemAction::GrantUnfit`).
+to the world as a ground item at its feet (`ItemAction::GrantUnfit`; only
+what never landed or what the server's copy gives up, taken exact-first and
+spawned as the instance taken, `window_events::return_unfit`, §4.2g).
 
 *Client* (`GameState::send_block_use`). Claimed like an eat:
 `Asked::UseBlock { cell, kind, claim }` with `claim = block_use::claim(kind,
@@ -2348,7 +2355,9 @@ within a few ticks.
 **Shared rules beside the click.** The owed payment of an accepted
 interaction or eat is `joiner_actions::take_owed_window` on both sides (36
 slots — the request's slot first —, then the grid row-major, then the
-cursor). A server-landed hit wears the server's copy of the armour by
+cursor; since C3b-fix-c an exact match, durability included, wins over one
+of its kind in each place, `joiner_actions::take_owed_search`, the one search
+every owed take shares). A server-landed hit wears the server's copy of the armour by
 `window::wear_armour` for the hits it drains from `armour_wear_hits` into one
 `ArmourWorn`; the client wears its own with the same function on receipt; a
 piece that breaks unequips on both. `InputPacket.armour_points` still sets
@@ -2457,9 +2466,17 @@ furnace, never a private copy. Every container click is mirrored with the
 shared rules; when the real container changes the outcome (someone else got
 there first, or the server refused), the server corrects the client by item
 and sets just the container slots involved; others' changes to an open
-container reach the joiner live. **Invariant (C3b-fix-a):** two players racing
-for one chest can never duplicate or lose a real item, whatever either does
-inside a correction's round trip.
+container reach the joiner live. **Invariant (C3b-fix-a; scope corrected by
+C3b-fix-c):** container ops never duplicate or lose a real item — two players
+racing for one chest end with exactly the items it held, whatever container
+ops either makes inside a correction's round trip. It does NOT cover a
+phantom spent another way before its correction lands (placed, Q-dropped,
+eaten, crafted, used, trashed): the server's copy holds the phantom until the
+client applies the correction, and those spends are judged against that copy,
+so they make a real item from it. The correction's take then falls short; the
+shortfall is owed and tallied `correction_short` (C3b-fix-c, B-M1), and it
+closes at C3d, which judges every spend against the effective window (see
+Known limits below).
 
 **One rule.** `container_window::apply_container(view, click, ctx)` is one
 transition over a `window::WindowMut` whose `container` hook holds the open
@@ -2558,8 +2575,7 @@ piece above one; `container_window::claims_fit_stacks`). Otherwise:
   (below) and the REAL container — first on a copy, so a deposit past the
   believed bound can be refused whole; then the real container takes R's
   result. **Believed deposits:** units R put in beyond what the server's copy
-  of the window holds of that item (its 36 slots, grid, cursor, armour; a
-  tool or armour piece by kind) are believed — the container receives them,
+  of the window holds of that item are believed — the container receives them,
   and `PossessionTally::container_believed` counts the units (logged at the
   possession-check rate). BRIDGE until C3d, which refuses and corrects from
   the server's window: the same fabrication class as a claimed Q-drop. The
@@ -2568,7 +2584,18 @@ piece above one; `container_window::claims_fit_stacks`). Otherwise:
   (`window_ops::BelievedBucket`: `BELIEVED_BUCKET_UNITS` = 64, refilled at
   `BELIEVED_REFILL_PER_SECOND` = 4); an op whose believed units it can't pay
   is refused (all or nothing) and corrected. Creative is unbounded (items are
-  free there).
+  free there). **What counts as held (C3b-fix-c, B-M3):** only what the own
+  take can pay — exactly the correction take's places (the 36 slots, the
+  grid, the cursor and the armour slots), in the window as it will be once
+  its waiting events land (`window_events::effective_window`: a waiting
+  correction's take is already off it, so a phantom never counts as held),
+  and by exact identity: a tool or armour piece counts only at its own
+  durability. A claimed piece unlike any the copy holds (a fresh pickaxe
+  while it holds a worn one, a chestplate of another durability than the one
+  it wears) is believed — bounded and tallied — never paid by taking a
+  different piece (which repaired a tool) or by a take that can't reach it
+  (which minted armour silently). One consequence: an honest deposit of a
+  tool whose durability drifted from the server's copy is believed too.
 - **The server's own copy of the window (own)** applies the op as usual over
   a copy of the view the client predicted on: in lockstep exactly the
   client's prediction. Its digest — taken with the container as the client's
@@ -2583,7 +2610,12 @@ client — its client delta's takes net of its gives, item by item
 (`ClaimedWindow::debit`: the owed search's order over CLAIMED slots only)
 before R runs. An item the server already refused is never believed again:
 a loser's phantom stack, deposited back inside the round trip, moves nothing
-into the real chest.
+into the real chest. A correction the safety valve applied without the
+client's word (`EVENT_ACK_TIMEOUT_TICKS`, tallied `forced`) stays in the
+ledger until the client's `events_applied` passes it
+(`WindowEvents::forced_corrections`, C3b-fix-c B-L6): its client still holds
+the phantom, so an op made before it applied the correction, read after the
+valve, is debited, not believed.
 
 **Corrections, by item (C3b-fix-a, C-H1).** A correction is
 `WindowSlotSet { reason: Correction, op_seq_applied: the op's seq }`, a
@@ -2597,17 +2629,41 @@ during inbound processing (ahead of the tick's grants) and counted as
   ("take N of X", from the slot where its prediction put X first) and `give`
   ("give N of X"). The client resolves it on its window as it is when the
   correction lands (`CorrectionDebt::apply`: takes by
-  `joiner_actions::take_owed_window`, gives by `Inventory::add_item`), so an
-  op it made meanwhile keeps its effect. A take that finds nothing (the item
+  `joiner_actions::take_correction`, gives by `Inventory::add_item`), so an
+  op it made meanwhile keeps its effect. **The take's search (C3b-fix-c, a
+  LOCKSTEP rule: both sides call the one `joiner_actions::take_owed_search`):**
+  the hint slot (when it holds the item by kind), then the 36 slots, then the
+  grid, then the cursor, then the armour slots; in each place an exact match
+  (`==`, durability included) wins over one of its kind. So a phantom the
+  player equipped inside the round trip is taken off (B-M1 scenario 2), and a
+  phantom tool that left its hint slot is taken before the player's own tool
+  of its kind (B-L1); the hint the server sends is the claimed slot holding
+  the exact item first (`ClaimedWindow::slot_holding`). The other owed takes
+  (an eat, a D2b use, a Q-drop, a `GrantUnfit`'s take back) keep their places
+  — never armour — with the same exact-first rule. A take that finds nothing (the item
   had left the window: deposited back, say) is **owed**
   (`container_window::CorrectionDebt`, per session: `WindowInbox::debt` on the
   client, `WindowEvents::debt` for the server's copy, the same rule) and the
   next correction give of that item pays it first, so the take and that op's
-  own correction cancel whichever order they meet the window in. A give that
+  own correction cancel whichever order they meet the window in. On the
+  server's copy a take that falls short is tallied `correction_short` and
+  logged like an owed take's shortfall (`window_events::note_correction_short`,
+  C3b-fix-c B-M1): the visible sign of a phantom spent another way (Known
+  limits). A give that
   doesn't fit is reported back (`ItemAction::GrantUnfit` naming the event, one
   report per give in order — a give that fit before it reported as 0) and the
   server spawns it as a ground item (`return_unfit`, which matches the
-  event's gives in order).
+  event's gives in order). **What a give "landed" (C3b-fix-c, B-M2)** comes
+  from the server's own unfit: per item, `server_unfit` = Σ (own give −
+  settled), spent over the client's gives of that item in order, so each
+  records `landed = count − min(server_unfit_left, count)` (a revert's,
+  `landed = count`). Every other unit of an accepted op's give is one the
+  server's copy holds, so a `GrantUnfit` for it is backed only by what
+  `return_unfit` takes back from the copy (exact first, and the instance
+  taken is what spawns); only the server's true overflow spawns without a
+  take, and a claim beyond both is `unfit_unbacked`. A modified client
+  claiming a give back from stale room (its view showed room the real chest
+  no longer had) didn't fit spawns nothing.
 - **The server's copy** applies its own change, R − own, by the same rule
   when the client reports the event — never the client's claimed values
   (C-M2) — less the believed units it never held (tallied, not owed). In
@@ -2686,13 +2742,62 @@ the real ones. Economy blocks are refused for joiners at C3d.
 
 **Known limits.** Composters, drying racks, campfires, item frames and hives
 are C3b-2; the steed pack and villager trade D2c; economy blocks are refused
-from C3d. A correction debt that no give ever pays (the phantom left the
-window by a use the server doesn't mirror yet — trashed, placed, eaten,
-dropped — before the correction landed) swallows the next correction give of
-that item; with C3c and C3d mirroring every use, only a phantom the client
-destroyed can leave one. A refused op's revert is a transient lockstep gap on
-the server's copy until the client applies it (ops made in between are not
-tallied as mismatches). **`--no-lend`:** a `--no-lend` host
+from C3d. **A phantom spent another way inside the round trip (C3b-fix verify
+B-M1, a C3d prerequisite).** The server's copy holds the phantom from the op
+(its own run predicted the same withdrawal) until the client applies the
+correction, and every spend that isn't a container op — a placement, a
+Q-drop, an eat, a craft, a D2b use, a trash, an equip — is judged against
+that copy, so a phantom spent that way inside the round trip becomes a real
+item on both sides (a phantom equipped is the exception since C3b-fix-c: the
+correction's take reaches armour). The correction's take then falls short:
+the shortfall is owed (`CorrectionDebt`) and tallied `correction_short`. The
+world comes out conserved only if a later correction give of that item pays
+the debt and the phantom had become a real item; it is a net loss if the
+phantom was destroyed (trashed), and a standing dupe if no later give of it
+comes, the usual case. Honestly it needs a close-and-spend inside one round
+trip (or a slow link); a modified client can stretch the window to the
+200-tick valve by withholding acks (after which the forced correction still
+counts in the phantom ledger, above). `correction_short` also counts a debt a
+later give pays (a phantom deposited back): it shows takes that fell short,
+not net dupes. Closes at C3d, whose gate (1) judges every spend, correction
+takes included, against `effective_inventory`. A refused op's revert is a
+transient lockstep gap on the server's copy until the client applies it (ops
+made in between are not tallied as mismatches). **Smaller known limits
+(C3b-fix verify, LOW):**
+- **B-L2, two debt ledgers fed by different deltas.** The client's
+  `WindowInbox::debt` takes the client delta (R − P), the server's
+  `WindowEvents::debt` takes own (R − own) and applies it at once when nothing
+  reaches the client. Under drift a short take there leaves a server-only debt
+  that later swallows a give only the server's copy sees. Lockstep is
+  unaffected; the ledgers converge once C3c and C3d remove the drift.
+- **B-L3, the believed bound refuses some honest play.** A `testlab` world's
+  client-made kit (640+ units the server's copy never sees) and more than 64
+  locally caught items are believed deposits: past 64 units (plus 4 a
+  second) the deposit bounces back — reverted, nothing lost. An owner
+  playtest in a testlab world shows `container_refused` and reverts that are
+  not bugs. Fast shift-clicking a full chest is not affected (withdrawals are
+  never believed).
+- **B-L4, `client_ok` is self-reported.** A modified client can send `false`
+  with every op and file all refusals as `window_noop`, hiding the
+  `window_refused` signal. It gains nothing (the server still requires its
+  own rule) and the tally is log-only.
+- **B-L5, the debit can land on real units.** `ClaimedWindow::debit` takes
+  the phantom from CLAIMED slots in claim order: if the phantom sits in an
+  unclaimed slot and a claimed slot holds the player's real units of the same
+  item, R refuses that real deposit and the correction gives it back. It
+  conserves items; the player sees a deposit that looks refused.
+- **A refused Autofill's reach residue (C3b-fix-c, B-M4).** A refused Autofill
+  is re-run on the server with the table grace off but the half-block reach
+  slack on (`ClickCtx::with_server_slack(false)`), so it moves what the
+  client's refused one moved (the grid and cursor back to the bag). A client
+  that refused for reach just inside that slack while the server's body is in
+  reach still diverges (rare); a `Result` the client refused is still never
+  crafted.
+- **The hint slot is checked by kind first.** A correction's take looks in
+  its hint slot before an exact match elsewhere (the hint is where the
+  prediction put the item, and for a Q-drop or a use the slot really used),
+  so a player that moves its own tool of the same kind into exactly that slot
+  inside the round trip loses that one instead of the phantom (rare). **`--no-lend`:** a `--no-lend` host
 mirrors its own block entities over the server's each tick
 (`HostedServer::mirror_host_world_state`, BRIDGE, deleted with the flag), so a
 joiner's change to a container there is overwritten.

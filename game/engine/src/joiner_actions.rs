@@ -66,8 +66,9 @@
 use std::collections::VecDeque;
 
 use crate::craft_ui::CraftingUi;
+use crate::armour::ArmourItem;
 use crate::inventory::Inventory;
-use crate::item::Item;
+use crate::item::{Item, ItemStack};
 use crate::mob::MobType;
 use crate::protocol::{InteractKind, InteractOutcomePacket, ItemActionOutcomePacket};
 
@@ -323,6 +324,8 @@ fn count_held(inv: &Inventory, ui: &CraftingUi, item: &Item) -> u32 {
 /// weapon there ([`apply_outcome`]), and the server wears its copy there
 /// (`hosted_server::wear_joiner_weapon`), so a weapon moved off its hotbar
 /// slot while the swing was in flight wears the same piece on both sides.
+/// (C3b-fix-c: the owed takes no longer use it; they search with
+/// [`take_owed_search`], an exact match first.)
 pub fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Option<usize> {
     let holds = |i: usize| inv.slot(i).is_some_and(|s| same_item(&s.item, held));
     if holds(slot) {
@@ -331,31 +334,118 @@ pub fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) ->
     (0..36).find(|&i| holds(i))
 }
 
+/// C3b-fix-c (decision 2) — THE owed-take search, one fn for every take of a
+/// joiner's window, run the same way by both copies of it (a LOCKSTEP rule:
+/// client and server must call this, or they diverge). It looks, in order:
+/// the hint slot `hint` (when it holds `held` by kind), then the 36 slots,
+/// then the crafting grid (row-major), then the cursor, then the armour
+/// slots — each only where the caller passes it. In each place an exact
+/// match (`==`, durability included) wins over a match by kind
+/// ([`same_item`]), so a tool owed is that tool wherever it can be told
+/// apart, never the player's own better one of its kind (C3b-fix verify
+/// B-L1, A-L4). Takes up to `n` units, one at a time, and returns the units
+/// it took, as stacks of equal items in the order taken: a tool or armour
+/// piece can differ from `held` by its durability.
+pub(crate) fn take_owed_search(
+    inv: &mut Inventory,
+    mut grid: Option<&mut crate::window::CraftGrid>,
+    mut cursor: Option<&mut Option<ItemStack>>,
+    mut armour: Option<&mut [Option<ArmourItem>; 4]>,
+    hint: Option<usize>,
+    held: &Item,
+    n: u8,
+) -> Vec<ItemStack> {
+    let mut taken: Vec<ItemStack> = Vec::new();
+    for _ in 0..n {
+        let Some(item) = take_one_owed(inv, grid.as_deref_mut(), cursor.as_deref_mut(), armour.as_deref_mut(), hint, held)
+        else {
+            break;
+        };
+        match taken.last_mut() {
+            Some(last) if last.item == item => last.count += 1,
+            _ => taken.push(ItemStack { item, count: 1 }),
+        }
+    }
+    taken
+}
+
+/// One unit of [`take_owed_search`]: the item it took, or `None` when no
+/// place it searches holds `held`.
+fn take_one_owed(
+    inv: &mut Inventory,
+    grid: Option<&mut crate::window::CraftGrid>,
+    cursor: Option<&mut Option<ItemStack>>,
+    armour: Option<&mut [Option<ArmourItem>; 4]>,
+    hint: Option<usize>,
+    held: &Item,
+) -> Option<Item> {
+    let exact = |s: &ItemStack| &s.item == held;
+    let kind = |s: &ItemStack| same_item(&s.item, held);
+    let slot = hint
+        .filter(|&h| h < 36 && inv.slot(h).is_some_and(kind))
+        .or_else(|| (0..36).find(|&i| inv.slot(i).is_some_and(exact)))
+        .or_else(|| (0..36).find(|&i| inv.slot(i).is_some_and(kind)));
+    if let Some(at) = slot {
+        let mut stack = inv.take_slot(at)?;
+        let item = stack.item.clone();
+        stack.count = stack.count.saturating_sub(1);
+        if stack.count > 0 {
+            inv.set_slot(at, Some(stack));
+        }
+        return Some(item);
+    }
+    if let Some(grid) = grid {
+        let find = |f: &dyn Fn(&ItemStack) -> bool| (0..9).find(|&k| grid[k / 3][k % 3].as_ref().is_some_and(f));
+        if let Some(k) = find(&exact).or_else(|| find(&kind)) {
+            return take_one_from(&mut grid[k / 3][k % 3]);
+        }
+    }
+    if let Some(cursor) = cursor
+        && cursor.as_ref().is_some_and(kind)
+    {
+        return take_one_from(cursor);
+    }
+    let armour = armour?;
+    let find = |f: &dyn Fn(&ItemStack) -> bool| {
+        (0..armour.len()).find(|&i| armour[i].is_some_and(|p| f(&ItemStack { item: Item::Armour(p), count: 1 })))
+    };
+    let at = find(&exact).or_else(|| find(&kind))?;
+    armour[at].take().map(Item::Armour)
+}
+
+/// Take one unit from `cell`: its item.
+fn take_one_from(cell: &mut Option<ItemStack>) -> Option<Item> {
+    let stack = cell.as_mut()?;
+    let item = stack.item.clone();
+    stack.count = stack.count.saturating_sub(1);
+    if stack.count == 0 {
+        *cell = None;
+    }
+    Some(item)
+}
+
+/// Units in what [`take_owed_search`] took.
+fn units(taken: &[ItemStack]) -> u8 {
+    taken.iter().map(|s| s.count).fold(0, u8::saturating_add)
+}
+
 /// Take what an accepted interaction OWES (review D2b LOW-1): `n` of `held`,
-/// each from `slot` if it still holds one, else from wherever one now is.
+/// each from `slot` if it still holds one, else from wherever one now is in
+/// the 36 slots (C3b-fix-c: an exact match first, [`take_owed_search`]).
 /// Returns how many were taken (fewer only when the inventory runs out).
 ///
 /// The 36-slot part of [`take_owed_window`], which both copies of a
 /// joiner's window run for an accepted outcome. Also the server's rule for a
 /// Q-drop's item (`item_actions::serve_drop`).
 pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item, n: u8) -> u8 {
-    let mut taken = 0;
-    for _ in 0..n {
-        let Some(at) = where_now(inv, slot, held) else { break };
-        let Some(mut stack) = inv.take_slot(at) else { break };
-        stack.count = stack.count.saturating_sub(1);
-        if stack.count > 0 {
-            inv.set_slot(at, Some(stack));
-        }
-        taken += 1;
-    }
-    taken
+    units(&take_owed_search(inv, None, None, None, Some(slot), held, n))
 }
 
 /// The owed payment (C2b decision 5; C3a-2a: one rule for both copies of a
 /// joiner's window): `n` of `held`, from the 36 slots first ([`take_owed`]:
 /// the request's slot if it still holds one, else wherever one is), then the
-/// crafting grid (row-major), then the cursor. Returns how many were taken.
+/// crafting grid (row-major), then the cursor — an exact match first in each
+/// ([`take_owed_search`], C3b-fix-c). Returns how many were taken.
 /// The client runs it on its own window ([`take_owed_held`]) when the
 /// outcome arrives, the server on its copy (`hosted_server::shadow_take_owed`,
 /// a `window_events::WindowEvent::Take`) once the client reports it applied
@@ -369,22 +459,25 @@ pub fn take_owed_window(
     held: &Item,
     n: u8,
 ) -> u8 {
-    let mut taken = take_owed(inv, slot, held, n);
-    while taken < n {
-        let cell = match grid.iter_mut().flatten().find(|c| c.as_ref().is_some_and(|s| same_item(&s.item, held))) {
-            Some(cell) => cell,
-            None if cursor.as_ref().is_some_and(|s| same_item(&s.item, held)) => &mut *cursor,
-            None => break,
-        };
-        if let Some(stack) = cell.as_mut() {
-            stack.count = stack.count.saturating_sub(1);
-            if stack.count == 0 {
-                *cell = None;
-            }
-        }
-        taken += 1;
-    }
-    taken
+    units(&take_owed_search(inv, Some(grid), Some(cursor), None, Some(slot), held, n))
+}
+
+/// C3b-fix-c (decision 2) — a correction's take
+/// (`container_window::CorrectionDebt::apply`, run by both copies of a
+/// joiner's window): [`take_owed_window`]'s places, then the armour slots, so
+/// a phantom the player equipped inside the correction's round trip is taken
+/// off on both sides (C3b-fix verify B-M1 scenario 2). Player-visible: a
+/// correction can take an equipped piece off (Spec 05).
+pub fn take_correction(
+    inv: &mut Inventory,
+    grid: &mut crate::window::CraftGrid,
+    cursor: &mut Option<crate::item::ItemStack>,
+    armour: &mut [Option<ArmourItem>; 4],
+    hint: usize,
+    held: &Item,
+    n: u8,
+) -> u8 {
+    units(&take_owed_search(inv, Some(grid), Some(cursor), Some(armour), Some(hint), held, n))
 }
 
 /// The client's owed payment: [`take_owed_window`] on its window (`inv`, and
@@ -535,6 +628,41 @@ mod tests {
         let mut inv = inv_with(3, ItemStack { item: Item::Armour(fresh), count: 1 });
         let boots = ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Iron);
         assert_eq!(take_owed(&mut inv, 0, &Item::Armour(boots), 1), 0);
+    }
+
+    /// C3b-fix-c (decision 2) — an owed take prefers the exact instance
+    /// (durability included) in each place it looks: the player's own worn
+    /// pickaxe isn't taken for the fresh one it owes.
+    #[test]
+    fn an_owed_take_prefers_the_exact_instance_over_one_of_its_kind() {
+        let fresh = Tool::new(ToolType::Pickaxe, ToolMaterial::Diamond);
+        let worn = Tool { durability: fresh.durability - 100, ..fresh };
+        let mut inv = Inventory::new();
+        inv.set_slot(3, Some(ItemStack::new_tool(worn)));
+        inv.set_slot(10, Some(ItemStack::new_tool(fresh)));
+        assert_eq!(take_owed(&mut inv, 0, &Item::Tool(fresh), 1), 1);
+        assert_eq!(inv.slot(3), Some(&ItemStack::new_tool(worn)), "its own worn pickaxe stays");
+        assert!(inv.slot(10).is_none(), "the fresh one was taken");
+        // No exact one: one of its kind still pays.
+        assert_eq!(take_owed(&mut inv, 0, &Item::Tool(fresh), 1), 1);
+        assert!(inv.slot(3).is_none());
+    }
+
+    /// C3b-fix-c (decision 2) — a correction's take searches the hint, the
+    /// 36 slots, the grid, the cursor, then the armour slots: an equipped
+    /// phantom is taken; the other owed takes never reach armour.
+    #[test]
+    fn a_correction_take_reaches_the_armour_slots_and_an_owed_take_does_not() {
+        use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};
+        let plate = ArmourItem::new(ArmourSlot::Chestplate, ArmourMaterial::Iron);
+        let mut inv = Inventory::new();
+        let mut grid: crate::window::CraftGrid = Default::default();
+        let mut cursor = None;
+        let mut armour = [None, Some(plate), None, None];
+        assert_eq!(take_owed_window(&mut inv, &mut grid, &mut cursor, 0, &Item::Armour(plate), 1), 0);
+        assert_eq!(armour[1], Some(plate));
+        assert_eq!(take_correction(&mut inv, &mut grid, &mut cursor, &mut armour, 0, &Item::Armour(plate), 1), 1);
+        assert_eq!(armour[1], None, "taken off");
     }
 
     fn durability(inv: &Inventory, slot: usize) -> u32 {

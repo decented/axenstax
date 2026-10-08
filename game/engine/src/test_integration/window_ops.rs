@@ -689,6 +689,29 @@ fn a_result_click_the_client_refused_after_a_stuck_forced_close_is_not_crafted()
     assert_eq!(t.window_noop, 2, "the stuck close and the result click: refused on both sides");
 }
 
+/// B-M4 (C3b-fix-c) — a recipe card the player can't afford, clicked with
+/// planks in the table's grid: the client's rule returns the grid to the bag
+/// first, then refuses (`client_ok = false`). The server runs the same rule
+/// with its slack off (`with_server_slack(false)`), so its grid goes back
+/// too: lockstep, a no-op on both sides, no mismatch.
+#[test]
+fn an_autofill_the_client_refused_returns_the_grid_on_the_server_too() {
+    let mut rig = Rig::dedicated("autofill-refused");
+    rig.give(0, Item::Block(block::OAK_PLANKS), 4);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    rig.step("pick the planks up", slot(0, false));
+    rig.step("lay them in the grid", WindowClick::Grid { row: 1, col: 1, right: false });
+    assert!(rig.c.ui.grid[1][1].is_some(), "planks in the grid");
+    let result = rig.step("autofill a recipe it can't afford", WindowClick::Autofill { example: example("Iron Pickaxe") });
+    assert_eq!(result, ClickResult::Refused, "the client's rule refused, after returning the grid");
+    let sp = &rig.hs.server.players[rig.c.slot];
+    assert!(sp.craft_grid.iter().flatten().all(|c| c.is_none()), "the server's grid went back too");
+    let t = rig.tally();
+    assert_eq!((t.window_refused, t.window_mismatch), (0, 0));
+    assert_eq!(t.window_noop, 1, "refused on both sides");
+}
+
 /// B-L2 — a table another player just broke: the honest client has not heard,
 /// crafts at it, and the server (grace of ten ticks) crafts too. The grace
 /// ends, and only in reach.

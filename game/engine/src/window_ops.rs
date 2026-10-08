@@ -62,6 +62,13 @@
 //!   next give of that item (`container_window::CorrectionDebt`).
 //! - A refused op's revert has no server-side effect (C-M2); believed
 //!   deposits are bounded per joiner ([`BelievedBucket`], C-L3).
+//! - C3b-fix-c — that holds for container ops. A phantom spent another way
+//!   (placed, dropped, eaten, crafted) before its correction lands is a real
+//!   item until C3d; the correction's short take shows it
+//!   (`correction_short`). A correction's take is the one owed search
+//!   (`joiner_actions::take_owed_search`: an exact match first, the armour
+//!   slots too), and a believed deposit counts as held only what that take
+//!   can pay ([`believed_units`]).
 //!
 //! [`container_push`] sends what others changed in an open container, once
 //! a tick.
@@ -576,11 +583,17 @@ pub fn latest_view(sp: &ServerPlayer) -> Option<MirrorView> {
 /// player's grid, as the client's screen closes. `OpenPlayer` and
 /// `OpenTable` set the station; `SetAutoRefill` sets the setting.
 ///
-/// C3b-fix-a (A-L2) — a `Result` or `Autofill` click (the ones that read
-/// the table verdict, where the server's slack is kinder than the client's
-/// rule) is applied only when the client's own rule accepted it
-/// (`WindowOpPacket::client_ok`): the server never crafts what the client
-/// refused, so a stuck forced close can't craft on one side only.
+/// C3b-fix-a (A-L2) — a `Result` click (it reads the table verdict, where
+/// the server's slack is kinder than the client's rule) is applied only when
+/// the client's own rule accepted it (`WindowOpPacket::client_ok`): the
+/// server never crafts what the client refused, so a stuck forced close
+/// can't craft on one side only. C3b-fix-c (B-M4) — an `Autofill` the
+/// client refused is not skipped: a refused Autofill has already returned
+/// the grid and the cursor to the bag (step 1, `window::autofill`), so the
+/// server runs the rule with its table grace off
+/// (`ClickCtx::with_server_slack(false)`) and moves what the client's did.
+/// The half-block reach slack stays (that toggle keeps it), so a client
+/// that refused for reach within the slack still diverges (rare).
 ///
 /// C3b-1 — `Close`, `OpenPlayer` and `OpenTable` also close the open
 /// container (and the model of the client's mirror: the client's screen
@@ -618,10 +631,13 @@ pub fn serve_op(
     };
     let result = match op {
         WireWindowOp::Click(click) => {
-            let result = if !pkt.client_ok && matches!(click, WindowClick::Result | WindowClick::Autofill { .. }) {
-                ClickResult::Refused
-            } else {
-                window::apply(&mut view, click, &ctx)
+            let result = match click {
+                WindowClick::Result if !pkt.client_ok => ClickResult::Refused,
+                // C3b-fix-c (B-M4) — a refused Autofill already moved the
+                // grid and cursor back: the rule runs without the table
+                // grace, so it moves what the client's did.
+                WindowClick::Autofill { .. } if !pkt.client_ok => window::apply(&mut view, click, &ctx.clone().with_server_slack(false)),
+                _ => window::apply(&mut view, click, &ctx),
             };
             station = window::station_after(station, click, &result);
             Some(result)
@@ -806,7 +822,7 @@ fn serve_container(
         // Nothing reaches the client: its window is its prediction, so the
         // server's copy takes its own change now (none in lockstep).
         if let Some(own) = correction.own.as_ref().filter(|d| !d.is_empty()) {
-            sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, own);
+            crate::window_events::apply_own_now(sp, own, now);
         }
         None
     };
@@ -861,17 +877,24 @@ fn view_correction(sp: &ServerPlayer, real: container_window::ContainerRef, invo
 
 /// Units a container op's R put into the real container (`r_gain`'s
 /// negative counts) beyond what the server's copy of joiner `sp`'s window
-/// holds of each item (its 36 slots, grid and cursor, its armour for an
-/// armour piece; a tool or armour piece by kind, as an owed take finds it):
-/// believed deposits, item by item (none listed at 0).
+/// holds of each item: believed deposits, item by item (none listed at 0).
+///
+/// C3b-fix-c (B-M3) — `held` counts only what the own take can pay: exactly
+/// the correction take's places (`joiner_actions::take_correction`: the 36
+/// slots, the grid, the cursor and the armour slots), in the window as it
+/// will be once its waiting events land (`window_events::effective_window`:
+/// a waiting correction's take is already off it, so a phantom never counts
+/// as held), and by exact identity (`==`): a tool or armour piece counts only
+/// at its own durability, so a claimed piece unlike any the copy holds is
+/// believed (bounded, tallied) instead of paid with a different one.
 fn believed_units(sp: &ServerPlayer, r_gain: &container_window::ItemCounts) -> Vec<(crate::item::Item, u32)> {
-    use crate::joiner_actions::same_item;
+    let w = crate::window_events::effective_window(sp);
     let held = |item: &crate::item::Item| -> u64 {
-        let of = |s: Option<&ItemStack>| s.filter(|s| same_item(&s.item, item)).map_or(0, |s| u64::from(s.count));
-        let inv: u64 = sp.inventory.slots_iter().map(of).sum();
-        let grid: u64 = sp.craft_grid.iter().flatten().map(|c| of(c.as_ref())).sum();
-        let armour = sp.armour.iter().flatten().filter(|p| same_item(&crate::item::Item::Armour(**p), item)).count() as u64;
-        inv + grid + of(sp.cursor.as_ref()) + armour
+        let of = |s: Option<&ItemStack>| s.filter(|s| &s.item == item).map_or(0, |s| u64::from(s.count));
+        let inv: u64 = w.inv.slots_iter().map(of).sum();
+        let grid: u64 = w.grid.iter().flatten().map(|c| of(c.as_ref())).sum();
+        let armour = w.armour.iter().flatten().filter(|p| &crate::item::Item::Armour(**p) == item).count() as u64;
+        inv + grid + of(w.cursor.as_ref()) + armour
     };
     r_gain
         .iter()

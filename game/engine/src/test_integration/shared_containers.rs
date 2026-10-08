@@ -169,10 +169,25 @@ impl Client {
         )
     }
 
+    /// Units of `item` in its window: the 36 slots, the cursor, the grid
+    /// and the armour slots (C3b-fix-c: a correction take reaches all four).
     fn count(&self, item: &Item) -> u32 {
-        let in_inv: u32 = self.inv.slots_iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum();
-        in_inv + self.ui.cursor_item.iter().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum::<u32>()
+        window_units(&self.inv, &self.ui.cursor_item, &self.ui.grid, &self.armour, item)
     }
+}
+
+/// Units of `item` (by exact identity) in a window: its 36 slots, cursor,
+/// crafting grid and armour slots.
+fn window_units(
+    inv: &Inventory,
+    cursor: &Option<ItemStack>,
+    grid: &window::CraftGrid,
+    armour: &[Option<ArmourItem>; 4],
+    item: &Item,
+) -> u32 {
+    let stacks = inv.slots_iter().flatten().chain(cursor.iter()).chain(grid.iter().flatten().flatten());
+    let held: u32 = stacks.filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum();
+    held + armour.iter().flatten().filter(|p| &Item::Armour(**p) == item).count() as u32
 }
 
 /// Joiners standing on a stone floor round (40, 80, 40), on a dedicated
@@ -270,9 +285,10 @@ impl Rig {
         self.tick();
     }
 
-    /// Units of `item` in the world: every joiner's client window, the real
-    /// container joiner 0 has open, and the ground items; and the same with
-    /// the server's copies of the windows instead of the clients'.
+    /// Units of `item` in the world: every joiner's client window (C3b-fix-c:
+    /// its 36 slots, cursor, grid and armour), the chest at `chest`, and the
+    /// ground items; and the same with the server's copies of the windows
+    /// instead of the clients'.
     fn world_total(&self, item: &Item, chest: [i32; 3]) -> (u32, u32) {
         let in_chest: u32 = self
             .world_ref()
@@ -294,8 +310,7 @@ impl Rig {
             .iter()
             .map(|c| {
                 let sp = &self.hs.server.players[c.slot];
-                let inv: u32 = sp.inventory.slots_iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum();
-                inv + sp.cursor.iter().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum::<u32>()
+                window_units(&sp.inventory, &sp.cursor, &sp.craft_grid, &sp.armour, item)
             })
             .sum();
         (clients + in_chest + ground, servers + in_chest + ground)
@@ -387,6 +402,98 @@ impl Rig {
         assert_eq!(self.server_digest(n), c.digest(), "{what}: the digests");
         assert_eq!(sp.possession.window_mismatch, 0, "{what}: no op mismatched");
         assert_eq!(sp.possession.container_corrected, 0, "{what}: nothing corrected");
+    }
+
+    /// C3b-fix-c — a modified client's container op: `click`, claiming
+    /// `claims` (each slot's value before it), reporting the events joiner
+    /// `n` applied.
+    fn send_op(&mut self, n: usize, click: ContainerClick, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, protocol::WireSlot)>) {
+        let c = &mut self.cs[n];
+        c.seq += 1;
+        let pkt = protocol::WindowOpPacket {
+            op_seq: c.seq,
+            op: protocol::WireWindowOp::Container(click),
+            digest: 0,
+            events_applied: c.events,
+            touched,
+            claims,
+            client_ok: true,
+        };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
+    }
+
+    /// C3b-fix-c — joiner `n` places `placed` at `cell` from hotbar slot 0,
+    /// whose hand holds `held`: its client takes one from slot 0, and one
+    /// input carries the edit with its own hand (as the game loop sends it),
+    /// reporting the events the client applied.
+    fn place_from_hotbar(&mut self, n: usize, cell: [i32; 3], placed: block::BlockId, held: &Item) {
+        let (kind, id) = crate::inventory::item_to_ref(held).to_wire();
+        let c = &mut self.cs[n];
+        take_one(&mut c.inv, 0);
+        c.inputs += 1;
+        let sp = &self.hs.server.players[c.slot];
+        let input = protocol::InputPacket {
+            tick: c.inputs,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            yaw: sp.yaw,
+            pitch: sp.pitch,
+            health: 20.0,
+            held_kind: kind,
+            held_id: id,
+            hotbar_slot: Some(0),
+            block_changes: vec![protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: placed, meta: 0 }],
+            edit_hands: vec![(0, kind, id)],
+            events_applied: c.events,
+            ..Default::default()
+        };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    }
+
+    /// C3b-fix-c — joiner `n` Q-drops one `held` from hotbar slot 0 (its
+    /// client takes it), reporting the events it applied.
+    fn drop_from_hotbar(&mut self, n: usize, held: &Item) {
+        let (held_kind, held_id) = crate::inventory::item_to_ref(held).to_wire();
+        let held_full = crate::inventory::item_to_wire_full(held);
+        take_one(&mut self.cs[n].inv, 0);
+        self.send_action(n, protocol::ItemAction::Drop { hotbar_slot: 0, held_kind, held_id, held_full });
+    }
+
+    /// C3b-fix-c — joiner `n` sends `action`, reporting the events it
+    /// applied (a modified client's `GrantUnfit`, say).
+    fn send_action(&mut self, n: usize, action: protocol::ItemAction) {
+        let c = &mut self.cs[n];
+        c.actions += 1;
+        let pkt = protocol::ItemActionPacket { seq: c.actions, action, events_applied: c.events };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    }
+
+    /// The ground items of `item` the server simulates.
+    fn ground(&self, item: &Item) -> u32 {
+        self.hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().filter(|(_, it)| &it.stack.item == item).map(|(_, it)| u32::from(it.stack.count)).sum()
+    }
+
+    /// The last correction joiner `n` was sent that gives it something:
+    /// its window event.
+    fn last_give(&self, n: usize) -> u32 {
+        self.cs[n]
+            .slot_sets
+            .iter()
+            .rev()
+            .find(|s| s.reason == slot_set_reason::CORRECTION && !s.give.is_empty())
+            .map(|s| s.window_event)
+            .expect("a correction that gives")
+    }
+}
+
+/// Take one from inventory slot `slot`.
+fn take_one(inv: &mut Inventory, slot: usize) {
+    if let Some(mut stack) = inv.take_slot(slot) {
+        stack.count -= 1;
+        if stack.count > 0 {
+            inv.set_slot(slot, Some(stack));
+        }
     }
 }
 
@@ -1354,4 +1461,337 @@ fn a_joined_clients_bulk_vendor_pulls_nothing_from_an_adjacent_chest() {
     assert_eq!(raw.matches(call).count(), 1, "{call}: one call site");
     let before = &raw[at.saturating_sub(200)..at];
     assert!(before.contains("(!self.joined())"), "the depot pull must be gated on not joined");
+}
+
+// ── C3b-fix-c — phantoms spent outside containers, unfits backed, armour ──
+
+fn chestplate(durability: Option<u16>) -> ArmourItem {
+    let piece = ArmourItem::new(crate::armour::ArmourSlot::Chestplate, crate::armour::ArmourMaterial::Iron);
+    ArmourItem { durability: durability.unwrap_or(piece.durability), ..piece }
+}
+
+fn armour_stack(piece: ArmourItem) -> ItemStack {
+    ItemStack { item: Item::Armour(piece), count: 1 }
+}
+
+fn chest_cell(chest: [i32; 3]) -> (i32, i32, i32) {
+    (chest[0], chest[1], chest[2])
+}
+
+/// B-M1 scenario 1 (decision 6) — the loser of a race for 16 cobblestone
+/// closes the chest, places 3 and Q-drops 1 before its correction lands. The
+/// server's copy held the phantom, so it paid all four; the correction then
+/// takes the 12 left and falls 4 short. Those 4 show as `correction_short`
+/// (they are a dupe until C3d judges every spend against the effective
+/// window).
+#[test]
+fn a_phantom_placed_and_dropped_inside_the_round_trip_shows_as_a_correction_short() {
+    let mut rig = Rig::dedicated("phantom-spent", 2);
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(cobble(16));
+    rig.world().insert_chest(chest_cell(chest), contents);
+    rig.open(0, chest);
+    rig.open(1, chest);
+    let (loser, winner) = loser_and_winner(&rig);
+    let item = Item::Block(block::COBBLESTONE);
+    let take = ContainerClick::Withdraw { slot: 0, all: true };
+    let (ew, el) = (rig.eye(winner), rig.eye(loser));
+    rig.cs[winner].click(take.clone(), ew);
+    rig.cs[loser].click(take, el);
+    assert_eq!(rig.cs[loser].inv.slot(0), Some(&cobble(16)), "predicted into hotbar slot 0");
+    rig.cs[winner].flush();
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    // Inside the correction's round trip: close, place 3, Q-drop 1.
+    rig.cs[loser].close();
+    rig.cs[loser].flush();
+    let base = [rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32];
+    for (dx, dz) in [(2, 0), (2, -1), (-2, 0)] {
+        rig.place_from_hotbar(loser, [base[0] + dx, base[1], base[2] + dz], block::COBBLESTONE, &item);
+    }
+    rig.drop_from_hotbar(loser, &item);
+    rig.tick_holding(Some(loser));
+    rig.tick_holding(Some(loser));
+    assert_eq!(rig.tally(loser).matched, 3, "the three placements were paid from the phantom");
+    assert_eq!(rig.tally(loser).drops, 1, "the drop was spawned");
+    assert_eq!(rig.sp(loser).inventory.slot(0), Some(&cobble(12)), "the server's copy paid all four");
+    // The correction lands on both sides: 12 taken, 4 short.
+    rig.tick();
+    rig.report(loser);
+    assert_eq!(rig.sp(loser).inventory.slot(0), None);
+    assert_eq!(rig.cs[loser].count(&item), 0);
+    assert_eq!(rig.tally(loser).correction_short, 4, "the take that fell short shows");
+    assert!(rig.tally(loser).summary("Keeper").unwrap().contains("4 unit(s) a container correction took short"));
+}
+
+/// B-L6 (decision 7) — the loser of a race hears nothing for longer than the
+/// valve: its correction is applied to the server's copy without its word.
+/// It then deposits its phantom back, an op made before it applied that
+/// correction: the phantom is still debited, never believed, and the world
+/// holds 16 stone.
+#[test]
+fn a_correction_the_valve_forced_still_debits_an_op_made_before_the_client_applied_it() {
+    let mut rig = Rig::dedicated("forced-phantom", 2);
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(stone(16));
+    rig.world().insert_chest(chest_cell(chest), contents);
+    rig.open(0, chest);
+    rig.open(1, chest);
+    let (loser, winner) = loser_and_winner(&rig);
+    let stone_item = Item::Block(block::STONE);
+    let take = ContainerClick::Withdraw { slot: 0, all: true };
+    let (ew, el) = (rig.eye(winner), rig.eye(loser));
+    rig.cs[winner].click(take.clone(), ew);
+    rig.cs[loser].click(take, el);
+    rig.cs[winner].flush();
+    rig.cs[loser].flush();
+    for _ in 0..=crate::window_events::EVENT_ACK_TIMEOUT_TICKS {
+        rig.tick_holding(Some(loser));
+    }
+    assert!(rig.sp(loser).window_events.tally.forced >= 1, "the valve applied the correction");
+    assert_eq!(window_units(&rig.sp(loser).inventory, &None, &Default::default(), &[None; 4], &stone_item), 0);
+    // Still before it applied the correction: it deposits its phantom.
+    let at = rig.cs[loser].inv.slots_iter().position(|s| s.is_some_and(|s| s.item == stone_item)).expect("the phantom");
+    assert_eq!(rig.cs[loser].click(ContainerClick::Deposit { slot: at, all: true }, el), ClickResult::Done);
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    assert_eq!(rig.tally(loser).container_believed, 0, "the phantom was debited, not believed");
+    rig.tick();
+    rig.report(loser);
+    rig.report(winner);
+    assert_eq!(rig.world_total(&stone_item, chest), (16, 16), "16 stone in the world");
+    assert!(crate::window_events::phantom(rig.sp(loser)).is_empty(), "the client applied it: the ledger lets it go");
+}
+
+/// B-M2 (decision 4 a) — a modified client's deposit into room its view
+/// shows but the real chest no longer has, claiming 64 cobblestone the
+/// server's copy doesn't hold: R puts nothing in, and the correction gives
+/// the client its stack back. A `GrantUnfit` claiming that give didn't fit
+/// spawns nothing: the server's copy never gave anything up.
+#[test]
+fn a_claimed_unfit_for_a_give_back_from_stale_room_spawns_nothing() {
+    let mut rig = Rig::dedicated("stale-room-unfit", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest(chest_cell(chest), ChestData::new());
+    let item = Item::Block(block::COBBLESTONE);
+    rig.cs[0].inv.set_slot(0, Some(cobble(64))); // the client's only
+    rig.open(0, chest);
+    // The real chest fills; the push is still on its way.
+    if let Some(c) = rig.world().chest_at_mut(chest_cell(chest)) {
+        for s in c.slots.iter_mut() {
+            *s = Some(ItemStack::new_block(block::DIRT, 64));
+        }
+    }
+    rig.tick_holding(Some(0));
+    let eye = rig.eye(0);
+    assert_eq!(rig.cs[0].click(ContainerClick::Deposit { slot: 0, all: true }, eye), ClickResult::Done, "room in its view");
+    rig.cs[0].flush();
+    rig.tick();
+    rig.report(0);
+    assert_eq!(rig.cs[0].count(&item), 64, "the correction gave the stack back");
+    let event = rig.last_give(0);
+    let before = rig.world_total(&item, chest).1;
+    rig.send_action(0, protocol::ItemAction::GrantUnfit { event, count: 64 });
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.ground(&item), 0, "nothing spawned from nothing");
+    assert_eq!(rig.world_total(&item, chest).1, before, "the server's view of the world is unchanged");
+    assert_eq!(rig.sp(0).window_events.tally.unfit_unbacked, 64);
+}
+
+/// B-M2 (decision 4 b) — the Restock shape: the loser of a race (its 16
+/// cobblestone a phantom) Restocks inside the round trip with a full window.
+/// The phantom debit gives R room P lacked, so the client is given 16 while
+/// the server's roomier copy (it lacks the client's local dirt) restocked
+/// more, and owes 4 back. A claimed unfit of the 16 spawns only what the
+/// server's copy gives up: the world's cobblestone is conserved.
+#[test]
+fn a_claimed_unfit_after_a_restock_on_debited_claims_spawns_only_what_the_copy_gave_up() {
+    let mut rig = Rig::dedicated("restock-unfit", 2);
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(cobble(16));
+    contents.slots[1] = Some(cobble(20));
+    rig.world().insert_chest(chest_cell(chest), contents);
+    let (loser, winner) = loser_and_winner(&rig);
+    let item = Item::Block(block::COBBLESTONE);
+    rig.give(loser, 0, item.clone(), 48);
+    for s in 2..36 {
+        rig.give(loser, s, Item::Block(block::DIRT), 64);
+    }
+    rig.cs[loser].inv.set_slot(1, Some(ItemStack::new_block(block::DIRT, 64))); // the client's only
+    rig.open(0, chest);
+    rig.open(1, chest);
+    let take = ContainerClick::Withdraw { slot: 0, all: true };
+    let (ew, el) = (rig.eye(winner), rig.eye(loser));
+    rig.cs[winner].click(take.clone(), ew);
+    rig.cs[loser].click(take, el);
+    rig.cs[winner].flush();
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    rig.cs[loser].click(ContainerClick::Restock, el);
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    rig.tick();
+    rig.report(loser);
+    rig.report(winner);
+    assert_eq!(rig.world_total(&item, chest).1, 84, "48 + 16 + 20, on the server's side");
+    assert_eq!(rig.cs[loser].count(&item), 64, "given the 16 R restocked");
+    let event = rig.last_give(loser);
+    // The winner steps away, so the stack lies where it lands.
+    rig.sp(winner).player.pos.x += 7.0;
+    rig.send_action(loser, protocol::ItemAction::GrantUnfit { event, count: 16 });
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.ground(&item), 16, "what the server's copy gave up");
+    assert_eq!(rig.world_total(&item, chest).1, 84, "conserved");
+}
+
+/// B-M2 (decision 4 c) — an honest give that really fits nowhere: a hopper
+/// added one cobblestone the joiner's withdraw didn't see, and a second
+/// withdraw inside the round trip filled its last room. The correction's
+/// give of 1 fits neither the client nor the server's copy: exactly that one
+/// comes back to the world.
+#[test]
+fn an_honest_correction_give_that_fits_nowhere_spawns_exactly_what_came_back() {
+    let mut rig = Rig::dedicated("true-unfit", 1);
+    let item = Item::Block(block::COBBLESTONE);
+    for s in 1..36 {
+        rig.give(0, s, Item::Block(block::DIRT), 64);
+    }
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[7] = Some(cobble(19));
+    contents.slots[8] = Some(cobble(45));
+    hopper_fed(&mut rig, chest, contents, 1);
+    rig.open(0, chest);
+    for _ in 0..crate::hopper::HOPPER_INTERVAL_TICKS * 3 {
+        if real_slot(&rig, chest, 7) == Some(cobble(20)) {
+            break;
+        }
+        rig.tick_holding(Some(0));
+    }
+    assert_eq!(real_slot(&rig, chest, 7), Some(cobble(20)));
+    let eye = rig.eye(0);
+    rig.cs[0].click(ContainerClick::Withdraw { slot: 7, all: true }, eye);
+    rig.cs[0].flush();
+    rig.tick_holding(Some(0));
+    rig.cs[0].click(ContainerClick::Withdraw { slot: 8, all: true }, eye);
+    assert_eq!(rig.cs[0].inv.slot(0), Some(&cobble(64)), "its last room filled");
+    rig.cs[0].flush();
+    rig.tick();
+    rig.tick();
+    rig.report(0);
+    assert_eq!(rig.cs[0].unfit, 1, "the client reported the give that didn't fit");
+    assert_eq!(rig.ground(&item), 1, "exactly what came back");
+    assert_eq!(rig.world_total(&item, chest), (65, 65), "19 + 45 + the hopper's 1");
+    let t = rig.sp(0).window_events.tally;
+    assert_eq!((t.unfit_returned, t.unfit_unbacked), (1, 0));
+}
+
+/// B-M3 (decision 5 a) — a modified client deposits an iron chestplate whose
+/// durability differs from the one the server's copy wears (and the copy
+/// holds no other): no take can pay it, so it is believed — it costs the
+/// bound and is tallied — and the copy keeps wearing its own.
+#[test]
+fn a_claimed_chestplate_unlike_the_one_worn_is_believed() {
+    let mut rig = Rig::dedicated("believed-armour", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest(chest_cell(chest), ChestData::new());
+    rig.open(0, chest);
+    let worn = chestplate(Some(50));
+    rig.sp(0).armour[1] = Some(worn);
+    let claimed = chestplate(None);
+    let claims = vec![(WireWindowSlot::Inv(0), Some(crate::inventory::stack_to_wire(&armour_stack(claimed))))];
+    rig.send_op(0, ContainerClick::Deposit { slot: 0, all: true }, vec![WireWindowSlot::Inv(0), WireWindowSlot::Container(0)], claims);
+    rig.tick();
+    rig.tick();
+    assert_eq!(real_slot(&rig, chest, 0), Some(armour_stack(claimed)));
+    assert_eq!(rig.tally(0).container_believed, 1, "believed, tallied");
+    assert_eq!(rig.sp(0).container_sent.believed.units(), crate::window_ops::BELIEVED_BUCKET_UNITS - 1, "it cost the bound");
+    assert_eq!(rig.sp(0).armour[1], Some(worn), "the copy still wears its own");
+}
+
+/// B-M3 (decision 5 b) — the same claim with the durability the copy's worn
+/// chestplate has: the world's chestplates are conserved — either the
+/// deposit is believed, or the server's copy gives up the one it wears.
+#[test]
+fn a_claimed_chestplate_like_the_one_worn_is_paid_or_believed_never_neither() {
+    let mut rig = Rig::dedicated("worn-armour", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest(chest_cell(chest), ChestData::new());
+    rig.open(0, chest);
+    let worn = chestplate(Some(50));
+    rig.sp(0).armour[1] = Some(worn);
+    let claims = vec![(WireWindowSlot::Inv(0), Some(crate::inventory::stack_to_wire(&armour_stack(worn))))];
+    rig.send_op(0, ContainerClick::Deposit { slot: 0, all: true }, vec![WireWindowSlot::Inv(0), WireWindowSlot::Container(0)], claims);
+    rig.tick();
+    rig.tick();
+    assert_eq!(real_slot(&rig, chest, 0), Some(armour_stack(worn)), "it went in");
+    let total = rig.world_total(&Item::Armour(worn), chest).1;
+    assert_eq!(total, 1 + rig.tally(0).container_believed, "one chestplate, unless the deposit was believed");
+    assert_eq!(rig.tally(0).correction_short, 0, "the take found it");
+}
+
+/// B-M3 (decision 5 c) — a claimed fresh pickaxe while the server's copy
+/// holds a worn one: believed, never paid by taking the worn one (which
+/// would repair it).
+#[test]
+fn a_claimed_fresh_pickaxe_while_the_copy_holds_a_worn_one_is_believed() {
+    let mut rig = Rig::dedicated("believed-pick", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest(chest_cell(chest), ChestData::new());
+    rig.open(0, chest);
+    let fresh = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Diamond);
+    let worn = crate::crafting::Tool { durability: fresh.durability - 100, ..fresh };
+    rig.sp(0).inventory.set_slot(5, Some(ItemStack::new_tool(worn)));
+    let claims = vec![(WireWindowSlot::Inv(0), Some(crate::inventory::stack_to_wire(&ItemStack::new_tool(fresh))))];
+    rig.send_op(0, ContainerClick::Deposit { slot: 0, all: true }, vec![WireWindowSlot::Inv(0), WireWindowSlot::Container(0)], claims);
+    rig.tick();
+    rig.tick();
+    assert_eq!(real_slot(&rig, chest, 0), Some(ItemStack::new_tool(fresh)));
+    assert_eq!(rig.tally(0).container_believed, 1, "believed, tallied");
+    assert_eq!(rig.sp(0).inventory.slot(5), Some(&ItemStack::new_tool(worn)), "the worn one stays: no repair");
+}
+
+/// B-M1 scenario 2 (decision 2) — the loser of a race for an iron
+/// chestplate equips it inside the round trip (an ordinary window op, which
+/// equips it in the server's copy too). Its correction's take reaches the
+/// armour slots on both sides: no chestplate is duplicated.
+#[test]
+fn a_phantom_chestplate_equipped_inside_the_round_trip_is_taken_by_its_correction() {
+    let mut rig = Rig::dedicated("equipped-phantom", 2);
+    let chest = rig.place(0, 2, block::CHEST);
+    let plate = chestplate(None);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(armour_stack(plate));
+    rig.world().insert_chest(chest_cell(chest), contents);
+    rig.open(0, chest);
+    rig.open(1, chest);
+    let (loser, winner) = loser_and_winner(&rig);
+    let take = ContainerClick::Withdraw { slot: 0, all: true };
+    let (ew, el) = (rig.eye(winner), rig.eye(loser));
+    rig.cs[winner].click(take.clone(), ew);
+    rig.cs[loser].click(take, el);
+    rig.cs[winner].flush();
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    // Inside the round trip: pick it up and put it on.
+    let at = rig.cs[loser].inv.slots_iter().position(|s| s.is_some_and(|s| s.item == Item::Armour(plate))).expect("the phantom");
+    for click in [window::WindowClick::Slot { slot: at, right: false }, window::WindowClick::Armour { slot: 1 }] {
+        let c = &mut rig.cs[loser];
+        assert!(c.ui.apply_click(&mut c.inv, &mut c.armour, &click, false, el, |_| block::AIR).ok());
+    }
+    assert_eq!(rig.cs[loser].armour[1], Some(plate), "worn");
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    assert_eq!(rig.sp(loser).armour[1], Some(plate), "the server's copy wears the phantom too");
+    rig.tick();
+    rig.report(loser);
+    rig.report(winner);
+    assert_eq!((rig.cs[loser].armour[1], rig.sp(loser).armour[1]), (None, None), "taken off on both sides");
+    assert_eq!(rig.world_total(&Item::Armour(plate), chest), (1, 1), "the winner's, alone");
+    assert_eq!(rig.tally(loser).correction_short, 0);
 }

@@ -2330,7 +2330,9 @@ pub struct ServerAnnouncePacket {
 ///   placeholder in a [`WireStack`]. A container op's window digest covers
 ///   the container.
 /// - v78 (2026-10-08, C3b-fix-a):
-///   container corrections that can't duplicate or lose an item. Every
+///   container corrections that conserve items across container ops (a phantom
+///   spent another way before its correction lands is tallied, not closed,
+///   until C3d; Spec 04 §4.2g). Every
 ///   container view the server sends a joiner is a numbered window event:
 ///   [`ContainerOpenedPacket`] appends `window_event: u32` (0 for a
 ///   refusal), and every [`WindowSlotSetPacket`] (push or correction) is

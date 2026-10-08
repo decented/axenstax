@@ -554,18 +554,18 @@ impl ClaimedWindow {
         PlayerSlots::of(&self.inv, &self.armour, &self.cursor, &self.grid).stack(at)
     }
 
-    /// C3b-fix-a — the first claimed inventory slot holding `item` (by
-    /// `joiner_actions::same_item`): where a correction's take of it looks
-    /// first (where the prediction put it).
+    /// C3b-fix-a — the first claimed inventory slot holding `item`: where a
+    /// correction's take of it looks first (where the prediction put it).
+    /// C3b-fix-c — the exact item (durability included) first, then one of
+    /// its kind (`joiner_actions::same_item`), as the take itself searches.
     pub fn slot_holding(&self, item: &Item) -> Option<u8> {
-        self.claimed.iter().find_map(|at| match *at {
-            WireWindowSlot::Inv(i)
-                if self.inv.slot(usize::from(i)).is_some_and(|s| crate::joiner_actions::same_item(&s.item, item)) =>
-            {
-                Some(i)
-            }
-            _ => None,
-        })
+        let first = |matches: &dyn Fn(&Item) -> bool| {
+            self.claimed.iter().find_map(|at| match *at {
+                WireWindowSlot::Inv(i) if self.inv.slot(usize::from(i)).is_some_and(|s| matches(&s.item)) => Some(i),
+                _ => None,
+            })
+        };
+        first(&|i| i == item).or_else(|| first(&|i| crate::joiner_actions::same_item(i, item)))
     }
 
     /// C3b-fix-a (v78) — the phantom ledger: take `n` of `item` off the
@@ -785,30 +785,36 @@ impl CorrectionDebt {
         self.owed.is_empty()
     }
 
-    /// Apply `delta` to a window (`inv`, `grid`, `cursor`): every take
-    /// (`joiner_actions::take_owed_window` from its hint first; what it can't
-    /// pay is owed), then every give (what is owed of its item first, then
-    /// `Inventory::add_item`). Returns, per give in order, how many of its
-    /// units were settled — a debt paid or landed in the window; the rest
-    /// didn't fit (the client reports it, `ItemAction::GrantUnfit`).
+    /// Apply `delta` to a window (`inv`, `grid`, `cursor`, `armour`): every
+    /// take (`joiner_actions::take_correction`: its hint, the 36 slots, the
+    /// grid, the cursor, then the armour slots, an exact match first in each;
+    /// what it can't pay is owed), then every give (what is owed of its item
+    /// first, then `Inventory::add_item`). Returns, per give in order, how
+    /// many of its units were settled — a debt paid or landed in the window;
+    /// the rest didn't fit (the client reports it, `ItemAction::GrantUnfit`)
+    /// — and, per take that fell short, what it couldn't pay (C3b-fix-c:
+    /// the server tallies it, `correction_short`).
     pub fn apply(
         &mut self,
         inv: &mut Inventory,
         grid: &mut CraftGrid,
         cursor: &mut Option<ItemStack>,
+        armour: &mut [Option<ArmourItem>; 4],
         delta: &ItemDelta,
-    ) -> Vec<u8> {
+    ) -> DebtApplied {
+        let mut out = DebtApplied::default();
         for (hint, stack) in &delta.take {
-            let taken = crate::joiner_actions::take_owed_window(inv, grid, cursor, usize::from(*hint), &stack.item, stack.count);
+            let taken =
+                crate::joiner_actions::take_correction(inv, grid, cursor, armour, usize::from(*hint), &stack.item, stack.count);
             if taken < stack.count {
                 let short = u32::from(stack.count - taken);
                 match self.owed.iter_mut().find(|(i, _)| i == &stack.item) {
                     Some((_, n)) => *n += short,
                     None => self.owed.push((stack.item.clone(), short)),
                 }
+                out.short.push((stack.item.clone(), short));
             }
         }
-        let mut settled = Vec::with_capacity(delta.give.len());
         for stack in &delta.give {
             let mut paid = 0u8;
             for (item, n) in self.owed.iter_mut() {
@@ -825,10 +831,21 @@ impl CorrectionDebt {
             } else {
                 0
             };
-            settled.push(stack.count - unfit);
+            out.settled.push(stack.count - unfit);
         }
-        settled
+        out
     }
+}
+
+/// What [`CorrectionDebt::apply`] did to a window.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DebtApplied {
+    /// Per give, in order: the units settled (a debt paid, or landed in the
+    /// window); the rest didn't fit.
+    pub settled: Vec<u8>,
+    /// C3b-fix-c (B-M1) — per take that fell short, in order: its item and
+    /// the units it couldn't pay (now owed).
+    pub short: Vec<(Item, u32)>,
 }
 
 impl ContainerData {
@@ -996,7 +1013,7 @@ pub fn apply_slot_set(
     }
     let delta = ItemDelta::from_wire(&pkt.take, &pkt.give, registry);
     if !delta.is_empty() {
-        let settled = debt.apply(view.inv, view.grid, view.cursor, &delta);
+        let settled = debt.apply(view.inv, view.grid, view.cursor, view.armour, &delta).settled;
         out.unfit = delta.give.iter().zip(settled).map(|(g, s)| g.count - s).collect();
     }
     out
@@ -1304,22 +1321,24 @@ mod tests {
     fn a_take_that_finds_nothing_is_owed_and_paid_by_the_next_give() {
         let mut inv = Inventory::new();
         let (mut grid, mut cursor): (CraftGrid, Option<ItemStack>) = (Default::default(), None);
+        let mut armour = [None; 4];
         let mut debt = CorrectionDebt::default();
         inv.set_slot(9, Some(stone(10)));
-        // Take 16: 10 found, 6 owed.
+        // Take 16: 10 found, 6 owed — and reported short (C3b-fix-c).
         let take = ItemDelta { take: vec![(0, stone(16))], give: vec![] };
-        assert!(debt.apply(&mut inv, &mut grid, &mut cursor, &take).is_empty());
+        let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &take);
+        assert_eq!(applied, DebtApplied { settled: vec![], short: vec![(Item::Block(block::STONE), 6)] });
         assert_eq!((inv.slot(9), debt.owed(&Item::Block(block::STONE))), (None, 6));
         // Give 16: 6 pay the debt, 10 land.
         let give = ItemDelta { take: vec![], give: vec![stone(16)] };
-        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &give), vec![16], "all 16 settled");
+        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &give).settled, vec![16], "all 16 settled");
         assert_eq!((inv.slot(0), debt.is_empty()), (Some(&stone(10)), true));
         // A full window: the give's rest doesn't fit.
         for i in 0..SLOTS {
             inv.set_slot(i, Some(ItemStack::new_block(block::DIRT, 64)));
         }
         let give = ItemDelta { take: vec![], give: vec![stone(5)] };
-        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &give), vec![0], "nothing settled: 5 unfit");
+        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &give).settled, vec![0], "nothing settled: 5 unfit");
     }
 
     /// C3b-fix-a — a delta comes from net counts by item, split into stacks

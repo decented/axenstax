@@ -275,6 +275,12 @@ pub struct PossessionTally {
     /// deposits (BRIDGE until C3d; a locally fished item, unmirrored until
     /// C3c, is the honest case).
     pub container_believed: u32,
+    /// C3b-fix-c (B-M1) — units a container op's correction took short from
+    /// the server's copy of the window: the phantom had already gone some
+    /// other way (placed, dropped, eaten, crafted) before the correction
+    /// landed. Owed (`container_window::CorrectionDebt`), and a dupe unless a
+    /// later correction give pays it; it conserves nothing until C3d.
+    pub correction_short: u32,
     /// C3a-2a — ops after which the server's window digest differed from the
     /// one the client sent (log-only). Not counted for a creative joiner,
     /// whose item browser gives stay local until C3c.
@@ -339,7 +345,7 @@ impl PossessionTally {
     pub fn summary(&self, label: &str) -> Option<String> {
         let window = [self.window_ops, self.window_noop, self.window_refused, self.window_mismatch];
         let c2b = [self.drops, self.grant_overflow];
-        let c3b = [self.container_refused, self.container_corrected, self.container_believed];
+        let c3b = [self.container_refused, self.container_corrected, self.container_believed, self.correction_short];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
             .chain(&window)
@@ -370,8 +376,9 @@ impl PossessionTally {
         }
         if c3b.iter().any(|&n| n > 0) {
             line.push_str(&format!(
-                "; {} container op(s) refused, {} container correction(s) sent, {} unit(s) deposited believed",
-                self.container_refused, self.container_corrected, self.container_believed
+                "; {} container op(s) refused, {} container correction(s) sent, {} unit(s) deposited believed, \
+                 {} unit(s) a container correction took short",
+                self.container_refused, self.container_corrected, self.container_believed, self.correction_short
             ));
         }
         if c2b.iter().any(|&n| n > 0) {
@@ -515,7 +522,9 @@ mod tests {
         assert_eq!(t.first_window_mismatch, Some(OpKind::Result), "the first kind is kept");
         t.drops = 5;
         t.grant_overflow = 7;
+        t.correction_short = 4;
         let line = t.summary("Crafter").unwrap();
+        assert!(line.contains("4 unit(s) a container correction took short"), "{line}");
         assert!(
             line.contains(
                 "12 window op(s) mirrored, 3 no-op(s) both rules refused, 2 refused by the server alone, \
