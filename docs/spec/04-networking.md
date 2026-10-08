@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `75`** (C3a-2a) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `76`** (C3a-fix-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -34,6 +34,7 @@
 - **The FU1 verify fixes (2026-10-07, FU3, NO wire change — still v73).** The inbound queue's hard bound is bytes only (8 MiB, each packet charged 64 bytes more): FU1's 1,024-packet bound disconnected every joiner after an honest host stall of about 51 s, because each joiner's bridge thread keeps queueing while the host's game thread is stopped. A client with more than 40 packets waiting is read 64 a tick (catch-up); entity requests and device interactions past their per-kind budgets wait instead of being skipped. Block edits past the 4-a-tick budget wait in a per-client edit queue (with their input's tags and hand) instead of being refused, up to a hard cap of 16,384. The server derives a joiner's campfire smoke itself (`campfire::on_block_edit`), so a campfire action is one edit, and a joiner runs no campfire sweep. A closed connection's slot is freed only after a fill that began after the close. A refused milk or shear skips every later mob arm of that click (it untied a leashed cow), and `entity_flags::PRODUCT_NOT_READY` (bit 32; 0 = ready or unknown, so no bump) lets a joiner's bucket or shears click on an animal that isn't ready go to the block. See §11.2a, §4.1, §4.2d.
 - **v74** (2026-10-07, C2b): **A joiner's crafting and Q-drops are mirrored on the server.** `ItemAction` appends `Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (= 2: the grid as it stood before the craft, row-major `item_to_ref` pairs; the crafting table the 3×3 grid was opened from) and `Drop { hotbar_slot, held_kind, held_id, held_full }` (= 3, `Eat`'s held claim). Both are fire-and-forget: `ItemActionPacket.seq` still moves on, no outcome is sent, no new `PacketType`. The server mirrors a craft on its shadow of the joiner's inventory (`item_actions::judge_craft`: a known recipe from blocks and materials, a recipe bigger than 2×2 only at a crafting table in block reach; one of each input taken, owed; the output added) and spawns a Q-drop as a real ground item thrown from the joiner's server body (full fidelity from `held_full`), paced by a per-joiner token bucket (2, refilled one per `DROP_INTERVAL_TICKS` = 4; a drop it can't pay for waits in the inbound queue). (C2b first spilled a grant that didn't fit the shadow; the C2b-fix reversed it: the `InventoryGrant` carries the whole stack and the overflow is tallied, §4.2e.) On the client, a Q-drop or a craft click that would spend an item a request in flight claims does nothing, and an owed outcome is paid from the 36 slots, then the crafting grid, then the cursor. `ServerPlayer.crafting_ui` (a dead BRIDGE) is gone. See §4.2f, §4.2e, §4.2d.
 - **v75** (2026-10-08, C3a-2a): **The server mirrors a joiner's inventory window, click for click.** Appended: `PacketType::WindowOp = 64` (C→S, `WindowOpPacket { op_seq: u32, op: WireWindowOp, digest: u32 }`; `WireWindowOp` = `Click(window::WindowClick)` | `OpenPlayer` | `OpenTable { cell: [i32; 3] }` | `SetAutoRefill { on: bool }`, append only), never answered. `window::WindowClick` (Slot = 0 … Close = 10), `window::WindowSlot` and `crafting::CraftSlot` become wire data, append only; a drag's slot list over 45 doesn't decode. The client sends one op for every window transition it applies, with its window digest after it; the server applies the same `window::apply` to its copy of the joiner's window (36 slots, armour, cursor, craft grid, station) behind the client's edits, at most `MAX_WINDOW_OPS_PER_TICK` = 8 a tick (the rest wait), and tallies digest mismatches (log-only). `ItemAction::Craft` (= 2) is unused — the craft is the result click — and a v75 server ignores and tallies it. The server's owed payment searches its 36 slots, then its grid, then its cursor (the client's search); a server-landed hit wears its copy of the armour; an accepted swing wears the weapon where it now is (`joiner_actions::where_now`, shared). See §4.2g.
+- **v76** (2026-10-08, C3a-fix-1): **A joiner's window stays in lockstep: ordered server window events, one ordered send path, per-edit hands.** The server numbers every change it makes to a joiner's window — a grant (a pickup's too), an accepted request's owed take (an eat, a D2b interaction), an armour-wear hit, a swing's weapon wear — as a window event (1, 2, 3… per connection), queues it and applies it to its copy only once the client reports it applied it too, so both sides apply it at the same point among the client's ops and edits (the content is the server's; only the order follows the client; no replay). Appended, in this order: `InventoryGrantPacket`, `InteractOutcomePacket`, `ItemActionOutcomePacket` and `PlayerEventPacket` gain trailing `window_event: u32` (0 = changes nothing; on `PlayerEvent` only `ArmourWorn` sets it); `InputPacket` gains trailing `events_applied: u32` then `edit_hands: Vec<(u8 slot, u8 held_kind, u16 held_id)>` (parallel to `block_changes`); `WindowOpPacket`, `ItemActionPacket` and `EntityInteractPacket` gain trailing `events_applied: u32`; `EntityAttackPacket` gains trailing `hotbar_slot: u8` then `events_applied: u32`; `ItemAction` appends `GrantUnfit { event: u32, count: u8 }` (= 4, fire-and-forget). `window::digest` now covers the session locks and the station. The client applies a grant's unfit part nowhere: it reports it (`GrantUnfit`) and the server spawns it as a real ground item at the joiner's feet. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `joiner_action_packets_round_trip`, `item_action_packets_round_trip`, `window_op_packets_round_trip`, `respawn_request_and_life_events_round_trip`, `inventory_grant_roundtrip`). See §4.2g.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -520,13 +521,13 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x32 | `TimeSync` | S->C | Unreliable | Server tick number + timestamp for clock synchronisation. |
 | 0x38 | `DeviceInteract` | C->S | Reliable | Client asks the server to apply one right-click to the power device in a named cell: `{ pos: (i32, i32, i32) }`, 12 bytes. **Implemented tag** (`PacketType::DeviceInteract = 56`, protocol v62). |
 | 0x39 | `Respawn` | C->S | Reliable | The joiner chose Respawn on its death screen. Empty payload — it asserts the wish only; the server respawns the player only if it holds them dead, at the spawn point it holds, and answers `PlayerEvent { Respawned { x, y, z } }`. **Implemented tag** (`PacketType::Respawn = 57`, protocol v67). See §4.2b. |
-| 0x3A | `EntityAttack` | C->S | Reliable | A joiner swings at a server entity: `{ seq: u32, entity: u32, held_kind: u8, held_id: u16, held_full: WireItem, sprint, sneak }`. **Implemented tag** (`PacketType::EntityAttack = 58`, protocol v70). See §4.2d. |
-| 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak }`. **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
-| 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8 }`. **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
+| 0x3A | `EntityAttack` | C->S | Reliable | A joiner swings at a server entity: `{ seq: u32, entity: u32, held_kind: u8, held_id: u16, held_full: WireItem, sprint, sneak, hotbar_slot: u8, events_applied: u32 }` (the last two v76: the swing's own slot, where the server's weapon wear starts, and the window events the client had applied). **Implemented tag** (`PacketType::EntityAttack = 58`, protocol v70). See §4.2d, §4.2g. |
+| 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak, events_applied: u32 }` (`events_applied` v76). **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
+| 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) or `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` (append only: Eat=0, Sleep=1, Craft=2, Drop=3). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft and Drop are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
-| 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32 }`, `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3). Never answered. **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
-| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8 }` (`item_actions::ItemNote`). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop and GrantUnfit are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
+| 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32 }` (`events_applied` v76), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3). Never answered. **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
+| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32 }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's take, 0 for none). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
 > discriminants live in `game/engine/src/protocol.rs` and are the wire-stable
@@ -1567,8 +1568,9 @@ server's yield would (the joiner's copy of the cell disagreed) yields nothing
 and is counted unchecked. Creative yields nothing. Tool durability stays the
 client's. Inventory full: the client is granted the whole yield whatever the SHADOW
 holds, and what the shadow can't hold is tallied (C2b-fix, "Grant overflow"
-below); what doesn't fit the CLIENT's inventory it spills at its feet, as for
-every grant.
+below); what doesn't fit the CLIENT's inventory comes back as a real ground
+item at its feet (C3a-fix-1, D-M2: `ItemAction::GrantUnfit`), as for every
+grant.
 
 **Every block a joiner puts into a cell is player-placed**, whatever the
 edit was classified as below — a plain placement, a fill with a tool claimed
@@ -1594,7 +1596,7 @@ cell, on the server as in single-player (`break_drops::break_yield` gates on
 
 | Change | Source | Shadow |
 |---|---|---|
-| Server-side pickup (mob loot, spilled containers, dispenser drops, a joiner's Q-drop) | `entity::tick_item_pickups_with` | gains; the client gets the whole stack even if the shadow is full (overflow tallied) |
+| Server-side pickup (mob loot, spilled containers, dispenser drops, a joiner's Q-drop) | `entity::tick_item_pickups_for`, decided on a scratch copy of the window with its waiting events applied | gains, as a window event (C3a-fix-1, §4.2g); the client gets the whole stack even if the shadow is full (overflow tallied when applied) |
 | A break the joiner mined | `break_drops`, above | gains the yield |
 | An accepted interaction's products (wool, a milk bucket, a Lead back) | D2b, §4.2d | gains |
 | An accepted interaction's `consume_held` | D2b | takes, owed from wherever the item is (`joiner_actions::take_owed`, the client's own rule) |
@@ -1602,6 +1604,16 @@ cell, on the server as in single-player (`break_drops::break_yield` gates on
 | An accepted `Eat` (C2a) | §4.2f | takes the food, owed |
 | A window op (C3a-2a, `WindowOp`): a slot move, drag, sort, lock, trash, armour equip, the craft result click, a close returning the grid | §4.2g | the same `window::apply` the client ran, on the server's copy of the window (36 slots, armour, cursor, grid) |
 | A server-landed hit (C3a-2a) | §4.2g | wears the server's copy of the armour (`window::wear_armour`) |
+| An accepted swing (C3a-2b) | §4.2d, §4.2g | wears the weapon where it now is, from the swing's slot |
+| A grant's unfit part the client reports (C3a-fix-1, `ItemAction::GrantUnfit`) | §4.2g | gives back what it holds of the grant beyond what the client kept (none in lockstep); the part becomes a real ground item |
+
+Since C3a-fix-1 (v76) every row the server originates — a pickup, a yield,
+a product, an owed take, armour and weapon wear — is a **window event**: the
+server numbers and sends it but changes its copy only once the client reports
+it applied it (`window_events`, §4.2g), so a click, an edit or a request the
+client made before the event finds the server's copy as the client's was.
+The rows the client originates (a placement, a window op, a Q-drop) apply in
+the client's order already.
 | A Q-drop (C2b, `ItemAction::Drop`) | §4.2f | takes the item, owed; the item becomes a real ground item |
 
 **Grant overflow (C2b, reversed by the C2b-fix, 2026-10-07; no wire change).**
@@ -1616,14 +1628,36 @@ container deposits, a worn-out tool (it vanishes on the client but keeps its
 slot in the shadow), armour put on, bucket, seed and hoe consumes and a death
 without retrieval, so it fills by drift, and a spill the joiner's body could
 never pick up was a lost item. A joiner's **server pickups** follow the same
-rule (`entity::tick_item_pickups_with`, `grant_unfit`): a ground item the
+rule (`entity::tick_item_pickups_for`, `grant_unfit`): a ground item the
 joiner stands on is granted whole and removed, what fits the shadow is added
-and the rest tallied, so a drifted-full shadow never leaves items on the
-floor. The client's own spill when ITS inventory is full
-(`remote_entities::apply_inventory_grant`, a ground item only it sees) is the
-client's own business, not a duplicate.
-BRIDGE: spill the shadow's overflow as a real item once C3d makes the server
-inventory the truth.
+(when the client reports the grant) and the rest tallied, so a drifted-full
+shadow never leaves items on the floor.
+**What the CLIENT can't hold (C3a-fix-1, C3a verify D-M2).** The client used
+to spill it as a ground item only it saw (`remote_entities::
+apply_inventory_grant`): with the shadow-full guard gone, a joiner whose
+client was really full vacuumed other players' drops, mob loot and death
+scatters into a private copy nobody else could take. Now the client spills
+nothing: `apply_inventory_grant` returns the unfit count and the client sends
+`ItemAction::GrantUnfit { event, count }` (the grant's window event, after
+applying it). The server clamps the count to that grant (one report per
+grant; a grant it can't name, or a count past the grant, gives nothing and is
+tallied `unfit_clamped`), gives back what its copy holds of the grant beyond
+what the client kept (`window_events::return_unfit`: none in lockstep, where
+its own `add_item` left the same part out; the overflow the client confirmed
+stops counting as `grant_overflow`), and spawns it at the server body's feet
+by the shared spill rule (`break_drops::spill_at_feet`): a real item everyone
+sees and anyone can take. For `window_events::UNFIT_HOLD_TICKS` = 100 after a
+report, that joiner's pickups follow its window (the effective window, waiting
+events applied) instead of the whole-stack rule, so the item it just gave back
+is not picked up, refused and respawned in a loop. Pinned by
+`window_ops::a_full_joiner_leaves_a_drop_it_cannot_hold_as_a_real_item_at_its_feet`
+(on a lending host: the item is in the host's world) and
+`a_grant_unfit_claiming_more_than_its_grant_is_clamped`. A modified client
+can still claim an unfit part it did hold and pick the spawned item up again:
+the same fabrication class as a claimed Q-drop (BRIDGE: possession check,
+closes at C3d), bounded by the grants it is sent.
+BRIDGE: the whole stack is granted whatever the shadow holds — replace when
+C3d makes the server inventory the truth (only what fits is taken).
 
 **On a `--no-lend` host the host can't see or pick up a joiner's server drop**
 (a Q-drop, C2b): the owning server's ECS is separate from the host client's,
@@ -1655,12 +1689,24 @@ bought blocks):
 - drying-rack recovery on a break (its logs; likewise no double grant);
 - slot layout: moving stacks between slots, the client's `auto_refill`
   setting and locked slots (the shadow always auto-refills and locks
-  nothing). The check keys on the held slot, so layout drift alone
-  mismatches. (A scroll after a placement no longer charges the wrong slot:
-  since C3a-2b each edit group carries the hotbar slot of the input that made
-  it, `EditGroup::hotbar_slot`, and a placement is charged to that slot even
-  if it waits in the edit queue while a later input scrolls on; an input that
-  names no slot falls back to the latest one);
+  nothing), and a placement charged to the hotbar slot named in the input (a
+  scroll after a placement within one send window charges the wrong slot).
+  The check keys on the held slot, so layout drift alone mismatches.
+  **Closed for the hotbar slot by C3a-fix-1 (v76, C3a verify C-M1):** C3a-2b
+  kept the slot of the input that carried an edit (`EditGroup`), which fixed a
+  placement waiting in the edit queue while a later input scrolled on, but not
+  a scroll within one send window — the input goes out at the slot selected
+  at the send. Now each edit carries the slot and hand it was made with
+  (`InputPacket.edit_hands`, parallel to `block_changes`; the client stamps
+  its unsent edits just before its hotbar selection changes and at the send,
+  `window_ops::PendingEdits`), and `EditGroup` keeps them per edit:
+  `classify`, `check_placement` and the break wear use the edit's own; an edit
+  past the end of the list, or with a slot of 9 or more, falls back to the
+  input's slot and hand (the latest input's slot if it names none). Pinned by
+  `joiner_inventory::a_scroll_after_an_edit_in_one_send_window_charges_and_wears_the_edits_own_slot`.
+  (Window ops mirror layout moves, locks and `auto_refill` since C3a-2a,
+  §4.2g.) The hand is stamped after the edit, so the last of a stack placed
+  reports an empty hand (classified as a placement all the same);
 - a bucket filled at a source (C1 verify N3): the client swaps a Bucket for a
   Water or Lava Bucket, and the scoop edit is untagged, so it is unchecked —
   the shadow never sees the filled bucket.
@@ -1672,9 +1718,13 @@ slot, by the client's own rule (`Inventory::use_tool_at`,
 the client, and the break still yields. A slot that doesn't hold a tool of the
 same type and material wears nothing and counts a
 `PossessionTally.wear_mismatch`. An accepted `EntityAttack` wears the held
-weapon the same way at the latest input's slot (it carries no slot of its
-own). The claimed tool still sets the drop tier and the damage; enforcement is
-C3d.
+weapon the same way, starting at the swing's own slot
+(`EntityAttackPacket.hotbar_slot`, C3a-fix-1 C-L2; the latest input's if out
+of range) — a select and a swing in one tick wear the same piece on both
+sides. Since C3a-fix-1 the swing's wear is a window event (§4.2g): applied
+when the client reports it wore its own. A break's wear (an edit) is applied
+in the client's order already. The claimed tool still sets the drop tier and
+the damage; enforcement is C3d.
 
 **Tool wear the server never settles (C3a verify C-L1; known gaps).** The
 client wears its tool at the break, but four paths reach no
@@ -1957,7 +2007,7 @@ craft the server's window can't make is refused there, tallied, and makes
 nothing on the server). Both close with enforcement (C3). Crafting is not enforced: a refused craft is
 only counted, and the client keeps what it made.
 
-### 4.2g Window ops (as built, protocol v75, C3a-2a)
+### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1)
 
 The server holds each joiner's inventory window slot for slot and the client
 predicts it with the same rules, the way Minecraft's window clicks work
@@ -1975,7 +2025,8 @@ window::Station` (`Player`, or `Table { cell }`). Both sides build a
 station's table cell (Spec 05 §3.6).
 
 **Wire.** `PacketType::WindowOp = 64` (C→S): `WindowOpPacket { op_seq: u32,
-op: WireWindowOp, digest: u32 }`. `WireWindowOp` (append only): `Click
+op: WireWindowOp, digest: u32, events_applied: u32 }` (`events_applied` v76,
+"Ordered window events" below). `WireWindowOp` (append only): `Click
 (window::WindowClick)` = 0, `OpenPlayer` = 1, `OpenTable { cell: [i32; 3] }` =
 2, `SetAutoRefill { on: bool }` = 3. `WindowClick` (append only, pinned by
 `protocol::tests::window_op_packets_round_trip`): `Slot { slot, right }` = 0,
@@ -1993,7 +2044,12 @@ little-endian bytes — per slot a presence byte, then kind (Block 1, Tool 2,
 Material 3, Armour 4, Plan 5), id (`u16`: block id; tool type << 8 | tier;
 material id; armour slot << 8 | tier; 0 for a Plan), count and durability
 (`u16`) — over the 36 slots, the four armour slots, the cursor and the nine
-grid cells, then `auto_refill`. Locks are not in it.
+grid cells, then `auto_refill`; since C3a-fix-1 (B-L6) then the session locks
+(a `u64` mask, bit `i` = slot `i`, little-endian) and the station (`Player`
+= 0; `Table` = 1, then the cell's x, y, z as `i32`), digested at the station
+AFTER the op on both sides (`window::station_after`: a close that returned
+everything is back at `Player`), so a lock or a station that differs shows at
+the op that made it differ. The hotbar selection is not in it.
 
 **Client.** Every window transition `CraftingUi` applies is logged
 (`window_ops::OpLog`) with the digest after it: each `apply_click` (slot,
@@ -2004,11 +2060,28 @@ refused one too — the rule ran), `open_player_crafting` (`OpenPlayer`, E) and
 auto-refill setting is logged as `SetAutoRefill` the first time an op is
 logged in a session and whenever it differs from the last one logged —
 ahead of the op it first applies to, with the digest before that op; a
-change with no op after it goes at the end of the log. `GameState::
-flush_window_ops` runs at the start of every tick's `network_send_input`,
-before that tick's input is built: when joined and connected it sends player
-0's log in order; otherwise it drops every log and forgets the setting (so a
-join always starts by sending it). Single-player, a host's own slots and a
+change with no op after it goes at the end of the log. **One ordered send path
+(C3a-fix-1, B-L1).** Each logged op and the first unsent edit of each input
+are stamped from one client order clock (`window_ops::order_stamp`, a
+per-thread counter; the unsent edits wait in `window_ops::PendingEdits`, which
+`GameState::pending_block_changes` is). At the tick's `network_send_input`
+the ops logged before the input's first edit go before the input
+(`GameState::flush_ops_before_edits`, `OpLog::take_before`), and the rest
+after it (`GameState::flush_window_ops`), so a placement then E reaches the
+server as the edit, then `OpenPlayer`. A request sent mid-frame
+(`EntityAttack`, `EntityInteract`, `ItemAction`, `DeviceInteract`) first sends
+the ops logged before any unsent edit, so a Close then a Q-drop in one tick
+reach the server as Close, Drop (the drop finds the stack the close put
+back). Pinned on the real client by the GPU harness
+(`game_harness_a_close_then_a_drop_in_one_tick_reach_the_server_in_order`,
+`game_harness_a_placement_then_e_in_one_tick_reach_the_server_in_order`) and
+the split by `window_ops::tests`. A request made after an unsent edit in the
+same tick still goes out ahead of the input carrying the edit (the server
+waits a request only behind edits it already holds); only a Q-drop's or a
+`GrantUnfit`'s take applies at receipt, and neither can follow an unsent edit
+in practice (a drop needs the screen closed after it; a `GrantUnfit` is sent
+only when no edit waits). When not joined `flush_window_ops` drops every log
+and forgets the setting (so a join always starts by sending it). Single-player, a host's own slots and a
 split-screen seat send nothing. A rule refusal is still sent: the server runs
 the same rule to the same refusal. The craft result click is gated by the
 claims (`may_craft`, §4.2d) before it is applied; a gated click applies
@@ -2033,7 +2106,16 @@ a slot that won't take it, a Result with no recipe — benign) and as
 a table the client still sees, or a click a modified client invented;
 C3a-fix-2, B-L4). `window_mismatch` counts digest mismatches, keeping the
 first one's kind (`first_window_mismatch`, `window_ops::OpKind`; the first is
-logged at info, the rest at debug; the leave summary prints them). A creative
+logged at info, the rest at debug; the leave summary prints them).
+C3a-fix-1: before the op the server applies the window events the client had
+applied ("Ordered window events" below); `op_seq` must be one past the last
+(`WindowEvents::note_op_seq`: a gap — an op that never arrived or didn't
+decode — is tallied `EventTally::ops_lost`; an old number moves nothing); and
+the FIRST digest comparison after join is not tallied but recorded as the
+baseline (`WindowEvents::baseline`, logged at info if it differs): it
+compares the window the joiner arrived with, which no wire carries before
+the sidecar's join sync. Later comparisons tally as above (a joiner that
+arrived with items therefore still mismatches until the sidecar). A creative
 joiner is mirrored but not tallied: its item browser's gives stay local until
 C3c. Nothing is refused, corrected or answered.
 
@@ -2077,14 +2159,84 @@ within a few ticks.
 interaction or eat is `joiner_actions::take_owed_window` on both sides (36
 slots — the request's slot first —, then the grid row-major, then the
 cursor). A server-landed hit wears the server's copy of the armour by
-`window::wear_armour` when it drains `armour_wear_hits` into `ArmourWorn`; the
-client wears its own with the same function on receipt; a piece that breaks
-unequips on both. `InputPacket.armour_points` still sets the damage (C3d
-flips it). An accepted swing wears the weapon where it now is on both sides:
-the slot it was swung from (the server: the latest input's hotbar slot) if
-it still holds it, else the first of the 36 that does
-(`joiner_actions::where_now`), so a weapon moved by a window op while the
-swing flew wears the same piece.
+`window::wear_armour` for the hits it drains from `armour_wear_hits` into one
+`ArmourWorn`; the client wears its own with the same function on receipt; a
+piece that breaks unequips on both. `InputPacket.armour_points` still sets
+the damage (C3d flips it). An accepted swing wears the weapon where it now is
+on both sides: the slot it was swung from (`EntityAttackPacket.hotbar_slot`
+since v76, C-L2 — the server used the latest input's slot, and a select and a
+swing in one tick wore different pieces of two alike) if it still holds it,
+else the first of the 36 that does (`joiner_actions::where_now`), so a weapon
+moved by a window op while the swing flew wears the same piece. Each of these
+is a window event (below).
+
+**Ordered window events (C3a-fix-1, v76; C3a verify B-H1).** The server
+changes a joiner's window by itself four ways: a grant (a break's yield, an
+interaction's product, a server pickup), an accepted request's owed take (an
+`Eat`, a D2b interaction), an armour-wear hit (one `ArmourWorn`, any number of
+hits) and an accepted swing's weapon wear. Before v76 it changed its copy at
+once and the client changed its own when the packet arrived, so a window op
+the client applied in between ran "op, then change" on the client and "change,
+then op" on the server: a grant crossing a click landed in different slots, an
+owed take crossing a split took from different stacks, an `ArmourWorn`
+crossing an unequip wore different durabilities, and an honest joiner
+mismatched steadily. Now:
+- **The server numbers each** (`window_events::queue`: 1, 2, 3… per
+  connection, `ServerPlayer::window_events`, fresh per attach) and sends the
+  number on its carrier as `window_event`: `InventoryGrant` (one per stack),
+  `InteractOutcome` (an accepted interaction's take, or an accepted swing's
+  wear when a tool was in hand), `ItemActionOutcome` (an accepted eat's take)
+  and the `ArmourWorn` `PlayerEvent`; 0 when the packet changes nothing. An
+  interaction's take is numbered before its products, so the outcome precedes
+  their grants on the wire, as the client applies them. A Q-drop is not an
+  event: the client takes its item when it sends the drop and the server when
+  it reads it — the same point in the client's order.
+- **The client applies the carriers in arrival order** (`window_events::
+  WindowInbox`, drained by `GameState::apply_window_inbox`: `RemoteClient`
+  decodes them into one queue per kind, and the inbox merges them back by
+  event number) and counts the highest it applied
+  (`RemoteClient::note_window_event`). It applies none while it holds edits
+  not yet sent (this tick's, or a packet's overflow waiting in `RemoteClient`):
+  they wait in the inbox, with the `StateUpdate` acknowledgement that ends
+  their requests' claims (joiner_actions N4), until just after the input
+  carrying the edits goes out — so every edit of an input is made at the one
+  count the input reports. Before applying them it sends the ops logged
+  before them.
+- **Every C→S packet the server judges against the window reports the
+  count** (`events_applied`, stamped by `RemoteClient` as it sends):
+  `InputPacket`, `WindowOpPacket`, `ItemActionPacket`, `EntityInteractPacket`
+  and `EntityAttackPacket`. Before processing one, the server applies its
+  queued events up to that count (`window_events::apply_through`); an input's
+  count is applied when its edits are processed (`EditGroup::events_applied`:
+  they may wait behind earlier edits), an input with no edits applies it only
+  when no edits wait. The content is the server's; only the ORDER follows the
+  client; there is no replay.
+- **Effective window.** A decision the server makes at the time of an event
+  reads the window with its waiting events applied
+  (`window_events::effective_inventory`): today the pickup fit while a
+  `GrantUnfit` hold lasts (the pass decides on a scratch copy and changes no
+  window); C3d's refusals will read it too. Processing a client packet reads
+  the plain window (the events past its count happened after it, for that
+  client).
+- **Safety valve and bound.** An event still waiting
+  `window_events::EVENT_ACK_TIMEOUT_TICKS` = 200 ticks after it was sent is
+  applied anyway (`apply_overdue`, every tick), and at most
+  `MAX_PENDING_EVENTS` = 1,024 wait per joiner (past it the oldest is applied
+  first); both are tallied `EventTally::forced`. A shortfall in a take is
+  logged when the take is applied (`possession.mismatched`, as before); a
+  grant's shadow overflow is tallied then too.
+- **Tallies** (`window_events::EventTally`, in the leave summary beside the
+  possession line): events sent, forced, ops lost, unfit units returned,
+  unfit units clamped, and a baseline that differed.
+
+Pinned at zero digest mismatches for an honest joiner with each crossing
+staged under a 3-tick latency (`test_integration::window_ops`:
+`a_grant_crossing_a_click_lands_in_the_same_slot_on_both_sides`,
+`an_owed_take_crossing_a_split_takes_from_the_same_place_on_both_sides`,
+`armour_wear_crossing_an_unequip_wears_the_same_on_both_sides`). This keeps a
+joiner's own window in lockstep. Shared containers (C3b) converge differently:
+several players' moves meet in one chest, so a mismatched op there is
+corrected per slot (§4 of the C3 design).
 
 **Known divergences (all tallied, none refused).** The client's local uses
 (bucket, seeds, bone meal… C3c), chests and other containers (C3b), its
@@ -2092,12 +2244,12 @@ death (the death phase), the inventory it joined with (the sidecar), and
 creative gives are not mirrored, so the next op after one mismatches. A
 client-held Plan is a slot the server sees as empty (Plans have no wire form
 until C3c); ops that move it are layout no-ops on the server, and the digest
-counts that. Races: a grant, an owed payment or an `ArmourWorn` lands on the
-server at a different point among the ops than on the client, which can show
-as one mismatch. An `ItemAction` sent mid-frame can overtake a window op the
-same frame logged (ops go out at the next tick's start). No sync exists yet:
-`InventorySync` lands with the death phase; mismatch-driven resync with
-replay with C3d.
+counts that. The server's own changes (grants, owed takes, wear) no longer
+race the ops: they apply in the client's order (above). A carrier the client
+drops (its bounded queues: 256 grants or outcomes, 16 life events a poll) is
+applied on the server when a later count passes it: a divergence, never
+expected of an honest server. No sync exists yet: `InventorySync` lands with
+the death phase; mismatch-driven resync with replay with C3d.
 
 ### 4.3 Block Mutations
 

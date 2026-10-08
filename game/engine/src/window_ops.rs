@@ -5,31 +5,73 @@
 //! **Client.** Every window transition the inventory screen applies — each
 //! click, the close included (`CraftingUi::apply_click`, `CraftingUi::close`),
 //! and each open — is logged in an [`OpLog`] with the window's digest after
-//! it (`window::digest`). A joined client sends the log as `WindowOp`
-//! packets at the start of every tick, before that tick's input
-//! (`GameState::flush_window_ops`), so the server reads them in the order
-//! the client made them relative to its edits. Its auto-refill setting is an
-//! op too, logged at join and whenever it changes, ahead of the op it first
-//! applies to. Single-player and a host's own slots send nothing.
+//! it (`window::digest`). Its auto-refill setting is an op too, logged at
+//! join and whenever it changes, ahead of the op it first applies to.
+//! Single-player and a host's own slots send nothing.
+//!
+//! **One ordered send path (C3a-fix-1, B-L1).** A joined client sends its
+//! ops, its edits and its requests in the order it made them. Each op and
+//! the first edit of each input are stamped from one order clock
+//! ([`order_stamp`]; the edits wait in [`PendingEdits`]). At the tick's send
+//! the ops logged before the input's first edit go before the input and the
+//! rest after it ([`OpLog::take_before`], `GameState::network_send_input`);
+//! a request sent mid-frame (`EntityAttack`, `EntityInteract`, `ItemAction`,
+//! `DeviceInteract`) first sends the ops logged before any unsent edit
+//! (`GameState::flush_ops_before_edits`). So a Close then a Q-drop in one
+//! tick reach the server as Close, Drop; a placement then E as the input,
+//! then `OpenPlayer`.
 //!
 //! **Server.** [`serve_op`] applies the op to its copy of that joiner's
 //! window (`ServerPlayer`'s 36 slots, armour, cursor, craft grid and
 //! station) by the same rule, `window::apply`, judging a table's reach from
 //! the server's body in the server's world. [`note_served`] compares the
-//! digests and tallies (`PossessionTally`). It is log-only: nothing is
+//! digests and tallies (`PossessionTally`; C3a-fix-1: the first comparison
+//! after join is the baseline, not a mismatch). It is log-only: nothing is
 //! refused, nothing is sent back. A rule refusal leaves the server's window
-//! as the rule leaves it, exactly as on the client.
+//! as the rule leaves it, exactly as on the client. Before an op, the server
+//! applies its own window events the client had applied by then
+//! (`window_events`, `WindowOpPacket.events_applied`) and checks the op
+//! sequence (`window_events::WindowEvents::note_op_seq`).
 
-use crate::protocol::{WindowOpPacket, WireWindowOp};
+use std::cell::Cell;
+
+use crate::protocol::{BlockChange, EditHand, WindowOpPacket, WireWindowOp};
 use crate::server::ServerPlayer;
 use crate::window::{self, ClickCtx, ClickResult, Station, WindowClick, WindowMut};
 use crate::world::World;
+
+thread_local! {
+    /// The client's order clock ([`order_stamp`]).
+    static ORDER: Cell<u64> = const { Cell::new(0) };
+}
+
+/// C3a-fix-1 — a stamp from the client's order clock: strictly increasing on
+/// this thread. A window op ([`OpLog`]) and the first unsent edit
+/// ([`PendingEdits`]) are each stamped when made, so the send can tell which
+/// came first. Per thread, not per game: a client's game loop runs on one
+/// thread, and another game on the same thread (a test's host and joiner)
+/// only skips numbers, which keeps every client's own order.
+pub fn order_stamp() -> u64 {
+    ORDER.with(|c| {
+        let next = c.get().wrapping_add(1);
+        c.set(next);
+        next
+    })
+}
+
+/// One logged op: the op, the window's digest after it, and its order stamp.
+#[derive(Debug)]
+struct Logged {
+    op: WireWindowOp,
+    digest: u32,
+    stamp: u64,
+}
 
 /// A client's window ops waiting to be sent, oldest first, each with the
 /// window's digest after it.
 #[derive(Debug, Default)]
 pub struct OpLog {
-    pending: Vec<(WireWindowOp, u32)>,
+    pending: Vec<Logged>,
     /// The auto-refill setting last logged this session; `None` until the
     /// first, so a session always starts by sending it.
     auto_refill: Option<bool>,
@@ -43,13 +85,13 @@ impl OpLog {
     pub fn sync_auto_refill(&mut self, on: bool, digest: impl FnOnce() -> u32) {
         if self.auto_refill != Some(on) {
             self.auto_refill = Some(on);
-            self.pending.push((WireWindowOp::SetAutoRefill { on }, digest()));
+            self.record(WireWindowOp::SetAutoRefill { on }, digest());
         }
     }
 
     /// Log an op just applied, with the window's digest after it.
     pub fn record(&mut self, op: WireWindowOp, digest: u32) {
-        self.pending.push((op, digest));
+        self.pending.push(Logged { op, digest, stamp: order_stamp() });
     }
 
     /// Everything logged, oldest first, for a joined client to send. A
@@ -57,7 +99,18 @@ impl OpLog {
     /// op goes last, with the window's digest now (`digest_now`).
     pub fn take(&mut self, auto_refill: bool, digest_now: u32) -> Vec<(WireWindowOp, u32)> {
         self.sync_auto_refill(auto_refill, || digest_now);
-        std::mem::take(&mut self.pending)
+        std::mem::take(&mut self.pending).into_iter().map(|l| (l.op, l.digest)).collect()
+    }
+
+    /// C3a-fix-1 (B-L1) — the ops logged before the unsent edit stamped
+    /// `first_edit` (every op, if there is none), oldest first; the rest
+    /// stay, to go after the input that carries the edit.
+    pub fn take_before(&mut self, first_edit: Option<u64>) -> Vec<(WireWindowOp, u32)> {
+        let cut = match first_edit {
+            Some(edit) => self.pending.iter().position(|l| l.stamp > edit).unwrap_or(self.pending.len()),
+            None => self.pending.len(),
+        };
+        self.pending.drain(..cut).map(|l| (l.op, l.digest)).collect()
     }
 
     /// Drop everything (not joined, so nothing is sent) and forget the
@@ -70,6 +123,77 @@ impl OpLog {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.pending.len()
+    }
+}
+
+/// C3a-fix-1 — a client's block edits not sent yet (`GameState`'s
+/// `pending_block_changes`), with what the send needs to know of each:
+/// - the order stamp of the first ([`order_stamp`]), so the ops logged before
+///   it go ahead of the input that carries it (B-L1);
+/// - C-M1 — the hotbar slot and hand each was made with
+///   (`InputPacket.edit_hands`). The client stamps them just before its
+///   hotbar selection changes and at the send ([`Self::stamp_hands`]): an
+///   edit takes the selection it was made under, whatever the player
+///   scrolled to before the input went out.
+#[derive(Debug, Default)]
+pub struct PendingEdits {
+    edits: Vec<BlockChange>,
+    /// The hands of the first `hands.len()` edits.
+    hands: Vec<EditHand>,
+    /// The order stamp of the first edit since the last take.
+    first: Option<u64>,
+}
+
+impl PendingEdits {
+    pub fn push(&mut self, edit: BlockChange) {
+        if self.edits.is_empty() {
+            self.first = Some(order_stamp());
+        }
+        self.edits.push(edit);
+    }
+
+    pub fn extend(&mut self, edits: impl IntoIterator<Item = BlockChange>) {
+        for edit in edits {
+            self.push(edit);
+        }
+    }
+
+    /// Drop everything unsent (the world was left or reset).
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.edits.len()
+    }
+
+    #[cfg(test)]
+    pub fn iter(&self) -> std::slice::Iter<'_, BlockChange> {
+        self.edits.iter()
+    }
+
+    /// The order stamp of the first unsent edit, if any.
+    pub fn first_stamp(&self) -> Option<u64> {
+        self.first
+    }
+
+    /// Every edit without a hand yet was made with `hand` (the selection is
+    /// about to change, or the input is going out).
+    pub fn stamp_hands(&mut self, hand: EditHand) {
+        self.hands.resize(self.edits.len(), hand);
+    }
+
+    /// Take everything for the input going out, the edits not stamped yet
+    /// made with `hand`: the edits and their hands, in step.
+    pub fn take(&mut self, hand: EditHand) -> (Vec<BlockChange>, Vec<EditHand>) {
+        self.stamp_hands(hand);
+        let taken = std::mem::take(self);
+        (taken.edits, taken.hands)
     }
 }
 
@@ -182,9 +306,7 @@ pub fn serve_op(sp: &mut ServerPlayer, world: &World, creative: bool, op: &WireW
             let ctx = ClickCtx::new(creative, station, eye, |c| world.get_block(c[0], c[1], c[2]))
                 .with_server_slack(lately);
             let result = window::apply(&mut view, click, &ctx);
-            if *click == WindowClick::Close && result.ok() {
-                station = Station::Player;
-            }
+            station = window::station_after(station, click, &result);
             Some(result)
         }
         WireWindowOp::OpenPlayer => {
@@ -202,7 +324,7 @@ pub fn serve_op(sp: &mut ServerPlayer, world: &World, creative: bool, op: &WireW
             None
         }
     };
-    let digest = window::digest(&view);
+    let digest = window::digest(&view, station);
     sp.station = station;
     Some(Served { result, digest })
 }
@@ -226,6 +348,11 @@ pub fn watch_table(sp: &mut ServerPlayer, world: &World) {
 /// no-op when the client's digest agrees, a refusal when it doesn't) and a
 /// digest that differs from the client's is a mismatch (the first one's
 /// kind is kept, and it is logged at info; the rest at debug). Log-only.
+///
+/// C3a-fix-1 (decision 2) — the first comparison after join is not tallied:
+/// it is recorded as the baseline (`WindowEvents::baseline`), the window the
+/// joiner arrived with, which no wire carries yet (the sidecar's join sync
+/// will).
 pub fn note_served(sp: &mut ServerPlayer, pkt: &WindowOpPacket, served: &Served, creative: bool) {
     let tally = &mut sp.possession;
     tally.window_ops = tally.window_ops.saturating_add(1);
@@ -241,7 +368,19 @@ pub fn note_served(sp: &mut ServerPlayer, pkt: &WindowOpPacket, served: &Served,
             tally.window_refused = tally.window_refused.saturating_add(1);
         }
     }
-    if served.digest == pkt.digest {
+    let matched = served.digest == pkt.digest;
+    if sp.window_events.baseline.is_none() {
+        sp.window_events.baseline = Some(matched);
+        if !matched {
+            log::info!(
+                "window mirror (log-only): {}'s window differs at its first op after join ({}): recorded as the baseline, not tallied",
+                sp.display_name,
+                OpKind::of(&pkt.op).label(),
+            );
+        }
+        return;
+    }
+    if matched {
         return;
     }
     let kind = OpKind::of(&pkt.op);
@@ -284,6 +423,51 @@ mod tests {
         log.discard();
         assert_eq!(log.len(), 0);
         assert_eq!(log.take(false, 2), vec![(WireWindowOp::SetAutoRefill { on: false }, 2)]);
+    }
+
+    /// C3a-fix-1 (B-L1) — the ops logged before the first unsent edit go
+    /// before the input, the rest after it.
+    #[test]
+    fn ops_split_at_the_first_unsent_edit() {
+        let mut log = OpLog::default();
+        let mut edits = PendingEdits::default();
+        log.record(WireWindowOp::Click(WindowClick::Close), 1);
+        edits.push(BlockChange { x: 1, y: 2, z: 3, new_block: 4, meta: 0 });
+        log.record(WireWindowOp::OpenPlayer, 2);
+        edits.push(BlockChange { x: 5, y: 2, z: 3, new_block: 4, meta: 0 });
+        log.record(WireWindowOp::Click(WindowClick::Sort), 3);
+        assert_eq!(log.take_before(edits.first_stamp()), vec![(WireWindowOp::Click(WindowClick::Close), 1)]);
+        assert_eq!(log.take_before(edits.first_stamp()), vec![], "the rest wait for the input");
+        let (sent, _) = edits.take((0, 0, 0));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(edits.first_stamp(), None);
+        assert_eq!(
+            log.take_before(edits.first_stamp()),
+            vec![(WireWindowOp::OpenPlayer, 2), (WireWindowOp::Click(WindowClick::Sort), 3)],
+            "with no edit unsent, everything goes"
+        );
+    }
+
+    /// C3a-fix-1 (C-M1) — an edit keeps the hand it was made with: hands are
+    /// stamped before the selection changes, the rest at the send.
+    #[test]
+    fn each_unsent_edit_keeps_the_hand_it_was_made_with() {
+        let mut edits = PendingEdits::default();
+        let edit = |x| BlockChange { x, y: 70, z: 0, new_block: 1, meta: 0 };
+        edits.push(edit(1));
+        edits.push(edit(2));
+        edits.stamp_hands((2, 1, 7));
+        edits.extend([edit(3)]);
+        edits.stamp_hands((5, 4, 9));
+        edits.stamp_hands((6, 0, 0));
+        edits.push(edit(4));
+        let (sent, hands) = edits.take((8, 1, 3));
+        assert_eq!(sent.iter().map(|b| b.x).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(hands, vec![(2, 1, 7), (2, 1, 7), (5, 4, 9), (8, 1, 3)]);
+        assert!(edits.is_empty() && edits.take((0, 0, 0)).1.is_empty());
+        edits.push(edit(9));
+        edits.clear();
+        assert_eq!((edits.len(), edits.first_stamp()), (0, None));
     }
 
     #[test]

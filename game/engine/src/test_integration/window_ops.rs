@@ -9,6 +9,16 @@
 //! sent numbered, as `GameState::flush_window_ops` and
 //! `RemoteClient::send_window_op` send it. The tests compare the server's
 //! copy of the window with the client's, slot for slot.
+//!
+//! C3a-fix-1 (v76) — the client also applies what the server sends that
+//! changes its window (grants, request outcomes, armour wear), in arrival
+//! order, by the client's own functions, after a simulated latency
+//! (`Client::latency`), counts the window events it applied, and reports the
+//! count on every op and on the input it sends each tick, as
+//! `RemoteClient` does: so an event and an op can cross, and the server must
+//! still end in lockstep.
+
+use std::collections::VecDeque;
 
 use glam::Vec3;
 
@@ -19,13 +29,14 @@ use crate::crafting::{CraftSlot, Tool, ToolMaterial, ToolType};
 use crate::hosted_server::{HostedServer, RemoteTransport, MAX_WINDOW_OPS_PER_TICK};
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack, MaterialId};
+use crate::joiner_actions::{Asked, JoinerActions, Pending};
 use crate::protocol::{self, PlayerEventType, WindowOpPacket};
 use crate::sim_lend::OwnedSimParts;
 use crate::transport::{ChannelClientTransport, ClientTransport};
 use crate::window::{self, ClickResult, Station, WindowClick, WindowSlot};
 use crate::window_ops::OpKind;
 
-use super::joiner_authority::{join_guest, send_edits};
+use super::joiner_authority::join_guest;
 use super::joiners_act::floor_and_stand;
 use super::lent_world::{join_guest_lent, start_lent};
 
@@ -40,6 +51,24 @@ struct Client {
     seq: u32,
     /// `ArmourWorn` hits it was told of.
     worn: u32,
+    /// C3a-fix-1 — the highest server window event it applied.
+    events: u32,
+    /// Packets from the server not applied yet, each with the rig tick it
+    /// arrives on.
+    inbox: VecDeque<(u64, Vec<u8>)>,
+    /// Ticks a server packet takes to arrive: 0 = applied in the tick it was
+    /// sent.
+    latency: u64,
+    /// The rig's tick count.
+    now: u64,
+    /// Its requests in flight (`joiner_actions`).
+    actions: JoinerActions,
+    /// The last input's sequence number.
+    input_seq: u64,
+    /// Grants received.
+    grants: u32,
+    /// `GrantUnfit` units reported back.
+    unfit: u32,
 }
 
 /// One joiner standing on a stone floor round (40, 80, 40), on a dedicated
@@ -93,19 +122,44 @@ impl Rig {
             armour: [None; 4],
             seq: 0,
             worn: 0,
+            events: 0,
+            inbox: VecDeque::new(),
+            latency: 0,
+            now: 0,
+            actions: JoinerActions::default(),
+            input_seq: 0,
+            grants: 0,
+            unfit: 0,
         };
         let mut rig = Rig { hs, host, c, at };
         rig.tick();
         rig
     }
 
+    /// One server tick, then the client: what arrived by now is applied in
+    /// arrival order, and its input goes out reporting the events applied.
     fn tick(&mut self) {
         match self.host.as_mut() {
             Some(h) => h.lend_tick(&mut self.hs),
             None => self.hs.tick(),
         }
+        self.c.now += 1;
         while let Some(pkt) = self.c.transport.try_recv_from_server() {
-            if let Some((protocol::PacketType::PlayerEvent, payload)) = protocol::deserialize_header(&pkt) {
+            self.c.inbox.push_back((self.c.now + self.c.latency, pkt));
+        }
+        while self.c.inbox.front().is_some_and(|(due, _)| *due <= self.c.now) {
+            let (_, pkt) = self.c.inbox.pop_front().unwrap();
+            self.receive(&pkt);
+        }
+        self.send_input(&[]);
+    }
+
+    /// The client applies one server packet that changes its window, by the
+    /// client's own functions, and counts its window event.
+    fn receive(&mut self, pkt: &[u8]) {
+        let Some((ptype, payload)) = protocol::deserialize_header(pkt) else { return };
+        let event = match ptype {
+            protocol::PacketType::PlayerEvent => {
                 let ev: protocol::PlayerEventPacket = protocol::safe_deserialize(payload).unwrap();
                 if let PlayerEventType::ArmourWorn { hits } = ev.event {
                     // The client wears its own armour by the shared rule, as
@@ -115,8 +169,108 @@ impl Rig {
                     }
                     self.c.worn += u32::from(hits);
                 }
+                ev.window_event
             }
-        }
+            protocol::PacketType::InventoryGrant => {
+                let grant: protocol::InventoryGrantPacket = protocol::safe_deserialize(payload).unwrap();
+                self.c.grants += 1;
+                let registry = &self.hs.server.registry;
+                let unfit = crate::remote_entities::apply_inventory_grant(&mut self.c.inv, &grant, registry).unwrap_or(0);
+                self.c.events = self.c.events.max(grant.window_event);
+                if unfit > 0 {
+                    self.c.unfit += u32::from(unfit);
+                    self.send_action(protocol::ItemAction::GrantUnfit { event: grant.window_event, count: unfit });
+                }
+                return;
+            }
+            protocol::PacketType::ItemActionOutcome => {
+                let out: protocol::ItemActionOutcomePacket = protocol::safe_deserialize(payload).unwrap();
+                if let Some(request) = self.c.actions.take(out.seq) {
+                    let c = &mut self.c;
+                    crate::joiner_actions::apply_item_outcome(&mut c.inv, &mut c.ui, &request, &out);
+                }
+                out.window_event
+            }
+            protocol::PacketType::InteractOutcome => {
+                let out: protocol::InteractOutcomePacket = protocol::safe_deserialize(payload).unwrap();
+                if let Some(request) = self.c.actions.take(out.seq) {
+                    let c = &mut self.c;
+                    crate::joiner_actions::apply_outcome(&mut c.inv, &mut c.ui, &request, &out);
+                }
+                out.window_event
+            }
+            _ => return,
+        };
+        self.c.events = self.c.events.max(event);
+    }
+
+    /// The client's input for this tick: standing still, carrying `edits`
+    /// and the events it has applied.
+    fn send_input(&mut self, edits: &[((i32, i32, i32), block::BlockId)]) {
+        self.c.input_seq += 1;
+        let sp = &self.hs.server.players[self.c.slot];
+        let input = protocol::InputPacket {
+            tick: self.c.input_seq,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            yaw: sp.yaw,
+            pitch: sp.pitch,
+            health: 20.0,
+            block_changes: edits
+                .iter()
+                .map(|&((x, y, z), b)| protocol::BlockChange { x, y, z, new_block: b, meta: 0 })
+                .collect(),
+            events_applied: self.c.events,
+            ..Default::default()
+        };
+        self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    }
+
+    /// One item action from the client, reporting the events it applied.
+    fn send_action(&mut self, action: protocol::ItemAction) {
+        let seq = self.c.actions.unanswered();
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events };
+        self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    }
+
+    /// The client asks to eat `held` from hotbar slot `slot` (claimed until
+    /// the outcome, as `GameState::send_eat_request` does).
+    fn eat(&mut self, slot: usize, held: Item) {
+        let (held_kind, held_id) = crate::inventory::item_to_ref(&held).to_wire();
+        let held = Some(held);
+        let seq = self.c.actions.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: slot, held }, u64::MAX);
+        let action = protocol::ItemAction::Eat {
+            hotbar_slot: slot as u8,
+            held_kind,
+            held_id,
+            held_full: protocol::WireItem::None,
+        };
+        let pkt = protocol::ItemActionPacket { seq, action, events_applied: self.c.events };
+        self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    }
+
+    /// A stack another player dropped, lying at the joiner's feet (no pickup
+    /// delay for the joiner).
+    fn drop_at_feet(&mut self, stack: ItemStack) {
+        let at = self.hs.server.players[self.c.slot].player.pos;
+        let ecs = match self.host.as_mut() {
+            Some(h) => &mut h.ecs,
+            None => &mut self.hs.server.ecs,
+        };
+        crate::entity::spawn_thrown_item(ecs, at, Vec3::ZERO, stack, 200);
+    }
+
+    /// The ground items in the world the server simulates, with where they lie.
+    fn ground_items(&self) -> Vec<(Vec3, ItemStack)> {
+        let ecs = match self.host.as_ref() {
+            Some(h) => &h.ecs,
+            None => &self.hs.server.ecs,
+        };
+        ecs.query::<(&crate::entity::Position, &crate::entity::ItemEntity)>()
+            .iter()
+            .map(|(_, (p, it))| (p.0, it.stack.clone()))
+            .collect()
     }
 
     fn world(&mut self) -> &mut crate::world::World {
@@ -168,26 +322,28 @@ impl Rig {
         c.ui.close(&mut c.inv, &mut c.armour)
     }
 
-    /// Send every logged op, numbered, as the game loop's flush does.
+    /// Send every logged op, numbered, as the game loop's flush does, each
+    /// reporting the window events applied (none is applied between the
+    /// ops being logged and sent here).
     fn flush(&mut self) -> usize {
         let c = &mut self.c;
         let ops = c.ui.take_ops(&c.inv, &c.armour);
         let n = ops.len();
         for (op, digest) in ops {
             c.seq += 1;
-            let pkt = WindowOpPacket { op_seq: c.seq, op, digest };
+            let pkt = WindowOpPacket { op_seq: c.seq, op, digest, events_applied: c.events };
             c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
         }
         n
     }
 
     fn client_digest(&self) -> u32 {
-        window::digest_parts(&self.c.inv, &self.c.armour, &self.c.ui.cursor_item, &self.c.ui.grid)
+        window::digest_parts(&self.c.inv, &self.c.armour, &self.c.ui.cursor_item, &self.c.ui.grid, self.c.ui.station())
     }
 
     fn server_digest(&self) -> u32 {
         let sp = &self.hs.server.players[self.c.slot];
-        window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid)
+        window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station)
     }
 
     /// The server's window is the client's, slot for slot, and no op has
@@ -202,6 +358,7 @@ impl Rig {
         assert_eq!(sp.inventory.auto_refill, self.c.inv.auto_refill, "{what}: auto-refill");
         assert_eq!(self.server_digest(), self.client_digest(), "{what}: the digests");
         assert_eq!(sp.possession.window_mismatch, 0, "{what}: no op mismatched");
+        assert_eq!(sp.window_events.tally.ops_lost, 0, "{what}: no op lost");
         if self.c.ui.open {
             assert_eq!(sp.station, self.c.ui.station(), "{what}: the station");
         }
@@ -515,7 +672,8 @@ fn a_closed_connection_holding_a_thousand_window_ops_is_reaped() {
     let Rig { mut hs, c, .. } = rig;
     let slot = c.slot;
     for n in 1..=1000u32 {
-        let pkt = WindowOpPacket { op_seq: n, op: protocol::WireWindowOp::Click(WindowClick::Sort), digest: 0 };
+        let pkt =
+            WindowOpPacket { op_seq: n, op: protocol::WireWindowOp::Click(WindowClick::Sort), digest: 0, events_applied: 0 };
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }
     drop(c.transport); // the link just goes
@@ -579,7 +737,9 @@ fn an_op_waits_behind_its_clients_waiting_edits() {
     let before = rig.tally().window_ops;
     let (x, y, z) = (rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32);
     let edits: Vec<_> = (0..6).map(|i| ((x - 3 + i, y, z + 2), block::GLASS)).collect();
-    send_edits(&rig.hs, &rig.c.transport, rig.c.slot, 1, &edits);
+    // The rig's own input (its sequence numbers; `joiner_authority::send_edits`
+    // would be stale behind the inputs it sends each tick).
+    rig.send_input(&edits);
     rig.click(WindowClick::ToggleLock { slot: 4 });
     rig.flush();
     rig.tick();
@@ -676,6 +836,10 @@ fn a_server_hit_wears_the_servers_armour_as_the_client_wears_its_own() {
     ));
     rig.tick();
     assert_eq!(rig.c.worn, 1, "the client was told of one hit");
+    // C3a-fix-1 — the server wears its copy once the client says it wore its
+    // own (its next input), not before.
+    assert_eq!(rig.sp().armour[0].unwrap().durability, full, "not before the client's word");
+    rig.tick();
     assert_eq!(rig.sp().armour[0].unwrap().durability, full - 1, "the server's piece wore once");
     let server_armour = rig.sp().armour;
     assert_eq!(server_armour, rig.c.armour, "the same as the client's");
@@ -692,8 +856,10 @@ fn a_server_hit_wears_the_servers_armour_as_the_client_wears_its_own() {
         Vec3::ZERO,
     ));
     rig.tick();
+    rig.tick();
     assert_eq!(rig.sp().armour[0], None);
     assert_eq!(rig.c.armour[0], None);
+    assert_eq!(rig.sp().window_events.tally.forced, 0, "every wear on the client's word");
 }
 
 /// An accepted request's owed payment is taken from the server's copy of the
@@ -707,19 +873,15 @@ fn an_accepted_eat_is_paid_from_the_servers_crafting_grid() {
     rig.step("pick up the bread", slot(0, false));
     rig.step("both into the grid", WindowClick::Grid { row: 1, col: 1, right: false });
     rig.sp().combat.hunger = 10;
-    let pkt = protocol::ItemActionPacket {
-        seq: 1,
-        action: protocol::ItemAction::Eat {
-            hotbar_slot: 0,
-            held_kind: protocol::item_kind::MATERIAL,
-            held_id: MaterialId::Bread as u16,
-            held_full: protocol::WireItem::None,
-        },
-    };
-    rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+    rig.eat(0, Item::Material(MaterialId::Bread));
+    rig.tick();
+    // C3a-fix-1 — the take waits for the client's word: the client paid from
+    // its grid when the outcome arrived, then said so.
+    assert_eq!(rig.c.ui.grid[1][1].as_ref().map(|s| s.count), Some(1), "the client paid from its grid");
     rig.tick();
     assert_eq!(rig.sp().craft_grid[1][1].as_ref().map(|s| s.count), Some(1), "paid from the server's grid");
     assert_eq!(rig.tally().mismatched, 0, "nothing short");
+    rig.assert_lockstep("after the eat");
 }
 
 /// On a lending host the server judges the table in the host's world (lent
@@ -734,6 +896,203 @@ fn a_table_craft_on_a_lending_host_is_judged_in_the_hosts_world() {
     assert!(rig.step("autofill", WindowClick::Autofill { example: example("Iron Pickaxe") }).ok());
     assert!(matches!(rig.step("craft", WindowClick::Result), ClickResult::Crafted(_)));
     assert!(matches!(rig.sp().cursor.as_ref().map(|s| &s.item), Some(Item::Tool(_))));
+}
+
+// ── C3a-fix-1: the server's window events cross the client's ops ───────
+
+/// B-H1, the reviewer's first scenario — a grant crossing a click. The
+/// server picks a log up for the joiner and sends the grant; before it
+/// lands, the client puts the dirt on its cursor down in slot 1, and then the
+/// log lands in slot 2. The server applies the click first and the grant
+/// second, as the client did: the same slots, no mismatch.
+#[test]
+fn a_grant_crossing_a_click_lands_in_the_same_slot_on_both_sides() {
+    let mut rig = Rig::dedicated("grant-cross");
+    rig.give(0, Item::Block(block::STONE), 1);
+    rig.give(4, Item::Block(block::DIRT), 5);
+    rig.open_player();
+    rig.step("pick up the dirt", slot(4, false));
+    rig.c.latency = 3;
+    rig.drop_at_feet(ItemStack::new_block(block::OAK_LOG, 1));
+    rig.tick();
+    assert!(rig.ground_items().is_empty(), "the server picked the log up for the joiner");
+    assert_eq!(rig.c.grants, 0, "the grant is still on its way");
+    // The click, before the grant lands.
+    rig.click(slot(1, false));
+    rig.flush();
+    for _ in 0..5 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.grants, 1);
+    assert_eq!(rig.c.inv.slot(1).map(|s| s.item.clone()), Some(Item::Block(block::DIRT)));
+    assert_eq!(rig.c.inv.slot(2).map(|s| s.item.clone()), Some(Item::Block(block::OAK_LOG)), "the log, after the click");
+    rig.assert_lockstep("the grant crossed the click");
+    assert_eq!(rig.sp().window_events.tally.forced, 0);
+}
+
+/// B-H1, the second — an owed take crossing a split. An Eat of the bread in
+/// slot 2 (3 of them) is accepted; before the outcome lands the client
+/// opens its inventory and right-click-splits slot 2 (cursor 2, slot 1),
+/// then the outcome takes the slot's last one. The server splits first,
+/// then takes: cursor 2, slot empty, on both sides.
+#[test]
+fn an_owed_take_crossing_a_split_takes_from_the_same_place_on_both_sides() {
+    let mut rig = Rig::dedicated("take-cross");
+    rig.give(2, Item::Material(MaterialId::Bread), 3);
+    rig.sp().combat.hunger = 10;
+    rig.c.latency = 3;
+    rig.eat(2, Item::Material(MaterialId::Bread));
+    rig.tick();
+    rig.open_player();
+    rig.click(slot(2, true));
+    assert_eq!(rig.c.ui.cursor_item.as_ref().map(|s| s.count), Some(2));
+    rig.flush();
+    for _ in 0..5 {
+        rig.tick();
+    }
+    assert!(rig.c.inv.slot(2).is_none(), "the outcome took the slot's last bread");
+    assert_eq!(rig.c.ui.cursor_item.as_ref().map(|s| s.count), Some(2));
+    rig.assert_lockstep("the take crossed the split");
+    assert_eq!(rig.tally().mismatched, 0, "nothing short");
+}
+
+/// B-H1, the third — `ArmourWorn` crossing an unequip. A hit lands on the
+/// joiner's helmet; before the wear reaches the client it takes the helmet
+/// off (onto the cursor), and then the wear finds nothing equipped. The
+/// server unequips first too: the helmet on both cursors, unworn.
+#[test]
+fn armour_wear_crossing_an_unequip_wears_the_same_on_both_sides() {
+    let mut rig = Rig::dedicated("wear-cross");
+    rig.give(5, helmet(), 1);
+    rig.open_player();
+    rig.step("pick up the helmet", slot(5, false));
+    rig.step("equip it", WindowClick::Armour { slot: 0 });
+    let full = rig.sp().armour[0].unwrap().durability;
+    rig.c.latency = 3;
+    let slot_index = rig.c.slot;
+    assert!(rig.hs.server.land_hit_on_joiner(
+        slot_index,
+        2.0,
+        crate::survival::DamageCause::Mob(crate::mob::MobType::Bee),
+        Vec3::ZERO,
+    ));
+    rig.tick();
+    rig.click(WindowClick::Armour { slot: 0 });
+    rig.flush();
+    for _ in 0..5 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.worn, 1);
+    let unworn = |s: &Option<ItemStack>| match s.as_ref().map(|s| &s.item) {
+        Some(Item::Armour(a)) => a.durability == full,
+        _ => false,
+    };
+    assert!(unworn(&rig.c.ui.cursor_item), "the client's helmet came off before the wear");
+    rig.assert_lockstep("the wear crossed the unequip");
+}
+
+/// D-M2 — a really full joiner walks over a stack another player dropped.
+/// The server picks it up and grants it whole (the BRIDGE); the client
+/// can't hold it and reports it (`GrantUnfit`), spilling nothing of its
+/// own; the server spawns it as a real ground item at the joiner's feet, in
+/// the host's world, where the host and everyone else see it — and the
+/// joiner doesn't vacuum it straight back up.
+#[test]
+fn a_full_joiner_leaves_a_drop_it_cannot_hold_as_a_real_item_at_its_feet() {
+    let mut rig = Rig::lent("full-joiner");
+    for i in 0..36 {
+        rig.give(i, Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron)), 1);
+    }
+    let before: Vec<_> = rig.c.inv.slots_iter().map(|s| s.cloned()).collect();
+    rig.drop_at_feet(ItemStack::new_material(MaterialId::Stick, 3));
+    for _ in 0..4 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.grants, 1, "the server picked it up for the joiner and granted it");
+    assert_eq!(rig.c.unfit, 3, "the client couldn't hold it and said so");
+    assert_eq!(rig.c.inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), before, "nothing changed on the client");
+    let feet = rig.hs.server.players[rig.c.slot].player.pos;
+    let real = rig.ground_items();
+    assert_eq!(real.len(), 1, "one real item, in the host's world");
+    assert_eq!(real[0].1, ItemStack::new_material(MaterialId::Stick, 3));
+    assert!((real[0].0 - feet).length() < 2.0, "at the joiner's feet");
+    assert_eq!(rig.sp().window_events.tally.unfit_returned, 3);
+    // It stays where it is: the joiner's pickups follow its (full) window
+    // for the hold, so the item is not picked up, refused and respawned.
+    for _ in 0..40 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.grants, 1, "no second grant");
+    assert_eq!(rig.ground_items().len(), 1, "still there for anyone to take");
+    rig.assert_lockstep("the full joiner");
+}
+
+/// D-M2 — a `GrantUnfit` claiming more than its grant gave is clamped to the
+/// grant; one naming no grant gives nothing.
+#[test]
+fn a_grant_unfit_claiming_more_than_its_grant_is_clamped() {
+    let mut rig = Rig::dedicated("unfit-clamp");
+    rig.drop_at_feet(ItemStack::new_material(MaterialId::Stick, 2));
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.grants, 1);
+    assert_eq!(rig.c.unfit, 0, "it fit");
+    rig.assert_lockstep("the grant");
+    let event = rig.c.events;
+    // A modified client claims 200 of the 2 didn't fit, then a grant it
+    // never had.
+    rig.send_action(protocol::ItemAction::GrantUnfit { event, count: 200 });
+    rig.send_action(protocol::ItemAction::GrantUnfit { event: event + 50, count: 9 });
+    rig.tick();
+    let real: Vec<ItemStack> = rig.ground_items().into_iter().map(|(_, s)| s).collect();
+    assert_eq!(real, vec![ItemStack::new_material(MaterialId::Stick, 2)], "never more than the grant");
+    let t = rig.sp().window_events.tally;
+    assert_eq!((t.unfit_returned, t.unfit_clamped), (2, 198 + 9));
+}
+
+/// B-L6 — a gap in the op sequence (an op that never arrived) is tallied as
+/// lost; the digest now covers the locks and the station, so a lock the
+/// server never heard of shows at the next op.
+#[test]
+fn a_lost_op_is_tallied_and_a_lock_divergence_shows_at_once() {
+    let mut rig = Rig::dedicated("lost-op");
+    rig.give(3, Item::Block(block::STONE), 1);
+    rig.open_player();
+    rig.flush();
+    rig.tick();
+    // The lock op is lost on the way.
+    rig.click(WindowClick::ToggleLock { slot: 3 });
+    let _ = rig.c.ui.take_ops(&rig.c.inv, &rig.c.armour);
+    rig.c.seq += 1;
+    rig.click(slot(9, false));
+    rig.flush();
+    rig.tick();
+    let sp = &rig.hs.server.players[rig.c.slot];
+    assert_eq!(sp.window_events.tally.ops_lost, 1);
+    assert_eq!(sp.possession.window_mismatch, 1, "the lock it never heard of shows at the very next op");
+}
+
+/// Decision 2 — the first digest comparison after join is the baseline,
+/// not a mismatch: the window the joiner arrived with (a fresh world's kit)
+/// is on no wire yet.
+#[test]
+fn the_first_comparison_after_join_is_the_baseline_not_a_mismatch() {
+    let mut rig = Rig::dedicated("baseline");
+    // The client arrived with something the server never had; its session
+    // starts by sending its auto-refill setting, digested over that window.
+    rig.c.inv.set_slot(0, Some(ItemStack::new_block(block::STONE, 4)));
+    assert_eq!(rig.flush(), 1, "the auto-refill setting");
+    rig.tick();
+    let sp = &rig.hs.server.players[rig.c.slot];
+    assert_eq!(sp.window_events.baseline, Some(false), "recorded as the baseline");
+    assert_eq!(sp.possession.window_mismatch, 0, "not tallied");
+    // From matched windows on, the tally counts.
+    rig.sp().inventory.set_slot(0, Some(ItemStack::new_block(block::STONE, 4)));
+    rig.open_player();
+    rig.flush();
+    rig.tick();
+    rig.assert_lockstep("after the baseline");
 }
 
 /// Craft — the client never sends `ItemAction::Craft` (the craft is the

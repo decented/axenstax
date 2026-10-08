@@ -215,11 +215,17 @@ impl RemoteProjectiles {
 }
 
 /// Apply a server `InventoryGrantPacket` to the local player: decode the
-/// wire stack and add it to `inv`. If the inventory can't hold all of it,
-/// the remainder is spawned as a LOCAL ground item at the player's feet so
-/// nothing is silently lost (it re-enters via the normal client pickup pass
-/// when space frees up). Returns `false` when the stack doesn't decode
+/// wire stack and add it to `inv`. Returns how many units didn't fit
+/// (`Some(0)` when it all did), or `None` when the stack doesn't decode
 /// (tampered or newer-version server) — nothing is changed in that case.
+///
+/// C3a-fix-1 (D-M2) — what doesn't fit is NOT spilled here: the caller
+/// reports it to the server (`ItemAction::GrantUnfit`), which spawns it as a
+/// real ground item at the joiner's feet that everyone can see and take. A
+/// client-local spill was a private ghost of an item the server had already
+/// taken out of the shared world. A refused grant (`None`) still counts as
+/// applied (its window event is passed): the server's copy never held it
+/// either way — it changes nothing on either side.
 ///
 /// Decode precedence (death-drops phase 3, v61): a `full` payload other than
 /// `WireItem::None` WINS over the legacy `(kind, id)` pair — it carries the
@@ -229,13 +235,10 @@ impl RemoteProjectiles {
 /// fabricated full-durability item.
 pub fn apply_inventory_grant(
     inv: &mut crate::inventory::Inventory,
-    ecs: &mut hecs::World,
-    player_pos: Vec3,
     grant: &crate::protocol::InventoryGrantPacket,
     registry: &crate::block::BlockRegistry,
-) -> bool {
-    let crate::protocol::InventoryGrantPacket { item_kind: kind, item_id: id, count, full_item } =
-        *grant;
+) -> Option<u8> {
+    let crate::protocol::InventoryGrantPacket { item_kind: kind, item_id: id, count, full_item, .. } = *grant;
     let decoded = if full_item == crate::protocol::WireItem::None {
         crate::inventory::item_from_ref(kind, id, registry)
     } else {
@@ -245,25 +248,13 @@ pub fn apply_inventory_grant(
         log::warn!(
             "InventoryGrant with undecodable stack (kind {kind}, id {id}, full {full_item:?}) — dropped"
         );
-        return false;
+        return None;
     };
     if count == 0 {
-        return false;
+        return None;
     }
     let stack = crate::item::ItemStack { item, count };
-    if let Some(remainder) = inv.add_item(stack) {
-        // Inventory full (or partially) — spill what didn't fit at the
-        // player's feet as a normal local ground item; the client pickup
-        // pass re-grants it when space frees up. C2b: this is a late
-        // delivery of an item the server's shadow ALREADY holds (a grant
-        // carries only what landed in the shadow; what didn't fit there the
-        // server spills as a real item), so picking it up later is not a
-        // duplicate — the client is catching up with the shadow.
-        if remainder.count > 0 {
-            crate::entity::spawn_item(&mut *ecs, player_pos, remainder, id as u32);
-        }
-    }
-    true
+    Some(inv.add_item(stack).map_or(0, |rest| rest.count))
 }
 
 #[cfg(test)]
@@ -465,22 +456,19 @@ mod tests {
     }
 
     fn grant(kind: u8, id: u16, count: u8, full_item: WireItem) -> crate::protocol::InventoryGrantPacket {
-        crate::protocol::InventoryGrantPacket { item_kind: kind, item_id: id, count, full_item }
+        crate::protocol::InventoryGrantPacket { item_kind: kind, item_id: id, count, full_item, window_event: 1 }
     }
 
     #[test]
     fn grant_adds_stack_to_inventory() {
         let mut inv = crate::inventory::Inventory::new();
-        let mut ecs = hecs::World::new();
         let reg = crate::block::BlockRegistry::new();
-        let ok = apply_inventory_grant(
+        let unfit = apply_inventory_grant(
             &mut inv,
-            &mut ecs,
-            Vec3::new(0.0, 64.0, 0.0),
             &grant(item_kind::MATERIAL, crate::item::MaterialId::Bone as u16, 2, WireItem::None),
             &reg,
         );
-        assert!(ok);
+        assert_eq!(unfit, Some(0), "it all fit");
         let bones: u32 = inv
             .slots_iter()
             .flatten()
@@ -488,11 +476,13 @@ mod tests {
             .map(|s| s.count as u32)
             .sum();
         assert_eq!(bones, 2);
-        assert_eq!(ecs.query::<&crate::entity::ItemEntity>().iter().count(), 0);
     }
 
+    /// C3a-fix-1 (D-M2) — what doesn't fit is reported, never spilled as a
+    /// client-local item: the server spawns it as a real one
+    /// (`ItemAction::GrantUnfit`).
     #[test]
-    fn grant_overflow_spills_to_local_ground_item() {
+    fn grant_overflow_is_reported_unfit_not_spilled_locally() {
         use crate::crafting::{Tool, ToolMaterial, ToolType};
         let mut inv = crate::inventory::Inventory::new();
         // Fill all 36 slots with non-stacking tools — zero headroom.
@@ -505,48 +495,27 @@ mod tests {
                 ))),
             );
         }
-        let mut ecs = hecs::World::new();
         let reg = crate::block::BlockRegistry::new();
-        let ok = apply_inventory_grant(
+        let before: Vec<_> = inv.slots_iter().map(|s| s.cloned()).collect();
+        let unfit = apply_inventory_grant(
             &mut inv,
-            &mut ecs,
-            Vec3::new(0.0, 64.0, 0.0),
             &grant(item_kind::MATERIAL, crate::item::MaterialId::Bone as u16, 2, WireItem::None),
             &reg,
         );
-        assert!(ok);
-        let ground: Vec<u8> = ecs
-            .query::<&crate::entity::ItemEntity>()
-            .iter()
-            .map(|(_, it)| it.stack.count)
-            .collect();
-        assert_eq!(ground, vec![2], "whole stack spilled at the player's feet");
+        assert_eq!(unfit, Some(2), "the whole stack is reported unfit");
+        assert_eq!(inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), before, "nothing changed");
     }
 
     #[test]
     fn grant_rejects_undecodable_wire_pairs() {
         let mut inv = crate::inventory::Inventory::new();
-        let mut ecs = hecs::World::new();
         let reg = crate::block::BlockRegistry::new();
         // A bare TOOL ref with no full payload is lossy — must never mint a
         // fabricated full-durability tool.
-        assert!(!apply_inventory_grant(
-            &mut inv,
-            &mut ecs,
-            Vec3::ZERO,
-            &grant(item_kind::TOOL, 2, 1, WireItem::None),
-            &reg
-        ));
+        assert!(apply_inventory_grant(&mut inv, &grant(item_kind::TOOL, 2, 1, WireItem::None), &reg).is_none());
         // Hostile block id.
-        assert!(!apply_inventory_grant(
-            &mut inv,
-            &mut ecs,
-            Vec3::ZERO,
-            &grant(item_kind::BLOCK, u16::MAX, 1, WireItem::None),
-            &reg
-        ));
+        assert!(apply_inventory_grant(&mut inv, &grant(item_kind::BLOCK, u16::MAX, 1, WireItem::None), &reg).is_none());
         assert!(inv.slots_iter().flatten().count() == 0);
-        assert_eq!(ecs.query::<&crate::entity::ItemEntity>().iter().count(), 0);
     }
 
     #[test]
@@ -557,12 +526,9 @@ mod tests {
         let mut pick = Tool::new(ToolType::Pickaxe, ToolMaterial::Iron);
         pick.durability = 37;
         let mut inv = crate::inventory::Inventory::new();
-        let mut ecs = hecs::World::new();
         let reg = crate::block::BlockRegistry::new();
-        let ok = apply_inventory_grant(
+        let unfit = apply_inventory_grant(
             &mut inv,
-            &mut ecs,
-            Vec3::ZERO,
             &grant(
                 item_kind::TOOL,
                 2,
@@ -571,7 +537,7 @@ mod tests {
             ),
             &reg,
         );
-        assert!(ok);
+        assert_eq!(unfit, Some(0));
         let got: Vec<crate::item::Item> =
             inv.slots_iter().flatten().map(|s| s.item.clone()).collect();
         assert_eq!(got, vec![crate::item::Item::Tool(pick)]);
@@ -584,7 +550,6 @@ mod tests {
         // would mint a fabricated full-durability tool, exactly what the
         // refusal exists to prevent.
         let mut inv = crate::inventory::Inventory::new();
-        let mut ecs = hecs::World::new();
         let reg = crate::block::BlockRegistry::new();
         for bad in [
             WireItem::Tool { tool_type: 0, material: 2, durability: 0 },
@@ -592,17 +557,10 @@ mod tests {
             WireItem::Armour { slot: 0, material: 200, durability: 10 },
         ] {
             assert!(
-                !apply_inventory_grant(
-                    &mut inv,
-                    &mut ecs,
-                    Vec3::ZERO,
-                    &grant(item_kind::TOOL, 2, 1, bad),
-                    &reg
-                ),
+                apply_inventory_grant(&mut inv, &grant(item_kind::TOOL, 2, 1, bad), &reg).is_none(),
                 "{bad:?} must be refused"
             );
         }
         assert_eq!(inv.slots_iter().flatten().count(), 0);
-        assert_eq!(ecs.query::<&crate::entity::ItemEntity>().iter().count(), 0);
     }
 }

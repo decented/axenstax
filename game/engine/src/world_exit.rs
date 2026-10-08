@@ -577,6 +577,11 @@ impl crate::GameState {
         self.remote_swing.clear();
         self.pending_block_changes.clear();
         self.pending_mined.clear();
+        // C3a-fix-1 — window-event carriers held while edits were unsent
+        // belong to the session being left: applied to a later session they
+        // would land stale items and push its fresh `events_applied` to this
+        // one's numbers.
+        self.window_inbox.clear();
 
         // Session overlays that belong to the world being left.
         self.scenario = None;

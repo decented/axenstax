@@ -390,7 +390,7 @@ pub struct ResourcePackSuggestPacket {
 /// the per-instance fidelity that pair loses (tool type/material/durability,
 /// armour slot/material/durability). Plans have no wire form and stay
 /// floor-bound: the server never grants one.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InventoryGrantPacket {
     /// `item_kind::*` discriminator (`BLOCK` or `MATERIAL` in practice).
     pub item_kind: u8,
@@ -406,6 +406,13 @@ pub struct InventoryGrantPacket {
     /// would mis-decode, not default.
     #[serde(default)]
     pub full_item: WireItem,
+    /// v76 (C3a-fix-1) — the number of this grant as a window event: the
+    /// server numbers every change it makes to a joiner's window (1, 2, 3…
+    /// per connection) and applies it to its copy only once the client
+    /// reports, in a later packet's `events_applied`, that it applied it
+    /// too (`window_ops::WindowEvents`). Always non-zero on a grant.
+    #[serde(default)]
+    pub window_event: u32,
 }
 
 // ─── World chat (Phase 2) ───
@@ -611,7 +618,30 @@ pub struct InputPacket {
     /// the limit wait for its next input with their tags.
     #[serde(default)]
     pub mined: Vec<MinedBlock>,
+    /// v76 (C3a-fix-1) — the highest server window event this client had
+    /// applied when it made this input's edits (`window_ops::WindowEvents`):
+    /// the server applies its own queued window events up to this number
+    /// before it processes the edits, so its copy of the window sees them in
+    /// the order the client did. A joined client applies no event while it
+    /// holds edits it has not sent (`window_ops::WindowInbox`), so every edit
+    /// of one input was made at this one count.
+    #[serde(default)]
+    pub events_applied: u32,
+    /// v76 (C3a-fix-1, C-M1) — parallel to `block_changes`: the hotbar slot
+    /// and held item ([`EditHand`]) each edit was made with, recorded when
+    /// the edit was made. The server charges a placement to that slot,
+    /// wears a break's tool there and classifies the edit by that hand; an
+    /// edit past the end of this list (or with a slot of 9 or more) falls
+    /// back to the input-level `hotbar_slot` and `held_kind`/`held_id`.
+    #[serde(default)]
+    pub edit_hands: Vec<EditHand>,
 }
+
+/// v76 (C3a-fix-1) — one edit's hand ([`InputPacket::edit_hands`]): the
+/// hotbar slot it was made at (below 9), then the held item's `ItemRef`
+/// wire pair (`item_kind`, id), as `InputPacket.held_kind`/`held_id`
+/// encode it.
+pub type EditHand = (u8, u8, u16);
 
 /// A local column whose generation differed from the server's (v71, Phase
 /// B2b): which one, the hash the server's note carried and the hash of the
@@ -853,6 +883,15 @@ pub struct EntityAttackPacket {
     /// Sneaking: a deliberate hit on the player's own pet (no friendly-fire
     /// shield), as in single-player.
     pub sneak: bool,
+    /// v76 (C3a-fix-1, C-L2) — the hotbar slot the weapon was in when the
+    /// swing was made. The server wears its copy of the weapon there if that
+    /// slot still holds it, else the first slot that does
+    /// (`joiner_actions::where_now`) — the slot the client's own wear
+    /// starts from.
+    pub hotbar_slot: u8,
+    /// v76 — the highest window event the client had applied when it sent
+    /// this ([`InputPacket::events_applied`]).
+    pub events_applied: u32,
 }
 
 /// What an [`EntityInteractPacket`] asks for (MP-D2b). Wire-stable, append
@@ -899,11 +938,15 @@ pub struct EntityInteractPacket {
     pub hotbar_slot: u8,
     /// Sneaking (the horse family's breeding feed is a sneak gesture).
     pub sneak: bool,
+    /// v76 — the highest window event the client had applied when it sent
+    /// this ([`InputPacket::events_applied`]).
+    pub events_applied: u32,
 }
 
-/// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`).
-/// Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2, Drop = 3
-/// (pinned on the wire bytes by `item_action_packets_round_trip`).
+/// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
+/// `GrantUnfit`). Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2,
+/// Drop = 3, GrantUnfit = 4 (pinned on the wire bytes by
+/// `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
@@ -929,12 +972,19 @@ pub enum ItemAction {
     /// `held_full`, as a real ground item everyone sees. Fire-and-forget,
     /// paced by the server's drop bucket (`item_actions::DropBucket`).
     Drop { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// v76 (C3a-fix-1, D-M2) — `count` of the stack granted by window event
+    /// `event` (an `InventoryGrant`) didn't fit the client's inventory. The
+    /// client spills nothing itself: the server takes that part back out of
+    /// its copy of the window and spawns it as a real ground item at the
+    /// joiner's feet, which everyone can see and pick up. Never more than the
+    /// grant gave (the server clamps it). Fire-and-forget (no outcome).
+    GrantUnfit { event: u32, count: u8 },
 }
 
 /// Wire index of an [`ItemAction`] variant the server reads before decoding
 /// (bincode writes it as a `u32` right after the packet's `seq`,
 /// [`peek_item_action_variant`]). The order is Eat = 0, Sleep = 1, Craft = 2,
-/// Drop = 3, pinned by `item_action_packets_round_trip`.
+/// Drop = 3, GrantUnfit = 4 (v76), pinned by `item_action_packets_round_trip`.
 pub mod item_action_variant {
     /// `ItemAction::Drop`, paced by the joiner's drop bucket.
     pub const DROP: u32 = 3;
@@ -952,9 +1002,13 @@ pub fn peek_item_action_variant(payload: &[u8]) -> Option<u32> {
 pub struct ItemActionPacket {
     /// The client's request number, echoed in the outcome. Shares its
     /// sequence with `EntityAttack` / `EntityInteract` (`joiner_actions`).
-    /// A `Craft` or `Drop` takes a number too, and is never answered.
+    /// A `Craft`, `Drop` or `GrantUnfit` takes a number too, and is never
+    /// answered.
     pub seq: u32,
     pub action: ItemAction,
+    /// v76 — the highest window event the client had applied when it sent
+    /// this ([`InputPacket::events_applied`]).
+    pub events_applied: u32,
 }
 
 /// One window op (C3a-2a, [`WindowOpPacket`]). Wire-stable, APPEND ONLY:
@@ -988,6 +1042,10 @@ pub struct WindowOpPacket {
     /// The client's window digest after applying the op
     /// (`window::digest`). The server compares its copy's (log-only).
     pub digest: u32,
+    /// v76 (C3a-fix-1) — the highest server window event the client had
+    /// applied when it applied this op: the server applies its queued
+    /// events up to it first ([`InputPacket::events_applied`]).
+    pub events_applied: u32,
 }
 
 /// Server → Client: the decision on one [`ItemActionPacket`] (C2a).
@@ -1003,6 +1061,10 @@ pub struct ItemActionOutcomePacket {
     /// Why it was refused (an `item_actions::ItemNote` code), 0 = nothing.
     /// Unknown codes are shown as nothing.
     pub note: u8,
+    /// v76 (C3a-fix-1) — the window event this outcome's take is
+    /// ([`InventoryGrantPacket::window_event`]); 0 when it changes nothing
+    /// in the window (a refusal, a sleep).
+    pub window_event: u32,
 }
 
 /// Server → Client: the decision on one attack or interaction (MP-D2b).
@@ -1026,6 +1088,11 @@ pub struct InteractOutcomePacket {
     /// What to tell the player: a `mob_interact::InteractNote` code, 0 =
     /// nothing. Unknown codes are shown as nothing.
     pub note: u8,
+    /// v76 (C3a-fix-1) — the window event this outcome is
+    /// ([`InventoryGrantPacket::window_event`]): an accepted interaction's
+    /// take, or an accepted swing's weapon wear; 0 when it changes nothing in
+    /// the window (a refusal, nothing used, no tool in hand).
+    pub window_event: u32,
 }
 
 /// Server → Client: a kill this player made (MP-D2b), to the killer alone.
@@ -1423,6 +1490,10 @@ pub enum PlayerEventType {
 pub struct PlayerEventPacket {
     pub player_index: u32,
     pub event: PlayerEventType,
+    /// v76 (C3a-fix-1) — the window event an `ArmourWorn` is
+    /// ([`InventoryGrantPacket::window_event`]); 0 for every other event.
+    #[serde(default)]
+    pub window_event: u32,
 }
 
 // ─── Discovery (LAN broadcast) ───
@@ -1873,7 +1944,23 @@ pub struct ServerAnnouncePacket {
 ///   station), behind the client's edits, and tallies digest mismatches
 ///   (log-only). `ItemAction::Craft` (= 2) is unused: the craft is the
 ///   result click; a v75 server ignores it and tallies it.
-pub const PROTOCOL_VERSION: u32 = 75;
+/// - v76 (2026-10-08, C3a-fix-1): a joiner's window stays in lockstep. The server numbers every
+///   change it makes to a joiner's window — a grant (a pickup's too), an
+///   accepted request's owed take, an armour-wear hit, a swing's weapon wear —
+///   as a window event (1, 2, 3… per connection), queues it, and applies it
+///   to its copy only up to the count the client reports having applied.
+///   S→C carriers gain trailing `window_event: u32` (0 = changes nothing):
+///   `InventoryGrantPacket`, `InteractOutcomePacket`,
+///   `ItemActionOutcomePacket`, `PlayerEventPacket` (for `ArmourWorn`). C→S
+///   packets the server judges against the window gain trailing
+///   `events_applied: u32`: `InputPacket` (then `edit_hands:
+///   Vec<EditHand>`, each edit's own hotbar slot and hand),
+///   `WindowOpPacket`, `ItemActionPacket`, `EntityInteractPacket` and
+///   `EntityAttackPacket` (after a new `hotbar_slot: u8`, the swing's slot).
+///   `ItemAction` appends `GrantUnfit { event, count }` (= 4): the part of a
+///   grant that didn't fit the client comes back as a real ground item the
+///   server spawns, never a client-local spill.
+pub const PROTOCOL_VERSION: u32 = 76;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2043,8 +2130,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3a-2a — v75.
-        assert_eq!(super::PROTOCOL_VERSION, 75);
+        // C3a-fix-1 — v76.
+        assert_eq!(super::PROTOCOL_VERSION, 76);
     }
 
     #[test]
@@ -2056,6 +2143,7 @@ mod tests {
             item_id: 4,
             count: 3,
             full_item: WireItem::None,
+            window_event: 0x0102_0304,
         };
         let bytes = serialize_packet(PacketType::InventoryGrant, &pkt);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -2065,6 +2153,7 @@ mod tests {
         assert_eq!(back.item_id, 4);
         assert_eq!(back.count, 3);
         assert_eq!(back.full_item, WireItem::None);
+        assert_eq!(back.window_event, 0x0102_0304, "v76 — the grant's window event survives");
     }
 
     #[test]
@@ -2081,6 +2170,7 @@ mod tests {
                 item_id: 0,
                 count: 1,
                 full_item: w,
+                window_event: 1,
             };
             let bytes = serialize_packet(PacketType::InventoryGrant, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -2118,14 +2208,16 @@ mod tests {
             item_id: 0,
             count: 1,
             full_item: WireItem::None,
+            window_event: 1,
         };
         let bytes = serialize_packet(PacketType::InventoryGrant, &pkt);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         let mut payload = payload.to_vec();
         // Overwrite the first byte of the trailing (fixint u32) variant index
         // with an unassigned discriminant.
+        // v76 — `window_event` (a u32) follows `full_item` now.
         let n = payload.len();
-        payload[n - 4] = 9;
+        payload[n - 8] = 9;
         let back: Result<InventoryGrantPacket, _> = safe_deserialize(&payload);
         assert!(back.is_err(), "unknown WireItem discriminant must not decode");
     }
@@ -2243,10 +2335,15 @@ mod tests {
                 z: 0,
                 tool: WireItem::Tool { tool_type: 0, material: 3, durability: 100 },
             }],
+            events_applied: 12,
+            edit_hands: vec![(4, item_kind::BLOCK, 3)],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.column_mismatch, pkt.column_mismatch);
+        // C3a-fix-1 (v76) — the window-event count and each edit's hand.
+        assert_eq!(back.events_applied, 12);
+        assert_eq!(back.edit_hands, pkt.edit_hands);
         // C1 (v72) — the mined cells and their tools survive the round-trip.
         assert_eq!(back.mined, pkt.mined);
         assert_eq!(back.chunk_ack, 77);
@@ -2287,6 +2384,8 @@ mod tests {
                 client_hash: 0x5566_7788,
             }),
             mined: vec![MinedBlock { x: 3, y: -4, z: 5, tool: WireItem::None }],
+            events_applied: 0x0A0B_0C0D,
+            edit_hands: vec![(2, 0x11, 0x0304)],
             ..head.clone()
         };
         let base = bincode::serialize(&head).unwrap();
@@ -2318,12 +2417,18 @@ mod tests {
             tail.extend_from_slice(&v.to_le_bytes());
         }
         tail.extend_from_slice(&0u32.to_le_bytes());
+        // v76 (C3a-fix-1): events_applied u32, then edit_hands (u64 length +
+        // entries: slot u8, held_kind u8, held_id u16).
+        tail.extend_from_slice(&0x0A0B_0C0Du32.to_le_bytes());
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        tail.extend_from_slice(&[2, 0x11]);
+        tail.extend_from_slice(&0x0304u16.to_le_bytes());
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8)]);
     }
 
     #[test]
@@ -2663,7 +2768,12 @@ mod tests {
         //   `WindowOp = 64` (Click, OpenPlayer, OpenTable, SetAutoRefill) —
         //   the server mirrors a joiner's inventory window; `ItemAction::Craft`
         //   is unused.
-        assert_eq!(PROTOCOL_VERSION, 75);
+        // v76 (2026-10-08, C3a-fix-1):
+        //   trailing `window_event` on the four S→C carriers, `events_applied`
+        //   on the five C→S packets judged against the window,
+        //   `InputPacket.edit_hands`, `EntityAttackPacket.hotbar_slot`,
+        //   `ItemAction::GrantUnfit` (= 4) — ordered server window events.
+        assert_eq!(PROTOCOL_VERSION, 76);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2785,11 +2895,16 @@ mod tests {
             held_full: WireItem::Tool { tool_type: 1, material: 2, durability: 99 },
             sprint: true,
             sneak: false,
+            hotbar_slot: 6,
+            events_applied: 0x0102_0304,
         };
         let bytes = serialize_packet(PacketType::EntityAttack, &attack);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(ptype, PacketType::EntityAttack);
         assert_eq!(safe_deserialize::<EntityAttackPacket>(payload).unwrap(), attack);
+        // v76 (C3a-fix-1) — appended in order: hotbar_slot u8, then
+        // events_applied u32, closing the packet.
+        assert_eq!(&payload[payload.len() - 5..], &[6, 4, 3, 2, 1]);
 
         let interact = EntityInteractPacket {
             seq: 8,
@@ -2800,6 +2915,7 @@ mod tests {
             held_full: WireItem::None,
             hotbar_slot: 4,
             sneak: true,
+            events_applied: 9,
         };
         let bytes = serialize_packet(PacketType::EntityInteract, &interact);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -2822,11 +2938,16 @@ mod tests {
             accepted: true,
             consume_held: 1,
             note: 2,
+            window_event: 0x0A0B_0C0D,
         };
         let bytes = serialize_packet(PacketType::InteractOutcome, &outcome);
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(ptype, PacketType::InteractOutcome);
         assert_eq!(safe_deserialize::<InteractOutcomePacket>(payload).unwrap(), outcome);
+        assert_eq!(&payload[payload.len() - 4..], &0x0A0B_0C0Du32.to_le_bytes(), "v76 window_event closes it");
+        assert_eq!(safe_deserialize::<EntityInteractPacket>(
+            deserialize_header(&serialize_packet(PacketType::EntityInteract, &interact)).unwrap().1
+        ).unwrap().events_applied, 9);
 
         let kill = KillEventPacket {
             victim: EntityKind::Nostrich,
@@ -2852,7 +2973,8 @@ mod tests {
 
     /// C2a (v73) — the item-action request and its outcome keep their tags
     /// and shapes, and the `ItemAction` variants their wire order (append
-    /// only: Eat = 0, Sleep = 1, C2b's Craft = 2 and Drop = 3).
+    /// only: Eat = 0, Sleep = 1, C2b's Craft = 2 and Drop = 3, v76's
+    /// GrantUnfit = 4).
     #[test]
     fn item_action_packets_round_trip() {
         let eat = ItemActionPacket {
@@ -2863,6 +2985,7 @@ mod tests {
                 held_id: 17,
                 held_full: WireItem::None,
             },
+            events_applied: 0x0102_0304,
         };
         let bytes = serialize_packet(PacketType::ItemAction, &eat);
         assert_eq!(bytes[0], 62, "wire-stable tag");
@@ -2871,8 +2994,11 @@ mod tests {
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), eat);
         // The enum's variant index leads the action: Eat = 0.
         assert_eq!(&payload[4..8], &0u32.to_le_bytes());
+        // v76 — events_applied closes the packet.
+        assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes());
 
-        let sleep = ItemActionPacket { seq: 12, action: ItemAction::Sleep { bed: [-5, 70, 1_000_000] } };
+        let sleep =
+            ItemActionPacket { seq: 12, action: ItemAction::Sleep { bed: [-5, 70, 1_000_000] }, events_applied: 0 };
         let bytes = serialize_packet(PacketType::ItemAction, &sleep);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), sleep);
@@ -2883,7 +3009,7 @@ mod tests {
         grid[0] = (item_kind::MATERIAL, 3);
         grid[4] = (item_kind::BLOCK, 5);
         for table in [None, Some([7, 64, -9])] {
-            let craft = ItemActionPacket { seq: 13, action: ItemAction::Craft { grid, table } };
+            let craft = ItemActionPacket { seq: 13, action: ItemAction::Craft { grid, table }, events_applied: 0 };
             let bytes = serialize_packet(PacketType::ItemAction, &craft);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), craft);
@@ -2898,6 +3024,7 @@ mod tests {
                 held_id: 2,
                 held_full: WireItem::Tool { tool_type: 1, material: 2, durability: 77 },
             },
+            events_applied: 0,
         };
         let bytes = serialize_packet(PacketType::ItemAction, &drop);
         assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
@@ -2906,13 +3033,24 @@ mod tests {
         assert_eq!(&payload[4..8], &3u32.to_le_bytes(), "Drop = 3");
         assert_eq!(peek_item_action_variant(payload), Some(item_action_variant::DROP));
         assert_eq!(peek_item_action_variant(&payload[..7]), None, "too short to say");
+        // v76 (C3a-fix-1) — GrantUnfit = 4, appended after Drop: the grant's
+        // window event (u32), then the count (u8).
+        let unfit = ItemActionPacket { seq: 15, action: ItemAction::GrantUnfit { event: 0x0506_0708, count: 9 }, events_applied: 3 };
+        let bytes = serialize_packet(PacketType::ItemAction, &unfit);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), unfit);
+        assert_eq!(&payload[4..8], &4u32.to_le_bytes(), "GrantUnfit = 4");
+        assert_eq!(&payload[8..12], &0x0506_0708u32.to_le_bytes());
+        assert_eq!(payload[12], 9);
+        assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
 
-        let outcome = ItemActionOutcomePacket { seq: 12, accepted: false, consume_held: 0, note: 5 };
+        let outcome = ItemActionOutcomePacket { seq: 12, accepted: false, consume_held: 0, note: 5, window_event: 0x0102_0304 };
         let bytes = serialize_packet(PacketType::ItemActionOutcome, &outcome);
         assert_eq!(bytes[0], 63, "wire-stable tag");
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(ptype, PacketType::ItemActionOutcome);
         assert_eq!(safe_deserialize::<ItemActionOutcomePacket>(payload).unwrap(), outcome);
+        assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes(), "v76 window_event closes it");
         for (tag, t) in [(62u8, PacketType::ItemAction), (63, PacketType::ItemActionOutcome)] {
             assert_eq!(t as u8, tag, "wire-stable tag");
             assert_eq!(deserialize_header(&[tag, 0]).map(|(p, _)| p), Some(t));
@@ -2944,7 +3082,8 @@ mod tests {
             WindowClick::Close,
         ];
         for (index, click) in clicks.into_iter().enumerate() {
-            let pkt = WindowOpPacket { op_seq: 7, op: WireWindowOp::Click(click), digest: 0xDEAD_BEEF };
+            let pkt =
+                WindowOpPacket { op_seq: 7, op: WireWindowOp::Click(click), digest: 0xDEAD_BEEF, events_applied: 0x0102_0304 };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             assert_eq!(bytes[0], 64, "wire-stable tag");
             let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -2953,6 +3092,9 @@ mod tests {
             // op_seq (u32), then the op's variant (Click = 0), then the click's.
             assert_eq!(&payload[4..8], &0u32.to_le_bytes(), "Click = 0");
             assert_eq!(&payload[8..12], &(index as u32).to_le_bytes(), "WindowClick variant {index}");
+            // v76 — digest, then events_applied, close the packet.
+            assert_eq!(&payload[payload.len() - 8..payload.len() - 4], &0xDEAD_BEEFu32.to_le_bytes());
+            assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes());
         }
         let others = [
             (WireWindowOp::OpenPlayer, 1u32),
@@ -2960,7 +3102,7 @@ mod tests {
             (WireWindowOp::SetAutoRefill { on: false }, 3),
         ];
         for (op, index) in others {
-            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1 };
+            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1, events_applied: 0 };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), pkt);
@@ -2971,6 +3113,7 @@ mod tests {
             op_seq: 1,
             op: WireWindowOp::Click(WindowClick::DragGather { slots: vec![WindowSlot::Grid(2, 0)] }),
             digest: 0,
+            events_applied: 0,
         };
         let bytes = serialize_packet(PacketType::WindowOp, &grid);
         // tag, op_seq, Click, DragGather, the list's u64 length, then Grid = 1.
@@ -2981,6 +3124,7 @@ mod tests {
                 op_seq: 1,
                 op: WireWindowOp::Click(WindowClick::DragDistribute { slots: vec![WindowSlot::Inv(0); n] }),
                 digest: 0,
+                events_applied: 0,
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3037,12 +3181,15 @@ mod tests {
             PlayerEventType::ArmourWorn { hits: 3 },
             PlayerEventType::Bred { offspring: EntityKind::Mule },
         ] {
-            let pkt = PlayerEventPacket { player_index: 4, event };
+            let pkt = PlayerEventPacket { player_index: 4, event, window_event: 0x0102_0304 };
             let bytes = serialize_packet(PacketType::PlayerEvent, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             let back: PlayerEventPacket = safe_deserialize(payload).unwrap();
             assert_eq!(back.player_index, 4);
             assert_eq!(back.event, pkt.event);
+            // v76 — the window event closes the packet.
+            assert_eq!(back.window_event, 0x0102_0304);
+            assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes());
         }
     }
 

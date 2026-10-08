@@ -214,7 +214,12 @@ fn protocol_version_is_the_pinned_value() {
     // v75 (2026-10-08, C3a-2a):
     //   `WindowOp = 64` — the server mirrors a joiner's inventory window,
     //   click for click; `ItemAction::Craft` is unused.
-    assert_eq!(protocol::PROTOCOL_VERSION, 75);
+    // v76 (2026-10-08, C3a-fix-1):
+    //   ordered server window events — `window_event` on the S→C carriers,
+    //   `events_applied` on the C→S packets judged against the window,
+    //   `InputPacket.edit_hands`, `EntityAttackPacket.hotbar_slot`,
+    //   `ItemAction::GrantUnfit`.
+    assert_eq!(protocol::PROTOCOL_VERSION, 76);
 }
 
 #[test]

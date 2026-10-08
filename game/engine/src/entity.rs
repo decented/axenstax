@@ -1043,13 +1043,28 @@ pub fn tick_item_pickups(
 /// tally. The server passes it for a joiner, whose inventory is only a SHADOW
 /// of the client's and fills by drift, so a "full" shadow must not leave the
 /// joiner's own items on the floor.
-// BRIDGE: spill the shadow's overflow as a real item once C3d makes the
-// server inventory the truth — replace when C3d lands.
 pub fn tick_item_pickups_with(
     ecs: &mut hecs::World,
     players: &mut [(usize, Vec3, &mut crate::inventory::Inventory)],
     eligible: impl Fn(&crate::item::Item) -> bool,
     grant_unfit: bool,
+) -> (Vec<(usize, crate::item::ItemStack)>, Vec<(usize, u8)>) {
+    tick_item_pickups_for(ecs, players, eligible, |_| grant_unfit)
+}
+
+/// [`tick_item_pickups_with`], the joiner rule chosen per player:
+/// `grant_unfit(real_player_index)`. C3a-fix-1 (D-M2) — the server turns it
+/// off for a joiner whose client just gave a grant back as unfit
+/// (`window_events::WindowEvents::grants_whole`).
+// BRIDGE: the whole stack is granted whatever the shadow holds — replace when
+// C3d makes the server inventory the truth (then only what fits is taken).
+// What the CLIENT can't hold comes back as a real item (`GrantUnfit`), so
+// nothing vanishes from the shared world meanwhile.
+pub fn tick_item_pickups_for(
+    ecs: &mut hecs::World,
+    players: &mut [(usize, Vec3, &mut crate::inventory::Inventory)],
+    eligible: impl Fn(&crate::item::Item) -> bool,
+    grant_unfit: impl Fn(usize) -> bool,
 ) -> (Vec<(usize, crate::item::ItemStack)>, Vec<(usize, u8)>) {
     if players.is_empty() {
         return (Vec::new(), Vec::new());
@@ -1117,7 +1132,7 @@ pub fn tick_item_pickups_with(
                         grants.push((real_idx, offered));
                         to_despawn.push(id);
                     }
-                    Some(remainder) if grant_unfit => {
+                    Some(remainder) if grant_unfit(real_idx) => {
                         // Joiner shadow: grant the whole stack, tally what
                         // the shadow couldn't hold.
                         overflow.push((real_idx, remainder.count));

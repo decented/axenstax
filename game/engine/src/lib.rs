@@ -107,6 +107,7 @@ mod craft_ui;
 // C3a-1 — the inventory window's click rules, one pure model.
 mod window;
 mod window_ops;
+mod window_events;
 mod recipe_book_ui;
 mod egui_integration;
 mod menu;
@@ -1293,7 +1294,15 @@ pub(crate) struct GameState {
     /// `network_send_input` can drain it on both targets. NOTE: the ~30 push
     /// sites stay native-gated for now, so a browser joiner does not yet
     /// propagate its OWN edits to the server (v1 limitation L-web-edit).
-    pub(crate) pending_block_changes: Vec<crate::protocol::BlockChange>,
+    /// C3a-fix-1 — with the order stamp of the first (the ops logged before
+    /// it go ahead of the input) and each edit's hotbar slot and hand
+    /// (`window_ops::PendingEdits`).
+    pub(crate) pending_block_changes: crate::window_ops::PendingEdits,
+    /// C3a-fix-1 — the server's window-event carriers (outcomes, grants,
+    /// armour wear) not applied yet, with the acknowledgement that ends the
+    /// requests' claims: applied in arrival order, never while edits wait to
+    /// be sent (`GameState::apply_window_inbox`).
+    pub(crate) window_inbox: crate::window_events::WindowInbox,
     /// C1 — the cells this JOINED client's survival break arm mined since its
     /// last input, with the tool each was mined with (`InputPacket.mined`):
     /// the server yields a joiner's breaks and grants the drops.
@@ -1873,7 +1882,8 @@ impl GameState {
             remote_mobs_clock: None,
             own_health: crate::health_sync::OwnHealth::new(),
             joiner_actions: crate::joiner_actions::JoinerActions::default(),
-            pending_block_changes: Vec::new(),
+            pending_block_changes: Default::default(),
+            window_inbox: Default::default(),
             pending_mined: Vec::new(),
             touch: crate::touch_input::TouchInput::new(),
             #[cfg(target_arch = "wasm32")]

@@ -9,13 +9,19 @@
 //! here, per client, in arrival order, and go first on the next tick.
 //!
 //! **Kept with their input.** An edit is queued with the rest of its input's
-//! edits, the hand and hotbar slot its input reported and the life it was
-//! made in, so it is judged exactly as it would have been in its own tick: a
+//! edits, the hand and hotbar slot it was made with and the life it was made
+//! in, so it is judged exactly as it would have been in its own tick: a
 //! placement is classified by what was in hand when it was made, and charged
 //! to the slot it was made at (C3a-2b), not a later input's hand or slot, and
 //! an edit made before its joiner died and respawned is sent back,
 //! not applied (FU4a, FU3 verify L1). Reach and plot rules are checked when
-//! the edit is processed (the body the server holds then).
+//! the edit is processed (the body the server holds then). C3a-fix-1 (C-M1)
+//! — the hand and slot are each EDIT's own (`InputPacket.edit_hands`), so a
+//! scroll after a placement within one send window charges the placement to
+//! the slot it came from; an edit the list doesn't cover takes its input's.
+//! The group also keeps the window events its client had applied when it
+//! made the edits (`InputPacket.events_applied`): the server applies them
+//! just before it processes the group (`window_events`).
 //!
 //! **Each edit owns its tag (FU4a, FU3 verify L2).** The input's `mined` tags
 //! are paired with its edits when the input is read ([`EditGroup::new`]), and
@@ -30,7 +36,7 @@
 use std::collections::VecDeque;
 
 use crate::block::BlockId;
-use crate::protocol::{BlockChange, MinedBlock};
+use crate::protocol::{BlockChange, EditHand, MinedBlock};
 
 /// Most edits one client may have waiting. 16,384 — the client's own bound on
 /// edits it holds back unsent (`remote_client::INPUT_CARRY_OVER_MAX_CHANGES`).
@@ -39,10 +45,11 @@ use crate::protocol::{BlockChange, MinedBlock};
 /// fit, in a buffer shrunk to them (FU3 kept each capped input's whole
 /// deserialized buffer, about 69 KB, for the four edits that fitted: a modified
 /// joiner sending one full input a tick at the cap pinned about 280 MB). The
-/// worst case is now the cap's edits (16 B each), as many group headers (a
+/// worst case is now the cap's edits (20 B each since C3a-fix-1: the block
+/// change and the four-byte hand it was made with), as many group headers (a
 /// group holds at least one edit: 72 B each), a tag for each edit at most
 /// (24 B), and the front group's processed slack (one input's edits at most,
-/// about 4,370): **under 2 MB of capacity per client** (about 1.9 MB), plus
+/// about 4,370): **under 2 MB of capacity per client** (about 1.99 MB), plus
 /// the allocator's own overhead of a few dozen bytes for each of a group's
 /// one or two allocations. FU3's "about 256 KiB" counted the edits alone.
 /// Pinned by
@@ -65,11 +72,62 @@ use crate::protocol::{BlockChange, MinedBlock};
 /// `explosion::BLAST_RADIUS` (4) of it, about 260; the cap holds sixty.
 pub const MAX_DEFERRED_EDITS: usize = 16_384;
 
+/// What one input says about the hands its edits were made with.
+#[derive(Clone, Debug, Default)]
+pub struct InputHand {
+    /// What the input said was in hand (`InputPacket.held_kind` / `held_id`).
+    pub held: (u8, u16),
+    /// The input's hotbar slot (`InputPacket.hotbar_slot`).
+    pub hotbar_slot: Option<u8>,
+    /// C3a-fix-1 — each edit's own slot and hand, parallel to the edits
+    /// (`InputPacket.edit_hands`); may be short or empty.
+    pub edit_hands: Vec<EditHand>,
+    /// C3a-fix-1 — `InputPacket.events_applied`.
+    pub events_applied: u32,
+}
+
+/// The hand one edit was made with: four bytes, kept beside each waiting
+/// edit (the queue's memory bound counts them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hand {
+    /// The hotbar slot (below 9), or [`Hand::LATEST`].
+    slot: u8,
+    /// The held item's wire pair.
+    kind: u8,
+    id: u16,
+}
+
+impl Hand {
+    /// No slot known: the latest input's at processing.
+    const LATEST: u8 = u8::MAX;
+
+    /// Edit `k`'s hand by `input`: its own entry in `edit_hands` (a slot of 9
+    /// or more falls back to the input's), else the input's slot and hand.
+    fn of(input: &InputHand, k: usize) -> Self {
+        let input_slot = input.hotbar_slot.filter(|&s| s < 9).unwrap_or(Self::LATEST);
+        match input.edit_hands.get(k) {
+            Some(&(slot, kind, id)) => Hand { slot: if slot < 9 { slot } else { input_slot }, kind, id },
+            None => Hand { slot: input_slot, kind: input.held.0, id: input.held.1 },
+        }
+    }
+
+    /// The hotbar slot, below 9; `None` = the latest input's.
+    pub fn slot(self) -> Option<u8> {
+        (self.slot < 9).then_some(self.slot)
+    }
+
+    /// The held item's wire pair (`item_kind`, id).
+    pub fn held(self) -> (u8, u16) {
+        (self.kind, self.id)
+    }
+}
+
 /// The edits of one input that have not been processed yet, with what they
 /// are judged by.
 pub struct EditGroup {
-    /// In the order the client made them.
-    edits: VecDeque<BlockChange>,
+    /// In the order the client made them, each with the hand it was made
+    /// with (C3a-fix-1).
+    edits: VecDeque<(BlockChange, Hand)>,
     /// FU4a (L2) — the input's `mined` tags, each paired with its own edit
     /// (by the edit's place in the input, 0 its first), newest place first so
     /// the front edit's tag is the last. At most
@@ -77,19 +135,13 @@ pub struct EditGroup {
     tags: Vec<(u32, MinedBlock)>,
     /// The place in the input of the front of `edits`.
     next: u32,
-    /// What the input said was in hand (`InputPacket.held_kind` / `held_id`).
-    pub held_kind: u8,
-    pub held_id: u16,
     /// FU4a (L1) — the joiner's life when the input was read
     /// (`server::ServerPlayer::respawns`): a group from an earlier life is
     /// sent back, not applied.
     pub life: u32,
-    /// C3a-2b — the hotbar slot the input was made at
-    /// (`InputPacket.hotbar_slot`, below 9; `None` if it sent none or an
-    /// out-of-range one): the slot its placements are charged to and its
-    /// tool wears in, whatever the joiner scrolled to in a later input
-    /// before these edits were processed.
-    pub hotbar_slot: Option<u8>,
+    /// C3a-fix-1 — the window events the client had applied when it made
+    /// these edits (`InputPacket.events_applied`).
+    pub events_applied: u32,
 }
 
 impl EditGroup {
@@ -97,26 +149,25 @@ impl EditGroup {
     /// are dropped, their count returned — before their tags are paired, so
     /// a flood at the cap costs nothing more), each paired with its own tag
     /// from `tags` (the input's first `protocol::MAX_MINED_PER_INPUT`, its
-    /// DoS guard; [`pair_tags`]). `block_at` reads the world, for the first
-    /// edit of a tagged cell.
+    /// DoS guard; [`pair_tags`]) and its own hand by `input` ([`Hand::of`]).
+    /// `block_at` reads the world, for the first edit of a tagged cell.
     pub fn new(
         mut edits: Vec<BlockChange>,
         keep: usize,
         tags: &[MinedBlock],
-        (held_kind, held_id): (u8, u16),
+        input: InputHand,
         life: u32,
-        hotbar_slot: Option<u8>,
         block_at: impl FnMut(i32, i32, i32) -> BlockId,
     ) -> (Self, usize) {
-        let hotbar_slot = hotbar_slot.filter(|&s| s < 9);
         let dropped = edits.len().saturating_sub(keep);
         if dropped > 0 {
             edits.truncate(keep);
-            edits.shrink_to_fit();
         }
         let tags = &tags[..tags.len().min(crate::protocol::MAX_MINED_PER_INPUT)];
         let tags = pair_tags(&edits, tags, block_at);
-        (Self { edits: edits.into(), tags, next: 0, held_kind, held_id, life, hotbar_slot }, dropped)
+        let mut handed = VecDeque::with_capacity(edits.len());
+        handed.extend(edits.into_iter().enumerate().map(|(k, bc)| (bc, Hand::of(&input, k))));
+        (Self { edits: handed, tags, next: 0, life, events_applied: input.events_applied }, dropped)
     }
 
     /// Edits still waiting.
@@ -128,22 +179,22 @@ impl EditGroup {
         self.edits.is_empty()
     }
 
-    /// Take the next edit, with its own tag.
-    pub fn pop_front(&mut self) -> Option<(BlockChange, Option<MinedBlock>)> {
-        let bc = self.edits.pop_front()?;
+    /// Take the next edit, with its own tag and hand.
+    pub fn pop_front(&mut self) -> Option<(BlockChange, Option<MinedBlock>, Hand)> {
+        let (bc, hand) = self.edits.pop_front()?;
         let tag = match self.tags.last() {
             Some(&(at, _)) if at == self.next => self.tags.pop().map(|(_, m)| m),
             _ => None,
         };
         self.next += 1;
-        Some((bc, tag))
+        Some((bc, tag, hand))
     }
 
     /// Take every edit left, their tags gone with them (a dead joiner's or
     /// an earlier life's: sent back, never applied).
-    pub fn take_edits(&mut self) -> VecDeque<BlockChange> {
+    pub fn take_edits(&mut self) -> Vec<BlockChange> {
         self.tags = Vec::new();
-        std::mem::take(&mut self.edits)
+        std::mem::take(&mut self.edits).into_iter().map(|(bc, _)| bc).collect()
     }
 
     /// FU4a (M1) — keep the first `keep` edits waiting, with their tags, and
@@ -295,7 +346,7 @@ impl EditQueue {
                 .groups
                 .iter()
                 .map(|g| {
-                    g.edits.capacity() * size_of::<BlockChange>()
+                    g.edits.capacity() * size_of::<(BlockChange, Hand)>()
                         + g.tags.capacity() * size_of::<(u32, MinedBlock)>()
                 })
                 .sum::<usize>()
@@ -326,12 +377,12 @@ mod tests {
     }
 
     fn group_in(edits: &[BlockChange], tags: &[MinedBlock], world: impl FnMut(i32, i32, i32) -> BlockId) -> EditGroup {
-        EditGroup::new(edits.to_vec(), usize::MAX, tags, (0, 0), 0, None, world).0
+        EditGroup::new(edits.to_vec(), usize::MAX, tags, InputHand::default(), 0, world).0
     }
 
     /// Each edit with its tag, in order.
     fn drain(mut g: EditGroup) -> Vec<(i32, Option<MinedBlock>)> {
-        std::iter::from_fn(|| g.pop_front()).map(|(bc, t)| (bc.x, t)).collect()
+        std::iter::from_fn(|| g.pop_front()).map(|(bc, t, _)| (bc.x, t)).collect()
     }
 
     #[test]
@@ -342,7 +393,7 @@ mod tests {
         assert_eq!(q.push_back(group(&[], &[tag(9)])), 0, "an empty group is not kept");
         assert_eq!(q.len(), 3);
         let mut first = q.pop_front().expect("oldest");
-        assert_eq!(first.pop_front().map(|(e, _)| e.x), Some(1));
+        assert_eq!(first.pop_front().map(|(e, _, _)| e.x), Some(1));
         q.push_front(first);
         assert_eq!(q.len(), 2);
         let order: Vec<i32> =
@@ -403,6 +454,29 @@ mod tests {
         assert_eq!(g.tags.len(), crate::protocol::MAX_MINED_PER_INPUT);
     }
 
+    /// C3a-fix-1 (C-M1) — each edit keeps its own slot and hand from the
+    /// input's `edit_hands`; one past the list, or with a slot of 9 or more,
+    /// takes the input's.
+    #[test]
+    fn each_edit_keeps_its_own_slot_and_hand() {
+        let input = InputHand {
+            held: (4, 40),
+            hotbar_slot: Some(5),
+            edit_hands: vec![(2, 1, 10), (11, 1, 11)],
+            events_applied: 7,
+        };
+        let edits = [edit(1, STONE), edit(2, STONE), edit(3, STONE)];
+        let (mut g, _) = EditGroup::new(edits.to_vec(), usize::MAX, &[], input, 0, |_, _, _| AIR);
+        assert_eq!(g.events_applied, 7);
+        let hands: Vec<(Option<u8>, (u8, u16))> =
+            std::iter::from_fn(|| g.pop_front()).map(|(_, _, h)| (h.slot(), h.held())).collect();
+        assert_eq!(hands, vec![(Some(2), (1, 10)), (Some(5), (1, 11)), (Some(5), (4, 40))]);
+        // No input slot either: the latest input's, at processing.
+        let (mut g, _) = EditGroup::new(vec![edit(1, STONE)], usize::MAX, &[], InputHand::default(), 0, |_, _, _| AIR);
+        assert_eq!(g.pop_front().map(|(_, _, h)| h.slot()), Some(None));
+        assert_eq!(std::mem::size_of::<Hand>(), 4, "four bytes beside each waiting edit");
+    }
+
     /// FU4a (FU3 verify M1) — the M1 scenario: the queue at the cap, then
     /// one full input a tick while the budget drains four edits a tick. FU3
     /// kept each input's whole deserialized buffer for the four edits that
@@ -418,7 +492,7 @@ mod tests {
         let per_edit = bincode::serialized_size(&edit(0, 1)).expect("sizes") as usize;
         let max_input = crate::protocol::MAX_WIRE_PACKET_LEN / per_edit;
         let bound = MAX_DEFERRED_EDITS * size_of::<EditGroup>()
-            + (MAX_DEFERRED_EDITS + max_input) * size_of::<BlockChange>()
+            + (MAX_DEFERRED_EDITS + max_input) * size_of::<(BlockChange, Hand)>()
             + (MAX_DEFERRED_EDITS + crate::protocol::MAX_MINED_PER_INPUT) * size_of::<(u32, MinedBlock)>();
         // A full input, its buffer exactly its length (as bincode leaves it),
         // with its tags on cells it mines.
@@ -433,7 +507,7 @@ mod tests {
             let mut t = 0;
             while !q.is_full() {
                 let (v, tags) = full_input(t);
-                q.push_back(EditGroup::new(v, usize::MAX, &tags, (0, 0), 0, None, |_, _, _| STONE).0);
+                q.push_back(EditGroup::new(v, usize::MAX, &tags, InputHand::default(), 0, |_, _, _| STONE).0);
                 t += 1;
             }
             let mut peak = 0;
@@ -453,7 +527,7 @@ mod tests {
                 let (v, tags) = full_input(t);
                 t += 1;
                 let keep = if truncated_as_read { q.room() } else { usize::MAX };
-                let (g, dropped) = EditGroup::new(v, keep, &tags, (0, 0), 0, None, |_, _, _| STONE);
+                let (g, dropped) = EditGroup::new(v, keep, &tags, InputHand::default(), 0, |_, _, _| STONE);
                 let dropped = dropped + q.push_back(g);
                 assert_eq!(dropped + q.len(), MAX_DEFERRED_EDITS - 4 + max_input, "only what fits is kept");
                 peak = peak.max(q.allocated_bytes());
@@ -463,7 +537,7 @@ mod tests {
                 "edit queue at the cap: peak {peak} bytes allocated (bound {bound}; {} B a group, \
                  {} B an edit, {} B a tag, {max_input} edits an input)",
                 size_of::<EditGroup>(),
-                size_of::<BlockChange>(),
+                size_of::<(BlockChange, Hand)>(),
                 size_of::<(u32, MinedBlock)>(),
             );
             assert!(bound < 2_000_000, "the bound the docs state: under 2 MB ({bound})");

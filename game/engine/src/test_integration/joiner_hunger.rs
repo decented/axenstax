@@ -103,13 +103,23 @@ impl Rig {
         }
     }
 
+    /// C3a-fix-1 — the client says it applied the window events it was sent
+    /// (an eat's take rides its outcome), and the server applies them to its
+    /// shadow.
+    fn report(&mut self) {
+        super::joiner_authority::report_window_events(&self.client);
+        self.tick(1);
+    }
+
     fn sp(&mut self) -> &mut crate::server::ServerPlayer {
         &mut self.hs.server.players[self.slot]
     }
 
     fn send(&mut self, action: ItemAction) -> u32 {
         self.seq += 1;
-        let pkt = protocol::ItemActionPacket { seq: self.seq, action };
+        // C3a-fix-1 — a test client that applies every window event the
+        // moment the server sends it.
+        let pkt = protocol::ItemActionPacket { seq: self.seq, action, events_applied: u32::MAX };
         self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
         self.seq
     }
@@ -276,6 +286,7 @@ fn an_accepted_eat_heals_feeds_and_takes_the_food_from_the_shadow() {
     let v = bread_value();
     assert_eq!(rig.sp().combat.health, 10.0 + v, "healed by the food value");
     assert_eq!(rig.sp().combat.hunger, 10 + v as u8, "and fed by it");
+    rig.report();
     assert_eq!(rig.shadow_count(MaterialId::Bread), 2, "the shadow lost one bread");
     assert_eq!(rig.inbox.last_hunger(), 10 + v as u8, "the joiner hears its new hunger");
 }
@@ -317,6 +328,7 @@ fn a_second_eat_inside_the_cooldown_is_refused() {
     let third = rig.eat(&bread());
     rig.tick(1);
     assert!(rig.inbox.outcome(third).accepted, "12 ticks after the first");
+    rig.report();
     assert_eq!(rig.shadow_count(MaterialId::Bread), 3);
 }
 
@@ -695,6 +707,8 @@ fn an_outcome_arrives_before_the_state_update_that_acknowledges_the_input_after_
         }
     }
     assert_eq!(count(&inv), 1, "paid exactly once");
+    // C3a-fix-1 — the server takes it once the client says it paid.
+    rig.report();
     assert_eq!(rig.shadow_count(MaterialId::Bread), 1, "the server took the same one");
     assert!(ja.can_afford(&inv, &ui, Asked::Eat, Some(&bread())), "the second bread is free to eat");
 }

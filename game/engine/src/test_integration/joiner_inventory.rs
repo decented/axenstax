@@ -141,6 +141,19 @@ impl Rig {
         edits: &[((i32, i32, i32), BlockId)],
         mined: &[MinedBlock],
     ) {
+        self.send_with_hands(slot, held, edits, mined, Vec::new());
+    }
+
+    /// [`Self::send_at`], each edit with its own hand
+    /// (`InputPacket.edit_hands`, C3a-fix-1).
+    fn send_with_hands(
+        &mut self,
+        slot: u8,
+        held: Option<&Item>,
+        edits: &[((i32, i32, i32), BlockId)],
+        mined: &[MinedBlock],
+        edit_hands: Vec<protocol::EditHand>,
+    ) {
         self.input += 1;
         let (held_kind, held_id) = match held {
             Some(item) => crate::inventory::item_to_ref(item).to_wire(),
@@ -160,6 +173,7 @@ impl Rig {
                 .map(|&((x, y, z), b)| protocol::BlockChange { x, y, z, new_block: b, meta: 0 })
                 .collect(),
             mined: mined.to_vec(),
+            edit_hands,
             ..Default::default()
         };
         self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
@@ -175,6 +189,13 @@ impl Rig {
     fn granted(&self, item: &Item) -> u32 {
         let (kind, id) = crate::inventory::item_to_ref(item).to_wire();
         self.grants.iter().filter(|g| (g.item_kind, g.item_id) == (kind, id)).map(|g| u32::from(g.count)).sum()
+    }
+
+    /// C3a-fix-1 — the client says it applied the window events it was sent
+    /// (the grants), and the server applies them to its shadow.
+    fn report(&mut self) {
+        super::joiner_authority::report_window_events(&self.client);
+        self.tick();
     }
 
     fn shadow_count(&self, item: &Item) -> u32 {
@@ -217,6 +238,7 @@ fn a_joiners_mined_stone_is_granted_once_by_the_server_and_lands_in_its_shadow()
     let cobble = Item::Block(block::COBBLESTONE);
     assert_eq!(rig.grants.len(), 1, "one break, one grant");
     assert_eq!(rig.granted(&cobble), 1, "stone yields cobblestone");
+    rig.report();
     assert_eq!(rig.shadow_count(&cobble), 1, "and the server's shadow holds it");
     assert_eq!(rig.world().get_block(FLOOR.0, FLOOR.1, FLOOR.2), block::AIR);
     assert_eq!(rig.tally().breaks, 1);
@@ -323,6 +345,7 @@ fn satori_on_the_worlds_secret(mut rig: Rig) {
     ready_vein(&mut rig, cell, at);
     rig.mine(cell, block::AIR, diamond);
     assert_eq!(rig.granted(&satori), 1, "a freshly exposed vein cell yields a Satori");
+    rig.report();
     assert_eq!(rig.shadow_count(&satori), 1);
     let world = rig.world();
     assert!(
@@ -835,6 +858,57 @@ fn a_waiting_placement_is_charged_to_the_slot_it_was_made_at_not_the_one_scrolle
         assert_eq!(inv.slot(5).map(|s| s.count), Some(5), "slot 5 untouched");
         assert_eq!(rig.tally().matched, 5);
         assert_eq!(rig.tally().mismatched, 0);
+    }
+}
+
+/// C3a-fix-1 (C-M1) — a scroll after an edit within ONE send window: the
+/// input goes out at the new slot (5) with its hand, but each edit carries
+/// the slot and hand it was made with (`InputPacket.edit_hands`). A
+/// placement from slot 2 is charged to slot 2, and a break mined with the
+/// pickaxe in slot 2 wears slot 2. Without the per-edit hand (an older
+/// sender, or a list too short) the input's slot is the fallback — and here
+/// it charges the wrong one.
+#[test]
+fn a_scroll_after_an_edit_in_one_send_window_charges_and_wears_the_edits_own_slot() {
+    for mut rig in [Rig::dedicated("hand-skew"), Rig::lent("hand-skew")] {
+        let stone = Item::Block(block::STONE);
+        let dirt = Item::Block(block::DIRT);
+        let iron = pick(ToolMaterial::Iron);
+        let hand = |slot: u8, item: &Item| {
+            let (k, i) = crate::inventory::item_to_ref(item).to_wire();
+            (slot, k, i)
+        };
+        let inv = &mut rig.hs.server.players[rig.slot].inventory;
+        inv.set_slot(2, Some(ItemStack::new_block(block::STONE, 3)));
+        inv.set_slot(5, Some(ItemStack::new_block(block::DIRT, 5)));
+        rig.hs.hold_column_for_test(rig.slot, crate::chunk_stream::column_of(rig.at));
+        // Placed from slot 2, then scrolled to slot 5 before the send.
+        rig.send_with_hands(5, Some(&dirt), &[(ABOVE, block::STONE)], &[], vec![hand(2, &stone)]);
+        rig.tick();
+        assert_eq!(rig.world().get_block(ABOVE.0, ABOVE.1, ABOVE.2), block::STONE);
+        let inv = &rig.hs.server.players[rig.slot].inventory;
+        assert_eq!(inv.slot(2).map(|s| s.count), Some(2), "charged to slot 2, where it was placed from");
+        assert_eq!(inv.slot(5).map(|s| s.count), Some(5), "not to slot 5");
+        assert_eq!((rig.tally().matched, rig.tally().mismatched), (1, 0));
+
+        // Mined with the pickaxe in slot 2, then scrolled to slot 5.
+        rig.hs.server.players[rig.slot].inventory.set_slot(2, Some(ItemStack { item: Item::Tool(iron), count: 1 }));
+        rig.send_with_hands(5, Some(&dirt), &[(FLOOR, block::AIR)], &[mined(FLOOR, Some(iron))], vec![hand(2, &Item::Tool(iron))]);
+        rig.tick();
+        let worn = match rig.hs.server.players[rig.slot].inventory.slot(2).map(|s| &s.item) {
+            Some(Item::Tool(t)) => t.durability,
+            other => panic!("slot 2 holds {other:?}"),
+        };
+        assert_eq!(worn, iron.durability - 1, "the pickaxe in slot 2 wore");
+        assert_eq!(rig.tally().wear_mismatch, 0);
+
+        // No per-edit hand: the input's slot (5) is the fallback, and the
+        // stone placed from slot 2 doesn't match it.
+        rig.hs.server.players[rig.slot].inventory.set_slot(2, Some(ItemStack::new_block(block::STONE, 3)));
+        let cell = (ABOVE.0 + 1, ABOVE.1, ABOVE.2);
+        rig.send_with_hands(5, Some(&dirt), &[(cell, block::STONE)], &[], Vec::new());
+        rig.tick();
+        assert_eq!(rig.tally().mismatched, 1, "the fallback charges the input's slot");
     }
 }
 

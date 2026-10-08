@@ -256,8 +256,9 @@ pub enum OwnLifeEvent {
     /// The server respawned us here (after our `Respawn` request).
     Respawned(glam::Vec3),
     /// MP-D2b — this many hits the server landed on our body wear our armour
-    /// (`PlayerSlot::wear_armour` once per hit).
-    ArmourWorn(u8),
+    /// (`PlayerSlot::wear_armour` once per hit). C3a-fix-1 — with its window
+    /// event (`PlayerEventPacket.window_event`).
+    ArmourWorn(u8, u32),
     /// Review D2b B2 — a baby of this species was born to an animal we fed
     /// (the `BreedAnimals` challenge).
     Bred(crate::mob::MobType),
@@ -391,6 +392,12 @@ pub struct RemoteClient {
     /// C3a-2a — the `op_seq` the last window op went out with: 1, 2, 3… per
     /// connection ([`Self::send_window_op`]).
     window_op_seq: u32,
+    /// C3a-fix-1 — the highest server window event this client has applied
+    /// (`window_events`), per connection. Stamped on every packet the server
+    /// judges against the window as it goes out (`events_applied`): the game
+    /// loop applies no event while it holds unsent edits or ops logged before
+    /// it, so the count at sending is the count they were made at.
+    events_applied: u32,
     /// Entity-event and block-change DELTAS accumulated across every
     /// StateUpdate since the game loop last drained them. `latest_state` is
     /// last-write-wins, which is right for snapshot fields (players,
@@ -686,6 +693,7 @@ impl RemoteClient {
             pending_kills: Vec::new(),
             respawn_resend_from: None,
             window_op_seq: 0,
+            events_applied: 0,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
@@ -732,6 +740,7 @@ impl RemoteClient {
             pending_kills: Vec::new(),
             respawn_resend_from: None,
             window_op_seq: 0,
+            events_applied: 0,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
@@ -946,7 +955,8 @@ impl RemoteClient {
                                     if self.player_index() == Some(event.player_index)
                                         && self.pending_life_events.len() < 16
                                     {
-                                        self.pending_life_events.push(OwnLifeEvent::ArmourWorn(*hits));
+                                        self.pending_life_events
+                                            .push(OwnLifeEvent::ArmourWorn(*hits, event.window_event));
                                         changed = true;
                                     }
                                 }
@@ -1192,13 +1202,17 @@ impl RemoteClient {
             self.send_respawn();
         }
 
+        // C3a-fix-1 — the window events applied when these edits were made.
+        input.events_applied = self.events_applied;
         // C1/FU1 — this tick's edits, each paired with the `mined` tag of the
         // break that made it, behind the edits trimmed from earlier packets
-        // (the host validates them in the order they were made).
-        let fresh = pair_tags_with_edits(
-            std::mem::take(&mut input.block_changes),
-            std::mem::take(&mut input.mined),
-        );
+        // (the host validates them in the order they were made). C3a-fix-1
+        // (C-M1) — and with the hand it was made with, which travels with it
+        // into a later packet if it is trimmed or held back.
+        let fresh_edits = std::mem::take(&mut input.block_changes);
+        let mut hands = std::mem::take(&mut input.edit_hands);
+        hands.resize(fresh_edits.len(), (u8::MAX, input.held_kind, input.held_id));
+        let fresh = pair_tags_with_edits(fresh_edits.into_iter().zip(hands).collect(), std::mem::take(&mut input.mined));
         let mut edits = std::mem::take(&mut self.input_carry_over);
         edits.extend(fresh);
         // C1 (review LOW-3) / FU1 (C1 verify N4) — the edits from the first
@@ -1245,8 +1259,9 @@ impl RemoteClient {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
+        let pkt = protocol::EntityAttackPacket { events_applied: self.events_applied, ..pkt.clone() };
         self.transport
-            .send_to_server(&protocol::serialize_packet(PacketType::EntityAttack, pkt));
+            .send_to_server(&protocol::serialize_packet(PacketType::EntityAttack, &pkt));
     }
 
     /// MP-D2b — ask the server for a one-shot interaction with one of its
@@ -1255,8 +1270,9 @@ impl RemoteClient {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
+        let pkt = protocol::EntityInteractPacket { events_applied: self.events_applied, ..pkt.clone() };
         self.transport
-            .send_to_server(&protocol::serialize_packet(PacketType::EntityInteract, pkt));
+            .send_to_server(&protocol::serialize_packet(PacketType::EntityInteract, &pkt));
     }
 
     /// C2a — ask the server for an item action (eat, sleep). No-op before
@@ -1266,8 +1282,9 @@ impl RemoteClient {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
+        let pkt = protocol::ItemActionPacket { events_applied: self.events_applied, ..pkt.clone() };
         self.transport
-            .send_to_server(&protocol::serialize_packet(PacketType::ItemAction, pkt));
+            .send_to_server(&protocol::serialize_packet(PacketType::ItemAction, &pkt));
     }
 
     /// C3a-2a — send one window op (`WindowOp`): `op` as the client applied
@@ -1280,8 +1297,23 @@ impl RemoteClient {
             return;
         }
         self.window_op_seq = self.window_op_seq.wrapping_add(1);
-        let pkt = protocol::WindowOpPacket { op_seq: self.window_op_seq, op, digest };
+        let pkt =
+            protocol::WindowOpPacket { op_seq: self.window_op_seq, op, digest, events_applied: self.events_applied };
         self.transport.send_to_server(&protocol::serialize_packet(PacketType::WindowOp, &pkt));
+    }
+
+    /// C3a-fix-1 — this client applied the server's window event `event`
+    /// (0 = none): the count every later packet reports goes up to it.
+    pub fn note_window_event(&mut self, event: u32) {
+        self.events_applied = self.events_applied.max(event);
+    }
+
+    /// C3a-fix-1 — are edits waiting for a later input (trimmed off a full
+    /// packet, or held back behind a tag)? The game loop applies no window
+    /// event while they do: they were made at the count they will go out
+    /// with.
+    pub fn has_carry_over(&self) -> bool {
+        !self.input_carry_over.is_empty()
     }
 
     /// Send a chat line to the server (world chat, Phase 2). No-op before
@@ -1379,7 +1411,7 @@ impl RemoteClient {
     /// Test-only: the `mined` tags still waiting with their edits.
     #[cfg(test)]
     fn carried_tags(&self) -> usize {
-        self.input_carry_over.iter().filter(|(_, tag)| tag.is_some()).count()
+        self.input_carry_over.iter().filter(|(_, tag, _)| tag.is_some()).count()
     }
 }
 
@@ -1398,14 +1430,17 @@ impl Drop for RemoteClient {
 const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
 
 /// C1/FU1 — an edit waiting to be sent, with the `mined` tag of the break
-/// that made it (`None` for every other edit).
-type PairedEdit = (protocol::BlockChange, Option<protocol::MinedBlock>);
+/// that made it (`None` for every other edit), and (C3a-fix-1, C-M1) the
+/// hotbar slot and hand it was made with.
+type PairedEdit = (protocol::BlockChange, Option<protocol::MinedBlock>, protocol::EditHand);
 
 /// Write `edits` into `input`: its block changes in order, and beside them the
-/// tags of the tagged ones, in the same order.
+/// tags of the tagged ones, in the same order, and every edit's hand
+/// (`edit_hands`, in step with the block changes).
 fn set_input_edits(input: &mut protocol::InputPacket, edits: &[PairedEdit]) {
-    input.block_changes = edits.iter().map(|(bc, _)| bc.clone()).collect();
-    input.mined = edits.iter().filter_map(|(_, tag)| *tag).collect();
+    input.block_changes = edits.iter().map(|(bc, _, _)| bc.clone()).collect();
+    input.mined = edits.iter().filter_map(|(_, tag, _)| *tag).collect();
+    input.edit_hands = edits.iter().map(|(_, _, hand)| *hand).collect();
 }
 
 /// Serialize a `ClientInput` carrying `edits`, trimming them (newest first)
@@ -1426,15 +1461,17 @@ fn serialize_input_within_cap(
 ) -> (Vec<u8>, Vec<PairedEdit>) {
     set_input_edits(input, &edits);
     let packet = protocol::serialize_packet(PacketType::ClientInput, &*input);
-    let Some((first, _)) = edits.first() else {
+    let Some((first, _, hand)) = edits.first() else {
         return (packet, Vec::new());
     };
     if packet.len() <= protocol::MAX_WIRE_PACKET_LEN {
         return (packet, Vec::new());
     }
-    // Each edit dropped frees at least its block change (a tagged one, its
-    // tag too), so dropping this many always fits.
-    let per_change = bincode::serialized_size(first).expect("a block change sizes") as usize;
+    // Each edit dropped frees at least its block change and (C3a-fix-1) its
+    // hand in `edit_hands` (a tagged one, its tag in `mined` too), so
+    // dropping this many always fits.
+    let per_change = (bincode::serialized_size(first).expect("a block change sizes")
+        + bincode::serialized_size(hand).expect("a hand sizes")) as usize;
     let excess = packet.len() - protocol::MAX_WIRE_PACKET_LEN;
     let keep = edits.len().saturating_sub(excess.div_ceil(per_change));
     log::warn!(
@@ -1455,13 +1492,13 @@ fn serialize_input_within_cap(
 /// crop harvest leaves its replacement). A tag with no edit of its cell this
 /// tick has nothing to yield and is not sent.
 fn pair_tags_with_edits(
-    edits: Vec<protocol::BlockChange>,
+    edits: Vec<(protocol::BlockChange, protocol::EditHand)>,
     tags: Vec<protocol::MinedBlock>,
 ) -> Vec<PairedEdit> {
-    let mut paired: Vec<PairedEdit> = edits.into_iter().map(|bc| (bc, None)).collect();
+    let mut paired: Vec<PairedEdit> = edits.into_iter().map(|(bc, hand)| (bc, None, hand)).collect();
     for tag in tags {
         let cell = (tag.x, tag.y, tag.z);
-        let free_here = |(bc, t): &PairedEdit| t.is_none() && (bc.x, bc.y, bc.z) == cell;
+        let free_here = |(bc, t, _): &PairedEdit| t.is_none() && (bc.x, bc.y, bc.z) == cell;
         let at = paired
             .iter()
             .rposition(|p| free_here(p) && p.0.new_block == crate::block::AIR)
@@ -1489,7 +1526,7 @@ fn pair_tags_with_edits(
 fn hold_back_for_tags(edits: &mut Vec<PairedEdit>) -> Vec<PairedEdit> {
     let mut tagged = 0;
     let mut untagged_cells = std::collections::HashSet::new();
-    for (i, (bc, tag)) in edits.iter().enumerate() {
+    for (i, (bc, tag, _)) in edits.iter().enumerate() {
         let cell = (bc.x, bc.y, bc.z);
         if tag.is_none() {
             untagged_cells.insert(cell);
@@ -1783,6 +1820,7 @@ mod tests {
             item_id: 4,
             count: 2,
             full_item: protocol::WireItem::None,
+            window_event: 1,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::InventoryGrant, &grant));
         rc.poll();
@@ -1958,7 +1996,7 @@ mod tests {
             block_changes: vec![protocol::BlockChange::with_meta(1, 2, 3, 4, 0)],
             ..Default::default()
         };
-        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None)).collect();
+        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0))).collect();
         let (pkt, trimmed) = serialize_input_within_cap(&mut small, edits);
         assert!(trimmed.is_empty(), "nothing trimmed under the cap");
         assert_eq!(small.block_changes.len(), 1, "a packet under the cap is untouched");
@@ -1970,16 +2008,24 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None)).collect();
+        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0))).collect();
         let (pkt, trimmed) = serialize_input_within_cap(&mut big, edits);
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
         let back: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
-        assert!(back.block_changes.len() > 4_000, "only the overflow is trimmed");
+        // C3a-fix-1 — each edit is 19 bytes on the wire now: its 15-byte
+        // block change and its 4-byte hand (`edit_hands`).
+        let per_edit = 15 + 4;
+        assert!(
+            back.block_changes.len() >= protocol::MAX_WIRE_PACKET_LEN / per_edit - 16,
+            "only the overflow is trimmed: {} kept",
+            back.block_changes.len()
+        );
+        assert_eq!(back.edit_hands.len(), back.block_changes.len(), "every edit keeps its hand");
         assert_eq!(back.block_changes[0].x, 0, "the oldest changes are the ones kept");
         // The trimmed tail is handed back, not lost: kept + trimmed is the lot, in order.
         assert_eq!(back.block_changes.len() + trimmed.len(), 10_000);
-        let xs: Vec<i32> = back.block_changes.iter().chain(trimmed.iter().map(|(b, _)| b)).map(|b| b.x).collect();
+        let xs: Vec<i32> = back.block_changes.iter().chain(trimmed.iter().map(|(b, _, _)| b)).map(|b| b.x).collect();
         assert_eq!(xs, (0..10_000).collect::<Vec<_>>());
     }
 
@@ -2182,10 +2228,13 @@ mod tests {
         let tag = |x| protocol::MinedBlock { x, y: 64, z: 0, tool: protocol::WireItem::None };
         let edit = |x, b| protocol::BlockChange::with_meta(x, 64, 0, b, 0);
         let paired = pair_tags_with_edits(
-            vec![edit(1, crate::block::AIR), edit(1, 3), edit(2, crate::block::TILLED_SOIL)],
+            vec![edit(1, crate::block::AIR), edit(1, 3), edit(2, crate::block::TILLED_SOIL)]
+                .into_iter()
+                .map(|e| (e, (0, 0, 0)))
+                .collect(),
             vec![tag(1), tag(2), tag(9)],
         );
-        let tags: Vec<Option<i32>> = paired.iter().map(|(_, t)| t.map(|m| m.x)).collect();
+        let tags: Vec<Option<i32>> = paired.iter().map(|(_, t, _)| t.map(|m| m.x)).collect();
         assert_eq!(tags, vec![Some(1), None, Some(2)]);
     }
 
@@ -2224,6 +2273,7 @@ mod tests {
                 name: "Axolittle".into(),
                 npub: "npub1axoexample".into(),
             },
+            window_event: 0,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::PlayerEvent, &ev));
         rc.poll();
@@ -2235,6 +2285,7 @@ mod tests {
         let left = protocol::PlayerEventPacket {
             player_index: 5,
             event: protocol::PlayerEventType::Left,
+            window_event: 0,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::PlayerEvent, &left));
         rc.poll();
@@ -2654,7 +2705,9 @@ mod tests {
     }
 
     fn life_event(srv: &dyn ServerTransport, index: u32, event: protocol::PlayerEventType) {
-        let ev = protocol::PlayerEventPacket { player_index: index, event };
+        // C3a-fix-1 — an armour wear is window event 6.
+        let window_event = if matches!(event, protocol::PlayerEventType::ArmourWorn { .. }) { 6 } else { 0 };
+        let ev = protocol::PlayerEventPacket { player_index: index, event, window_event };
         srv.send_to_client(&protocol::serialize_packet(PacketType::PlayerEvent, &ev));
     }
 
@@ -2693,7 +2746,7 @@ mod tests {
         assert_eq!(
             std::mem::take(&mut rc.pending_life_events),
             vec![
-                OwnLifeEvent::ArmourWorn(2),
+                OwnLifeEvent::ArmourWorn(2, 6),
                 OwnLifeEvent::Died(crate::survival::DamageCause::Mob(crate::mob::MobType::Brigand)),
             ]
         );
@@ -2740,6 +2793,7 @@ mod tests {
             accepted: true,
             consume_held: 1,
             note: 2,
+            window_event: 3,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::InteractOutcome, &out));
         let kill = protocol::KillEventPacket {
@@ -2752,7 +2806,7 @@ mod tests {
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::KillEvent, &kill));
         // C2a — an item action's answer joins the same queue, in order.
-        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3 };
+        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3, window_event: 0 };
         srv.send_to_client(&protocol::serialize_packet(PacketType::ItemActionOutcome, &item));
         rc.poll();
         assert_eq!(

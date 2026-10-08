@@ -857,9 +857,22 @@ pub fn wear_armour(armour: &mut [Option<ArmourItem>; 4]) {
     }
 }
 
-/// C3a-2a — the window's digest ([`digest_parts`] over a view).
-pub fn digest(view: &WindowMut) -> u32 {
-    digest_parts(view.inv, view.armour, view.cursor, view.grid)
+/// C3a-fix-1 — the station a window is at after `click` (applied at
+/// `station`) gave `result`: a close that returned everything is back at the
+/// player's grid; every other click leaves it. One rule for both copies of a
+/// joiner's window (the client's screen, `window_ops::serve_op`).
+pub fn station_after(station: Station, click: &WindowClick, result: &ClickResult) -> Station {
+    if *click == WindowClick::Close && result.ok() {
+        Station::Player
+    } else {
+        station
+    }
+}
+
+/// C3a-2a — the window's digest ([`digest_parts`] over a view), at
+/// `station` (C3a-fix-1: the screen the window is open at, after the op).
+pub fn digest(view: &WindowMut, station: Station) -> u32 {
+    digest_parts(view.inv, view.armour, view.cursor, view.grid, station)
 }
 
 /// C3a-2a — a stable 32-bit hash of a window: the 36 slots, the four armour
@@ -873,8 +886,21 @@ pub fn digest(view: &WindowMut) -> u32 {
 /// durability (u16): Block = 1 (block id), Tool = 2 (type << 8 | tier),
 /// Material = 3 (material id), Armour = 4 (slot << 8 | tier), Plan = 5 (no
 /// id: a Plan has no wire form yet, so the server sees that slot empty and
-/// the digest says so). Locks are not in it.
-pub fn digest_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid) -> u32 {
+/// the digest says so).
+///
+/// C3a-fix-1 (B-L6) — then the session locks (a u64 mask, bit `i` = slot `i`
+/// locked, little-endian) and the station (`Player` = 0; `Table` = 1, then
+/// the cell's x, y, z as i32): a lock or a station that differs shows at the
+/// op that made it differ, not only at the next Sort or result click. Both
+/// sides digest the station AFTER the op (a successful close is back at
+/// `Player`). The hotbar selection is still not in it.
+pub fn digest_parts(
+    inv: &Inventory,
+    armour: &[Option<ArmourItem>; 4],
+    cursor: &Option<ItemStack>,
+    grid: &CraftGrid,
+    station: Station,
+) -> u32 {
     let mut h = Fnv32::default();
     for i in 0..SLOTS {
         h.stack(inv.slot(i));
@@ -890,6 +916,21 @@ pub fn digest_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &
         h.stack(cell.as_ref());
     }
     h.byte(u8::from(inv.auto_refill));
+    let locks = (0..SLOTS).filter(|&i| inv.is_locked(i)).fold(0u64, |m, i| m | (1 << i));
+    for b in locks.to_le_bytes() {
+        h.byte(b);
+    }
+    match station {
+        Station::Player => h.byte(0),
+        Station::Table { cell } => {
+            h.byte(1);
+            for v in cell {
+                for b in v.to_le_bytes() {
+                    h.byte(b);
+                }
+            }
+        }
+    }
     h.0
 }
 
@@ -992,7 +1033,11 @@ mod tests {
         }
 
         fn digest(&mut self) -> u32 {
-            digest_parts(&self.inv, &self.armour, &self.cursor, &self.grid)
+            self.digest_at(Station::Player)
+        }
+
+        fn digest_at(&mut self, station: Station) -> u32 {
+            digest_parts(&self.inv, &self.armour, &self.cursor, &self.grid, station)
         }
 
         fn cursor_count(&self) -> Option<u8> {
@@ -1797,6 +1842,16 @@ mod tests {
         changed(&mut w, "a grid cell");
         w.inv.auto_refill = !w.inv.auto_refill;
         changed(&mut w, "auto-refill");
+        // C3a-fix-1 (B-L6) — the locks and the station.
+        w.inv.toggle_lock(35);
+        changed(&mut w, "a lock");
+        w.inv.toggle_lock(0);
+        changed(&mut w, "another lock");
+        let player = w.digest();
+        let table = w.digest_at(TABLE);
+        assert_ne!(player, table, "the station");
+        assert_ne!(table, w.digest_at(Station::Table { cell: [0, 64, 1] }), "the table's cell");
+        assert!(!seen.contains(&table));
         // Where a stack sits matters, not just what is held.
         let mut a = Win::new();
         a.inv.set_slot(9, Some(stone(5)));
@@ -1823,9 +1878,11 @@ mod tests {
         assert_eq!(again.digest(), d);
     }
 
-    /// The digest of an empty window with auto-refill on (pinned): FNV-1a
-    /// over fifty empty-slot bytes (36 + 4 + cursor + 9) and the setting's 1.
-    const EMPTY_WINDOW_DIGEST: u32 = 56_220_004;
+    /// The digest of an empty window with auto-refill on, at the player's
+    /// grid (pinned): FNV-1a over fifty empty-slot bytes (36 + 4 + cursor +
+    /// 9), the setting's 1, eight zero bytes of lock mask and the station's 0
+    /// (C3a-fix-1 added the last two).
+    const EMPTY_WINDOW_DIGEST: u32 = 2_574_539_244;
 
     // ── C3a-2a: armour wear ─────────────────────────────────────────────
 

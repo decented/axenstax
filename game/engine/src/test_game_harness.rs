@@ -735,6 +735,131 @@ mod tests {
         assert_eq!(sp.possession.crafts_ignored, 0, "no ItemAction::Craft was sent");
     }
 
+    /// C3a-fix-1 — a joined client on a dedicated server, joined and settled,
+    /// with the same window on both sides (the setting included) and the
+    /// server's tally from there: `(game, server, joiner's slot)`.
+    fn joined_window_client(tag: &str) -> (HeadlessGame, crate::hosted_server::HostedServer, usize) {
+        let mut hg = HeadlessGame::boot_into_world(&format!("harness-{tag}"));
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-{tag}-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Orderly", 0),
+            None,
+        ));
+        for _ in 0..5 {
+            harness_step(&mut server, &mut hg);
+        }
+        let slot = server.server.players.len() - 1;
+        let p = &mut hg.state.players[0];
+        p.inventory = crate::inventory::Inventory::new();
+        p.armour_slots = [None; 4];
+        server.server.players[slot].inventory = crate::inventory::Inventory::new();
+        server.server.players[slot].inventory.auto_refill = p.inventory.auto_refill;
+        server.server.players[slot].possession = Default::default();
+        (hg, server, slot)
+    }
+
+    /// One logical tick of a joined client and its dedicated server.
+    fn harness_step(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame) {
+        server.tick();
+        hg.frames(1);
+        hg.ticks(1);
+        hg.state.network_send_input();
+    }
+
+    /// C3a-fix-1 (B-L1) — a Close then a Q-drop in one tick, through the REAL
+    /// send path: the close put the cursor's stack back in hotbar slot 0 and
+    /// the drop takes one from there. The drop goes out mid-frame, but the
+    /// Close logged before it goes first (`flush_ops_before_edits`), so the
+    /// server's copy has the stack back when it pays the drop: no shortfall,
+    /// no mismatch. (It used to read the Drop first and find the stack still
+    /// on its cursor.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_close_then_a_drop_in_one_tick_reach_the_server_in_order() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("close-then-drop");
+        let sticks = crate::item::ItemStack::new_material(crate::item::MaterialId::Stick, 5);
+        hg.state.players[0].inventory.set_slot(0, Some(sticks.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(sticks));
+        hg.state.players[0].hotbar_slot = 0;
+        let p = &mut hg.state.players[0];
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        let eye = p.player.eye_pos();
+        let pick_up = crate::window::WindowClick::Slot { slot: 0, right: false };
+        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &pick_up, false, eye, |_| crate::block::AIR);
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        assert!(server.server.players[slot].cursor.is_some(), "the server's cursor holds the sticks");
+        // One tick: Close, then Q.
+        let p = &mut hg.state.players[0];
+        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots));
+        hg.state.players[0].drop_ready_tick = 0;
+        hg.state.send_drop_request(0, 0);
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.possession.drops, 1, "the drop was spawned");
+        assert_eq!(sp.possession.mismatched, 0, "no shortfall: the Close came first");
+        assert_eq!(sp.possession.window_mismatch, 0);
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(4));
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(4), "the same on the client");
+    }
+
+    /// C3a-fix-1 (B-L1) — a placement then E in one tick, through the REAL
+    /// send path: the ops logged after the input's first edit go after the
+    /// input, so the server places (and charges the stone) before it opens
+    /// the screen, as the client did: the `OpenPlayer` digest matches.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_placement_then_e_in_one_tick_reach_the_server_in_order() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("place-then-e");
+        let stone = crate::item::ItemStack::new_block(crate::block::STONE, 3);
+        hg.state.players[0].inventory.set_slot(0, Some(stone.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(stone));
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        // The cell over the server body's head: air, and in reach.
+        let body = server.server.players[slot].player.pos;
+        let cell = (body.x.floor() as i32, body.y.floor() as i32 + 2, body.z.floor() as i32);
+        assert_eq!(server.server.world.get_block(cell.0, cell.1, cell.2), crate::block::AIR);
+        // One tick: the place arm's edit (one stone from slot 0), then E.
+        let p = &mut hg.state.players[0];
+        p.inventory.take_placeable_from_hotbar(0);
+        hg.state.world.set_block(cell.0, cell.1, cell.2, crate::block::STONE);
+        hg.state.pending_block_changes.push(crate::protocol::BlockChange {
+            x: cell.0,
+            y: cell.1,
+            z: cell.2,
+            new_block: crate::block::STONE,
+            meta: 0,
+        });
+        let p = &mut hg.state.players[0];
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        hg.state.network_send_input();
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        assert_eq!(server.server.world.get_block(cell.0, cell.1, cell.2), crate::block::STONE, "placed");
+        assert_eq!((sp.possession.matched, sp.possession.mismatched), (1, 0), "charged to slot 0");
+        assert_eq!(sp.possession.window_mismatch, 0, "the edit came first: OpenPlayer matched");
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(2));
+    }
+
     /// C1 — a joiner's break through its REAL client: the survival break arm
     /// mines the block under its feet, tags it (`InputPacket.mined`) and takes
     /// nothing itself (`break_drops::take_yield`); the server yields the break

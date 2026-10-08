@@ -130,6 +130,21 @@ pub(super) fn cell_beside(hs: &HostedServer, slot: usize, dx: i32, dy: i32, dz: 
 }
 
 /// Send one ClientInput carrying `edits`.
+/// C3a-fix-1 — the joiner's client says it has applied every window event
+/// the server sent it (a client applies grants, request outcomes and armour
+/// wear as they arrive): the server applies them to its copy of the window
+/// when it reads this, before anything sent after it. Carried on a
+/// `GrantUnfit` that names no grant and gives nothing back — the one request
+/// with no other effect — so it needs no input sequence number of its own.
+pub(super) fn report_window_events(client: &ChannelClientTransport) {
+    let pkt = protocol::ItemActionPacket {
+        seq: 0,
+        action: protocol::ItemAction::GrantUnfit { event: 0, count: 0 },
+        events_applied: u32::MAX,
+    };
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+}
+
 pub(super) fn send_edits(
     hs: &HostedServer,
     client: &ChannelClientTransport,

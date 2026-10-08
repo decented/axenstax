@@ -236,6 +236,11 @@ pub struct ServerPlayer {
     /// `None` while it stands, or until the first tick that sees it gone. The
     /// table verdict's grace ([`crate::window::SERVER_TABLE_GRACE_TICKS`]).
     pub table_gone_ticks: Option<u8>,
+    /// C3a-fix-1 — the server's own changes to this joiner's window (grants,
+    /// owed takes, armour and weapon wear), numbered and waiting until its
+    /// client reports it applied them (`window_events`), with the mirror's
+    /// op-sequence check, join baseline and counters. Fresh per attach.
+    pub window_events: crate::window_events::WindowEvents,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -470,6 +475,7 @@ impl ServerPlayer {
             craft_grid: Default::default(),
             station: crate::window::Station::Player,
             table_gone_ticks: None,
+            window_events: Default::default(),
         }
     }
 
@@ -1624,34 +1630,44 @@ impl GameServer {
         }
         self.pending_item_grants.clear();
         {
-            let mut eligible_players: Vec<(usize, Vec3, &mut Inventory)> = Vec::new();
-            for (idx, sp) in self.players.iter_mut().enumerate() {
+            // C3a-fix-1 — a pickup is a window event like every grant: the
+            // server's copy of the joiner's window takes it only once the
+            // client says it took it (`HostedServer::grant_to_joiner`, which
+            // numbers and sends `pending_item_grants`), so the pass decides on
+            // a SCRATCH copy of each window with its waiting events applied
+            // (`window_events::effective_inventory`) and changes no window.
+            let now = self.tick_counter;
+            let mut scratch: Vec<(usize, Vec3, Inventory)> = Vec::new();
+            let mut whole: Vec<usize> = Vec::new();
+            for (idx, sp) in self.players.iter().enumerate() {
                 if !sp.server_simulated || !sp.is_in_world() || sp.combat.dead {
                     continue;
                 }
-                eligible_players.push((idx, sp.player.pos, &mut sp.inventory));
+                scratch.push((idx, sp.player.pos, crate::window_events::effective_inventory(sp)));
+                if sp.window_events.grants_whole(now) {
+                    whole.push(idx);
+                }
             }
+            let mut eligible_players: Vec<(usize, Vec3, &mut Inventory)> =
+                scratch.iter_mut().map(|(idx, pos, inv)| (*idx, *pos, inv)).collect();
             // Death-drops phase 3 (v61) — everything the wire can express is
             // eligible. Blocks/materials ride the lossless `(kind, id)` pair;
             // tools and armour ride `WireItem` on the grant packet. Only
             // `Item::Plan` stays floor-bound: `plan::PlanData` has no wire
             // form, so granting one would mint an empty plan client-side.
             // M1 (C2b verify): a joiner's shadow fills by drift, so a stack
-            // it can't hold is still granted whole; the overflow is tallied.
-            let (grants, overflow) = crate::entity::tick_item_pickups_with(
+            // it can't hold is still granted whole (the overflow is tallied
+            // when the grant is applied). D-M2 (C3a-fix-1): not while a
+            // `GrantUnfit` hold lasts — its client is full, and what it just
+            // gave back would be vacuumed straight up again; then only what
+            // fits its window is taken.
+            let (grants, _overflow) = crate::entity::tick_item_pickups_for(
                 &mut self.ecs,
                 &mut eligible_players,
                 |item| !matches!(item, crate::item::Item::Plan(_)),
-                true,
+                |idx| whole.contains(&idx),
             );
             self.pending_item_grants.extend(grants);
-            drop(eligible_players);
-            for (idx, units) in overflow {
-                if let Some(sp) = self.players.get_mut(idx) {
-                    sp.possession.grant_overflow =
-                        sp.possession.grant_overflow.saturating_add(u32::from(units));
-                }
-            }
         }
 
         // Spec 48 (Electricity) — power & logic sim. Runs AFTER entity physics
@@ -3173,8 +3189,11 @@ mod tests {
     }
 
     /// The whole chain: `tick()` decays pickup_delay (tick_item_lifetimes),
-    /// then grants the settled stack to a server-simulated player — into the
-    /// server-side inventory AND onto `pending_item_grants` for the wire.
+    /// then grants the settled stack to a server-simulated player — onto
+    /// `pending_item_grants` for the wire. C3a-fix-1 — and into the
+    /// server-side inventory once the client says it took it: the grant is a
+    /// window event (`HostedServer::grant_to_joiner` numbers it), so the pickup
+    /// itself leaves the window alone.
     #[test]
     fn server_grants_dropped_item_to_server_simulated_player() {
         let mut server = pickup_server_with_drop(crate::item::ItemStack::new_material(
@@ -3192,10 +3211,13 @@ mod tests {
             }
         }
 
-        assert_eq!(bone_count(&server), 2, "stack landed in the server-side inventory");
+        assert_eq!(bone_count(&server), 0, "not before the client takes it (a window event)");
         let (idx, stack) = seen_grant.expect("a grant must be queued for the wire");
         assert_eq!(idx, 0);
         assert_eq!(stack.count, 2);
+        let seq = crate::window_events::queue(&mut server.players[0], crate::window_events::WindowEvent::Grant(stack), 0);
+        crate::window_events::apply_through(&mut server.players[0], seq, 0);
+        assert_eq!(bone_count(&server), 2, "stack landed in the server-side inventory");
         assert_eq!(
             server.ecs.query::<&crate::entity::ItemEntity>().iter().count(),
             0,
@@ -3252,6 +3274,9 @@ mod tests {
             crate::item::Item::Tool(pick),
             "the half-worn pickaxe is granted as itself, not re-minted"
         );
+        // C3a-fix-1 — as its window event, once the client has taken it.
+        let seq = crate::window_events::queue(&mut server.players[0], crate::window_events::WindowEvent::Grant(stack), 0);
+        crate::window_events::apply_through(&mut server.players[0], seq, 0);
         assert!(
             server.players[0]
                 .inventory

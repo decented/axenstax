@@ -181,7 +181,7 @@ impl CraftingUi {
     /// changed (`window_ops::OpLog::sync_auto_refill`) — before this op, so
     /// with the digest of the window as it was.
     fn log_op(&mut self, op: crate::protocol::WireWindowOp, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
-        let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid);
+        let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid, self.station());
         self.ops.sync_auto_refill(inv.auto_refill, || now);
         self.ops.record(op, now);
     }
@@ -190,8 +190,14 @@ impl CraftingUi {
     /// client to send in order; auto-refill's setting is logged first if it
     /// changed since the last op (`window_ops::OpLog::take`).
     pub fn take_ops(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Vec<(crate::protocol::WireWindowOp, u32)> {
-        let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid);
+        let now = self.digest(inv, armour);
         self.ops.take(inv.auto_refill, now)
+    }
+
+    /// C3a-fix-1 — the window's digest now (`window::digest_parts`), at this
+    /// screen's station.
+    pub fn digest(&self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> u32 {
+        window::digest_parts(inv, armour, &self.cursor_item, &self.grid, self.station())
     }
 
     /// C3a-1 — apply one window click: the pure rule (`window::apply`) over
@@ -221,12 +227,16 @@ impl CraftingUi {
         click: &WindowClick,
         ctx: &ClickCtx,
     ) -> ClickResult {
+        let station = self.station();
         self.ops.sync_auto_refill(inv.auto_refill, || {
-            window::digest_parts(inv, armour, &self.cursor_item, &self.grid)
+            window::digest_parts(inv, armour, &self.cursor_item, &self.grid, station)
         });
         let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
         let out = window::apply(&mut view, click, ctx);
-        let after = window::digest(&view);
+        // C3a-fix-1 — digested at the station after the op: a close that
+        // returned everything is back at the player's grid (`close` resets
+        // `table` just after), as the server's copy is (`window_ops::serve_op`).
+        let after = window::digest(&view, window::station_after(station, click, &out));
         self.ops.record(crate::protocol::WireWindowOp::Click(click.clone()), after);
         // L2 — after every click, a refused close's half-emptied grid too.
         self.update_result();
@@ -276,13 +286,12 @@ impl CraftingUi {
     /// screen closed.
     pub fn force_close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], new_tick: bool) -> bool {
         if let Some(refused_at) = self.forced_close_refused
-            && (!new_tick || window::digest_parts(inventory, armour, &self.cursor_item, &self.grid) == refused_at)
+            && (!new_tick || self.digest(inventory, armour) == refused_at)
         {
             return false;
         }
         let closed = self.close(inventory, armour);
-        self.forced_close_refused =
-            (!closed).then(|| window::digest_parts(inventory, armour, &self.cursor_item, &self.grid));
+        self.forced_close_refused = (!closed).then(|| self.digest(inventory, armour));
         closed
     }
 

@@ -52,7 +52,11 @@
 //! the cursor when its `Eat` was accepted used to go unpaid), and a claim
 //! counts all three ([`JoinerActions::can_afford`]). C3a-2a — the server
 //! holds the same window (it mirrors every window op) and pays an accepted
-//! outcome from its copy by the same search ([`take_owed_window`]). And a joined client's
+//! outcome from its copy by the same search ([`take_owed_window`]). C3a-fix-1
+//! — an outcome that changes the window (a take, a swing's wear) carries a
+//! window event number, applied by the client in arrival order
+//! (`window_events::WindowInbox`) and by the server once the client reports
+//! it: so both pay at the same point among the client's window ops. And a joined client's
 //! own uses respect the claims: a Q-drop or a craft that would spend an item
 //! a request in flight needs does nothing ([`JoinerActions::can_spend`],
 //! [`JoinerActions::may_craft`]). A `Drop` takes a request number too but is
@@ -347,8 +351,10 @@ pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item
 /// the request's slot if it still holds one, else wherever one is), then the
 /// crafting grid (row-major), then the cursor. Returns how many were taken.
 /// The client runs it on its own window ([`take_owed_held`]) when the
-/// outcome arrives, the server on its copy (`hosted_server::shadow_take_owed`)
-/// when it accepts the request.
+/// outcome arrives, the server on its copy (`hosted_server::shadow_take_owed`,
+/// a `window_events::WindowEvent::Take`) once the client reports it applied
+/// that outcome (C3a-fix-1): the same point in the client's order on both
+/// sides, whatever window ops crossed the outcome in flight.
 pub fn take_owed_window(
     inv: &mut Inventory,
     grid: &mut crate::window::CraftGrid,
@@ -447,7 +453,7 @@ mod tests {
     use crate::item::{ItemStack, MaterialId};
 
     fn outcome(seq: u32, accepted: bool, consume_held: u8) -> InteractOutcomePacket {
-        InteractOutcomePacket { seq, entity: 1, kind: None, accepted, consume_held, note: 0 }
+        InteractOutcomePacket { seq, entity: 1, kind: None, accepted, consume_held, note: 0, window_event: 0 }
     }
 
     fn inv_with(slot: usize, stack: ItemStack) -> Inventory {
@@ -670,7 +676,7 @@ mod tests {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = inv_with(4, ItemStack::new_material(MaterialId::Bread, 3));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
-        let out = |accepted, consume_held| ItemActionOutcomePacket { seq: 1, accepted, consume_held, note: 0 };
+        let out = |accepted, consume_held| ItemActionOutcomePacket { seq: 1, accepted, consume_held, note: 0, window_event: 0 };
         assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &eat, &out(false, 0)), 0);
         assert_eq!(inv.hotbar_slot(4).unwrap().count, 3);
         assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &eat, &out(true, 1)), 1);
@@ -799,7 +805,7 @@ mod tests {
         // Eat: the bread is on the cursor mid-drag when the outcome lands.
         ui.cursor_item = Some(ItemStack::new_material(MaterialId::Bread, 2));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
-        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0 };
+        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0 };
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(1), "paid from the cursor");
         // With bread back in the 36 slots, they pay first.
@@ -820,7 +826,7 @@ mod tests {
         ui.open_player_crafting(&Inventory::new(), &[None; 4]);
         ui.grid[0][1] = Some(ItemStack::new_material(MaterialId::Bread, 2));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
-        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0 };
+        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0 };
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
         assert_eq!(ui.grid[0][1].as_ref().map(|s| s.count), Some(1), "one bite taken from the grid cell");
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);

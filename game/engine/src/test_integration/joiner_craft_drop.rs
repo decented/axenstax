@@ -27,7 +27,7 @@ use crate::protocol::{self, InventoryGrantPacket, ItemAction};
 use crate::sim_lend::OwnedSimParts;
 use crate::transport::{ChannelClientTransport, ClientTransport};
 
-use super::joiner_authority::join_guest;
+use super::joiner_authority::{join_guest, report_window_events};
 use super::joiners_act::floor_and_stand;
 use super::lent_world::{join_guest_lent, start_lent};
 
@@ -122,6 +122,15 @@ impl Rig {
         }
     }
 
+    /// C3a-fix-1 — every joiner's client says it applied the window events
+    /// it was sent (the grants), and the server applies them to its shadow.
+    fn report(&mut self) {
+        for j in &self.joiners {
+            report_window_events(&j.client);
+        }
+        self.tick();
+    }
+
     fn world(&mut self) -> &mut crate::world::World {
         match self.host.as_mut() {
             Some(h) => &mut h.world,
@@ -144,7 +153,9 @@ impl Rig {
     fn send(&mut self, j: usize, action: ItemAction) {
         let joiner = &mut self.joiners[j];
         joiner.seq += 1;
-        let pkt = protocol::ItemActionPacket { seq: joiner.seq, action };
+        // C3a-fix-1 — a test client that applies every window event the
+        // moment the server sends it.
+        let pkt = protocol::ItemActionPacket { seq: joiner.seq, action, events_applied: u32::MAX };
         joiner.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 
@@ -329,6 +340,7 @@ fn a_joiners_drop_is_a_real_item_another_joiner_can_pick_up() {
     rig.tick();
     assert!(rig.items().is_empty(), "picked up");
     assert_eq!(rig.granted(1, &stick_item), 1, "granted to the other joiner");
+    rig.report();
     assert_eq!(rig.shadow_count(1, &stick_item), 1);
     assert_eq!(rig.granted(0, &stick_item), 0);
 }
@@ -349,6 +361,7 @@ fn the_dropper_waits_out_the_pickup_delay_then_gets_it_back() {
     rig.ticks(6);
     assert!(rig.items().is_empty(), "the delay is over: picked up");
     assert_eq!(rig.granted(0, &bone), 1, "by InventoryGrant");
+    rig.report();
     assert_eq!(rig.shadow_count(0, &bone), 1);
 }
 
@@ -477,6 +490,7 @@ fn a_full_shadow_still_grants_the_whole_stack_and_spills_nothing() {
     rig.tick();
     let wheat = Item::Material(MaterialId::Wheat);
     assert_eq!(rig.granted(0, &wheat), 10, "the client is granted the whole stack");
+    rig.report();
     assert_eq!(rig.shadow_count(0, &wheat), 64, "the shadow took what fitted");
     assert!(rig.items().is_empty(), "nothing is spilled on the ground");
     assert_eq!(rig.tally(0).grant_overflow, 6, "the rest is tallied");
@@ -516,6 +530,7 @@ fn a_break_into_a_full_shadow_still_grants_its_whole_yield() {
     assert_eq!(rig.tally(0).breaks, 1);
     assert_eq!(rig.granted(0, &cobble()), 1, "the whole yield reaches the client");
     assert!(rig.items().is_empty(), "nothing spilled: the joiner could never pick it up");
+    rig.report();
     assert_eq!(rig.tally(0).grant_overflow, 1);
     assert_eq!(rig.shadow_count(0, &cobble()), 0, "the shadow had no room");
 }
@@ -542,6 +557,7 @@ fn a_joiner_with_a_full_shadow_still_picks_up_a_ground_item() {
     let wheat = Item::Material(MaterialId::Wheat);
     assert!(rig.items().is_empty(), "picked up, not left on the ground");
     assert_eq!(rig.granted(0, &wheat), 5, "the client is granted it");
+    rig.report();
     assert_eq!(rig.tally(0).grant_overflow, 5, "the shadow had no room: tallied");
 }
 

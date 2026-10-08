@@ -133,6 +133,11 @@ impl Joiner {
     }
 
     fn attack(&mut self, entity: u32, held: Option<&Item>, sneak: bool) -> u32 {
+        self.attack_from(0, entity, held, sneak)
+    }
+
+    /// [`Self::attack`] with the weapon in hotbar slot `hotbar_slot`.
+    fn attack_from(&mut self, hotbar_slot: u8, entity: u32, held: Option<&Item>, sneak: bool) -> u32 {
         self.seq += 1;
         let (held_kind, held_id, held_full) = held_wire(held);
         let pkt = protocol::EntityAttackPacket {
@@ -143,6 +148,10 @@ impl Joiner {
             held_full,
             sprint: false,
             sneak,
+            hotbar_slot,
+            // C3a-fix-1 — a test client that applies every window event the
+            // moment the server sends it.
+            events_applied: u32::MAX,
         };
         self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::EntityAttack, &pkt));
         self.seq
@@ -164,6 +173,7 @@ impl Joiner {
             held_full,
             hotbar_slot: 0,
             sneak: false,
+            events_applied: u32::MAX,
         };
         self.client
             .send_to_server(&protocol::serialize_packet(protocol::PacketType::EntityInteract, &pkt));
@@ -285,6 +295,16 @@ impl Rig {
                 j.inbox.drain(&j.client, j.slot);
             }
         }
+    }
+
+    /// C3a-fix-1 — every joiner's client says it applied the window events it
+    /// was sent (a take, a wear, a grant), and the server applies them to its
+    /// shadow.
+    fn report(&mut self) {
+        for j in &self.joiners {
+            super::joiner_authority::report_window_events(&j.client);
+        }
+        self.tick(1);
     }
 
     /// The ECS the server's mobs live in (outside a lend window: the host's).
@@ -895,7 +915,9 @@ fn milking_swaps_the_bucket_for_a_milk_bucket() {
     assert!(out.accepted);
     assert_eq!(out.consume_held, 1, "the bucket is used");
     assert_eq!(rig.joiners[0].inbox.granted(MaterialId::MilkBucket), 1, "a milk bucket is granted");
-    // C1 — and the shadow follows: the bucket out, the milk bucket in.
+    // C1 — and the shadow follows: the bucket out, the milk bucket in
+    // (C3a-fix-1: once the client says it applied both).
+    rig.report();
     let shadow = &rig.hs.server.players[slot].inventory;
     let count = |m: MaterialId| -> u32 {
         shadow.slots_iter().flatten().filter(|s| s.item == mat(m)).map(|s| u32::from(s.count)).sum()
@@ -913,6 +935,7 @@ fn milking_swaps_the_bucket_for_a_milk_bucket() {
     let again = rig.joiners[0].interact(id2, InteractKind::Milk, Some(&mat(MaterialId::Bucket)));
     rig.tick(1);
     assert!(rig.joiners[0].inbox.outcome(again).accepted);
+    rig.report();
     assert_eq!(rig.hs.server.players[slot].possession.mismatched, 1);
 }
 
@@ -1157,6 +1180,9 @@ fn an_accepted_swing_wears_the_shadows_sword_as_the_clients_wears() {
         rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().invincible_timer = 0;
         let seq = rig.joiners[0].attack(id, held, false);
         rig.tick(1);
+        // C3a-fix-1 — the wear lands on the shadow once the client says it
+        // wore its own.
+        rig.report();
         rig.joiners[0].inbox.outcome(seq).accepted
     };
     for _ in 0..5 {
@@ -1175,6 +1201,52 @@ fn an_accepted_swing_wears_the_shadows_sword_as_the_clients_wears() {
     assert!(swing(&mut rig, Some(&axe)));
     assert_eq!(shadow(&rig), client.slot(0).map(|s| s.item.clone()));
     assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 1);
+}
+
+/// C3a-fix-1 (C-L2) — a select and a swing in one tick, with two of the same
+/// sword (slots 0 and 3): the swing goes out before the input that carries
+/// the new selection, so the server's latest slot is still 0. The swing
+/// carries its own slot (3), and both sides wear the sword there.
+#[test]
+fn a_select_and_swing_in_one_tick_wears_the_same_sword_on_both_sides() {
+    use crate::joiner_actions::{apply_outcome, Asked, Pending};
+    let mut rig = Rig::new("swing-slot", 1);
+    let slot = rig.joiners[0].slot;
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    {
+        let mut h = rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap();
+        h.max = 10_000.0;
+        h.current = 10_000.0;
+    }
+    let stack = crate::item::ItemStack { item: sword(), count: 1 };
+    let mut inv = crate::inventory::Inventory::new();
+    for s in [0, 3] {
+        rig.hs.server.players[slot].inventory.set_slot(s, Some(stack.clone()));
+        inv.set_slot(s, Some(stack.clone()));
+    }
+    let mut ui = crate::craft_ui::CraftingUi::new();
+    rig.tick(10);
+    assert_eq!(rig.hs.server.players[slot].hotbar_slot, 0, "the server's latest slot is 0");
+    rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().invincible_timer = 0;
+    let seq = rig.joiners[0].attack_from(3, id, Some(&sword()), false);
+    rig.tick(1);
+    let outcome = rig.joiners[0].inbox.outcome(seq).clone();
+    assert!(outcome.accepted);
+    let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 3, held: Some(sword()) };
+    apply_outcome(&mut inv, &mut ui, &request, &outcome);
+    rig.report();
+    let fresh = match sword() {
+        Item::Tool(t) => t.durability,
+        _ => unreachable!(),
+    };
+    let worn = |item: Option<&crate::item::ItemStack>| match item.map(|s| &s.item) {
+        Some(Item::Tool(t)) => Some(t.durability),
+        _ => None,
+    };
+    let server = &rig.hs.server.players[slot].inventory;
+    assert_eq!((worn(inv.slot(0)), worn(inv.slot(3))), (Some(fresh), Some(fresh - 1)), "the client wore slot 3");
+    assert_eq!((worn(server.slot(0)), worn(server.slot(3))), (Some(fresh), Some(fresh - 1)), "and so did the server");
 }
 
 /// C3a-2a — the sword moved off its hotbar slot by a window op (mirrored on
@@ -1205,7 +1277,7 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
         ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR);
     }
     for (n, (op, digest)) in ui.take_ops(&inv, &armour).into_iter().enumerate() {
-        let pkt = protocol::WindowOpPacket { op_seq: n as u32 + 1, op, digest };
+        let pkt = protocol::WindowOpPacket { op_seq: n as u32 + 1, op, digest, events_applied: u32::MAX };
         rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }
     rig.tick(10); // the ops, and past the swing schedule
@@ -1219,6 +1291,7 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
     assert!(outcome.accepted);
     let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(sword()) };
     assert!(apply_outcome(&mut inv, &mut ui, &request, &outcome).wear.is_some(), "the client wore it in slot 9");
+    rig.report();
     let fresh = match sword() {
         Item::Tool(t) => t.durability,
         _ => unreachable!(),
@@ -1232,8 +1305,8 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
     assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 0);
     let sp = &rig.hs.server.players[slot];
     assert_eq!(
-        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid),
-        crate::window::digest_parts(&inv, &armour, &ui.cursor_item, &ui.grid),
+        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station),
+        crate::window::digest_parts(&inv, &armour, &ui.cursor_item, &ui.grid, ui.station()),
         "the windows agree"
     );
 }

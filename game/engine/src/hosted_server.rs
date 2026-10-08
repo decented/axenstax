@@ -1715,6 +1715,12 @@ impl HostedServer {
             {
                 log::info!("{line}");
             }
+            // C3a-fix-1 — and on its ordered window events.
+            if sp.server_simulated
+                && let Some(line) = sp.window_events.summary()
+            {
+                log::info!("{} — {line}", sp.display_name);
+            }
             // Review D2b MEDIUM-1 — what this connection stamped on the
             // world's mobs (its hits, its feeds, a Bear's grudge) is forgotten
             // at the top of the next server tick, before the slot's next
@@ -1759,6 +1765,7 @@ impl HostedServer {
                 &protocol::PlayerEventPacket {
                     player_index: i as u32,
                     event: protocol::PlayerEventType::Left,
+                    window_event: 0,
                 },
             )
         })
@@ -1813,6 +1820,7 @@ impl HostedServer {
                 &protocol::PlayerEventPacket {
                     player_index: i as u32,
                     event: protocol::PlayerEventType::DiedOf { cause },
+                    window_event: 0,
                 },
             );
             self.send_to_joined_slot(i, &pkt);
@@ -1823,6 +1831,7 @@ impl HostedServer {
     /// (`PlayerEventType::ArmourWorn`, to that joiner alone), and the kills
     /// credited to joiners go out as `KillEvent`s, each to its killer alone.
     fn announce_joiner_hits_and_kills(&mut self) {
+        let now = self.server.tick_counter;
         for i in 0..self.server.players.len() {
             let sp = &mut self.server.players[i];
             let hits = std::mem::take(&mut sp.armour_wear_hits);
@@ -1831,14 +1840,15 @@ impl HostedServer {
             }
             // C3a-2a — the same hits wear the server's copy of its armour, by
             // the rule its client wears its own with (`window::wear_armour`).
-            for _ in 0..hits {
-                crate::window::wear_armour(&mut sp.armour);
-            }
+            // C3a-fix-1 — as a window event, applied once the client says it
+            // wore its own (`window_events`).
+            let window_event = crate::window_events::queue(sp, crate::window_events::WindowEvent::WearArmour { hits }, now);
             let pkt = protocol::serialize_packet(
                 protocol::PacketType::PlayerEvent,
                 &protocol::PlayerEventPacket {
                     player_index: i as u32,
                     event: protocol::PlayerEventType::ArmourWorn { hits },
+                    window_event,
                 },
             );
             self.send_to_joined_slot(i, &pkt);
@@ -1854,6 +1864,7 @@ impl HostedServer {
                 &protocol::PlayerEventPacket {
                     player_index: slot as u32,
                     event: protocol::PlayerEventType::Bred { offspring },
+                    window_event: 0,
                 },
             );
             self.send_to_joined_slot(slot, &pkt);
@@ -1911,32 +1922,32 @@ impl HostedServer {
     /// when the joiner's weapon wears.
     fn handle_entity_attack(&mut self, i: usize, req: &protocol::EntityAttackPacket) {
         let accepted = self.land_joiner_swing(i, req);
-        self.send_outcome(i, req.seq, req.entity, None, accepted, 0, 0);
-        if accepted {
-            self.wear_joiner_weapon(i, req);
-        }
+        let window_event = if accepted { self.wear_joiner_weapon(i, req) } else { 0 };
+        self.send_outcome(i, req.seq, req.entity, None, accepted, 0, 0, window_event);
     }
 
     /// C3a-2b — an accepted swing wears the weapon in the server's shadow as
     /// it wears on the client (`joiner_actions::apply_outcome`: a swing that
-    /// found its target wears the tool, damage or not). `EntityAttack`
-    /// carries no hotbar slot, so it starts from the latest input's
-    /// (`ServerPlayer.hotbar_slot`). C3a-2a — and, as on the client, the
-    /// weapon is worn where it now is: that slot if it still holds it, else
-    /// the first of the 36 that does (`joiner_actions::where_now`, the
-    /// client's own lookup), so a weapon moved by a window op while the swing
-    /// flew wears the same piece on both sides. None anywhere is a
-    /// `wear_mismatch`. A non-tool in hand wears nothing. Log-only: the
-    /// claimed weapon still sets the damage (C3d).
-    fn wear_joiner_weapon(&mut self, i: usize, req: &protocol::EntityAttackPacket) {
+    /// found its target wears the tool, damage or not). C3a-2a — and, as on
+    /// the client, the weapon is worn where it now is: the swing's slot if it
+    /// still holds it, else the first of the 36 that does
+    /// (`joiner_actions::where_now`, the client's own lookup), so a weapon
+    /// moved by a window op while the swing flew wears the same piece on both
+    /// sides. None anywhere is a `wear_mismatch`. A non-tool in hand wears
+    /// nothing. Log-only: the claimed weapon still sets the damage (C3d).
+    ///
+    /// C3a-fix-1 — C-L2: the search starts at the slot the swing itself was
+    /// made from (`EntityAttackPacket.hotbar_slot`; the latest input's if it
+    /// is out of range), as the client's does; and the wear is a window
+    /// event (`window_events`): queued, applied once the client says it wore
+    /// its own. Returns the event's number (0 when nothing wears).
+    fn wear_joiner_weapon(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> u32 {
         let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
-        let Some(crate::item::Item::Tool(tool)) = held else { return };
+        let Some(crate::item::Item::Tool(tool)) = held else { return 0 };
+        let now = self.server.tick_counter;
         let sp = &mut self.server.players[i];
-        let check = match crate::joiner_actions::where_now(&sp.inventory, sp.hotbar_slot, &crate::item::Item::Tool(tool)) {
-            Some(at) => crate::joiner_inventory::wear_tool(&mut sp.inventory, at, &tool),
-            None => crate::joiner_inventory::WearCheck::Mismatched,
-        };
-        sp.possession.note_wear(check);
+        let slot = if req.hotbar_slot < 9 { usize::from(req.hotbar_slot) } else { sp.hotbar_slot };
+        crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { slot, tool }, now)
     }
 
     fn land_joiner_swing(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> bool {
@@ -2011,21 +2022,23 @@ impl HostedServer {
             Some(r) => (r.done, if r.done { r.consume } else { 0 }, r.note.to_wire()),
             None => (false, 0, 0),
         };
-        self.send_outcome(i, req.seq, req.entity, Some(req.kind), accepted, consume, note);
+        // C1 — the server's shadow of the joiner's inventory follows the
+        // outcome as its client does: what it used, owed from wherever the
+        // item is now (`joiner_actions::take_owed`, the client's own rule),
+        // then the products (`InventoryGrant`), in the order the client
+        // applies them. C3a-fix-1 — each a window event: the take rides the
+        // outcome, each product its grant.
+        let mut window_event = 0;
+        if accepted
+            && consume > 0
+            && let Some(held) = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry)
+        {
+            window_event = self.shadow_take_owed(i, usize::from(req.hotbar_slot), &held, consume, "in an interaction");
+        }
+        self.send_outcome(i, req.seq, req.entity, Some(req.kind), accepted, consume, note, window_event);
         if let Some(r) = result
             && r.done
         {
-            // C1 — the server's shadow of the joiner's inventory follows the
-            // outcome as its client does: what it used, owed from wherever
-            // the item is now (`joiner_actions::take_owed`, the client's own
-            // rule), then the products (`InventoryGrant`), in the order the
-            // client applies them.
-            if consume > 0
-                && let Some(held) =
-                    held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry)
-            {
-                self.shadow_take_owed(i, usize::from(req.hotbar_slot), &held, consume, "in an interaction");
-            }
             self.grant_to_joiner(i, r.give);
         }
     }
@@ -2038,6 +2051,7 @@ impl HostedServer {
     /// it, `joiner_actions`).
     fn handle_item_action(&mut self, i: usize, req: &protocol::ItemActionPacket) {
         use crate::item_actions::{self, ItemNote};
+        let mut window_event = 0;
         let served: Result<u8, ItemNote> = match &req.action {
             protocol::ItemAction::Eat { hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
@@ -2049,7 +2063,7 @@ impl HostedServer {
                 if eaten.is_ok()
                     && let Some(held) = &held
                 {
-                    self.shadow_take_owed(i, usize::from(*hotbar_slot), held, 1, "by eating");
+                    window_event = self.shadow_take_owed(i, usize::from(*hotbar_slot), held, 1, "by eating");
                 }
                 eaten.map(|()| 1)
             }
@@ -2084,6 +2098,11 @@ impl HostedServer {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 return self.spawn_joiner_drop(i, usize::from(*hotbar_slot), held);
             }
+            // C3a-fix-1 (D-M2) — the part of a grant the client couldn't
+            // hold comes back to the world as a real item. Never answered.
+            protocol::ItemAction::GrantUnfit { event, count } => {
+                return self.return_joiner_unfit(i, *event, *count);
+            }
         };
         let (accepted, consume_held, note) = match served {
             Ok(n) => (true, n, ItemNote::None.to_wire()),
@@ -2091,9 +2110,31 @@ impl HostedServer {
         };
         let pkt = protocol::serialize_packet(
             protocol::PacketType::ItemActionOutcome,
-            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note },
+            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note, window_event },
         );
         self.send_to_joined_slot(i, &pkt);
+    }
+
+    /// C3a-fix-1 (D-M2) — joiner `i`'s client says `count` of the stack its
+    /// window event `event` granted didn't fit (`ItemAction::GrantUnfit`).
+    /// Clamped to that grant (`window_events::return_unfit`, which also takes
+    /// it back out of the server's copy of the window as far as that copy
+    /// holds it), then spawned as a real ground item at the server body's
+    /// feet by the shared spill rule (`break_drops::spill_at_feet`, what a
+    /// full single-player breaker gets): everyone sees it and anyone can take
+    /// it; the joiner's own pickups follow its window for a while
+    /// (`window_events::UNFIT_HOLD_TICKS`), so it isn't vacuumed straight
+    /// back. A body not in the world gets nothing spawned.
+    fn return_joiner_unfit(&mut self, i: usize, event: u32, count: u8) {
+        let now = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        if !sp.server_simulated || !sp.is_in_world() {
+            return;
+        }
+        let Some(stack) = crate::window_events::return_unfit(sp, event, count, now) else { return };
+        let feet = sp.player.pos;
+        let seed = crate::break_drops::drop_seed(now, feet.x as i32, feet.y as i32, feet.z as i32);
+        crate::break_drops::spill_at_feet(&mut self.server.ecs, feet, &[stack], seed);
     }
 
     /// C1 — joiner `i`'s accepted request (an interaction, C2a an eat) used
@@ -2103,11 +2144,16 @@ impl HostedServer {
     /// crafting grid, then the cursor). What it can't pay is a possession
     /// mismatch — counted and logged (rate-limited), never refused. `how`
     /// ends the log line's "used … ".
-    fn shadow_take_owed(&mut self, i: usize, slot: usize, held: &crate::item::Item, n: u8, how: &str) {
-        let Some(sp) = self.server.players.get_mut(i) else { return };
-        let taken =
-            crate::joiner_actions::take_owed_window(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, slot, held, n);
-        self.note_shortfall(i, held, n, taken, how);
+    ///
+    /// C3a-fix-1 — as a window event (`window_events::WindowEvent::Take`),
+    /// applied once the client says it paid its own: returns the event's
+    /// number for the outcome to carry (0 for a seat that isn't a joiner).
+    /// The shortfall is logged when it is applied.
+    fn shadow_take_owed(&mut self, i: usize, slot: usize, held: &crate::item::Item, n: u8, how: &'static str) -> u32 {
+        let now = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return 0 };
+        let event = crate::window_events::WindowEvent::Take { slot, item: held.clone(), n, how };
+        crate::window_events::queue(sp, event, now)
     }
 
     /// C3a-2a — slot `i`'s window op: applied to the server's copy of its
@@ -2115,12 +2161,34 @@ impl HostedServer {
     /// dead or alive), then the digests compared and tallied
     /// (`window_ops::note_served`; a creative joiner is mirrored, not
     /// tallied). Never refused, never answered.
+    ///
+    /// C3a-fix-1 — the server's own window events the client had applied
+    /// before this op go first (`window_events::apply_through`); a gap in
+    /// `op_seq` is tallied (B-L6).
     fn handle_window_op(&mut self, i: usize, pkt: &protocol::WindowOpPacket) {
         let creative = self.server.play_mode.is_creative();
+        let now = self.server.tick_counter;
         let server = &mut self.server;
         let Some(sp) = server.players.get_mut(i) else { return };
+        if !sp.server_simulated {
+            return;
+        }
+        crate::window_events::apply_through(sp, pkt.events_applied, now);
+        sp.window_events.note_op_seq(pkt.op_seq);
         if let Some(served) = crate::window_ops::serve_op(sp, &server.world, creative, &pkt.op) {
             crate::window_ops::note_served(sp, pkt, &served, creative);
+        }
+    }
+
+    /// C3a-fix-1 — before a packet from joiner `i` that the server judges
+    /// against its window is processed, the window events its client says
+    /// it had applied (`events_applied`) are applied to the server's copy.
+    fn apply_window_events(&mut self, i: usize, events_applied: u32) {
+        let now = self.server.tick_counter;
+        if let Some(sp) = self.server.players.get_mut(i)
+            && sp.server_simulated
+        {
+            crate::window_events::apply_through(sp, events_applied, now);
         }
     }
 
@@ -2268,10 +2336,11 @@ impl HostedServer {
         accepted: bool,
         consume_held: u8,
         note: u8,
+        window_event: u32,
     ) {
         let pkt = protocol::serialize_packet(
             protocol::PacketType::InteractOutcome,
-            &protocol::InteractOutcomePacket { seq, entity, kind, accepted, consume_held, note },
+            &protocol::InteractOutcomePacket { seq, entity, kind, accepted, consume_held, note, window_event },
         );
         self.send_to_joined_slot(i, &pkt);
     }
@@ -2323,6 +2392,7 @@ impl HostedServer {
                 &protocol::PlayerEventPacket {
                     player_index: i as u32,
                     event: protocol::PlayerEventType::Respawned { x: at.x, y: at.y, z: at.z },
+                    window_event: 0,
                 },
             );
             self.send_to_joined_slot(i, &pkt);
@@ -2419,13 +2489,16 @@ impl HostedServer {
         // grants to the players who earned them. Per-connection (never
         // broadcast: the stack belongs to one inventory); the item's
         // disappearance for everyone rides the entity-despawn diff below.
+        // C3a-fix-1 — each a window event, like every other grant.
         let grants = std::mem::take(&mut self.server.pending_item_grants);
-        for (idx, pkt) in build_grant_packets(&grants) {
-            if self.handshake_done.get(idx).copied().unwrap_or(false)
-                && !self.disconnected.get(idx).copied().unwrap_or(true)
-            {
-                self.transports[idx].send_to_client(&pkt);
-            }
+        for (idx, stack) in grants {
+            self.grant_to_joiner(idx, [stack]);
+        }
+        // C3a-fix-1 — the safety valve: a window event the client has not
+        // reported within `EVENT_ACK_TIMEOUT_TICKS` is applied anyway.
+        let now = self.server.tick_counter;
+        for sp in self.server.players.iter_mut().filter(|sp| sp.server_simulated) {
+            crate::window_events::apply_overdue(sp, now);
         }
         self.server_tick += 1;
         self.broadcast_state();
@@ -3120,6 +3193,7 @@ impl HostedServer {
                                 name: join_name,
                                 npub: join_npub,
                             },
+                            window_event: 0,
                         };
                         let event_pkt = protocol::serialize_packet(
                             protocol::PacketType::PlayerEvent,
@@ -3167,6 +3241,15 @@ impl HostedServer {
                             continue;
                         }
                         sp.last_input_tick = input.tick;
+                        // C3a-fix-1 — an input with no edits brings the
+                        // server's copy of the window up to the events its
+                        // client had applied (one with edits does so when its
+                        // edits are processed, `process_edit_group`: they may
+                        // wait behind earlier ones). Not while edits wait: the
+                        // client made them before these events.
+                        if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty() {
+                            crate::window_events::apply_through(sp, input.events_applied, now);
+                        }
                         // MP-A3 — death is server-held for a joiner. While
                         // dead its input is ignored: no moves, no look, no
                         // edits — each edit is sent back so the ghost block
@@ -3250,8 +3333,13 @@ impl HostedServer {
                         // through the one validator; the budget is per tick,
                         // and what is past it waits (FU3).
                         let edits = std::mem::take(&mut input.block_changes);
-                        let held = (input.held_kind, input.held_id);
-                        self.process_or_queue_edits(i, edits, &input.mined, held, input.hotbar_slot, &mut budget);
+                        let hand = crate::edit_queue::InputHand {
+                            held: (input.held_kind, input.held_id),
+                            hotbar_slot: input.hotbar_slot,
+                            edit_hands: std::mem::take(&mut input.edit_hands),
+                            events_applied: input.events_applied,
+                        };
+                        self.process_or_queue_edits(i, edits, &input.mined, hand, &mut budget);
                         // MP-A3 — a reported death (only ever believed
                         // downward: health coming back is never taken — only
                         // a `Respawn` revives). Drops this packet's move too.
@@ -3291,11 +3379,13 @@ impl HostedServer {
                             if let Ok(req) =
                                 protocol::safe_deserialize::<protocol::EntityAttackPacket>(payload)
                             {
+                                self.apply_window_events(i, req.events_applied);
                                 self.handle_entity_attack(i, &req);
                             }
                         } else if let Ok(req) =
                             protocol::safe_deserialize::<protocol::EntityInteractPacket>(payload)
                         {
+                            self.apply_window_events(i, req.events_applied);
                             self.handle_entity_interact(i, &req);
                         }
                     }
@@ -3307,6 +3397,7 @@ impl HostedServer {
                         if let Ok(req) =
                             protocol::safe_deserialize::<protocol::ItemActionPacket>(payload)
                         {
+                            self.apply_window_events(i, req.events_applied);
                             self.handle_item_action(i, &req);
                         }
                     }
@@ -3427,8 +3518,7 @@ impl HostedServer {
         i: usize,
         edits: Vec<protocol::BlockChange>,
         tags: &[protocol::MinedBlock],
-        held: (u8, u16),
-        hotbar_slot: Option<u8>,
+        hand: crate::edit_queue::InputHand,
         budget: &mut EditTickBudget,
     ) {
         let waiting = !self.edit_queues[i].is_empty();
@@ -3436,7 +3526,7 @@ impl HostedServer {
         let life = self.server.players.get(i).map_or(0, |sp| sp.respawns);
         let world = &self.server.world;
         let (mut group, mut dropped) =
-            crate::edit_queue::EditGroup::new(edits, keep, tags, held, life, hotbar_slot, |x, y, z| world.get_block(x, y, z));
+            crate::edit_queue::EditGroup::new(edits, keep, tags, hand, life, |x, y, z| world.get_block(x, y, z));
         if !waiting {
             self.process_edit_group(i, &mut group, budget);
         }
@@ -3465,6 +3555,9 @@ impl HostedServer {
         group: &mut crate::edit_queue::EditGroup,
         budget: &mut EditTickBudget,
     ) {
+        // C3a-fix-1 — the window events its client had applied when it made
+        // these edits go first (idempotent for a group already started).
+        self.apply_window_events(i, group.events_applied);
         let earlier_life = self.server.players.get(i).is_some_and(|sp| sp.respawns != group.life);
         if self.joiner_is_dead(i) || earlier_life {
             for bc in group.take_edits() {
@@ -3473,16 +3566,16 @@ impl HostedServer {
             return;
         }
         while budget.edits < MAX_BLOCK_CHANGES_PER_TICK {
-            let Some((bc, tag)) = group.pop_front() else {
+            let Some((bc, tag, hand)) = group.pop_front() else {
                 break;
             };
             budget.edits += 1;
             // C3a-2b — the hotbar slot of the input that carried the edit, the
             // latest input's only if it sent none (it is always below 9).
-            let slot = group
-                .hotbar_slot
-                .map_or_else(|| self.server.players[i].hotbar_slot, usize::from);
-            self.process_one_edit(i, &bc, tag, (group.held_kind, group.held_id), slot, budget);
+            // C3a-fix-1 (C-M1) — and the slot and hand the edit itself was
+            // made with, when its input said (`InputPacket.edit_hands`).
+            let slot = hand.slot().map_or_else(|| self.server.players[i].hotbar_slot, usize::from);
+            self.process_one_edit(i, &bc, tag, hand.held(), slot, budget);
         }
     }
 
@@ -3827,32 +3920,42 @@ impl HostedServer {
     }
 
     /// C1 — what the server gives joiner `i` (a break's yield, an
-    /// interaction's products): into its shadow of the joiner's inventory, and
-    /// to the joiner by `InventoryGrant`. C2b-fix (verify M1) — the client is
-    /// always sent the WHOLE stack, whatever fits the shadow: the shadow fills
-    /// by drift in ordinary play (container deposits, worn-out tools, armour
-    /// put on, consumes), so a "full" shadow must not cost the joiner an item.
-    /// What the shadow can't hold is tallied as `grant_overflow`, never
-    /// spilled. (The client's own spill when ITS inventory is full —
-    /// `remote_entities::apply_inventory_grant` — is the client's, not a
-    /// duplicate.) Plans have no wire form and are never granted.
-    // BRIDGE: spill the shadow's overflow as a real item once C3d makes the
-    // server inventory the truth — replace when C3d lands.
+    /// interaction's products, C3a-fix-1 a pickup): into its shadow of the
+    /// joiner's inventory, and to the joiner by `InventoryGrant`. C2b-fix
+    /// (verify M1) — the client is always sent the WHOLE stack, whatever fits
+    /// the shadow: the shadow fills by drift in ordinary play (container
+    /// deposits, worn-out tools, armour put on, consumes), so a "full" shadow
+    /// must not cost the joiner an item. What the shadow can't hold is
+    /// tallied as `grant_overflow`. Plans have no wire form and are never
+    /// granted.
+    ///
+    /// C3a-fix-1 — each stack is a window event (`window_events`), numbered
+    /// on its packet and added to the shadow only once the client says it
+    /// added it too, so both sides add it to the same layout. D-M2 — what
+    /// the CLIENT can't hold it reports (`ItemAction::GrantUnfit`), and the
+    /// server spawns that as a real ground item ([`Self::return_joiner_unfit`]):
+    /// the client spills nothing of its own, so nothing a full joiner walks
+    /// over vanishes into a private copy.
+    // BRIDGE: the whole stack is granted whatever the shadow holds — replace
+    // when C3d makes the server inventory the truth (then only what fits the
+    // server's window is taken).
     pub(crate) fn grant_to_joiner(&mut self, i: usize, stacks: impl IntoIterator<Item = crate::item::ItemStack>) {
-        let Some(sp) = self.server.players.get_mut(i) else { return };
-        let mut grants: Vec<(usize, crate::item::ItemStack)> = Vec::new();
+        if !self.handshake_done.get(i).copied().unwrap_or(false) || self.disconnected.get(i).copied().unwrap_or(true) {
+            return;
+        }
+        let now = self.server.tick_counter;
         for stack in stacks {
             if stack.count == 0 || matches!(stack.item, crate::item::Item::Plan(_)) {
                 continue;
             }
-            if let Some(rest) = sp.inventory.add_item(stack.clone()) {
-                sp.possession.grant_overflow =
-                    sp.possession.grant_overflow.saturating_add(u32::from(rest.count));
+            let Some(sp) = self.server.players.get_mut(i) else { return };
+            if !sp.server_simulated {
+                continue;
             }
-            grants.push((i, stack));
-        }
-        for (slot, pkt) in build_grant_packets(&grants) {
-            self.send_to_joined_slot(slot, &pkt);
+            let seq = crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(stack.clone()), now);
+            if let Some(pkt) = grant_packet(&stack, seq) {
+                self.send_to_joined_slot(i, &pkt);
+            }
         }
     }
 
@@ -5239,45 +5342,29 @@ fn current_unix_ts() -> u32 {
 
 /// C1 — the tail of a possession-mismatch WARNING: how many mismatches went
 /// to the debug log only since the previous one (`PossessionTally::note_mismatch`).
-fn held_back_note(due: Option<u32>) -> String {
+pub(crate) fn held_back_note(due: Option<u32>) -> String {
     match due {
         Some(n) if n > 0 => format!(" (+{n} more since the last warning, logged at debug)"),
         _ => String::new(),
     }
 }
 
-/// Serialize this tick's server-side pickup grants (death-drops phase 2b)
-/// into per-connection `InventoryGrantPacket`s: `(player_index, bytes)` pairs
-/// for the caller to route to `transports[player_index]`. Stacks that don't
-/// survive the `ItemRef` wire encoding are dropped defensively — the pickup
-/// pass in `GameServer::tick` already refuses them, so hitting that branch
-/// means a logic regression upstream, not player-visible loss.
-fn build_grant_packets(
-    grants: &[(usize, crate::item::ItemStack)],
-) -> Vec<(usize, Vec<u8>)> {
-    grants
-        .iter()
-        .filter_map(|(idx, stack)| {
-            // Death-drops phase 3 — everything except a Plan is grantable.
-            // Blocks/materials ride the lossless `(kind, id)` pair; tools and
-            // armour ride `full_item`, which the client prefers on decode.
-            if matches!(stack.item, crate::item::Item::Plan(_)) {
-                return None;
-            }
-            let (item_kind, item_id) = crate::inventory::item_to_ref(&stack.item).to_wire();
-            let full_item = crate::inventory::item_to_wire_full(&stack.item);
-            let pkt = protocol::InventoryGrantPacket {
-                item_kind,
-                item_id,
-                count: stack.count,
-                full_item,
-            };
-            Some((
-                *idx,
-                protocol::serialize_packet(protocol::PacketType::InventoryGrant, &pkt),
-            ))
-        })
-        .collect()
+/// One grant (death-drops phase 2b; C3a-fix-1: window event `window_event`)
+/// as an `InventoryGrantPacket`. A stack that doesn't survive the `ItemRef`
+/// wire encoding (a Plan) gives none — [`HostedServer::grant_to_joiner`] and
+/// the pickup pass in `GameServer::tick` already refuse them, so hitting that
+/// branch means a logic regression upstream, not player-visible loss.
+fn grant_packet(stack: &crate::item::ItemStack, window_event: u32) -> Option<Vec<u8>> {
+    // Death-drops phase 3 — everything except a Plan is grantable.
+    // Blocks/materials ride the lossless `(kind, id)` pair; tools and
+    // armour ride `full_item`, which the client prefers on decode.
+    if matches!(stack.item, crate::item::Item::Plan(_)) {
+        return None;
+    }
+    let (item_kind, item_id) = crate::inventory::item_to_ref(&stack.item).to_wire();
+    let full_item = crate::inventory::item_to_wire_full(&stack.item);
+    let pkt = protocol::InventoryGrantPacket { item_kind, item_id, count: stack.count, full_item, window_event };
+    Some(protocol::serialize_packet(protocol::PacketType::InventoryGrant, &pkt))
 }
 
 /// How long one incoming QUIC connection gets to complete its handshake.
@@ -5396,26 +5483,18 @@ mod tests {
 
     #[test]
     fn grant_packets_encode_stack_per_player_and_skip_plans() {
-        let grants = vec![
-            (
-                2usize,
-                crate::item::ItemStack::new_material(crate::item::MaterialId::Bone, 2),
-            ),
-            // Plans stay floor-bound by design — `PlanData` has no wire form,
-            // so a plan grant must be dropped, not garbled.
-            (
-                1usize,
-                crate::item::ItemStack {
-                    item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),
-                    count: 1,
-                },
-            ),
-        ];
-        let packets = build_grant_packets(&grants);
-        assert_eq!(packets.len(), 1, "only the wire-encodable grant survives");
-        let (idx, bytes) = &packets[0];
-        assert_eq!(*idx, 2, "packet addressed to the picking-up player's slot");
-        let pkt = decode_grant(bytes);
+        // C3a-fix-1 — one packet per grant, numbered as a window event; the
+        // caller (`grant_to_joiner`) addresses it to the joiner it numbered
+        // it for.
+        let bone = crate::item::ItemStack::new_material(crate::item::MaterialId::Bone, 2);
+        // Plans stay floor-bound by design — `PlanData` has no wire form,
+        // so a plan grant must be dropped, not garbled.
+        let plan = crate::item::ItemStack {
+            item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),
+            count: 1,
+        };
+        assert!(grant_packet(&plan, 1).is_none(), "only the wire-encodable grant survives");
+        let pkt = decode_grant(&grant_packet(&bone, 7).expect("a material is grantable"));
         assert_eq!(pkt.item_kind, protocol::item_kind::MATERIAL);
         assert_eq!(pkt.item_id, crate::item::MaterialId::Bone as u16);
         assert_eq!(pkt.count, 2);
@@ -5424,6 +5503,7 @@ mod tests {
             protocol::WireItem::None,
             "a material needs no full-fidelity payload"
         );
+        assert_eq!(pkt.window_event, 7, "the grant's window event");
     }
 
     // ── Death-drops phase 3 (v61): full-fidelity item wire ──
@@ -5436,24 +5516,20 @@ mod tests {
         pick.durability = 37;
         let mut boots = ArmourItem::new(ArmourSlot::Boots, ArmourMaterial::Diamond);
         boots.durability = 11;
-        let grants = vec![
-            (0usize, crate::item::ItemStack::new_tool(pick)),
-            (
-                1usize,
-                crate::item::ItemStack { item: crate::item::Item::Armour(boots), count: 1 },
-            ),
-        ];
-        let packets = build_grant_packets(&grants);
+        let tool = grant_packet(&crate::item::ItemStack::new_tool(pick), 1);
+        let armour =
+            grant_packet(&crate::item::ItemStack { item: crate::item::Item::Armour(boots), count: 1 }, 2);
+        let packets: Vec<Vec<u8>> = tool.into_iter().chain(armour).collect();
         assert_eq!(packets.len(), 2, "tools and armour are grantable from v61");
 
-        let tool_pkt = decode_grant(&packets[0].1);
+        let tool_pkt = decode_grant(&packets[0]);
         assert_eq!(
             crate::inventory::item_from_wire_full(&tool_pkt.full_item),
             Some(crate::item::Item::Tool(pick)),
             "half-worn iron pickaxe survives the wire exactly"
         );
 
-        let armour_pkt = decode_grant(&packets[1].1);
+        let armour_pkt = decode_grant(&packets[1]);
         assert_eq!(
             crate::inventory::item_from_wire_full(&armour_pkt.full_item),
             Some(crate::item::Item::Armour(boots)),

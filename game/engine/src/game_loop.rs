@@ -10445,6 +10445,12 @@ impl super::GameState {
                 self.show_debug = !self.show_debug;
             }
 
+            // C3a-fix-1 (C-M1) — every edit made so far was made under the
+            // selection about to change (if it does): it keeps that slot and
+            // hand (`InputPacket.edit_hands`).
+            if pidx == 0 {
+                self.stamp_edit_hands();
+            }
             // Hotbar selection (number keys + touch hotbar tap — player 0 only).
             // Read from the MERGED intent, not raw `self.input`: touch (and
             // gamepad) land their slot selection in the intent, so reading
@@ -13953,8 +13959,8 @@ impl super::GameState {
                         // their own copy of the world. The host and single-player
                         // take the local branch and broadcast the result, so
                         // nobody ever applies the same interaction twice.
-                        if let Some(rc) = self.remote_client.as_mut() {
-                            rc.send_device_interact(pos_key);
+                        if self.remote_client.is_some() {
+                            self.send_device_interact(pos_key);
                         } else if let Some(outcome) = crate::power::interact_device(
                             &mut self.world,
                             pos_key,
@@ -21745,7 +21751,9 @@ impl super::GameState {
             self.chunk_intake.confirm_drops(acked);
             // FU verify N4 — and so were the requests sent ahead of them:
             // their claims end (their answers came first, on the same stream).
-            self.joiner_actions.acknowledged(acked);
+            // C3a-fix-1 — together with those answers, which may wait in the
+            // window inbox (`apply_window_inbox`).
+            self.window_inbox.acknowledged(acked);
             // C2a — our hunger is the server's (it runs our metabolism).
             let joined = self.joined();
             if let Some(slot) = self.players.first_mut() {
@@ -21858,6 +21866,7 @@ impl super::GameState {
         // back too, and is a no-op) — enter the death screen, whose Respawn
         // asks the server. `Respawned`: it put us at the spawn point it holds;
         // stand there. Creative bodies never die (the death loop agrees).
+        let mut armour_worn: Vec<(u8, u32)> = Vec::new();
         if !self.players.is_empty() {
             for ev in &pending_life_events {
                 match *ev {
@@ -21879,11 +21888,11 @@ impl super::GameState {
                     }
                     // MP-D2b — the hits the server landed wear our armour,
                     // one durability per worn piece per hit, as a hit landed
-                    // in single-player does.
-                    crate::remote_client::OwnLifeEvent::ArmourWorn(hits) => {
-                        for _ in 0..hits {
-                            self.players[0].wear_armour();
-                        }
+                    // in single-player does. C3a-fix-1 — a window event:
+                    // applied in arrival order with the others
+                    // (`apply_window_inbox`).
+                    crate::remote_client::OwnLifeEvent::ArmourWorn(hits, event) => {
+                        armour_worn.push((hits, event));
                     }
                     crate::remote_client::OwnLifeEvent::Respawned(at) => {
                         // Back at full health: nothing reported before the
@@ -21898,48 +21907,20 @@ impl super::GameState {
             }
         }
 
-        // MP-D2b — the server's word on our swings and right-clicks, then
-        // the kills it credited to us.
-        // C2a — and on our item actions, in the one order they arrived.
-        for out in &pending_outcomes {
-            match out {
-                crate::remote_client::RequestOutcome::Interact(out) => self.apply_interact_outcome(out),
-                crate::remote_client::RequestOutcome::Item(out) => self.apply_item_action_outcome(out),
-            }
+        // MP-D2b — the server's word on our swings and right-clicks; C2a —
+        // and on our item actions; death-drops phase 2b — the stacks it gave
+        // us; the hits that wear our armour. C3a-fix-1 — every one of them
+        // that changes our window is a numbered window event: into the inbox,
+        // applied in the one order they arrived — now, or (while we hold
+        // edits not sent yet) right after the input carrying them goes out
+        // (`apply_window_inbox`).
+        self.window_inbox.add(pending_outcomes, pending_grants, armour_worn);
+        if !self.edits_unsent() {
+            self.apply_window_inbox();
         }
+        // The kills the server credited to us.
         for kill in &pending_kills {
             self.apply_kill_event(kill);
-        }
-
-        // Death-drops phase 2b — stacks the server picked up for us. Decode
-        // into the local player's inventory; overflow spills at our feet as a
-        // normal local ground item (nothing silently lost).
-        if !pending_grants.is_empty() && !self.players.is_empty() {
-            let player_pos = self.players[0].player.pos;
-            for grant in &pending_grants {
-                crate::remote_entities::apply_inventory_grant(
-                    &mut self.players[0].inventory,
-                    &mut self.ecs,
-                    player_pos,
-                    grant,
-                    &self.registry,
-                );
-            }
-            // C1 — a joiner's Satori is the server's roll, granted like any
-            // break drop: the routine pickup celebration plays here. (The
-            // Genesis Block is the host's world's to claim — not wired for a
-            // joiner's find.)
-            let satori = crate::inventory::item_to_ref(&crate::item::Item::Material(
-                crate::item::MaterialId::Satori,
-            ))
-            .to_wire();
-            if self.joined() && pending_grants.iter().any(|g| (g.item_kind, g.item_id) == satori) {
-                self.audio.play_gem_pickup();
-                self.toast = Some((
-                    "+1 Satori".to_string(),
-                    Instant::now() + std::time::Duration::from_secs(3),
-                ));
-            }
         }
 
         // World chat (Phase 2) — push every line delivered this poll (host
@@ -22114,6 +22095,7 @@ impl super::GameState {
             },
             next_input,
         );
+        self.flush_ops_before_edits();
         if let Some(client) = self.remote_client.as_mut() {
             client.send_entity_attack(&crate::protocol::EntityAttackPacket {
                 seq,
@@ -22123,6 +22105,11 @@ impl super::GameState {
                 held_full,
                 sprint,
                 sneak,
+                // C3a-fix-1 (C-L2) — the slot the swing was made from: the
+                // server's weapon wear starts there, as ours does.
+                hotbar_slot: hot.min(usize::from(u8::MAX)) as u8,
+                // Stamped by `RemoteClient::send_entity_attack`.
+                events_applied: 0,
             });
         }
     }
@@ -22168,6 +22155,7 @@ impl super::GameState {
             crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held },
             next_input,
         );
+        self.flush_ops_before_edits();
         if let Some(client) = self.remote_client.as_mut() {
             client.send_entity_interact(&crate::protocol::EntityInteractPacket {
                 seq,
@@ -22178,6 +22166,8 @@ impl super::GameState {
                 held_full,
                 hotbar_slot: hot as u8,
                 sneak,
+                // Stamped by `RemoteClient::send_entity_interact`.
+                events_applied: 0,
             });
         }
     }
@@ -22199,6 +22189,7 @@ impl super::GameState {
             crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
             next_input,
         );
+        self.flush_ops_before_edits();
         if let Some(client) = self.remote_client.as_mut() {
             client.send_item_action(&crate::protocol::ItemActionPacket {
                 seq,
@@ -22208,6 +22199,8 @@ impl super::GameState {
                     held_id,
                     held_full,
                 },
+                // Stamped by `RemoteClient::send_item_action`.
+                events_applied: 0,
             });
         }
     }
@@ -22220,7 +22213,7 @@ impl super::GameState {
     /// (`take_one_from_hotbar`), nothing is spawned here, and the server is
     /// told (`ItemAction::Drop`, never answered): it throws the item from our
     /// body as a real ground item everyone sees, which we see as its ghost.
-    fn send_drop_request(&mut self, pidx: usize, slot: usize) {
+    pub(crate) fn send_drop_request(&mut self, pidx: usize, slot: usize) {
         let now = self.tick_counter;
         let p = &self.players[pidx];
         if now < p.drop_ready_tick {
@@ -22236,10 +22229,14 @@ impl super::GameState {
         let (held_kind, held_id) = crate::inventory::item_to_ref(&stack.item).to_wire();
         let held_full = crate::inventory::item_to_wire_full(&stack.item);
         let seq = self.joiner_actions.unanswered();
+        // C3a-fix-1 (B-L1) — a close logged before this drop reaches the
+        // server first: it put the stack back in the slot the drop takes from.
+        self.flush_ops_before_edits();
         if let Some(client) = self.remote_client.as_mut() {
             client.send_item_action(&crate::protocol::ItemActionPacket {
                 seq,
                 action: crate::protocol::ItemAction::Drop { hotbar_slot: slot as u8, held_kind, held_id, held_full },
+                events_applied: 0,
             });
         }
     }
@@ -22259,10 +22256,12 @@ impl super::GameState {
             },
             next_input,
         );
+        self.flush_ops_before_edits();
         if let Some(client) = self.remote_client.as_mut() {
             client.send_item_action(&crate::protocol::ItemActionPacket {
                 seq,
                 action: crate::protocol::ItemAction::Sleep { bed },
+                events_applied: 0,
             });
         }
     }
@@ -22371,8 +22370,11 @@ impl super::GameState {
     /// C3a-2a — send the window ops player 0 applied since the last tick,
     /// in order, as `WindowOp`s, when joined and connected; drop everyone
     /// else's log (single-player, a host's own slots and a split-screen seat
-    /// send nothing). Runs at the start of every tick's send, so an op made
-    /// before an edit reaches the server before the input carrying the edit.
+    /// send nothing). C3a-fix-1 (B-L1) — runs AFTER the tick's input: the ops
+    /// logged before the input's first edit already went ahead of it
+    /// ([`Self::flush_ops_before_edits`]), so what is left was logged after
+    /// an edit the input carries and must reach the server after it (a
+    /// placement, then E: the edit, then `OpenPlayer`).
     fn flush_window_ops(&mut self) {
         let connected = self.remote_client.as_ref().is_some_and(|c| c.is_connected());
         for (pidx, p) in self.players.iter_mut().enumerate() {
@@ -22389,14 +22391,148 @@ impl super::GameState {
         }
     }
 
+    /// C3a-fix-1 (B-L1) — one ordered send path: send player 0's window ops
+    /// logged before its first unsent edit (all of them, if it has none),
+    /// when joined and connected. Called before every request that goes out
+    /// mid-frame (`EntityAttack`, `EntityInteract`, `ItemAction`,
+    /// `DeviceInteract`), ahead of the tick's input, and before window events
+    /// are applied: so the server reads ops, edits and requests in the order
+    /// this client made them (a Close, then a Q-drop: the Close first).
+    /// The ops logged after an unsent edit wait for the input carrying it.
+    fn flush_ops_before_edits(&mut self) {
+        let first_edit = self.pending_block_changes.first_stamp();
+        let Some(client) = self.remote_client.as_mut().filter(|c| c.is_connected()) else { return };
+        let Some(p) = self.players.first_mut() else { return };
+        for (op, digest) in p.crafting_ui.ops.take_before(first_edit) {
+            client.send_window_op(op, digest);
+        }
+    }
+
+    /// Wind/Copper/Electricity Task 2b — ask the host to right-click the power
+    /// device at `pos` (a joiner). C3a-fix-1 — after the ops logged before it.
+    fn send_device_interact(&mut self, pos: (i32, i32, i32)) {
+        self.flush_ops_before_edits();
+        if let Some(rc) = self.remote_client.as_mut() {
+            rc.send_device_interact(pos);
+        }
+    }
+
+    /// C3a-fix-1 — player 0's hotbar slot and the item in it, as an edit's
+    /// hand (`InputPacket.edit_hands`).
+    fn edit_hand_now(&self) -> crate::protocol::EditHand {
+        let Some(slot) = self.players.first() else { return (u8::MAX, 0, 0) };
+        let (kind, id) = match slot.inventory.hotbar_slot(slot.hotbar_slot) {
+            Some(stack) => crate::inventory::item_to_ref(&stack.item).to_wire(),
+            None => crate::protocol::ItemRef::Empty.to_wire(),
+        };
+        (slot.hotbar_slot.min(usize::from(u8::MAX)) as u8, kind, id)
+    }
+
+    /// C3a-fix-1 (C-M1) — the edits made so far keep the hotbar slot and
+    /// hand they were made under: called just before the selection can
+    /// change, and at the send.
+    fn stamp_edit_hands(&mut self) {
+        if !self.pending_block_changes.is_empty() {
+            let hand = self.edit_hand_now();
+            self.pending_block_changes.stamp_hands(hand);
+        }
+    }
+
+    /// C3a-fix-1 — does this client hold edits the server has not been sent
+    /// yet (this tick's, or a packet's overflow waiting in `RemoteClient`)?
+    /// While it does it applies no window event: every edit of an input is
+    /// made at the one count the input reports (`InputPacket.events_applied`).
+    fn edits_unsent(&self) -> bool {
+        !self.pending_block_changes.is_empty() || self.remote_client.as_ref().is_some_and(|c| c.has_carry_over())
+    }
+
+    /// C3a-fix-1 — apply the window-event carriers waiting in the inbox, in
+    /// the one order they arrived (`window_events::WindowInbox`): the
+    /// outcomes of our requests (their takes, a swing's wear), the grants
+    /// (what didn't fit goes back to the server as `GrantUnfit`, which
+    /// spawns it as a real item — nothing is spilled here), the armour wear.
+    /// Each one's event number then counts as applied
+    /// (`RemoteClient::note_window_event`), so every later packet tells the
+    /// server to apply it before that packet. The ops logged before them go
+    /// out first, with the count before them. Then the acknowledgement that
+    /// ends the requests' claims (joiner_actions N4). Not joined: dropped.
+    pub(crate) fn apply_window_inbox(&mut self) {
+        if self.window_inbox.is_empty() {
+            return;
+        }
+        if !self.joined() || self.players.is_empty() {
+            self.window_inbox.clear();
+            return;
+        }
+        self.flush_ops_before_edits();
+        let (items, ack) = self.window_inbox.take_ordered();
+        let satori_wire =
+            crate::inventory::item_to_ref(&crate::item::Item::Material(crate::item::MaterialId::Satori)).to_wire();
+        let mut satori = false;
+        for item in items {
+            let event = item.event();
+            let mut unfit = 0;
+            match item {
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Interact(out)) => {
+                    self.apply_interact_outcome(&out);
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Item(out)) => {
+                    self.apply_item_action_outcome(&out);
+                }
+                crate::window_events::InboxItem::Grant(grant) => {
+                    unfit = crate::remote_entities::apply_inventory_grant(
+                        &mut self.players[0].inventory,
+                        &grant,
+                        &self.registry,
+                    )
+                    .unwrap_or(0);
+                    // C1 — a joiner's Satori is the server's roll, granted
+                    // like any break drop: the routine pickup celebration
+                    // plays here. (The Genesis Block is the host's world's
+                    // to claim — not wired for a joiner's find.)
+                    satori |= (grant.item_kind, grant.item_id) == satori_wire;
+                }
+                crate::window_events::InboxItem::ArmourWorn { hits, .. } => {
+                    for _ in 0..hits {
+                        self.players[0].wear_armour();
+                    }
+                }
+            }
+            if let Some(client) = self.remote_client.as_mut() {
+                client.note_window_event(event);
+                if unfit > 0 {
+                    let seq = self.joiner_actions.unanswered();
+                    client.send_item_action(&crate::protocol::ItemActionPacket {
+                        seq,
+                        action: crate::protocol::ItemAction::GrantUnfit { event, count: unfit },
+                        events_applied: 0,
+                    });
+                }
+            }
+        }
+        if let Some(acked) = ack {
+            self.joiner_actions.acknowledged(acked);
+        }
+        if satori {
+            self.audio.play_gem_pickup();
+            self.toast = Some(("+1 Satori".to_string(), Instant::now() + std::time::Duration::from_secs(3)));
+        }
+    }
+
     pub(crate) fn network_send_input(&mut self) {
         if self.players.is_empty() { return; }
-        self.flush_window_ops();
+        // C3a-fix-1 (B-L1) — the ops logged before this input's first edit
+        // go ahead of it; the rest after it (`flush_window_ops` below).
+        self.flush_ops_before_edits();
         let has_server = self.hosted_server.is_some();
         let has_client = self.remote_client.is_some();
-        if !has_server && !has_client { return; }
+        if !has_server && !has_client {
+            self.flush_window_ops();
+            return;
+        }
 
-        // Build packet from local player state (borrows self.players, self.pending_block_changes)
+        // Build packet from local player state (borrows self.players; the
+        // edits are taken from self.pending_block_changes below)
         let slot = &self.players[0];
         let held_item = slot.inventory.hotbar_block_id(slot.hotbar_slot).unwrap_or(0);
         // Tool-capable held ref: resolve the active hotbar slot's Item into an
@@ -22441,6 +22577,11 @@ impl super::GameState {
             0.0
         };
 
+        // C3a-fix-1 — the edits, each with the slot and hand it was made
+        // with (stamped when the selection changed; the rest are this one's).
+        let hand_now = self.edit_hand_now();
+        let (block_changes, edit_hands) = self.pending_block_changes.take(hand_now);
+        let slot = &self.players[0];
         let input = crate::protocol::InputPacket {
             tick: send_tick,
             x: slot.player.pos.x,
@@ -22463,7 +22604,7 @@ impl super::GameState {
             toggle_inventory: intent.toggle_inventory,
             drop_item: intent.drop_item,
             hotbar_slot: wire_hotbar,
-            block_changes: std::mem::take(&mut self.pending_block_changes),
+            block_changes,
             armour_points: slot.total_armour_points(),
             health_delta,
             // Set on the joined path below; the host's loopback has no push.
@@ -22473,6 +22614,11 @@ impl super::GameState {
             column_mismatch: None,
             // The joined client's mined cells (empty on a host's loopback).
             mined: std::mem::take(&mut self.pending_mined),
+            // Stamped by `RemoteClient::send_input` (the count these edits
+            // were made at: no window event is applied while they wait).
+            events_applied: 0,
+            // C3a-fix-1 (C-M1) — each edit's own slot and hand.
+            edit_hands,
         };
 
         // Serialize once, send to whichever transport is active
@@ -22527,6 +22673,12 @@ impl super::GameState {
             if let Some(seq) = seq {
                 self.own_health.sent(seq, health_delta, slot.combat.health, slot.combat.dead);
             }
+        }
+        // C3a-fix-1 (B-L1) — the ops logged after this input's first edit go
+        // after it; then the window events that waited while its edits did.
+        self.flush_window_ops();
+        if !self.edits_unsent() {
+            self.apply_window_inbox();
         }
 
         // Cinematic replay (Phase 2c) — tee one frame per sim tick into the

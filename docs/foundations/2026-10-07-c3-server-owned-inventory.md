@@ -28,7 +28,7 @@ It never refuses anything. The evidence shows the gap is wider than the shadow-g
   - The client applies it at once.
   - It also sends it as a window op.
   - The server applies the same transition to its copy, in arrival order.
-- **Lockstep.** Because both sides run the same transitions in the same order, their layouts stay in lockstep by construction. Grants stay additive and land in the same slot on both sides (same `add_item` from the same layout).
+- **Lockstep: ordered application (C3a-fix-1, 2026-10-08).** Both sides run the same transitions, and they must run them in the same ORDER. The client's own ops, edits and requests reach the server in the order it made them (one ordered send path). The server's own changes to the window — a grant (a pickup's too), an accepted request's owed take (an eat, a D2b interaction), an armour-wear hit, a swing's weapon wear — are **window events**: the server numbers each per joiner and sends the number on its carrier, the client applies the carriers in arrival order and reports the highest number it has applied on every packet the server judges against the window, and the server applies its queued events to its copy only up to that count, just before processing that packet. So each event lands at the same point among the client's ops on both sides, and a grant stays additive into the same layout. The content is the server's; only the order follows the client; there is no replay. A decision the server makes when it originates an event reads the window with its waiting events applied (the effective window). Events waiting 200 ticks are applied anyway (tallied). (C3a-2a claimed lockstep from same transitions alone; the C3a verify, B-H1, showed a server change crossing an op in flight diverges an honest joiner. Spec 04 §4.2g.)
 
 **Why not the cheaper fork,** a layout-free "hold at least one anywhere" check (c3-evidence-b §3)? Two needs rule it out:
 - A joiner's arrangement must survive leave and rejoin through the sidecar.
@@ -36,7 +36,7 @@ It never refuses anything. The evidence shows the gap is wider than the shadow-g
 
 Only a server-owned layout gives both. Don't reopen this.
 
-**Ordering.** Window ops are requests: they wait behind the same client's earlier edits (FU4a) and are processed in arrival order with its inputs. That is what keeps placements, auto-refill and ops in the same order on both sides.
+**Ordering.** Window ops are requests: they wait behind the same client's earlier edits (FU4a) and are processed in arrival order with its inputs. That is what keeps placements, auto-refill and ops in the same order on both sides — given that the client sends them in the order it made them (C3a-fix-1: the ops logged before a tick's first unsent edit go before its input, the rest after; a mid-frame request sends the ops logged before it first) and that the server's own events apply at the client's count (above).
 
 ## 3. Rules that hold across every phase
 
@@ -54,7 +54,8 @@ Only a server-owned layout gives both. Don't reopen this.
 3. **Layout divergence sources are mirrored, not ignored:**
    - `auto_refill` (a per-client setting; the shadow assumes true today)
    - session locks, sort and trash
-   - the hotbar slot of each edit's OWN input. Add it to FU3's `EditGroup` beside the hand. `check_placement` and server tool wear key on it, not on the latest input's slot.
+   - the hotbar slot of each edit's OWN input. Add it to FU3's `EditGroup` beside the hand. `check_placement` and server tool wear key on it, not on the latest input's slot. (C3a-fix-1: each EDIT's own slot and hand, `InputPacket.edit_hands`, so a scroll within one send window doesn't skew it; a swing carries its own slot too.)
+   - **Lockstep scope (C3a-fix-1).** Ordered application keeps the per-joiner window — the 36 slots, armour, cursor, grid, station — in lockstep: only one client acts on it, so the client's order is the order. Shared containers (C3b) can't work that way: several players' moves meet in one chest, so their slots converge by per-slot correction (the server's authoritative contents of the slots a mismatched op touched), not by replaying any one client's order.
 4. **Graves stay ownerless,** Minecraft-like: anyone can take dropped items.
    - `GraveData` is a Vec element inside APPEND-ONLY `WorldSave.graves`. Adding a field to it would change every element's encoding.
    - If an owner is ever wanted, it goes in a side table appended to `WorldSave`.
