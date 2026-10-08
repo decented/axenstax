@@ -1369,3 +1369,65 @@ fn an_open_at_a_cell_that_is_not_a_table_earns_no_grace() {
     rig.tick();
     assert_eq!(rig.sp().table_gone_ticks, None);
 }
+
+/// The client crafts an Iron Pickaxe at `table` (autofill, then the result
+/// click) in a world that still shows the table, and the ops go to the
+/// server.
+fn craft_at_a_table_the_client_still_sees(rig: &mut Rig, table: [i32; 3]) {
+    rig.open_table(table);
+    let eye = rig.sp().player.eye_pos();
+    let fill = WindowClick::Autofill { example: example("Iron Pickaxe") };
+    let crafted = {
+        let c = &mut rig.c;
+        assert!(c.ui.apply_click(&mut c.inv, &mut c.armour, &fill, false, eye, |_| block::CRAFTING_TABLE).ok());
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+    };
+    assert!(matches!(crafted, ClickResult::Crafted(_)), "the client crafts at the table it still sees");
+    rig.flush();
+    rig.tick();
+}
+
+/// C3b-fix-d (A-L5) — the grace is for a table that WAS there, even one that
+/// broke before the open reached the server. Another player breaks the table;
+/// two ticks later the joiner, whose world still shows it, opens it and
+/// crafts 3×3. The server remembers the cell (`GameServer::tables_gone`) and
+/// gives the open the grace that is left: the craft is accepted on both
+/// sides, with no refusal and no mismatch. On a dedicated server and on a
+/// lending host (whose own break goes straight into the lent world).
+#[test]
+fn an_open_at_a_table_that_just_broke_gets_the_grace_that_is_left() {
+    for lent in [false, true] {
+        let mut rig = if lent { Rig::lent("grace-just-broke-lent") } else { Rig::dedicated("grace-just-broke") };
+        rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+        rig.give(1, Item::Material(MaterialId::Stick), 2);
+        let table = rig.place_table(-2);
+        rig.tick();
+        rig.world().set_block(table[0], table[1], table[2], block::AIR);
+        rig.tick();
+        rig.tick();
+        craft_at_a_table_the_client_still_sees(&mut rig, table);
+        let gone = rig.sp().table_gone_ticks;
+        assert!(gone.is_some_and(|n| n <= window::SERVER_TABLE_GRACE_TICKS), "lent {lent}: inside the grace: {gone:?}");
+        rig.assert_lockstep("a craft at a table that broke two ticks before the open arrived");
+        assert_eq!(rig.tally().window_refused, 0, "lent {lent}: not refused");
+        assert!(rig.sp().cursor.is_some(), "lent {lent}: the server crafted the pickaxe too");
+    }
+}
+
+/// C3b-fix-d (A-L5) — the remembered grace runs from when the table went,
+/// not from the open: an open after the grace has run out gets none.
+#[test]
+fn an_open_at_a_table_that_broke_longer_ago_than_the_grace_gets_none() {
+    let mut rig = Rig::dedicated("grace-broke-long-ago");
+    rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.tick();
+    rig.world().set_block(table[0], table[1], table[2], block::AIR);
+    for _ in 0..=window::SERVER_TABLE_GRACE_TICKS + 1 {
+        rig.tick();
+    }
+    craft_at_a_table_the_client_still_sees(&mut rig, table);
+    assert!(rig.sp().cursor.is_none(), "the server crafted nothing");
+    assert!(rig.tally().window_refused >= 1, "and counts the refusal");
+}

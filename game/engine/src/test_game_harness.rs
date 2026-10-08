@@ -906,6 +906,131 @@ mod tests {
         assert_eq!((sp.possession.matched, sp.possession.mismatched), (1, 0), "the placement matched its slot");
     }
 
+    /// `n` tagged breaks of air cells high over the server body (out of
+    /// reach: the server refuses each and changes nothing), as one tick's
+    /// edits: 16 tags ride an input (`MAX_MINED_PER_INPUT`), so a long run
+    /// waits in the carry-over over several inputs.
+    fn queue_tagged_breaks(hg: &mut HeadlessGame, server: &crate::hosted_server::HostedServer, slot: usize, n: i32) {
+        let body = server.server.players[slot].player.pos;
+        let (x0, y, z0) = (body.x.floor() as i32, body.y.floor() as i32 + 20, body.z.floor() as i32);
+        for k in 0..n {
+            let (x, z) = (x0 + k % 10, z0 + k / 10);
+            hg.state.pending_block_changes.push(crate::protocol::BlockChange { x, y, z, new_block: crate::block::AIR, meta: 0 });
+            hg.state.pending_mined.push(crate::protocol::MinedBlock { x, y, z, tool: crate::protocol::WireItem::None });
+        }
+    }
+
+    /// One input a step: [`harness_step`] with the client's wall-clock tick
+    /// accumulator emptied first, so the frame runs no ticks (and sends no
+    /// inputs) of its own.
+    fn paced_step(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame) {
+        hg.state.last_tick = std::time::Instant::now();
+        hg.state.tick_accumulator = std::time::Duration::ZERO;
+        harness_step(server, hg);
+    }
+
+    /// Let the server read every input sent so far (the join steps' frames
+    /// may have sent several a step), then one paced step.
+    fn catch_up(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame) {
+        for _ in 0..20 {
+            server.tick();
+        }
+        paced_step(server, hg);
+    }
+
+    /// C3b-fix-d (A-L1) — an Eat queued behind a long carry-over (160 tagged
+    /// breaks in one tick, over ten inputs) claims its bread until it is
+    /// SENT, then until the server acknowledges the input after it. The
+    /// acknowledgements of the inputs it waited behind are applied as it goes
+    /// out and end nothing, so a Q-drop of that last bread is refused: it
+    /// can't be both eaten and thrown. (The claim used to end with the second
+    /// input's acknowledgement, while the Eat still waited.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_an_eat_queued_behind_a_long_carry_over_claims_its_bread_until_it_is_sent() {
+        use crate::item::{ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("eat-behind-carry-over");
+        let bread = ItemStack::new_material(MaterialId::Bread, 1);
+        hg.state.players[0].inventory.set_slot(0, Some(bread.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(bread));
+        hg.state.players[0].hotbar_slot = 0;
+        server.server.players[slot].combat.hunger = 9;
+        catch_up(&mut server, &mut hg);
+        queue_tagged_breaks(&mut hg, &server, slot, 160);
+        let made_before = hg.state.remote_client.as_ref().expect("joined").next_input_seq();
+        hg.state.send_eat_request(0);
+        let queued = |hg: &HeadlessGame| hg.state.remote_client.as_ref().expect("joined").has_queued_requests();
+        assert!(queued(&hg), "the Eat waits behind the breaks");
+        let mut steps = 0;
+        while queued(&hg) {
+            paced_step(&mut server, &mut hg);
+            steps += 1;
+            assert!(steps < 40, "the carry-over drains");
+        }
+        assert!(
+            server.server.players[slot].last_applied_input > made_before,
+            "the server read inputs made after the Eat before it went (the acknowledgements it waited behind): \
+             made before input {made_before}, {steps} steps, server at {}, client at {}",
+            server.server.players[slot].last_applied_input,
+            hg.state.remote_client.as_ref().expect("joined").next_input_seq()
+        );
+        // Sent just now, not yet read by the server: still spoken for.
+        assert!(hg.state.joiner_actions.eat_in_flight(), "the Eat still claims its bread");
+        let breads = |hg: &HeadlessGame| hg.state.players[0].inventory.count_material(MaterialId::Bread);
+        hg.state.players[0].drop_ready_tick = 0;
+        hg.state.send_drop_request(0, 0);
+        assert_eq!(breads(&hg), 1, "the Q-drop of the claimed bread is refused");
+        // The server reads the Eat after the edits it deferred (four a tick).
+        let mut steps = 0;
+        while server.server.players[slot].combat.hunger == 9 {
+            paced_step(&mut server, &mut hg);
+            steps += 1;
+            assert!(steps < 120, "the server reads the Eat");
+            assert!(hg.state.joiner_actions.eat_in_flight() || breads(&hg) == 0, "claimed until it is answered");
+        }
+        for _ in 0..4 {
+            paced_step(&mut server, &mut hg);
+        }
+        let fed = 9 + crate::item::Item::Material(MaterialId::Bread).food_value().unwrap() as u8;
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.combat.hunger, fed, "the server ate it");
+        assert_eq!(sp.possession.drops, 0, "and threw nothing");
+        assert_eq!(breads(&hg), 0, "the accepted outcome took it here too");
+        assert!(!hg.state.joiner_actions.eat_in_flight());
+    }
+
+    /// C3b-fix-d (A-L1) — a request queued behind a carry-over and then
+    /// discarded unsent (the link closed while edits still waited) releases
+    /// its claim: its bread is spendable again, not locked for the rest of
+    /// the session.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_queued_request_discarded_unsent_releases_its_claim() {
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("discarded-unsent");
+        hg.state.players[0].inventory.set_slot(0, Some(ItemStack::new_material(MaterialId::Bread, 1)));
+        hg.state.players[0].hotbar_slot = 0;
+        catch_up(&mut server, &mut hg);
+        queue_tagged_breaks(&mut hg, &server, slot, 80);
+        hg.state.send_eat_request(0);
+        paced_step(&mut server, &mut hg);
+        let client = hg.state.remote_client.as_mut().expect("joined");
+        assert!(client.has_carry_over() && client.has_queued_requests(), "edits still wait, and the Eat behind them");
+        assert!(hg.state.joiner_actions.eat_in_flight());
+        client.state = crate::remote_client::ConnectionState::Failed("the link went".to_string());
+        hg.state.network_send_input();
+        assert!(
+            !hg.state.remote_client.as_ref().expect("still held").has_queued_requests(),
+            "discarded: nothing will send it"
+        );
+        assert!(!hg.state.joiner_actions.eat_in_flight(), "its claim is released");
+        let p = &hg.state.players[0];
+        let bread = Item::Material(MaterialId::Bread);
+        assert!(hg.state.joiner_actions.can_spend(&p.inventory, &p.crafting_ui, &bread, 1), "the bread is free");
+    }
+
     /// C1 — a joiner's break through its REAL client: the survival break arm
     /// mines the block under its feet, tags it (`InputPacket.mined`) and takes
     /// nothing itself (`break_drops::take_yield`); the server yields the break

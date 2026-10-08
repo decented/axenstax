@@ -419,6 +419,11 @@ pub struct BrowseEntry {
     pub size: u64,
 }
 
+/// C3b-fix-d (A-L5) — most cells a world's `tables_gone` log holds between a
+/// server's takes (it takes them every tick, so an honest tick logs a few);
+/// past it the oldest is dropped.
+pub const MAX_TABLES_GONE_LOGGED: usize = 256;
+
 pub struct World {
     chunks: AHashMap<(i32, i32, i32), Chunk>,
     /// Spec 02 §7.5 — the evicted-chunk store. A column streamed out of range
@@ -448,6 +453,14 @@ pub struct World {
     /// ([`World::without_edit_tracking`]) or by `insert_chunk`
     /// (`Chunk::from_bytes`). Runtime-only.
     edited_columns: Option<ahash::AHashSet<(i32, i32)>>,
+    /// C3b-fix-d (A-L5) — the cells that stopped being a crafting table
+    /// outside world-gen since the last [`World::take_tables_gone`], oldest
+    /// first, at most [`MAX_TABLES_GONE_LOGGED`]. `None` = not tracking:
+    /// only a world a server runs on logs them (the server turns this on and
+    /// takes them in every tick, for its table grace:
+    /// `window_ops::TablesGone`), so single-player and a joiner keep nothing.
+    /// Runtime-only.
+    tables_gone: Option<Vec<(i32, i32, i32)>>,
     /// Spec 02 §8.4 — chunk coordinates whose `.chunk` file this session read in
     /// (`save::load_chunk_dir`, from `chunks/` or `autosave/chunks/`) or wrote (every
     /// native save path). A save deletes a chunk's file — the all-air, mined-out
@@ -773,6 +786,7 @@ impl World {
             evicted_columns: ahash::AHashSet::new(),
             worldgen_depth: 0,
             edited_columns: None,
+            tables_gone: None,
             disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
             drying_racks: AHashMap::new(),
@@ -1014,6 +1028,19 @@ impl World {
             .as_mut()
             .map(|set| set.drain().collect())
             .unwrap_or_default()
+    }
+
+    /// C3b-fix-d (A-L5) — start logging the cells that stop being a crafting
+    /// table (see the `tables_gone` field). Idempotent; a server calls it on
+    /// the world it runs on.
+    pub fn track_tables_gone(&mut self) {
+        self.tables_gone.get_or_insert_with(Vec::new);
+    }
+
+    /// C3b-fix-d (A-L5) — the cells that stopped being a crafting table since
+    /// the last call, oldest first (none when not tracking), cleared.
+    pub fn take_tables_gone(&mut self) -> Vec<(i32, i32, i32)> {
+        self.tables_gone.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Phase B2b — record an edit at block `pos` (no-op inside world-gen or
@@ -1986,13 +2013,23 @@ impl World {
         let chunk = self.chunk_for_block_write(cx, cy, cz);
         // Spec 02 §7.5 — a real change outside world-gen makes the chunk
         // persist-worthy (it no longer matches what `generate_column` produces).
-        let edit = !in_worldgen && chunk.get(lx, ly, lz) != block;
+        let was = chunk.get(lx, ly, lz);
+        let edit = !in_worldgen && was != block;
         if edit {
             chunk.mark_persist();
         }
         chunk.set(lx, ly, lz, block);
         if edit {
             self.mark_edited((x, y, z));
+            // C3b-fix-d (A-L5) — a table gone, for a server's table grace.
+            if was == block::CRAFTING_TABLE
+                && let Some(log) = self.tables_gone.as_mut()
+            {
+                if log.len() >= MAX_TABLES_GONE_LOGGED {
+                    log.remove(0);
+                }
+                log.push((x, y, z));
+            }
         }
     }
 

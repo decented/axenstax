@@ -113,12 +113,20 @@ pub struct Pending {
     pub held: Option<Item>,
 }
 
+/// C3b-fix-d (A-L1) — the `ends_at_input` of a request queued behind unsent
+/// edits (`GameState::send_request`): it rides behind no input yet, so no
+/// acknowledgement ends its claim until it is sent and rebased
+/// ([`JoinerActions::rebase`]), or discarded unsent and released
+/// ([`JoinerActions::release`]).
+pub const UNTIL_SENT: u64 = u64::MAX;
+
 /// One remembered request.
 #[derive(Debug)]
 struct Entry {
     seq: u32,
     /// The sequence number of the input sent after this request; its claim
-    /// ends once the server acknowledges that input (N4).
+    /// ends once the server acknowledges that input (N4). [`UNTIL_SENT`]
+    /// while the request waits in the queue.
     ends_at_input: u64,
     /// Still claiming its item ([`JoinerActions::can_afford`]).
     claims: bool,
@@ -138,7 +146,8 @@ impl JoinerActions {
     /// `next_input_seq` is the sequence number of the input this client
     /// sends next (`RemoteClient::next_input_seq`): the request goes out
     /// ahead of it, so once the server acknowledges that input it has read
-    /// (and answered, or skipped) the request.
+    /// (and answered, or skipped) the request. C3b-fix-d (A-L1) — a request
+    /// that will wait in the queue is recorded with [`UNTIL_SENT`] instead.
     pub fn record(&mut self, request: Pending, next_input_seq: u64) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
         if self.pending.len() >= MAX_PENDING {
@@ -184,6 +193,24 @@ impl JoinerActions {
                 e.claims = false;
             }
         }
+    }
+
+    /// C3b-fix-d (A-L1) — request `seq`, queued until now, was just sent
+    /// ahead of input `next_input_seq` (`RemoteClient::next_input_seq` at the
+    /// send): its claim ends once the server acknowledges that input, as a
+    /// request sent at once does. No entry (an unanswered `Drop`, or one
+    /// forgotten past [`MAX_PENDING`]): nothing to do.
+    pub fn rebase(&mut self, seq: u32, next_input_seq: u64) {
+        if let Some(e) = self.pending.iter_mut().find(|e| e.seq == seq) {
+            e.ends_at_input = next_input_seq;
+        }
+    }
+
+    /// C3b-fix-d (A-L1) — request `seq` was discarded unsent (the link
+    /// closed, or there was none): it will never be answered, so it is
+    /// forgotten and its items are free at once.
+    pub fn release(&mut self, seq: u32) {
+        self.pending.retain(|e| e.seq != seq);
     }
 
     /// Forget everything (the session ended: leaving the world, and so every
@@ -833,6 +860,65 @@ mod tests {
         a.clear();
         assert!(a.can_afford(&inv, &CraftingUi::new(), milk, Some(&bucket)));
         assert_eq!(a.len(), 0);
+    }
+
+    /// C3b-fix-d (A-L1) — a request queued behind unsent edits claims until
+    /// it is SENT: the acknowledgements of the inputs it waits behind end
+    /// nothing, however many. Once sent (rebased to the input after it) it
+    /// claims until that input is acknowledged, like any request.
+    #[test]
+    fn a_queued_request_claims_until_it_is_sent_then_until_the_input_after_it() {
+        let bread = Item::Material(MaterialId::Bread);
+        let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 1));
+        let ui = CraftingUi::new();
+        let mut a = JoinerActions::default();
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT);
+        // A long carry-over: inputs 10..=14 go out ahead of it, and the
+        // server acknowledges every one.
+        for acked in 10..=14 {
+            a.acknowledged(acked);
+        }
+        assert!(a.eat_in_flight(), "still queued: nothing the server read covers it");
+        assert!(!a.can_spend(&inv, &ui, &bread, 1), "a Q-drop of the bread it claims is refused");
+        // Sent right after input 14: it rides ahead of input 15.
+        a.rebase(eat, 15);
+        a.acknowledged(14);
+        assert!(!a.can_spend(&inv, &ui, &bread, 1), "an acknowledgement from before the send ends nothing");
+        a.acknowledged(15);
+        assert!(a.can_spend(&inv, &ui, &bread, 1), "read by the server: the bread is free");
+        assert!(!a.eat_in_flight());
+        assert!(a.take(eat).is_some(), "the entry stays for its answer");
+        // A seq with no entry (an unanswered Drop) moves nothing.
+        a.rebase(999, 1);
+        assert_eq!(a.len(), 0);
+    }
+
+    /// C3b-fix-d (A-L1) — a queued request discarded unsent releases its
+    /// claim at once (it will never be answered), and only its own.
+    #[test]
+    fn a_queued_request_discarded_unsent_releases_its_claim() {
+        let bread = Item::Material(MaterialId::Bread);
+        let bucket = Item::Material(MaterialId::Bucket);
+        let mut inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 1));
+        inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        let ui = CraftingUi::new();
+        let mut a = JoinerActions::default();
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT);
+        let milk = Pending {
+            kind: Asked::Interact(InteractKind::Milk),
+            mob: Some(MobType::Cow),
+            hotbar_slot: 1,
+            held: Some(bucket.clone()),
+        };
+        a.record(milk, UNTIL_SENT);
+        assert!(!a.can_spend(&inv, &ui, &bread, 1) && !a.can_spend(&inv, &ui, &bucket, 1));
+        a.release(eat);
+        assert!(a.can_spend(&inv, &ui, &bread, 1), "the discarded Eat's bread is free");
+        assert!(!a.eat_in_flight());
+        assert!(!a.can_spend(&inv, &ui, &bucket, 1), "the other request still claims its bucket");
+        assert_eq!(a.len(), 1);
+        a.release(999);
+        assert_eq!(a.len(), 1, "a seq with no entry releases nothing");
     }
 
     /// C2a — eating claims the food like a Feed does (one carrot can't be

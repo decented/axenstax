@@ -932,6 +932,11 @@ pub struct GameServer {
     pub pop_secret: [u8; 32],
     /// The Proof-of-Play epoch (always 0 in alpha; Spec 06 §2.6).
     pub pop_epoch: u32,
+    /// C3b-fix-d (A-L5) — the cells that stopped being a crafting table
+    /// within the table grace, taken in from this server's world every tick
+    /// (and at each `OpenTable`): an open at one gets the grace that is left
+    /// (`window_ops::serve_op`).
+    pub tables_gone: crate::window_ops::TablesGone,
 }
 
 impl GameServer {
@@ -982,6 +987,7 @@ impl GameServer {
             pending_kill_events: Vec::new(),
             night_calendar: crate::item_actions::NightCalendar::default(),
             pending_bred_events: Vec::new(),
+            tables_gone: Default::default(),
             next_attach_gen: 0,
             released_joiners: Vec::new(),
             animal_life_simulated: false,
@@ -1743,6 +1749,10 @@ impl GameServer {
         if self.runs(SimSystem::Carts) {
             crate::cart::tick_carts(&mut self.ecs, &mut self.world);
         }
+
+        // C3b-fix-d (A-L5) — the tables this tick's world lost, for the
+        // table grace (before `watch_table` below, as each open reads it).
+        self.tables_gone.note(&mut self.world, self.tick_counter);
 
         // Per-player entity collision + combat timers
         for i in 0..self.players.len() {

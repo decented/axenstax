@@ -22008,16 +22008,17 @@ impl super::GameState {
         self.remote_client.as_ref().map_or(0, |c| c.next_input_seq())
     }
 
-    /// C3b-fix-b (B-M1) — the input a request made now goes out ahead of: the
-    /// next one, or, when edits are unsent and it will be queued behind them
-    /// ([`Self::send_request`]), the one after (it goes right after the input
-    /// carrying those edits, so only that later input's acknowledgement
-    /// proves the server read it).
-    ///
-    /// Open: a request held past one input by a carry-over (a packet's
-    /// overflow, rare) is released a few ticks early.
+    /// C3b-fix-b (B-M1) — the input a request made now goes out ahead of, so
+    /// its claim ends with that input's acknowledgement: the next one, when
+    /// it goes at once. C3b-fix-d (A-L1) — when edits are unsent it waits in
+    /// the queue behind them ([`Self::send_request`]), for one input or (a
+    /// packet's overflow, carried over) several, and rides ahead of no input
+    /// yet: its claim lives until it is sent
+    /// ([`crate::joiner_actions::UNTIL_SENT`]), when [`Self::flush_window_ops`]
+    /// rebases it to the input after it, or until it is discarded unsent,
+    /// which releases it.
     fn request_input_seq(&self) -> u64 {
-        self.next_input_seq() + u64::from(self.edits_unsent())
+        if self.edits_unsent() { crate::joiner_actions::UNTIL_SENT } else { self.next_input_seq() }
     }
 
     /// MP-D2b — the item in player `pidx`'s active hotbar slot, and the
@@ -22422,7 +22423,13 @@ impl super::GameState {
     /// before it and before the ops logged after it: the one order this
     /// client made them in. While edits still wait in the carry-over (a
     /// packet's overflow), the ops and requests made after the first of them
-    /// wait for the input that carries it.
+    /// wait for the input that carries it. C3b-fix-d (A-L3) — the first of
+    /// them by its own stamp: what was made before it goes now.
+    ///
+    /// C3b-fix-d (A-L1) — a queued request's claim is rebased as it goes, to
+    /// the input after it (`RemoteClient::next_input_seq` now): only that
+    /// input's acknowledgement proves the server read it. Not connected,
+    /// every queued request is discarded and its claim released.
     fn flush_window_ops(&mut self) {
         let connected = self.remote_client.as_ref().is_some_and(|c| c.is_connected());
         for (pidx, p) in self.players.iter_mut().enumerate() {
@@ -22434,7 +22441,11 @@ impl super::GameState {
                     for logged in p.crafting_ui.ops.take_before(Some(stamp)) {
                         client.send_window_op(logged);
                     }
+                    let seq = request.seq();
                     client.send_request(request);
+                    if let Some(seq) = seq {
+                        self.joiner_actions.rebase(seq, client.next_input_seq());
+                    }
                 }
                 let ops = match client.first_carried_stamp() {
                     Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
@@ -22448,8 +22459,14 @@ impl super::GameState {
             }
         }
         if !connected && let Some(client) = self.remote_client.as_mut() {
-            // Not connected: nothing is sent, so nothing waits for it.
-            let _ = client.take_queued_requests();
+            // Not connected: nothing is sent, so nothing waits for it — even
+            // behind a carry-over — and nothing it would have used stays
+            // claimed (C3b-fix-d, A-L1).
+            for (_, request) in client.discard_queued_requests() {
+                if let Some(seq) = request.seq() {
+                    self.joiner_actions.release(seq);
+                }
+            }
         }
     }
 
@@ -22482,7 +22499,16 @@ impl super::GameState {
     /// With edits unsent it waits, in the op log's order, and goes right
     /// after the input that carries them ([`Self::flush_window_ops`]);
     /// otherwise it goes now, after the ops logged before it.
+    ///
+    /// C3b-fix-d (A-L1) — with no connection it is dropped unsent, and its
+    /// claim released: nothing will ever answer it.
     fn send_request(&mut self, request: crate::remote_client::Request) {
+        if !self.remote_client.as_ref().is_some_and(|c| c.is_connected()) {
+            if let Some(seq) = request.seq() {
+                self.joiner_actions.release(seq);
+            }
+            return;
+        }
         let must_wait = self.edits_unsent();
         if must_wait {
             if let Some(client) = self.remote_client.as_mut() {
@@ -22687,8 +22713,7 @@ impl super::GameState {
         // C3a-fix-1 — the edits, each with the slot and hand it was made
         // with (stamped when the selection changed; the rest are this one's).
         let hand_now = self.edit_hand_now();
-        let first_edit_stamp = self.pending_block_changes.first_stamp();
-        let (block_changes, edit_hands) = self.pending_block_changes.take(hand_now);
+        let (block_changes, edit_hands, edit_stamps) = self.pending_block_changes.take(hand_now);
         let slot = &self.players[0];
         let input = crate::protocol::InputPacket {
             tick: send_tick,
@@ -22765,9 +22790,9 @@ impl super::GameState {
             // B2b — once a local column's generation did not hash as the
             // server's note said, every input asks for everything pushed.
             joined_input.column_mismatch = self.chunk_intake.column_mismatch();
-            // C3b-fix-b (B-L2) — if the packet can't carry every edit, the
-            // first one's stamp stays with those that wait.
-            client.note_first_edit_stamp(first_edit_stamp);
+            // C3b-fix-b (B-L2) / C3b-fix-d (A-L3) — if the packet can't carry
+            // every edit, each that waits keeps its own stamp.
+            client.note_edit_stamps(edit_stamps);
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
             let seq = self.own_prediction.send(

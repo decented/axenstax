@@ -1337,7 +1337,26 @@ are kept by `seq`, at most 64 outstanding):
   buckets from one (N4; Feed, Tame and Lead alike). The entry stays, so an
   answer is still applied. Leaving the world forgets every claim
   (`JoinerActions::clear`, `world_exit`); every reconnect is a leave and a new
-  join. Eating (§4.2f) claims its food the same way. **The ordering this
+  join. Eating (§4.2f) claims its food the same way. **A queued request's
+  claim lives until it is sent (C3b-fix-d, A-L1):** a request made while
+  edits are unsent waits in the queue behind them (§4.2g "Requests wait
+  behind unsent edits") and rides ahead of no input yet, so it is recorded
+  with `joiner_actions::UNTIL_SENT` and no acknowledgement ends its claim;
+  `flush_window_ops` rebases it as it goes out (`JoinerActions::rebase`, to
+  `RemoteClient::next_input_seq` at the send: the input after it). Before,
+  it claimed until the acknowledgement of the input after the one it was
+  queued behind, which a carry-over longer than one input outlived: the
+  acknowledgements it waited behind (applied as it went out) ended the claim
+  before the server had read it, and a Q-drop of that same last bread passed
+  `can_spend` — eaten and thrown. A request discarded unsent releases its
+  claim at once (`JoinerActions::release`): the link closed while it was
+  queued, even behind a carry-over (`RemoteClient::discard_queued_requests`),
+  or there was no connection when it was made (`GameState::send_request`).
+  This holds for every request that claims, C3b-2's `ItemAction::UseBlock`
+  included. Pinned by `joiner_actions::tests` and, on the real client, the GPU
+  harness
+  (`game_harness_an_eat_queued_behind_a_long_carry_over_claims_its_bread_until_it_is_sent`,
+  `game_harness_a_queued_request_discarded_unsent_releases_its_claim`). **The ordering this
   relies on (C2a verify L4):** every server-to-client packet shares ONE
   ordered stream (QUIC's single bi stream, a WebSocket, the channel
   transport), and the server sends an outcome inline while it reads the
@@ -2259,14 +2278,31 @@ send moves. So a placement that emptied the slot and auto-refilled it, then
 Q, reaches the server as the placement, then the drop: its 36 slots are the
 client's (before, the drop overtook the edit, took the slot's last item with
 no refill, and the placement then found nothing: the layouts split and stayed
-split). While edits still wait in the carry-over the requests, and the ops
-logged after the first of them, wait too: `RemoteClient` keeps the stamp of
-the first carried edit (the run's original first; the edits carry no stamp of
-their own, so after a partial send it is earlier than exact). Limit: an edit
-made after a queued request in the same tick still rides the same input
-ahead of it (the input is one packet). Pinned by
+split). A queued request's item claim lives until it is sent (C3b-fix-d,
+A-L1; §4.2d). While edits still wait in the carry-over, the requests and ops
+made after the first of them wait too. **Each edit keeps its own stamp
+(C3b-fix-d, A-L3):** `PendingEdits` stamps every edit as it is made, the game
+loop hands the stamps to `RemoteClient::note_edit_stamps` with the input (they
+never go on the wire), and each stamp travels with its edit through trimming
+and the tag hold-back, so the cut is the first WAITING edit's own stamp
+(`first_carried_stamp`): a request or op made before it goes now
+(`take_queued_requests` releases the queued requests stamped before the cut,
+all of them when nothing is carried). So in one tick a placement at X (e1), a
+Q-drop, then a tagged break of X (e2, held back behind the untagged placement
+of its cell, §4.2e) reach the server as e1, the drop, e2: the client's order.
+(The cut used to be the run's original first edit, e1's, so the drop waited
+for e2.) **Known limit (A-L2):** an edit made after a queued request in the
+same input window still rides that input, ahead of the request (the input is
+one packet; the request follows it). With auto-refill on this changes only the
+hotbar layout, never the counts: two dirt in hotbar slot 0 and 64 in the bag,
+an earlier edit unsent, then Q on slot 0 (queued), then a placement from it.
+The client's Q leaves one and its placement takes that one and refills the
+slot from the bag (slot 64, bag empty); the server places first (two to one)
+and the drop then empties the slot, with no refill (slot empty, bag 64). The
+layouts agree again at C3d's sync. Pinned by
 `test_integration::window_ops::a_q_drop_after_a_placement_leaves_the_servers_layout_the_clients`,
-`remote_client::tests::a_request_behind_unsent_edits_goes_out_after_the_input_carrying_them`
+`remote_client::tests::a_request_behind_unsent_edits_goes_out_after_the_input_carrying_them`,
+`remote_client::tests::a_request_made_between_a_sent_edit_and_a_held_one_goes_between_them`
 and, on the real client, the GPU harness
 (`game_harness_a_placement_then_q_in_one_tick_reach_the_server_in_order`).
 A `GrantUnfit` is sent only when no edit waits. When not joined `flush_window_ops` drops every log
@@ -2320,7 +2356,27 @@ counts that grace once a tick (`window_ops::watch_table`,
 behind the server's, and a body is a little further from the table than the
 client's eye after knockback. The grace never extends reach, and is for a table that was there
 (C3b-fix-b, A-L1): an `OpenTable` at a cell that isn't a crafting table sets
-`table_gone_ticks` past the grace from the start. C3b-fix-a (A-L2): the
+`table_gone_ticks` past the grace from the start — **unless the table broke
+just before the open reached the server (C3b-fix-d, A-L5).** The server
+remembers every cell that stopped being a crafting table within the last
+`SERVER_TABLE_GRACE_TICKS`, whoever broke it: `World::set_block` logs each
+table removal on a world a server runs on (`World::take_tables_gone`,
+`MAX_TABLES_GONE_LOGGED`; untracked, so empty, in single-player and on a
+joiner), which the server takes into `GameServer::tables_gone`
+(`window_ops::TablesGone`, at most `MAX_TABLES_GONE` cells, pruned as they
+age) once a tick and at each `OpenTable`; its first take only drops what the
+log already held (a lending host's world keeps logging after a server stops,
+so it can hold tables broken in solo play). An `OpenTable` at a remembered cell
+gets the grace that is left (`table_gone_ticks` = the ticks since it went), so
+another player breaks a table, the joiner (whose world still shows it) opens
+it inside the grace and crafts 3×3: accepted, no `window_refused` (before,
+the server said `NeedsTable` and the craft diverged). A lending host's own
+break goes straight into the lent world, and is logged the same way. Any
+other cell that isn't a table still gets none. Pinned by
+`window_ops::tests::a_table_that_goes_is_remembered_for_the_grace_then_forgotten`
+and `test_integration::window_ops::an_open_at_a_table_that_just_broke_gets_the_grace_that_is_left`
+(dedicated and lent), `…broke_longer_ago_than_the_grace_gets_none` and
+`…an_open_at_a_cell_that_is_not_a_table_earns_no_grace`. C3b-fix-a (A-L2): the
 slack makes the server kinder, never the decider of a craft the client
 refused: a `Result` or `Autofill` click is applied only when the client's own
 rule accepted it (`client_ok`), so a client whose forced close is stuck (a

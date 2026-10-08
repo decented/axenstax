@@ -299,6 +299,20 @@ pub enum Request {
     Device((i32, i32, i32)),
 }
 
+impl Request {
+    /// C3b-fix-d (A-L1) — the request number it goes under
+    /// (`JoinerActions`' shared sequence), which names its claim; `None`
+    /// for a device right-click, which has none.
+    pub fn seq(&self) -> Option<u32> {
+        match self {
+            Request::Attack(pkt) => Some(pkt.seq),
+            Request::Interact(pkt) => Some(pkt.seq),
+            Request::Item(pkt) => Some(pkt.seq),
+            Request::Device(_) => None,
+        }
+    }
+}
+
 /// Most unnumbered carriers of one kind a poll keeps; a numbered window
 /// event (`window_event != 0`) is never dropped (C3b-fix-b, B-L1): the
 /// server applies its side when the client reports the number, so a carrier
@@ -452,22 +466,19 @@ pub struct RemoteClient {
     /// Edits [`serialize_input_within_cap`] trimmed off an earlier input
     /// packet (or [`hold_back_for_tags`] held back), oldest first, each with
     /// the `mined` tag of the break that made it, if it was one (C1; paired
-    /// at the source, FU1). [`Self::send_input`] puts them ahead of the next
+    /// at the source, FU1), and its own order stamp (C3b-fix-d, A-L3). [`Self::send_input`] puts them ahead of the next
     /// packet's own edits, so a burst too big for one packet is spread over
     /// several instead of the tail being lost (the host never saw it, so it
     /// could never refuse and un-ghost it on this client); a tag rides only
     /// with its own edit. At most [`INPUT_CARRY_OVER_MAX_CHANGES`].
     input_carry_over: Vec<PairedEdit>,
-    /// C3b-fix-b (B-L2) — the order stamp (`window_ops::order_stamp`) of the
-    /// first edit in `input_carry_over`, or an earlier edit of the same run:
-    /// the ops and requests logged after it wait for the input that carries
-    /// it. `None` while nothing is carried over. After a partial send it is
-    /// the run's original first edit (earlier than the exact one: the edits
-    /// don't carry a stamp each).
-    carry_over_stamp: Option<u64>,
-    /// C3b-fix-b (B-L2) — the stamp of the first edit of the NEXT input,
-    /// noted by the game loop just before it ([`Self::note_first_edit_stamp`]).
-    next_edit_stamp: Option<u64>,
+    /// C3b-fix-d (A-L3) — the order stamps (`window_ops::order_stamp`) of
+    /// the NEXT input's edits, one each, noted by the game loop just before
+    /// it ([`Self::note_edit_stamps`]). Never sent: each rides with its edit
+    /// into `input_carry_over` if the edit has to wait, and the first one
+    /// there is the cut the ops and requests made after it wait behind
+    /// ([`Self::first_carried_stamp`]).
+    next_edit_stamps: Vec<u64>,
     /// C3b-fix-b (B-M1) — requests made while edits were unsent, each with
     /// its order stamp, oldest first: they go right after the input that
     /// carries those edits ([`Self::queue_request`],
@@ -751,8 +762,7 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
-            carry_over_stamp: None,
-            next_edit_stamp: None,
+            next_edit_stamps: Vec::new(),
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
@@ -801,8 +811,7 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
-            carry_over_stamp: None,
-            next_edit_stamp: None,
+            next_edit_stamps: Vec::new(),
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
@@ -1306,10 +1315,15 @@ impl RemoteClient {
         let fresh_edits = std::mem::take(&mut input.block_changes);
         let mut hands = std::mem::take(&mut input.edit_hands);
         hands.resize(fresh_edits.len(), (u8::MAX, input.held_kind, input.held_id));
-        let fresh = pair_tags_with_edits(fresh_edits.into_iter().zip(hands).collect(), std::mem::take(&mut input.mined));
-        let carried_before = !self.input_carry_over.is_empty();
-        let fresh_len = fresh.len();
-        let fresh_stamp = self.next_edit_stamp.take();
+        // C3b-fix-d (A-L3) — and with its own order stamp (one taken now for
+        // an edit the game loop noted none for).
+        let mut stamps = std::mem::take(&mut self.next_edit_stamps);
+        stamps.truncate(fresh_edits.len());
+        stamps.resize_with(fresh_edits.len(), crate::window_ops::order_stamp);
+        let fresh = pair_tags_with_edits(
+            fresh_edits.into_iter().zip(hands).zip(stamps).map(|((bc, hand), stamp)| (bc, hand, stamp)).collect(),
+            std::mem::take(&mut input.mined),
+        );
         let mut edits = std::mem::take(&mut self.input_carry_over);
         edits.extend(fresh);
         // C1 (review LOW-3) / FU1 (C1 verify N4) — the edits from the first
@@ -1325,35 +1339,27 @@ impl RemoteClient {
             );
             trimmed.drain(..drop);
         }
-        // C3b-fix-b (B-L2) — what waits keeps the stamp of its first edit.
-        // `trimmed` is the tail of (carried ++ fresh): if it is longer than
-        // the fresh edits it still starts with a carried one (the run's
-        // stamp stands); otherwise it starts among the fresh.
-        self.carry_over_stamp = if trimmed.is_empty() {
-            None
-        } else if carried_before && trimmed.len() > fresh_len && self.carry_over_stamp.is_some() {
-            self.carry_over_stamp
-        } else {
-            Some(fresh_stamp.unwrap_or_else(crate::window_ops::order_stamp))
-        };
+        // C3b-fix-b (B-L2) / C3b-fix-d (A-L3) — what waits keeps each edit's
+        // own stamp: the first of them is the cut.
         self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
         Some(seq)
     }
 
-    /// C3b-fix-b (B-L2) — the order stamp of the first edit of the input
-    /// about to be sent (`PendingEdits::first_stamp`; `None` if it has no
-    /// edits), noted just before [`Self::send_input`]: if the packet can't
-    /// carry them all, the stamp stays with the edits that wait.
-    pub fn note_first_edit_stamp(&mut self, stamp: Option<u64>) {
-        self.next_edit_stamp = stamp;
+    /// C3b-fix-d (A-L3) — the order stamps of the edits of the input about
+    /// to be sent, one each, in order (`PendingEdits::take`), noted just
+    /// before [`Self::send_input`]: an edit the packet can't carry keeps its
+    /// own stamp while it waits.
+    pub fn note_edit_stamps(&mut self, stamps: Vec<u64>) {
+        self.next_edit_stamps = stamps;
     }
 
     /// C3b-fix-b (B-L2) — the order stamp of the first edit waiting in the
     /// carry-over, if any: an op or request logged after it goes after the
-    /// input that carries it.
+    /// input that carries it. C3b-fix-d (A-L3) — that edit's own stamp, so
+    /// what was made before it (after an edit that already went) goes now.
     pub fn first_carried_stamp(&self) -> Option<u64> {
-        if self.input_carry_over.is_empty() { None } else { self.carry_over_stamp }
+        self.input_carry_over.first().map(|(_, _, _, stamp)| *stamp)
     }
 
     /// C3b-fix-b (B-M1) — hold `request`, made at order stamp `stamp` while
@@ -1372,12 +1378,22 @@ impl RemoteClient {
     }
 
     /// C3b-fix-b (B-M1) — the queued requests with their stamps, oldest
-    /// first, once the edits they waited behind are all sent (none, while
-    /// some still wait in the carry-over: they were made after those).
+    /// first, once the edits they waited behind are all sent. C3b-fix-d
+    /// (A-L3) — those made before the first edit still waiting in the
+    /// carry-over ([`Self::first_carried_stamp`]) are due now; the rest wait
+    /// for the input that carries it.
     pub fn take_queued_requests(&mut self) -> Vec<(u64, Request)> {
-        if self.has_carry_over() {
-            return Vec::new();
-        }
+        let due = match self.first_carried_stamp() {
+            Some(cut) => self.queued_requests.iter().take_while(|(stamp, _)| *stamp < cut).count(),
+            None => self.queued_requests.len(),
+        };
+        self.queued_requests.drain(..due).collect()
+    }
+
+    /// C3b-fix-d (A-L1) — every queued request, oldest first, whatever still
+    /// waits in the carry-over: the link is gone and nothing will send them
+    /// (the caller releases their claims).
+    pub fn discard_queued_requests(&mut self) -> Vec<(u64, Request)> {
         std::mem::take(&mut self.queued_requests)
     }
 
@@ -1573,7 +1589,7 @@ impl RemoteClient {
     /// Test-only: the `mined` tags still waiting with their edits.
     #[cfg(test)]
     fn carried_tags(&self) -> usize {
-        self.input_carry_over.iter().filter(|(_, tag, _)| tag.is_some()).count()
+        self.input_carry_over.iter().filter(|(_, tag, _, _)| tag.is_some()).count()
     }
 }
 
@@ -1592,17 +1608,18 @@ impl Drop for RemoteClient {
 const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
 
 /// C1/FU1 — an edit waiting to be sent, with the `mined` tag of the break
-/// that made it (`None` for every other edit), and (C3a-fix-1, C-M1) the
-/// hotbar slot and hand it was made with.
-type PairedEdit = (protocol::BlockChange, Option<protocol::MinedBlock>, protocol::EditHand);
+/// that made it (`None` for every other edit), (C3a-fix-1, C-M1) the hotbar
+/// slot and hand it was made with, and (C3b-fix-d, A-L3) its order stamp,
+/// which never goes on the wire.
+type PairedEdit = (protocol::BlockChange, Option<protocol::MinedBlock>, protocol::EditHand, u64);
 
 /// Write `edits` into `input`: its block changes in order, and beside them the
 /// tags of the tagged ones, in the same order, and every edit's hand
 /// (`edit_hands`, in step with the block changes).
 fn set_input_edits(input: &mut protocol::InputPacket, edits: &[PairedEdit]) {
-    input.block_changes = edits.iter().map(|(bc, _, _)| bc.clone()).collect();
-    input.mined = edits.iter().filter_map(|(_, tag, _)| *tag).collect();
-    input.edit_hands = edits.iter().map(|(_, _, hand)| *hand).collect();
+    input.block_changes = edits.iter().map(|(bc, _, _, _)| bc.clone()).collect();
+    input.mined = edits.iter().filter_map(|(_, tag, _, _)| *tag).collect();
+    input.edit_hands = edits.iter().map(|(_, _, hand, _)| *hand).collect();
 }
 
 /// Serialize a `ClientInput` carrying `edits`, trimming them (newest first)
@@ -1623,7 +1640,7 @@ fn serialize_input_within_cap(
 ) -> (Vec<u8>, Vec<PairedEdit>) {
     set_input_edits(input, &edits);
     let packet = protocol::serialize_packet(PacketType::ClientInput, &*input);
-    let Some((first, _, hand)) = edits.first() else {
+    let Some((first, _, hand, _)) = edits.first() else {
         return (packet, Vec::new());
     };
     if packet.len() <= protocol::MAX_WIRE_PACKET_LEN {
@@ -1646,21 +1663,22 @@ fn serialize_input_within_cap(
     (protocol::serialize_packet(PacketType::ClientInput, &*input), trimmed)
 }
 
-/// FU1 (C1 verify N4) — pair this tick's `tags` with this tick's `edits`, at
-/// the source, so a tag only ever travels with the edit it was made for. The
+/// FU1 (C1 verify N4) — pair this tick's `tags` with this tick's `edits`
+/// (each with its hand and order stamp), at the source, so a tag only ever
+/// travels with the edit it was made for. The
 /// survival break arm pushes a mined cell's edit and then its tag, so each tag
 /// goes to the last edit of its cell not yet paired that emptied it (the
 /// break leaves AIR), or failing that the last of its cell not yet paired (a
 /// crop harvest leaves its replacement). A tag with no edit of its cell this
 /// tick has nothing to yield and is not sent.
 fn pair_tags_with_edits(
-    edits: Vec<(protocol::BlockChange, protocol::EditHand)>,
+    edits: Vec<(protocol::BlockChange, protocol::EditHand, u64)>,
     tags: Vec<protocol::MinedBlock>,
 ) -> Vec<PairedEdit> {
-    let mut paired: Vec<PairedEdit> = edits.into_iter().map(|(bc, hand)| (bc, None, hand)).collect();
+    let mut paired: Vec<PairedEdit> = edits.into_iter().map(|(bc, hand, stamp)| (bc, None, hand, stamp)).collect();
     for tag in tags {
         let cell = (tag.x, tag.y, tag.z);
-        let free_here = |(bc, t, _): &PairedEdit| t.is_none() && (bc.x, bc.y, bc.z) == cell;
+        let free_here = |(bc, t, _, _): &PairedEdit| t.is_none() && (bc.x, bc.y, bc.z) == cell;
         let at = paired
             .iter()
             .rposition(|p| free_here(p) && p.0.new_block == crate::block::AIR)
@@ -1688,7 +1706,7 @@ fn pair_tags_with_edits(
 fn hold_back_for_tags(edits: &mut Vec<PairedEdit>) -> Vec<PairedEdit> {
     let mut tagged = 0;
     let mut untagged_cells = std::collections::HashSet::new();
-    for (i, (bc, tag, _)) in edits.iter().enumerate() {
+    for (i, (bc, tag, _, _)) in edits.iter().enumerate() {
         let cell = (bc.x, bc.y, bc.z);
         if tag.is_none() {
             untagged_cells.insert(cell);
@@ -2160,7 +2178,7 @@ mod tests {
             block_changes: vec![protocol::BlockChange::with_meta(1, 2, 3, 4, 0)],
             ..Default::default()
         };
-        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0))).collect();
+        let edits = small.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0), 0)).collect();
         let (pkt, trimmed) = serialize_input_within_cap(&mut small, edits);
         assert!(trimmed.is_empty(), "nothing trimmed under the cap");
         assert_eq!(small.block_changes.len(), 1, "a packet under the cap is untouched");
@@ -2172,7 +2190,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0))).collect();
+        let edits = big.block_changes.iter().map(|bc| (bc.clone(), None, (0, 0, 0), 0)).collect();
         let (pkt, trimmed) = serialize_input_within_cap(&mut big, edits);
         assert!(pkt.len() <= protocol::MAX_WIRE_PACKET_LEN, "{} bytes", pkt.len());
         let (_, payload) = protocol::deserialize_header(&pkt).unwrap();
@@ -2189,7 +2207,7 @@ mod tests {
         assert_eq!(back.block_changes[0].x, 0, "the oldest changes are the ones kept");
         // The trimmed tail is handed back, not lost: kept + trimmed is the lot, in order.
         assert_eq!(back.block_changes.len() + trimmed.len(), 10_000);
-        let xs: Vec<i32> = back.block_changes.iter().chain(trimmed.iter().map(|(b, _, _)| b)).map(|b| b.x).collect();
+        let xs: Vec<i32> = back.block_changes.iter().chain(trimmed.iter().map(|(b, _, _, _)| b)).map(|b| b.x).collect();
         assert_eq!(xs, (0..10_000).collect::<Vec<_>>());
     }
 
@@ -2394,11 +2412,11 @@ mod tests {
         let paired = pair_tags_with_edits(
             vec![edit(1, crate::block::AIR), edit(1, 3), edit(2, crate::block::TILLED_SOIL)]
                 .into_iter()
-                .map(|e| (e, (0, 0, 0)))
+                .map(|e| (e, (0, 0, 0), 0))
                 .collect(),
             vec![tag(1), tag(2), tag(9)],
         );
-        let tags: Vec<Option<i32>> = paired.iter().map(|(_, t, _)| t.map(|m| m.x)).collect();
+        let tags: Vec<Option<i32>> = paired.iter().map(|(_, t, _, _)| t.map(|m| m.x)).collect();
         assert_eq!(tags, vec![Some(1), None, Some(2)]);
     }
 
@@ -3248,31 +3266,106 @@ mod tests {
         assert!(!rc.has_queued_requests());
     }
 
-    /// B-L2 — edits still waiting in the carry-over keep the stamp of the
-    /// first of them; requests (and ops) made after it wait for the input
-    /// that carries it, and are released once the last has gone.
+    /// B-L2 / C3b-fix-d (A-L3) — edits waiting in the carry-over keep their
+    /// own stamps, and the first of them is the cut: a request made after it
+    /// waits for the input that carries it, and is released once every edit
+    /// made before it has gone.
     #[test]
-    fn the_carry_over_keeps_its_first_stamp_and_holds_requests_until_it_drains() {
+    fn the_carry_over_keeps_each_edits_stamp_and_holds_requests_made_after_the_first_waiting() {
         let (srv, mut rc) = connected_client();
         assert_eq!(rc.first_carried_stamp(), None);
-        rc.note_first_edit_stamp(Some(5));
+        // A burst stamped 1..=10_000, too big for one packet.
+        rc.note_edit_stamps((1..=10_000).collect());
         rc.send_input(&input_with(0..10_000));
-        assert_eq!(rc.first_carried_stamp(), Some(5), "the burst was trimmed: its first edit's stamp stays");
-        rc.queue_request(8, drop_request(0));
-        // A later input's own edits don't move it while older ones wait.
-        rc.note_first_edit_stamp(Some(9));
+        let sent = 10_000 - rc.input_carry_over.len() as u64;
+        let cut = rc.first_carried_stamp().expect("the burst was trimmed");
+        assert_eq!(cut, sent + 1, "the first WAITING edit's own stamp, not the burst's first");
+        rc.queue_request(10_001, drop_request(0));
+        // A later input's own edit goes behind the burst; the cut moves on
+        // with the burst's edits as they go.
+        rc.note_edit_stamps(vec![10_002]);
         rc.send_input(&input_with([50_000]));
-        assert_eq!(rc.first_carried_stamp(), Some(5));
-        assert!(rc.take_queued_requests().is_empty(), "made after edits that are still waiting");
-        assert!(rc.has_queued_requests(), "kept for later");
+        let next = rc.first_carried_stamp().expect("still trimmed");
+        assert!(next > cut && next < 10_001, "the burst's next waiting edit: {next}");
         let mut guard = 0;
-        while rc.has_carry_over() {
+        while rc.first_carried_stamp().is_some_and(|stamp| stamp < 10_001) {
+            assert!(rc.take_queued_requests().is_empty(), "made after edits that still wait");
+            assert!(rc.has_queued_requests(), "kept for later");
             rc.send_input(&protocol::InputPacket::default());
             guard += 1;
             assert!(guard < 100, "the carry-over drains");
         }
-        assert_eq!(rc.first_carried_stamp(), None);
-        assert_eq!(rc.take_queued_requests().len(), 1, "released once the last edit went");
+        assert_eq!(rc.take_queued_requests().len(), 1, "released once the edits made before it went");
+        let _ = srv;
+    }
+
+    /// The packets the server end holds, in order: each one's type, and for
+    /// a `ClientInput` its block changes (x, new block) and tagged cells.
+    fn sent_in_order(srv: &dyn ServerTransport) -> Vec<(PacketType, Vec<(i32, u16)>, usize)> {
+        std::iter::from_fn(|| srv.try_recv_from_client())
+            .map(|pkt| {
+                let (ptype, payload) = protocol::deserialize_header(&pkt).expect("a packet");
+                if ptype != PacketType::ClientInput {
+                    return (ptype, Vec::new(), 0);
+                }
+                let input: protocol::InputPacket = protocol::safe_deserialize(payload).unwrap();
+                let edits = input.block_changes.iter().map(|b| (b.x, b.new_block)).collect();
+                (ptype, edits, input.mined.len())
+            })
+            .collect()
+    }
+
+    /// C3b-fix-d (A-L3) — each edit keeps its own order stamp, so the
+    /// carry-over's cut is the first WAITING edit's: in one tick a placement
+    /// at X (e1, stamp 1), a Q-drop (queued, stamp 2), then a tagged break of
+    /// X (e2, stamp 3, held back behind the untagged placement of its cell)
+    /// reach the server as e1, the drop, e2: the client's order. (The cut
+    /// used to be e1's stamp, so the drop waited for e2.)
+    #[test]
+    fn a_request_made_between_a_sent_edit_and_a_held_one_goes_between_them() {
+        let (srv, mut rc) = connected_client();
+        let place = protocol::BlockChange { x: 3, y: 70, z: 0, new_block: crate::block::STONE, meta: 0 };
+        let brk = protocol::BlockChange { x: 3, y: 70, z: 0, new_block: crate::block::AIR, meta: 0 };
+        let input = protocol::InputPacket {
+            block_changes: vec![place, brk],
+            mined: vec![protocol::MinedBlock { x: 3, y: 70, z: 0, tool: protocol::WireItem::None }],
+            ..Default::default()
+        };
+        rc.queue_request(2, drop_request(0));
+        rc.note_edit_stamps(vec![1, 3]);
+        rc.send_input(&input);
+        assert!(rc.has_carry_over(), "the tagged break waits behind the placement of its cell");
+        assert_eq!(rc.first_carried_stamp(), Some(3), "with its own stamp, not the placement's");
+        for (_, request) in rc.take_queued_requests() {
+            rc.send_request(request);
+        }
+        rc.send_input(&protocol::InputPacket::default());
+        assert_eq!(
+            sent_in_order(&*srv),
+            vec![
+                (PacketType::ClientInput, vec![(3, crate::block::STONE)], 0),
+                (PacketType::ItemAction, Vec::new(), 0),
+                (PacketType::ClientInput, vec![(3, crate::block::AIR)], 1),
+            ],
+            "e1, the drop, e2"
+        );
+    }
+
+    /// C3b-fix-d (A-L1) — a closed link's queued requests are all handed
+    /// back for discarding, even while edits still wait in the carry-over
+    /// (`take_queued_requests` holds them then), so their claims can be
+    /// released.
+    #[test]
+    fn a_discard_takes_every_queued_request_even_behind_a_carry_over() {
+        let (srv, mut rc) = connected_client();
+        rc.send_input(&input_with(0..10_000));
+        assert!(rc.has_carry_over());
+        rc.queue_request(u64::MAX - 1, drop_request(7));
+        assert!(rc.take_queued_requests().is_empty(), "held behind the carry-over");
+        let discarded = rc.discard_queued_requests();
+        assert_eq!(discarded.iter().map(|(_, r)| r.seq()).collect::<Vec<_>>(), vec![Some(7)]);
+        assert!(!rc.has_queued_requests());
+        assert_eq!(Request::Device((1, 2, 3)).seq(), None, "a device right-click claims nothing");
         let _ = srv;
     }
 

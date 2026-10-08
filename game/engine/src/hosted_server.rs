@@ -2310,7 +2310,9 @@ impl HostedServer {
         }
         crate::window_events::apply_through(sp, pkt.events_applied, now);
         sp.window_events.note_op_seq(pkt.op_seq);
-        let Some(served) = crate::window_ops::serve_op(sp, &mut server.world, &server.registry, creative, pkt, now) else {
+        let Some(served) =
+            crate::window_ops::serve_op(sp, &mut server.world, &server.registry, creative, pkt, now, &mut server.tables_gone)
+        else {
             return;
         };
         crate::window_ops::note_served(sp, pkt, &served, creative);

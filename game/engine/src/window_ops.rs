@@ -11,8 +11,9 @@
 //!
 //! **One ordered send path (C3a-fix-1, B-L1).** A joined client sends its
 //! ops, its edits and its requests in the order it made them. Each op and
-//! the first edit of each input are stamped from one order clock
-//! ([`order_stamp`]; the edits wait in [`PendingEdits`]). At the tick's send
+//! each edit (C3b-fix-d: every edit, not just an input's first) are stamped
+//! from one order clock ([`order_stamp`]; the edits wait in
+//! [`PendingEdits`]). At the tick's send
 //! the ops logged before the input's first edit go before the input and the
 //! rest after it ([`OpLog::take_before`], `GameState::network_send_input`);
 //! a request sent mid-frame (`EntityAttack`, `EntityInteract`, `ItemAction`,
@@ -212,8 +213,11 @@ impl OpLog {
 
 /// C3a-fix-1 — a client's block edits not sent yet (`GameState`'s
 /// `pending_block_changes`), with what the send needs to know of each:
-/// - the order stamp of the first ([`order_stamp`]), so the ops logged before
-///   it go ahead of the input that carries it (B-L1);
+/// - its order stamp ([`order_stamp`]), so the ops logged before the first
+///   go ahead of the input that carries it (B-L1); C3b-fix-d (A-L3) — every
+///   edit's own, not just the first's: an edit that waits for a later input
+///   (`RemoteClient`'s carry-over) keeps it, so what was made before it is
+///   not held behind it;
 /// - C-M1 — the hotbar slot and hand each was made with
 ///   (`InputPacket.edit_hands`). The client stamps them just before its
 ///   hotbar selection changes and at the send ([`Self::stamp_hands`]): an
@@ -224,15 +228,13 @@ pub struct PendingEdits {
     edits: Vec<BlockChange>,
     /// The hands of the first `hands.len()` edits.
     hands: Vec<EditHand>,
-    /// The order stamp of the first edit since the last take.
-    first: Option<u64>,
+    /// Each edit's order stamp, in step with `edits` (C3b-fix-d, A-L3).
+    stamps: Vec<u64>,
 }
 
 impl PendingEdits {
     pub fn push(&mut self, edit: BlockChange) {
-        if self.edits.is_empty() {
-            self.first = Some(order_stamp());
-        }
+        self.stamps.push(order_stamp());
         self.edits.push(edit);
     }
 
@@ -263,7 +265,7 @@ impl PendingEdits {
 
     /// The order stamp of the first unsent edit, if any.
     pub fn first_stamp(&self) -> Option<u64> {
-        self.first
+        self.stamps.first().copied()
     }
 
     /// Every edit without a hand yet was made with `hand` (the selection is
@@ -273,11 +275,12 @@ impl PendingEdits {
     }
 
     /// Take everything for the input going out, the edits not stamped yet
-    /// made with `hand`: the edits and their hands, in step.
-    pub fn take(&mut self, hand: EditHand) -> (Vec<BlockChange>, Vec<EditHand>) {
+    /// made with `hand`: the edits, their hands and their order stamps, in
+    /// step.
+    pub fn take(&mut self, hand: EditHand) -> (Vec<BlockChange>, Vec<EditHand>, Vec<u64>) {
         self.stamp_hands(hand);
         let taken = std::mem::take(self);
-        (taken.edits, taken.hands)
+        (taken.edits, taken.hands, taken.stamps)
     }
 }
 
@@ -606,6 +609,7 @@ pub fn serve_op(
     creative: bool,
     pkt: &WindowOpPacket,
     now: u64,
+    tables_gone: &mut TablesGone,
 ) -> Option<Served> {
     if !crate::item_actions::can_mirror(sp) {
         return None;
@@ -652,8 +656,14 @@ pub fn serve_op(
             // C3b-fix-b (A-L1) — the grace is for a table that WAS there: an
             // open at a cell that isn't a crafting table gets none (counted
             // past it from the start; `watch_table` only counts up).
-            sp.table_gone_ticks = (world.get_block(cell[0], cell[1], cell[2]) != crate::block::CRAFTING_TABLE)
-                .then_some(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1));
+            // C3b-fix-d (A-L5) — a table the server saw go within the grace
+            // was there: the open gets what is left of it.
+            sp.table_gone_ticks = if world.get_block(cell[0], cell[1], cell[2]) == crate::block::CRAFTING_TABLE {
+                None
+            } else {
+                tables_gone.note(world, now);
+                Some(tables_gone.gone_for(*cell, now).unwrap_or(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1)))
+            };
             None
         }
         WireWindowOp::SetAutoRefill { on } => {
@@ -986,6 +996,65 @@ pub fn container_push(sp: &mut ServerPlayer, world: &World, now: u64) -> Option<
     })
 }
 
+/// C3b-fix-d (A-L5) — most cells a server's [`TablesGone`] remembers; past
+/// it the oldest is forgotten.
+pub const MAX_TABLES_GONE: usize = 256;
+
+/// C3b-fix-d (A-L5) — a server's memory of the cells that stopped being a
+/// crafting table within the last [`window::SERVER_TABLE_GRACE_TICKS`], each
+/// with the tick it went (`GameServer::tables_gone`): taken in from its
+/// world's log (`World::take_tables_gone`, every table removal on the world
+/// the server runs on, whoever made it) once a tick and at each `OpenTable`
+/// ([`Self::note`]), pruned as they age, at most [`MAX_TABLES_GONE`]. An
+/// `OpenTable` at one of them gets the grace that is left ([`serve_op`]):
+/// the joiner's world, a few ticks behind, still showed the table another
+/// player broke. Any other cell that isn't a table gets none.
+#[derive(Debug, Default)]
+pub struct TablesGone {
+    /// Oldest first.
+    cells: std::collections::VecDeque<([i32; 3], u64)>,
+    /// Has this server taken its world's log in yet? The first take only
+    /// drops what is there: a lending host's world keeps its log on after a
+    /// server stops (nothing turns it off), so it can hold tables broken in
+    /// solo play long before this server started.
+    started: bool,
+}
+
+impl TablesGone {
+    /// Take in the cells `world` logged since the last call as gone at tick
+    /// `now` (the first time, turn its log on and drop what it already
+    /// held), and forget every cell past the grace.
+    pub fn note(&mut self, world: &mut World, now: u64) {
+        world.track_tables_gone();
+        let logged = world.take_tables_gone();
+        if !std::mem::replace(&mut self.started, true) {
+            return;
+        }
+        for (x, y, z) in logged {
+            if self.cells.len() >= MAX_TABLES_GONE {
+                self.cells.pop_front();
+            }
+            self.cells.push_back(([x, y, z], now));
+        }
+        let grace = u64::from(window::SERVER_TABLE_GRACE_TICKS);
+        while self.cells.front().is_some_and(|&(_, at)| now.saturating_sub(at) > grace) {
+            self.cells.pop_front();
+        }
+    }
+
+    /// How many ticks before `now` the table at `cell` went (the last time),
+    /// if that is inside the grace.
+    pub fn gone_for(&self, cell: [i32; 3], now: u64) -> Option<u8> {
+        let ago = self.cells.iter().rev().find(|(c, _)| *c == cell).map(|&(_, at)| now.saturating_sub(at))?;
+        u8::try_from(ago).ok().filter(|&n| n <= window::SERVER_TABLE_GRACE_TICKS)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+}
+
 /// B-L2 — once a tick, for a joiner whose open screen is a crafting table's:
 /// count the ticks its cell has not been a crafting table
 /// (`ServerPlayer::table_gone_ticks`), so [`serve_op`] can grant a table that
@@ -1109,8 +1178,9 @@ mod tests {
         let pairs = |ops: Vec<LoggedOp>| ops.into_iter().map(|l| (l.op, l.digest)).collect::<Vec<_>>();
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![(WireWindowOp::Click(WindowClick::Close), 1)]);
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![], "the rest wait for the input");
-        let (sent, _) = edits.take((0, 0, 0));
+        let (sent, _, stamps) = edits.take((0, 0, 0));
         assert_eq!(sent.len(), 2);
+        assert!(stamps[0] < stamps[1], "each edit keeps its own stamp (C3b-fix-d, A-L3)");
         assert_eq!(edits.first_stamp(), None);
         assert_eq!(
             pairs(log.take_before(edits.first_stamp())),
@@ -1132,13 +1202,59 @@ mod tests {
         edits.stamp_hands((5, 4, 9));
         edits.stamp_hands((6, 0, 0));
         edits.push(edit(4));
-        let (sent, hands) = edits.take((8, 1, 3));
+        let (sent, hands, _) = edits.take((8, 1, 3));
         assert_eq!(sent.iter().map(|b| b.x).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
         assert_eq!(hands, vec![(2, 1, 7), (2, 1, 7), (5, 4, 9), (8, 1, 3)]);
         assert!(edits.is_empty() && edits.take((0, 0, 0)).1.is_empty());
         edits.push(edit(9));
         edits.clear();
         assert_eq!((edits.len(), edits.first_stamp()), (0, None));
+    }
+
+    /// C3b-fix-d (A-L5) — a world a server runs on logs every crafting table
+    /// that goes (and nothing else); the server remembers each for the grace,
+    /// then forgets it, and never holds more than its cap.
+    #[test]
+    fn a_table_that_goes_is_remembered_for_the_grace_then_forgotten() {
+        use crate::block::{AIR, CRAFTING_TABLE, DIRT, STONE};
+        let mut world = World::new();
+        world.set_block(1, 70, 1, CRAFTING_TABLE);
+        world.set_block(1, 70, 1, AIR);
+        assert!(world.take_tables_gone().is_empty(), "not tracking: nothing logged");
+        let mut gone = TablesGone::default();
+        gone.note(&mut world, 100);
+        world.set_block(2, 70, 2, CRAFTING_TABLE);
+        world.set_block(2, 70, 2, STONE);
+        world.set_block(3, 70, 3, DIRT);
+        world.set_block(3, 70, 3, AIR);
+        gone.note(&mut world, 101);
+        assert_eq!(gone.gone_for([2, 70, 2], 101), Some(0), "taken in as gone now");
+        assert_eq!(gone.gone_for([2, 70, 2], 104), Some(3));
+        assert_eq!(gone.gone_for([3, 70, 3], 104), None, "never a table");
+        assert_eq!(gone.gone_for([1, 70, 1], 104), None, "went before the server tracked the world");
+        let grace = u64::from(window::SERVER_TABLE_GRACE_TICKS);
+        assert_eq!(gone.gone_for([2, 70, 2], 101 + grace), Some(window::SERVER_TABLE_GRACE_TICKS));
+        assert_eq!(gone.gone_for([2, 70, 2], 102 + grace), None, "past the grace");
+        gone.note(&mut world, 102 + grace);
+        assert_eq!(gone.len(), 0, "pruned as it ages");
+        let n = MAX_TABLES_GONE as i32 + 10;
+        for x in 0..n {
+            world.set_block(x, 71, 0, CRAFTING_TABLE);
+            world.set_block(x, 71, 0, AIR);
+        }
+        gone.note(&mut world, 200);
+        assert_eq!(gone.len(), MAX_TABLES_GONE, "bounded");
+        assert_eq!(gone.gone_for([n - 1, 71, 0], 200), Some(0), "the newest kept");
+        assert_eq!(gone.gone_for([0, 71, 0], 200), None, "the oldest dropped");
+        // A new server on a world whose log stayed on (a lending host that
+        // stopped, played solo, and hosts again): what was logged before it
+        // started is not taken in as gone now.
+        world.set_block(5, 70, 5, CRAFTING_TABLE);
+        world.set_block(5, 70, 5, AIR);
+        let mut fresh = TablesGone::default();
+        fresh.note(&mut world, 1);
+        assert_eq!(fresh.gone_for([5, 70, 5], 1), None, "broken before this server started");
+        assert_eq!(fresh.len(), 0);
     }
 
     /// C3b-fix-a (C-L3) — the believed bucket: 64 units deep, 4 a second
