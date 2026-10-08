@@ -373,6 +373,8 @@ mod remote_mobs;
 mod health_sync;
 mod joiner_actions;
 mod joiner_inventory;
+// C3c-1 — block-edit uses: the shared rules, a joiner's use tag, the server's mirror.
+mod use_edits;
 // C2a — a joiner's eating and sleeping, decided by the server.
 mod item_actions;
 mod mob_interact;

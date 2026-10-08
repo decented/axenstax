@@ -464,9 +464,10 @@ pub struct RemoteClient {
     pub pending_entity_batches: Vec<crate::remote_entities::EntityDeltas>,
     pub pending_block_changes: Vec<protocol::BlockChange>,
     /// Edits [`serialize_input_within_cap`] trimmed off an earlier input
-    /// packet (or [`hold_back_for_tags`] held back), oldest first, each with
-    /// the `mined` tag of the break that made it, if it was one (C1; paired
-    /// at the source, FU1), and its own order stamp (C3b-fix-d, A-L3). [`Self::send_input`] puts them ahead of the next
+    /// packet (or [`tag_cut`] / [`order_cut_at`] held back), oldest first,
+    /// each with the `mined` tag of the break that made it, if it was one
+    /// (C1; paired at the source, FU1), or (C3c-1) its use tag, and its own
+    /// order stamp (C3b-fix-d, A-L3). [`Self::send_input`] puts them ahead of the next
     /// packet's own edits, so a burst too big for one packet is spread over
     /// several instead of the tail being lost (the host never saw it, so it
     /// could never refuse and un-ghost it on this client); a tag rides only
@@ -479,6 +480,18 @@ pub struct RemoteClient {
     /// there is the cut the ops and requests made after it wait behind
     /// ([`Self::first_carried_stamp`]).
     next_edit_stamps: Vec<u64>,
+    /// C3c-1 — the use tags of the NEXT input's edits, one each (`None` for
+    /// an edit that is no use), noted by the game loop just before it
+    /// ([`Self::note_edit_uses`]). Each rides with its edit from then on.
+    next_edit_uses: Vec<Option<protocol::UseTag>>,
+    /// C3c-1 — the order stamp of the first window op the game loop still
+    /// holds unsent, noted just before the next input
+    /// ([`Self::note_order_cut`]): an edit made after it waits for a later
+    /// input, so the op (sent right after this input) reaches the server
+    /// between the edits it was made between. A use's gain lands on the
+    /// server's copy of the window when its edit is processed, so the order
+    /// of an op and a use matters there.
+    order_cut: Option<u64>,
     /// C3b-fix-b (B-M1) — requests made while edits were unsent, each with
     /// its order stamp, oldest first: they go right after the input that
     /// carries those edits ([`Self::queue_request`],
@@ -763,6 +776,8 @@ impl RemoteClient {
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
             next_edit_stamps: Vec::new(),
+            next_edit_uses: Vec::new(),
+            order_cut: None,
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
@@ -812,6 +827,8 @@ impl RemoteClient {
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
             next_edit_stamps: Vec::new(),
+            next_edit_uses: Vec::new(),
+            order_cut: None,
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
@@ -1320,15 +1337,34 @@ impl RemoteClient {
         let mut stamps = std::mem::take(&mut self.next_edit_stamps);
         stamps.truncate(fresh_edits.len());
         stamps.resize_with(fresh_edits.len(), crate::window_ops::order_stamp);
+        // C3c-1 — and with its use tag, paired at the source (the game loop
+        // keeps it beside its edit from the moment the use is made).
+        let mut uses = std::mem::take(&mut self.next_edit_uses);
+        uses.truncate(fresh_edits.len());
+        uses.resize(fresh_edits.len(), None);
+        input.use_tags.clear();
         let fresh = pair_tags_with_edits(
-            fresh_edits.into_iter().zip(hands).zip(stamps).map(|((bc, hand), stamp)| (bc, hand, stamp)).collect(),
+            fresh_edits
+                .into_iter()
+                .zip(hands)
+                .zip(stamps)
+                .zip(uses)
+                .map(|(((bc, hand), stamp), use_tag)| (bc, hand, stamp, use_tag))
+                .collect(),
             std::mem::take(&mut input.mined),
         );
         let mut edits = std::mem::take(&mut self.input_carry_over);
         edits.extend(fresh);
         // C1 (review LOW-3) / FU1 (C1 verify N4) — the edits from the first
         // that can't go with its tag in this packet wait for the next one.
-        let mut held_back = hold_back_for_tags(&mut edits);
+        // C3c-1 — and so do those made after the first op or request still
+        // waiting: they go after it.
+        let order_cut = [self.order_cut.take(), self.queued_requests.first().map(|(stamp, _)| *stamp)]
+            .into_iter()
+            .flatten()
+            .min();
+        let cut = tag_cut(&edits).min(order_cut_at(&edits, order_cut));
+        let mut held_back = edits.split_off(cut);
         let (packet, mut trimmed) = serialize_input_within_cap(&mut input, edits);
         trimmed.append(&mut held_back);
         if trimmed.len() > INPUT_CARRY_OVER_MAX_CHANGES {
@@ -1352,6 +1388,20 @@ impl RemoteClient {
     /// own stamp while it waits.
     pub fn note_edit_stamps(&mut self, stamps: Vec<u64>) {
         self.next_edit_stamps = stamps;
+    }
+
+    /// C3c-1 — the use tags of the edits of the input about to be sent, one
+    /// each, in order (`PendingEdits::take`), noted just before
+    /// [`Self::send_input`].
+    pub fn note_edit_uses(&mut self, uses: Vec<Option<protocol::UseTag>>) {
+        self.next_edit_uses = uses;
+    }
+
+    /// C3c-1 — the order stamp of the first window op still waiting to be
+    /// sent (`window_ops::OpLog::first_stamp`), noted just before
+    /// [`Self::send_input`]: the edits made after it wait for a later input.
+    pub fn note_order_cut(&mut self, stamp: Option<u64>) {
+        self.order_cut = stamp;
     }
 
     /// C3b-fix-b (B-L2) — the order stamp of the first edit waiting in the
@@ -1591,6 +1641,11 @@ impl RemoteClient {
     fn carried_tags(&self) -> usize {
         self.input_carry_over.iter().filter(|(_, tag, _, _)| tag.is_some()).count()
     }
+
+    #[cfg(test)]
+    fn carried_use_tags(&self) -> usize {
+        self.input_carry_over.iter().filter(|(_, tag, _, _)| tag.as_ref().is_some_and(|t| t.use_tag().is_some())).count()
+    }
 }
 
 impl Drop for RemoteClient {
@@ -1607,18 +1662,22 @@ impl Drop for RemoteClient {
 /// holding them without bound would grow memory for nothing. About 240 KB.
 const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
 
-/// C1/FU1 — an edit waiting to be sent, with the `mined` tag of the break
-/// that made it (`None` for every other edit), (C3a-fix-1, C-M1) the hotbar
-/// slot and hand it was made with, and (C3b-fix-d, A-L3) its order stamp,
-/// which never goes on the wire.
-type PairedEdit = (protocol::BlockChange, Option<protocol::MinedBlock>, protocol::EditHand, u64);
+/// C1/FU1 — an edit waiting to be sent, with its tag: the `mined` tag of the
+/// break that made it or (C3c-1) the use tag of the use that made it
+/// (`None` for every other edit), (C3a-fix-1, C-M1) the hotbar slot and hand
+/// it was made with, and (C3b-fix-d, A-L3) its order stamp, which never goes
+/// on the wire.
+type PairedEdit = (protocol::BlockChange, Option<protocol::EditTag>, protocol::EditHand, u64);
 
 /// Write `edits` into `input`: its block changes in order, and beside them the
-/// tags of the tagged ones, in the same order, and every edit's hand
-/// (`edit_hands`, in step with the block changes).
+/// tags of the tagged ones, in the same order (the mined ones in `mined`,
+/// C3c-1 the use ones in `use_tags`), and every edit's hand (`edit_hands`, in
+/// step with the block changes).
 fn set_input_edits(input: &mut protocol::InputPacket, edits: &[PairedEdit]) {
     input.block_changes = edits.iter().map(|(bc, _, _, _)| bc.clone()).collect();
-    input.mined = edits.iter().filter_map(|(_, tag, _, _)| *tag).collect();
+    input.mined = edits.iter().filter_map(|(_, tag, _, _)| tag.as_ref().and_then(|t| t.mined()).copied()).collect();
+    input.use_tags =
+        edits.iter().filter_map(|(_, tag, _, _)| tag.as_ref().and_then(|t| t.use_tag()).cloned()).collect();
     input.edit_hands = edits.iter().map(|(_, _, hand, _)| *hand).collect();
 }
 
@@ -1647,8 +1706,8 @@ fn serialize_input_within_cap(
         return (packet, Vec::new());
     }
     // Each edit dropped frees at least its block change and (C3a-fix-1) its
-    // hand in `edit_hands` (a tagged one, its tag in `mined` too), so
-    // dropping this many always fits.
+    // hand in `edit_hands` (a tagged one, its tag in `mined` or `use_tags`
+    // too), so dropping this many always fits.
     let per_change = (bincode::serialized_size(first).expect("a block change sizes")
         + bincode::serialized_size(hand).expect("a hand sizes")) as usize;
     let excess = packet.len() - protocol::MAX_WIRE_PACKET_LEN;
@@ -1664,18 +1723,23 @@ fn serialize_input_within_cap(
 }
 
 /// FU1 (C1 verify N4) — pair this tick's `tags` with this tick's `edits`
-/// (each with its hand and order stamp), at the source, so a tag only ever
-/// travels with the edit it was made for. The
+/// (each with its hand, order stamp and, C3c-1, the use tag it was made
+/// with), at the source, so a tag only ever travels with the edit it was
+/// made for. The
 /// survival break arm pushes a mined cell's edit and then its tag, so each tag
 /// goes to the last edit of its cell not yet paired that emptied it (the
 /// break leaves AIR), or failing that the last of its cell not yet paired (a
 /// crop harvest leaves its replacement). A tag with no edit of its cell this
-/// tick has nothing to yield and is not sent.
+/// tick has nothing to yield and is not sent. A use's edit already has its
+/// tag and takes no mined one.
 fn pair_tags_with_edits(
-    edits: Vec<(protocol::BlockChange, protocol::EditHand, u64)>,
+    edits: Vec<(protocol::BlockChange, protocol::EditHand, u64, Option<protocol::UseTag>)>,
     tags: Vec<protocol::MinedBlock>,
 ) -> Vec<PairedEdit> {
-    let mut paired: Vec<PairedEdit> = edits.into_iter().map(|(bc, hand, stamp)| (bc, None, hand, stamp)).collect();
+    let mut paired: Vec<PairedEdit> = edits
+        .into_iter()
+        .map(|(bc, hand, stamp, use_tag)| (bc, use_tag.map(protocol::EditTag::Use), hand, stamp))
+        .collect();
     for tag in tags {
         let cell = (tag.x, tag.y, tag.z);
         let free_here = |(bc, t, _, _): &PairedEdit| t.is_none() && (bc.x, bc.y, bc.z) == cell;
@@ -1684,40 +1748,67 @@ fn pair_tags_with_edits(
             .rposition(|p| free_here(p) && p.0.new_block == crate::block::AIR)
             .or_else(|| paired.iter().rposition(free_here));
         match at {
-            Some(k) => paired[k].1 = Some(tag),
+            Some(k) => paired[k].1 = Some(protocol::EditTag::Mined(tag)),
             None => log::debug!("a mined tag for {cell:?} with no edit of its cell: not sent"),
         }
     }
     paired
 }
 
-/// C1 (review LOW-3) / FU1 (C1 verify N4) — cut `edits` before the first
-/// tagged edit that can't go in this packet with its tag, and return the
-/// cut-off tail (empty when it all fits); it goes in the next packet, in
-/// order, tags and all. Two reasons:
+/// C1 (review LOW-3) / FU1 (C1 verify N4) / C3c-1 — where to cut `edits` so
+/// every tagged edit goes in this packet with its tag and the server pairs
+/// each tag with its own edit: before the first edit that can't (the whole
+/// list when every one can). What is cut off goes in the next packet, in
+/// order, tags and all. Three reasons:
 ///
-/// - the server reads at most `MAX_MINED_PER_INPUT` tags from one input, so
-///   the 17th tagged edit waits;
-/// - the server gives a cell's tags, in order, to the edits of that cell that
-///   break it (`HostedServer::classify_joiner_edit`), so a tagged edit behind
-///   an untagged edit of its own cell (an Eraser, a bucket, the client's own
-///   piston clearing it — or a placement there) waits: the untagged one could
-///   otherwise take its tag.
-fn hold_back_for_tags(edits: &mut Vec<PairedEdit>) -> Vec<PairedEdit> {
+/// - the server reads at most `MAX_MINED_PER_INPUT` tags from one input,
+///   mined and use tags together, so the 17th tagged edit waits;
+/// - the server gives a cell's mined tags, in order, to the edits of that
+///   cell that break it (`HostedServer::classify_joiner_edit`), so a mined
+///   edit behind an untagged edit of its own cell (an Eraser, a bucket, the
+///   client's own piston clearing it — or a placement there) waits: the
+///   untagged one could otherwise take its tag;
+/// - C3c-1 — the server gives a use tag to the LAST edit of its cell in the
+///   input, so any edit of a cell behind a use-tagged edit of that cell
+///   waits: a second use of the cell (a bucket emptied then filled again
+///   within one send), the break of what the use just grew, a placement
+///   over the water it just poured.
+fn tag_cut(edits: &[PairedEdit]) -> usize {
     let mut tagged = 0;
     let mut untagged_cells = std::collections::HashSet::new();
+    let mut used_cells = std::collections::HashSet::new();
     for (i, (bc, tag, _, _)) in edits.iter().enumerate() {
         let cell = (bc.x, bc.y, bc.z);
-        if tag.is_none() {
+        if used_cells.contains(&cell) {
+            return i;
+        }
+        let Some(tag) = tag else {
             untagged_cells.insert(cell);
             continue;
-        }
+        };
         tagged += 1;
-        if tagged > protocol::MAX_MINED_PER_INPUT || untagged_cells.contains(&cell) {
-            return edits.split_off(i);
+        if tagged > protocol::MAX_MINED_PER_INPUT {
+            return i;
+        }
+        match tag {
+            protocol::EditTag::Mined(_) if untagged_cells.contains(&cell) => return i,
+            protocol::EditTag::Mined(_) => {}
+            protocol::EditTag::Use(_) => {
+                used_cells.insert(cell);
+            }
         }
     }
-    Vec::new()
+    edits.len()
+}
+
+/// C3c-1 — where to cut `edits` for the order: before the first edit made
+/// after `cut` (the order stamp of the first window op or request still
+/// waiting), so that op or request goes ahead of it.
+fn order_cut_at(edits: &[PairedEdit], cut: Option<u64>) -> usize {
+    match cut {
+        Some(cut) => edits.iter().position(|(_, _, _, stamp)| *stamp > cut).unwrap_or(edits.len()),
+        None => edits.len(),
+    }
 }
 
 #[cfg(test)]
@@ -2412,12 +2503,127 @@ mod tests {
         let paired = pair_tags_with_edits(
             vec![edit(1, crate::block::AIR), edit(1, 3), edit(2, crate::block::TILLED_SOIL)]
                 .into_iter()
-                .map(|e| (e, (0, 0, 0), 0))
+                .map(|e| (e, (0, 0, 0), 0, None))
                 .collect(),
             vec![tag(1), tag(2), tag(9)],
         );
-        let tags: Vec<Option<i32>> = paired.iter().map(|(_, t, _, _)| t.map(|m| m.x)).collect();
+        let tags: Vec<Option<i32>> =
+            paired.iter().map(|(_, t, _, _)| t.as_ref().and_then(|t| t.mined()).map(|m| m.x)).collect();
         assert_eq!(tags, vec![Some(1), None, Some(2)]);
+    }
+
+    fn use_tag(x: i32) -> protocol::UseTag {
+        protocol::UseTag { x, y: 64, z: 0, kind: 1, slot: 0, used: None, tool: protocol::WireItem::None }
+    }
+
+    /// C3c-1 — send `edits` (each with its use tag, if any) in one input, as
+    /// the game loop does: the tags noted beside their edits.
+    fn send_uses(rc: &mut RemoteClient, edits: Vec<(protocol::BlockChange, Option<protocol::UseTag>)>) {
+        let (changes, uses): (Vec<_>, Vec<_>) = edits.into_iter().unzip();
+        rc.note_edit_uses(uses);
+        rc.send_input(&protocol::InputPacket { block_changes: changes, ..Default::default() });
+    }
+
+    /// C3c-1 — a use tag rides beside the edit it was made with, and a
+    /// mined tag never lands on a use's edit.
+    #[test]
+    fn a_use_tag_rides_beside_its_own_edit() {
+        let (srv, mut rc) = connected_client();
+        let edit = |x, b| protocol::BlockChange::with_meta(x, 64, 0, b, 0);
+        send_uses(&mut rc, vec![(edit(1, 3), None), (edit(2, crate::block::AIR), Some(use_tag(2))), (edit(3, 4), None)]);
+        let sent = next_input(&*srv);
+        assert_eq!(sent.block_changes.len(), 3);
+        assert_eq!(sent.use_tags, vec![use_tag(2)]);
+        assert!(sent.mined.is_empty());
+        let paired = pair_tags_with_edits(
+            vec![(edit(2, crate::block::AIR), (0, 0, 0), 0, Some(use_tag(2)))],
+            vec![protocol::MinedBlock { x: 2, y: 64, z: 0, tool: protocol::WireItem::None }],
+        );
+        assert_eq!(paired[0].1, Some(protocol::EditTag::Use(use_tag(2))), "the use keeps its own tag");
+    }
+
+    /// C3c-1 — the server pairs a use tag with the LAST edit of its cell in
+    /// the input, so two uses of one cell in one input (a bucket emptied,
+    /// then filled again within one send) can't share an input: the second
+    /// waits for the next, with its tag — and so does any edit of the cell
+    /// behind a use of it.
+    #[test]
+    fn a_second_edit_of_a_used_cell_waits_for_the_next_input_with_its_tag() {
+        let (srv, mut rc) = connected_client();
+        let edit = |x, b| protocol::BlockChange::with_meta(x, 64, 0, b, 0);
+        let empty = protocol::UseTag { kind: 1, ..use_tag(7) };
+        let fill = protocol::UseTag { kind: 0, ..use_tag(7) };
+        send_uses(
+            &mut rc,
+            vec![
+                (edit(7, crate::block::WATER), Some(empty.clone())),
+                (edit(8, 3), None),
+                (edit(7, crate::block::AIR), Some(fill.clone())),
+                (edit(7, 5), None),
+            ],
+        );
+        let first = next_input(&*srv);
+        assert_eq!(first.block_changes, vec![edit(7, crate::block::WATER), edit(8, 3)]);
+        assert_eq!(first.use_tags, vec![empty]);
+        assert_eq!(rc.carried_use_tags(), 1);
+        rc.send_input(&protocol::InputPacket::default());
+        let second = next_input(&*srv);
+        assert_eq!(second.block_changes, vec![edit(7, crate::block::AIR)]);
+        assert_eq!(second.use_tags, vec![fill], "the second use goes next, with its tag");
+        rc.send_input(&protocol::InputPacket::default());
+        let third = next_input(&*srv);
+        assert_eq!(third.block_changes, vec![edit(7, 5)], "and the placement behind it after");
+        assert!(third.use_tags.is_empty() && !rc.has_carry_over());
+    }
+
+    /// C3c-1 — use tags count with mined tags against the one per-input
+    /// limit: the 17th tagged edit waits for the next input, its tag with
+    /// it, never apart.
+    #[test]
+    fn a_use_tag_past_the_limit_travels_with_its_edit_in_the_next_input() {
+        let (srv, mut rc) = connected_client();
+        let edit = |x| protocol::BlockChange::with_meta(x, 64, 0, 3, 0);
+        let max = protocol::MAX_MINED_PER_INPUT as i32;
+        // 10 mined edits, then 10 uses: 20 tags.
+        let mut input = protocol::InputPacket {
+            block_changes: (0..2 * 10).map(|x| protocol::BlockChange::with_meta(x, 64, 0, crate::block::AIR, 0)).collect(),
+            mined: (0..10).map(|x| protocol::MinedBlock { x, y: 64, z: 0, tool: protocol::WireItem::None }).collect(),
+            ..Default::default()
+        };
+        for x in 10..20 {
+            input.block_changes[x as usize] = edit(x);
+        }
+        rc.note_edit_uses((0..20).map(|x| (x >= 10).then(|| use_tag(x))).collect());
+        rc.send_input(&input);
+        let first = next_input(&*srv);
+        assert_eq!(first.mined.len() + first.use_tags.len(), max as usize, "16 tags in all");
+        assert_eq!(first.block_changes.len(), max as usize);
+        for u in &first.use_tags {
+            assert!(first.block_changes.iter().any(|b| b.x == u.x), "use tag {} beside its edit", u.x);
+        }
+        rc.send_input(&protocol::InputPacket::default());
+        let second = next_input(&*srv);
+        assert_eq!(second.use_tags.iter().map(|u| u.x).collect::<Vec<_>>(), (16..20).collect::<Vec<_>>());
+        assert_eq!(second.block_changes.iter().map(|b| b.x).collect::<Vec<_>>(), (16..20).collect::<Vec<_>>());
+    }
+
+    /// C3c-1 — an edit made after a window op still waiting waits for the
+    /// next input, so the op (sent after this one) reaches the server
+    /// between the two uses it was made between.
+    #[test]
+    fn edits_made_after_a_waiting_op_wait_for_the_next_input() {
+        let (srv, mut rc) = connected_client();
+        let edit = |x| protocol::BlockChange::with_meta(x, 64, 0, 3, 0);
+        rc.note_edit_stamps(vec![10, 30]);
+        rc.note_order_cut(Some(20));
+        send_uses(&mut rc, vec![(edit(1), Some(use_tag(1))), (edit(2), Some(use_tag(2)))]);
+        let first = next_input(&*srv);
+        assert_eq!(first.block_changes, vec![edit(1)]);
+        assert_eq!(rc.first_carried_stamp(), Some(30), "the op (stamp 20) is due before the held edit");
+        rc.send_input(&protocol::InputPacket::default());
+        let second = next_input(&*srv);
+        assert_eq!(second.block_changes, vec![edit(2)]);
+        assert_eq!(second.use_tags, vec![use_tag(2)]);
     }
 
     #[test]

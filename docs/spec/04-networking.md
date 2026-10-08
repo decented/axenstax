@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `79`** (C3b-2) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `80`** (C3c-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -38,6 +38,7 @@
 - **v77** (2026-10-08, C3b-1): **Shared chests, dispensers and furnaces for joiners.** `WireWindowOp` appends `OpenContainer { cell: [i32; 3] }` (= 4) and `Container(container_window::ContainerClick)` (= 5; `ContainerClick` = `Withdraw { slot, all }` 0, `Deposit { slot, all }` 1, `Sort` 2, `DumpMatching` 3, `Restock` 4, `TakeAll` 5, `Furnace { kind: furnace::SlotKind, mode: furnace::ClickMode, hotbar }` 6, append only; `SlotKind` Input/Fuel/Output = 0/1/2, `ClickMode` Single/Stack = 0/1). `WindowOpPacket` appends, after v76's `events_applied`, `touched: Vec<WireWindowSlot>` (≤ 122: the slots a container op changed on the client) then `claims: Vec<(WireWindowSlot, WireSlot)>` (≤ 122: the client's values before a container op of the player slots it acts on); both empty for every other op. Appended S→C: `ContainerOpened = 65` (`{ cell, kind: container_window::ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal> }`; `ContainerKind` = `Chest { tier }` 0, `Dispenser` 1, `Dropper` 2, `Furnace` 3; `OpenRefusal` = `OutOfReach` 0, `Protected` 1, `NotAContainer` 2, `NotInWorld` 3) and `WindowSlotSet = 66` (`{ op_seq_applied: u32, reason: u8 (Correction 0 | Changed 1), sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32 }`; `WireWindowSlot` = `Inv(u8)` 0, `Armour(u8)` 1, `Cursor` 2, `Grid(u8, u8)` 3, `Container(u8)` 4; `window_event` ≠ 0 when the set changes player slots: a numbered window event, as v76's carriers). `WireSlot` = `Option<WireStack { item_kind, item_id, count, full_item: WireItem }>`; `item_kind::PLAN = 4` is reserved for a Plan placeholder. A container op's window digest covers the container. A player-slot correction is the op re-run over the client's claimed slots and the real container, never the server's drifted copy. Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g.
 - **v78** (2026-10-08, C3b-fix-a): **Container corrections that can't duplicate or lose an item.** Every container view the server sends a joiner is a numbered window event: `ContainerOpenedPacket` appends `window_event: u32` (0 for a refusal), and every `WindowSlotSetPacket`, a push too, is numbered. A set names container slots only; a correction's player part is an item delta, appended after `window_event`: `take: Vec<(u8 hint, WireStack)>` (≤ 122: take `count` of the item, from inventory slot `hint` first, then wherever it is) and `give: Vec<WireStack>` (≤ 122: each added; the part that doesn't fit comes back as `ItemAction::GrantUnfit` naming the event, one report per give, in order). `WindowOpPacket` appends, after `claims`, `client_ok: bool` (the client's own `ClickResult::ok()`). Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g "Shared containers". C3b-fix-c (no wire change and no protocol bump: it landed on v79, before any v78 or v79 build shipped): a correction's take also searches the armour slots and every owed take prefers an exact match (durability included) in each place it looks — a LOCKSTEP rule client and server share (`joiner_actions::take_owed_search`), so a build from before it must not meet one from after it; the "can't duplicate or lose" invariant holds for container ops, not for a phantom spent another way inside the round trip (§4.2g).
 - **v79** (2026-10-08, C3b-2): **Composters, drying racks, campfires, item frames and bee hives for joiners.** `ItemAction` appends `UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; `Eat`'s held claim): a right-click on one of the five blocks, applied by the server to its REAL block entity by the shared rule (`block_use`) and answered with an `ItemActionOutcome`, which appends `wear_held: bool` after `window_event` (shears on a hive wear instead of being taken; the wear is the outcome's window event). `ItemNote` appends codes 9–18 (`OutOfReach`, `NotHere`, `NotThatBlock`, `NothingToTake`, `RackFull`, `NotReady`, `HiveEmpty`, `HiveNeedsTool`, `FireFull`, `InventoryFull` — the last single-player only). `StateUpdatePacket` appends `block_views: Vec<BlockEntityView { cell: [i32; 3], kind: BlockViewKind, view: BlockView }>` after `own_hunger` (`BlockViewKind` and `BlockView` append only: ItemFrame 0, Campfire 1, DryingRack 2, Composter 3, Hive 4): what joiners are shown of those blocks, reliable and in line with the chunk pushes, sent whenever a view changes (whoever changed it) and after each push of its chunk. No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `block_entity_views_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Block uses".
+- **v80** (2026-10-08, C3c-1): **A joiner's block-edit uses are mirrored.** `InputPacket` appends, after v76's `edit_hands`, `use_tags: Vec<UseTag>` (`UseTag { x, y, z: i32, kind: u8, slot: u8, used: WireSlot, tool: WireItem }`; `kind` is `use_edits::UseKind`, append-only: BucketFill 0, BucketEmpty 1, Sow 2, PlantPapyrus 3, GrowGrass 4, GrowCrop 5, Salt 6, Erase 7, TapRubber 8, Till 9, DoorUpper 10): the uses among the input's edits, each with the hand BEFORE the use (its hotbar slot, one of what it consumed, the tool it wore). A use tag pairs with the LAST edit of its cell in its input, and counts with `mined` against one per-input limit (`MAX_MINED_PER_INPUT` = 16 in all; the server reads `mined` first, then use tags up to it). The server runs the use's rule on its copy of the joiner's inventory (log-only; `PossessionTally::use_mirrored` / `use_mismatch`). A door's top half now travels as its own edit (`DoorUpper`). Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `input_packet_roundtrip`) and `use_edits::tests::use_kind_wire_bytes_are_pinned`. See §4.2e "Block-edit uses".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -505,7 +506,7 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x03 | `ClientReady` | C->S | Reliable | Client capabilities, protocol version. |
 | 0x04 | `WorldInfo` | S->C | Reliable | World configuration, seed, tick rate. |
 | 0x05 | `Disconnect` | Both | Best-effort | Reason code. |
-| 0x10 | `Input` | C->S | Unreliable | Player input for a single tick. |
+| 0x10 | `Input` | C->S | Unreliable | Player input for a single tick. As built: `PacketType::ClientInput` (`InputPacket`); its trailing appends in the version list above — v72 `mined`, v76 `events_applied` + `edit_hands`, v80 `use_tags` (§4.2e "Block-edit uses"). |
 | 0x11 | `InputAck` | S->C | Unreliable | Server confirms processing of input up to sequence N. |
 | 0x12 | `EntityState` | S->C | Unreliable | Batch of entity state updates. |
 | 0x13 | `PlayerState` | S->C | Reliable | Full authoritative state for the player (position, health, inventory snapshot). |
@@ -1639,6 +1640,7 @@ client made before the event finds the server's copy as the client's was.
 The rows the client originates (a placement, a window op, a Q-drop) apply in
 the client's order already.
 | A Q-drop (C2b, `ItemAction::Drop`) | §4.2f | takes the item, owed; the item becomes a real ground item |
+| A block-edit use (C3c-1, v80: a bucket filled or emptied, a seed or reed planted, bone meal, fertiliser, salt, an Eraser, a rubber tap, a hoe) | the use edit and its `UseTag`, "Block-edit uses" below | takes what it used (owed, from the tag's slot first), wears its tool, adds its product (`add_item`); the overflow is a real ground item |
 
 **Grant overflow (C2b, reversed by the C2b-fix, 2026-10-07; no wire change).**
 `HostedServer::grant_to_joiner` (a break's yield, an interaction's products)
@@ -1750,9 +1752,9 @@ bought blocks):
   (Window ops mirror layout moves, locks and `auto_refill` since C3a-2a,
   §4.2g.) The hand is stamped after the edit, so the last of a stack placed
   reports an empty hand (classified as a placement all the same);
-- a bucket filled at a source (C1 verify N3): the client swaps a Bucket for a
-  Water or Lava Bucket, and the scoop edit is untagged, so it is unchecked —
-  the shadow never sees the filled bucket.
+- (a bucket filled at a source, C1 verify N3, left this list in C3c-1: the
+  fill is a tagged use and the shadow swaps the bucket too, "Block-edit uses"
+  below; so do an Eraser's sheet and a rubber tap's rubber.)
 
 **Tool wear (C3a-2b, log-only).** A joiner's accepted `Break` whose `mined`
 tag names a tool wears that tool in the shadow, at the edit group's hotbar
@@ -1783,9 +1785,9 @@ than the client's (log-only; the same direction as the gaps below):
 
 The other direction — the shadow holds MORE (composter, rack, campfire,
 frame and hive deposits left this list in C3b-2: each is an owed take, a
-window event): the
-bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
-cells; and **death** (C1 verify N3): off a keep-inventory world the client
+window event; the bucket, seed, reed, bone-meal, fertiliser, salt and
+hoe consumes and wear left it in C3c-1, "Block-edit uses" below): flint
+and steel's wear and the friction stick lighting a campfire (C3c-2); and **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow
 keeps everything — once the per-npub sidecar step persists the shadow, a
 death and a grave retrieval would duplicate the whole inventory. No refusal
@@ -1813,9 +1815,10 @@ and logged (name, placed block, slot, what the shadow holds there) and
 `debug` line; at most one a minute per player is a `warn`, carrying the count
 held back since (`MISMATCH_LOG_INTERVAL_TICKS`; review C1 LOW-6: the shadow
 starts empty, so a building joiner mismatches on almost every placement this
-release, and 20 builders made about four warnings a second). A non-block placement (bucket, seeds, flint, bone meal,
-a hoe's tilling, a tool in hand), a meta-only toggle and anything in creative
-is counted unchecked. An interaction outcome (or, C2a, an accepted eat) the
+release, and 20 builders made about four warnings a second). A non-block placement
+that carries no use tag (flint and steel, a friction stick), a meta-only toggle and
+anything in creative is counted unchecked; a use edit (C3c-1) is never a
+placement, whatever the hand reads after it (below). An interaction outcome (or, C2a, an accepted eat) the
 shadow can't pay is also a counted, logged mismatch. Counters per connection
 (`ServerPlayer.possession`: breaks, matched, mismatched, unchecked); one
 summary line (`info`) in the server log when the player leaves.
@@ -1826,6 +1829,110 @@ server (C2/C3), refusing would refuse legitimate placements. The
 `validate_block_edit`, the mined tool and the hand in
 `classify_joiner_edit`, `EntityAttack`, `EntityInteract`, `LeadToPost`, and
 C2b's Q-drop in `spawn_joiner_drop`) stay until enforcement.
+
+**Block-edit uses (C3c-1, protocol v80; log-only, like all of C3a–C3c).**
+Every live right-click that changes one cell and the hand together is a
+**use edit**: a bucket filled from a source (`BucketFill`) or emptied into
+an air cell (`BucketEmpty`), a seed sown on tilled soil (`Sow`), a papyrus
+reed planted (`PlantPapyrus`), bone meal on grass (`GrowGrass`), bone meal or
+fertiliser on a growing crop (`GrowCrop`), salt (`Salt`), an Eraser on
+blueprint paper (`Erase`), an empty bucket on a live rubber log
+(`TapRubber`), a hoe on dirt or grass (`Till`), and a door's top half
+(`DoorUpper`). One `UseKind` per rule, not per item (`use_edits.rs`).
+
+- *The tag.* The client stamps a `UseTag` where the use is made, BEFORE it
+  spends or wears anything (`GameState::use_tag`, `use_edits::tag`): the
+  hotbar `slot`, `used` (one of the item the use consumes; `None` for a tap,
+  a hoe, an Eraser, a door top) and `tool` (the hoe's or Eraser's state
+  before the wear). The edit's own `EditHand` can't serve: it is stamped
+  later, after the use spent its item, so the last bone meal reads as an
+  empty hand. The tag rides beside its edit from the moment it is made
+  (`window_ops::PendingEdits::push_use`, `RemoteClient::note_edit_uses`,
+  the carry-over), never apart.
+- *Pairing.* The server pairs a use tag with the LAST edit of its cell in its
+  input (`edit_queue::pair_use_tags`), before it pairs the `mined` tags among
+  the rest (a mined tag never takes a use's edit, even a fill that empties the
+  cell). For that to be unambiguous the client cuts its edits before any edit
+  of a cell that follows a use-tagged edit of that cell in the same input
+  (`remote_client::tag_cut`): a second use of one cell (a bucket emptied then
+  filled again within one send window), the break of what a use just grew, a
+  placement over water it just poured — each waits, with its tag, for the
+  next input. (Stricter than "one use per cell per input": any later edit of
+  the cell would take the use's tag.)
+- *The shared limit.* Mined and use tags count against one per-input limit,
+  `MAX_MINED_PER_INPUT` (16 in all): the 17th tagged edit waits for the next
+  input with its tag (`tag_cut`); the server reads `mined` first, then use
+  tags up to the limit; the edit queue keeps one tag per edit at most
+  (`edit_queue::EditGroup`, `(u32, EditTag)`, about 40 B), so its memory bound
+  is now about 2.25 MB per client (`MAX_DEFERRED_EDITS`).
+- *Order.* A use's product lands on the server's copy when its edit is
+  processed (it rides the edit stream, not a window event), so a window op
+  the client made BETWEEN two uses must reach the server between them: the
+  send cuts its edits at the first window op (or queued request) still
+  waiting (`RemoteClient::note_order_cut`, `window_ops::OpLog::first_stamp`);
+  the edits made after it wait for the next input, and the op goes right
+  after this one (`flush_window_ops`'s `take_before(first_carried_stamp)`).
+  This closes the one exception C3a-fix-1's ordered send path had: an edit
+  made after a queued request used to ride the input ahead of it.
+- *The mirror.* For an accepted, tagged edit, `HostedServer::judge_joiner_use`
+  reads the server's world BEFORE the edit lands (`use_edits::judge`: is
+  `old → new` an outcome of this use's rule for what it used? Any member of
+  the rule's outcome set is legal — bone meal one or two stages, never
+  re-rolled; a fill needs a server-side source; a seed needs tilled soil under
+  it, a reed water beside its base, a door top its bottom half; a tap a live
+  log the server has not got on cooldown), and once the edit is in,
+  `settle_joiner_use` applies the client's own steps to the copy
+  (`use_edits::settle`): take one of `used` (`joiner_actions::take_owed`, the
+  tag's slot first), wear `tool` in the tag's slot
+  (`joiner_inventory::wear_tool`), add the rule's product (a filled bucket of
+  the fluid the server's cell held, the empty bucket back, a Papyrus Sheet,
+  one Rubber) with the client's `Inventory::add_item`, so in lockstep both
+  sides land it in the same slot. A tap requires a Bucket in the slot (it is
+  kept). The rubber tap stamps the SERVER's `tapped_rubber_logs` with the
+  server's own tick (a log still on cooldown keeps its stamp), so the log
+  regrows on the server's world (a lending host's clock is the server's).
+- *Mismatches, log-only.* An outcome the rule can't produce, an item the copy
+  doesn't hold, a tool not in the slot: each is a
+  `PossessionTally::use_mismatch` (one log line per kind per connection;
+  counted in the leave summary beside `use_mirrored`), and the edit stands.
+  The mirror never makes an item from nothing: an illegal outcome still takes
+  what the client says it spent and wears its tool, but adds no product, and
+  a use whose cost (or, for a tap, its bucket; for an Eraser, its tool) the
+  copy can't pay adds no product either. A kind byte this build doesn't know
+  is counted and not mirrored.
+- *Overflow.* A joined client spills nothing of a use's product its bag
+  can't hold (`GameState::spill_use_leftover`; single-player and a web
+  joiner, whose edits never reach a server, still drop it locally); the
+  server spills its copy's overflow as a real ground item at the joiner's
+  feet, thrown as its own (`window_events::spawn_unfit`), which reaches the
+  joiner by the entity broadcast. In lockstep the two overflows are the same
+  units, so the world's items are conserved. (If the copy has drifted fuller
+  than the client, the server spills an item the client also kept; if
+  emptier, the client's overflow is lost — log-only drift, closed at C3d.)
+  The Eraser's sheet: single-player still loses it on a full bag; a joiner's
+  is spilled by the server.
+- *Refused and creative.* A use edit the server refuses (reach, plot, play
+  mode) is sent back unsettled: the block reverts on the client, which keeps
+  what it spent and made (the same gap as a refused break's tool wear,
+  below). A creative joiner's uses are mirrored too: its arms spend a seed,
+  a bucket or a hoe's durability in creative as in survival.
+- *Doors.* A door is placed as two edits: the bottom half (a plain placement,
+  which pays for the door) and then the top half, tagged `DoorUpper` (no cost,
+  no gain), so the server and every other player see a whole door (before
+  C3c-1 only the bottom half was sent). A door with no headroom, or a Plot
+  Marker whose claim would overlap a foreign plot, is refused BEFORE the item
+  is taken (Spec 05): nothing is taken, refunded or sent. Breaking one half
+  of a door still sends only that half's edit (`game_loop.rs` break arms
+  remove the other half client-side; `hosted_server.rs` has no door rule), so
+  the other half stays standing on the server and for every other player —
+  open, with the door's break rule for a later phase.
+- *Not uses (C3c-2, C3c-3).* Lighting a campfire by friction, flint and steel
+  or a Firestarter, the bow, the slingshot, carts and fishing become requests
+  in C3c-2; Plans, face attachments (wallpaper, blank paper, a Plan laid
+  flat, `capture_art`, a capture's commit), a latent print lifted, a
+  cyanotype hung and Plan Build in C3c-3. Flint on a flammable block (FIRE)
+  and the hand-lit keg fuse are unreachable code (nested under the campfire
+  arm) awaiting an owner call.
 
 **Known limits (C1).**
 
@@ -2359,9 +2466,13 @@ all of them when nothing is carried). So in one tick a placement at X (e1), a
 Q-drop, then a tagged break of X (e2, held back behind the untagged placement
 of its cell, §4.2e) reach the server as e1, the drop, e2: the client's order.
 (The cut used to be the run's original first edit, e1's, so the drop waited
-for e2.) **Known limit (A-L2):** an edit made after a queued request in the
-same input window still rides that input, ahead of the request (the input is
-one packet; the request follows it). With auto-refill on this changes only the
+for e2.) **Known limit (A-L2), closed by C3c-1 (v80):** an edit made after a
+queued request (or a window op still waiting) in the same input window used to
+ride that input, ahead of the request (the input is one packet; the request
+follows it); since C3c-1 the send cuts its edits at the first op or queued
+request still waiting (`RemoteClient::note_order_cut`, §4.2e "Block-edit
+uses"), so such an edit waits for the next input and the request goes between.
+Before C3c-1, with auto-refill on, this changed only the
 hotbar layout, never the counts: two dirt in hotbar slot 0 and 64 in the bag,
 an earlier edit unsent, then Q on slot 0 (queued), then a placement from it.
 The client's Q leaves one and its placement takes that one and refills the

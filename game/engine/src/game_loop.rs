@@ -4155,6 +4155,41 @@ impl super::GameState {
         crate::break_drops::edits_reach_server(self.joined(), cfg!(target_arch = "wasm32"))
     }
 
+    /// C3c-1 — the tag for a use of `kind` at `cell` by player `pidx`: its
+    /// hotbar slot and what it holds there NOW, before the use spends or
+    /// wears it (`use_edits::tag`). Call it before the use's
+    /// `consume_one_material` / `use_hotbar_tool`.
+    fn use_tag(&self, pidx: usize, kind: crate::use_edits::UseKind, cell: [i32; 3]) -> crate::protocol::UseTag {
+        let hot = self.players[pidx].hotbar_slot;
+        let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| &s.item);
+        crate::use_edits::tag(kind, cell, hot, held)
+    }
+
+    /// C3c-1 — queue a use's edit for the server with its tag: the block now
+    /// standing at `cell` (`broadcast_change`), and the hand before the use
+    /// ([`Self::use_tag`]). The server mirrors the use on its copy of a
+    /// joiner's inventory (`use_edits`). Native only, in step with every
+    /// other edit push (L-web-edit).
+    fn push_use_edit(&mut self, cell: [i32; 3], new_block: block::BlockId, tag: crate::protocol::UseTag) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pending_block_changes.push_use(broadcast_change(&self.world, cell[0], cell[1], cell[2], new_block), tag);
+        #[cfg(target_arch = "wasm32")]
+        let _ = (cell, new_block, tag);
+    }
+
+    /// C3c-1 — what a use gave back that the bag couldn't hold (`leftover`):
+    /// single-player (and a web joiner, whose edits never reach a server)
+    /// drops it at `at` in its own world; a joined client spills nothing of
+    /// its own — the server spills its copy's overflow as a real ground item
+    /// at the joiner's feet, which reaches it like any other (in lockstep,
+    /// the same units).
+    fn spill_use_leftover(&mut self, leftover: crate::item::ItemStack, at: glam::Vec3, seed: u32) {
+        if self.edits_reach_server() {
+            return;
+        }
+        crate::entity::spawn_item(&mut self.ecs, at, leftover, seed);
+    }
+
     /// FU4b (FU3 verify M3) — right-click with an EMPTY bucket: aim with the
     /// fluid-aware ray (`raycast::cast_ray_fluid`: the first WATER or LAVA
     /// source cell in reach; every other item's ray passes through water, so a
@@ -4220,6 +4255,8 @@ impl super::GameState {
         let Some(filled) = held.and_then(|h| crate::bucket::fill_result(&h, target_blk, is_source)) else {
             return false;
         };
+        // C3c-1 — the hand before the fill spends the bucket.
+        let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketFill, pos);
         if !self.players[pidx]
             .inventory
             .consume_one_material(hotbar, crate::item::MaterialId::Bucket)
@@ -4242,19 +4279,10 @@ impl super::GameState {
         if let Some(leftover) = self.players[pidx].inventory.add_item(stack) {
             let seed_h = (pos[0] as u32).wrapping_mul(374761393)
                 ^ (self.tick_counter as u32).wrapping_mul(668265263);
-            crate::entity::spawn_item(
-                &mut self.ecs,
-                glam::Vec3::new(
-                    pos[0] as f32 + 0.5,
-                    pos[1] as f32 + 0.5,
-                    pos[2] as f32 + 0.5,
-                ),
-                leftover,
-                seed_h,
-            );
+            let at = glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5);
+            self.spill_use_leftover(leftover, at, seed_h);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
+        self.push_use_edit(pos, block::AIR, tag);
         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
         self.audio.play_place();
         self.players[pidx].place_cooldown = 8;
@@ -14329,15 +14357,15 @@ impl super::GameState {
                         // through a stack against a ceiling.
                         let above = [pos[0], pos[1] + 1, pos[2]];
                         let above_blk = self.world.get_block(above[0], above[1], above[2]);
-                        if above_blk == block::AIR {
+                        if crate::use_edits::grows_tall_grass(target_blk, above_blk) {
                             let hotbar = self.players[pidx].hotbar_slot;
+                            let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowGrass, above);
                             if self.players[pidx]
                                 .inventory
                                 .consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)
                             {
                                 self.world.set_block(above[0], above[1], above[2], block::TALL_GRASS);
-                                #[cfg(not(target_arch = "wasm32"))]
-                                self.pending_block_changes.push(broadcast_change(&self.world, above[0], above[1], above[2], block::TALL_GRASS));
+                                self.push_use_edit(above, block::TALL_GRASS, tag);
                                 self.rebuild_chunk_at(above[0], above[1], above[2]);
                                 self.players[pidx].place_cooldown = 8;
                             }
@@ -14786,7 +14814,7 @@ impl super::GameState {
                         if pidx == 0 { self.release_cursor(); }
                         self.players[pidx].place_cooldown = 8;
                     } else if self.play_mode.can_edit_world()
-                        && target_blk == block::BLUEPRINT_PAPER
+                        && crate::use_edits::erases(target_blk)
                         && self.players[pidx]
                             .inventory
                             .hotbar_slot(self.players[pidx].hotbar_slot)
@@ -14801,6 +14829,8 @@ impl super::GameState {
                         // durability by 1. Players reclaim paper from
                         // mistake placements without losing the eraser.
                         let hotbar = self.players[pidx].hotbar_slot;
+                        // C3c-1 — the Eraser as it was before this use wore it.
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::Erase, pos);
                         let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                         self.handle_tool_use(info);
                         self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
@@ -14808,12 +14838,14 @@ impl super::GameState {
                         // wallpaper overlays so none orphan onto the bare cell
                         // (resurface as phantom wallpaper + dupe-on-break later).
                         let _ = self.world.remove_face_attachments_at((pos[0], pos[1], pos[2]));
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
+                        self.push_use_edit(pos, block::AIR, tag);
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         let paper = crate::item::ItemStack::new_material(
                             crate::item::MaterialId::PapyrusSheet, 1,
                         );
+                        // A full bag loses the sheet here (single-player as
+                        // ever); on a joined client the server's copy spills
+                        // its overflow as a real item.
                         let _ = self.players[pidx].inventory.add_item(paper);
                         self.audio.play_break();
                         self.players[pidx].place_cooldown = 8;
@@ -14895,7 +14927,7 @@ impl super::GameState {
                             }
                         }
                     } else if self.play_mode.can_edit_world()
-                        && (target_blk == block::DIRT || target_blk == block::GRASS)
+                        && crate::use_edits::tills(target_blk)
                         && self.players[pidx].target_face == [0, 1, 0]
                         && self.players[pidx]
                             .inventory
@@ -14911,9 +14943,10 @@ impl super::GameState {
                         // top face tills (Minecraft parity); side-face clicks
                         // fall through harmlessly. Hoe loses 1 durability.
                         let hotbar = self.players[pidx].hotbar_slot;
+                        // C3c-1 — the hoe as it was before this use wore it.
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::Till, pos);
                         self.world.set_block(pos[0], pos[1], pos[2], block::TILLED_SOIL);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::TILLED_SOIL));
+                        self.push_use_edit(pos, block::TILLED_SOIL, tag);
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                         self.handle_tool_use(info);
@@ -14929,31 +14962,19 @@ impl super::GameState {
                         // faces fall through to block-placement which is the
                         // standard "stack a block on top of this" path.
                         let hotbar = self.players[pidx].hotbar_slot;
+                        // C3c-1 — the seed table is `use_edits::sown_crop`,
+                        // the rule the server judges a joiner's sowing by.
                         let seed_kind = self.players[pidx]
                             .inventory
                             .hotbar_slot(hotbar)
                             .and_then(|s| match &s.item {
-                                crate::item::Item::Material(m) => match m {
-                                    crate::item::MaterialId::WheatSeeds => Some((*m, block::WHEAT_STAGE_0)),
-                                    crate::item::MaterialId::Carrot => Some((*m, block::CARROT_STAGE_0)),
-                                    crate::item::MaterialId::Potato => Some((*m, block::POTATO_STAGE_0)),
-                                    // Wave 28 — corn plants from CornSeeds
-                                    // (separate-seed pattern, like wheat).
-                                    crate::item::MaterialId::CornSeeds => Some((*m, block::CORN_STAGE_0)),
-                                    // Spec 36 Phase 2 — fibre crops.
-                                    crate::item::MaterialId::CottonSeeds => Some((*m, block::COTTON_STAGE_0)),
-                                    crate::item::MaterialId::HempSeeds => Some((*m, block::HEMP_STAGE_0)),
-                                    // Spec 35 farmable-flower follow-on.
-                                    crate::item::MaterialId::CornflowerSeeds => Some((*m, block::CORNFLOWER_STAGE_0)),
-                                    crate::item::MaterialId::FieldPoppySeeds => Some((*m, block::FIELD_POPPY_STAGE_0)),
-                                    crate::item::MaterialId::ButtercupSeeds => Some((*m, block::BUTTERCUP_STAGE_0)),
-                                    _ => None,
-                                },
+                                crate::item::Item::Material(m) => crate::use_edits::sown_crop(*m).map(|b| (*m, b)),
                                 _ => None,
                             });
                         if let Some((seed_id, stage_0)) = seed_kind {
                             let above = [pos[0], pos[1] + 1, pos[2]];
                             let above_blk = self.world.get_block(above[0], above[1], above[2]);
+                            let tag = self.use_tag(pidx, crate::use_edits::UseKind::Sow, above);
                             if self.play_mode.can_edit_world()
                                 && above_blk == block::AIR
                                 && self.hand_may_spend(pidx)
@@ -14966,8 +14987,7 @@ impl super::GameState {
                                 // changes don't touch it) so harvesting it earns
                                 // the produce but no proof-of-play work.
                                 self.world.place_player_block(above[0], above[1], above[2], stage_0);
-                                #[cfg(not(target_arch = "wasm32"))]
-                                self.pending_block_changes.push(broadcast_change(&self.world, above[0], above[1], above[2], stage_0));
+                                self.push_use_edit(above, stage_0, tag);
                                 self.rebuild_chunk_at(above[0], above[1], above[2]);
                                 self.audio.play_place();
                                 self.players[pidx].place_cooldown = 8;
@@ -15021,6 +15041,7 @@ impl super::GameState {
                                 crate::growth::next_stage(target_blk),
                             )
                         };
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowCrop, pos);
                         if let Some(next) = next
                             && self.hand_may_spend(pidx)
                             && self.players[pidx]
@@ -15028,8 +15049,7 @@ impl super::GameState {
                                 .consume_one_material(hotbar, material)
                             {
                                 self.world.set_block(pos[0], pos[1], pos[2], next);
-                                #[cfg(not(target_arch = "wasm32"))]
-                                self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], next));
+                                self.push_use_edit(pos, next, tag);
                                 self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                 self.audio.play_place();
                                 self.players[pidx].place_cooldown = 8;
@@ -15060,6 +15080,8 @@ impl super::GameState {
                         // adjacency check. The placement-base check is in the
                         // papyrus module so the rules stay testable in isolation.
                         let hotbar = self.players[pidx].hotbar_slot;
+                        let reed_cell = [pos[0], pos[1] + 1, pos[2]];
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::PlantPapyrus, reed_cell);
                         if self.play_mode.can_edit_world()
                             && crate::papyrus::is_valid_planting_base(&self.world, pos[0], pos[1], pos[2])
                             && self.hand_may_spend(pidx)
@@ -15069,8 +15091,7 @@ impl super::GameState {
                         {
                             // Spec 06 §2.2 — planted papyrus is player-placed.
                             self.world.place_player_block(pos[0], pos[1] + 1, pos[2], block::PAPYRUS_STAGE_0);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1] + 1, pos[2], block::PAPYRUS_STAGE_0));
+                            self.push_use_edit(reed_cell, block::PAPYRUS_STAGE_0, tag);
                             self.rebuild_chunk_at(pos[0], pos[1] + 1, pos[2]);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -15096,30 +15117,21 @@ impl super::GameState {
                         // with world_time (cyclic) here means the two
                         // clocks diverge and the cooldown fires at random.
                         let tap_tick = self.tick_counter;
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::TapRubber, pos);
                         if crate::rubber::apply_tap(
                             &mut self.world, (pos[0], pos[1], pos[2]), tap_tick,
                         ) {
                             let rubber = crate::item::ItemStack::new_material(
                                 crate::item::MaterialId::Rubber, 1,
                             );
-                            let took = self.players[pidx].inventory.add_item(rubber.clone()).is_none();
-                            if !took {
+                            if let Some(leftover) = self.players[pidx].inventory.add_item(rubber) {
                                 let seed_h = (pos[0] as u32)
                                     .wrapping_mul(374761393)
                                     ^ (tap_tick as u32).wrapping_mul(668265263);
-                                crate::entity::spawn_item(
-                                    &mut self.ecs,
-                                    glam::Vec3::new(
-                                        pos[0] as f32 + 0.5,
-                                        pos[1] as f32 + 1.0,
-                                        pos[2] as f32 + 0.5,
-                                    ),
-                                    rubber,
-                                    seed_h,
-                                );
+                                let at = glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 1.0, pos[2] as f32 + 0.5);
+                                self.spill_use_leftover(leftover, at, seed_h);
                             }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::RUBBER_LOG_TAPPED));
+                            self.push_use_edit(pos, block::RUBBER_LOG_TAPPED, tag);
                             self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -15153,6 +15165,7 @@ impl super::GameState {
                             .inventory
                             .hotbar_slot(hotbar)
                             .map(|s| s.item.clone());
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketEmpty, [dx, dy, dz]);
                         if let Some((liquid, filled)) = held
                             .and_then(|h| crate::bucket::empty_result(&h, self.world.get_block(dx, dy, dz)))
                             && self.players[pidx]
@@ -15177,19 +15190,10 @@ impl super::GameState {
                                 {
                                     let seed_h = (dx as u32).wrapping_mul(374761393)
                                         ^ (self.tick_counter as u32).wrapping_mul(668265263);
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs,
-                                        glam::Vec3::new(
-                                            dx as f32 + 0.5,
-                                            dy as f32 + 0.5,
-                                            dz as f32 + 0.5,
-                                        ),
-                                        leftover,
-                                        seed_h,
-                                    );
+                                    let at = glam::Vec3::new(dx as f32 + 0.5, dy as f32 + 0.5, dz as f32 + 0.5);
+                                    self.spill_use_leftover(leftover, at, seed_h);
                                 }
-                                #[cfg(not(target_arch = "wasm32"))]
-                                self.pending_block_changes.push(broadcast_change(&self.world, dx, dy, dz, liquid));
+                                self.push_use_edit([dx, dy, dz], liquid, tag);
                                 self.rebuild_chunk_at(dx, dy, dz);
                                 self.audio.play_place();
                                 // Emptying a bucket is a fluids action too — fire
@@ -15217,13 +15221,13 @@ impl super::GameState {
                         // base block was converted. Snowfall painter
                         // naturally skips SALT_PATH (it's not GRASS/DIRT).
                         let hotbar = self.players[pidx].hotbar_slot;
+                        let tag = self.use_tag(pidx, crate::use_edits::UseKind::Salt, pos);
                         if self.players[pidx]
                             .inventory
                             .consume_one_material(hotbar, crate::item::MaterialId::Salt)
                         {
                             self.world.set_block(pos[0], pos[1], pos[2], block::SALT_PATH);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::SALT_PATH));
+                            self.push_use_edit(pos, block::SALT_PATH, tag);
                             self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -15531,6 +15535,35 @@ impl super::GameState {
                             }
                             if !overlaps_any_player && !plot_place_blocked && !on_rail && !sapling_blocked && self.play_mode.can_edit_world() {
                                 let hotbar = self.players[pidx].hotbar_slot;
+                                // C3c-1 — check first: a door with no headroom,
+                                // or a Plot Marker whose claim would overlap
+                                // another player's plot, is refused BEFORE the
+                                // item is taken, so nothing is taken, refunded
+                                // or sent (it used to be placed, then undone
+                                // and refunded — a take and a refund the server
+                                // never saw). Single-player and joined alike.
+                                let refusal = match self.players[pidx].inventory.hotbar_placeable_id(hotbar) {
+                                    Some(block::OAK_DOOR)
+                                        if self.world.get_block(place_x, place_y + 1, place_z) != block::AIR =>
+                                    {
+                                        Some(("No room for the door — needs 2 blocks of height.", 2))
+                                    }
+                                    Some(block::PLOT_MARKER)
+                                        if crate::plot::claim_would_conflict(
+                                            &self.world.plots,
+                                            &crate::plot::PlotOwner::LocalPlayer(pidx),
+                                            place_x,
+                                            place_z,
+                                        ) =>
+                                    {
+                                        Some(("Too close to another player's plot.", 3))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some((why, secs)) = refusal {
+                                    self.toast = Some((why.to_string(), Instant::now() + Duration::from_secs(secs)));
+                                    self.players[pidx].place_cooldown = BLOCK_PLACE_COOLDOWN_TICKS;
+                                }
                                 // Wave 29 — use the placeable-aware path so log
                                 // materials (Green/Seasoned/KilnDried) place as
                                 // OAK_LOG without needing a 1:1 crafting-table
@@ -15538,7 +15571,9 @@ impl super::GameState {
                                 // the same path with no behaviour change.
                                 // C3b-2-fix (M1) — a joiner places nothing a
                                 // request in flight claims (`hand_may_spend`).
-                                let block_to_place = if self.is_creative {
+                                let block_to_place = if refusal.is_some() {
+                                    None
+                                } else if self.is_creative {
                                     self.players[pidx].inventory.hotbar_placeable_id(hotbar)
                                 } else if self.hand_may_spend(pidx) {
                                     self.players[pidx].inventory.take_placeable_from_hotbar(hotbar)
@@ -15689,47 +15724,24 @@ impl super::GameState {
                                     }
                                     // F1 Wave 2 — a door is two cells tall: the
                                     // generic place put the bottom half here; place
-                                    // the top half above (needs headroom). No room →
-                                    // undo + refund.
-                                    if block_to_place == block::OAK_DOOR {
-                                        let (ax, ay, az) = (place_x, place_y + 1, place_z);
-                                        if self.world.get_block(ax, ay, az) == block::AIR {
-                                            let bottom_m =
-                                                self.world.meta_at(place_x, place_y, place_z);
-                                            let top_m = crate::meta::with_state(
-                                                bottom_m,
-                                                crate::meta::state(bottom_m) | 0b10,
-                                            );
-                                            self.world.place_player_block(ax, ay, az, block::OAK_DOOR);
-                                            self.world.set_meta((ax, ay, az), top_m);
-                                            crate::lighting::update_for_block_change(
-                                                &mut self.world,
-                                                (ax, ay, az),
-                                                block::AIR,
-                                                block::OAK_DOOR,
-                                                &self.registry,
-                                            );
-                                            self.rebuild_chunks_for_lighting(ax, ay, az);
-                                        } else {
-                                            // No headroom — remove the bottom half and
-                                            // refund the door (survival consumed it).
-                                            self.world.set_block(place_x, place_y, place_z, block::AIR);
-                                            self.world.set_meta((place_x, place_y, place_z), 0);
-                                            if !self.is_creative {
-                                                let _ = self.players[pidx].inventory.add_item(
-                                                    crate::item::ItemStack::new_block(
-                                                        block::OAK_DOOR,
-                                                        1,
-                                                    ),
-                                                );
-                                            }
-                                            self.rebuild_chunk_at(place_x, place_y, place_z);
-                                            self.toast = Some((
-                                                "No room for the door — needs 2 blocks of height."
-                                                    .to_string(),
-                                                Instant::now() + Duration::from_secs(2),
-                                            ));
-                                        }
+                                    // the top half above. C3c-1 — the headroom was
+                                    // checked before the door was taken (a door
+                                    // without it never gets here).
+                                    let door_top = (block_to_place == block::OAK_DOOR
+                                        && self.world.get_block(place_x, place_y + 1, place_z) == block::AIR)
+                                        .then_some([place_x, place_y + 1, place_z]);
+                                    if let Some([ax, ay, az]) = door_top {
+                                        let bottom_m = self.world.meta_at(place_x, place_y, place_z);
+                                        self.world.place_player_block(ax, ay, az, block::OAK_DOOR);
+                                        self.world.set_meta((ax, ay, az), crate::use_edits::door_top_meta(bottom_m));
+                                        crate::lighting::update_for_block_change(
+                                            &mut self.world,
+                                            (ax, ay, az),
+                                            block::AIR,
+                                            block::OAK_DOOR,
+                                            &self.registry,
+                                        );
+                                        self.rebuild_chunks_for_lighting(ax, ay, az);
                                     }
                                     // Wave 2c — a freshly placed Sign gets an empty
                                     // text entity and opens its editor straight away
@@ -15751,23 +15763,14 @@ impl super::GameState {
                                             crate::item_frame::ItemFrameData::new(),
                                         );
                                     }
-                                    // Phase 3 — coverage-challenge PlaceBlock event. Skip it when
-                                    // this is a Plot Marker that the conflict handler below will
-                                    // REVERT (set_block back + refund) — otherwise a rolled-back
-                                    // placement would wrongly count toward a place-blocks challenge.
-                                    let place_will_revert = block_to_place == block::PLOT_MARKER
-                                        && crate::plot::claim_would_conflict(
-                                            &self.world.plots,
-                                            &crate::plot::PlotOwner::LocalPlayer(pidx),
-                                            place_x,
-                                            place_z,
-                                        );
-                                    if !place_will_revert
-                                        && let Some(scenario) = &mut self.scenario {
-                                            scenario.on_event(crate::scenario::ChallengeEvent::PlaceBlock {
-                                                block: Some(block_to_place),
-                                            });
-                                        }
+                                    // Phase 3 — coverage-challenge PlaceBlock event. (A Plot
+                                    // Marker whose claim would conflict never gets here:
+                                    // C3c-1 checks it before the take.)
+                                    if let Some(scenario) = &mut self.scenario {
+                                        scenario.on_event(crate::scenario::ChallengeEvent::PlaceBlock {
+                                            block: Some(block_to_place),
+                                        });
+                                    }
                                     // Spec 30 — re-light around the placement.
                                     // Updates block-light if the new block emits
                                     // (torch / campfire / furnace_lit) and
@@ -15946,56 +15949,25 @@ impl super::GameState {
                                     // gameplay edit) already does.
                                     self.world.notify_neighbours((place_x, place_y, place_z));
                                     // Spec 36 — Plot Marker claim handler. The
-                                    // marker block is already placed; either
-                                    // claim the region or (on overlap with a
-                                    // foreign plot) undo the placement.
+                                    // marker block is already placed: claim the
+                                    // region. (C3c-1 — one whose claim would
+                                    // overlap a foreign plot was refused before
+                                    // it was taken, so it never gets here.)
                                     if block_to_place == block::PLOT_MARKER {
                                         let owner = crate::plot::PlotOwner::LocalPlayer(pidx);
-                                        if crate::plot::claim_would_conflict(
-                                            &self.world.plots, &owner, place_x, place_z,
-                                        ) {
-                                            // Undo: remove the marker block +
-                                            // refund the item. (Item was taken
-                                            // from the hotbar in survival; in
-                                            // creative nothing was consumed.)
-                                            self.world.set_block(place_x, place_y, place_z, existing);
-                                            // The placement was undone — drop the
-                                            // player-placed flag set above so the
-                                            // reverted cell isn't left stale.
-                                            self.world.set_placed(place_x, place_y, place_z, false);
-                                            crate::lighting::update_for_block_change(
-                                                &mut self.world,
-                                                (place_x, place_y, place_z),
-                                                block_to_place, existing,
-                                                &self.registry,
-                                            );
-                                            self.rebuild_chunks_for_lighting(place_x, place_y, place_z);
-                                            if !self.is_creative {
-                                                let _ = self.players[pidx].inventory.add_item(
-                                                    crate::item::ItemStack::new_material(
-                                                        crate::item::MaterialId::PlotMarkerItem, 1,
-                                                    ),
-                                                );
-                                            }
-                                            self.toast = Some((
-                                                "Too close to another player's plot.".to_string(),
-                                                Instant::now() + Duration::from_secs(3),
-                                            ));
-                                        } else {
-                                            self.world.plots.push(
-                                                crate::plot::PlotData::from_marker(
-                                                    owner, place_x, place_y, place_z,
-                                                ),
-                                            );
-                                            let span = crate::plot::PLOT_HALF_EXTENT * 2 + 1;
-                                            self.toast = Some((
-                                                format!("Plot claimed — {span}×{span} protected."),
-                                                Instant::now() + Duration::from_secs(3),
-                                            ));
-                                            // Phase 3 — coverage-challenge ClaimPlot event.
-                                            if let Some(scenario) = &mut self.scenario {
-                                                scenario.on_event(crate::scenario::ChallengeEvent::ClaimPlot);
-                                            }
+                                        self.world.plots.push(
+                                            crate::plot::PlotData::from_marker(
+                                                owner, place_x, place_y, place_z,
+                                            ),
+                                        );
+                                        let span = crate::plot::PLOT_HALF_EXTENT * 2 + 1;
+                                        self.toast = Some((
+                                            format!("Plot claimed — {span}×{span} protected."),
+                                            Instant::now() + Duration::from_secs(3),
+                                        ));
+                                        // Phase 3 — coverage-challenge ClaimPlot event.
+                                        if let Some(scenario) = &mut self.scenario {
+                                            scenario.on_event(crate::scenario::ChallengeEvent::ClaimPlot);
                                         }
                                     }
                                     // Spec 37 — Market Bell place handler.
@@ -16042,18 +16014,26 @@ impl super::GameState {
                                         );
                                     }
                                     // Broadcast what is ACTUALLY standing in the
-                                    // cell, not what we set out to place: the
-                                    // Plot Marker overlap handler above reverts
-                                    // the world to `existing` when the claim
-                                    // conflicts, and sending `block_to_place`
-                                    // then planted a marker on the host and on
-                                    // every other client that this one had
-                                    // already taken back.
+                                    // cell, not what we set out to place (a
+                                    // marker once planted on the host and every
+                                    // other client one this client had taken
+                                    // back; C3c-1 checks a conflicting claim
+                                    // first, so it is the placed block).
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
                                         let standing =
                                             self.world.get_block(place_x, place_y, place_z);
                                         self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing));
+                                    }
+                                    // C3c-1 — and a door's top half, after its
+                                    // bottom (the server judges it standing on
+                                    // the bottom half), tagged as the door's own
+                                    // use: no cost (the bottom's placement paid
+                                    // for the door), so the server and everyone
+                                    // else see a whole door.
+                                    if let Some(top) = door_top {
+                                        let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, None);
+                                        self.push_use_edit(top, block::OAK_DOOR, tag);
                                     }
                                     self.rebuild_chunk_at(place_x, place_y, place_z);
                                     self.audio.play_place();
@@ -22506,11 +22486,14 @@ impl super::GameState {
     /// `RemoteClient`'s carry-over counts as unsent, by its stamp.
     ///
     /// What the order covers: ops, edits and requests reach the server in the
-    /// order they were made, except that an edit made AFTER a queued request
-    /// in the same tick still rides the input ahead of it (the input is one
-    /// packet; the request follows it). A request made while edits are unsent
-    /// is queued, not sent ([`Self::send_request`]); one made with none goes
-    /// at once, after the ops logged before it.
+    /// order they were made. C3c-1 — an edit made AFTER an op or a queued
+    /// request still waiting is held for a later input
+    /// (`RemoteClient::note_order_cut`), so the op or request goes between
+    /// (it used to ride the input ahead of them: harmless while every gain
+    /// was a window event, not once a use's gain lands with its edit). A
+    /// request made while edits are unsent is queued, not sent
+    /// ([`Self::send_request`]); one made with none goes at once, after the
+    /// ops logged before it.
     fn flush_ops_before_edits(&mut self) {
         let Some(client) = self.remote_client.as_mut().filter(|c| c.is_connected()) else { return };
         let first_edit = [self.pending_block_changes.first_stamp(), client.first_carried_stamp()]
@@ -22690,6 +22673,10 @@ impl super::GameState {
         let has_client = self.remote_client.is_some();
         if !has_server && !has_client {
             self.flush_window_ops();
+            // C3c-1 — nobody reads them: don't keep a solo world's edits
+            // (and their use tags) for ever.
+            self.pending_block_changes.clear();
+            self.pending_mined.clear();
             return;
         }
 
@@ -22742,7 +22729,7 @@ impl super::GameState {
         // C3a-fix-1 — the edits, each with the slot and hand it was made
         // with (stamped when the selection changed; the rest are this one's).
         let hand_now = self.edit_hand_now();
-        let (block_changes, edit_hands, edit_stamps) = self.pending_block_changes.take(hand_now);
+        let (block_changes, edit_hands, edit_stamps, edit_uses) = self.pending_block_changes.take(hand_now);
         let slot = &self.players[0];
         let input = crate::protocol::InputPacket {
             tick: send_tick,
@@ -22781,6 +22768,9 @@ impl super::GameState {
             events_applied: 0,
             // C3a-fix-1 (C-M1) — each edit's own slot and hand.
             edit_hands,
+            // C3c-1 — set by `RemoteClient::send_input` from the tags noted
+            // beside the edits (the host's loopback mirrors no use).
+            use_tags: Vec::new(),
         };
 
         // Serialize once, send to whichever transport is active
@@ -22822,6 +22812,12 @@ impl super::GameState {
             // C3b-fix-b (B-L2) / C3b-fix-d (A-L3) — if the packet can't carry
             // every edit, each that waits keeps its own stamp.
             client.note_edit_stamps(edit_stamps);
+            // C3c-1 — each edit's use tag rides beside it; and an edit made
+            // after the first window op still waiting goes in a later input,
+            // after that op (a use's gain lands on the server's copy when its
+            // edit is processed, so an op between two uses must too).
+            client.note_edit_uses(edit_uses);
+            client.note_order_cut(self.players[0].crafting_ui.ops.first_stamp());
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
             let seq = self.own_prediction.send(

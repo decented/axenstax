@@ -81,7 +81,8 @@ use std::cell::Cell;
 use crate::container_window::{self, ClaimedWindow, ContainerClick, ContainerData, ContainerKind, ItemDelta};
 use crate::item::ItemStack;
 use crate::protocol::{
-    BlockChange, EditHand, FurnaceView, WindowOpPacket, WindowSlotSetPacket, WireSlot, WireWindowOp, WireWindowSlot,
+    BlockChange, EditHand, FurnaceView, UseTag, WindowOpPacket, WindowSlotSetPacket, WireSlot, WireWindowOp,
+    WireWindowSlot,
 };
 use crate::server::ServerPlayer;
 use crate::window::{self, ClickCtx, ClickResult, Station, WindowClick, WindowMut};
@@ -200,6 +201,13 @@ impl OpLog {
         self.pending.drain(..cut).collect()
     }
 
+    /// C3c-1 — the order stamp of the first op still waiting, if any: the
+    /// send cuts its edits there, so an edit made after it goes in a later
+    /// input, after it (`RemoteClient::note_order_cut`).
+    pub fn first_stamp(&self) -> Option<u64> {
+        self.pending.first().map(|l| l.stamp)
+    }
+
     /// Drop everything (not joined, so nothing is sent) and forget the
     /// setting, so the next joined session starts by sending it.
     pub fn discard(&mut self) {
@@ -224,7 +232,10 @@ impl OpLog {
 ///   (`InputPacket.edit_hands`). The client stamps them just before its
 ///   hotbar selection changes and at the send ([`Self::stamp_hands`]): an
 ///   edit takes the selection it was made under, whatever the player
-///   scrolled to before the input went out.
+///   scrolled to before the input went out;
+/// - C3c-1 — a use's tag ([`UseTag`], `InputPacket.use_tags`), kept beside
+///   the edit it was made with from the moment it is made, so it never
+///   travels without it.
 #[derive(Debug, Default)]
 pub struct PendingEdits {
     edits: Vec<BlockChange>,
@@ -232,12 +243,25 @@ pub struct PendingEdits {
     hands: Vec<EditHand>,
     /// Each edit's order stamp, in step with `edits` (C3b-fix-d, A-L3).
     stamps: Vec<u64>,
+    /// C3c-1 — each edit's use tag (`None` for every edit but a use's), in
+    /// step with `edits`.
+    uses: Vec<Option<UseTag>>,
 }
 
 impl PendingEdits {
     pub fn push(&mut self, edit: BlockChange) {
         self.stamps.push(order_stamp());
         self.edits.push(edit);
+        self.uses.push(None);
+    }
+
+    /// C3c-1 — push a use's edit with its tag (`use_edits::tag`, stamped
+    /// before the use spent its item).
+    pub fn push_use(&mut self, edit: BlockChange, tag: UseTag) {
+        self.push(edit);
+        if let Some(last) = self.uses.last_mut() {
+            *last = Some(tag);
+        }
     }
 
     pub fn extend(&mut self, edits: impl IntoIterator<Item = BlockChange>) {
@@ -277,12 +301,13 @@ impl PendingEdits {
     }
 
     /// Take everything for the input going out, the edits not stamped yet
-    /// made with `hand`: the edits, their hands and their order stamps, in
-    /// step.
-    pub fn take(&mut self, hand: EditHand) -> (Vec<BlockChange>, Vec<EditHand>, Vec<u64>) {
+    /// made with `hand`: the edits, their hands, their order stamps and
+    /// (C3c-1) their use tags, in step.
+    #[allow(clippy::type_complexity)]
+    pub fn take(&mut self, hand: EditHand) -> (Vec<BlockChange>, Vec<EditHand>, Vec<u64>, Vec<Option<UseTag>>) {
         self.stamp_hands(hand);
         let taken = std::mem::take(self);
-        (taken.edits, taken.hands, taken.stamps)
+        (taken.edits, taken.hands, taken.stamps, taken.uses)
     }
 }
 
@@ -1208,7 +1233,7 @@ mod tests {
         let pairs = |ops: Vec<LoggedOp>| ops.into_iter().map(|l| (l.op, l.digest)).collect::<Vec<_>>();
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![(WireWindowOp::Click(WindowClick::Close), 1)]);
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![], "the rest wait for the input");
-        let (sent, _, stamps) = edits.take((0, 0, 0));
+        let (sent, _, stamps, _) = edits.take((0, 0, 0));
         assert_eq!(sent.len(), 2);
         assert!(stamps[0] < stamps[1], "each edit keeps its own stamp (C3b-fix-d, A-L3)");
         assert_eq!(edits.first_stamp(), None);
@@ -1232,7 +1257,7 @@ mod tests {
         edits.stamp_hands((5, 4, 9));
         edits.stamp_hands((6, 0, 0));
         edits.push(edit(4));
-        let (sent, hands, _) = edits.take((8, 1, 3));
+        let (sent, hands, _, _) = edits.take((8, 1, 3));
         assert_eq!(sent.iter().map(|b| b.x).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
         assert_eq!(hands, vec![(2, 1, 7), (2, 1, 7), (5, 4, 9), (8, 1, 3)]);
         assert!(edits.is_empty() && edits.take((0, 0, 0)).1.is_empty());

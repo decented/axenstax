@@ -27,7 +27,12 @@
 //! are paired with its edits when the input is read ([`EditGroup::new`]), and
 //! from then on a tag goes wherever its edit goes: processed with it, refused
 //! with it, dropped with it at the cap. A refused crop harvest takes its tag
-//! with it, so a later edit of its cell can't yield the crop.
+//! with it, so a later edit of its cell can't yield the crop. C3c-1 — so do
+//! the input's use tags (`InputPacket.use_tags`), each paired with the LAST
+//! edit of its cell in the input (the client sends no edit of a cell behind
+//! a use of it in one input), before the mined tags are paired among the
+//! rest; one input's tags of both kinds count against one limit
+//! (`protocol::MAX_MINED_PER_INPUT`), the mined ones read first.
 //!
 //! **A hard cap no honest client reaches** ([`MAX_DEFERRED_EDITS`]): past it
 //! an edit is dropped, with nothing sent back (FU4a, FU3 verify M2), and the
@@ -36,7 +41,7 @@
 use std::collections::VecDeque;
 
 use crate::block::BlockId;
-use crate::protocol::{BlockChange, EditHand, MinedBlock};
+use crate::protocol::{BlockChange, EditHand, EditTag, MinedBlock, UseTag};
 
 /// Most edits one client may have waiting. 16,384 — the client's own bound on
 /// edits it holds back unsent (`remote_client::INPUT_CARRY_OVER_MAX_CHANGES`).
@@ -48,8 +53,10 @@ use crate::protocol::{BlockChange, EditHand, MinedBlock};
 /// worst case is now the cap's edits (20 B each since C3a-fix-1: the block
 /// change and the four-byte hand it was made with), as many group headers (a
 /// group holds at least one edit: 72 B each), a tag for each edit at most
-/// (24 B), and the front group's processed slack (one input's edits at most,
-/// about 4,370): **under 2 MB of capacity per client** (about 1.99 MB), plus
+/// (C3c-1: a mined or a use tag, `(u32, EditTag)`, 40 B since a use tag
+/// carries the stack it used and the tool it wore; 24 B before), and the
+/// front group's processed slack (one input's edits at most, about 4,370):
+/// **under 2.5 MB of capacity per client** (about 2.25 MB), plus
 /// the allocator's own overhead of a few dozen bytes for each of a group's
 /// one or two allocations. FU3's "about 256 KiB" counted the edits alone.
 /// Pinned by
@@ -84,6 +91,9 @@ pub struct InputHand {
     pub edit_hands: Vec<EditHand>,
     /// C3a-fix-1 — `InputPacket.events_applied`.
     pub events_applied: u32,
+    /// C3c-1 — `InputPacket.use_tags`: the hand before each of the input's
+    /// uses, paired with their edits as the input is read.
+    pub use_tags: Vec<UseTag>,
 }
 
 /// The hand one edit was made with: four bytes, kept beside each waiting
@@ -128,11 +138,12 @@ pub struct EditGroup {
     /// In the order the client made them, each with the hand it was made
     /// with (C3a-fix-1).
     edits: VecDeque<(BlockChange, Hand)>,
-    /// FU4a (L2) — the input's `mined` tags, each paired with its own edit
-    /// (by the edit's place in the input, 0 its first), newest place first so
-    /// the front edit's tag is the last. At most
-    /// `protocol::MAX_MINED_PER_INPUT`, each with a distinct waiting edit.
-    tags: Vec<(u32, MinedBlock)>,
+    /// FU4a (L2) — the input's `mined` tags (C3c-1: and its use tags), each
+    /// paired with its own edit (by the edit's place in the input, 0 its
+    /// first), newest place first so the front edit's tag is the last. At
+    /// most `protocol::MAX_MINED_PER_INPUT` in all, each with a distinct
+    /// waiting edit.
+    tags: Vec<(u32, EditTag)>,
     /// The place in the input of the front of `edits`.
     next: u32,
     /// FU4a (L1) — the joiner's life when the input was read
@@ -149,8 +160,10 @@ impl EditGroup {
     /// are dropped, their count returned — before their tags are paired, so
     /// a flood at the cap costs nothing more), each paired with its own tag
     /// from `tags` (the input's first `protocol::MAX_MINED_PER_INPUT`, its
-    /// DoS guard; [`pair_tags`]) and its own hand by `input` ([`Hand::of`]).
-    /// `block_at` reads the world, for the first edit of a tagged cell.
+    /// DoS guard; [`pair_tags`]) or (C3c-1) from `input.use_tags` (as many
+    /// more as that limit leaves; [`pair_use_tags`]) and its own hand by
+    /// `input` ([`Hand::of`]). `block_at` reads the world, for the first
+    /// edit of a tagged cell.
     pub fn new(
         mut edits: Vec<BlockChange>,
         keep: usize,
@@ -164,10 +177,19 @@ impl EditGroup {
             edits.truncate(keep);
         }
         let tags = &tags[..tags.len().min(crate::protocol::MAX_MINED_PER_INPUT)];
-        let tags = pair_tags(&edits, tags, block_at);
+        let room = crate::protocol::MAX_MINED_PER_INPUT - tags.len();
+        let uses = &input.use_tags[..input.use_tags.len().min(room)];
+        let used = pair_use_tags(&edits, uses);
+        let mut paired: Vec<(u32, EditTag)> = pair_tags(&edits, tags, &used, block_at)
+            .into_iter()
+            .map(|(at, m)| (at, EditTag::Mined(m)))
+            .chain(used.into_iter().map(|(at, u)| (at, EditTag::Use(u))))
+            .collect();
+        paired.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
+        paired.shrink_to_fit();
         let mut handed = VecDeque::with_capacity(edits.len());
         handed.extend(edits.into_iter().enumerate().map(|(k, bc)| (bc, Hand::of(&input, k))));
-        (Self { edits: handed, tags, next: 0, life, events_applied: input.events_applied }, dropped)
+        (Self { edits: handed, tags: paired, next: 0, life, events_applied: input.events_applied }, dropped)
     }
 
     /// Edits still waiting.
@@ -180,7 +202,7 @@ impl EditGroup {
     }
 
     /// Take the next edit, with its own tag and hand.
-    pub fn pop_front(&mut self) -> Option<(BlockChange, Option<MinedBlock>, Hand)> {
+    pub fn pop_front(&mut self) -> Option<(BlockChange, Option<EditTag>, Hand)> {
         let (bc, hand) = self.edits.pop_front()?;
         let tag = match self.tags.last() {
             Some(&(at, _)) if at == self.next => self.tags.pop().map(|(_, m)| m),
@@ -221,11 +243,13 @@ impl EditGroup {
 /// break or harvest its break arm made, and holds back a tagged edit behind an
 /// untagged one of its cell, `remote_client::hold_back_for_tags`), and a fill
 /// never takes a tag, so a place-then-break of one cell pairs the tag with the
-/// break. A tag no edit takes yields nothing and is dropped. Returns the pairs
-/// newest place first.
+/// break. A tag no edit takes yields nothing and is dropped. C3c-1 — an edit
+/// a use tag was paired with (`used`, [`pair_use_tags`]) takes no mined tag.
+/// Returns the pairs newest place first.
 fn pair_tags(
     edits: &[BlockChange],
     tags: &[MinedBlock],
+    used: &[(u32, UseTag)],
     mut block_at: impl FnMut(i32, i32, i32) -> BlockId,
 ) -> Vec<(u32, MinedBlock)> {
     let mut unpaired: Vec<MinedBlock> = tags.to_vec();
@@ -247,12 +271,34 @@ fn pair_tags(
                 block_at(cell.0, cell.1, cell.2)
             }
         };
-        if takes_tag(old, bc.new_block) {
+        if takes_tag(old, bc.new_block) && !used.iter().any(|&(u, _)| u == at as u32) {
             paired.push((at as u32, unpaired.remove(k)));
         }
     }
     paired.reverse();
     paired.shrink_to_fit();
+    paired
+}
+
+/// C3c-1 — pair each use tag with the LAST edit of its cell in the input not
+/// already paired with one (the client's own pairing: it sends no edit of a
+/// cell behind a use-tagged edit of that cell in one input,
+/// `remote_client::tag_cut`). A use tag with no edit of its cell is dropped.
+fn pair_use_tags(edits: &[BlockChange], uses: &[UseTag]) -> Vec<(u32, UseTag)> {
+    let mut paired: Vec<(u32, UseTag)> = Vec::with_capacity(uses.len());
+    for tag in uses.iter().rev() {
+        let cell = (tag.x, tag.y, tag.z);
+        let at = edits
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|&(k, bc)| (bc.x, bc.y, bc.z) == cell && !paired.iter().any(|&(p, _)| p == k as u32))
+            .map(|(k, _)| k as u32);
+        match at {
+            Some(at) => paired.push((at, tag.clone())),
+            None => log::debug!("a use tag for {cell:?} with no edit of its cell: dropped"),
+        }
+    }
     paired
 }
 
@@ -347,7 +393,7 @@ impl EditQueue {
                 .iter()
                 .map(|g| {
                     g.edits.capacity() * size_of::<(BlockChange, Hand)>()
-                        + g.tags.capacity() * size_of::<(u32, MinedBlock)>()
+                        + g.tags.capacity() * size_of::<(u32, EditTag)>()
                 })
                 .sum::<usize>()
     }
@@ -380,9 +426,51 @@ mod tests {
         EditGroup::new(edits.to_vec(), usize::MAX, tags, InputHand::default(), 0, world).0
     }
 
-    /// Each edit with its tag, in order.
+    /// Each edit with its mined tag, in order.
     fn drain(mut g: EditGroup) -> Vec<(i32, Option<MinedBlock>)> {
+        std::iter::from_fn(|| g.pop_front()).map(|(bc, t, _)| (bc.x, t.and_then(|t| t.mined().copied()))).collect()
+    }
+
+    fn use_tag(x: i32) -> UseTag {
+        UseTag { x, y: 70, z: 0, kind: 2, slot: 0, used: None, tool: WireItem::None }
+    }
+
+    /// C3c-1 — each edit with its tag of either kind, in order.
+    fn drain_tags(mut g: EditGroup) -> Vec<(i32, Option<EditTag>)> {
         std::iter::from_fn(|| g.pop_front()).map(|(bc, t, _)| (bc.x, t)).collect()
+    }
+
+    /// C3c-1 — a use tag pairs with the last edit of its cell, and a mined
+    /// tag never takes a use's edit (a bucket fill empties its cell too).
+    #[test]
+    fn a_use_tag_pairs_with_the_last_edit_of_its_cell_and_a_mined_tag_never_takes_it() {
+        let input = InputHand { use_tags: vec![use_tag(1), use_tag(9)], ..Default::default() };
+        // A mine of cell 1 (a tall grass), then a bucket fill there… the use
+        // is the last edit of its cell.
+        let edits = [edit(1, AIR), edit(2, STONE), edit(1, AIR)];
+        let (g, _) = EditGroup::new(edits.to_vec(), usize::MAX, &[tag(1)], input, 0, |_, _, _| STONE);
+        assert_eq!(
+            drain_tags(g),
+            vec![(1, Some(EditTag::Mined(tag(1)))), (2, None), (1, Some(EditTag::Use(use_tag(1))))],
+        );
+        // A mined tag alone for a use's edit: the use keeps it.
+        let input = InputHand { use_tags: vec![use_tag(3)], ..Default::default() };
+        let (g, _) = EditGroup::new(vec![edit(3, AIR)], usize::MAX, &[tag(3)], input, 0, |_, _, _| STONE);
+        assert_eq!(drain_tags(g), vec![(3, Some(EditTag::Use(use_tag(3))))]);
+    }
+
+    /// C3c-1 — mined and use tags count against one limit: the mined ones
+    /// first, then use tags up to it.
+    #[test]
+    fn mined_and_use_tags_share_one_limit() {
+        let max = crate::protocol::MAX_MINED_PER_INPUT;
+        let edits: Vec<BlockChange> = (0..30).map(|x| edit(x, AIR)).collect();
+        let mined: Vec<MinedBlock> = (0..10).map(tag).collect();
+        let input = InputHand { use_tags: (10..30).map(use_tag).collect(), ..Default::default() };
+        let (g, _) = EditGroup::new(edits, usize::MAX, &mined, input, 0, |_, _, _| STONE);
+        assert_eq!(g.tags.len(), max);
+        let uses = g.tags.iter().filter(|(_, t)| t.use_tag().is_some()).count();
+        assert_eq!(uses, max - 10);
     }
 
     #[test]
@@ -464,6 +552,7 @@ mod tests {
             hotbar_slot: Some(5),
             edit_hands: vec![(2, 1, 10), (11, 1, 11)],
             events_applied: 7,
+            use_tags: Vec::new(),
         };
         let edits = [edit(1, STONE), edit(2, STONE), edit(3, STONE)];
         let (mut g, _) = EditGroup::new(edits.to_vec(), usize::MAX, &[], input, 0, |_, _, _| AIR);
@@ -493,7 +582,7 @@ mod tests {
         let max_input = crate::protocol::MAX_WIRE_PACKET_LEN / per_edit;
         let bound = MAX_DEFERRED_EDITS * size_of::<EditGroup>()
             + (MAX_DEFERRED_EDITS + max_input) * size_of::<(BlockChange, Hand)>()
-            + (MAX_DEFERRED_EDITS + crate::protocol::MAX_MINED_PER_INPUT) * size_of::<(u32, MinedBlock)>();
+            + (MAX_DEFERRED_EDITS + crate::protocol::MAX_MINED_PER_INPUT) * size_of::<(u32, EditTag)>();
         // A full input, its buffer exactly its length (as bincode leaves it),
         // with its tags on cells it mines.
         let full_input = |t: i32| -> (Vec<BlockChange>, Vec<MinedBlock>) {
@@ -538,9 +627,9 @@ mod tests {
                  {} B an edit, {} B a tag, {max_input} edits an input)",
                 size_of::<EditGroup>(),
                 size_of::<(BlockChange, Hand)>(),
-                size_of::<(u32, MinedBlock)>(),
+                size_of::<(u32, EditTag)>(),
             );
-            assert!(bound < 2_000_000, "the bound the docs state: under 2 MB ({bound})");
+            assert!(bound < 2_500_000, "the bound the docs state: under 2.5 MB ({bound})");
         }
     }
 }

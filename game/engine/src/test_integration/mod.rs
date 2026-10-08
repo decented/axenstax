@@ -35,6 +35,7 @@ pub mod late_join;
 pub mod entity_mirror; // MP-D2a — joiners see and are hurt by the server's mobs.
 pub mod joiners_act; // MP-D2b — joiners attack, interact with and kill the server's mobs.
 pub mod joiner_inventory; // C1 — the server yields joiners' breaks and shadows their inventory.
+pub mod use_edits; // C3c-1 — a joiner's block-edit uses are mirrored on the server's copy of its inventory.
 pub mod joiner_hunger; // C2a — the server runs joiners' hunger, eating and sleep.
 pub mod joiner_craft_drop; // C2b — the server mirrors joiners' crafts and spawns their Q-drops.
 pub mod window_ops; // C3a-2a — the server mirrors a joiner's inventory window, click for click.

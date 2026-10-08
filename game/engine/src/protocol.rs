@@ -644,6 +644,19 @@ pub struct InputPacket {
     /// back to the input-level `hotbar_slot` and `held_kind`/`held_id`.
     #[serde(default)]
     pub edit_hands: Vec<EditHand>,
+    /// v80 (C3c-1) — the block-edit USES among this input's edits (a bucket
+    /// filled or emptied, a seed or reed planted, bone meal, fertiliser,
+    /// salt, an Eraser, a rubber tap, a hoe, a door's top half), each with
+    /// what it used ([`UseTag`]). The server mirrors each on its copy of the
+    /// joiner's inventory by the rule the client ran (`use_edits`), log-only
+    /// until C3d. A tag pairs with the LAST edit of its cell in this input:
+    /// the client never sends an edit of a cell behind a tagged edit of that
+    /// cell in one input (it waits, with its own tag, for the next), and it
+    /// counts these tags with `mined`'s against one limit
+    /// ([`MAX_MINED_PER_INPUT`], 16 in all; the server reads `mined` first,
+    /// then use tags up to it).
+    #[serde(default)]
+    pub use_tags: Vec<UseTag>,
 }
 
 /// v76 (C3a-fix-1) — one edit's hand ([`InputPacket::edit_hands`]): the
@@ -665,12 +678,58 @@ pub struct ColumnMismatch {
     pub client_hash: u32,
 }
 
-/// Most [`MinedBlock`]s the server reads from one `InputPacket` (a survival
-/// break takes at least a tick, so one is the norm) — its DoS guard. An
-/// honest client never sends more (it holds the edits past the limit back for
-/// its next input, tags and all), so only a modified client's extra tags are
-/// ever ignored.
+/// Most tags the server reads from one `InputPacket` — [`MinedBlock`]s and
+/// (C3c-1, v80) [`UseTag`]s together, the mined ones first (a survival break
+/// takes at least a tick and a use has an 8-tick cooldown, so one or two is
+/// the norm) — its DoS guard. An honest client never sends more (it holds the
+/// edits past the limit back for its next input, tags and all), so only a
+/// modified client's extra tags are ever ignored.
 pub const MAX_MINED_PER_INPUT: usize = 16;
+
+/// C3c-1 (v80) — a block-edit use a joiner made ([`InputPacket::use_tags`]):
+/// its cell (the edit's), the use's kind (`use_edits::UseKind`, a `u8`
+/// on the wire, append-only), and the hand BEFORE the use, stamped where
+/// the use was made (the edit's [`EditHand`] is stamped later, after the
+/// use spent its item): the hotbar `slot`, the item it consumed (`used`,
+/// count 1; `None` when it consumed nothing: a rubber tap, a hoe, an
+/// Eraser, a door's top half) and the tool it wore (`tool`, a hoe's or an
+/// Eraser's state before the use; `WireItem::None` otherwise).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseTag {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub kind: u8,
+    pub slot: u8,
+    pub used: WireSlot,
+    pub tool: WireItem,
+}
+
+/// C3c-1 — the tag one edit travels with, client side and in the server's
+/// edit queue: a break's [`MinedBlock`] or a use's [`UseTag`]. Never on the
+/// wire as such: [`InputPacket`] carries the two kinds as two lists
+/// (`mined`, `use_tags`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditTag {
+    Mined(MinedBlock),
+    Use(UseTag),
+}
+
+impl EditTag {
+    pub fn mined(&self) -> Option<&MinedBlock> {
+        match self {
+            EditTag::Mined(m) => Some(m),
+            EditTag::Use(_) => None,
+        }
+    }
+
+    pub fn use_tag(&self) -> Option<&UseTag> {
+        match self {
+            EditTag::Use(u) => Some(u),
+            EditTag::Mined(_) => None,
+        }
+    }
+}
 
 /// A block a joiner mined (v72, C1): its cell and the tool in hand for the
 /// strike (`WireItem::Tool`, or `WireItem::None` for a bare hand or a
@@ -2355,7 +2414,17 @@ pub struct ServerAnnouncePacket {
 ///   slots, a rack's logs, a composter's input and output, a hive's honey),
 ///   reliable and in line with the chunk pushes, sent whenever a view
 ///   changes and after each push of its chunk.
-pub const PROTOCOL_VERSION: u32 = 79;
+/// - v80 (2026-10-08, C3c-1): a joiner's block-edit uses are
+///   mirrored. [`InputPacket`] appends, after v76's `edit_hands`,
+///   `use_tags: Vec<UseTag>` ([`UseTag`] `{ x, y, z: i32, kind: u8, slot:
+///   u8, used: WireSlot, tool: WireItem }`; `kind` is `use_edits::UseKind`,
+///   append-only: BucketFill 0, BucketEmpty 1, Sow 2, PlantPapyrus 3,
+///   GrowGrass 4, GrowCrop 5, Salt 6, Erase 7, TapRubber 8, Till 9,
+///   DoorUpper 10). A use tag pairs with the last edit of its cell in its
+///   input, and counts with `mined` against [`MAX_MINED_PER_INPUT`] (16 in
+///   all). The server runs the use's rule on its copy of the joiner's
+///   inventory (take what it used, add what it made, wear its tool), log-only.
+pub const PROTOCOL_VERSION: u32 = 80;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2527,8 +2596,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3b-2 — v79.
-        assert_eq!(super::PROTOCOL_VERSION, 79);
+        // C3c-1 — v80.
+        assert_eq!(super::PROTOCOL_VERSION, 80);
     }
 
     #[test]
@@ -2734,9 +2803,20 @@ mod tests {
             }],
             events_applied: 12,
             edit_hands: vec![(4, item_kind::BLOCK, 3)],
+            use_tags: vec![UseTag {
+                x: 0,
+                y: 65,
+                z: 0,
+                kind: 2,
+                slot: 4,
+                used: Some(WireStack { item_kind: item_kind::MATERIAL, item_id: 9, count: 1, full_item: WireItem::None }),
+                tool: WireItem::Tool { tool_type: 9, material: 1, durability: 50 },
+            }],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: InputPacket = safe_deserialize(&bytes).unwrap();
+        // C3c-1 (v80) — the use tags survive the round-trip.
+        assert_eq!(back.use_tags, pkt.use_tags);
         assert_eq!(back.column_mismatch, pkt.column_mismatch);
         // C3a-fix-1 (v76) — the window-event count and each edit's hand.
         assert_eq!(back.events_applied, 12);
@@ -2783,6 +2863,15 @@ mod tests {
             mined: vec![MinedBlock { x: 3, y: -4, z: 5, tool: WireItem::None }],
             events_applied: 0x0A0B_0C0D,
             edit_hands: vec![(2, 0x11, 0x0304)],
+            use_tags: vec![UseTag {
+                x: 6,
+                y: -7,
+                z: 8,
+                kind: 0x0B,
+                slot: 4,
+                used: Some(WireStack { item_kind: 3, item_id: 0x0506, count: 1, full_item: WireItem::None }),
+                tool: WireItem::None,
+            }],
             ..head.clone()
         };
         let base = bincode::serialize(&head).unwrap();
@@ -2820,12 +2909,24 @@ mod tests {
         tail.extend_from_slice(&1u64.to_le_bytes());
         tail.extend_from_slice(&[2, 0x11]);
         tail.extend_from_slice(&0x0304u16.to_le_bytes());
+        // v80 (C3c-1): use_tags (u64 length + entries: x, y, z i32, kind u8,
+        // slot u8, used (`Some` tag, then item_kind u8, item_id u16, count
+        // u8, full_item's u32 variant tag), tool's u32 variant tag).
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        for v in [6i32, -7, 8] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.extend_from_slice(&[0x0B, 4, 1, 3]);
+        tail.extend_from_slice(&0x0506u16.to_le_bytes());
+        tail.push(1);
+        tail.extend_from_slice(&0u32.to_le_bytes());
+        tail.extend_from_slice(&0u32.to_le_bytes());
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
         let prefix = bytes.len() - tail.len();
         assert_eq!(&bytes[prefix..], &tail[..]);
-        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8)]);
+        assert_eq!(&bytes[..prefix], &base[..base.len() - (1 + 4 + 4 + 8 + 1 + 1 + 8 + 4 + 8 + 8)]);
     }
 
     #[test]
@@ -3188,7 +3289,10 @@ mod tests {
         //   (after `window_event`), `StateUpdatePacket.block_views` (after
         //   `own_hunger`) — composters, drying racks, campfires, item frames
         //   and hives for joiners.
-        assert_eq!(PROTOCOL_VERSION, 79);
+        // v80 (2026-10-08, C3c-1):
+        //   `InputPacket.use_tags` (after `edit_hands`) — a joiner's
+        //   block-edit uses, mirrored on the server's copy of its inventory.
+        assert_eq!(PROTOCOL_VERSION, 80);
     }
 
     fn sample_accept() -> JoinAcceptPacket {

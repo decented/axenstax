@@ -333,6 +333,17 @@ fn is_request(packet: &[u8]) -> bool {
     )
 }
 
+/// C3c-1 — a joiner's use as the server judged it before its edit landed
+/// (`HostedServer::judge_joiner_use`), to be mirrored once it has.
+struct JoinerUse {
+    tag: protocol::UseTag,
+    /// `None` for a kind byte this build doesn't know.
+    kind: Option<crate::use_edits::UseKind>,
+    /// What the tag says the use consumed, decoded.
+    used: Option<crate::item::Item>,
+    judged: Option<crate::use_edits::Judged>,
+}
+
 /// FU4a — one client's edit counters for one tick
 /// (`HostedServer::process_inbound_packets`).
 #[derive(Default)]
@@ -3657,11 +3668,14 @@ impl HostedServer {
                         // through the one validator; the budget is per tick,
                         // and what is past it waits (FU3).
                         let edits = std::mem::take(&mut input.block_changes);
+                        // C3c-1 — and its use tags, each paired with the last
+                        // edit of its cell, within the same per-input limit.
                         let hand = crate::edit_queue::InputHand {
                             held: (input.held_kind, input.held_id),
                             hotbar_slot: input.hotbar_slot,
                             edit_hands: std::mem::take(&mut input.edit_hands),
                             events_applied: input.events_applied,
+                            use_tags: std::mem::take(&mut input.use_tags),
                         };
                         self.process_or_queue_edits(i, edits, &input.mined, hand, &mut budget);
                         // MP-A3 — a reported death (only ever believed
@@ -3904,14 +3918,14 @@ impl HostedServer {
     }
 
     /// Validate and apply one of slot `i`'s edits, with its own `mined` tag
-    /// (FU4a, L2) and the hand its input reported. A refused edit is sent
-    /// back (within the per-tick cap), so the sender's optimistic local edit
-    /// is undone; its tag yields nothing.
+    /// (FU4a, L2) or (C3c-1) use tag, and the hand its input reported. A
+    /// refused edit is sent back (within the per-tick cap), so the sender's
+    /// optimistic local edit is undone; its tag yields nothing.
     fn process_one_edit(
         &mut self,
         i: usize,
         bc: &protocol::BlockChange,
-        tag: Option<protocol::MinedBlock>,
+        tag: Option<protocol::EditTag>,
         hand: (u8, u16),
         slot: usize,
         budget: &mut EditTickBudget,
@@ -3929,12 +3943,23 @@ impl HostedServer {
         // spills its contents instead of stranding them
         // as an orphan block entity (audit 2026-09-27).
         let remote = self.server.players[i].server_simulated;
+        // C3c-1 — a joiner's use (its edit carried a use tag): judged by the
+        // use's own rule on the world as it is BEFORE the edit (the soil
+        // under a seed, a fill's source, a door's bottom half, a tap's
+        // cooldown), and mirrored on its copy once the edit is in. Never
+        // classified as a placement.
+        let joiner_use = match tag.as_ref().and_then(|t| t.use_tag()) {
+            Some(use_tag) if remote => Some(self.judge_joiner_use(bc, old_block, use_tag)),
+            _ => None,
+        };
         // C1 — what a server-simulated player's edit is to
         // its inventory (`joiner_inventory`): a break it
         // mined, a plain placement, or neither. A break's
         // yield is read now, before the block leaves the
         // world (`break_drops`).
-        let joiner_edit = remote.then(|| self.classify_joiner_edit(bc, old_block, tag.as_ref(), hand));
+        let mined = tag.as_ref().and_then(|t| t.mined());
+        let joiner_edit =
+            (remote && joiner_use.is_none()).then(|| self.classify_joiner_edit(bc, old_block, mined, hand));
         let break_yield = match joiner_edit {
             Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
                 self.joiner_break_yield(bc, old_block, tool)
@@ -3987,6 +4012,9 @@ impl HostedServer {
         }
         if let Some(edit) = joiner_edit {
             self.settle_joiner_edit(i, bc, slot, edit, break_yield);
+        }
+        if let Some(judged) = joiner_use {
+            self.settle_joiner_use(i, bc, judged);
         }
         // T1-3 — a log broken by a REMOTE player queues its
         // leaves for the server's leaf-decay pass (the
@@ -4133,6 +4161,74 @@ impl HostedServer {
             if self.lends_host_world() {
                 self.lent_edit_cells.push((x, y, z));
             }
+        }
+    }
+
+    /// C3c-1 — judge a joiner's use, read before its edit `bc` lands (`old` is
+    /// the cell's block then): the use's kind and what it used, decoded from
+    /// its tag, and the server's verdict on the outcome (`use_edits::judge`).
+    fn judge_joiner_use(&self, bc: &protocol::BlockChange, old: crate::block::BlockId, tag: &protocol::UseTag) -> JoinerUse {
+        let kind = crate::use_edits::UseKind::from_wire(tag.kind);
+        let used = tag
+            .used
+            .as_ref()
+            .and_then(|w| crate::inventory::stack_from_wire(w, &self.server.registry, false))
+            .map(|s| s.item);
+        let source = match old {
+            crate::block::WATER => self.server.water.is_source(bc.x, bc.y, bc.z),
+            crate::block::LAVA => self.server.lava.is_source(bc.x, bc.y, bc.z),
+            _ => false,
+        };
+        let before = crate::use_edits::Before { old, source };
+        let judged = kind.map(|k| crate::use_edits::judge(k, used.as_ref(), bc, before, &self.server.world));
+        JoinerUse { tag: tag.clone(), kind, used, judged }
+    }
+
+    /// C3c-1 — joiner `i`'s use `bc` is in the world: mirror it on the
+    /// server's copy of its inventory by the use's rule
+    /// (`use_edits::settle`: take what it used from the tag's slot first,
+    /// wear its tool there, add its product with the client's `add_item`),
+    /// and tally the verdict (`PossessionTally::use_mirrored` /
+    /// `use_mismatch`, a mismatch logged once per kind per connection;
+    /// log-only, the edit stands). The product the copy has no room for is
+    /// spilled as a real ground item at the joiner's feet, thrown as its
+    /// own: a joined client spills nothing of its own, so in lockstep the
+    /// two overflows are the same units. A rubber tap stamps the SERVER's
+    /// cooldown with the server's tick, so the log regrows on the server's
+    /// world (a log still on cooldown keeps its stamp).
+    fn settle_joiner_use(&mut self, i: usize, bc: &protocol::BlockChange, joiner_use: JoinerUse) {
+        let JoinerUse { tag, kind, used, judged } = joiner_use;
+        let tick = self.server.tick_counter;
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let (Some(kind), Some(judged)) = (kind, judged) else {
+            // An unknown kind: a modified peer's (the version gate keeps a
+            // newer one out). Counted, applied, not mirrored.
+            sp.possession.use_mismatch = sp.possession.use_mismatch.saturating_add(1);
+            log::debug!("{} sent a use of unknown kind {} — applied, not mirrored", sp.display_name, tag.kind);
+            return;
+        };
+        let settled = crate::use_edits::settle(&mut sp.inventory, kind, &tag, used.as_ref(), judged);
+        if sp.possession.note_use(kind, settled.miss) {
+            let miss = settled.miss.map_or("", |m| m.label());
+            log::info!(
+                "use mirror (log-only): {}'s {} at ({}, {}, {}) from hotbar slot {} claimed {miss} — applied \
+                 (further mismatches of this kind are counted, not logged)",
+                sp.display_name,
+                kind.label(),
+                bc.x,
+                bc.y,
+                bc.z,
+                tag.slot,
+            );
+        }
+        if let Some(stack) = settled.overflow
+            && sp.is_in_world()
+        {
+            let feet = sp.player.pos;
+            crate::window_events::spawn_unfit(&mut self.server.ecs, feet, stack, i);
+        }
+        if kind == crate::use_edits::UseKind::TapRubber && bc.new_block == crate::block::RUBBER_LOG_TAPPED {
+            self.server.world.tapped_rubber_logs.entry((bc.x, bc.y, bc.z)).or_insert(tick);
         }
     }
 

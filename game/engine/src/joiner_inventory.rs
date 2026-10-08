@@ -20,13 +20,17 @@
 //!   locks, trash, armour equip, the craft result click, opening a screen,
 //!   its auto-refill setting — is applied to the server's copy of the window
 //!   by the same rule (`window_ops`), and a hit the server lands wears the
-//!   server's copy of the armour.
+//!   server's copy of the armour;
+//! - C3c-1: a block-edit use (a bucket filled or emptied, a seed or reed,
+//!   bone meal, fertiliser, salt, an Eraser, a rubber tap, a hoe) takes what
+//!   it used, wears its tool and adds its product (`use_edits`, by the use
+//!   tag its edit carries; tallied in [`PossessionTally::use_mirrored`]).
 //!
 //! Still the client's alone (the shadow does not see them): the inventory it
-//! joined with, chests and furnaces, face-attachment and drying-rack
-//! recovery, and its local uses (a break's and a swing's tool wear is
-//! mirrored since C3a-2b; the full list of gaps, which must close before
-//! enforcement: Spec 04 §4.2e). So the shadow
+//! joined with, face-attachment recovery, and the local uses C3c-2 and C3c-3
+//! carry (a bow, a fishing rod, a campfire lit, Plans; a break's and a
+//! swing's tool wear is mirrored since C3a-2b; the full list of gaps, which
+//! must close before enforcement: Spec 04 §4.2e). So the shadow
 //! drifts, and the possession check on placements is LOG-ONLY for one
 //! release ([`PossessionTally`]): it counts and logs a mismatch (debug; a
 //! warning at most once a minute per player), never refuses or corrects.
@@ -55,9 +59,10 @@ pub enum JoinerEdit {
     /// A plain block-item placement: checked against the shadow's held slot,
     /// and one consumed from it.
     Place,
-    /// Neither: creative, a non-block placement (bucket, seeds, flint, bone
-    /// meal, a hoe's tilling…), a meta-only toggle, or a side effect of the
-    /// client's own sim. Counted, not checked.
+    /// Neither: creative, a non-block placement its client sent no use tag
+    /// for (flint and steel, a friction stick; a tagged use is mirrored by
+    /// `use_edits` instead, C3c-1), a meta-only toggle, or a side effect of
+    /// the client's own sim. Counted, not checked.
     Unchecked,
 }
 
@@ -308,6 +313,16 @@ pub struct PossessionTally {
     /// tool the shadow's slot didn't hold ([`wear_tool`]). Logged at debug
     /// only; never refused.
     pub wear_mismatch: u32,
+    /// C3c-1 — block-edit uses (`use_edits`) mirrored on the copy: a legal
+    /// outcome whose cost, tool and product all matched.
+    pub use_mirrored: u32,
+    /// C3c-1 — uses that didn't mirror cleanly: an outcome the use's rule
+    /// can't produce, an item the copy didn't hold, a tool not in the slot.
+    /// Applied all the same (log-only).
+    pub use_mismatch: u32,
+    /// C3c-1 — the use kinds already logged a mismatch for
+    /// (`use_edits::UseKind::bit`): one line per kind per connection.
+    uses_logged: u16,
     /// Mismatches since the last warning.
     suppressed: u32,
     /// When the last warning went out.
@@ -339,6 +354,20 @@ impl PossessionTally {
         }
     }
 
+    /// C3c-1 — count a use's verdict (`miss` = `None` for a clean mirror).
+    /// `true` when this mismatch is the first of its kind this connection,
+    /// so it is logged.
+    pub fn note_use(&mut self, kind: crate::use_edits::UseKind, miss: Option<crate::use_edits::UseMiss>) -> bool {
+        if miss.is_none() {
+            self.use_mirrored = self.use_mirrored.saturating_add(1);
+            return false;
+        }
+        self.use_mismatch = self.use_mismatch.saturating_add(1);
+        let first = self.uses_logged & kind.bit() == 0;
+        self.uses_logged |= kind.bit();
+        first
+    }
+
     /// C3a-2a — count a window op whose digest differed; `true` for the
     /// first one this connection.
     pub fn note_window_mismatch(&mut self, kind: crate::window_ops::OpKind) -> bool {
@@ -361,8 +390,10 @@ impl PossessionTally {
             self.use_believed,
             self.use_refused,
         ];
+        let uses = [self.use_mirrored, self.use_mismatch];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
+            .chain(&uses)
             .chain(&window)
             .chain(&c2b)
             .chain(&c3b)
@@ -379,6 +410,12 @@ impl PossessionTally {
             line.push_str(&format!(
                 "; {} tool use(s) the shadow's slot didn't hold a tool for",
                 self.wear_mismatch
+            ));
+        }
+        if uses.iter().any(|&n| n > 0) {
+            line.push_str(&format!(
+                "; {} block-edit use(s) mirrored, {} use(s) that didn't match the server's copy",
+                self.use_mirrored, self.use_mismatch
             ));
         }
         if window.iter().any(|&n| n > 0) {

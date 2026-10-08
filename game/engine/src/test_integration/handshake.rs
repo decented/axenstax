@@ -232,7 +232,9 @@ fn protocol_version_is_the_pinned_value() {
     //   `ItemAction::UseBlock` (= 5), `ItemActionOutcomePacket.wear_held`,
     //   `StateUpdatePacket.block_views` — composters, drying racks, campfires,
     //   item frames and hives for joiners.
-    assert_eq!(protocol::PROTOCOL_VERSION, 79);
+    // v80 (2026-10-08, C3c-1):
+    //   `InputPacket.use_tags` — a joiner's block-edit uses, mirrored.
+    assert_eq!(protocol::PROTOCOL_VERSION, 80);
 }
 
 #[test]

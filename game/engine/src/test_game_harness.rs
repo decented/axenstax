@@ -1990,4 +1990,156 @@ mod tests {
             }
         }
     }
+
+    // ─── C3c-1 ─────────────────────────────────────────────────────────────
+
+    /// The ground items in an ECS that hold `item`, units.
+    fn ground_units(ecs: &hecs::World, item: &crate::item::Item) -> u32 {
+        ecs.query::<&crate::entity::ItemEntity>()
+            .iter()
+            .filter(|(_, it)| &it.stack.item == item)
+            .map(|(_, it)| u32::from(it.stack.count))
+            .sum()
+    }
+
+    /// C3c-1 — a joiner with a full bag fills a bucket from a pond through
+    /// the REAL fill arm (`try_bucket_fill`): the use rides its edit with its
+    /// tag, the server mirrors it on its copy (one bucket spent, the water
+    /// bucket made), and the water bucket that fits neither side is spilled
+    /// by the SERVER, from its copy, as one real ground item the joiner sees —
+    /// the joined client spills nothing of its own. The world's buckets are
+    /// conserved, and the copy is the client's window.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_full_joiners_bucket_fill_is_spilled_by_the_server_alone() {
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("full-fill");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let pond = [feet[0] + 2, feet[1], feet[2]];
+        hg.state.world.set_block(pond[0], pond[1], pond[2], crate::block::WATER);
+        hg.state.water.add_source(pond[0], pond[1], pond[2]);
+        server.server.world.set_block(pond[0], pond[1], pond[2], crate::block::WATER);
+        server.server.water.add_source(pond[0], pond[1], pond[2]);
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+            for k in 1..36 {
+                inv.set_slot(k, Some(ItemStack::new_block(crate::block::STONE, 64)));
+            }
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        let water_bucket = Item::Material(MaterialId::WaterBucket);
+        aim_at(&mut hg, glam::Vec3::new(pond[0] as f32 + 0.5, pond[1] as f32 + 0.5, pond[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(pond[0], pond[1], pond[2]), crate::block::AIR, "the client filled its bucket");
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(1), "one bucket spent");
+        assert_eq!(ground_units(&hg.state.ecs, &water_bucket), 0, "a joined client spills nothing of its own");
+        for _ in 0..4 {
+            harness_step(&mut server, &mut hg);
+        }
+        assert_eq!(server.server.world.get_block(pond[0], pond[1], pond[2]), crate::block::AIR);
+        let sp = &server.server.players[slot];
+        assert_eq!((sp.possession.use_mirrored, sp.possession.use_mismatch), (1, 0), "the fill mirrored");
+        let slots = |inv: &crate::inventory::Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
+        assert_eq!(slots(&sp.inventory), slots(&hg.state.players[0].inventory), "the copy is the client's window");
+        assert_eq!(ground_units(&server.server.ecs, &water_bucket), 1, "the server spilled one real water bucket");
+        assert_eq!(ground_units(&hg.state.ecs, &water_bucket), 0);
+        let (kind, id) = crate::inventory::item_to_ref(&water_bucket).to_wire();
+        assert!(
+            hg.state.remote_items.iter().any(|it| it.item.to_wire() == (kind, id)),
+            "the joiner sees the server's water bucket"
+        );
+        let inv = &hg.state.players[0].inventory;
+        let buckets = u32::from(inv.count_material(MaterialId::Bucket))
+            + u32::from(inv.count_material(MaterialId::WaterBucket))
+            + ground_units(&server.server.ecs, &water_bucket);
+        assert_eq!(buckets, 2, "the world's buckets are conserved");
+    }
+
+    /// C3c-1 — a joiner places a door through the REAL place arm. With no
+    /// headroom it is refused BEFORE the door is taken: nothing taken,
+    /// nothing placed, nothing sent (it used to be placed, undone and
+    /// refunded on the client alone). With headroom both halves reach the
+    /// server — the top half as the door's tagged use — and the server's copy
+    /// paid for one door.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_door_is_checked_first_and_reaches_the_server_whole() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("door");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let door = crate::item::ItemStack::new_block(crate::block::OAK_DOOR, 2);
+        hg.state.players[0].inventory.set_slot(0, Some(door.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(door));
+        hg.state.players[0].hotbar_slot = 0;
+        let place = [feet[0], feet[1], feet[2] - 2];
+        let top = [place[0], place[1] + 1, place[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(top[0], top[1], top[2], crate::block::STONE);
+        }
+        harness_step(&mut server, &mut hg);
+        let floor_top = glam::Vec3::new(place[0] as f32 + 0.5, place[1] as f32 + 0.02, place[2] as f32 + 0.5);
+        aim_at(&mut hg, floor_top);
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(place[0], place[1], place[2]), crate::block::AIR, "no room: nothing placed");
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(2), "and nothing taken");
+        assert!(hg.state.toast.as_ref().is_some_and(|(t, _)| t.starts_with("No room for the door")));
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        assert_eq!(server.server.world.get_block(place[0], place[1], place[2]), crate::block::AIR);
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(2), "the server's copy paid nothing");
+        assert_eq!((sp.possession.matched, sp.possession.mismatched, sp.possession.unchecked), (0, 0, 0), "nothing was sent");
+        // Headroom: a whole door.
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(top[0], top[1], top[2], crate::block::AIR);
+        }
+        harness_step(&mut server, &mut hg);
+        aim_at(&mut hg, floor_top);
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(top[0], top[1], top[2]), crate::block::OAK_DOOR, "the client's door is whole");
+        for _ in 0..4 {
+            harness_step(&mut server, &mut hg);
+        }
+        let w = &server.server.world;
+        assert_eq!(w.get_block(place[0], place[1], place[2]), crate::block::OAK_DOOR, "the bottom half");
+        assert_eq!(w.get_block(top[0], top[1], top[2]), crate::block::OAK_DOOR, "the top half reached the server");
+        assert!(crate::block_shape::door_is_top(w.meta_at(top[0], top[1], top[2])));
+        let sp = &server.server.players[slot];
+        assert_eq!((sp.possession.matched, sp.possession.mismatched), (1, 0), "the bottom half paid for the door");
+        assert_eq!((sp.possession.use_mirrored, sp.possession.use_mismatch), (1, 0), "the top half is the door's use");
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(1));
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(1));
+    }
+
+    /// C3c-1 — single-player: a Plot Marker whose claim would overlap another
+    /// player's plot is refused BEFORE it is taken (it used to be placed,
+    /// undone and refunded): the toast, and the marker still in hand.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_conflicting_plot_marker_is_refused_before_it_is_taken() {
+        use crate::item::{ItemStack, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-plot-check-first");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        let feet = clear_pad(&mut hg, None);
+        let place = [feet[0], feet[1], feet[2] - 2];
+        // Someone else's plot, its edge four blocks to the +x: the new claim
+        // would overlap it, though the marker's own cell is outside it.
+        let foreign = crate::plot::PlotData::from_marker(crate::plot::PlotOwner::LocalPlayer(1), place[0] + 20, place[1], place[2]);
+        hg.state.world.plots.push(foreign);
+        let inv = &mut hg.state.players[0].inventory;
+        *inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::PlotMarkerItem, 1)));
+        hg.state.players[0].hotbar_slot = 0;
+        aim_at(&mut hg, glam::Vec3::new(place[0] as f32 + 0.5, place[1] as f32 + 0.02, place[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(place[0], place[1], place[2]), crate::block::AIR, "nothing placed");
+        assert_eq!(hg.state.players[0].inventory.count_material(MaterialId::PlotMarkerItem), 1, "nothing taken");
+        assert_eq!(hg.state.world.plots.len(), 1, "no claim");
+        assert!(hg.state.toast.as_ref().is_some_and(|(t, _)| t == "Too close to another player's plot."));
+    }
 }
