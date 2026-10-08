@@ -445,9 +445,10 @@ fn a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server() {
     // client's power tick, dispensers, pistons, keg fuses and lightning fire
     // pushed their block changes to the server as the joiner's own edits, where
     // they fought the server's own machines and grew its edit FIFO (FU3 verify
-    // Q9). Each stays behind `remote_client.is_none()`; the furnace sweep still
-    // runs on a joiner (its own furnace UI cooks until C3) but its changes are
-    // not queued for the server.
+    // Q9). Each stays behind `remote_client.is_none()`. C3b-1 — so does the
+    // furnace sweep itself now (FU4b kept it running for the joiner's own
+    // furnace UI, which now draws the server's furnace), so nothing it changes
+    // reaches the server.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
@@ -464,7 +465,7 @@ fn a_joiner_client_runs_no_machine_sim_that_pushes_edits_to_the_server() {
         ("crate::piston::tick_pistons(", 3),
         ("crate::power::tick_keg_fuses(", 4),
         ("self.fire.ignite(&mut self.world, bx, surface_y + 1, bz", 3),
-        ("self.pending_block_changes.extend(furnace_sweep.changes)", 3),
+        ("crate::furnace::tick_all(&mut self.world)", 3),
     ];
     for (needle, back) in sites {
         let mut found = 0;

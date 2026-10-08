@@ -219,7 +219,12 @@ fn protocol_version_is_the_pinned_value() {
     //   `events_applied` on the C→S packets judged against the window,
     //   `InputPacket.edit_hands`, `EntityAttackPacket.hotbar_slot`,
     //   `ItemAction::GrantUnfit`.
-    assert_eq!(protocol::PROTOCOL_VERSION, 76);
+    // v77 (2026-10-08, C3b-1):
+    //   `WireWindowOp::OpenContainer`/`Container`, `WindowOpPacket.touched`
+    //   and `.claims` (after v76's `events_applied`), `ContainerOpened = 65`,
+    //   `WindowSlotSet = 66` (its `window_event` numbers a player-slot
+    //   correction) — shared chests, dispensers and furnaces for joiners.
+    assert_eq!(protocol::PROTOCOL_VERSION, 77);
 }
 
 #[test]

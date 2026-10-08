@@ -178,6 +178,8 @@ Every pickaxe strike — on any block, including grass and dirt — runs an HMAC
 
 **Anti-farming (player-placed blocks earn no reward).** Anti-X-ray stops a player *reading* hidden value; a separate hole let them *manufacture* work — chop a block, restand/replace it, re-break it ("rehash your own work"). On a Bitcoin server that same place→break loop would mint payouts for free. **Invariant, every world:** a block a *player* placed earns no proof-of-play hash/work and no hash-driven drop (material or Bitcoin) when broken. Breaking and item recovery are unchanged — only the reward credit is withheld. "Anything you place" counts (a stone, a workbench, a sown crop — the crop's produce still drops, the work does not). Implemented as a per-voxel "placed" bit persisted with the chunk (Spec 2 §4.3), gating `crafting::block_work` via the shared `break_work(block, harvestable, was_player_placed)` decision; the bit travels with falling blocks so a dropped placed block can't be laundered natural. Full design + build notes: `docs/foundations/2026-06-03-work-based-hashing.md` ("Anti-farming"). BUILT 2026-06-08.
 
+**A joiner's furnace earns no Proof-of-Play trickle (C3b-1, 2026-10-08).** The furnace's sats trickle on a completed smelt (`furnace::PROOF_OF_PLAY_TRICKLE_SATS`, the nearest player within `POP_TRICKLE_RADIUS_BLOCKS`) is paid in the client's furnace sweep and reads `PlayerSlot` policy (`charter_allows_sats`, the Vow); a joined client runs no furnace sweep (its furnace screen draws the server's real furnace, Spec 04 §4.2g), and the server's sweep pays nothing.
+
 ### 2.2 Hash Computation
 
 When a player digs a block at position `(x, y, z)`:

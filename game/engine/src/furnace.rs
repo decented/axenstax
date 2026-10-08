@@ -326,8 +326,10 @@ pub fn tick_burner(data: &mut FurnaceData) -> Option<bool> {
 
 // ── Spec 29 — slot-click free function ───────────────────────────────
 
-/// Which slot of a furnace UI was clicked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which slot of a furnace UI was clicked. C3b-1 — wire data (inside
+/// `container_window::ContainerClick::Furnace`), APPEND ONLY: Input = 0,
+/// Fuel = 1, Output = 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SlotKind {
     Input,
     Fuel,
@@ -336,8 +338,9 @@ pub enum SlotKind {
 
 /// How much to move on a click: 1 (left-click) or the whole hotbar
 /// / slot stack (shift-click). Matches Minecraft's left-click vs
-/// shift-click idiom for furnace slots.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// shift-click idiom for furnace slots. C3b-1 — wire data, APPEND ONLY:
+/// Single = 0, Stack = 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClickMode {
     Single,
     Stack,

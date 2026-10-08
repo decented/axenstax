@@ -55,10 +55,11 @@ pub struct WindowMut<'a> {
     pub cursor: &'a mut Option<ItemStack>,
     /// The crafting grid (its usable size comes from [`ClickCtx::station`]).
     pub grid: &'a mut CraftGrid,
-    /// The open container's slots. Always `None` until C3b puts chests,
-    /// furnaces and the rest in the same window.
-    #[allow(dead_code)] // BRIDGE: read when C3b adds container clicks.
-    pub container: Option<&'a mut [Option<ItemStack>]>,
+    /// C3b-1 — the open container (a chest of any tier, a dispenser or
+    /// dropper, a furnace): `container_window::apply_container`'s clicks
+    /// move items between it and the rest of the window, and [`digest`]
+    /// covers it. `None` for every other screen.
+    pub container: Option<crate::container_window::ContainerMut<'a>>,
 }
 
 /// Which crafting grid the window shows.
@@ -103,6 +104,11 @@ pub struct ClickCtx {
     /// [`SERVER_TABLE_GRACE_TICKS`], so the client may not have heard.
     /// `false` on the client; the server sets it ([`Self::with_server_slack`]).
     pub table_grace: bool,
+    /// C3b-1 — the open container is a shared one: a joined client's mirror
+    /// of the server's, or the server applying a joiner's op. A Plan neither
+    /// goes in nor comes out (`container_window`). `false` for single-player
+    /// and a host's own screens, whose rules don't change.
+    pub shared: bool,
 }
 
 /// B-L2 — the server judges a joiner's table reach this much more kindly than
@@ -122,7 +128,7 @@ impl ClickCtx {
             Station::Table { cell } => block_at(cell),
             Station::Player => crate::block::AIR,
         };
-        ClickCtx { creative, station, eye, table_block, reach_slack: 0.0, table_grace: false }
+        ClickCtx { creative, station, eye, table_block, reach_slack: 0.0, table_grace: false, shared: false }
     }
 
     /// B-L2 — the SERVER's context: [`SERVER_TABLE_REACH_SLACK`] more reach,
@@ -131,6 +137,12 @@ impl ClickCtx {
     pub fn with_server_slack(mut self, table_changed_lately: bool) -> Self {
         self.reach_slack = SERVER_TABLE_REACH_SLACK;
         self.table_grace = table_changed_lately;
+        self
+    }
+
+    /// C3b-1 — the same context, judging a shared container (`shared`).
+    pub fn with_shared(mut self, shared: bool) -> Self {
+        self.shared = shared;
         self
     }
 
@@ -246,12 +258,16 @@ pub enum ClickResult {
     /// `Autofill` of a recipe bigger than 2×2 into the player's grid: nothing
     /// moved (the caller toasts "Needs a crafting table").
     NeedsTable,
+    /// C3b-1 — a Plan can't go into, or come out of, a shared container:
+    /// nothing moved (the caller toasts "Plans can't go in shared containers
+    /// yet").
+    PlanStays,
 }
 
 impl ClickResult {
     /// Did the click succeed (the old `bool` the click handlers returned)?
     pub fn ok(&self) -> bool {
-        !matches!(self, ClickResult::Refused | ClickResult::NeedsTable)
+        !matches!(self, ClickResult::Refused | ClickResult::NeedsTable | ClickResult::PlanStays)
     }
 }
 
@@ -871,8 +887,10 @@ pub fn station_after(station: Station, click: &WindowClick, result: &ClickResult
 
 /// C3a-2a — the window's digest ([`digest_parts`] over a view), at
 /// `station` (C3a-fix-1: the screen the window is open at, after the op).
+/// C3b-1 — with the open container's slots when the view has one
+/// ([`digest_with`]).
 pub fn digest(view: &WindowMut, station: Station) -> u32 {
-    digest_parts(view.inv, view.armour, view.cursor, view.grid, station)
+    digest_with(view.inv, view.armour, view.cursor, view.grid, station, view.container.as_ref().map(|c| c.as_ref()))
 }
 
 /// C3a-2a — a stable 32-bit hash of a window: the 36 slots, the four armour
@@ -900,6 +918,23 @@ pub fn digest_parts(
     cursor: &Option<ItemStack>,
     grid: &CraftGrid,
     station: Station,
+) -> u32 {
+    digest_with(inv, armour, cursor, grid, station, None)
+}
+
+/// C3b-1 — [`digest_parts`], then, when a container is open, a presence
+/// byte, its kind (chest 0, furnace 1), its slot count (u16) and each slot
+/// (a furnace's input, fuel, output). A container op's digest covers the
+/// container on both sides; every other op's has none, so its digest is
+/// [`digest_parts`]'s. A furnace's progress is not in it: it moves on the
+/// server between the client's pushes.
+pub fn digest_with(
+    inv: &Inventory,
+    armour: &[Option<ArmourItem>; 4],
+    cursor: &Option<ItemStack>,
+    grid: &CraftGrid,
+    station: Station,
+    container: Option<crate::container_window::ContainerRef>,
 ) -> u32 {
     let mut h = Fnv32::default();
     for i in 0..SLOTS {
@@ -930,6 +965,38 @@ pub fn digest_parts(
                 }
             }
         }
+    }
+    if let Some(c) = container {
+        h.byte(1);
+        h.byte(match c {
+            crate::container_window::ContainerRef::Chest(_) => 0,
+            crate::container_window::ContainerRef::Furnace(_) => 1,
+        });
+        let n = c.len().min(usize::from(u16::MAX));
+        h.u16(n as u16);
+        for i in 0..n {
+            h.stack(c.get(i));
+        }
+    }
+    h.0
+}
+
+/// C3b-1 — one slot's fingerprint: the digest's hash of that slot alone
+/// (kind, id, count, durability; a Plan content-free). Two slots print the
+/// same exactly when the digest can't tell them apart. Names the slots a
+/// container click changed, and what a joiner was last sent.
+pub fn slot_print(stack: Option<&ItemStack>) -> u32 {
+    let mut h = Fnv32::default();
+    h.stack(stack);
+    h.0
+}
+
+/// C3b-1 — an armour slot's fingerprint ([`slot_print`] of the piece).
+pub fn armour_print(piece: Option<&ArmourItem>) -> u32 {
+    let mut h = Fnv32::default();
+    match piece {
+        Some(p) => h.item(&Item::Armour(*p), 1),
+        None => h.byte(0),
     }
     h.0
 }

@@ -38,6 +38,7 @@ pub mod joiner_inventory; // C1 — the server yields joiners' breaks and shadow
 pub mod joiner_hunger; // C2a — the server runs joiners' hunger, eating and sleep.
 pub mod joiner_craft_drop; // C2b — the server mirrors joiners' crafts and spawns their Q-drops.
 pub mod window_ops; // C3a-2a — the server mirrors a joiner's inventory window, click for click.
+pub mod shared_containers; // C3b-1 — shared chests, dispensers and furnaces for joiners.
 pub mod state_budget; // T1-5 — bounded server→client StateUpdates.
 pub mod joiner_authority;
 // D1 — a host lends its world to its server: one world, one sim.

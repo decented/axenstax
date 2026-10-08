@@ -189,7 +189,7 @@ impl CraftingUi {
     /// C3a-2a — the window ops logged since the last call, for a joined
     /// client to send in order; auto-refill's setting is logged first if it
     /// changed since the last op (`window_ops::OpLog::take`).
-    pub fn take_ops(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Vec<(crate::protocol::WireWindowOp, u32)> {
+    pub fn take_ops(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Vec<crate::window_ops::LoggedOp> {
         let now = self.digest(inv, armour);
         self.ops.take(inv.auto_refill, now)
     }
@@ -198,6 +198,57 @@ impl CraftingUi {
     /// screen's station.
     pub fn digest(&self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> u32 {
         window::digest_parts(inv, armour, &self.cursor_item, &self.grid, self.station())
+    }
+
+    /// C3b-1 — apply one container click: the shared rule
+    /// (`container_window::apply_container`) over `container` (the real one
+    /// in single-player or on a host; a joiner's mirror of the server's) plus
+    /// this screen's grid and cursor and the player's `inv` and `armour`.
+    /// Logged as a window op (`Container`), with the window's digest after
+    /// it (the container included), the slots it changed and the claims:
+    /// the window's values BEFORE it of the player slots it acts on
+    /// (`container_window::claim_slots`), which the server re-runs it over.
+    /// `ctx.shared` for a joiner's mirror. A container op doesn't move the
+    /// station.
+    pub fn apply_container_click(
+        &mut self,
+        inv: &mut Inventory,
+        armour: &mut [Option<ArmourItem>; 4],
+        container: crate::container_window::ContainerMut,
+        click: &crate::container_window::ContainerClick,
+        ctx: &ClickCtx,
+    ) -> crate::container_window::ContainerApplied {
+        let station = self.station();
+        self.ops.sync_auto_refill(inv.auto_refill, || {
+            window::digest_parts(inv, armour, &self.cursor_item, &self.grid, station)
+        });
+        let before = crate::container_window::PlayerSlots::of(inv, armour, &self.cursor_item, &self.grid);
+        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: Some(container) };
+        let applied = crate::container_window::apply_container(&mut view, click, ctx);
+        let after = window::digest(&view, station);
+        let claims = crate::container_window::claim_slots(click, &applied.touched)
+            .into_iter()
+            .filter_map(|at| before.wire(at).map(|v| (at, v)))
+            .collect();
+        self.ops.record_container(crate::protocol::WireWindowOp::Container(click.clone()), after, applied.touched.clone(), claims);
+        applied
+    }
+
+    /// C3b-1 — a joined client asked to open the container at `cell`
+    /// (`OpenContainer`): logged as a window op, with the window's digest
+    /// (no container yet: nothing opens until the server answers).
+    pub fn log_open_container(&mut self, cell: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+        self.log_op(crate::protocol::WireWindowOp::OpenContainer { cell }, inv, armour);
+    }
+
+    /// C3b-1 — a container screen closed (the player, or the reach/kind
+    /// rule): `WindowClick::Close`, applied and logged as any close is, so
+    /// the server closes the container too. The grid and cursor it returns
+    /// are empty while a container is open; this screen's own open state is
+    /// left alone.
+    pub fn close_container(&mut self, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> ClickResult {
+        let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
+        self.apply_ctx(inv, armour, &WindowClick::Close, &ctx)
     }
 
     /// C3a-1 — apply one window click: the pure rule (`window::apply`) over
@@ -2056,7 +2107,7 @@ mod tests {
     fn closes_logged(ui: &mut CraftingUi, inv: &Inventory) -> usize {
         ui.take_ops(inv, &[None; 4])
             .iter()
-            .filter(|(op, _)| matches!(op, crate::protocol::WireWindowOp::Click(WindowClick::Close)))
+            .filter(|l| matches!(l.op, crate::protocol::WireWindowOp::Click(WindowClick::Close)))
             .count()
     }
 

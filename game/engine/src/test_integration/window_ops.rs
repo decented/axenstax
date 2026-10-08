@@ -329,9 +329,16 @@ impl Rig {
         let c = &mut self.c;
         let ops = c.ui.take_ops(&c.inv, &c.armour);
         let n = ops.len();
-        for (op, digest) in ops {
+        for logged in ops {
             c.seq += 1;
-            let pkt = WindowOpPacket { op_seq: c.seq, op, digest, events_applied: c.events };
+            let pkt = WindowOpPacket {
+                op_seq: c.seq,
+                op: logged.op,
+                digest: logged.digest,
+                events_applied: c.events,
+                touched: logged.touched,
+                claims: logged.claims,
+            };
             c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
         }
         n
@@ -672,8 +679,14 @@ fn a_closed_connection_holding_a_thousand_window_ops_is_reaped() {
     let Rig { mut hs, c, .. } = rig;
     let slot = c.slot;
     for n in 1..=1000u32 {
-        let pkt =
-            WindowOpPacket { op_seq: n, op: protocol::WireWindowOp::Click(WindowClick::Sort), digest: 0, events_applied: 0 };
+        let pkt = WindowOpPacket {
+            op_seq: n,
+            op: protocol::WireWindowOp::Click(WindowClick::Sort),
+            digest: 0,
+            events_applied: 0,
+            touched: Vec::new(),
+            claims: Vec::new(),
+        };
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }
     drop(c.transport); // the link just goes

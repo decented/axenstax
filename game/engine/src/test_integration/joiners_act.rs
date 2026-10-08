@@ -1276,8 +1276,15 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
     for click in [crate::window::WindowClick::Slot { slot: 0, right: false }, crate::window::WindowClick::Slot { slot: 9, right: false }] {
         ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR);
     }
-    for (n, (op, digest)) in ui.take_ops(&inv, &armour).into_iter().enumerate() {
-        let pkt = protocol::WindowOpPacket { op_seq: n as u32 + 1, op, digest, events_applied: u32::MAX };
+    for (n, logged) in ui.take_ops(&inv, &armour).into_iter().enumerate() {
+        let pkt = protocol::WindowOpPacket {
+            op_seq: n as u32 + 1,
+            op: logged.op,
+            digest: logged.digest,
+            events_applied: u32::MAX,
+            touched: logged.touched,
+            claims: logged.claims,
+        };
         rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }
     rig.tick(10); // the ops, and past the swing schedule

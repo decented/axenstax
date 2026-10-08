@@ -259,6 +259,18 @@ pub struct PossessionTally {
     /// sees, a click a modified client sent. Not counted for a creative
     /// joiner.
     pub window_refused: u32,
+    /// C3b-1 — container ops (`WireWindowOp::Container`) refused because no
+    /// container was open on the server, or its cell was gone or out of
+    /// reach.
+    pub container_refused: u32,
+    /// C3b-1 — `WindowSlotSet` corrections sent after a container op whose
+    /// result differed (someone else got there first, or a refusal).
+    pub container_corrections: u32,
+    /// C3b-1 (v77) — units a joiner put into a shared container, by its
+    /// claims, that the server's copy of its inventory didn't hold: believed
+    /// deposits (BRIDGE until C3d; a locally fished item, unmirrored until
+    /// C3c, is the honest case).
+    pub container_believed: u32,
     /// C3a-2a — ops after which the server's window digest differed from the
     /// one the client sent (log-only). Not counted for a creative joiner,
     /// whose item browser gives stay local until C3c.
@@ -323,10 +335,12 @@ impl PossessionTally {
     pub fn summary(&self, label: &str) -> Option<String> {
         let window = [self.window_ops, self.window_noop, self.window_refused, self.window_mismatch];
         let c2b = [self.drops, self.grant_overflow];
+        let c3b = [self.container_refused, self.container_corrections, self.container_believed];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
             .chain(&window)
             .chain(&c2b)
+            .chain(&c3b)
             .all(|&n| n == 0)
         {
             return None;
@@ -348,6 +362,12 @@ impl PossessionTally {
                 "; {} window op(s) mirrored, {} no-op(s) both rules refused, {} refused by the server alone, \
                  {} digest mismatch(es){first}",
                 self.window_ops, self.window_noop, self.window_refused, self.window_mismatch
+            ));
+        }
+        if c3b.iter().any(|&n| n > 0) {
+            line.push_str(&format!(
+                "; {} container op(s) refused, {} container correction(s) sent, {} unit(s) deposited believed",
+                self.container_refused, self.container_corrections, self.container_believed
             ));
         }
         if c2b.iter().any(|&n| n > 0) {

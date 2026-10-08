@@ -269,10 +269,22 @@ pub enum OwnLifeEvent {
 /// `ItemActionOutcome` (eating, sleeping). One queue for both: the requests
 /// share one sequence (`joiner_actions`), and an answer applied out of order
 /// would forget the earlier request still waiting (`JoinerActions::take`).
+///
+/// C3b-1 — the server's container answers ride the same queue, in arrival
+/// order with the outcomes, into the window inbox
+/// (`window_events::WindowInbox`): a `WindowSlotSet` that changes player
+/// slots is a numbered window event and is applied at its number's turn
+/// with the grants and the armour wear; `ContainerOpened` and a set of
+/// container slots only (`window_event` 0) keep their place among the
+/// outcomes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RequestOutcome {
     Interact(protocol::InteractOutcomePacket),
     Item(protocol::ItemActionOutcomePacket),
+    /// C3b-1 — the answer to our `OpenContainer`.
+    ContainerOpened(protocol::ContainerOpenedPacket),
+    /// C3b-1 — the server's values for some slots of our window.
+    SlotSet(protocol::WindowSlotSetPacket),
 }
 
 /// MP-D2b — the death cause a `DiedOf` names, as the death screen reads it.
@@ -1065,6 +1077,27 @@ impl RemoteClient {
                             changed = true;
                         }
                     }
+                    // C3b-1 — container answers, in order with the outcomes.
+                    PacketType::ContainerOpened => {
+                        if let Ok(opened) = protocol::safe_deserialize::<
+                            protocol::ContainerOpenedPacket,
+                        >(payload)
+                            && self.pending_outcomes.len() < 256
+                        {
+                            self.pending_outcomes.push(RequestOutcome::ContainerOpened(opened));
+                            changed = true;
+                        }
+                    }
+                    PacketType::WindowSlotSet => {
+                        if let Ok(set) = protocol::safe_deserialize::<
+                            protocol::WindowSlotSetPacket,
+                        >(payload)
+                            && self.pending_outcomes.len() < 256
+                        {
+                            self.pending_outcomes.push(RequestOutcome::SlotSet(set));
+                            changed = true;
+                        }
+                    }
                     PacketType::KillEvent => {
                         if let Ok(kill) =
                             protocol::safe_deserialize::<protocol::KillEventPacket>(payload)
@@ -1292,13 +1325,29 @@ impl RemoteClient {
     /// connection. No-op before the join completes (and the number doesn't
     /// move). Never answered. Not native-only: a web joiner's window is
     /// mirrored too.
-    pub fn send_window_op(&mut self, op: protocol::WireWindowOp, digest: u32) {
+    ///
+    /// C3b-1 — `touched`: the slots a container op changed on our side, and
+    /// `claims`: our values before it of the player slots it acts on (both
+    /// empty for any other op).
+    pub fn send_window_op(
+        &mut self,
+        op: protocol::WireWindowOp,
+        digest: u32,
+        touched: Vec<protocol::WireWindowSlot>,
+        claims: Vec<(protocol::WireWindowSlot, protocol::WireSlot)>,
+    ) {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
         self.window_op_seq = self.window_op_seq.wrapping_add(1);
-        let pkt =
-            protocol::WindowOpPacket { op_seq: self.window_op_seq, op, digest, events_applied: self.events_applied };
+        let pkt = protocol::WindowOpPacket {
+            op_seq: self.window_op_seq,
+            op,
+            digest,
+            events_applied: self.events_applied,
+            touched,
+            claims,
+        };
         self.transport.send_to_server(&protocol::serialize_packet(PacketType::WindowOp, &pkt));
     }
 

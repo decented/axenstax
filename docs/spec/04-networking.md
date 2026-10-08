@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `76`** (C3a-fix-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `77`** (C3b-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -35,6 +35,7 @@
 - **v74** (2026-10-07, C2b): **A joiner's crafting and Q-drops are mirrored on the server.** `ItemAction` appends `Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (= 2: the grid as it stood before the craft, row-major `item_to_ref` pairs; the crafting table the 3×3 grid was opened from) and `Drop { hotbar_slot, held_kind, held_id, held_full }` (= 3, `Eat`'s held claim). Both are fire-and-forget: `ItemActionPacket.seq` still moves on, no outcome is sent, no new `PacketType`. The server mirrors a craft on its shadow of the joiner's inventory (`item_actions::judge_craft`: a known recipe from blocks and materials, a recipe bigger than 2×2 only at a crafting table in block reach; one of each input taken, owed; the output added) and spawns a Q-drop as a real ground item thrown from the joiner's server body (full fidelity from `held_full`), paced by a per-joiner token bucket (2, refilled one per `DROP_INTERVAL_TICKS` = 4; a drop it can't pay for waits in the inbound queue). (C2b first spilled a grant that didn't fit the shadow; the C2b-fix reversed it: the `InventoryGrant` carries the whole stack and the overflow is tallied, §4.2e.) On the client, a Q-drop or a craft click that would spend an item a request in flight claims does nothing, and an owed outcome is paid from the 36 slots, then the crafting grid, then the cursor. `ServerPlayer.crafting_ui` (a dead BRIDGE) is gone. See §4.2f, §4.2e, §4.2d.
 - **v75** (2026-10-08, C3a-2a): **The server mirrors a joiner's inventory window, click for click.** Appended: `PacketType::WindowOp = 64` (C→S, `WindowOpPacket { op_seq: u32, op: WireWindowOp, digest: u32 }`; `WireWindowOp` = `Click(window::WindowClick)` | `OpenPlayer` | `OpenTable { cell: [i32; 3] }` | `SetAutoRefill { on: bool }`, append only), never answered. `window::WindowClick` (Slot = 0 … Close = 10), `window::WindowSlot` and `crafting::CraftSlot` become wire data, append only; a drag's slot list over 45 doesn't decode. The client sends one op for every window transition it applies, with its window digest after it; the server applies the same `window::apply` to its copy of the joiner's window (36 slots, armour, cursor, craft grid, station) behind the client's edits, at most `MAX_WINDOW_OPS_PER_TICK` = 8 a tick (the rest wait), and tallies digest mismatches (log-only). `ItemAction::Craft` (= 2) is unused — the craft is the result click — and a v75 server ignores and tallies it. The server's owed payment searches its 36 slots, then its grid, then its cursor (the client's search); a server-landed hit wears its copy of the armour; an accepted swing wears the weapon where it now is (`joiner_actions::where_now`, shared). See §4.2g.
 - **v76** (2026-10-08, C3a-fix-1): **A joiner's window stays in lockstep: ordered server window events, one ordered send path, per-edit hands.** The server numbers every change it makes to a joiner's window — a grant (a pickup's too), an accepted request's owed take (an eat, a D2b interaction), an armour-wear hit, a swing's weapon wear — as a window event (1, 2, 3… per connection), queues it and applies it to its copy only once the client reports it applied it too, so both sides apply it at the same point among the client's ops and edits (the content is the server's; only the order follows the client; no replay). Appended, in this order: `InventoryGrantPacket`, `InteractOutcomePacket`, `ItemActionOutcomePacket` and `PlayerEventPacket` gain trailing `window_event: u32` (0 = changes nothing; on `PlayerEvent` only `ArmourWorn` sets it); `InputPacket` gains trailing `events_applied: u32` then `edit_hands: Vec<(u8 slot, u8 held_kind, u16 held_id)>` (parallel to `block_changes`); `WindowOpPacket`, `ItemActionPacket` and `EntityInteractPacket` gain trailing `events_applied: u32`; `EntityAttackPacket` gains trailing `hotbar_slot: u8` then `events_applied: u32`; `ItemAction` appends `GrantUnfit { event: u32, count: u8 }` (= 4, fire-and-forget). `window::digest` now covers the session locks and the station. The client applies a grant's unfit part nowhere: it reports it (`GrantUnfit`) and the server spawns it as a real ground item at the joiner's feet. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `joiner_action_packets_round_trip`, `item_action_packets_round_trip`, `window_op_packets_round_trip`, `respawn_request_and_life_events_round_trip`, `inventory_grant_roundtrip`). See §4.2g.
+- **v77** (2026-10-08, C3b-1): **Shared chests, dispensers and furnaces for joiners.** `WireWindowOp` appends `OpenContainer { cell: [i32; 3] }` (= 4) and `Container(container_window::ContainerClick)` (= 5; `ContainerClick` = `Withdraw { slot, all }` 0, `Deposit { slot, all }` 1, `Sort` 2, `DumpMatching` 3, `Restock` 4, `TakeAll` 5, `Furnace { kind: furnace::SlotKind, mode: furnace::ClickMode, hotbar }` 6, append only; `SlotKind` Input/Fuel/Output = 0/1/2, `ClickMode` Single/Stack = 0/1). `WindowOpPacket` appends, after v76's `events_applied`, `touched: Vec<WireWindowSlot>` (≤ 122: the slots a container op changed on the client) then `claims: Vec<(WireWindowSlot, WireSlot)>` (≤ 122: the client's values before a container op of the player slots it acts on); both empty for every other op. Appended S→C: `ContainerOpened = 65` (`{ cell, kind: container_window::ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal> }`; `ContainerKind` = `Chest { tier }` 0, `Dispenser` 1, `Dropper` 2, `Furnace` 3; `OpenRefusal` = `OutOfReach` 0, `Protected` 1, `NotAContainer` 2, `NotInWorld` 3) and `WindowSlotSet = 66` (`{ op_seq_applied: u32, reason: u8 (Correction 0 | Changed 1), sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32 }`; `WireWindowSlot` = `Inv(u8)` 0, `Armour(u8)` 1, `Cursor` 2, `Grid(u8, u8)` 3, `Container(u8)` 4; `window_event` ≠ 0 when the set changes player slots: a numbered window event, as v76's carriers). `WireSlot` = `Option<WireStack { item_kind, item_id, count, full_item: WireItem }>`; `item_kind::PLAN = 4` is reserved for a Plan placeholder. A container op's window digest covers the container. A player-slot correction is the op re-run over the client's claimed slots and the real container, never the server's drifted copy. Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -526,7 +527,9 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
 | 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop and GrantUnfit are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
-| 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32 }` (`events_applied` v76), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3). Never answered. **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
+| 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, WireSlot)> }` (`events_applied` v76; `touched` and `claims` v77, ≤ 122 each, in that order), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3; v77: OpenContainer { cell }=4, Container(ContainerClick)=5). Never answered, except an `OpenContainer` (by `ContainerOpened`) and a `Container` op that earns a correction (by a `WindowSlotSet`). **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
+| 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal> }`. **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
+| 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named slots of a joiner's window: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32 }` — a correction of a container op, or a push of what changed in the open container. Never a whole window. A set that changes player slots is a numbered window event (`window_event` ≠ 0); container slots are shared state (0). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
 | 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32 }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's take, 0 for none). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
@@ -1675,8 +1678,9 @@ interaction; several give placeable blocks — logs, wallpaper, item frames,
 bought blocks):
 
 - the inventory the joiner arrived with (not on the wire);
-- what it takes from chests, furnaces and other containers; client-side
-  pickups of what its own client spilled (a bucket's or a purchase's
+- what it takes from composters, drying racks, campfires, item frames and
+  hives (C3b-2; chests, dispensers and furnaces left this list in C3b-1,
+  §4.2g); client-side pickups of what its own client spilled (a bucket's or a purchase's
   overflow, a death scatter); a grant's overflow (above: the client holds
   what the shadow had no room for, so the shadow holds less);
 - fishing; a beehive's honey (bottle or bucket); keg / aged output; an item
@@ -1738,8 +1742,8 @@ than the client's (log-only; the same direction as the gaps below):
 - queue truncation: an edit past the queue's bound is dropped;
 - an unpaired `mined` tag: it becomes `Unchecked` and wears nothing.
 
-The other direction — the shadow holds MORE: container
-deposits and the
+The other direction — the shadow holds MORE: composter, rack, campfire,
+frame and hive deposits (C3b-2) and the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
 cells; and **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow
@@ -1751,7 +1755,9 @@ its food from the shadow by the owed rule, §4.2f. Crafting outputs and
 inputs, Q-drops and grant overflow left the lists in C2b: a craft and a drop
 are mirrored, §4.2f, and a grant's overflow is tallied and the client holds it, above.
 Slot moves, armour put on and taken off, armour wear, sort, trash and the
-craft left them in C3a-2a: every window op is mirrored, §4.2g.) (A fill carrying a `mined`
+craft left them in C3a-2a: every window op is mirrored, §4.2g. Chest,
+dispenser and furnace takes and deposits left both lists in C3b-1: a
+joiner's container clicks act on the server's real container, §4.2g.) (A fill carrying a `mined`
 tag, C1's MEDIUM-1 residual, is no longer one: since FU1 it is classified
 like any fill and a plain placement consumes.)
 
@@ -2007,7 +2013,7 @@ craft the server's window can't make is refused there, tallied, and makes
 nothing on the server). Both close with enforcement (C3). Crafting is not enforced: a refused craft is
 only counted, and the client keeps what it made.
 
-### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1)
+### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1; v77, C3b-1)
 
 The server holds each joiner's inventory window slot for slot and the client
 predicts it with the same rules, the way Minecraft's window clicks work
@@ -2249,7 +2255,196 @@ race the ops: they apply in the client's order (above). A carrier the client
 drops (its bounded queues: 256 grants or outcomes, 16 life events a poll) is
 applied on the server when a later count passes it: a divergence, never
 expected of an honest server. No sync exists yet: `InventorySync` lands with
-the death phase; mismatch-driven resync with replay with C3d.
+the death phase; mismatch-driven resync with replay with C3d. (C3b-1's per-slot `WindowSlotSet`, below, is a
+narrower carrier.)
+
+#### Shared containers (as built, protocol v77, C3b-1)
+
+A joiner opens the server's REAL chest (any tier), dispenser, dropper or
+furnace, never a private copy. Every container click is mirrored with the
+shared rules; when the real container changes the outcome (someone else got
+there first, or the server refused), the server corrects just the slots
+involved; others' changes to an open container reach the joiner live.
+
+**One rule.** `container_window::apply_container(view, click, ctx)` is one
+transition over a `window::WindowMut` whose `container` hook holds the open
+container (`ContainerMut::Chest(&mut ChestData)` — a chest, or a dispenser's
+or dropper's 9 slots — or `ContainerMut::Furnace(&mut FurnaceData)`, slots
+input 0, fuel 1, output 2). It calls the existing pure rules
+(`chest_ui::withdraw_chest_slot`, `deposit_to_chest`, `sort_chest`,
+`dump_matching`, `restock_from_chest`, `take_all_where`;
+`furnace::apply_slot_click`) and returns `ContainerApplied { result:
+ClickResult, touched: Vec<WireWindowSlot> }` — the slots whose contents it
+changed, found by fingerprint (`window::slot_print`, the digest's hash of one
+slot). A click for the other kind, or with nothing open, is `Refused`. A
+furnace click carries its own hotbar slot (the server's latest input may name
+an older one). Single-player and a host apply it to the real block entity
+(the chest and furnace dialogs only draw and report clicks now); behaviour is
+unchanged.
+
+**Plans stay with their holder** (C3 design §5). In a shared container
+(`ClickCtx::shared`: a joiner's mirror, or the server applying a joiner's op)
+a Plan can't go in and can't come out: `ClickResult::PlanStays` on both sides
+(the client toasts "Plans can't go in shared containers yet", or "…can't
+leave…"), and Take all leaves a Plan where it is (Dump matching and Restock
+never move one: a Plan never stacks). A host's Plan in a container reaches a
+joiner as `item_kind::PLAN` (id 0), decoded as a body-less
+`plan::PlanData::placeholder`; a Plan digests content-free, so the mirror and
+the real one digest alike. A `WindowSlotSet` never overwrites a window slot
+(not a container slot) that holds a Plan on the client, and the server never
+names one.
+
+**Opening.** The joined client's right-click on a chest, dispenser/dropper
+or furnace (`game_loop`) creates and opens nothing locally: if the cell is in
+reach by the server's rule (`container_window::container_in_reach` =
+`item_actions::cell_in_reach`, the block-edit envelope from the body's eye)
+it logs `OpenContainer { cell }` as a window op; otherwise it toasts "You
+can't open that here." The server (`HostedServer::open_joiner_container`)
+opens it when the joiner is in the world and alive, the cell holds a
+container (`ContainerKind::of_block`; a furnace lit or not), it is in reach of
+the server body — with the server's slack, `container_window::
+container_in_server_reach` (+`window::SERVER_TABLE_REACH_SLACK` = 0.5 block,
+C3a-fix-2's table verdict), so an honest client's open near the edge isn't
+refused — and the play mode and plot rules let the joiner touch it
+(`remote_may_touch`); it creates the block entity if missing (a chest sized to
+its tier), sets `ServerPlayer.open_container`, records what it sends
+(`container_sent: window_ops::SentContainer`: the contents by value and a
+furnace's `FurnaceView`), and answers `ContainerOpened` with the slots
+(full-fidelity `WireStack`s) and the furnace's progress. A refusal carries
+`OpenRefusal` and opens nothing (the client toasts). The client opens its
+screen on the answer: a mirror (`PlayerSlot.shared_container:
+container_window::SharedContainer`) and the matching `open_chest` /
+`open_dispenser` / `open_furnace` naming the cell, so every "a screen is
+open" check holds; the screen draws from the mirror (`GameState::
+draw_shared_container`).
+
+**Ops and claims.** A click predicts on the mirror and the window
+(`CraftingUi::apply_container_click`, `shared`) and is logged as
+`Container(click)` with the digest after it — `window::digest_with`, which
+for a container op covers the container (a presence byte, kind, slot count,
+each slot; a furnace's progress is not in it) — the slots it changed
+(`WindowOpPacket.touched`) and its **claims** (`WindowOpPacket.claims`): the
+client's values BEFORE the op, at full fidelity, of the player slots it acts
+on (`container_window::claim_slots`: the ones it changed, the ones the click
+names — a deposit's source, a furnace click's held slot — and all 36 for
+Restock, whose rule reads every slot).
+
+The server (`window_ops::serve_op` → `serve_container`) first refuses an op
+before the rule when no container is open, its cell no longer holds it (then
+it is closed), or it is out of reach of the server body (with the same
+slack): `container_refused`, tallied; nothing moved, so the player slots the
+client changed go back to the values it claims they had (a correction).
+Otherwise it runs the op three times by the one rule:
+- **R, the shared truth:** over a `container_window::ClaimedWindow` — the
+  claimed player slots at their claimed values, every other inventory slot a
+  blocker (a one-off tool: nothing merges into it, lands in it or is taken
+  from it) — and the REAL container. The real container keeps R's result.
+  **Believed deposits:** a deposit of an item the server's copy of the window
+  doesn't hold is believed — the container receives the claimed item, and
+  `PossessionTally::container_believed` counts the units (logged at the
+  possession-check rate). BRIDGE until C3d, which refuses and corrects from
+  the server's window: the same fabrication class as a claimed Q-drop (the
+  possession-check debt). The honest case is a locally fished or filled item,
+  unmirrored until C3c.
+- **P, the client's prediction as the server sees it:** the same claims over
+  the container as last sent to the joiner (`SentContainer`, held by value),
+  and — while a push or correction of a slot may still be on its way
+  (`window_ops::IN_FLIGHT_TICKS` = 40, two seconds) — over the container as
+  the joiner may still be seeing it, that slot at its value before (a race it
+  lost before the winner's push reached it). The view the client predicted
+  on is the one whose window — the server's copy with the claimed slots at
+  that view's results, and that view's container — digests as the client's
+  did; a drift confined to the claimed slots doesn't hide it. When neither
+  matches (a drift in other slots), both are judged.
+- **The server's own copy of the window** applies the op as usual over a copy
+  of the container as it was (log-only), and its digest — with the real
+  container — is compared with the client's (`note_served`).
+
+**Corrections.** `WindowSlotSet { reason: Correction, op_seq_applied: the
+op's seq }`, sent at once during inbound processing (ahead of the tick's
+grants), counted as `container_corrections`:
+- **Player slots:** each claimed slot whose R result differs from P's (on
+  every view judged), at R's value. It is relative to the client's own pre-op state, never the server's
+  drifted copy, and it exists only where the real container changed the
+  outcome: a joiner whose window drifted from the server's copy (a local use
+  not mirrored until C3c) earns none for an op nobody raced, and no
+  correction ever names a slot the op didn't claim. The losing joiner of a
+  race for the last stack has exactly what it predicted it gained taken back;
+  whatever else that slot held stays. This part is a numbered **window
+  event** (`window_events::WindowEvent::SetSlots`; the packet's
+  `window_event`): the client applies it in arrival order with the other
+  carriers, and the server applies it to its copy when the client reports it
+  (`events_applied`), so both copies take it at the same point among the
+  client's ops.
+- **Container slots:** each container slot the op involved (either side's
+  changes and the click's named slots) whose REAL value differs from what P
+  left in the client's mirror. Shared state, not an event: applied at once,
+  as the pushes are. (Not on a digest mismatch alone: a joiner whose window
+  drifted would be corrected on every op, and a correction arriving after
+  its next click on the same slot would overwrite that click's prediction.)
+
+The container slots an op involved are recorded as sent at their real values
+either way, so a joiner's own clicks never come back as pushes. Creative
+joiners are corrected too (the container is everyone's).
+
+**Pushes.** Once a tick, after the world's machines ran
+(`HostedServer::push_open_containers` → `window_ops::container_push`), each
+joiner with a container open is sent `WindowSlotSet { reason: Changed,
+window_event: 0 }` with the container slots that differ from what it was last
+sent, and a furnace's `FurnaceView` when it moved: another player's clicks, a
+hopper, the furnace cooking, a host's own clicks on its lent world. A
+container whose cell no longer holds it is closed (`open_container` cleared,
+no more pushes).
+
+**Applying.** The client queues `ContainerOpened` and `WindowSlotSet` with the
+request outcomes (`remote_client::RequestOutcome::ContainerOpened` /
+`SlotSet`) into the window inbox (`window_events::WindowInbox`,
+`GameState::apply_window_inbox`), so they apply in arrival order with the
+other window-event carriers, and not while edits are unsent: a set with
+`window_event` ≠ 0 at its number's turn; `ContainerOpened` and a
+container-only set (0) in their place among the outcomes.
+`container_window::apply_slot_set` overwrites exactly the named slots, in the
+window and the mirror, and shows a furnace's progress; nothing is replayed (a
+later mismatch is corrected again). A container slot with no mirror open, a
+Plan placeholder named for a window slot, and an undecodable stack are
+skipped.
+
+**Closing.** `WindowClick::Close`, `OpenPlayer` and `OpenTable` close the
+server's container. The client's screen closes when its `open_*` field stops
+naming the mirror (Close button, E, Esc, the chest broken), the player dies or
+leaves, or the cell leaves reach or changes kind (`SharedContainer::
+still_open`, the server's rule; `GameState::tick_shared_container`, every
+frame); the close is logged as `WindowClick::Close`
+(`CraftingUi::close_container`: the grid and cursor it returns are empty
+while a container is open).
+
+**Breaking one.** A joined client that breaks a chest, dispenser, dropper or
+furnace clears its own copy of the block entity without spilling it: the
+server's spill of the real one (`spill_container_on_change`) is the only one,
+so exactly one set of real items lands.
+
+**Joined-client sims off.** A joined client runs no furnace sweep (FU4b kept
+it for the private furnace UI, which now draws the server's furnace), no
+hopper tick and no chest autocollect: the server, or the lending host, runs
+the real ones. A joiner's furnace earns no Proof-of-Play trickle (Spec 06
+§2.1).
+
+**Loot chests.** A worldgen loot chest a joiner opens shows the server's
+contents (c3-evidence-a G6): its own generated copy is never opened, so it
+can't be looted privately.
+
+**Known limits.** Composters, drying racks, campfires, item frames and hives
+are C3b-2; the steed pack and villager trade D2c; economy blocks are refused
+from C3d. The in-flight view keeps a slot's value from before the FIRST send
+still in flight, not every state between; and when a drift outside the
+claimed slots hides which view the client used, a slot whose outcome differs
+between the views is corrected even if the client had the newer one (the
+value sent is R's either way). A correction that arrives after the joiner
+already acted again on the same slot overwrites that later prediction (no
+replay before C3d). **`--no-lend`:** a `--no-lend` host
+mirrors its own block entities over the server's each tick
+(`HostedServer::mirror_host_world_state`, BRIDGE, deleted with the flag), so a
+joiner's change to a container there is overwritten.
 
 ### 4.3 Block Mutations
 

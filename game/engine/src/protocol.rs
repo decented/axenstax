@@ -132,6 +132,15 @@ pub enum PacketType {
     /// order behind the client's edits, and compares digests (log-only).
     /// Never answered. Sent by a joiner only.
     WindowOp = 64,
+    /// Server → Client: the answer to a joiner's `WireWindowOp::OpenContainer`
+    /// (C3b-1, [`ContainerOpenedPacket`]): the server's real chest, dispenser,
+    /// dropper or furnace at that cell, slot for slot, or why it can't open.
+    ContainerOpened = 65,
+    /// Server → Client: the server's values for some slots of the joiner's
+    /// window (C3b-1, [`WindowSlotSetPacket`]): a correction after a container
+    /// op whose result differed, or a push of what changed in the open
+    /// container. Never a whole-window overwrite.
+    WindowSlotSet = 66,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -727,6 +736,12 @@ pub mod item_kind {
     pub const BLOCK: u8 = 1;
     pub const TOOL: u8 = 2;
     pub const MATERIAL: u8 = 3;
+    /// C3b-1 — reserved for [`super::WireStack`]: a Plan the receiver holds
+    /// only as a placeholder it can't take. A Plan's body has no wire form
+    /// (it can reach about 160 KB), so a host's Plan in a shared container
+    /// reaches a joiner as this kind (id 0) and decodes to a body-less
+    /// stand-in (`plan::PlanData::placeholder`).
+    pub const PLAN: u8 = 4;
 }
 
 /// A reference to an item held by a player, encoded on the wire as a
@@ -1012,8 +1027,9 @@ pub struct ItemActionPacket {
 }
 
 /// One window op (C3a-2a, [`WindowOpPacket`]). Wire-stable, APPEND ONLY:
-/// Click = 0, OpenPlayer = 1, OpenTable = 2, SetAutoRefill = 3 (pinned by
-/// `window_op_packets_round_trip`).
+/// Click = 0, OpenPlayer = 1, OpenTable = 2, SetAutoRefill = 3, (C3b-1)
+/// OpenContainer = 4, Container = 5 (pinned by `window_op_packets_round_trip`
+/// and `container_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum WireWindowOp {
     /// A click on the window (`window::WindowClick`, itself append-only):
@@ -1030,6 +1046,190 @@ pub enum WireWindowOp {
     /// join and whenever it changes: a placement refills the hotbar on both
     /// sides by the same rule.
     SetAutoRefill { on: bool },
+    /// C3b-1 — the client right-clicked the container at `cell` (a chest of
+    /// any tier, a dispenser or dropper, a furnace lit or not) and asks to
+    /// open the server's real one. Nothing opens until the server answers
+    /// with [`ContainerOpenedPacket`]; the window doesn't change.
+    OpenContainer { cell: [i32; 3] },
+    /// C3b-1 — a click on the open container's screen
+    /// (`container_window::ContainerClick`, itself append-only): the client
+    /// applied `container_window::apply_container` to its mirror and its
+    /// window, and the server applies the same rule to the real container
+    /// and its copy of the window. The digest covers the container.
+    Container(crate::container_window::ContainerClick),
+}
+
+/// C3b-1 — the most slots one container shows: the largest chest tier
+/// (`chest::ChestTier::Satori`, 8 rows of 9).
+pub const MAX_CONTAINER_SLOTS: usize = 72;
+
+/// C3b-1 — the most slots one [`WindowSlotSetPacket`] names (and one
+/// container op reports touched): a whole container, the 36 slots, the 4
+/// armour slots, the cursor and the 9 grid cells.
+pub const MAX_WINDOW_SLOTS: usize = MAX_CONTAINER_SLOTS + 36 + 4 + 1 + 9;
+
+/// C3b-1 — one slot of a joiner's window, as a correction or a push names
+/// it, and as a container op reports it touched. Wire-stable, APPEND ONLY:
+/// Inv = 0, Armour = 1, Cursor = 2, Grid = 3, Container = 4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WireWindowSlot {
+    /// Inventory slot 0..36.
+    Inv(u8),
+    /// Armour slot `ArmourSlot as usize`, 0..4.
+    Armour(u8),
+    /// The stack on the cursor.
+    Cursor,
+    /// Crafting-grid cell `(row, col)`.
+    Grid(u8, u8),
+    /// Slot of the open container: a chest's index, or a furnace's input (0),
+    /// fuel (1) and output (2).
+    Container(u8),
+}
+
+/// C3b-1 — a full-fidelity stack on the wire: the `(item_kind, item_id)`
+/// pair (`inventory::item_to_ref`), its count, and the tool/armour state the
+/// pair loses (`WireItem`, which wins on decode, as `InventoryGrantPacket`'s
+/// does). `item_kind::PLAN` is reserved for a Plan placeholder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireStack {
+    pub item_kind: u8,
+    pub item_id: u16,
+    pub count: u8,
+    pub full_item: WireItem,
+}
+
+/// C3b-1 — one window or container slot on the wire: empty, or a stack.
+pub type WireSlot = Option<WireStack>;
+
+/// C3b-1 — a furnace's progress as its screen draws it (the bars), sent with
+/// [`ContainerOpenedPacket`] and with each push while the furnace cooks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FurnaceView {
+    pub smelt_progress: u32,
+    pub smelt_total: u32,
+    pub fuel_ticks_remaining: u32,
+    pub lit: bool,
+}
+
+impl FurnaceView {
+    /// The progress `furnace` shows.
+    pub fn of(furnace: &crate::furnace::FurnaceData) -> Self {
+        FurnaceView {
+            smelt_progress: furnace.smelt_progress,
+            smelt_total: furnace.smelt_total,
+            fuel_ticks_remaining: furnace.fuel_ticks_remaining,
+            lit: furnace.lit,
+        }
+    }
+
+    /// Show this progress on a mirror `furnace` (its slots stay as they are).
+    pub fn apply_to(self, furnace: &mut crate::furnace::FurnaceData) {
+        furnace.smelt_progress = self.smelt_progress;
+        furnace.smelt_total = self.smelt_total;
+        furnace.fuel_ticks_remaining = self.fuel_ticks_remaining;
+        furnace.lit = self.lit;
+    }
+}
+
+/// C3b-1 — why a container didn't open for a joiner. Wire-stable, APPEND
+/// ONLY: OutOfReach = 0, Protected = 1, NotAContainer = 2, NotInWorld = 3.
+/// The client toasts "You can't open that here." for each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenRefusal {
+    /// Beyond the block reach of the server's body
+    /// (`item_actions::cell_in_reach`).
+    OutOfReach,
+    /// The world's play mode forbids it, or it stands in a plot the joiner
+    /// doesn't own (`HostedServer::remote_may_touch`).
+    Protected,
+    /// The cell holds no chest, dispenser, dropper or furnace.
+    NotAContainer,
+    /// The joiner isn't in the world, or is dead.
+    NotInWorld,
+}
+
+/// Server → Client (C3b-1, `PacketType::ContainerOpened`): the answer to
+/// `WireWindowOp::OpenContainer`. Opened: `kind` and `slots` are the server's
+/// real container at `cell` (a furnace's slots are input, fuel and output,
+/// with `furnace` its progress), and the client's screen opens on a mirror of
+/// them. Refused (`refused` set): `kind`, `slots` and `furnace` mean nothing,
+/// and nothing opens.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContainerOpenedPacket {
+    pub cell: [i32; 3],
+    pub kind: crate::container_window::ContainerKind,
+    /// At most [`MAX_CONTAINER_SLOTS`] (more doesn't decode).
+    #[serde(deserialize_with = "bounded_container_slots")]
+    pub slots: Vec<WireSlot>,
+    pub furnace: Option<FurnaceView>,
+    pub refused: Option<OpenRefusal>,
+}
+
+/// C3b-1 — `WindowSlotSetPacket::reason` values.
+pub mod slot_set_reason {
+    /// A container op's result differed from the client's (someone else got
+    /// there first, or the server refused it): the REAL values of the
+    /// container slots it involved, and the server's re-run of the op over
+    /// the client's claimed pre-op player slots
+    /// (`WindowOpPacket::claims`) for each player slot whose result differs
+    /// from the client's own prediction — never the server's drifted copy.
+    pub const CORRECTION: u8 = 0;
+    /// What changed in the open container since the last push, made by
+    /// anyone but this joiner's own ops: another player, a hopper, the
+    /// furnace's cooking, a host's click on its lent world.
+    pub const CHANGED: u8 = 1;
+}
+
+/// Server → Client (C3b-1, `PacketType::WindowSlotSet`): values for exactly
+/// the named slots of the joiner's window (§3 rule 7: never a whole-window
+/// overwrite, which would revert local uses not mirrored yet). The client
+/// overwrites those slots and nothing else; nothing is replayed, and a later
+/// mismatch is corrected again. It is applied in arrival order with the
+/// other window-event carriers (`window_events::WindowInbox`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowSlotSetPacket {
+    /// The `op_seq` of the last window op from this client the server had
+    /// applied when it sent this.
+    pub op_seq_applied: u32,
+    /// [`slot_set_reason`]: `CORRECTION` or `CHANGED`.
+    pub reason: u8,
+    /// At most [`MAX_WINDOW_SLOTS`] (more doesn't decode).
+    #[serde(deserialize_with = "bounded_slot_sets")]
+    pub sets: Vec<(WireWindowSlot, WireSlot)>,
+    /// The open furnace's progress, when the open container is a furnace.
+    pub furnace: Option<FurnaceView>,
+    /// v77 — a set that changes this joiner's PLAYER slots (inventory,
+    /// armour, cursor, grid) is a numbered window event (`window_events`,
+    /// as `InventoryGrantPacket::window_event`): the client applies it in
+    /// arrival order with the other carriers, and the server applies its
+    /// side when the client reports it (`events_applied`). 0 for a set of
+    /// container slots only (a push, or a container-only correction): shared
+    /// state, applied at once.
+    pub window_event: u32,
+}
+
+fn bounded_container_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WireSlot>, D::Error> {
+    let slots = Vec::<WireSlot>::deserialize(d)?;
+    if slots.len() > MAX_CONTAINER_SLOTS {
+        return Err(serde::de::Error::invalid_length(slots.len(), &"at most 72 container slots"));
+    }
+    Ok(slots)
+}
+
+fn bounded_slot_sets<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<(WireWindowSlot, WireSlot)>, D::Error> {
+    let sets = Vec::<(WireWindowSlot, WireSlot)>::deserialize(d)?;
+    if sets.len() > MAX_WINDOW_SLOTS {
+        return Err(serde::de::Error::invalid_length(sets.len(), &"at most 122 window slots"));
+    }
+    Ok(sets)
+}
+
+fn bounded_window_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WireWindowSlot>, D::Error> {
+    let touched = Vec::<WireWindowSlot>::deserialize(d)?;
+    if touched.len() > MAX_WINDOW_SLOTS {
+        return Err(serde::de::Error::invalid_length(touched.len(), &"at most 122 touched slots"));
+    }
+    Ok(touched)
 }
 
 /// Client → Server: one window op (C3a-2a, `PacketType::WindowOp`). A joined
@@ -1046,6 +1246,24 @@ pub struct WindowOpPacket {
     /// applied when it applied this op: the server applies its queued
     /// events up to it first ([`InputPacket::events_applied`]).
     pub events_applied: u32,
+    /// C3b-1 (v77) — for a `Container` op, the slots the client's own apply
+    /// changed (`container_window::ContainerApplied::touched`); empty for
+    /// every other op. A mismatched container op's correction covers the
+    /// container slots among these as well as the ones the server's apply
+    /// changed. At most [`MAX_WINDOW_SLOTS`].
+    #[serde(deserialize_with = "bounded_window_slots")]
+    pub touched: Vec<WireWindowSlot>,
+    /// C3b-1 (v77) — for a `Container` op, the client's values BEFORE the op
+    /// of the player slots it acts on (`container_window::claim_slots`: the
+    /// ones it touched, the ones the click names, and all 36 for Restock,
+    /// whose rule reads them all), at full fidelity; empty for every other
+    /// op. The server re-runs the op over these slots and the REAL container
+    /// (`window_ops::serve_op`), so a correction of a player slot is
+    /// relative to the client's own state, never to the server's drifted
+    /// copy. Believed while the mirror is log-only (C3d refuses). At most
+    /// [`MAX_WINDOW_SLOTS`].
+    #[serde(deserialize_with = "bounded_slot_sets")]
+    pub claims: Vec<(WireWindowSlot, WireSlot)>,
 }
 
 /// Server → Client: the decision on one [`ItemActionPacket`] (C2a).
@@ -1960,7 +2178,24 @@ pub struct ServerAnnouncePacket {
 ///   `ItemAction` appends `GrantUnfit { event, count }` (= 4): the part of a
 ///   grant that didn't fit the client comes back as a real ground item the
 ///   server spawns, never a client-local spill.
-pub const PROTOCOL_VERSION: u32 = 76;
+/// - v77 (2026-10-08, C3b-1): shared chests, dispensers and furnaces for
+///   joiners. `WireWindowOp` appends `OpenContainer { cell }` (= 4) and
+///   `Container(container_window::ContainerClick)` (= 5; Withdraw, Deposit,
+///   Sort, DumpMatching, Restock, TakeAll, Furnace, append-only);
+///   `WindowOpPacket` appends, after v76's `events_applied`, `touched:
+///   Vec<WireWindowSlot>` (≤ 122, the slots a container op changed on the
+///   client) and `claims: Vec<(WireWindowSlot, WireSlot)>` (≤ 122, the
+///   client's pre-op values of the player slots a container op acts on).
+///   Appended S→C: `ContainerOpened = 65` ([`ContainerOpenedPacket`] `{ cell,
+///   kind, slots ≤ 72, furnace, refused }`) and `WindowSlotSet = 66`
+///   ([`WindowSlotSetPacket`] `{ op_seq_applied, reason, sets ≤ 122,
+///   furnace, window_event }`: a per-slot correction of a container op, or a
+///   push of what changed in the open container — never a whole window; a
+///   set that changes player slots is a numbered window event,
+///   `window_event` ≠ 0). `item_kind::PLAN = 4` is reserved for a Plan
+///   placeholder in a [`WireStack`]. A container op's window digest covers
+///   the container.
+pub const PROTOCOL_VERSION: u32 = 77;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2029,6 +2264,8 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         62 => PacketType::ItemAction,
         63 => PacketType::ItemActionOutcome,
         64 => PacketType::WindowOp,
+        65 => PacketType::ContainerOpened,
+        66 => PacketType::WindowSlotSet,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2130,8 +2367,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3a-fix-1 — v76.
-        assert_eq!(super::PROTOCOL_VERSION, 76);
+        // C3b-1 — v77.
+        assert_eq!(super::PROTOCOL_VERSION, 77);
     }
 
     #[test]
@@ -2773,7 +3010,12 @@ mod tests {
         //   on the five C→S packets judged against the window,
         //   `InputPacket.edit_hands`, `EntityAttackPacket.hotbar_slot`,
         //   `ItemAction::GrantUnfit` (= 4) — ordered server window events.
-        assert_eq!(PROTOCOL_VERSION, 76);
+        // v77 (2026-10-08, C3b-1):
+        //   `WireWindowOp::OpenContainer` (= 4) and `Container` (= 5),
+        //   `WindowOpPacket.touched` and `.claims` (after `events_applied`),
+        //   `ContainerOpened = 65`, `WindowSlotSet = 66` (trailing
+        //   `window_event`) — shared chests, dispensers and furnaces.
+        assert_eq!(PROTOCOL_VERSION, 77);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3082,8 +3324,14 @@ mod tests {
             WindowClick::Close,
         ];
         for (index, click) in clicks.into_iter().enumerate() {
-            let pkt =
-                WindowOpPacket { op_seq: 7, op: WireWindowOp::Click(click), digest: 0xDEAD_BEEF, events_applied: 0x0102_0304 };
+            let pkt = WindowOpPacket {
+                op_seq: 7,
+                op: WireWindowOp::Click(click),
+                digest: 0xDEAD_BEEF,
+                events_applied: 0x0102_0304,
+                touched: Vec::new(),
+                claims: Vec::new(),
+            };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             assert_eq!(bytes[0], 64, "wire-stable tag");
             let (ptype, payload) = deserialize_header(&bytes).unwrap();
@@ -3092,9 +3340,14 @@ mod tests {
             // op_seq (u32), then the op's variant (Click = 0), then the click's.
             assert_eq!(&payload[4..8], &0u32.to_le_bytes(), "Click = 0");
             assert_eq!(&payload[8..12], &(index as u32).to_le_bytes(), "WindowClick variant {index}");
-            // v76 — digest, then events_applied, close the packet.
-            assert_eq!(&payload[payload.len() - 8..payload.len() - 4], &0xDEAD_BEEFu32.to_le_bytes());
-            assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes());
+            // v76 — digest, then events_applied; v77 — then `touched` and
+            // `claims` (each an empty list: a u64 length of 0) close the
+            // packet. Append order: main's fields first.
+            let tail = &payload[payload.len() - 24..];
+            assert_eq!(&tail[0..4], &0xDEAD_BEEFu32.to_le_bytes(), "digest");
+            assert_eq!(&tail[4..8], &0x0102_0304u32.to_le_bytes(), "events_applied (v76)");
+            assert_eq!(&tail[8..16], &0u64.to_le_bytes(), "touched (v77)");
+            assert_eq!(&tail[16..24], &0u64.to_le_bytes(), "claims (v77)");
         }
         let others = [
             (WireWindowOp::OpenPlayer, 1u32),
@@ -3102,7 +3355,7 @@ mod tests {
             (WireWindowOp::SetAutoRefill { on: false }, 3),
         ];
         for (op, index) in others {
-            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1, events_applied: 0 };
+            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1, events_applied: 0, touched: Vec::new(), claims: Vec::new() };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), pkt);
@@ -3114,6 +3367,8 @@ mod tests {
             op: WireWindowOp::Click(WindowClick::DragGather { slots: vec![WindowSlot::Grid(2, 0)] }),
             digest: 0,
             events_applied: 0,
+            touched: Vec::new(),
+            claims: Vec::new(),
         };
         let bytes = serialize_packet(PacketType::WindowOp, &grid);
         // tag, op_seq, Click, DragGather, the list's u64 length, then Grid = 1.
@@ -3125,6 +3380,8 @@ mod tests {
                 op: WireWindowOp::Click(WindowClick::DragDistribute { slots: vec![WindowSlot::Inv(0); n] }),
                 digest: 0,
                 events_applied: 0,
+                touched: Vec::new(),
+                claims: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3132,7 +3389,250 @@ mod tests {
         }
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
-        assert_eq!(deserialize_header(&[65, 0]), None, "nothing past 64 yet");
+        // C3b-1 (v77) — 65 and 66 are taken (`container_packets_round_trip`).
+        assert_eq!(deserialize_header(&[67, 0]), None, "nothing past 66 yet");
+    }
+
+    /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)
+    /// and `Container` (= 5) ops with every `ContainerClick` (variant order
+    /// pinned on the wire bytes), `WindowOpPacket.touched` and its bound,
+    /// `ContainerOpened = 65` and `WindowSlotSet = 66` round trips with
+    /// their bounds, `WireWindowSlot`, `ContainerKind`, `OpenRefusal`, the
+    /// furnace's `SlotKind`/`ClickMode` order, and the Plan placeholder kind.
+    #[test]
+    fn container_packets_round_trip() {
+        fn stone_claim() -> WireSlot {
+            Some(WireStack { item_kind: item_kind::BLOCK, item_id: 1, count: 5, full_item: WireItem::None })
+        }
+        use crate::chest::ChestTier;
+        use crate::container_window::{ContainerClick, ContainerKind};
+        use crate::furnace::{ClickMode, SlotKind};
+        let clicks = [
+            ContainerClick::Withdraw { slot: 71, all: true },
+            ContainerClick::Deposit { slot: 35, all: false },
+            ContainerClick::Sort,
+            ContainerClick::DumpMatching,
+            ContainerClick::Restock,
+            ContainerClick::TakeAll,
+            ContainerClick::Furnace { kind: SlotKind::Fuel, mode: ClickMode::Stack, hotbar: 8 },
+        ];
+        for (index, click) in clicks.into_iter().enumerate() {
+            let pkt = WindowOpPacket {
+                op_seq: 3,
+                op: WireWindowOp::Container(click),
+                digest: 9,
+                events_applied: 3,
+                touched: vec![WireWindowSlot::Inv(4), WireWindowSlot::Container(71)],
+                claims: vec![(WireWindowSlot::Inv(4), None)],
+            };
+            let bytes = serialize_packet(PacketType::WindowOp, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), pkt);
+            assert_eq!(&payload[4..8], &5u32.to_le_bytes(), "Container = 5");
+            assert_eq!(&payload[8..12], &(index as u32).to_le_bytes(), "ContainerClick variant {index}");
+        }
+        let open = WindowOpPacket {
+            op_seq: 1,
+            op: WireWindowOp::OpenContainer { cell: [-5, 70, 9] },
+            digest: 2,
+            events_applied: 0,
+            touched: Vec::new(),
+            claims: Vec::new(),
+        };
+        let bytes = serialize_packet(PacketType::WindowOp, &open);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), open);
+        assert_eq!(&payload[4..8], &4u32.to_le_bytes(), "OpenContainer = 4");
+        // The furnace click's own enums: SlotKind Input/Fuel/Output = 0/1/2,
+        // ClickMode Single/Stack = 0/1 (after the click's variant u32).
+        let furnace = WindowOpPacket {
+            op_seq: 1,
+            op: WireWindowOp::Container(ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Single, hotbar: 0 }),
+            digest: 0,
+            events_applied: 0,
+            touched: Vec::new(),
+            claims: Vec::new(),
+        };
+        let bytes = serialize_packet(PacketType::WindowOp, &furnace);
+        assert_eq!(&bytes[1 + 12..1 + 16], &2u32.to_le_bytes(), "SlotKind::Output = 2");
+        assert_eq!(&bytes[1 + 16..1 + 20], &0u32.to_le_bytes(), "ClickMode::Single = 0");
+        // touched is bounded at 122.
+        for (n, decodes) in [(MAX_WINDOW_SLOTS, true), (MAX_WINDOW_SLOTS + 1, false)] {
+            let pkt = WindowOpPacket {
+                op_seq: 1,
+                op: WireWindowOp::Container(ContainerClick::Sort),
+                digest: 0,
+                events_applied: 0,
+                touched: vec![WireWindowSlot::Cursor; n],
+                claims: Vec::new(),
+            };
+            let bytes = serialize_packet(PacketType::WindowOp, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<WindowOpPacket>(payload).is_ok(), decodes, "{n} touched");
+        }
+        // claims too.
+        for (n, decodes) in [(MAX_WINDOW_SLOTS, true), (MAX_WINDOW_SLOTS + 1, false)] {
+            let pkt = WindowOpPacket {
+                op_seq: 1,
+                op: WireWindowOp::Container(ContainerClick::Restock),
+                digest: 0,
+                events_applied: 0,
+                touched: Vec::new(),
+                claims: vec![(WireWindowSlot::Inv(0), stone_claim()); n],
+            };
+            let bytes = serialize_packet(PacketType::WindowOp, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<WindowOpPacket>(payload).is_ok(), decodes, "{n} claims");
+        }
+        // The trailing order (v77): events_applied (v76), then touched, then
+        // claims, each list a u64 length then its items.
+        let order = WindowOpPacket {
+            op_seq: 1,
+            op: WireWindowOp::Container(ContainerClick::Deposit { slot: 2, all: true }),
+            digest: 0x0A0B_0C0D,
+            events_applied: 0x0102_0304,
+            touched: vec![WireWindowSlot::Inv(2)],
+            claims: vec![(WireWindowSlot::Inv(2), None)],
+        };
+        let bytes = bincode::serialize(&order).unwrap();
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&0x0A0B_0C0Du32.to_le_bytes());
+        tail.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        tail.extend_from_slice(&0u32.to_le_bytes()); // WireWindowSlot::Inv
+        tail.push(2);
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        tail.extend_from_slice(&0u32.to_le_bytes()); // WireWindowSlot::Inv
+        tail.push(2);
+        tail.push(0); // None
+        assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..], "digest, events_applied, touched, claims");
+        assert_eq!(MAX_WINDOW_SLOTS, 72 + 36 + 4 + 1 + 9);
+
+        // ContainerOpened = 65: every kind, a refusal, the slot bound.
+        let stone = Some(WireStack { item_kind: item_kind::BLOCK, item_id: 1, count: 5, full_item: WireItem::None });
+        let pick = Some(WireStack {
+            item_kind: item_kind::TOOL,
+            item_id: 2,
+            count: 1,
+            full_item: WireItem::Tool { tool_type: 0, material: 2, durability: 99 },
+        });
+        let plan = Some(WireStack { item_kind: item_kind::PLAN, item_id: 0, count: 1, full_item: WireItem::None });
+        let kinds = [
+            (ContainerKind::Chest { tier: ChestTier::Satori }, 0u32),
+            (ContainerKind::Dispenser, 1),
+            (ContainerKind::Dropper, 2),
+            (ContainerKind::Furnace, 3),
+        ];
+        for (kind, index) in kinds {
+            let pkt = ContainerOpenedPacket {
+                cell: [1, 2, 3],
+                kind,
+                slots: vec![stone.clone(), None, pick.clone(), plan.clone()],
+                furnace: Some(FurnaceView { smelt_progress: 40, smelt_total: 200, fuel_ticks_remaining: 1500, lit: true }),
+                refused: None,
+            };
+            let bytes = serialize_packet(PacketType::ContainerOpened, &pkt);
+            assert_eq!(bytes[0], 65, "wire-stable tag");
+            let (ptype, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(ptype, PacketType::ContainerOpened);
+            assert_eq!(safe_deserialize::<ContainerOpenedPacket>(payload).unwrap(), pkt);
+            assert_eq!(&payload[12..16], &index.to_le_bytes(), "ContainerKind variant {index}");
+        }
+        for (refusal, index) in [
+            (OpenRefusal::OutOfReach, 0u8),
+            (OpenRefusal::Protected, 1),
+            (OpenRefusal::NotAContainer, 2),
+            (OpenRefusal::NotInWorld, 3),
+        ] {
+            let pkt = ContainerOpenedPacket {
+                cell: [0, 0, 0],
+                kind: ContainerKind::Dispenser,
+                slots: Vec::new(),
+                furnace: None,
+                refused: Some(refusal),
+            };
+            let bytes = serialize_packet(PacketType::ContainerOpened, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<ContainerOpenedPacket>(payload).unwrap(), pkt);
+            // cell 12, kind 4, slots length 8, furnace None 1, Some 1, then the refusal.
+            assert_eq!(&payload[26..30], &u32::from(index).to_le_bytes(), "OpenRefusal variant {index}");
+        }
+        for (n, decodes) in [(MAX_CONTAINER_SLOTS, true), (MAX_CONTAINER_SLOTS + 1, false)] {
+            let pkt = ContainerOpenedPacket {
+                cell: [0, 0, 0],
+                kind: ContainerKind::Chest { tier: ChestTier::Wood },
+                slots: vec![None; n],
+                furnace: None,
+                refused: None,
+            };
+            let bytes = serialize_packet(PacketType::ContainerOpened, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<ContainerOpenedPacket>(payload).is_ok(), decodes, "{n} slots");
+        }
+
+        // WindowSlotSet = 66: every WireWindowSlot (Inv/Armour/Cursor/Grid/
+        // Container = 0..4), both reasons, the bound.
+        let slots = [
+            (WireWindowSlot::Inv(35), 0u32),
+            (WireWindowSlot::Armour(3), 1),
+            (WireWindowSlot::Cursor, 2),
+            (WireWindowSlot::Grid(2, 1), 3),
+            (WireWindowSlot::Container(71), 4),
+        ];
+        for (at, index) in slots {
+            let pkt = WindowSlotSetPacket {
+                op_seq_applied: 12,
+                reason: slot_set_reason::CORRECTION,
+                sets: vec![(at, stone.clone())],
+                furnace: None,
+                window_event: 0,
+            };
+            let bytes = serialize_packet(PacketType::WindowSlotSet, &pkt);
+            assert_eq!(bytes[0], 66, "wire-stable tag");
+            let (ptype, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(ptype, PacketType::WindowSlotSet);
+            assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).unwrap(), pkt);
+            // op_seq_applied 4, reason 1, the list's u64 length 8, then the slot.
+            assert_eq!(&payload[13..17], &index.to_le_bytes(), "WireWindowSlot variant {index}");
+        }
+        assert_eq!((slot_set_reason::CORRECTION, slot_set_reason::CHANGED), (0, 1));
+        let push = WindowSlotSetPacket {
+            op_seq_applied: 0,
+            reason: slot_set_reason::CHANGED,
+            sets: vec![(WireWindowSlot::Container(0), None)],
+            furnace: Some(FurnaceView::default()),
+            window_event: 0,
+        };
+        let bytes = serialize_packet(PacketType::WindowSlotSet, &push);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).unwrap(), push);
+        for (n, decodes) in [(MAX_WINDOW_SLOTS, true), (MAX_WINDOW_SLOTS + 1, false)] {
+            let pkt = WindowSlotSetPacket {
+                op_seq_applied: 0,
+                reason: slot_set_reason::CHANGED,
+                sets: vec![(WireWindowSlot::Cursor, None); n],
+                furnace: None,
+                window_event: 0,
+            };
+            let bytes = serialize_packet(PacketType::WindowSlotSet, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).is_ok(), decodes, "{n} sets");
+        }
+        // v77 — a correction that changes player slots is a numbered window
+        // event: `window_event` closes the packet.
+        let numbered = WindowSlotSetPacket {
+            op_seq_applied: 9,
+            reason: slot_set_reason::CORRECTION,
+            sets: vec![(WireWindowSlot::Inv(3), None)],
+            furnace: None,
+            window_event: 0x0102_0304,
+        };
+        let bytes = serialize_packet(PacketType::WindowSlotSet, &numbered);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).unwrap(), numbered);
+        assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes(), "window_event last");
+        assert_eq!(item_kind::PLAN, 4, "the reserved Plan placeholder kind");
+        assert_eq!((PacketType::ContainerOpened as u8, PacketType::WindowSlotSet as u8), (65, 66));
     }
 
     /// bincode 1 is positional, so `StateUpdatePacket`'s trailing fields must

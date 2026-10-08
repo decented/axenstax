@@ -235,6 +235,14 @@ pub struct PlayerSlot {
     /// Dispenser/Dropper (2026-07-04) — world-space position of the one the
     /// player has open. Mirrors `open_chest`.
     pub open_dispenser: Option<(i32, i32, i32)>,
+    /// C3b-1 — a joined client's mirror of the server's container it has
+    /// open (`ContainerOpened`), kept by the server's corrections and pushes.
+    /// While it is set, the matching `open_chest` / `open_dispenser` /
+    /// `open_furnace` names its cell (so every "a screen is open" check
+    /// holds) and the screen draws from it, not from the world. Cleared, and
+    /// the close sent as a window op, when that field stops naming it or the
+    /// cell leaves reach or changes kind (`GameState::tick_shared_container`).
+    pub shared_container: Option<crate::container_window::SharedContainer>,
     /// Task 11 (2026-07-06) — the Donkey/Mule ECS entity whose cargo pack
     /// the player has open, plus its world-space position AT OPEN TIME.
     /// Entity-keyed (not block-position-keyed like the other `open_*`
@@ -374,6 +382,7 @@ impl PlayerSlot {
             open_vendor: None,
             open_chest: None,
             open_dispenser: None,
+            shared_container: None,
             open_pack: None,
             was_in_water: false,
             open_sign: None,

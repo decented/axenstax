@@ -241,6 +241,18 @@ pub struct ServerPlayer {
     /// client reports it applied them (`window_events`), with the mirror's
     /// op-sequence check, join baseline and counters. Fresh per attach.
     pub window_events: crate::window_events::WindowEvents,
+    /// C3b-1 — the cell of the real container (chest, dispenser, dropper,
+    /// furnace) this joiner has open, set when the server opens it on
+    /// `OpenContainer` and cleared by `Close`, `OpenPlayer`, `OpenTable`, or
+    /// the container going. Container ops act on it; it is pushed every tick
+    /// it changes (`window_ops::container_push`).
+    pub open_container: Option<[i32; 3]>,
+    /// C3b-1 — what the server last sent this joiner of that container
+    /// (`window_ops::SentContainer`): the baseline the pushes diff against.
+    pub container_sent: Option<crate::window_ops::SentContainer>,
+    /// C3b-1 — the `op_seq` of the last window op applied from this joiner
+    /// (`WindowSlotSetPacket::op_seq_applied`).
+    pub last_window_op_seq: u32,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -476,6 +488,9 @@ impl ServerPlayer {
             station: crate::window::Station::Player,
             table_gone_ticks: None,
             window_events: Default::default(),
+            open_container: None,
+            container_sent: None,
+            last_window_op_seq: 0,
         }
     }
 

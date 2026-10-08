@@ -1249,13 +1249,14 @@ mod tests {
 
     /// FU4b (FU3 verify Q9 row 3) — a JOINED client's own machine sims push no
     /// edits to the server: its power tick, dispensers, pistons and lightning
-    /// fire are the server's to run, and its furnace still cooks in its own
-    /// copy (C3 makes it the server's) but the lit flip is not queued as an
-    /// edit. A fuelled steam generator beside a lamp, a loaded furnace and a
-    /// powered dispenser in the joiner's own world, ticked: nothing queued, the
-    /// lamp stays dark (no power tick), the furnace lights locally. The control:
-    /// the same rig on a client that has joined nobody queues the lamp, the
-    /// generator and the furnace.
+    /// fire are the server's to run. C3b-1 — and it runs no furnace sweep or
+    /// hopper tick either (its furnace screen draws the server's furnace). A
+    /// fuelled steam generator beside a lamp, a loaded furnace and a powered
+    /// dispenser in the joiner's own world, ticked: nothing queued, the lamp
+    /// stays dark (no power tick), the furnace stays unlit (no sweep; FU4b
+    /// let it light locally), and a hopper between two chests moves nothing.
+    /// The control: the same rig on a client that has joined nobody queues
+    /// the lamp, the generator and the furnace.
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
     fn game_harness_a_joined_clients_machines_push_no_edits() {
@@ -1357,12 +1358,108 @@ mod tests {
             "the joiner pushed power changes: {:?}",
             hg.state.pending_block_changes.iter().map(|b| (b.x, b.y, b.z)).collect::<Vec<_>>()
         );
+        // C3b-1 — a joined client runs no furnace sweep at all now: its
+        // furnace screen draws the server's furnace (was: "its own furnace
+        // still cooks", FU4b).
         assert_eq!(
             hg.state.world.get_block(furnace.0, furnace.1, furnace.2),
-            crate::block::FURNACE_LIT,
-            "its own furnace still cooks (C3 makes it the server's)"
+            crate::block::FURNACE,
+            "no furnace sweep on a joined client: its own copy doesn't cook"
         );
-        assert!(!queued(&hg, furnace), "but the lit flip is not an edit for the server");
+        assert!(!queued(&hg, furnace), "and no lit flip is an edit for the server");
+
+        // C3b-1 — nor a hopper tick: a hopper between two chests of its own
+        // copy moves nothing.
+        let p = hg.state.players[0].player.pos;
+        let (x, y, z) = (p.x.floor() as i32 - 6, p.y.floor() as i32 + 3, p.z.floor() as i32 - 6);
+        let w = &mut hg.state.world;
+        w.set_block(x, y, z, crate::block::CHEST);
+        w.set_block(x, y + 1, z, crate::block::HOPPER);
+        w.set_block(x, y + 2, z, crate::block::CHEST);
+        let mut above = crate::chest::ChestData::new();
+        above.slots[0] = Some(ItemStack::new_block(crate::block::STONE, 4));
+        w.insert_chest((x, y + 2, z), above);
+        w.insert_chest((x, y, z), crate::chest::ChestData::new());
+        hg.ticks(crate::hopper::HOPPER_INTERVAL_TICKS as u32 * 3);
+        assert!(
+            hg.state.world.chest_at((x, y, z)).is_some_and(|c| c.slots.iter().all(Option::is_none)),
+            "no hopper tick on a joined client"
+        );
+    }
+
+    /// C3b-1 — a joiner's right-click on a chest asks the server
+    /// (`OpenContainer`) and creates no private copy; the screen opens on the
+    /// server's answer, drawn from a mirror of the server's chest; closing it
+    /// (as Esc does) tells the server, which closes it too.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_opens_the_servers_chest_not_its_own() {
+        use crate::item::ItemStack;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-chest");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-chest-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Keeper", 0),
+            None,
+        ));
+        let step = |server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame| {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        };
+        for _ in 0..5 {
+            step(&mut server, &mut hg);
+        }
+        let slot = server.server.players.len() - 1;
+        let body = server.server.players[slot].player.pos;
+        let cell = [body.x.floor() as i32 + 1, body.y.floor() as i32, body.z.floor() as i32];
+        let key = (cell[0], cell[1], cell[2]);
+        server.server.world.set_block(cell[0], cell[1], cell[2], crate::block::CHEST);
+        hg.state.world.set_block(cell[0], cell[1], cell[2], crate::block::CHEST);
+        let mut real = crate::chest::ChestData::new();
+        real.slots[2] = Some(ItemStack::new_block(crate::block::STONE, 6));
+        server.server.world.insert_chest(key, real);
+        hg.state.players[0].player.pos = body;
+        hg.state.request_shared_open(0, cell);
+        assert!(hg.state.world.chest_at(key).is_none(), "the right-click created no private copy");
+        // Step until the answer is in (a request can wait behind the
+        // client's edits on a loaded machine), at most 20 rounds.
+        for _ in 0..20 {
+            step(&mut server, &mut hg);
+            if hg.state.players[0].shared_container.is_some() {
+                break;
+            }
+        }
+        let p = &hg.state.players[0];
+        assert_eq!(p.open_chest, Some(key), "the screen opened on the server's answer");
+        let mirror = p.shared_container.as_ref().expect("a mirror of the server's chest");
+        let crate::container_window::ContainerData::Chest(m) = &mirror.contents else { panic!("a chest") };
+        assert_eq!(m.slots[2], Some(ItemStack::new_block(crate::block::STONE, 6)), "the server's contents");
+        assert!(hg.state.world.chest_at(key).is_none(), "still no private copy");
+        assert_eq!(server.server.players[slot].open_container, Some(cell));
+
+        // Close it as Esc does: the server closes it too.
+        hg.state.players[0].open_chest = None;
+        for _ in 0..20 {
+            step(&mut server, &mut hg);
+            if server.server.players[slot].open_container.is_none() {
+                break;
+            }
+        }
+        assert!(hg.state.players[0].shared_container.is_none(), "the mirror went with the screen");
+        assert_eq!(server.server.players[slot].open_container, None, "the close reached the server");
     }
 
     /// C2a — a joiner's hunger, eating and sleep through its REAL client: the

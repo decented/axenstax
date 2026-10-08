@@ -253,6 +253,14 @@ impl PlanData {
         }
     }
 
+    /// C3b-1 — what a joiner's mirror of a shared container holds for a
+    /// Plan the host put in it (`protocol::item_kind::PLAN`): a body-less
+    /// stand-in it can see but not take (`container_window`). A Plan
+    /// digests content-free, so it digests like the real one.
+    pub fn placeholder() -> Self {
+        PlanData { name: "Plan".to_string(), ..PlanData::render_stub(true) }
+    }
+
     /// Stub used by `/give debug_plan` (Phase 14) + tests. 3×3 footprint,
     /// 1 stone block in each cell at y=0.
     pub fn debug_3x3_stone() -> Self {

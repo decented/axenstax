@@ -266,6 +266,43 @@ pub fn item_from_wire_full(w: &crate::protocol::WireItem) -> Option<crate::item:
     }
 }
 
+/// C3b-1 — a stack on the wire at full fidelity
+/// ([`crate::protocol::WireStack`]): the `(kind, id)` pair, the count, and
+/// the tool/armour state ([`item_to_wire_full`]). A Plan, which has no wire
+/// form, goes as the reserved `item_kind::PLAN` (id 0): a placeholder.
+pub fn stack_to_wire(stack: &ItemStack) -> crate::protocol::WireStack {
+    let (item_kind, item_id) = match &stack.item {
+        crate::item::Item::Plan(_) => (crate::protocol::item_kind::PLAN, 0),
+        item => item_to_ref(item).to_wire(),
+    };
+    crate::protocol::WireStack { item_kind, item_id, count: stack.count, full_item: item_to_wire_full(&stack.item) }
+}
+
+/// C3b-1 — the inverse of [`stack_to_wire`]: the full-fidelity payload wins,
+/// then the pair ([`item_from_ref`]). A Plan placeholder decodes to
+/// `plan::PlanData::placeholder` only where `allow_plan` (a container slot);
+/// a zero count, or anything that doesn't decode faithfully, is `None`.
+pub fn stack_from_wire(
+    w: &crate::protocol::WireStack,
+    registry: &crate::block::BlockRegistry,
+    allow_plan: bool,
+) -> Option<ItemStack> {
+    if w.count == 0 {
+        return None;
+    }
+    let item = match item_from_wire_full(&w.full_item) {
+        Some(item) => item,
+        None if w.item_kind == crate::protocol::item_kind::PLAN => {
+            if !allow_plan {
+                return None;
+            }
+            crate::item::Item::Plan(crate::plan::PlanData::placeholder())
+        }
+        None => item_from_ref(w.item_kind, w.item_id, registry)?,
+    };
+    Some(ItemStack { item, count: w.count })
+}
+
 /// Returned by [`Inventory::use_hotbar_tool`]. Carries the pre/post durability
 /// percentage so callers can drive low-durability warnings + just-broke
 /// toasts without re-reading the slot.

@@ -4,10 +4,17 @@
 //! the player's inventory and the chest; shift-click bulk-transfers (one
 //! direction at a time per click) per the Spec 29 furnace UX. Close on
 //! Escape clears `PlayerSlot.open_chest`.
+//!
+//! C3b-1 — the dialog only draws and reports what was clicked, as
+//! `container_window::ContainerClick`s; the caller applies each through the
+//! one shared rule (`container_window::apply_container`, which calls the
+//! pure functions below), on the real chest or on a joiner's mirror of the
+//! server's.
 
 use egui::{Color32, RichText};
 
 use crate::chest::ChestData;
+use crate::container_window::ContainerClick;
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
 
@@ -18,7 +25,9 @@ const SLOT_SIZE: f32 = 36.0;
 #[derive(Clone, Debug, Default)]
 pub struct ChestUiResult {
     pub close_requested: bool,
-    pub mutated: bool,
+    /// C3b-1 — what the player clicked this frame, in order: the caller
+    /// applies each (`container_window::apply_container`).
+    pub clicks: Vec<ContainerClick>,
     /// Task 20 (2026-07-07) — the donkey/mule pack variant only. Set when
     /// the player clicks the in-dialog "Remove pack" button (enabled only
     /// when the pack is empty). The caller (game_loop pack UI branch)
@@ -27,12 +36,12 @@ pub struct ChestUiResult {
     pub remove_pack_requested: bool,
 }
 
-/// Render the chest dialog. Mutates `chest.slots` + the inventory's
-/// slots in-place. Pos is purely informational (window title).
+/// Render the chest dialog over `chest` and the player's `inventory`; the
+/// clicks come back in the result. Pos is purely informational (window title).
 pub fn show_chest_dialog(
     ctx: &egui::Context,
-    chest: &mut ChestData,
-    inventory: &mut Inventory,
+    chest: &ChestData,
+    inventory: &Inventory,
     pos: (i32, i32, i32),
 ) -> ChestUiResult {
     // #15 — tier drives the title; the grid + interactions are shared with
@@ -57,8 +66,8 @@ pub fn pack_removal_enabled(chest: &ChestData) -> bool {
 pub fn show_container_dialog(
     ctx: &egui::Context,
     title: &str,
-    chest: &mut ChestData,
-    inventory: &mut Inventory,
+    chest: &ChestData,
+    inventory: &Inventory,
     pos: (i32, i32, i32),
 ) -> ChestUiResult {
     show_container_dialog_ext(ctx, title, chest, inventory, pos, false)
@@ -72,8 +81,8 @@ pub fn show_container_dialog(
 pub fn show_container_dialog_ext(
     ctx: &egui::Context,
     title: &str,
-    chest: &mut ChestData,
-    inventory: &mut Inventory,
+    chest: &ChestData,
+    inventory: &Inventory,
     pos: (i32, i32, i32),
     show_remove_pack: bool,
 ) -> ChestUiResult {
@@ -101,18 +110,14 @@ pub fn show_container_dialog_ext(
                         let label = slot_label(chest.slots.get(idx).and_then(|s| s.as_ref()));
                         let shift = ui.input(|i| i.modifiers.shift);
                         let resp = ui.add_sized([SLOT_SIZE, SLOT_SIZE], egui::Button::new(label));
-                        if resp.clicked() && withdraw_chest_slot(chest, idx, inventory, shift) {
-                            result.mutated = true;
+                        if resp.clicked() {
+                            result.clicks.push(ContainerClick::Withdraw { slot: idx, all: shift });
                         }
                         // #45 P3 — scroll over a chest slot pulls one item out to
                         // the inventory per tick (shift = whole stack).
                         if resp.hovered() {
-                            let ticks = scroll_ticks(ui);
-                            for _ in 0..ticks {
-                                if !withdraw_chest_slot(chest, idx, inventory, shift) {
-                                    break;
-                                }
-                                result.mutated = true;
+                            for _ in 0..scroll_ticks(ui) {
+                                result.clicks.push(ContainerClick::Withdraw { slot: idx, all: shift });
                             }
                         }
                     }
@@ -129,18 +134,14 @@ pub fn show_container_dialog_ext(
                         let label = slot_label(inventory.slot(idx));
                         let shift = ui.input(|i| i.modifiers.shift);
                         let resp = ui.add_sized([SLOT_SIZE, SLOT_SIZE], egui::Button::new(label));
-                        if resp.clicked() && deposit_to_chest(inventory, idx, chest, shift) {
-                            result.mutated = true;
+                        if resp.clicked() {
+                            result.clicks.push(ContainerClick::Deposit { slot: idx, all: shift });
                         }
                         // #45 P3 — scroll over an inventory slot stashes one item
                         // into the chest per tick (shift = whole stack).
                         if resp.hovered() {
-                            let ticks = scroll_ticks(ui);
-                            for _ in 0..ticks {
-                                if !deposit_to_chest(inventory, idx, chest, shift) {
-                                    break;
-                                }
-                                result.mutated = true;
+                            for _ in 0..scroll_ticks(ui) {
+                                result.clicks.push(ContainerClick::Deposit { slot: idx, all: shift });
                             }
                         }
                     }
@@ -152,17 +153,16 @@ pub fn show_container_dialog_ext(
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Sort").clicked() {
-                    sort_chest(chest);
-                    result.mutated = true;
+                    result.clicks.push(ContainerClick::Sort);
                 }
-                if ui.button("Dump matching").clicked() && dump_matching(inventory, chest) {
-                    result.mutated = true;
+                if ui.button("Dump matching").clicked() {
+                    result.clicks.push(ContainerClick::DumpMatching);
                 }
-                if ui.button("Restock").clicked() && restock_from_chest(inventory, chest) {
-                    result.mutated = true;
+                if ui.button("Restock").clicked() {
+                    result.clicks.push(ContainerClick::Restock);
                 }
-                if ui.button("Take all").clicked() && take_all(inventory, chest) {
-                    result.mutated = true;
+                if ui.button("Take all").clicked() {
+                    result.clicks.push(ContainerClick::TakeAll);
                 }
             });
 
@@ -343,9 +343,19 @@ pub fn restock_from_chest(inventory: &mut Inventory, chest: &mut ChestData) -> b
 
 /// #45 P2 — "Take all": move the entire chest into the inventory, best-effort.
 /// Anything that doesn't fit stays in the chest (count-conserving).
+#[cfg(test)]
 pub fn take_all(inventory: &mut Inventory, chest: &mut ChestData) -> bool {
+    take_all_where(inventory, chest, |_| true)
+}
+
+/// [`take_all`] of the stacks `take` accepts; the rest stay where they are
+/// (C3b-1: a shared container's Take all leaves a Plan in place).
+pub fn take_all_where(inventory: &mut Inventory, chest: &mut ChestData, take: impl Fn(&ItemStack) -> bool) -> bool {
     let mut moved = false;
     for ci in 0..chest.slots.len() {
+        if !chest.slots[ci].as_ref().is_some_and(&take) {
+            continue;
+        }
         let Some(taken) = chest.slots[ci].take() else { continue };
         let want = taken.count;
         match inventory.add_item(taken) {

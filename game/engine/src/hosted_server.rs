@@ -2165,6 +2165,19 @@ impl HostedServer {
     /// C3a-fix-1 — the server's own window events the client had applied
     /// before this op go first (`window_events::apply_through`); a gap in
     /// `op_seq` is tallied (B-L6).
+    ///
+    /// C3b-1 — except for containers, which are shared:
+    /// - `OpenContainer` is answered with `ContainerOpened`: the real
+    ///   container, or a refusal ([`Self::open_joiner_container`]).
+    /// - A container op acts on the real container, re-run over the client's
+    ///   claimed slots (`window_ops::serve_op`). One refused before the rule
+    ///   (none open, gone, out of reach) is tallied; one that earns a
+    ///   correction is answered with a `WindowSlotSet { Correction }` (a
+    ///   creative joiner too: the container is everyone's), sent now, ahead
+    ///   of this tick's grants. Its player slots are a numbered window event
+    ///   (`window_events::WindowEvent::SetSlots`), applied to the server's
+    ///   copy when the client reports it applied it; its container slots are
+    ///   already the real ones.
     fn handle_window_op(&mut self, i: usize, pkt: &protocol::WindowOpPacket) {
         let creative = self.server.play_mode.is_creative();
         let now = self.server.tick_counter;
@@ -2175,8 +2188,114 @@ impl HostedServer {
         }
         crate::window_events::apply_through(sp, pkt.events_applied, now);
         sp.window_events.note_op_seq(pkt.op_seq);
-        if let Some(served) = crate::window_ops::serve_op(sp, &server.world, creative, &pkt.op) {
-            crate::window_ops::note_served(sp, pkt, &served, creative);
+        let Some(served) = crate::window_ops::serve_op(sp, &mut server.world, &server.registry, creative, pkt, now) else {
+            return;
+        };
+        crate::window_ops::note_served(sp, pkt, &served, creative);
+        if served.container_refused {
+            sp.possession.container_refused = sp.possession.container_refused.saturating_add(1);
+        }
+        if served.believed > 0 {
+            sp.possession.container_believed = sp.possession.container_believed.saturating_add(served.believed);
+            let due = sp.possession.note_mismatch(now);
+            log::log!(
+                crate::joiner_inventory::mismatch_log_level(due),
+                "possession check (log-only): {} put {} item(s) in a shared container that the server's copy of \
+                 their inventory didn't hold — believed{}",
+                sp.display_name,
+                served.believed,
+                held_back_note(due),
+            );
+        }
+        if let Some(correction) = served.correction {
+            sp.possession.container_corrections = sp.possession.container_corrections.saturating_add(1);
+            let window_event = if correction.player.is_empty() {
+                0
+            } else {
+                crate::window_events::queue(sp, crate::window_events::WindowEvent::SetSlots(correction.player), now)
+            };
+            let pkt = protocol::WindowSlotSetPacket {
+                op_seq_applied: pkt.op_seq,
+                reason: protocol::slot_set_reason::CORRECTION,
+                sets: correction.sets,
+                furnace: served.furnace,
+                window_event,
+            };
+            self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::WindowSlotSet, &pkt));
+        }
+        if let protocol::WireWindowOp::OpenContainer { cell } = pkt.op {
+            self.open_joiner_container(i, cell);
+        }
+    }
+
+    /// C3b-1 — joiner `i` asks to open the container at `cell`. It opens
+    /// when the joiner is in the world and alive, the cell holds a chest of
+    /// any tier, a dispenser or dropper, or a furnace lit or not
+    /// (`container_window::ContainerKind::of_block`), within the block reach
+    /// of the server body, with the server's slack
+    /// (`container_window::container_in_server_reach`), and the
+    /// play mode and plot rules let it touch the cell
+    /// ([`Self::remote_may_touch`]). The block entity is created if missing,
+    /// as a client's open always has. The joiner is answered with
+    /// `ContainerOpened`: the container's slots (a Plan as the placeholder
+    /// kind) and a furnace's progress, recorded as sent; or why not
+    /// (`OpenRefusal`), and nothing opens.
+    fn open_joiner_container(&mut self, i: usize, cell: [i32; 3]) {
+        use crate::container_window::{self as cw, ContainerKind};
+        let Some(sp) = self.server.players.get(i) else { return };
+        let block_at = self.server.world.get_block(cell[0], cell[1], cell[2]);
+        let verdict = if !sp.server_simulated || !sp.is_present_and_alive() {
+            Err(protocol::OpenRefusal::NotInWorld)
+        } else if let Some(kind) = ContainerKind::of_block(block_at) {
+            if !cw::container_in_server_reach(sp.player.eye_pos(), cell) {
+                Err(protocol::OpenRefusal::OutOfReach)
+            } else if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+                Err(protocol::OpenRefusal::Protected)
+            } else {
+                Ok(kind)
+            }
+        } else {
+            Err(protocol::OpenRefusal::NotAContainer)
+        };
+        let pkt = match verdict {
+            Ok(kind) => {
+                cw::ensure_container(&mut self.server.world, cell, kind);
+                let Some(view) = cw::container_at(&self.server.world, cell, kind) else { return };
+                let (slots, furnace, contents) = (view.wire_slots(), view.furnace_view(), cw::ContainerData::of(view));
+                let sp = &mut self.server.players[i];
+                sp.open_container = Some(cell);
+                sp.container_sent = Some(crate::window_ops::SentContainer::new(kind, contents, furnace));
+                protocol::ContainerOpenedPacket { cell, kind, slots, furnace, refused: None }
+            }
+            Err(why) => {
+                log::debug!("{}'s container at {cell:?} didn't open: {why:?}", sp.display_name);
+                protocol::ContainerOpenedPacket {
+                    cell,
+                    kind: ContainerKind::of_block(block_at).unwrap_or(ContainerKind::Dispenser),
+                    slots: Vec::new(),
+                    furnace: None,
+                    refused: Some(why),
+                }
+            }
+        };
+        self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::ContainerOpened, &pkt));
+    }
+
+    /// C3b-1 — once a tick, after the world's machines ran: every joiner
+    /// with a container open is sent what changed in it since it was last
+    /// sent (`window_ops::container_push`): another player's clicks, a
+    /// hopper, the furnace's cooking and progress, a host's own clicks on
+    /// its lent world. The joiner's own ops never come back this way.
+    fn push_open_containers(&mut self) {
+        let now = self.server.tick_counter;
+        for i in 0..self.server.players.len() {
+            let server = &mut self.server;
+            let sp = &mut server.players[i];
+            if !sp.server_simulated {
+                continue;
+            }
+            let Some(pkt) = crate::window_ops::container_push(sp, &server.world, now) else { continue };
+            self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::WindowSlotSet, &pkt));
         }
     }
 
@@ -2500,6 +2619,8 @@ impl HostedServer {
         for sp in self.server.players.iter_mut().filter(|sp| sp.server_simulated) {
             crate::window_events::apply_overdue(sp, now);
         }
+        // C3b-1 — what others changed in the containers joiners have open.
+        self.push_open_containers();
         self.server_tick += 1;
         self.broadcast_state();
         // Operator Console snapshot (Spec B task 7 / B-7a): stream to the

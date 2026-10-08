@@ -108,6 +108,10 @@ mod craft_ui;
 mod window;
 mod window_ops;
 mod window_events;
+// C3b-1 — the container screens' click rules, shared by single-player, a
+// joiner's mirror and the server; and a joined client's glue for them.
+mod container_window;
+mod container_client;
 mod recipe_book_ui;
 mod egui_integration;
 mod menu;

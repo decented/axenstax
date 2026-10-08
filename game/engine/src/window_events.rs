@@ -6,7 +6,10 @@
 //! The server changes a joiner's window by itself four ways: a grant (a
 //! break's yield, an interaction's product, a pickup), the owed take of an
 //! accepted request (an eat, a D2b interaction), an armour-wear hit and an
-//! accepted swing's weapon wear. The client applies each when its packet
+//! accepted swing's weapon wear. C3b-1 (v77) adds a fifth: a container op's
+//! correction of player slots (`WindowSlotSet` with `window_event` set,
+//! [`WindowEvent::SetSlots`]); its container slots are shared state and are
+//! not an event. The client applies each when its packet
 //! arrives, so a window op it applied in between reached the server after the
 //! change: "change, then op" on the server, "op, then change" on the client,
 //! and the two windows diverged (C3a review B-H1).
@@ -38,7 +41,7 @@ use crate::armour::ArmourItem;
 use crate::crafting::Tool;
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
-use crate::protocol::InventoryGrantPacket;
+use crate::protocol::{InventoryGrantPacket, WireWindowSlot};
 use crate::remote_client::RequestOutcome;
 use crate::server::ServerPlayer;
 use crate::window::CraftGrid;
@@ -78,6 +81,12 @@ pub enum WindowEvent {
     /// An accepted swing wears `tool` where it now is
     /// (`joiner_actions::where_now` from `slot`).
     WearWeapon { slot: usize, tool: Tool },
+    /// C3b-1 (v77) — a container op's correction of player slots
+    /// (`WindowSlotSet`, `window_ops::Correction::player`): each named slot
+    /// takes the value the op had when re-run over the client's own claimed
+    /// slots and the real container. Container slots are never in it (they
+    /// are shared, set at once).
+    SetSlots(Vec<(WireWindowSlot, Option<ItemStack>)>),
 }
 
 /// One event waiting for the client's word.
@@ -214,6 +223,8 @@ enum Effect {
     Wore,
     /// A weapon's wear.
     Weapon(crate::joiner_inventory::WearCheck),
+    /// Slots set.
+    Set,
 }
 
 /// Apply `event` to `parts` by the client's own rule.
@@ -238,6 +249,26 @@ fn apply_to(parts: &mut Parts, event: &WindowEvent) -> Effect {
                 None => crate::joiner_inventory::WearCheck::Mismatched,
             };
             Effect::Weapon(check)
+        }
+        WindowEvent::SetSlots(sets) => {
+            for (at, stack) in sets {
+                match *at {
+                    WireWindowSlot::Inv(i) if usize::from(i) < crate::window::SLOTS => {
+                        parts.inv.set_slot(usize::from(i), stack.clone());
+                    }
+                    WireWindowSlot::Armour(i) if i < 4 => match stack {
+                        None => parts.armour[usize::from(i)] = None,
+                        Some(ItemStack { item: Item::Armour(piece), .. }) => parts.armour[usize::from(i)] = Some(*piece),
+                        Some(_) => {}
+                    },
+                    WireWindowSlot::Cursor => *parts.cursor = stack.clone(),
+                    WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => {
+                        parts.grid[usize::from(r)][usize::from(c)] = stack.clone();
+                    }
+                    _ => {}
+                }
+            }
+            Effect::Set
         }
     }
 }
@@ -375,7 +406,8 @@ pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> O
 #[derive(Clone, Debug, PartialEq)]
 pub enum InboxItem {
     /// An `InteractOutcome` or `ItemActionOutcome` (its take or swing wear,
-    /// if `window_event` is set).
+    /// if `window_event` is set); C3b-1 — or a `ContainerOpened` (never an
+    /// event), or a `WindowSlotSet` (an event when it sets player slots).
     Outcome(RequestOutcome),
     /// An `InventoryGrant`.
     Grant(InventoryGrantPacket),
@@ -389,6 +421,10 @@ impl InboxItem {
         match self {
             InboxItem::Outcome(RequestOutcome::Interact(o)) => o.window_event,
             InboxItem::Outcome(RequestOutcome::Item(o)) => o.window_event,
+            // C3b-1 — a set of player slots is an event; opening a mirror
+            // and a set of container slots only are not.
+            InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
+            InboxItem::Outcome(RequestOutcome::ContainerOpened(_)) => 0,
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
         }

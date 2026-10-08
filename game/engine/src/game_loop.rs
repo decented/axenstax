@@ -5923,17 +5923,22 @@ impl super::GameState {
             // and FURNACE_LIT and emit BlockChange packets.
             // The sweep itself (tick + lit flip) is `furnace::tick_all`,
             // shared with the dedicated server (block_machines.rs, T1-3).
-            let furnace_sweep = crate::furnace::tick_all(&mut self.world);
+            // C3b-1 — a JOINED client runs no furnace sweep (FU4b kept it for
+            // the joiner's private furnace UI; that UI now draws the server's
+            // furnace, pushed as it cooks). The server, or the lending host,
+            // cooks the real one and broadcasts its lit flips. So a joiner's
+            // furnace earns no Proof-of-Play trickle (`completed` below is
+            // client-only and reads `PlayerSlot` policy; Spec 06).
+            let furnace_sweep = if self.remote_client.is_none() {
+                crate::furnace::tick_all(&mut self.world)
+            } else {
+                crate::furnace::FurnaceSweep::default()
+            };
             for bc in &furnace_sweep.changes {
                 dirty_chunks.insert(World::block_to_chunk(bc.x, bc.y, bc.z));
             }
-            // FU4b (Q9 row 3) — a JOINED client keeps cooking in its own
-            // furnace UI (the furnace is still client-side until C3) but does
-            // not push the lit flips as edits: they fought the server's copy.
             #[cfg(not(target_arch = "wasm32"))]
-            if self.remote_client.is_none() {
-                self.pending_block_changes.extend(furnace_sweep.changes);
-            }
+            self.pending_block_changes.extend(furnace_sweep.changes);
             for pos in furnace_sweep.completed {
                 // Audio cue on recipe completion. Tied into the
                 // campfire's existing play_place hook for consistency.
@@ -6149,7 +6154,12 @@ impl super::GameState {
         // above each hopper into the chest below it. Sequential chest borrows
         // (read source, compute dest, then put + take) avoid aliasing the world.
         // Shared with the dedicated server (block_machines.rs, T1-3).
-        crate::hopper::tick_hoppers(&mut self.world, self.tick_counter);
+        // C3b-1 — a JOINED client runs none: its chests are the server's,
+        // which the server (or the lending host) moves; it would only shuffle
+        // its own unseen copies.
+        if self.remote_client.is_none() {
+            crate::hopper::tick_hoppers(&mut self.world, self.tick_counter);
+        }
 
         // P6 — fishing bite check: a cast line that's reached its wait time
         // hooks; the player then right-clicks to reel it in.
@@ -6799,7 +6809,10 @@ impl super::GameState {
         // Throttled (~2 Hz): absorption isn't time-critical and the scan is
         // O(items × auto-collect-chests). (Server-side path joins when the
         // GameServer entity sim matures — same call, see known debt in CLAUDE.md.)
-        if self.tick_counter.is_multiple_of(10) {
+        // C3b-1 — a JOINED client runs none: the chest is the server's, and
+        // the lending host's client runs the real one (a dedicated server
+        // runs no autocollect yet, block_machines.rs).
+        if self.remote_client.is_none() && self.tick_counter.is_multiple_of(10) {
             crate::chest::tick_chest_autocollect(&mut self.world, &mut self.ecs);
         }
 
@@ -11639,46 +11652,15 @@ impl super::GameState {
                                     10,
                                     self.tick_counter ^ ((pos[0] as u64) << 24) ^ pos[2] as u64,
                                 );
-                                let chest_spill = crate::chest::cleanup_chest(
-                                    &mut self.world, pos[0], pos[1], pos[2],
-                                );
-                                for (k, stack) in chest_spill.into_iter().enumerate() {
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs,
-                                        glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                        stack,
-                                        k as u32 * 7919,
-                                    );
-                                }
-                                // Task 1 (wave-hardening) — Furnace break spills
-                                // its input/fuel/output contents, the furnace
-                                // sibling of the chest cleanup above. Was
-                                // never wired: mining a furnace silently lost
-                                // its contents and left the FurnaceData
-                                // orphaned (ghost resurrection on re-place).
-                                let furnace_spill = crate::furnace::cleanup_furnace(
-                                    &mut self.world, pos[0], pos[1], pos[2],
-                                );
-                                for (k, stack) in furnace_spill.into_iter().enumerate() {
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs,
-                                        glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                        stack,
-                                        k as u32 * 6959,
-                                    );
-                                }
-                                // Dispenser/Dropper break spills its 9 slots.
-                                let disp_spill = crate::dispenser::cleanup_dispenser(
-                                    &mut self.world, pos[0], pos[1], pos[2],
-                                );
-                                for (k, stack) in disp_spill.into_iter().enumerate() {
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs,
-                                        glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                        stack,
-                                        k as u32 * 6151,
-                                    );
-                                }
+                                // The chest's contents spill as ground items;
+                                // Task 1 (wave-hardening) — a furnace's input,
+                                // fuel and output too (was never wired: mining
+                                // a furnace lost its contents and left the
+                                // FurnaceData orphaned); a dispenser/dropper's
+                                // 9 slots. C3b-1 — a JOINED client only clears
+                                // its copies: the server spills the real ones.
+                                let spill = !self.joined();
+                                crate::container_client::clear_broken_containers(&mut self.world, &mut self.ecs, pos, spill);
                                 // #47 — Grave break spills its remaining contents.
                                 let grave_spill = crate::grave::cleanup_grave(
                                     &mut self.world, pos[0], pos[1], pos[2],
@@ -11991,47 +11973,14 @@ impl super::GameState {
                                         10,
                                         self.tick_counter ^ ((pos[0] as u64) << 24) ^ pos[2] as u64,
                                     );
-                                    let chest_spill = crate::chest::cleanup_chest(
-                                        &mut self.world, pos[0], pos[1], pos[2],
-                                    );
-                                    for (k, stack) in chest_spill.into_iter().enumerate() {
-                                        crate::entity::spawn_item(
-                                            &mut self.ecs,
-                                            glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                            stack,
-                                            k as u32 * 7919,
-                                        );
-                                    }
-                                    // Task 1 (wave-hardening) — Furnace break
-                                    // spills its input/fuel/output contents,
-                                    // the furnace sibling of the chest cleanup
-                                    // above. Was never wired: mining a furnace
-                                    // silently lost its contents and left the
-                                    // FurnaceData orphaned (ghost resurrection
-                                    // on re-place).
-                                    let furnace_spill = crate::furnace::cleanup_furnace(
-                                        &mut self.world, pos[0], pos[1], pos[2],
-                                    );
-                                    for (k, stack) in furnace_spill.into_iter().enumerate() {
-                                        crate::entity::spawn_item(
-                                            &mut self.ecs,
-                                            glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                            stack,
-                                            k as u32 * 6959,
-                                        );
-                                    }
-                                    // Dispenser/Dropper break spills its 9 slots.
-                                    let disp_spill = crate::dispenser::cleanup_dispenser(
-                                        &mut self.world, pos[0], pos[1], pos[2],
-                                    );
-                                    for (k, stack) in disp_spill.into_iter().enumerate() {
-                                        crate::entity::spawn_item(
-                                            &mut self.ecs,
-                                            glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
-                                            stack,
-                                            k as u32 * 6151,
-                                        );
-                                    }
+                                    // Task 1 (wave-hardening) — a furnace's
+                                    // input/fuel/output spill too (was never
+                                    // wired: the FurnaceData was orphaned),
+                                    // and a dispenser/dropper's 9 slots.
+                                    // C3b-1 — a JOINED client only clears its
+                                    // copies: the server spills the real ones.
+                                    let spill = !self.joined();
+                                    crate::container_client::clear_broken_containers(&mut self.world, &mut self.ecs, pos, spill);
                                     // #47 — Grave break spills its remaining contents.
                                     let grave_spill = crate::grave::cleanup_grave(
                                         &mut self.world, pos[0], pos[1], pos[2],
@@ -13929,6 +13878,13 @@ impl super::GameState {
                         // hold-then-right-click insertion path was the v1
                         // bridge while the UI was informational-only.
                         let pos_key = (pos[0], pos[1], pos[2]);
+                        // C3b-1 — a joiner opens the server's real furnace:
+                        // it asks, and the screen opens on its answer. No
+                        // private copy is created or opened.
+                        if self.joined() {
+                            self.request_shared_open(pidx, pos);
+                            continue;
+                        }
                         // Ensure a FurnaceData entry exists.
                         if self.world.furnace_at(pos_key).is_none() {
                             self.world.insert_furnace(pos_key, crate::furnace::FurnaceData::default());
@@ -14096,6 +14052,11 @@ impl super::GameState {
                         // entity is created eagerly at place time; a worldgen /
                         // broadcast-placed one still lazily materialises here.
                         let pos_key = (pos[0], pos[1], pos[2]);
+                        // C3b-1 — a joiner opens the server's real one.
+                        if self.joined() {
+                            self.request_shared_open(pidx, pos);
+                            continue;
+                        }
                         if self.world.dispenser_at(pos_key).is_none() {
                             self.world
                                 .insert_dispenser(pos_key, crate::dispenser::DispenserData::new());
@@ -14108,6 +14069,13 @@ impl super::GameState {
                         // dialog. Lazily-creates a ChestData sized to the tier so
                         // a freshly-placed chest has somewhere to write to.
                         let pos_key = (pos[0], pos[1], pos[2]);
+                        // C3b-1 — a joiner opens the server's real chest
+                        // (a worldgen loot chest included: its own copy is
+                        // never opened, so it can't be looted privately).
+                        if self.joined() {
+                            self.request_shared_open(pidx, pos);
+                            continue;
+                        }
                         if self.world.chest_at(pos_key).is_none() {
                             self.world
                                 .insert_chest(pos_key, crate::chest::ChestData::for_tier(tier));
@@ -18538,6 +18506,10 @@ impl super::GameState {
                     self.players[pidx].open_vendor = None;
                     if pidx == 0 { self.capture_cursor(); }
                 }
+            } else if self.players[pidx].shared_container.is_some() {
+                // C3b-1 — a joiner's chest, dispenser or furnace screen,
+                // drawn from its mirror of the server's container.
+                self.draw_shared_container(pidx, &screen.viewport);
             } else if let Some(furnace_pos) = self.players[pidx].open_furnace {
                 // Spec 20 Phase 5 + Spec 29 — Furnace UI. Three clickable
                 // slots (Input/Fuel/Output), smelt progress + fuel
@@ -18567,21 +18539,24 @@ impl super::GameState {
                                 self.fire_challenge(crate::scenario::ChallengeEvent::SmeltItem);
                             }
                             // Apply the click straight against the world's
-                            // furnace data and the player's inventory —
+                            // furnace data and the player's window —
                             // `world` and `players` are disjoint fields on
                             // GameState, so splitting the borrow lets both
                             // be mutated together without cloning the whole
-                            // furnace through a local.
+                            // furnace through a local. C3b-1 — through the
+                            // one container rule (`apply_container`).
                             let hotbar = self.players[pidx].hotbar_slot;
+                            let click = crate::container_window::ContainerClick::Furnace { kind, mode, hotbar };
+                            let ctx = self.container_ctx(pidx, false);
                             let world = &mut self.world;
-                            let players = &mut self.players;
+                            let p = &mut self.players[pidx];
                             if let Some(f) = world.furnace_at_mut(furnace_pos) {
-                                let _ = crate::furnace::apply_slot_click(
-                                    f,
-                                    &mut players[pidx].inventory,
-                                    hotbar,
-                                    kind,
-                                    mode,
+                                let _ = p.crafting_ui.apply_container_click(
+                                    &mut p.inventory,
+                                    &mut p.armour_slots,
+                                    crate::container_window::ContainerMut::Furnace(f),
+                                    &click,
+                                    &ctx,
                                 );
                             }
                             self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
@@ -18597,7 +18572,7 @@ impl super::GameState {
                 // Dispenser/Dropper UI — the chest dialog engine on the
                 // embedded 9-slot ChestData, with our own title.
                 let disp_data = self.world.dispenser_at(disp_pos).cloned();
-                if let Some(mut data) = disp_data {
+                if let Some(data) = disp_data {
                     let title = if self.world.get_block(disp_pos.0, disp_pos.1, disp_pos.2)
                         == block::DISPENSER
                     {
@@ -18608,12 +18583,24 @@ impl super::GameState {
                     let result = crate::chest_ui::show_container_dialog(
                         &self.renderer.egui.ctx,
                         title,
-                        &mut data.chest,
-                        &mut self.players[pidx].inventory,
+                        &data.chest,
+                        &self.players[pidx].inventory,
                         disp_pos,
                     );
-                    if let Some(d) = self.world.dispenser_at_mut(disp_pos) {
-                        *d = data;
+                    // C3b-1 — each click through the one container rule.
+                    let ctx = self.container_ctx(pidx, false);
+                    for click in &result.clicks {
+                        let world = &mut self.world;
+                        let p = &mut self.players[pidx];
+                        if let Some(d) = world.dispenser_at_mut(disp_pos) {
+                            p.crafting_ui.apply_container_click(
+                                &mut p.inventory,
+                                &mut p.armour_slots,
+                                crate::container_window::ContainerMut::Chest(&mut d.chest),
+                                click,
+                                &ctx,
+                            );
+                        }
                     }
                     if result.close_requested {
                         self.players[pidx].open_dispenser = None;
@@ -18643,11 +18630,27 @@ impl super::GameState {
                     let result = crate::chest_ui::show_container_dialog_ext(
                         &self.renderer.egui.ctx,
                         "Pack",
-                        &mut data,
-                        &mut self.players[pidx].inventory,
+                        &data,
+                        &self.players[pidx].inventory,
                         pack_pos,
                         true,
                     );
+                    // C3b-1 — each click through the one container rule. A
+                    // pack is never a joiner's (riding and packs are refused
+                    // on a mirrored steed until D2c), so it isn't logged as a
+                    // window op.
+                    let ctx = self.container_ctx(pidx, false);
+                    for click in &result.clicks {
+                        let p = &mut self.players[pidx];
+                        let mut view = crate::window::WindowMut {
+                            inv: &mut p.inventory,
+                            armour: &mut p.armour_slots,
+                            cursor: &mut p.crafting_ui.cursor_item,
+                            grid: &mut p.crafting_ui.grid,
+                            container: Some(crate::container_window::ContainerMut::Chest(&mut data)),
+                        };
+                        crate::container_window::apply_container(&mut view, click, &ctx);
+                    }
                     // Commit the (possibly-mutated) slots back first, so
                     // `try_unequip_pack` below re-reads the live emptiness.
                     if let Ok(mut hd) = self.ecs.get::<&mut crate::horse_ai::HorseData>(pack_entity) {
@@ -18696,15 +18699,27 @@ impl super::GameState {
                 // on the world. Pure-render returns mutated state; we
                 // commit it back through the world accessor.
                 let chest_data = self.world.chest_at(chest_pos).cloned();
-                if let Some(mut data) = chest_data {
+                if let Some(data) = chest_data {
                     let result = crate::chest_ui::show_chest_dialog(
                         &self.renderer.egui.ctx,
-                        &mut data,
-                        &mut self.players[pidx].inventory,
+                        &data,
+                        &self.players[pidx].inventory,
                         chest_pos,
                     );
-                    if let Some(c) = self.world.chest_at_mut(chest_pos) {
-                        *c = data;
+                    // C3b-1 — each click through the one container rule.
+                    let ctx = self.container_ctx(pidx, false);
+                    for click in &result.clicks {
+                        let world = &mut self.world;
+                        let p = &mut self.players[pidx];
+                        if let Some(c) = world.chest_at_mut(chest_pos) {
+                            p.crafting_ui.apply_container_click(
+                                &mut p.inventory,
+                                &mut p.armour_slots,
+                                crate::container_window::ContainerMut::Chest(c),
+                                click,
+                                &ctx,
+                            );
+                        }
                     }
                     if result.close_requested {
                         self.players[pidx].open_chest = None;
@@ -21213,6 +21228,9 @@ impl super::GameState {
                 p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, ticks_run > 0);
             }
         }
+        // C3b-1 — a joiner's shared container screen closes by the same rule
+        // (and when its screen was closed), and the server is told.
+        self.tick_shared_container();
         for (pidx, click_target) in craft_clicks {
             match click_target {
                 crate::craft_ui::ClickTarget::ResultSlot => {
@@ -21909,7 +21927,8 @@ impl super::GameState {
 
         // MP-D2b — the server's word on our swings and right-clicks; C2a —
         // and on our item actions; death-drops phase 2b — the stacks it gave
-        // us; the hits that wear our armour. C3a-fix-1 — every one of them
+        // us; the hits that wear our armour; C3b-1 — the server's container
+        // answers. C3a-fix-1 — every one of them
         // that changes our window is a numbered window event: into the inbox,
         // applied in the one order they arrived — now, or (while we hold
         // edits not sent yet) right after the input carrying them goes out
@@ -22382,8 +22401,8 @@ impl super::GameState {
                 && connected
                 && let Some(client) = self.remote_client.as_mut()
             {
-                for (op, digest) in p.crafting_ui.take_ops(&p.inventory, &p.armour_slots) {
-                    client.send_window_op(op, digest);
+                for logged in p.crafting_ui.take_ops(&p.inventory, &p.armour_slots) {
+                    client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
                 }
             } else {
                 p.crafting_ui.ops.discard();
@@ -22403,8 +22422,8 @@ impl super::GameState {
         let first_edit = self.pending_block_changes.first_stamp();
         let Some(client) = self.remote_client.as_mut().filter(|c| c.is_connected()) else { return };
         let Some(p) = self.players.first_mut() else { return };
-        for (op, digest) in p.crafting_ui.ops.take_before(first_edit) {
-            client.send_window_op(op, digest);
+        for logged in p.crafting_ui.ops.take_before(first_edit) {
+            client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
         }
     }
 
@@ -22478,6 +22497,15 @@ impl super::GameState {
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Item(out)) => {
                     self.apply_item_action_outcome(&out);
+                }
+                // C3b-1 — the server's container answers: opening on its
+                // real container, and its per-slot corrections and pushes
+                // (a set of player slots is a numbered event, at its turn).
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::ContainerOpened(pkt)) => {
+                    self.apply_container_opened(&pkt);
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::SlotSet(pkt)) => {
+                    self.apply_window_slot_set(&pkt);
                 }
                 crate::window_events::InboxItem::Grant(grant) => {
                     unfit = crate::remote_entities::apply_inventory_grant(
