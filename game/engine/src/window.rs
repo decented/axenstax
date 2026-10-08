@@ -13,8 +13,18 @@
 //! Every rule is lossless: nothing is created or destroyed except by
 //! [`WindowClick::Trash`] (destroys the cursor) and [`WindowClick::Result`]
 //! (one of each grid cell becomes the crafted output).
+//!
+//! C3a-2a (protocol v75): a [`WindowClick`] is wire data. A joined client
+//! sends every click it applies as a window op (`window_ops`), with the
+//! [`digest`] of its window after it, and the server applies the same
+//! [`apply`] to its copy of that joiner's window. A table's reach is part of
+//! the rule ([`ClickCtx::table_present`]), so each side judges it from its
+//! own body and its own world.
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::armour::{ArmourItem, ArmourSlot};
+use crate::block::BlockId;
 use crate::crafting::{self, CraftSlot};
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
@@ -28,6 +38,11 @@ pub const SLOTS: usize = 36;
 /// The first bag slot. [`WindowClick::Sort`] tidies `BAG_START..SLOTS`; the
 /// hotbar is the player's curated bar and is never sorted.
 pub const BAG_START: usize = 9;
+
+/// The most slots one drag gesture paints: every inventory slot and every
+/// grid cell once (36 + 9). A longer list is refused by the rule and doesn't
+/// decode off the wire.
+pub const MAX_DRAG_SLOTS: usize = SLOTS + 9;
 
 /// A borrowed view over everything one inventory screen touches.
 pub struct WindowMut<'a> {
@@ -51,8 +66,9 @@ pub struct WindowMut<'a> {
 pub enum Station {
     /// The player's own 2×2 grid.
     Player,
-    /// A crafting table's 3×3 grid.
-    Table,
+    /// The 3×3 grid of the crafting table at `cell` (C3a-2a: the station
+    /// carries its table, so the rule can check it is still there).
+    Table { cell: [i32; 3] },
 }
 
 impl Station {
@@ -60,7 +76,7 @@ impl Station {
     pub fn grid_size(self) -> usize {
         match self {
             Station::Player => 2,
-            Station::Table => 3,
+            Station::Table { .. } => 3,
         }
     }
 }
@@ -69,15 +85,46 @@ impl Station {
 #[derive(Clone, Debug)]
 pub struct ClickCtx {
     /// The player is in creative mode. No rule differs in creative yet.
-    #[allow(dead_code)] // carried for C3a-2/C3b, whose server rules may need it.
+    #[allow(dead_code)] // carried for C3b, whose container rules may need it.
     pub creative: bool,
     /// The grid on screen: bounds a [`WindowClick::Grid`] click, and is what
     /// the result click's [`recipe_output`] matches against.
     pub station: Station,
+    /// C3a-2a — the acting body's eye: the client's own player, or the
+    /// server's body of a joiner. A table's reach is judged from it.
+    pub eye: glam::Vec3,
+    /// C3a-2a — the block the acting side's world holds at the station's
+    /// table cell (`AIR` at the player's grid). Each side reads its own world.
+    pub table_block: BlockId,
 }
 
-/// A slot a drag gesture paints over.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl ClickCtx {
+    /// A click at `station` by a body whose eye is at `eye`, in a world
+    /// whose blocks `block_at` reads.
+    pub fn new(creative: bool, station: Station, eye: glam::Vec3, block_at: impl Fn([i32; 3]) -> BlockId) -> Self {
+        let table_block = match station {
+            Station::Table { cell } => block_at(cell),
+            Station::Player => crate::block::AIR,
+        };
+        ClickCtx { creative, station, eye, table_block }
+    }
+
+    /// May this station craft now? The player's own grid always; a table
+    /// only while it stands in reach of the acting body ([`table_in_reach`],
+    /// the rule its screen closes by). The result click and `Autofill` ask,
+    /// so a screen whose forced close couldn't return everything can no
+    /// longer craft at, or lay a recipe into, a table that's gone.
+    pub fn table_present(&self) -> bool {
+        match self.station {
+            Station::Player => true,
+            Station::Table { cell } => table_in_reach(self.table_block, cell, self.eye),
+        }
+    }
+}
+
+/// A slot a drag gesture paints over. Wire data (C3a-2a), append only:
+/// `Inv` = 0, `Grid` = 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowSlot {
     /// Inventory slot 0..36.
     Inv(usize),
@@ -85,9 +132,13 @@ pub enum WindowSlot {
     Grid(usize, usize),
 }
 
-/// One transition the inventory screen performs. Plain data only, so it can
-/// be sent as a window op later (C3a-2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One transition the inventory screen performs. Plain data, sent as a
+/// window op (C3a-2a, `protocol::WireWindowOp::Click`).
+///
+/// Wire-stable, APPEND ONLY: Slot = 0, Grid = 1, Armour = 2, Result = 3,
+/// Trash = 4, DragDistribute = 5, DragGather = 6, Sort = 7, ToggleLock = 8,
+/// Autofill = 9, Close = 10 (pinned by `protocol::tests::window_op_packets_round_trip`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowClick {
     /// Click inventory slot `slot` (0..36). Left (`right == false`) works on
     /// the whole stack: pick up, put down, merge up to max, or swap. Right
@@ -104,16 +155,25 @@ pub enum WindowClick {
     /// ([`recipe_output`]) lands on the cursor (merged when it
     /// stacks; any overflow, or the whole output under a different cursor
     /// item, must fit the inventory), then one is taken from every non-empty
-    /// grid cell. Refused, consuming nothing, when it can't land.
+    /// grid cell. Refused, consuming nothing, when it can't land, or at a
+    /// table no longer in reach ([`ClickCtx::table_present`]).
     Result,
     /// The trash slot: destroy the stack on the cursor.
     Trash,
     /// RMB drag paint: drop one carried item into each slot in order (an
-    /// empty slot, or a matching one with room). Others are skipped.
-    DragDistribute { slots: Vec<WindowSlot> },
+    /// empty slot, or a matching one with room). Others are skipped. At most
+    /// [`MAX_DRAG_SLOTS`] slots (more is refused, and doesn't decode).
+    DragDistribute {
+        #[serde(deserialize_with = "bounded_drag")]
+        slots: Vec<WindowSlot>,
+    },
     /// LMB drag paint: gather each slot's matching items into the cursor, in
-    /// order. An empty cursor adopts the first painted stack.
-    DragGather { slots: Vec<WindowSlot> },
+    /// order. An empty cursor adopts the first painted stack. At most
+    /// [`MAX_DRAG_SLOTS`] slots.
+    DragGather {
+        #[serde(deserialize_with = "bounded_drag")]
+        slots: Vec<WindowSlot>,
+    },
     /// The Sort button: merge and order the bag (`BAG_START..SLOTS`),
     /// keeping locked slots where they are.
     Sort,
@@ -123,11 +183,23 @@ pub enum WindowClick {
     /// inventory, then lay `example` from it if the inventory holds every
     /// item; otherwise take nothing and leave the grid empty. A recipe
     /// bigger than the player's 2×2 is refused there (`NeedsTable`) before
-    /// anything moves; one that fits is laid in the 2×2's corner.
+    /// anything moves; one that fits is laid in the 2×2's corner. At a table
+    /// no longer in reach nothing moves either (`NeedsTable`).
     Autofill { example: [[CraftSlot; 3]; 3] },
     /// Closing the screen: return the grid and cursor to the inventory.
     /// What doesn't fit stays where it was (and the screen stays open).
     Close,
+}
+
+/// The wire bound on a drag's slot list ([`MAX_DRAG_SLOTS`]): a longer list
+/// doesn't decode, so the op is never applied. Bounded by the packet's size
+/// limit while it is read (`protocol::safe_deserialize`).
+fn bounded_drag<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<WindowSlot>, D::Error> {
+    let slots = Vec::<WindowSlot>::deserialize(d)?;
+    if slots.len() > MAX_DRAG_SLOTS {
+        return Err(serde::de::Error::invalid_length(slots.len(), &"at most 45 drag slots"));
+    }
+    Ok(slots)
 }
 
 /// What the caller must do outside the window.
@@ -226,11 +298,15 @@ pub fn apply(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx) -> Click
         WindowClick::Slot { slot, right } => click_slot(view, *slot, *right),
         WindowClick::Grid { row, col, right } => click_grid(view, *row, *col, *right, ctx.station),
         WindowClick::Armour { slot } => click_armour(view, *slot),
+        WindowClick::Result if !ctx.table_present() => ClickResult::Refused,
         WindowClick::Result => click_result(view, ctx.station),
         WindowClick::Trash => match view.cursor.take() {
             Some(stack) => ClickResult::Binned(stack),
             None => ClickResult::Refused,
         },
+        WindowClick::DragDistribute { slots } | WindowClick::DragGather { slots } if slots.len() > MAX_DRAG_SLOTS => {
+            ClickResult::Refused
+        }
         WindowClick::DragDistribute { slots } => {
             let mut moved = false;
             for &at in slots {
@@ -256,6 +332,7 @@ pub fn apply(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx) -> Click
             view.inv.toggle_lock(*slot);
             ClickResult::Done
         }
+        WindowClick::Autofill { .. } if !ctx.table_present() => ClickResult::NeedsTable,
         WindowClick::Autofill { example } => match fit_example(example, ctx.station) {
             Some(laid) => done_if(autofill(view, &laid)),
             None => ClickResult::NeedsTable,
@@ -732,6 +809,113 @@ fn autofill(view: &mut WindowMut, example: &[[CraftSlot; 3]; 3]) -> bool {
     true
 }
 
+/// C3a-2a — one landed hit's wear on a set of equipped armour: every worn
+/// piece loses one durability, and a piece that breaks is unequipped so it
+/// neither keeps contributing points nor lingers as a zero-durability ghost.
+/// The one rule: a player's own hits (`PlayerSlot::wear_armour`), a joined
+/// client's `ArmourWorn`, and the server's copy of that joiner's armour.
+pub fn wear_armour(armour: &mut [Option<ArmourItem>; 4]) {
+    for slot in armour.iter_mut() {
+        if let Some(piece) = slot.as_mut()
+            && !piece.is_broken()
+        {
+            piece.durability = piece.durability.saturating_sub(1);
+        }
+        if slot.as_ref().is_some_and(|p| p.is_broken()) {
+            *slot = None;
+        }
+    }
+}
+
+/// C3a-2a — the window's digest ([`digest_parts`] over a view).
+pub fn digest(view: &WindowMut) -> u32 {
+    digest_parts(view.inv, view.armour, view.cursor, view.grid)
+}
+
+/// C3a-2a — a stable 32-bit hash of a window: the 36 slots, the four armour
+/// slots, the cursor and the grid (each slot's kind, id, count and
+/// durability), then `auto_refill`. A joined client sends it with each
+/// window op, after applying it; the server compares its own copy's
+/// (log-only, `PossessionTally::window_mismatch`).
+///
+/// FNV-1a over explicit little-endian bytes, so every platform and build
+/// agrees. A slot is a presence byte, then kind, id (u16), count and
+/// durability (u16): Block = 1 (block id), Tool = 2 (type << 8 | tier),
+/// Material = 3 (material id), Armour = 4 (slot << 8 | tier), Plan = 5 (no
+/// id: a Plan has no wire form yet, so the server sees that slot empty and
+/// the digest says so). Locks are not in it.
+pub fn digest_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid) -> u32 {
+    let mut h = Fnv32::default();
+    for i in 0..SLOTS {
+        h.stack(inv.slot(i));
+    }
+    for piece in armour {
+        match piece {
+            Some(p) => h.item(&Item::Armour(*p), 1),
+            None => h.byte(0),
+        }
+    }
+    h.stack(cursor.as_ref());
+    for cell in grid.iter().flatten() {
+        h.stack(cell.as_ref());
+    }
+    h.byte(u8::from(inv.auto_refill));
+    h.0
+}
+
+/// FNV-1a, 32 bits.
+struct Fnv32(u32);
+
+impl Default for Fnv32 {
+    fn default() -> Self {
+        Fnv32(0x811c_9dc5)
+    }
+}
+
+impl Fnv32 {
+    fn byte(&mut self, b: u8) {
+        self.0 = (self.0 ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+
+    fn u16(&mut self, v: u16) {
+        for b in v.to_le_bytes() {
+            self.byte(b);
+        }
+    }
+
+    fn stack(&mut self, stack: Option<&ItemStack>) {
+        match stack {
+            Some(s) => self.item(&s.item, s.count),
+            None => self.byte(0),
+        }
+    }
+
+    fn item(&mut self, item: &Item, count: u8) {
+        let (kind, id, durability) = match item {
+            Item::Block(b) => (1, *b, 0),
+            Item::Tool(t) => match crate::inventory::item_to_wire_full(item) {
+                crate::protocol::WireItem::Tool { tool_type, material, .. } => {
+                    (2, u16::from(tool_type) << 8 | u16::from(material), t.durability)
+                }
+                _ => (2, 0, t.durability),
+            },
+            Item::Material(m) => (3, *m as u16, 0),
+            Item::Armour(a) => match crate::inventory::item_to_wire_full(item) {
+                crate::protocol::WireItem::Armour { slot, material, .. } => {
+                    (4, u16::from(slot) << 8 | u16::from(material), a.durability)
+                }
+                _ => (4, 0, a.durability),
+            },
+            Item::Plan(_) => (5, 0, 0),
+        };
+        self.byte(1);
+        self.byte(kind);
+        self.u16(id);
+        self.byte(count);
+        self.u16(durability);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Every `WindowClick` on plain values: no egui, no GPU.
@@ -754,8 +938,15 @@ mod tests {
             Win { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() }
         }
 
-        /// Apply `click` at `station`.
+        /// Apply `click` at `station`, by a body standing beside the table
+        /// ([`NEAR`]) in a world where [`TABLE`]'s cell holds one.
         fn at(&mut self, station: Station, click: WindowClick) -> ClickResult {
+            self.by(station, NEAR, block::CRAFTING_TABLE, click)
+        }
+
+        /// Apply `click` at `station` by a body whose eye is `eye`, where
+        /// the table's cell holds `table_block`.
+        fn by(&mut self, station: Station, eye: glam::Vec3, table_block: block::BlockId, click: WindowClick) -> ClickResult {
             let mut view = WindowMut {
                 inv: &mut self.inv,
                 armour: &mut self.armour,
@@ -763,11 +954,15 @@ mod tests {
                 grid: &mut self.grid,
                 container: None,
             };
-            apply(&mut view, &click, &ClickCtx { creative: false, station })
+            apply(&mut view, &click, &ClickCtx::new(false, station, eye, |_| table_block))
         }
 
         fn click(&mut self, click: WindowClick) -> ClickResult {
-            self.at(Station::Table, click)
+            self.at(TABLE, click)
+        }
+
+        fn digest(&mut self) -> u32 {
+            digest_parts(&self.inv, &self.armour, &self.cursor, &self.grid)
         }
 
         fn cursor_count(&self) -> Option<u8> {
@@ -797,6 +992,12 @@ mod tests {
             }
         }
     }
+
+    /// The crafting table the tests' 3×3 grid is opened from.
+    const TABLE: Station = Station::Table { cell: [0, 64, 0] };
+
+    /// An eye two blocks from [`TABLE`]'s cell: in reach.
+    const NEAR: glam::Vec3 = glam::Vec3::new(0.5, 65.6, 2.5);
 
     fn stone(n: u8) -> ItemStack {
         ItemStack::new_block(block::STONE, n)
@@ -996,8 +1197,8 @@ mod tests {
         assert_eq!(w.cell_count(1, 1), Some(5));
         // A table's 3×3 takes the corner; beyond the array is refused.
         w.cursor = Some(stone(1));
-        assert_eq!(w.at(Station::Table, cell(2, 2, false)), ClickResult::Done);
-        assert_eq!(w.at(Station::Table, cell(3, 0, false)), ClickResult::Refused);
+        assert_eq!(w.at(TABLE, cell(2, 2, false)), ClickResult::Done);
+        assert_eq!(w.at(TABLE, cell(3, 0, false)), ClickResult::Refused);
     }
 
     // ── Armour ──────────────────────────────────────────────────────────
@@ -1045,7 +1246,7 @@ mod tests {
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 2));
         }
-        let table = recipe_output(&w.grid, Station::Table).expect("four planks make a crafting table");
+        let table = recipe_output(&w.grid, TABLE).expect("four planks make a crafting table");
         assert_eq!(w.click(WindowClick::Result), ClickResult::Crafted(table.clone()));
         assert_eq!(w.cursor, Some(table));
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
@@ -1062,7 +1263,7 @@ mod tests {
         let mut w = Win::new();
         w.grid[0][0] = Some(ItemStack::new_block(block::OAK_LOG, 1));
         w.cursor = Some(ItemStack::new_block(block::OAK_PLANKS, 62));
-        let planks = recipe_output(&w.grid, Station::Table).expect("a log makes planks");
+        let planks = recipe_output(&w.grid, TABLE).expect("a log makes planks");
         assert!(w.click(WindowClick::Result).ok());
         assert_eq!(w.cursor_count(), Some(64), "the cursor fills to max");
         let spilled = u32::from(planks.count) - 2;
@@ -1101,7 +1302,7 @@ mod tests {
         let mut w = Win::new();
         w.grid[0][0] = Some(dirt(1));
         w.grid[2][2] = Some(stone(1));
-        assert_eq!(recipe_output(&w.grid, Station::Table), None, "dirt and stone in opposite corners make nothing");
+        assert_eq!(recipe_output(&w.grid, TABLE), None, "dirt and stone in opposite corners make nothing");
         assert_eq!(w.click(WindowClick::Result), ClickResult::Refused);
         assert_eq!(w.cell_count(0, 0), Some(1));
         assert_eq!(w.cell_count(2, 2), Some(1));
@@ -1254,7 +1455,7 @@ mod tests {
         w.inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Stick, 2)));
         let ex = example("Iron Pickaxe");
         assert_eq!(w.click(WindowClick::Autofill { example: ex }), ClickResult::Done);
-        assert!(recipe_output(&w.grid, Station::Table).is_some(), "the laid grid crafts");
+        assert!(recipe_output(&w.grid, TABLE).is_some(), "the laid grid crafts");
         assert_eq!(w.inv.count_material(MaterialId::IronIngot), 0);
         assert_eq!(w.inv.count_material(MaterialId::Stick), 0);
     }
@@ -1308,7 +1509,7 @@ mod tests {
         assert_eq!(w.inv.count_material(MaterialId::IronIngot), 3, "nothing taken");
         assert_eq!(w.grid[0][0], Some(dirt(5)), "nothing moved");
         // At a table the same fill goes.
-        assert!(w.at(Station::Table, WindowClick::Autofill { example: ex }).ok());
+        assert!(w.at(TABLE, WindowClick::Autofill { example: ex }).ok());
     }
 
     #[test]
@@ -1343,7 +1544,7 @@ mod tests {
         for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
             w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
         }
-        assert!(recipe_output(&w.grid, Station::Table).is_some());
+        assert!(recipe_output(&w.grid, TABLE).is_some());
         assert_eq!(recipe_output(&w.grid, Station::Player), None);
         assert_eq!(w.at(Station::Player, WindowClick::Result), ClickResult::Refused);
         assert_eq!(w.total(block::OAK_PLANKS), 4, "nothing consumed");
@@ -1358,9 +1559,9 @@ mod tests {
             for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                 w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
             }
-            assert!(recipe_output(&w.grid, Station::Table).is_some(), "four planks alone craft");
+            assert!(recipe_output(&w.grid, TABLE).is_some(), "four planks alone craft");
             w.grid[2][2] = Some(odd.clone());
-            assert_eq!(recipe_output(&w.grid, Station::Table), None, "{odd:?} blocks the craft");
+            assert_eq!(recipe_output(&w.grid, TABLE), None, "{odd:?} blocks the craft");
             assert_eq!(w.click(WindowClick::Result), ClickResult::Refused);
             assert_eq!(w.grid[2][2], Some(odd), "never destroyed");
             assert_eq!(w.total(block::OAK_PLANKS), 4);
@@ -1409,5 +1610,141 @@ mod tests {
         assert_eq!(w.click(WindowClick::Close), ClickResult::Refused);
         assert_eq!(w.cell_count(0, 0), Some(5));
         assert_eq!(w.cursor_count(), Some(3));
+    }
+
+    // ── C3a-2a: the table's reach is part of the rule ───────────────────
+
+    fn planks_table_grid(w: &mut Win) {
+        for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            w.grid[r][c] = Some(ItemStack::new_block(block::OAK_PLANKS, 1));
+        }
+    }
+
+    #[test]
+    fn a_table_result_click_out_of_reach_or_at_a_gone_table_is_refused_and_moves_nothing() {
+        let far = glam::Vec3::new(0.5, 65.6, 12.5);
+        for (eye, at_cell) in [(far, block::CRAFTING_TABLE), (NEAR, block::AIR), (NEAR, block::STONE)] {
+            let mut w = Win::new();
+            planks_table_grid(&mut w);
+            let before = w.digest();
+            assert_eq!(w.by(TABLE, eye, at_cell, WindowClick::Result), ClickResult::Refused);
+            assert_eq!(w.digest(), before, "nothing moved");
+            // Grid clicks still work: the player can empty the grid by hand.
+            assert_eq!(w.by(TABLE, eye, at_cell, cell(0, 0, false)), ClickResult::Done);
+            assert_eq!(w.cursor_count(), Some(1));
+        }
+        // In reach, the same click crafts.
+        let mut w = Win::new();
+        planks_table_grid(&mut w);
+        assert!(matches!(w.by(TABLE, NEAR, block::CRAFTING_TABLE, WindowClick::Result), ClickResult::Crafted(_)));
+        // The player's own 2×2 needs no table.
+        let mut w = Win::new();
+        planks_table_grid(&mut w);
+        assert!(matches!(w.by(Station::Player, far, block::AIR, WindowClick::Result), ClickResult::Crafted(_)));
+    }
+
+    #[test]
+    fn autofill_at_a_table_out_of_reach_needs_a_table_and_moves_nothing() {
+        let mut w = Win::new();
+        w.inv.set_slot(0, Some(ItemStack::new_block(block::OAK_PLANKS, 4)));
+        w.grid[0][0] = Some(dirt(2));
+        let before = w.digest();
+        let fill = WindowClick::Autofill { example: example("Crafting Table") };
+        assert_eq!(w.by(TABLE, NEAR, block::AIR, fill.clone()), ClickResult::NeedsTable);
+        assert_eq!(w.digest(), before);
+        assert!(w.by(TABLE, NEAR, block::CRAFTING_TABLE, fill).ok());
+    }
+
+    #[test]
+    fn a_drag_over_the_slot_bound_is_refused() {
+        let mut w = Win::new();
+        w.cursor = Some(stone(64));
+        let mut slots: Vec<WindowSlot> = (0..SLOTS).map(WindowSlot::Inv).collect();
+        slots.extend((0..3).flat_map(|r| (0..3).map(move |c| WindowSlot::Grid(r, c))));
+        assert_eq!(slots.len(), MAX_DRAG_SLOTS);
+        let mut over = slots.clone();
+        over.push(WindowSlot::Inv(0));
+        assert_eq!(w.click(WindowClick::DragDistribute { slots: over.clone() }), ClickResult::Refused);
+        assert_eq!(w.click(WindowClick::DragGather { slots: over }), ClickResult::Refused);
+        assert_eq!(w.cursor_count(), Some(64), "nothing moved");
+        assert_eq!(w.click(WindowClick::DragDistribute { slots }), ClickResult::Done);
+        assert_eq!(w.cursor_count(), Some(64 - MAX_DRAG_SLOTS as u8));
+    }
+
+    // ── C3a-2a: the digest ──────────────────────────────────────────────
+
+    #[test]
+    fn the_digest_sees_every_part_of_the_window() {
+        let mut w = Win::new();
+        let empty = w.digest();
+        let mut seen = vec![empty];
+        let mut changed = |w: &mut Win, what: &str| {
+            let d = w.digest();
+            assert!(!seen.contains(&d), "{what} changed nothing");
+            seen.push(d);
+        };
+        w.inv.set_slot(35, Some(stone(1)));
+        changed(&mut w, "a bag slot");
+        w.inv.set_slot(35, Some(stone(2)));
+        changed(&mut w, "its count");
+        w.inv.set_slot(35, Some(dirt(2)));
+        changed(&mut w, "its block");
+        let mut pick = Tool::new(ToolType::Pickaxe, ToolMaterial::Iron);
+        w.inv.set_slot(0, Some(ItemStack::new_tool(pick)));
+        changed(&mut w, "a tool");
+        pick.durability -= 1;
+        w.inv.set_slot(0, Some(ItemStack::new_tool(pick)));
+        changed(&mut w, "its wear");
+        w.armour[2] = Some(piece(ArmourSlot::Leggings));
+        changed(&mut w, "an armour piece");
+        w.armour[2].as_mut().unwrap().durability -= 1;
+        changed(&mut w, "its wear");
+        w.cursor = Some(ItemStack::new_material(MaterialId::Stick, 3));
+        changed(&mut w, "the cursor");
+        w.grid[2][2] = Some(stone(1));
+        changed(&mut w, "a grid cell");
+        w.inv.auto_refill = !w.inv.auto_refill;
+        changed(&mut w, "auto-refill");
+        // Where a stack sits matters, not just what is held.
+        let mut a = Win::new();
+        a.inv.set_slot(9, Some(stone(5)));
+        let mut b = Win::new();
+        b.inv.set_slot(10, Some(stone(5)));
+        assert_ne!(a.digest(), b.digest());
+        // A Plan is no empty slot (the server, which can't hold one yet,
+        // sees the slot empty: the digest tells them apart).
+        let mut p = Win::new();
+        p.inv.set_slot(3, Some(ItemStack { item: Item::Plan(crate::satoshi::starter_hut_plan()), count: 1 }));
+        assert_ne!(p.digest(), Win::new().digest());
+    }
+
+    #[test]
+    fn the_digest_is_stable() {
+        // FNV-1a over fixed little-endian bytes: the same window hashes the
+        // same on every platform and in every build (client and server).
+        let mut w = Win::new();
+        assert_eq!(w.digest(), EMPTY_WINDOW_DIGEST);
+        w.inv.set_slot(0, Some(stone(3)));
+        let d = w.digest();
+        let mut again = Win::new();
+        again.inv.set_slot(0, Some(stone(3)));
+        assert_eq!(again.digest(), d);
+    }
+
+    /// The digest of an empty window with auto-refill on (pinned): FNV-1a
+    /// over fifty empty-slot bytes (36 + 4 + cursor + 9) and the setting's 1.
+    const EMPTY_WINDOW_DIGEST: u32 = 56_220_004;
+
+    // ── C3a-2a: armour wear ─────────────────────────────────────────────
+
+    #[test]
+    fn wear_armour_wears_every_piece_once_and_unequips_a_broken_one() {
+        let mut armour = [Some(piece(ArmourSlot::Helmet)), None, Some(piece(ArmourSlot::Leggings)), None];
+        let full = armour[0].unwrap().durability;
+        armour[2].as_mut().unwrap().durability = 1;
+        wear_armour(&mut armour);
+        assert_eq!(armour[0].unwrap().durability, full - 1);
+        assert_eq!(armour[2], None, "the last point broke it: unequipped");
+        assert_eq!(armour[1], None);
     }
 }

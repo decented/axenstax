@@ -50,11 +50,14 @@
 //! the 36 slots while it is open): an owed outcome is paid from the first of
 //! them that has the item ([`take_owed_held`]; C2a verify L6 — food carried on
 //! the cursor when its `Eat` was accepted used to go unpaid), and a claim
-//! counts all three ([`JoinerActions::can_afford`]). And a joined client's
+//! counts all three ([`JoinerActions::can_afford`]). C3a-2a — the server
+//! holds the same window (it mirrors every window op) and pays an accepted
+//! outcome from its copy by the same search ([`take_owed_window`]). And a joined client's
 //! own uses respect the claims: a Q-drop or a craft that would spend an item
 //! a request in flight needs does nothing ([`JoinerActions::can_spend`],
-//! [`JoinerActions::may_craft`]). A `Craft` or `Drop` takes a request number
-//! too but is never answered ([`JoinerActions::unanswered`]).
+//! [`JoinerActions::may_craft`]). A `Drop` takes a request number too but is
+//! never answered ([`JoinerActions::unanswered`]); since C3a-2a a craft is
+//! the window's result click, sent as a window op, not a request.
 
 use std::collections::VecDeque;
 
@@ -141,7 +144,7 @@ impl JoinerActions {
     }
 
     /// C2b — the sequence number for a request the server never answers
-    /// (`ItemAction::Craft`, `ItemAction::Drop`): the shared sequence moves
+    /// (`ItemAction::Drop`): the shared sequence moves
     /// on, and nothing waits for an outcome or claims an item.
     pub fn unanswered(&mut self) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
@@ -289,8 +292,7 @@ fn count_of(inv: &Inventory, item: &Item) -> u32 {
 }
 
 /// C2b — how many of `item` the client holds: its 36 slots, the crafting
-/// grid and the cursor.
-// BRIDGE: replaced when C3a's server window holds the grid and cursor.
+/// grid and the cursor (the window the server mirrors since C3a-2a).
 fn count_held(inv: &Inventory, ui: &CraftingUi, item: &Item) -> u32 {
     let outside: u32 = ui
         .grid
@@ -305,8 +307,13 @@ fn count_held(inv: &Inventory, ui: &CraftingUi, item: &Item) -> u32 {
 }
 
 /// Where `held` is now: the slot `slot` it was used from if that still holds
-/// it, else the first slot (of all 36) that does.
-fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Option<usize> {
+/// it, else the first slot (of all 36) that does (a tool by type and
+/// material, an armour piece by slot and material). One rule for both copies
+/// of a joiner's window (C3a-2a): the client wears an accepted swing's
+/// weapon there ([`apply_outcome`]), and the server wears its copy there
+/// (`hosted_server::wear_joiner_weapon`), so a weapon moved off its hotbar
+/// slot while the swing was in flight wears the same piece on both sides.
+pub fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Option<usize> {
     let holds = |i: usize| inv.slot(i).is_some_and(|s| same_item(&s.item, held));
     if holds(slot) {
         return Some(slot);
@@ -318,9 +325,9 @@ fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) -> Opt
 /// each from `slot` if it still holds one, else from wherever one now is.
 /// Returns how many were taken (fewer only when the inventory runs out).
 ///
-/// One rule for both copies of a joiner's inventory: the client runs it on
-/// its own ([`apply_outcome`], [`apply_item_outcome`]) and the server on its
-/// shadow of it (C1, `joiner_inventory`), for the same accepted outcome.
+/// The 36-slot part of [`take_owed_window`], which both copies of a
+/// joiner's window run for an accepted outcome. Also the server's rule for a
+/// Q-drop's item (`item_actions::serve_drop`).
 pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item, n: u8) -> u8 {
     let mut taken = 0;
     for _ in 0..n {
@@ -335,23 +342,26 @@ pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item
     taken
 }
 
-/// C2b decision 5 — the client's owed payment: `n` of `held`, from its 36
-/// slots first ([`take_owed`]: the request's slot if it still holds one,
-/// else wherever one is), then the crafting grid (row-major), then the
-/// cursor. Returns how many were taken. The grid's result is recomputed if a
-/// cell was taken from. (The server's shadow has no grid: it runs
-/// [`take_owed`].)
-// BRIDGE: replaced when C3a's server window holds the grid and cursor.
-pub fn take_owed_held(inv: &mut Inventory, ui: &mut CraftingUi, slot: usize, held: &Item, n: u8) -> u8 {
+/// The owed payment (C2b decision 5; C3a-2a: one rule for both copies of a
+/// joiner's window): `n` of `held`, from the 36 slots first ([`take_owed`]:
+/// the request's slot if it still holds one, else wherever one is), then the
+/// crafting grid (row-major), then the cursor. Returns how many were taken.
+/// The client runs it on its own window ([`take_owed_held`]) when the
+/// outcome arrives, the server on its copy (`hosted_server::shadow_take_owed`)
+/// when it accepts the request.
+pub fn take_owed_window(
+    inv: &mut Inventory,
+    grid: &mut crate::window::CraftGrid,
+    cursor: &mut Option<crate::item::ItemStack>,
+    slot: usize,
+    held: &Item,
+    n: u8,
+) -> u8 {
     let mut taken = take_owed(inv, slot, held, n);
-    let mut from_grid = false;
     while taken < n {
-        let cell = match ui.grid.iter_mut().flatten().find(|c| c.as_ref().is_some_and(|s| same_item(&s.item, held))) {
-            Some(cell) => {
-                from_grid = true;
-                cell
-            }
-            None if ui.cursor_item.as_ref().is_some_and(|s| same_item(&s.item, held)) => &mut ui.cursor_item,
+        let cell = match grid.iter_mut().flatten().find(|c| c.as_ref().is_some_and(|s| same_item(&s.item, held))) {
+            Some(cell) => cell,
+            None if cursor.as_ref().is_some_and(|s| same_item(&s.item, held)) => &mut *cursor,
             None => break,
         };
         if let Some(stack) = cell.as_mut() {
@@ -362,9 +372,14 @@ pub fn take_owed_held(inv: &mut Inventory, ui: &mut CraftingUi, slot: usize, hel
         }
         taken += 1;
     }
-    if from_grid {
-        ui.update_result();
-    }
+    taken
+}
+
+/// The client's owed payment: [`take_owed_window`] on its window (`inv`, and
+/// `ui`'s grid and cursor), then the result shown is recomputed.
+pub fn take_owed_held(inv: &mut Inventory, ui: &mut CraftingUi, slot: usize, held: &Item, n: u8) -> u8 {
+    let taken = take_owed_window(inv, &mut ui.grid, &mut ui.cursor_item, slot, held, n);
+    ui.update_result();
     taken
 }
 
@@ -709,7 +724,7 @@ mod tests {
         let wheat = Item::Material(MaterialId::Wheat);
         let inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_table_crafting([0, 64, 0]);
+        ui.open_table_crafting([0, 64, 0], &Inventory::new(), &[None; 4]);
         for c in 0..3 {
             ui.grid[1][c] = Some(ItemStack::new_material(MaterialId::Wheat, 1));
         }
@@ -727,7 +742,7 @@ mod tests {
         assert!(a.may_craft(&spare, &ui));
         // A craft from other items is never gated by the wheat claim.
         let mut planks = CraftingUi::new();
-        planks.open_player_crafting();
+        planks.open_player_crafting(&Inventory::new(), &[None; 4]);
         for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             planks.grid[r][c] = Some(ItemStack::new_block(crate::block::OAK_PLANKS, 1));
         }
@@ -764,7 +779,7 @@ mod tests {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_player_crafting();
+        ui.open_player_crafting(&Inventory::new(), &[None; 4]);
         // Milk: the bucket was moved into the grid while the request flew.
         ui.grid[1][1] = Some(ItemStack::new_material(MaterialId::Bucket, 1));
         ui.cursor_item = Some(ItemStack::new_material(MaterialId::Bucket, 1));
@@ -802,7 +817,7 @@ mod tests {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_player_crafting();
+        ui.open_player_crafting(&Inventory::new(), &[None; 4]);
         ui.grid[0][1] = Some(ItemStack::new_material(MaterialId::Bread, 2));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
         let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0 };
@@ -819,7 +834,7 @@ mod tests {
         let wheat = Item::Material(MaterialId::Wheat);
         let mut inv = Inventory::new();
         let mut ui = CraftingUi::new();
-        ui.open_table_crafting([0, 64, 0]);
+        ui.open_table_crafting([0, 64, 0], &Inventory::new(), &[None; 4]);
         for c in 0..3 {
             ui.grid[1][c] = Some(ItemStack::new_material(MaterialId::Wheat, 1));
         }

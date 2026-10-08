@@ -1176,3 +1176,64 @@ fn an_accepted_swing_wears_the_shadows_sword_as_the_clients_wears() {
     assert_eq!(shadow(&rig), client.slot(0).map(|s| s.item.clone()));
     assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 1);
 }
+
+/// C3a-2a — the sword moved off its hotbar slot by a window op (mirrored on
+/// the server) before the swing is accepted: both sides wear it where it now
+/// is, the slot first, then anywhere in the 36 (`joiner_actions::where_now`,
+/// shared), so the same piece wears and the windows stay equal.
+#[test]
+fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
+    use crate::joiner_actions::{apply_outcome, Asked, Pending};
+    let mut rig = Rig::new("swing-moved", 1);
+    let slot = rig.joiners[0].slot;
+    let (cow, id) = rig.spawn(MobType::Cow, Vec3::new(0.0, 0.0, 2.0));
+    {
+        let mut h = rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap();
+        h.max = 10_000.0;
+        h.current = 10_000.0;
+    }
+    let stack = crate::item::ItemStack { item: sword(), count: 1 };
+    rig.hs.server.players[slot].inventory.set_slot(0, Some(stack.clone()));
+    let mut inv = crate::inventory::Inventory::new();
+    inv.set_slot(0, Some(stack));
+    let mut ui = crate::craft_ui::CraftingUi::new();
+    let mut armour = [None; 4];
+    // The player opens its inventory and moves the sword from hotbar slot 0
+    // into the bag (slot 9); the ops reach the server.
+    ui.open_player_crafting(&inv, &armour);
+    for click in [crate::window::WindowClick::Slot { slot: 0, right: false }, crate::window::WindowClick::Slot { slot: 9, right: false }] {
+        ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR);
+    }
+    for (n, (op, digest)) in ui.take_ops(&inv, &armour).into_iter().enumerate() {
+        let pkt = protocol::WindowOpPacket { op_seq: n as u32 + 1, op, digest };
+        rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
+    }
+    rig.tick(10); // the ops, and past the swing schedule
+    assert!(rig.hs.server.players[slot].inventory.slot(0).is_none(), "the server's copy moved it too");
+    assert_eq!(rig.hs.server.players[slot].hotbar_slot, 0, "the swing still comes from slot 0");
+    rig.place(cow, Vec3::new(0.0, 0.0, 2.0));
+    rig.ecs_mut().get::<&mut crate::combat::Health>(cow).unwrap().invincible_timer = 0;
+    let seq = rig.joiners[0].attack(id, Some(&sword()), false);
+    rig.tick(1);
+    let outcome = rig.joiners[0].inbox.outcome(seq).clone();
+    assert!(outcome.accepted);
+    let request = Pending { kind: Asked::Swing, mob: Some(MobType::Cow), hotbar_slot: 0, held: Some(sword()) };
+    assert!(apply_outcome(&mut inv, &mut ui, &request, &outcome).wear.is_some(), "the client wore it in slot 9");
+    let fresh = match sword() {
+        Item::Tool(t) => t.durability,
+        _ => unreachable!(),
+    };
+    let worn = |item: Option<&crate::item::ItemStack>| match item.map(|s| &s.item) {
+        Some(Item::Tool(t)) => Some(t.durability),
+        _ => None,
+    };
+    assert_eq!(worn(inv.slot(9)), Some(fresh - 1));
+    assert_eq!(worn(rig.hs.server.players[slot].inventory.slot(9)), Some(fresh - 1), "the server wore the same piece");
+    assert_eq!(rig.hs.server.players[slot].possession.wear_mismatch, 0);
+    let sp = &rig.hs.server.players[slot];
+    assert_eq!(
+        crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid),
+        crate::window::digest_parts(&inv, &armour, &ui.cursor_item, &ui.grid),
+        "the windows agree"
+    );
+}

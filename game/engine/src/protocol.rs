@@ -125,6 +125,13 @@ pub enum PacketType {
     /// player alone. Like `InteractOutcome`, the client takes the food it
     /// claimed only on an accepted outcome.
     ItemActionOutcome = 63,
+    /// Client → Server: one inventory-window op (C3a-2a, [`WindowOpPacket`]):
+    /// a click the joiner's client applied to its window, or the screen it
+    /// opened, or its auto-refill setting. The server applies the same rule
+    /// (`window::apply`) to its copy of that joiner's window, in arrival
+    /// order behind the client's edits, and compares digests (log-only).
+    /// Never answered. Sent by a joiner only.
+    WindowOp = 64,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -908,16 +915,13 @@ pub enum ItemAction {
     /// the server body, the night and once a night, then sets the spawn point
     /// there and heals the body to full. It never skips the night.
     Sleep { bed: [i32; 3] },
-    /// C2b — the client crafted once from this grid (row-major, as it stood
-    /// BEFORE the craft consumed it), each cell an `(item_kind, item_id)`
-    /// pair in the `inventory::item_to_ref` encoding (ingredients are always
-    /// blocks or materials, so the pair is lossless). `table` is the crafting
-    /// table the 3×3 grid was opened from; `None` for the 2×2 player grid.
-    /// Fire-and-forget: the server mirrors the craft on its shadow of the
-    /// joiner's inventory (`item_actions::judge_craft`) and answers nothing;
-    /// the client's own craft stands.
-    // BRIDGE: replaced when C3a mirrors the craft grid as window state (the
-    // result click becomes a window op); judge_craft's rule carries over.
+    /// C2b (v74) — the client crafted once from this grid (row-major, as it
+    /// stood BEFORE the craft consumed it), each cell an `(item_kind,
+    /// item_id)` pair; `table` is the crafting table the 3×3 grid was opened
+    /// from. **Unused since v75 (C3a-2a):** the craft is the window's result
+    /// click, sent as a `WindowOp`. Kept because this enum is append-only; a
+    /// v75 client never sends it, and a v75 server ignores it and tallies it
+    /// (`PossessionTally::crafts_ignored`).
     Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> },
     /// C2b — the client Q-dropped one of the item in hotbar slot
     /// `hotbar_slot` (the held claim mirrors `Eat`'s). It spawned nothing
@@ -951,6 +955,39 @@ pub struct ItemActionPacket {
     /// A `Craft` or `Drop` takes a number too, and is never answered.
     pub seq: u32,
     pub action: ItemAction,
+}
+
+/// One window op (C3a-2a, [`WindowOpPacket`]). Wire-stable, APPEND ONLY:
+/// Click = 0, OpenPlayer = 1, OpenTable = 2, SetAutoRefill = 3 (pinned by
+/// `window_op_packets_round_trip`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WireWindowOp {
+    /// A click on the window (`window::WindowClick`, itself append-only):
+    /// the server applies `window::apply` to its copy, at its station, from
+    /// its body.
+    Click(crate::window::WindowClick),
+    /// The client opened its own 2×2 inventory screen (E): the server's
+    /// station is the player's grid.
+    OpenPlayer,
+    /// The client opened the crafting table at `cell` (only while it is in
+    /// reach, `window::table_in_reach`): the server's station is that table.
+    OpenTable { cell: [i32; 3] },
+    /// The client's auto-refill setting (`Inventory::auto_refill`), sent at
+    /// join and whenever it changes: a placement refills the hotbar on both
+    /// sides by the same rule.
+    SetAutoRefill { on: bool },
+}
+
+/// Client → Server: one window op (C3a-2a, `PacketType::WindowOp`). A joined
+/// client sends one for every window transition it applies, in order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowOpPacket {
+    /// 1, 2, 3… per connection (`RemoteClient`): which op this is.
+    pub op_seq: u32,
+    pub op: WireWindowOp,
+    /// The client's window digest after applying the op
+    /// (`window::digest`). The server compares its copy's (log-only).
+    pub digest: u32,
 }
 
 /// Server → Client: the decision on one [`ItemActionPacket`] (C2a).
@@ -1825,7 +1862,18 @@ pub struct ServerAnnouncePacket {
 ///   mirrors a craft on its shadow of the joiner's inventory and spawns a
 ///   Q-drop as a real ground item; a grant that doesn't fit the shadow
 ///   spills at the joiner's feet.
-pub const PROTOCOL_VERSION: u32 = 74;
+/// - v75 (2026-10-08, C3a-2a): the server mirrors a joiner's inventory window, click for
+///   click. Appended: `PacketType::WindowOp = 64` (C→S, [`WindowOpPacket`]
+///   `{ op_seq, op: WireWindowOp, digest }`: `Click(window::WindowClick)`,
+///   `OpenPlayer`, `OpenTable { cell }`, `SetAutoRefill { on }`), never
+///   answered. `window::WindowClick`, `window::WindowSlot` and
+///   `crafting::CraftSlot` become wire data (append-only); a drag's slot
+///   list is bounded at 45. The server applies the same `window::apply` to
+///   its copy of the joiner's window (36 slots, armour, cursor, grid,
+///   station), behind the client's edits, and tallies digest mismatches
+///   (log-only). `ItemAction::Craft` (= 2) is unused: the craft is the
+///   result click; a v75 server ignores it and tallies it.
+pub const PROTOCOL_VERSION: u32 = 75;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -1893,6 +1941,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         61 => PacketType::KillEvent,
         62 => PacketType::ItemAction,
         63 => PacketType::ItemActionOutcome,
+        64 => PacketType::WindowOp,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -1994,8 +2043,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C2b — v74.
-        assert_eq!(super::PROTOCOL_VERSION, 74);
+        // C3a-2a — v75.
+        assert_eq!(super::PROTOCOL_VERSION, 75);
     }
 
     #[test]
@@ -2610,7 +2659,11 @@ mod tests {
         //   `ItemAction::Craft` (= 2) and `ItemAction::Drop` (= 3), both
         //   unanswered — a joiner's crafting and Q-drops are mirrored on the
         //   server.
-        assert_eq!(PROTOCOL_VERSION, 74);
+        // v75 (2026-10-08, C3a-2a):
+        //   `WindowOp = 64` (Click, OpenPlayer, OpenTable, SetAutoRefill) —
+        //   the server mirrors a joiner's inventory window; `ItemAction::Craft`
+        //   is unused.
+        assert_eq!(PROTOCOL_VERSION, 75);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -2864,6 +2917,78 @@ mod tests {
             assert_eq!(t as u8, tag, "wire-stable tag");
             assert_eq!(deserialize_header(&[tag, 0]).map(|(p, _)| p), Some(t));
         }
+    }
+
+    /// C3a-2a (v75) — `WindowOp = 64`: every `WireWindowOp` and every
+    /// `WindowClick` round-trips, their variant order is pinned on the wire
+    /// bytes (both enums are append-only), and a drag's slot list over 45
+    /// doesn't decode.
+    #[test]
+    fn window_op_packets_round_trip() {
+        use crate::crafting::CraftSlot;
+        use crate::window::{WindowClick, WindowSlot, MAX_DRAG_SLOTS};
+        let mut example = [[CraftSlot::Empty; 3]; 3];
+        example[0][0] = CraftSlot::Block(5);
+        example[1][1] = CraftSlot::Material(crate::item::MaterialId::Stick);
+        let clicks = [
+            WindowClick::Slot { slot: 35, right: true },
+            WindowClick::Grid { row: 2, col: 1, right: false },
+            WindowClick::Armour { slot: 3 },
+            WindowClick::Result,
+            WindowClick::Trash,
+            WindowClick::DragDistribute { slots: vec![WindowSlot::Inv(9), WindowSlot::Grid(1, 2)] },
+            WindowClick::DragGather { slots: vec![WindowSlot::Grid(0, 0)] },
+            WindowClick::Sort,
+            WindowClick::ToggleLock { slot: 4 },
+            WindowClick::Autofill { example },
+            WindowClick::Close,
+        ];
+        for (index, click) in clicks.into_iter().enumerate() {
+            let pkt = WindowOpPacket { op_seq: 7, op: WireWindowOp::Click(click), digest: 0xDEAD_BEEF };
+            let bytes = serialize_packet(PacketType::WindowOp, &pkt);
+            assert_eq!(bytes[0], 64, "wire-stable tag");
+            let (ptype, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(ptype, PacketType::WindowOp);
+            assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), pkt);
+            // op_seq (u32), then the op's variant (Click = 0), then the click's.
+            assert_eq!(&payload[4..8], &0u32.to_le_bytes(), "Click = 0");
+            assert_eq!(&payload[8..12], &(index as u32).to_le_bytes(), "WindowClick variant {index}");
+        }
+        let others = [
+            (WireWindowOp::OpenPlayer, 1u32),
+            (WireWindowOp::OpenTable { cell: [-3, 64, 1_000_000] }, 2),
+            (WireWindowOp::SetAutoRefill { on: false }, 3),
+        ];
+        for (op, index) in others {
+            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1 };
+            let bytes = serialize_packet(PacketType::WindowOp, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), pkt);
+            assert_eq!(&payload[4..8], &index.to_le_bytes(), "WireWindowOp variant {index}");
+        }
+        // WindowSlot: Inv = 0, Grid = 1.
+        let grid = WindowOpPacket {
+            op_seq: 1,
+            op: WireWindowOp::Click(WindowClick::DragGather { slots: vec![WindowSlot::Grid(2, 0)] }),
+            digest: 0,
+        };
+        let bytes = serialize_packet(PacketType::WindowOp, &grid);
+        // tag, op_seq, Click, DragGather, the list's u64 length, then Grid = 1.
+        assert_eq!(&bytes[1 + 12 + 8..1 + 12 + 12], &1u32.to_le_bytes(), "WindowSlot::Grid = 1");
+        // The drag bound: 45 decode, 46 don't.
+        for (n, decodes) in [(MAX_DRAG_SLOTS, true), (MAX_DRAG_SLOTS + 1, false)] {
+            let pkt = WindowOpPacket {
+                op_seq: 1,
+                op: WireWindowOp::Click(WindowClick::DragDistribute { slots: vec![WindowSlot::Inv(0); n] }),
+                digest: 0,
+            };
+            let bytes = serialize_packet(PacketType::WindowOp, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<WindowOpPacket>(payload).is_ok(), decodes, "{n} slots");
+        }
+        assert_eq!(PacketType::WindowOp as u8, 64);
+        assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
+        assert_eq!(deserialize_header(&[65, 0]), None, "nothing past 64 yet");
     }
 
     /// bincode 1 is positional, so `StateUpdatePacket`'s trailing fields must

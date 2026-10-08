@@ -388,6 +388,9 @@ pub struct RemoteClient {
     /// client's packets past its per-tick budget, and one lost `Respawn` would
     /// otherwise leave us walking about a respawned body the server holds dead.
     respawn_resend_from: Option<u64>,
+    /// C3a-2a — the `op_seq` the last window op went out with: 1, 2, 3… per
+    /// connection ([`Self::send_window_op`]).
+    window_op_seq: u32,
     /// Entity-event and block-change DELTAS accumulated across every
     /// StateUpdate since the game loop last drained them. `latest_state` is
     /// last-write-wins, which is right for snapshot fields (players,
@@ -682,6 +685,7 @@ impl RemoteClient {
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
             respawn_resend_from: None,
+            window_op_seq: 0,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
@@ -727,6 +731,7 @@ impl RemoteClient {
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
             respawn_resend_from: None,
+            window_op_seq: 0,
             pending_operator_snapshot_json: None,
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
@@ -1263,6 +1268,20 @@ impl RemoteClient {
         }
         self.transport
             .send_to_server(&protocol::serialize_packet(PacketType::ItemAction, pkt));
+    }
+
+    /// C3a-2a — send one window op (`WindowOp`): `op` as the client applied
+    /// it, `digest` its window's digest after it, numbered 1, 2, 3… per
+    /// connection. No-op before the join completes (and the number doesn't
+    /// move). Never answered. Not native-only: a web joiner's window is
+    /// mirrored too.
+    pub fn send_window_op(&mut self, op: protocol::WireWindowOp, digest: u32) {
+        if !matches!(self.state, ConnectionState::Connected { .. }) {
+            return;
+        }
+        self.window_op_seq = self.window_op_seq.wrapping_add(1);
+        let pkt = protocol::WindowOpPacket { op_seq: self.window_op_seq, op, digest };
+        self.transport.send_to_server(&protocol::serialize_packet(PacketType::WindowOp, &pkt));
     }
 
     /// Send a chat line to the server (world chat, Phase 2). No-op before

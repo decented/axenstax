@@ -59,20 +59,31 @@ pub const INTERACT_COOLDOWN_TICKS: u32 = 6;
 /// packets a tick) would leave honest requests unanswered.
 const MAX_ENTITY_REQUESTS_PER_TICK: usize = 4;
 
-/// C2a — `ItemAction` requests (eat, sleep; C2b craft, drop) read per client
+/// C2a — `ItemAction` requests (eat, sleep; C2b drop) read per client
 /// per tick: their own budget, not [`MAX_ENTITY_REQUESTS_PER_TICK`]'s. One
 /// past it WAITS for the next tick in the client's inbound queue (FU1), with
 /// everything sent after it: never dropped, never refused (FU3: as an entity
 /// request or a device interaction past its own budget now does). No honest
 /// client reaches it (an eat every 16 ticks, `item_actions::EAT_COOLDOWN_TICKS`;
-/// a sleep once a night; a drop every `item_actions::DROP_INTERVAL_TICKS`; a
-/// craft per click). C2b — a drop also waits while the joiner's drop bucket
+/// a sleep once a night; a drop every `item_actions::DROP_INTERVAL_TICKS`).
+/// C2b — a drop also waits while the joiner's drop bucket
 /// is empty (`item_actions::DropBucket`).
 const MAX_ITEM_ACTIONS_PER_TICK: usize = 4;
 
 /// C2a — is `packet` an `ItemAction` (budgeted by deferral, not dropping)?
 fn is_item_action(packet: &[u8]) -> bool {
     matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::ItemAction, _)))
+}
+
+/// C3a-2a — `WindowOp`s read per client per tick. One past it WAITS for the
+/// next tick in the client's inbound queue (FU1), with everything sent after
+/// it: never dropped, never refused. An honest client makes a click or two
+/// a tick; a drag paints one slot a frame.
+pub const MAX_WINDOW_OPS_PER_TICK: usize = 8;
+
+/// C3a-2a — is `packet` a `WindowOp` (budgeted by deferral)?
+fn is_window_op(packet: &[u8]) -> bool {
+    matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::WindowOp, _)))
 }
 
 /// Max device interactions per tick per client. A right-click is gated
@@ -319,13 +330,15 @@ fn is_drop_action(packet: &[u8]) -> bool {
 
 /// FU4a (FU3 verify L1) — a request about the world as the client's own
 /// edits left it, so it waits behind those still waiting: `EntityAttack`,
-/// `EntityInteract`, `DeviceInteract`, `ItemAction`. (`Respawn` and
-/// `Disconnect` don't: a dead joiner's waiting edits are sent back.)
+/// `EntityInteract`, `DeviceInteract`, `ItemAction`, and (C3a-2a) a
+/// `WindowOp`, whose window an edit's placement or auto-refill changed
+/// first. (`Respawn` and `Disconnect` don't: a dead joiner's waiting edits
+/// are sent back.)
 fn is_request(packet: &[u8]) -> bool {
     use protocol::PacketType as P;
     matches!(
         protocol::deserialize_header(packet),
-        Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction, _))
+        Some((P::EntityAttack | P::EntityInteract | P::DeviceInteract | P::ItemAction | P::WindowOp, _))
     )
 }
 
@@ -1825,6 +1838,11 @@ impl HostedServer {
             if hits == 0 || !sp.server_simulated {
                 continue;
             }
+            // C3a-2a — the same hits wear the server's copy of its armour, by
+            // the rule its client wears its own with (`window::wear_armour`).
+            for _ in 0..hits {
+                crate::window::wear_armour(&mut sp.armour);
+            }
             let pkt = protocol::serialize_packet(
                 protocol::PacketType::PlayerEvent,
                 &protocol::PlayerEventPacket {
@@ -1911,16 +1929,22 @@ impl HostedServer {
     /// C3a-2b — an accepted swing wears the weapon in the server's shadow as
     /// it wears on the client (`joiner_actions::apply_outcome`: a swing that
     /// found its target wears the tool, damage or not). `EntityAttack`
-    /// carries no hotbar slot, so it is the latest input's
-    /// (`ServerPlayer.hotbar_slot`); a slot that doesn't hold that tool is a
+    /// carries no hotbar slot, so it starts from the latest input's
+    /// (`ServerPlayer.hotbar_slot`). C3a-2a — and, as on the client, the
+    /// weapon is worn where it now is: that slot if it still holds it, else
+    /// the first of the 36 that does (`joiner_actions::where_now`, the
+    /// client's own lookup), so a weapon moved by a window op while the swing
+    /// flew wears the same piece on both sides. None anywhere is a
     /// `wear_mismatch`. A non-tool in hand wears nothing. Log-only: the
     /// claimed weapon still sets the damage (C3d).
     fn wear_joiner_weapon(&mut self, i: usize, req: &protocol::EntityAttackPacket) {
         let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
         let Some(crate::item::Item::Tool(tool)) = held else { return };
         let sp = &mut self.server.players[i];
-        let slot = sp.hotbar_slot;
-        let check = crate::joiner_inventory::wear_tool(&mut sp.inventory, slot, &tool);
+        let check = match crate::joiner_actions::where_now(&sp.inventory, sp.hotbar_slot, &crate::item::Item::Tool(tool)) {
+            Some(at) => crate::joiner_inventory::wear_tool(&mut sp.inventory, at, &tool),
+            None => crate::joiner_inventory::WearCheck::Mismatched,
+        };
         sp.possession.note_wear(check);
     }
 
@@ -2057,8 +2081,14 @@ impl HostedServer {
                     })
                     .map(|()| 0)
             }
-            // C2b — fire-and-forget: mirrored on the server, never answered.
-            protocol::ItemAction::Craft { grid, table } => return self.mirror_joiner_craft(i, grid, *table),
+            // C3a-2a (v75) — unused: the craft is the window's result click,
+            // mirrored as a window op. Ignored and tallied, never answered.
+            protocol::ItemAction::Craft { .. } => {
+                if let Some(sp) = self.server.players.get_mut(i) {
+                    sp.possession.crafts_ignored = sp.possession.crafts_ignored.saturating_add(1);
+                }
+                return;
+            }
             protocol::ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 return self.spawn_joiner_drop(i, usize::from(*hotbar_slot), held);
@@ -2077,13 +2107,30 @@ impl HostedServer {
 
     /// C1 — joiner `i`'s accepted request (an interaction, C2a an eat) used
     /// `n` of `held`, claimed from hotbar slot `slot`: take them from the
-    /// server's shadow of its inventory (`joiner_actions::take_owed`). What
-    /// the shadow can't pay is a possession mismatch — counted and logged
-    /// (rate-limited), never refused. `how` ends the log line's "used … ".
+    /// server's copy of its window by the client's own owed search
+    /// (C3a-2a, `joiner_actions::take_owed_window`: the 36 slots, then the
+    /// crafting grid, then the cursor). What it can't pay is a possession
+    /// mismatch — counted and logged (rate-limited), never refused. `how`
+    /// ends the log line's "used … ".
     fn shadow_take_owed(&mut self, i: usize, slot: usize, held: &crate::item::Item, n: u8, how: &str) {
         let Some(sp) = self.server.players.get_mut(i) else { return };
-        let taken = crate::joiner_actions::take_owed(&mut sp.inventory, slot, held, n);
+        let taken =
+            crate::joiner_actions::take_owed_window(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, slot, held, n);
         self.note_shortfall(i, held, n, taken, how);
+    }
+
+    /// C3a-2a — slot `i`'s window op: applied to the server's copy of its
+    /// window by the client's own rule (`window_ops::serve_op`, in the world,
+    /// dead or alive), then the digests compared and tallied
+    /// (`window_ops::note_served`; a creative joiner is mirrored, not
+    /// tallied). Never refused, never answered.
+    fn handle_window_op(&mut self, i: usize, pkt: &protocol::WindowOpPacket) {
+        let creative = self.server.play_mode.is_creative();
+        let server = &mut self.server;
+        let Some(sp) = server.players.get_mut(i) else { return };
+        if let Some(served) = crate::window_ops::serve_op(sp, &server.world, creative, &pkt.op) {
+            crate::window_ops::note_served(sp, pkt, &served, creative);
+        }
     }
 
     /// C1 — joiner `i` used `n` of `held` `how`, and the shadow paid `taken`:
@@ -2103,37 +2150,6 @@ impl HostedServer {
             sp.display_name,
             held_back_note(due),
         );
-    }
-
-    /// C2b — joiner `i` crafted once from `grid` (`table`: the crafting table
-    /// its 3×3 grid was opened from): judged and mirrored on the server's
-    /// shadow of its inventory by `item_actions::serve_craft` (one of each
-    /// input taken, owed; the output added). Never answered — the client's
-    /// own craft stands. An input the shadow can't pay is a log-only
-    /// mismatch; an output that doesn't fit is counted, not spilled (the
-    /// client holds it); a refusal leaves the shadow as it was and is counted
-    /// by reason.
-    // BRIDGE: replaced when C3a mirrors the craft grid as window state (the
-    // result click becomes a window op); judge_craft's rule carries over.
-    fn mirror_joiner_craft(&mut self, i: usize, grid: &[(u8, u16); 9], table: Option<[i32; 3]>) {
-        let server = &mut self.server;
-        let Some(sp) = server.players.get_mut(i) else { return };
-        let short = match crate::item_actions::serve_craft(sp, &server.world, &server.registry, grid, table) {
-            Ok(applied) => {
-                sp.possession.crafts = sp.possession.crafts.saturating_add(1);
-                sp.possession.craft_overflow =
-                    sp.possession.craft_overflow.saturating_add(u32::from(applied.overflow));
-                applied.short
-            }
-            Err(why) => {
-                log::debug!("{}'s craft not mirrored: {}", sp.display_name, why.label());
-                sp.possession.note_craft_refused(why);
-                return;
-            }
-        };
-        for item in &short {
-            self.note_shortfall(i, item, 1, 0, "in a craft");
-        }
     }
 
     /// C2b — joiner `i` Q-dropped one of `held` from hotbar slot `slot`: the
@@ -2679,6 +2695,7 @@ impl HostedServer {
             let mut interacts_this_tick = 0usize;
             let mut entity_requests_this_tick = 0usize;
             let mut item_actions_this_tick = 0usize;
+            let mut window_ops_this_tick = 0usize;
             // Per client per TICK, not per packet (audit 2026-09-27: the
             // budget reset for every packet, so 10 packets × 4 edits got in).
             let mut budget = EditTickBudget::default();
@@ -2735,6 +2752,8 @@ impl HostedServer {
                 let edits_waiting = !self.edit_queues[i].is_empty();
                 if (item_actions_this_tick >= MAX_ITEM_ACTIONS_PER_TICK
                     && self.inbound[i].front().is_some_and(|p| is_item_action(p)))
+                    || (window_ops_this_tick >= MAX_WINDOW_OPS_PER_TICK
+                        && self.inbound[i].front().is_some_and(|p| is_window_op(p)))
                     || self.inbound[i].front().is_some_and(|p| {
                         waits_for_kind_budget(
                             p,
@@ -3284,6 +3303,16 @@ impl HostedServer {
                             protocol::safe_deserialize::<protocol::ItemActionPacket>(payload)
                         {
                             self.handle_item_action(i, &req);
+                        }
+                    }
+                    protocol::PacketType::WindowOp => {
+                        if !self.handshake_done[i] || self.disconnected[i] {
+                            continue;
+                        }
+                        // Never past the budget: one at it waits at the front.
+                        window_ops_this_tick += 1;
+                        if let Ok(op) = protocol::safe_deserialize::<protocol::WindowOpPacket>(payload) {
+                            self.handle_window_op(i, &op);
                         }
                     }
                     // Native-only — the web build carries no chat surface at

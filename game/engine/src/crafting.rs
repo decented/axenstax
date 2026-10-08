@@ -480,7 +480,11 @@ pub fn crack_stage(break_progress: u32, break_time: u32) -> Option<u8> {
 // --- Crafting Recipes ---
 
 /// A crafting slot: what kind of item is in this grid position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Wire data since C3a-2a (`window::WindowClick::Autofill`'s example),
+/// APPEND ONLY: Empty = 0, Block = 1, Material = 2 (a `MaterialId` by its
+/// serde index, append-only for saves already).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CraftSlot {
     Empty,
     Block(BlockId),
@@ -2453,9 +2457,8 @@ fn armour_material_from_slot(slot: CraftSlot) -> Option<crate::armour::ArmourMat
 }
 
 /// Find the bounding box of non-empty slots in the grid: `(min_row,
-/// max_row, min_col, max_col)`. C2b: the server's craft mirror reads it to
-/// tell a 2×2 recipe from one that needs a crafting table
-/// (`item_actions::judge_craft`).
+/// max_row, min_col, max_col)`. The recipe book's fill reads it to lay a
+/// recipe in the player's 2×2 (`window::WindowClick::Autofill`).
 pub(crate) fn grid_bounds(grid: &[[CraftSlot; 3]; 3]) -> (usize, usize, usize, usize) {
     let mut min_r = 3;
     let mut max_r = 0;

@@ -36,11 +36,15 @@ pub struct ServerPlayer {
     /// A server-simulated player (joiner or guest): the SHADOW the server
     /// keeps of its inventory (C1, `joiner_inventory`) — empty at attach, fed
     /// every gain the server decides (pickups, the drops of the joiner's
-    /// breaks, interaction products, C2b crafted outputs) and every consume
-    /// it accepts (plain block placements, interaction outcomes, C2a accepted
-    /// eats, C2b crafting inputs and Q-drops). It doesn't see what the client
-    /// does alone (the inventory it joined with, chests, slot moves, wear),
-    /// so it drifts and checks nothing yet (log-only).
+    /// breaks, interaction products) and every consume it accepts (plain
+    /// block placements, interaction outcomes, C2a accepted eats, C2b
+    /// Q-drops). C3a-2a: it is the 36 slots of the server's copy of the
+    /// joiner's window (with [`Self::armour`], [`Self::cursor`],
+    /// [`Self::craft_grid`] and [`Self::station`]), which every window op the
+    /// client applies is applied to by the same rule (`window_ops`). It
+    /// doesn't see what the client does alone (the inventory it joined with,
+    /// chests, local uses, tool wear), so it drifts and checks nothing yet
+    /// (log-only).
     pub inventory: Inventory,
     pub combat: PlayerCombat,
     pub hotbar_slot: usize,
@@ -213,6 +217,20 @@ pub struct ServerPlayer {
     /// C2a — the night (`item_actions::NightCalendar`) this joiner last slept
     /// in a bed; `None` until its first sleep. Once a night.
     pub slept_night: Option<u32>,
+    /// C3a-2a — the server's copy of a joiner's four armour slots
+    /// (`ArmourSlot as usize`), moved by its window ops and worn by the hits
+    /// the server lands (`window::wear_armour`). Damage still uses the
+    /// client's word, [`Self::armour_points`], until C3d. Empty for a local
+    /// slot.
+    pub armour: [Option<crate::armour::ArmourItem>; 4],
+    /// C3a-2a — the server's copy of the stack on the joiner's cursor.
+    pub cursor: Option<crate::item::ItemStack>,
+    /// C3a-2a — the server's copy of the joiner's crafting grid.
+    pub craft_grid: crate::window::CraftGrid,
+    /// C3a-2a — the screen the joiner has open, by its last `OpenPlayer` /
+    /// `OpenTable` (a close that returned everything resets it): the grid's
+    /// size, and the table whose reach the result click checks.
+    pub station: crate::window::Station,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -442,6 +460,10 @@ impl ServerPlayer {
             possession: crate::joiner_inventory::PossessionTally::default(),
             eat_cooldown: 0,
             slept_night: None,
+            armour: [None; 4],
+            cursor: None,
+            craft_grid: Default::default(),
+            station: crate::window::Station::Player,
         }
     }
 

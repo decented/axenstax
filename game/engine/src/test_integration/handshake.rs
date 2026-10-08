@@ -211,7 +211,10 @@ fn protocol_version_is_the_pinned_value() {
     // v74 (2026-10-07, C2b, PROVISIONAL — renumbered at merge):
     //   `ItemAction::Craft` and `ItemAction::Drop` — the server mirrors a
     //   joiner's crafting and spawns its Q-drops.
-    assert_eq!(protocol::PROTOCOL_VERSION, 74);
+    // v75 (2026-10-08, C3a-2a):
+    //   `WindowOp = 64` — the server mirrors a joiner's inventory window,
+    //   click for click; `ItemAction::Craft` is unused.
+    assert_eq!(protocol::PROTOCOL_VERSION, 75);
 }
 
 #[test]

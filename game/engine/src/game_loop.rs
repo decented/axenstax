@@ -7239,7 +7239,7 @@ impl super::GameState {
         }
         let Some(p) = self.players.first_mut() else { return false };
         if p.crafting_ui.open {
-            p.crafting_ui.close(&mut p.inventory);
+            p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
             return true;
         }
         if p.dialogue_villager.is_some() {
@@ -7885,7 +7885,7 @@ impl super::GameState {
                         // Close crafting UI for all players that have it open
                         for p in &mut self.players {
                             if p.crafting_ui.open {
-                                p.crafting_ui.close(&mut p.inventory);
+                                p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
                             }
                         }
                         self.release_cursor();
@@ -10547,7 +10547,7 @@ impl super::GameState {
                 } else if self.players[pidx].crafting_ui.open {
                     let closed = {
                         let p = &mut self.players[pidx];
-                        p.crafting_ui.close(&mut p.inventory)
+                        p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots)
                     };
                     if !closed {
                         self.toast = Some((
@@ -10572,7 +10572,8 @@ impl super::GameState {
                             Instant::now() + Duration::from_secs(3),
                         ));
                     } else {
-                        self.players[pidx].crafting_ui.open_player_crafting();
+                        let p = &mut self.players[pidx];
+                        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
                         if pidx == 0 { self.release_cursor(); }
                         // Trials: auto-show the target recipe in the right-side
                         // placement card (no recipe book needed) — but never
@@ -13731,8 +13732,15 @@ impl super::GameState {
                 if let Some(pos) = self.players[pidx].target_block {
                     let target_blk = self.world.get_block(pos[0], pos[1], pos[2]);
                     if target_blk == block::CRAFTING_TABLE {
-                        self.players[pidx].crafting_ui.open_table_crafting(pos);
-                        if pidx == 0 { self.release_cursor(); }
+                        // C3a-2a — only a table in reach of the body opens, by
+                        // the rule its screen closes by (`window::table_in_reach`):
+                        // a Reach Claw's longer ray would open one the screen
+                        // (and a joiner's server) holds out of reach.
+                        let p = &mut self.players[pidx];
+                        if crate::window::table_in_reach(target_blk, pos, p.player.eye_pos()) {
+                            p.crafting_ui.open_table_crafting(pos, &p.inventory, &p.armour_slots);
+                            if pidx == 0 { self.release_cursor(); }
+                        }
                     } else if crate::block_shape::is_toggleable(target_blk) {
                         // Wave 2 / F1 — open/close toggle for fence gates,
                         // trapdoors and doors. Flip the meta open bit + re-mesh
@@ -16985,7 +16993,7 @@ impl super::GameState {
                 ];
                 for (pressed, dir) in dirs {
                     if pressed {
-                        let is_table = p.crafting_ui.is_table;
+                        let is_table = p.crafting_ui.is_table();
                         p.crafting_ui.pad_focus = Some(match p.crafting_ui.pad_focus {
                             None => crate::craft_ui::PadSlot::start(),
                             Some(cur) => crate::craft_ui::pad_move(cur, dir, is_table),
@@ -21182,7 +21190,6 @@ impl super::GameState {
         // the body's eye). The grid goes back as on any close.
         for p in self.players.iter_mut() {
             if p.crafting_ui.open
-                && p.crafting_ui.is_table
                 && let Some(cell) = p.crafting_ui.table
                 && !crate::window::table_in_reach(
                     self.world.get_block(cell[0], cell[1], cell[2]),
@@ -21190,26 +21197,23 @@ impl super::GameState {
                     p.player.eye_pos(),
                 )
             {
-                p.crafting_ui.close(&mut p.inventory);
+                p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
             }
         }
         for (pidx, click_target) in craft_clicks {
             match click_target {
                 crate::craft_ui::ClickTarget::ResultSlot => {
                     // C2b — a joiner's craft must not spend an item a request
-                    // in flight needs (it does nothing), and is mirrored on
-                    // the server from the grid as it was BEFORE the craft.
-                    // BRIDGE: replaced when C3a mirrors the craft grid as
-                    // window state (the result click becomes a window op);
-                    // judge_craft's rule carries over.
-                    let joined = self.joined();
+                    // in flight needs (it does nothing). C3a-2a — the click
+                    // is a window op like any other: the server applies the
+                    // same result rule to its copy of the window.
                     let p = &self.players[pidx];
-                    if joined && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui) {
+                    if self.joined() && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui) {
                         continue;
                     }
-                    let grid_before = joined.then(|| crate::item_actions::craft_grid_wire(&p.crafting_ui.grid));
-                    let table = p.crafting_ui.table;
+                    let world = &self.world;
                     let p = &mut self.players[pidx];
+                    let eye = p.player.eye_pos();
                     // UX polish sweep Task 2 — what was crafted, so a
                     // first-ever craft of a non-obvious item can teach a hint.
                     let craft_item = match p.crafting_ui.apply_click(
@@ -21217,14 +21221,13 @@ impl super::GameState {
                         &mut p.armour_slots,
                         &crate::window::WindowClick::Result,
                         creative,
+                        eye,
+                        |c| world.get_block(c[0], c[1], c[2]),
                     ) {
                         crate::window::ClickResult::Crafted(stack) => Some(stack.item),
                         _ => None,
                     };
                     let crafted = craft_item.is_some();
-                    if crafted && let Some(grid) = grid_before {
-                        self.send_craft_mirror(grid, table);
-                    }
                     // Phase 3 — coverage-challenge CraftItem event (only on a real craft).
                     if crafted
                         && let Some(scenario) = &mut self.scenario {
@@ -21271,8 +21274,12 @@ impl super::GameState {
                 | crate::craft_ui::ClickTarget::SortInventory
                 | crate::craft_ui::ClickTarget::ToggleLock(_) => {
                     if let Some(click) = click_target.window_click() {
+                        let world = &self.world;
                         let p = &mut self.players[pidx];
-                        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, creative);
+                        let eye = p.player.eye_pos();
+                        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, creative, eye, |c| {
+                            world.get_block(c[0], c[1], c[2])
+                        });
                     }
                 }
                 crate::craft_ui::ClickTarget::OpenBook => {
@@ -21286,9 +21293,18 @@ impl super::GameState {
                         let card = &crate::crafting_catalogue::all_cards()[gidx];
                         let example = card.example_grid;
                         let name = card.name.clone();
+                        let world = &self.world;
                         let p = &mut self.players[pidx];
+                        let eye = p.player.eye_pos();
                         let fill = crate::window::WindowClick::Autofill { example };
-                        let toast = match p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &fill, creative) {
+                        let toast = match p.crafting_ui.apply_click(
+                            &mut p.inventory,
+                            &mut p.armour_slots,
+                            &fill,
+                            creative,
+                            eye,
+                            |c| world.get_block(c[0], c[1], c[2]),
+                        ) {
                             // M3 — a 3×3 recipe can't be laid in the 2×2.
                             crate::window::ClickResult::NeedsTable => Some("Needs a crafting table".to_string()),
                             crate::window::ClickResult::Refused => Some(format!("Not enough materials for {name}")),
@@ -21316,9 +21332,18 @@ impl super::GameState {
                     }
                 }
                 crate::craft_ui::ClickTarget::TrashCursor => {
+                    let world = &self.world;
                     let p = &mut self.players[pidx];
+                    let eye = p.player.eye_pos();
                     let trash = crate::window::WindowClick::Trash;
-                    let binned = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &trash, creative);
+                    let binned = p.crafting_ui.apply_click(
+                        &mut p.inventory,
+                        &mut p.armour_slots,
+                        &trash,
+                        creative,
+                        eye,
+                        |c| world.get_block(c[0], c[1], c[2]),
+                    );
                     if matches!(binned, crate::window::ClickResult::Binned(_)) {
                         self.toast = Some((
                             "Binned the held item".to_string(),
@@ -22212,22 +22237,6 @@ impl super::GameState {
         }
     }
 
-    /// C2b — we (a joiner) crafted once from `grid` (the wire form of the
-    /// grid before the craft, `item_actions::craft_grid_wire`) at `table`:
-    /// tell the server, which mirrors it on its copy of our inventory. Never
-    /// answered; our craft stands.
-    // BRIDGE: replaced when C3a mirrors the craft grid as window state (the
-    // result click becomes a window op); judge_craft's rule carries over.
-    fn send_craft_mirror(&mut self, grid: [(u8, u16); 9], table: Option<[i32; 3]>) {
-        let seq = self.joiner_actions.unanswered();
-        if let Some(client) = self.remote_client.as_mut() {
-            client.send_item_action(&crate::protocol::ItemActionPacket {
-                seq,
-                action: crate::protocol::ItemAction::Craft { grid, table },
-            });
-        }
-    }
-
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed
     /// at `bed`. Claims nothing; an accepted outcome sets our spawn point
     /// there (the server set its own).
@@ -22352,8 +22361,30 @@ impl super::GameState {
         self.credit_kill(0, kind, pos, tamed);
     }
 
+    /// C3a-2a — send the window ops player 0 applied since the last tick,
+    /// in order, as `WindowOp`s, when joined and connected; drop everyone
+    /// else's log (single-player, a host's own slots and a split-screen seat
+    /// send nothing). Runs at the start of every tick's send, so an op made
+    /// before an edit reaches the server before the input carrying the edit.
+    fn flush_window_ops(&mut self) {
+        let connected = self.remote_client.as_ref().is_some_and(|c| c.is_connected());
+        for (pidx, p) in self.players.iter_mut().enumerate() {
+            if pidx == 0
+                && connected
+                && let Some(client) = self.remote_client.as_mut()
+            {
+                for (op, digest) in p.crafting_ui.take_ops(&p.inventory, &p.armour_slots) {
+                    client.send_window_op(op, digest);
+                }
+            } else {
+                p.crafting_ui.ops.discard();
+            }
+        }
+    }
+
     pub(crate) fn network_send_input(&mut self) {
         if self.players.is_empty() { return; }
+        self.flush_window_ops();
         let has_server = self.hosted_server.is_some();
         let has_client = self.remote_client.is_some();
         if !has_server && !has_client { return; }

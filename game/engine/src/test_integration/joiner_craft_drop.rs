@@ -1,6 +1,8 @@
-//! C2b (2026-10-07, protocol v74) — a joiner's crafting and
-//! Q-drops are mirrored on the server, and a grant the server's shadow of
-//! its inventory has no room for still reaches the client whole (C2b-fix).
+//! C2b (2026-10-07, protocol v74) — a joiner's Q-drops are mirrored on the
+//! server, and a grant the server's shadow of its inventory has no room for
+//! still reaches the client whole (C2b-fix). Its crafting was mirrored here
+//! too until C3a-2a (v75) made the craft a window op
+//! (`test_integration::window_ops`); an `ItemAction::Craft` is now ignored.
 //!
 //! Every test drives a REAL `HostedServer` over the in-process transport — a
 //! dedicated server, or a lending host where the world and ECS are the
@@ -20,7 +22,7 @@ use crate::crafting::{Tool, ToolMaterial, ToolType};
 use crate::entity::{ItemEntity, Position};
 use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::item::{Item, ItemStack, MaterialId};
-use crate::item_actions::{CraftRefusal, DROP_INTERVAL_TICKS};
+use crate::item_actions::DROP_INTERVAL_TICKS;
 use crate::protocol::{self, InventoryGrantPacket, ItemAction};
 use crate::sim_lend::OwnedSimParts;
 use crate::transport::{ChannelClientTransport, ClientTransport};
@@ -258,124 +260,39 @@ fn table_recipe() -> [(u8, u16); 9] {
     grid_of(&[(0, planks()), (1, planks()), (3, planks()), (4, planks())])
 }
 
-/// 3 cobblestone over 2 sticks, 3×3 → a stone pickaxe (a table recipe).
-fn pickaxe_recipe() -> [(u8, u16); 9] {
-    grid_of(&[(0, cobble()), (1, cobble()), (2, cobble()), (4, stick()), (7, stick())])
-}
+// ─── Crafting (C3a-2a: retired) ────────────────────────────────────────────
 
-fn stone_pickaxe() -> Item {
-    Item::Tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Stone))
-}
-
-// ─── Crafting (decision 1) ─────────────────────────────────────────────────
-
+/// C3a-2a (v75) — a craft is the window's result click, mirrored as a window
+/// op (`test_integration::window_ops`). An `ItemAction::Craft` (unused since
+/// v75; the variant stays, append-only) is ignored and tallied: nothing in
+/// the shadow changes and nothing is answered. Was C2b's
+/// `a_joiners_2x2_craft_is_mirrored_on_the_shadow`.
 #[test]
-fn a_joiners_2x2_craft_is_mirrored_on_the_shadow() {
-    let mut rig = Rig::dedicated("craft-2x2", 1);
+fn a_v75_server_ignores_a_craft_and_tallies_it() {
+    let mut rig = Rig::dedicated("craft-ignored", 1);
     rig.give(0, 3, ItemStack::new_block(block::OAK_PLANKS, 5));
     rig.craft(0, table_recipe(), None);
     rig.tick();
-    assert_eq!(rig.shadow_count(0, &planks()), 1, "four planks taken, one per cell");
-    assert_eq!(rig.shadow_count(0, &Item::Block(block::CRAFTING_TABLE)), 1, "the output added");
-    assert_eq!(rig.tally(0).crafts, 1);
+    assert_eq!(rig.shadow_count(0, &planks()), 5, "nothing taken");
+    assert_eq!(rig.shadow_count(0, &Item::Block(block::CRAFTING_TABLE)), 0, "nothing added");
+    assert_eq!(rig.tally(0).crafts_ignored, 1);
     assert_eq!(rig.tally(0).mismatched, 0);
-    assert!(rig.joiners[0].grants.is_empty(), "a craft is never granted: the client made it");
+    assert!(rig.joiners[0].grants.is_empty());
 }
 
+/// An ignored craft still counts against the item-action budget: one past it
+/// waits for the next tick, as before. Was C2b's
+/// `crafts_count_against_the_item_action_budget`.
 #[test]
-fn a_craft_bigger_than_2x2_needs_a_crafting_table_in_reach() {
-    let mut rig = Rig::dedicated("craft-3x3", 1);
-    rig.give(0, 0, ItemStack::new_block(block::COBBLESTONE, 6));
-    rig.give(0, 1, ItemStack::new_material(MaterialId::Stick, 4));
-    let shadow = |rig: &Rig| (rig.shadow_count(0, &cobble()), rig.shadow_count(0, &stick()), rig.shadow_count(0, &stone_pickaxe()));
-
-    // From the 2×2 player grid (no table): refused, the shadow untouched.
-    rig.craft(0, pickaxe_recipe(), None);
-    rig.tick();
-    assert_eq!(shadow(&rig), (6, 4, 0));
-    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::NeedsTable.index()], 1);
-
-    // A crafting table two blocks ahead: accepted.
-    let (x, y, z) = (rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32);
-    let near = [x, y, z + 2];
-    rig.world().set_block(near[0], near[1], near[2], block::CRAFTING_TABLE);
-    rig.craft(0, pickaxe_recipe(), Some(near));
-    rig.tick();
-    assert_eq!(shadow(&rig), (3, 2, 1));
-    assert_eq!(rig.tally(0).crafts, 1);
-
-    // A table out of reach, or a cell that holds none: refused.
-    let far = [x + 7, y, z];
-    rig.world().set_block(far[0], far[1], far[2], block::CRAFTING_TABLE);
-    rig.craft(0, pickaxe_recipe(), Some(far));
-    rig.tick();
-    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::TableTooFar.index()], 1);
-    let floor = [x + 1, y - 1, z];
-    rig.craft(0, pickaxe_recipe(), Some(floor));
-    rig.tick();
-    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::NotATable.index()], 1);
-    assert_eq!(shadow(&rig), (3, 2, 1), "a refused craft leaves the shadow as it was");
-    assert_eq!(rig.tally(0).crafts, 1);
-}
-
-#[test]
-fn a_grid_with_no_recipe_or_a_bad_ingredient_is_refused() {
-    let mut rig = Rig::dedicated("craft-none", 1);
-    rig.give(0, 0, ItemStack::new_block(block::OAK_PLANKS, 4));
-    rig.craft(0, grid_of(&[(0, planks()), (4, stick())]), None);
-    let mut bad = table_recipe();
-    bad[8] = pair(&stone_pickaxe());
-    rig.craft(0, bad, None);
-    rig.tick();
-    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::NoRecipe.index()], 1);
-    assert_eq!(rig.tally(0).crafts_refused[CraftRefusal::BadIngredient.index()], 1);
-    assert_eq!(rig.shadow_count(0, &planks()), 4, "nothing taken");
-    assert_eq!(rig.tally(0).crafts, 0);
-}
-
-#[test]
-fn a_crafted_tool_lands_in_the_shadow_at_full_durability() {
-    let mut rig = Rig::dedicated("craft-tool", 1);
-    rig.give(0, 0, ItemStack::new_material(MaterialId::IronIngot, 2));
-    let iron = Item::Material(MaterialId::IronIngot);
-    rig.craft(0, grid_of(&[(0, iron.clone()), (3, iron)]), None);
-    rig.tick();
-    let shears = rig.hs.server.players[rig.joiners[0].slot].inventory.slots_iter().flatten().find_map(|s| match &s.item {
-        Item::Tool(t) => Some(*t),
-        _ => None,
-    });
-    let fresh = Tool::new(ToolType::Shears, ToolMaterial::Iron);
-    assert_eq!(shears.map(|t| (t.tool_type, t.durability)), Some((ToolType::Shears, fresh.durability)));
-    assert_eq!(rig.shadow_count(0, &Item::Material(MaterialId::IronIngot)), 0);
-}
-
-/// An input the shadow can't pay is a log-only mismatch: the craft is still
-/// mirrored (the client holds the output).
-#[test]
-fn a_craft_the_shadow_cannot_pay_is_mirrored_and_counted() {
-    let mut rig = Rig::dedicated("craft-short", 1);
-    rig.give(0, 0, ItemStack::new_block(block::OAK_PLANKS, 1));
-    rig.craft(0, table_recipe(), None);
-    rig.tick();
-    assert_eq!(rig.shadow_count(0, &planks()), 0);
-    assert_eq!(rig.shadow_count(0, &Item::Block(block::CRAFTING_TABLE)), 1);
-    assert_eq!(rig.tally(0).mismatched, 3, "three planks the shadow lacked");
-}
-
-/// Decision 2 — crafts count against the item-action budget: one past it
-/// waits for the next tick.
-#[test]
-fn crafts_count_against_the_item_action_budget() {
+fn ignored_crafts_still_count_against_the_item_action_budget() {
     let mut rig = Rig::dedicated("craft-budget", 1);
-    rig.give(0, 0, ItemStack::new_block(block::OAK_PLANKS, 24));
     for _ in 0..6 {
         rig.craft(0, table_recipe(), None);
     }
     rig.tick();
-    assert_eq!(rig.tally(0).crafts, 4, "MAX_ITEM_ACTIONS_PER_TICK this tick");
+    assert_eq!(rig.tally(0).crafts_ignored, 4, "MAX_ITEM_ACTIONS_PER_TICK this tick");
     rig.tick();
-    assert_eq!(rig.tally(0).crafts, 6, "the rest the next");
-    assert_eq!(rig.shadow_count(0, &planks()), 0);
+    assert_eq!(rig.tally(0).crafts_ignored, 6, "the rest the next");
 }
 
 // ─── Dropping (decision 2) ─────────────────────────────────────────────────

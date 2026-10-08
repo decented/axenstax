@@ -106,6 +106,7 @@ mod gamestr;
 mod craft_ui;
 // C3a-1 — the inventory window's click rules, one pure model.
 mod window;
+mod window_ops;
 mod recipe_book_ui;
 mod egui_integration;
 mod menu;
@@ -1677,7 +1678,7 @@ impl GameState {
         // `GameMode::Playing` below. Used by the dev-side screenshot capture
         // path when no input-injection tool (xdotool) is available.
         if std::env::var("AXENSTAX_AUTO_INVENTORY").ok().as_deref() == Some("1") {
-            player0.crafting_ui.open_player_crafting();
+            player0.crafting_ui.open_player_crafting(&player0.inventory, &player0.armour_slots);
             log::info!("AXENSTAX_AUTO_INVENTORY=1 — booting into Playing with crafting UI open");
         }
         let screens = crate::screen::compute_screen_layout(1, renderer.width, renderer.height);
@@ -2540,7 +2541,7 @@ impl ApplicationHandler for App {
                                 }
                                 EscAction::CloseCraft => {
                                     let p = &mut state.players[0];
-                                    p.crafting_ui.close(&mut p.inventory);
+                                    p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
                                     state.capture_cursor();
                                 }
                                 EscAction::CloseVillager => {

@@ -462,16 +462,10 @@ impl PlayerSlot {
     /// One landed hit's wear on the equipped armour: every worn piece loses
     /// one durability, and a piece that breaks is unequipped so it neither
     /// keeps contributing points nor lingers as a zero-durability ghost.
+    /// The shared rule (`window::wear_armour`): the server wears its copy
+    /// of a joiner's armour with it too (C3a-2a).
     pub fn wear_armour(&mut self) {
-        for slot in self.armour_slots.iter_mut() {
-            if let Some(piece) = slot.as_mut()
-                && !piece.is_broken() {
-                    piece.durability = piece.durability.saturating_sub(1);
-                }
-            if slot.as_ref().is_some_and(|p| p.is_broken()) {
-                *slot = None;
-            }
-        }
+        crate::window::wear_armour(&mut self.armour_slots);
     }
 
     /// True when the creative break cooldown has elapsed, so a block may be

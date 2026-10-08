@@ -643,6 +643,98 @@ mod tests {
         );
     }
 
+    /// C3a-2a — a joined client's window ops through its REAL send path:
+    /// what its crafting screen applies (`CraftingUi::apply_click`,
+    /// `open_player_crafting`, `close`) is logged and sent by the flush at the
+    /// start of `network_send_input`, its auto-refill setting first; the
+    /// server's copy of its window follows slot for slot, the 2×2 craft
+    /// included, with no mismatch.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_inventory_clicks_reach_the_servers_window() {
+        use crate::item::ItemStack;
+        use crate::window::{WindowClick, WindowSlot};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-window");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-window-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Clicker", 0),
+            None,
+        ));
+        let step = |server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame| {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        };
+        for _ in 0..5 {
+            step(&mut server, &mut hg);
+        }
+        // The same window on both sides to start (the arrival inventory is
+        // not on the wire yet), except the setting: the client's is off.
+        let slot = server.server.players.len() - 1;
+        let start = |inv: &mut crate::inventory::Inventory| {
+            *inv = crate::inventory::Inventory::new();
+            inv.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 10)));
+            inv.set_slot(1, Some(ItemStack::new_block(crate::block::OAK_PLANKS, 4)));
+        };
+        start(&mut server.server.players[slot].inventory);
+        // The join already sent the client's setting (on) with the digest of
+        // the window it arrived with, which the server never had: start the
+        // tally from the matched windows.
+        server.server.players[slot].possession = Default::default();
+        let p = &mut hg.state.players[0];
+        start(&mut p.inventory);
+        p.inventory.auto_refill = false;
+        p.armour_slots = [None; 4];
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        let eye = p.player.eye_pos();
+        let clicks = [
+            WindowClick::Slot { slot: 1, right: false },
+            WindowClick::DragDistribute { slots: vec![WindowSlot::Grid(0, 0)] },
+            WindowClick::DragDistribute { slots: vec![WindowSlot::Grid(0, 1)] },
+            WindowClick::DragDistribute { slots: vec![WindowSlot::Grid(1, 0)] },
+            WindowClick::DragDistribute { slots: vec![WindowSlot::Grid(1, 1)] },
+            WindowClick::Result,
+            WindowClick::Slot { slot: 20, right: false },
+            WindowClick::Slot { slot: 0, right: false },
+            WindowClick::Slot { slot: 9, right: true },
+        ];
+        for click in &clicks {
+            p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, click, false, eye, |_| crate::block::AIR);
+        }
+        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots), "the stone goes back");
+        for _ in 0..3 {
+            step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        let p = &hg.state.players[0];
+        let slots = |inv: &crate::inventory::Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
+        assert_eq!(slots(&sp.inventory), slots(&p.inventory), "the server's 36 slots follow the client's");
+        assert_eq!(
+            sp.inventory.slot(20).map(|s| s.item.clone()),
+            Some(crate::item::Item::Block(crate::block::CRAFTING_TABLE)),
+            "the 2×2 craft was the server's too"
+        );
+        assert!(!sp.inventory.auto_refill, "the client's setting arrived first");
+        assert!(sp.cursor.is_none() && sp.craft_grid.iter().flatten().all(Option::is_none));
+        // SetAutoRefill, OpenPlayer, nine clicks, the close.
+        assert_eq!(sp.possession.window_ops, 12);
+        assert_eq!(sp.possession.window_mismatch, 0);
+        assert_eq!(sp.possession.crafts_ignored, 0, "no ItemAction::Craft was sent");
+    }
+
     /// C1 — a joiner's break through its REAL client: the survival break arm
     /// mines the block under its feet, tags it (`InputPacket.mined`) and takes
     /// nothing itself (`break_drops::take_yield`); the server yields the break

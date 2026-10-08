@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `74`** (C2b) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `75`** (C3a-2a) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -33,6 +33,7 @@
 - **v73** (2026-10-07, C2a): **A joiner's hunger, eating and sleep are the server's.** Appended: `PacketType::ItemAction = 62` (C→S, `ItemActionPacket { seq, action: ItemAction }`, `ItemAction` = `Eat { hotbar_slot, held_kind, held_id, held_full }` | `Sleep { bed: [i32; 3] }`, append only — C2b adds `Craft` and `Drop`) and `ItemActionOutcome = 63` (S→C, to the asker: `{ seq, accepted, consume_held, note }`); `StateUpdatePacket` gains trailing `own_hunger: u8` (per client, like `last_acked_input`: the addressed joiner's hunger as the server holds it). The server runs every joiner's metabolism (the client's `PlayerCombat::tick_metabolism`, starvation floor from its own difficulty; Hard starvation is a server death, `DiedOf { Starvation }`); a joined client runs none of its own and eats and sleeps by request; `InputPacket.health_delta` counts **losses only** (a reported heal is zero; `MAX_REPORTED_HEAL_PER_INPUT` is gone). A joiner's sleep sets its server spawn point and heals it but never skips the night. Also (no wire change): a request's item claim ends when the server acknowledges the input sent after it, not after FU1's 10 s (FU verify N4). See §4.2f, §5.3.2.
 - **The FU1 verify fixes (2026-10-07, FU3, NO wire change — still v73).** The inbound queue's hard bound is bytes only (8 MiB, each packet charged 64 bytes more): FU1's 1,024-packet bound disconnected every joiner after an honest host stall of about 51 s, because each joiner's bridge thread keeps queueing while the host's game thread is stopped. A client with more than 40 packets waiting is read 64 a tick (catch-up); entity requests and device interactions past their per-kind budgets wait instead of being skipped. Block edits past the 4-a-tick budget wait in a per-client edit queue (with their input's tags and hand) instead of being refused, up to a hard cap of 16,384. The server derives a joiner's campfire smoke itself (`campfire::on_block_edit`), so a campfire action is one edit, and a joiner runs no campfire sweep. A closed connection's slot is freed only after a fill that began after the close. A refused milk or shear skips every later mob arm of that click (it untied a leashed cow), and `entity_flags::PRODUCT_NOT_READY` (bit 32; 0 = ready or unknown, so no bump) lets a joiner's bucket or shears click on an animal that isn't ready go to the block. See §11.2a, §4.1, §4.2d.
 - **v74** (2026-10-07, C2b): **A joiner's crafting and Q-drops are mirrored on the server.** `ItemAction` appends `Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (= 2: the grid as it stood before the craft, row-major `item_to_ref` pairs; the crafting table the 3×3 grid was opened from) and `Drop { hotbar_slot, held_kind, held_id, held_full }` (= 3, `Eat`'s held claim). Both are fire-and-forget: `ItemActionPacket.seq` still moves on, no outcome is sent, no new `PacketType`. The server mirrors a craft on its shadow of the joiner's inventory (`item_actions::judge_craft`: a known recipe from blocks and materials, a recipe bigger than 2×2 only at a crafting table in block reach; one of each input taken, owed; the output added) and spawns a Q-drop as a real ground item thrown from the joiner's server body (full fidelity from `held_full`), paced by a per-joiner token bucket (2, refilled one per `DROP_INTERVAL_TICKS` = 4; a drop it can't pay for waits in the inbound queue). (C2b first spilled a grant that didn't fit the shadow; the C2b-fix reversed it: the `InventoryGrant` carries the whole stack and the overflow is tallied, §4.2e.) On the client, a Q-drop or a craft click that would spend an item a request in flight claims does nothing, and an owed outcome is paid from the 36 slots, then the crafting grid, then the cursor. `ServerPlayer.crafting_ui` (a dead BRIDGE) is gone. See §4.2f, §4.2e, §4.2d.
+- **v75** (2026-10-08, C3a-2a): **The server mirrors a joiner's inventory window, click for click.** Appended: `PacketType::WindowOp = 64` (C→S, `WindowOpPacket { op_seq: u32, op: WireWindowOp, digest: u32 }`; `WireWindowOp` = `Click(window::WindowClick)` | `OpenPlayer` | `OpenTable { cell: [i32; 3] }` | `SetAutoRefill { on: bool }`, append only), never answered. `window::WindowClick` (Slot = 0 … Close = 10), `window::WindowSlot` and `crafting::CraftSlot` become wire data, append only; a drag's slot list over 45 doesn't decode. The client sends one op for every window transition it applies, with its window digest after it; the server applies the same `window::apply` to its copy of the joiner's window (36 slots, armour, cursor, craft grid, station) behind the client's edits, at most `MAX_WINDOW_OPS_PER_TICK` = 8 a tick (the rest wait), and tallies digest mismatches (log-only). `ItemAction::Craft` (= 2) is unused — the craft is the result click — and a v75 server ignores and tallies it. The server's owed payment searches its 36 slots, then its grid, then its cursor (the client's search); a server-landed hit wears its copy of the armour; an accepted swing wears the weapon where it now is (`joiner_actions::where_now`, shared). See §4.2g.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -523,7 +524,8 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak }`. **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8 }`. **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` or `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` (append only: Eat=0, Sleep=1, Craft=2, Drop=3). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft and Drop are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) or `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }` (append only: Eat=0, Sleep=1, Craft=2, Drop=3). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft and Drop are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74). See §4.2f. |
+| 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32 }`, `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3). Never answered. **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
 | 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8 }` (`item_actions::ItemNote`). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
@@ -1347,9 +1349,10 @@ are kept by `seq`, at most 64 outstanding):
   is recomputed). Before C2b it searched the 36 slots only, so food or a
   bucket carried on the cursor (or laid in the grid) when its outcome landed
   went unpaid (D2b LOW-1 residual, C2a verify L6). `can_afford` counts the
-  same holdings. The server's `take_owed` on its shadow is unchanged: the
-  shadow has no grid. *BRIDGE: the grid/cursor search is replaced when C3a's
-  server window holds the grid and cursor.*
+  same holdings. Since C3a-2a the server holds the same window (§4.2g) and
+  pays an accepted outcome from its copy by the same search
+  (`joiner_actions::take_owed_window`: 36 slots, grid, cursor); the client's
+  `take_owed_held` is that function plus a refresh of the result shown.
 - **The claims gate (C2b).** A joined client's own uses respect the claims:
   a Q-drop, and a click on the crafting result, must not spend an item a
   request in flight needs. `JoinerActions::can_spend(item, n)`: after
@@ -1597,7 +1600,8 @@ cell, on the server as in single-player (`break_drops::break_yield` gates on
 | An accepted interaction's `consume_held` | D2b | takes, owed from wherever the item is (`joiner_actions::take_owed`, the client's own rule) |
 | A plain block placement | the edit, classified below | takes one from the held hotbar slot on a match |
 | An accepted `Eat` (C2a) | §4.2f | takes the food, owed |
-| A craft (C2b, `ItemAction::Craft`) | §4.2f | takes one of each input, owed; gains the output (an output that doesn't fit is counted, never spilled: the client holds it) |
+| A window op (C3a-2a, `WindowOp`): a slot move, drag, sort, lock, trash, armour equip, the craft result click, a close returning the grid | §4.2g | the same `window::apply` the client ran, on the server's copy of the window (36 slots, armour, cursor, grid) |
+| A server-landed hit (C3a-2a) | §4.2g | wears the server's copy of the armour (`window::wear_armour`) |
 | A Q-drop (C2b, `ItemAction::Drop`) | §4.2f | takes the item, owed; the item becomes a real ground item |
 
 **Grant overflow (C2b, reversed by the C2b-fix, 2026-10-07; no wire change).**
@@ -1673,7 +1677,7 @@ own). The claimed tool still sets the drop tier and the damage; enforcement is
 C3d.
 
 The other direction — the shadow holds MORE: container
-deposits, armour wear, armour put on, and the
+deposits and the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
 cells; and **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow
@@ -1683,7 +1687,9 @@ comes of those, but once the per-npub sidecar step persists the shadow they
 would be duplication. (Eating left this list in C2a: an accepted `Eat` takes
 its food from the shadow by the owed rule, §4.2f. Crafting outputs and
 inputs, Q-drops and grant overflow left the lists in C2b: a craft and a drop
-are mirrored, §4.2f, and a grant's overflow is tallied and the client holds it, above.) (A fill carrying a `mined`
+are mirrored, §4.2f, and a grant's overflow is tallied and the client holds it, above.
+Slot moves, armour put on and taken off, armour wear, sort, trash and the
+craft left them in C3a-2a: every window op is mirrored, §4.2g.) (A fill carrying a `mined`
 tag, C1's MEDIUM-1 residual, is no longer one: since FU1 it is classified
 like any fill and a plain placement consumes.)
 
@@ -1737,7 +1743,11 @@ C2b's Q-drop in `spawn_joiner_drop`) stay until enforcement.
 A joiner's eating and sleeping are requests the server decides, because the
 server runs the joiner's hunger and owns its health (§5.3.2). C2b adds
 `Craft` and `Drop`, which the server mirrors and never answers: the client's
-craft stands, and its Q-drop becomes a real server item.
+craft stands, and its Q-drop becomes a real server item. **C3a-2a (v75)
+retires `Craft`**: the craft is the window's result click, a `WindowOp`
+(§4.2g); a v75 server ignores an `ItemAction::Craft` and tallies it
+(`PossessionTally::crafts_ignored`), still counted against the item-action
+budget.
 
 **Wire.** `PacketType::ItemAction = 62` (C→S): `ItemActionPacket { seq: u32,
 action: ItemAction }`, with `ItemAction::Eat { hotbar_slot: u8, held_kind: u8,
@@ -1838,7 +1848,8 @@ and the cooldown is a rate limit only: the food comes off the shadow
 either way. The food an `Eat` claims is the client's word until the shadow is
 enforced (C3).
 
-**Craft (C2b).** The 2×2 player grid and a crafting table's 3×3 grid both
+**Craft (C2b; retired in v75 by C3a-2a, §4.2g — kept as the record of what
+the window op replaced).** The 2×2 player grid and a crafting table's 3×3 grid both
 craft at one site, the click on the result (`ClickTarget::ResultSlot`, the
 window rule `WindowClick::Result` in `window::apply`, C3a-1; the recipe book
 only fills the grid). On a joined client, before the click, the claims gate
@@ -1913,9 +1924,120 @@ than two arrive bunched.
 
 **Known limits (C2b).** A modified client can drop an item it doesn't hold,
 and that item is then real for everyone (`// BRIDGE: possession check`);
-likewise it can report a craft it never made, and the shadow mirrors it (a
-shortfall is only logged). Both close with enforcement (C3). Crafting is not enforced: a refused craft is
+likewise it could report a craft it never made, and the shadow mirrored it
+(until C3a-2a: the result click now runs on the server's own grid, so a
+craft the server's window can't make is refused there, tallied, and makes
+nothing on the server). Both close with enforcement (C3). Crafting is not enforced: a refused craft is
 only counted, and the client keeps what it made.
+
+### 4.2g Window ops (as built, protocol v75, C3a-2a)
+
+The server holds each joiner's inventory window slot for slot and the client
+predicts it with the same rules, the way Minecraft's window clicks work
+(`docs/foundations/2026-10-07-c3-server-owned-inventory.md` §2). This phase
+**mirrors** only: nothing is refused, no sync is sent, mismatches are tallied.
+
+**The window.** On the client: the 36 slots (`PlayerSlot.inventory`, with its
+locks and `auto_refill`), the four armour slots (`armour_slots`), and the
+crafting screen's cursor, grid and station (`CraftingUi`). On the server, per
+joiner (`ServerPlayer`): the shadow `inventory` is the 36 slots, plus `armour:
+[Option<ArmourItem>; 4]`, `cursor`, `craft_grid` and `station:
+window::Station` (`Player`, or `Table { cell }`). Both sides build a
+`window::WindowMut` over them and call `window::apply` — one function — with a
+`ClickCtx` built from their own body's eye and their own world's block at the
+station's table cell (Spec 05 §3.6).
+
+**Wire.** `PacketType::WindowOp = 64` (C→S): `WindowOpPacket { op_seq: u32,
+op: WireWindowOp, digest: u32 }`. `WireWindowOp` (append only): `Click
+(window::WindowClick)` = 0, `OpenPlayer` = 1, `OpenTable { cell: [i32; 3] }` =
+2, `SetAutoRefill { on: bool }` = 3. `WindowClick` (append only, pinned by
+`protocol::tests::window_op_packets_round_trip`): `Slot { slot, right }` = 0,
+`Grid { row, col, right }` = 1, `Armour { slot }` = 2, `Result` = 3, `Trash` =
+4, `DragDistribute { slots }` = 5, `DragGather { slots }` = 6, `Sort` = 7,
+`ToggleLock { slot }` = 8, `Autofill { example: [[CraftSlot; 3]; 3] }` = 9,
+`Close` = 10; indices are `usize` (bincode `u64`); `WindowSlot` = `Inv(usize)`
+| `Grid(usize, usize)`; `CraftSlot` = `Empty` | `Block(u16)` |
+`Material(MaterialId)` (serde index, append-only for saves already). A drag's
+slot list over `window::MAX_DRAG_SLOTS` = 45 doesn't decode (and the rule
+refuses one). `op_seq` counts 1, 2, 3… per connection
+(`RemoteClient::send_window_op`). `digest` is the client's
+`window::digest` AFTER applying the op: FNV-1a 32 over explicit
+little-endian bytes — per slot a presence byte, then kind (Block 1, Tool 2,
+Material 3, Armour 4, Plan 5), id (`u16`: block id; tool type << 8 | tier;
+material id; armour slot << 8 | tier; 0 for a Plan), count and durability
+(`u16`) — over the 36 slots, the four armour slots, the cursor and the nine
+grid cells, then `auto_refill`. Locks are not in it.
+
+**Client.** Every window transition `CraftingUi` applies is logged
+(`window_ops::OpLog`) with the digest after it: each `apply_click` (slot,
+grid, armour, result, trash, drag, sort, lock, autofill), each `close` (a
+refused one too — the rule ran), `open_player_crafting` (`OpenPlayer`, E) and
+`open_table_crafting` (`OpenTable`; a table opens only while
+`window::table_in_reach` holds, the rule its screen closes by). The
+auto-refill setting is logged as `SetAutoRefill` the first time an op is
+logged in a session and whenever it differs from the last one logged —
+ahead of the op it first applies to, with the digest before that op; a
+change with no op after it goes at the end of the log. `GameState::
+flush_window_ops` runs at the start of every tick's `network_send_input`,
+before that tick's input is built: when joined and connected it sends player
+0's log in order; otherwise it drops every log and forgets the setting (so a
+join always starts by sending it). Single-player, a host's own slots and a
+split-screen seat send nothing. A rule refusal is still sent: the server runs
+the same rule to the same refusal. The craft result click is gated by the
+claims (`may_craft`, §4.2d) before it is applied; a gated click applies
+nothing and sends nothing.
+
+**Server.** `HostedServer::handle_window_op` → `window_ops::serve_op`: for a
+joiner's body in the world, dead or alive (`item_actions::can_mirror` — the
+client acted before it heard of its death; a local slot, a seat still joining
+or one that left gets nothing applied), a `Click` is `window::apply` at the
+server's station, from the server body's eye, reading the server's world (on
+a lending host the lent, host's world); a `Close` that returned everything
+resets the station to the player's grid (the client clears its screen's
+table on the same close); `OpenPlayer` / `OpenTable` set the station;
+`SetAutoRefill` sets the shadow's `auto_refill`. Then
+`window_ops::note_served` compares digests: `PossessionTally.window_ops`
+counts every op; unless the world is creative, `window_refused` counts rule
+refusals (`Refused`, `NeedsTable` — the window stays as the rule leaves it,
+as on the client) and `window_mismatch` counts digest mismatches, keeping the
+first one's kind (`first_window_mismatch`, `window_ops::OpKind`; the first is
+logged at info, the rest at debug; the leave summary prints them). A creative
+joiner is mirrored but not tallied: its item browser's gives stay local until
+C3c. Nothing is refused, corrected or answered.
+
+**Ordering and budget.** A `WindowOp` is a request (`is_request`): it waits
+behind the same client's edits still waiting past the edit budget (FU4a,
+`waits_for_kind_budget`), in arrival order, so a placement (and its
+auto-refill) the client made before the op is applied first. At most
+`MAX_WINDOW_OPS_PER_TICK` = 8 are read per client per tick; one past it waits
+in the inbound queue with everything behind it (never dropped). A burst of 20
+applies over three ticks (`test_integration::window_ops`).
+
+**Shared rules beside the click.** The owed payment of an accepted
+interaction or eat is `joiner_actions::take_owed_window` on both sides (36
+slots — the request's slot first —, then the grid row-major, then the
+cursor). A server-landed hit wears the server's copy of the armour by
+`window::wear_armour` when it drains `armour_wear_hits` into `ArmourWorn`; the
+client wears its own with the same function on receipt; a piece that breaks
+unequips on both. `InputPacket.armour_points` still sets the damage (C3d
+flips it). An accepted swing wears the weapon where it now is on both sides:
+the slot it was swung from (the server: the latest input's hotbar slot) if
+it still holds it, else the first of the 36 that does
+(`joiner_actions::where_now`), so a weapon moved by a window op while the
+swing flew wears the same piece.
+
+**Known divergences (all tallied, none refused).** The client's local uses
+(bucket, seeds, bone meal… C3c), chests and other containers (C3b), its
+death (the death phase), the inventory it joined with (the sidecar), and
+creative gives are not mirrored, so the next op after one mismatches. A
+client-held Plan is a slot the server sees as empty (Plans have no wire form
+until C3c); ops that move it are layout no-ops on the server, and the digest
+counts that. Races: a grant, an owed payment or an `ArmourWorn` lands on the
+server at a different point among the ops than on the client, which can show
+as one mismatch. An `ItemAction` sent mid-frame can overtake a window op the
+same frame logged (ops go out at the next tick's start). No sync exists yet:
+`InventorySync` lands with the death phase; mismatch-driven resync with
+replay with C3d.
 
 ### 4.3 Block Mutations
 

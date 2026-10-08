@@ -4,7 +4,7 @@
 //! Rendering uses egui for modern, clean UI with block textures as managed textures.
 
 use crate::armour::{self, ArmourItem, ArmourSlot as ArmSlot};
-use crate::block::BlockRegistry;
+use crate::block::{BlockId, BlockRegistry};
 use crate::crafting::CraftSlot;
 use crate::egui_integration::EguiIntegration;
 use crate::inventory::Inventory;
@@ -24,11 +24,10 @@ const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
 /// The crafting UI state.
 pub struct CraftingUi {
     pub open: bool,
-    pub is_table: bool,
-    /// C2b — the crafting table the 3×3 grid was opened from (`None` for
-    /// the 2×2 player grid). A joined client names it in its
-    /// `ItemAction::Craft`, so the server can check the table is there and
-    /// in reach for a recipe bigger than 2×2.
+    /// The crafting table the 3×3 grid was opened from; `None` for the 2×2
+    /// player grid ([`Self::is_table`], [`Self::station`]). The result
+    /// click crafts only while it stands in reach (C3a-2a,
+    /// `window::ClickCtx::table_present`).
     pub table: Option<[i32; 3]>,
     pub grid: [[Option<ItemStack>; 3]; 3],
     pub result: Option<ItemStack>,
@@ -69,6 +68,10 @@ pub struct CraftingUi {
     /// catalogue indices ("what can I make with X"), overriding the category tab;
     /// search still narrows within them. Cleared by Close and by switching tabs.
     pub book_uses_filter: Option<Vec<usize>>,
+    /// C3a-2a — every window transition this screen applied (each click, and
+    /// each open), with the window's digest after it, waiting to be sent as
+    /// window ops when joined (`window_ops::OpLog`). Drained every tick.
+    pub ops: crate::window_ops::OpLog,
 }
 
 impl CraftingUi {
@@ -102,7 +105,6 @@ impl CraftingUi {
     pub fn new() -> Self {
         Self {
             open: false,
-            is_table: false,
             table: None,
             grid: [[None, None, None], [None, None, None], [None, None, None]],
             result: None,
@@ -118,12 +120,15 @@ impl CraftingUi {
             focus_book_search: false,
             pinned_recipe_stack: Vec::new(),
             book_uses_filter: None,
+            ops: crate::window_ops::OpLog::default(),
         }
     }
 
-    pub fn open_player_crafting(&mut self) {
+    /// Open the player's own 2×2 grid (E). Logged as a window op
+    /// (`OpenPlayer`, C3a-2a): `inv` and `armour` are the player's, for its
+    /// digest.
+    pub fn open_player_crafting(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
         self.open = true;
-        self.is_table = false;
         self.table = None;
         self.grid = [[None, None, None], [None, None, None], [None, None, None]];
         self.result = None;
@@ -132,13 +137,14 @@ impl CraftingUi {
         self.book_search.clear();
         self.pinned_recipe_stack.clear();
         self.book_uses_filter = None;
+        self.log_op(crate::protocol::WireWindowOp::OpenPlayer, inv, armour);
     }
 
-    /// Open the 3×3 grid of the crafting table at `table` (C2b: recorded
-    /// for a joiner's `ItemAction::Craft`).
-    pub fn open_table_crafting(&mut self, table: [i32; 3]) {
+    /// Open the 3×3 grid of the crafting table at `table`. The caller opens
+    /// one only while it is in reach (`window::table_in_reach`, the rule its
+    /// screen closes by). Logged as a window op (`OpenTable`, C3a-2a).
+    pub fn open_table_crafting(&mut self, table: [i32; 3], inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
         self.open = true;
-        self.is_table = true;
         self.table = Some(table);
         self.grid = [[None, None, None], [None, None, None], [None, None, None]];
         self.result = None;
@@ -147,36 +153,77 @@ impl CraftingUi {
         self.book_search.clear();
         self.pinned_recipe_stack.clear();
         self.book_uses_filter = None;
+        self.log_op(crate::protocol::WireWindowOp::OpenTable { cell: table }, inv, armour);
+    }
+
+    /// Is the screen a crafting table's 3×3 grid?
+    pub fn is_table(&self) -> bool {
+        self.table.is_some()
     }
 
     /// The grid on screen: the player's 2×2 or a table's 3×3.
     pub fn station(&self) -> Station {
-        if self.is_table { Station::Table } else { Station::Player }
+        match self.table {
+            Some(cell) => Station::Table { cell },
+            None => Station::Player,
+        }
+    }
+
+    /// C3a-2a — log one window op with the window's digest after it. The
+    /// auto-refill setting it was applied under is logged first if it
+    /// changed (`window_ops::OpLog::sync_auto_refill`) — before this op, so
+    /// with the digest of the window as it was.
+    fn log_op(&mut self, op: crate::protocol::WireWindowOp, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+        let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid);
+        self.ops.sync_auto_refill(inv.auto_refill, || now);
+        self.ops.record(op, now);
+    }
+
+    /// C3a-2a — the window ops logged since the last call, for a joined
+    /// client to send in order; auto-refill's setting is logged first if it
+    /// changed since the last op (`window_ops::OpLog::take`).
+    pub fn take_ops(&mut self, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Vec<(crate::protocol::WireWindowOp, u32)> {
+        let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid);
+        self.ops.take(inv.auto_refill, now)
     }
 
     /// C3a-1 — apply one window click: the pure rule (`window::apply`) over
     /// this screen's grid and cursor plus the player's `inv` and `armour`,
     /// then refresh the result shown. Every item move the screen makes goes
-    /// through here.
+    /// through here. C3a-2a — `eye` is the player's eye and `block_at` reads
+    /// its world: a table's reach is part of the rule. Each click is logged
+    /// as a window op (`ops`), with the window's digest after it.
     pub fn apply_click(
         &mut self,
         inv: &mut Inventory,
         armour: &mut [Option<ArmourItem>; 4],
         click: &WindowClick,
         creative: bool,
+        eye: glam::Vec3,
+        block_at: impl Fn([i32; 3]) -> BlockId,
     ) -> ClickResult {
-        let ctx = ClickCtx { creative, station: self.station() };
+        let ctx = ClickCtx::new(creative, self.station(), eye, block_at);
+        self.apply_ctx(inv, armour, click, &ctx)
+    }
+
+    /// [`Self::apply_click`] with its context built.
+    fn apply_ctx(
+        &mut self,
+        inv: &mut Inventory,
+        armour: &mut [Option<ArmourItem>; 4],
+        click: &WindowClick,
+        ctx: &ClickCtx,
+    ) -> ClickResult {
+        self.ops.sync_auto_refill(inv.auto_refill, || {
+            window::digest_parts(inv, armour, &self.cursor_item, &self.grid)
+        });
         let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
-        let out = window::apply(&mut view, click, &ctx);
+        let out = window::apply(&mut view, click, ctx);
+        let after = window::digest(&view);
+        self.ops.record(crate::protocol::WireWindowOp::Click(click.clone()), after);
         // L2 — after every click, a refused close's half-emptied grid too.
         self.update_result();
         out
-    }
-
-    /// `apply_click` for a click that never touches the armour slots.
-    fn apply_bag_click(&mut self, inv: &mut Inventory, click: &WindowClick) -> ClickResult {
-        let mut no_armour = [None; 4];
-        self.apply_click(inv, &mut no_armour, click, false)
     }
 
     /// Return all grid + cursor items to the inventory and close the panel
@@ -188,10 +235,17 @@ impl CraftingUi {
     /// silently dropped grid/cursor items on a full inventory). Returns `true`
     /// if the panel actually closed; callers can surface a "make room" hint on
     /// `false`.
-    pub fn close(&mut self, inventory: &mut Inventory) -> bool {
-        let all_placed = self.apply_bag_click(inventory, &WindowClick::Close).ok();
+    ///
+    /// C3a-2a — `armour` is the player's, for the close's window-op digest
+    /// (`WindowClick::Close` reads no reach, so no body is needed).
+    pub fn close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> bool {
+        let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
+        let all_placed = self.apply_ctx(inventory, armour, &WindowClick::Close, &ctx).ok();
         if all_placed {
             self.open = false;
+            // The station goes with the screen, as the server's does
+            // (`window_ops::serve_op`).
+            self.table = None;
             self.result = None;
             self.pad_focus = None;
             self.book_open = false;
@@ -199,6 +253,32 @@ impl CraftingUi {
             self.pinned_recipe_stack.clear();
         }
         all_placed
+    }
+
+    /// Tests: apply `click` by a body standing beside the screen's table (in
+    /// reach of it), or anywhere at the player's grid.
+    #[cfg(test)]
+    fn apply_test_click(
+        &mut self,
+        inv: &mut Inventory,
+        armour: &mut [Option<ArmourItem>; 4],
+        click: &WindowClick,
+    ) -> ClickResult {
+        let station = self.station();
+        let eye = match station {
+            Station::Table { cell } => glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 1.6, cell[2] as f32 + 2.5),
+            Station::Player => glam::Vec3::ZERO,
+        };
+        let ctx = ClickCtx::new(false, station, eye, |_| crate::block::CRAFTING_TABLE);
+        self.apply_ctx(inv, armour, click, &ctx)
+    }
+
+    /// Tests: [`Self::apply_test_click`] for a click that never touches the
+    /// armour slots.
+    #[cfg(test)]
+    fn apply_bag_click(&mut self, inv: &mut Inventory, click: &WindowClick) -> ClickResult {
+        let mut no_armour = [None; 4];
+        self.apply_test_click(inv, &mut no_armour, click)
     }
 
     /// Recipe-book auto-fill (`WindowClick::Autofill`). Returns `false` when
@@ -230,7 +310,7 @@ impl CraftingUi {
     #[cfg(test)]
     pub fn click_armour_slot(&mut self, armour_slot_idx: usize, armour_slots: &mut [Option<ArmourItem>; 4]) -> bool {
         let mut unused = Inventory::new();
-        self.apply_click(&mut unused, armour_slots, &WindowClick::Armour { slot: armour_slot_idx }, false).ok()
+        self.apply_test_click(&mut unused, armour_slots, &WindowClick::Armour { slot: armour_slot_idx }).ok()
     }
 
     /// Click an inventory slot (`WindowClick::Slot`).
@@ -521,7 +601,7 @@ pub fn draw_crafting_ui(
     if !any_down {
         ui_state.clear_drag();
     }
-    let grid_size = if ui_state.is_table { 3usize } else { 2 };
+    let grid_size = if ui_state.is_table() { 3usize } else { 2 };
     let slot_size = 48.0;
     let gap = 4.0;
     // Controller slot-cursor: rect of the focused slot, captured while
@@ -570,7 +650,7 @@ pub fn draw_crafting_ui(
                 ui.add_space(0.0);
 
                 // Title
-                let title = if ui_state.is_table { "Workbench" } else { "Crafting" };
+                let title = if ui_state.is_table() { "Workbench" } else { "Crafting" };
                 ui.label(
                     egui::RichText::new(title)
                         .size(24.0)
@@ -1710,7 +1790,7 @@ mod tests {
     #[test]
     fn multi_count_cursor_onto_occupied_grid_cell_loses_nothing() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 1));
         ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 10));
         // Old behaviour placed 1 dirt and put the displaced stone on the cursor,
@@ -1723,7 +1803,7 @@ mod tests {
     #[test]
     fn single_count_cursor_still_swaps_into_occupied_cell() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 1));
         ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 1));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), false);
@@ -1739,7 +1819,7 @@ mod tests {
         // batch-crafting path (left-click would dump the whole stack — see
         // left_click_merges_whole_stack_into_matching_grid_cell).
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 1));
         ui.cursor_item = Some(ItemStack::new_block(block::STONE, 5));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), true);
@@ -1753,7 +1833,7 @@ mod tests {
     #[test]
     fn left_click_drops_whole_stack_into_empty_grid_cell() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.cursor_item = Some(ItemStack::new_block(block::STONE, 5));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), false);
         assert_eq!(ui.grid[0][0].as_ref().map(|s| s.count), Some(5), "whole stack dropped");
@@ -1763,7 +1843,7 @@ mod tests {
     #[test]
     fn right_click_drops_one_into_empty_grid_cell() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.cursor_item = Some(ItemStack::new_block(block::STONE, 5));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), true);
         assert_eq!(ui.grid[0][0].as_ref().map(|s| s.count), Some(1), "one dropped");
@@ -1773,7 +1853,7 @@ mod tests {
     #[test]
     fn left_click_merges_whole_stack_into_matching_grid_cell_up_to_max() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 60));
         ui.cursor_item = Some(ItemStack::new_block(block::STONE, 10));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), false);
@@ -1784,7 +1864,7 @@ mod tests {
     #[test]
     fn right_click_empty_cursor_picks_up_half_from_grid_cell() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), true);
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(3), "picked up the ceil-half");
@@ -1794,7 +1874,7 @@ mod tests {
     #[test]
     fn left_click_empty_cursor_picks_up_whole_grid_cell() {
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), false);
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(5), "picked up the whole stack");
@@ -1849,7 +1929,7 @@ mod tests {
         // can click-to-stack one at a time. (Different-item swap still works —
         // see single_count_cursor_still_swaps_into_occupied_cell.)
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 1));
         ui.cursor_item = Some(ItemStack::new_block(block::STONE, 1));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), false);
@@ -1862,7 +1942,7 @@ mod tests {
         // A full cell (== max_stack) of the same item can't take more: the
         // click is a safe no-op (no swap that would strand the cursor stack).
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 64));
         ui.cursor_item = Some(ItemStack::new_block(block::STONE, 5));
         ui.click_grid_slot(0, 0, &mut Inventory::new(), false);
@@ -1917,7 +1997,7 @@ mod tests {
     fn close_with_full_inventory_keeps_items_and_stays_open() {
         let mut ui = CraftingUi::new();
         ui.open = true;
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 3));
         let mut inv = Inventory::new();
@@ -1925,7 +2005,7 @@ mod tests {
             inv.set_slot(i, Some(ItemStack::new_tool(
                 Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
         }
-        let closed = ui.close(&mut inv);
+        let closed = ui.close(&mut inv, &mut [None; 4]);
         assert!(!closed, "can't close into a full inventory");
         assert!(ui.open, "UI stays open so the items aren't stranded");
         assert_eq!(ui.grid[0][0].as_ref().map(|s| s.count), Some(5), "grid item preserved");
@@ -1948,7 +2028,7 @@ mod tests {
         }
         ui.update_result();
         let table = ui.result.clone().expect("four planks make a table");
-        assert!(!ui.close(&mut inv));
+        assert!(!ui.close(&mut inv, &mut [None; 4]));
         assert!(ui.open);
         assert_ne!(ui.result, Some(table), "the stale table is gone");
         assert_eq!(ui.result, window::recipe_output(&ui.grid, ui.station()));
@@ -1961,7 +2041,7 @@ mod tests {
         ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
         ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 3));
         let mut inv = Inventory::new();
-        let closed = ui.close(&mut inv);
+        let closed = ui.close(&mut inv, &mut [None; 4]);
         assert!(closed);
         assert!(!ui.open);
         assert!(ui.grid[0][0].is_none() && ui.cursor_item.is_none());
@@ -2165,11 +2245,11 @@ mod tests {
         let mut ui = CraftingUi::new();
         assert_eq!(ui.pad_focus, None);
         ui.pad_focus = Some(PadSlot::start());
-        ui.open_player_crafting();
+        ui.open_player_crafting(&Inventory::new(), &[None; 4]);
         assert_eq!(ui.pad_focus, None, "opening resets the pad cursor");
         ui.pad_focus = Some(Grid(0, 0));
         let mut inv = Inventory::new();
-        assert!(ui.close(&mut inv));
+        assert!(ui.close(&mut inv, &mut [None; 4]));
         assert_eq!(ui.pad_focus, None, "closing resets the pad cursor");
     }
 
@@ -2194,7 +2274,7 @@ mod tests {
         // Iron Pickaxe: 3 IronIngot + 2 Stick. Stock exactly that.
         let card = card_named("Iron Pickaxe");
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(crate::item::MaterialId::IronIngot, 3)));
         inv.set_slot(1, Some(ItemStack::new_material(crate::item::MaterialId::Stick, 2)));
@@ -2223,7 +2303,7 @@ mod tests {
     fn autofill_fails_and_takes_nothing_when_short() {
         let card = card_named("Iron Pickaxe");
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         let mut inv = Inventory::new();
         // Only 1 iron — not enough (needs 3).
         inv.set_slot(0, Some(ItemStack::new_material(crate::item::MaterialId::IronIngot, 1)));
@@ -2240,7 +2320,7 @@ mod tests {
     fn autofill_returns_prior_grid_contents_to_inventory() {
         let card = card_named("Crafting Table"); // 4 oak planks
         let mut ui = CraftingUi::new();
-        ui.is_table = true;
+        ui.table = Some([0, 64, 0]);
         // Pre-existing junk in the grid that must be returned, not lost.
         ui.grid[2][2] = Some(ItemStack::new_block(crate::block::DIRT, 5));
         let mut inv = Inventory::new();
