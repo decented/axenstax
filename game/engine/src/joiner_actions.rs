@@ -98,6 +98,37 @@ pub enum Asked {
     /// claiming `claim` of the held item (`block_use::claim`: what the rule
     /// could take).
     UseBlock { cell: [i32; 3], kind: crate::block_use::UseKind, claim: u8 },
+    /// C3c-2 — shoot the `weapon` of `material` in the request's hotbar slot
+    /// (`ItemAction::Shoot`). Unlike every other request, [`Pending::held`]
+    /// is what it SPENDS — one of its ammo (`shot::ammo_for`) — so the claim
+    /// is on the ammo; the weapon wears ([`apply_use_wear`]).
+    Shoot { weapon: crate::protocol::ShotWeapon, material: crate::crafting::ToolMaterial },
+    /// C3c-2 — place the cart in hand on the rail at `cell`
+    /// (`ItemAction::PlaceCart`), claiming the one cart.
+    PlaceCart { cell: [i32; 3] },
+    /// C3c-2 — light the unlit campfire at `cell` with `lighter` (sent as a
+    /// campfire `ItemAction::UseBlock`; the client remembers it was a
+    /// lighting for the feedback). Claims the stick, or flint and steel's
+    /// wear; the Firestarter nothing.
+    Light { cell: [i32; 3], lighter: crate::block_use::Lighter },
+    /// C3c-2 — cast the rod in hand (`ItemAction::Cast`): claims nothing.
+    Cast,
+    /// C3c-2 — reel the line in (`ItemAction::Reel`): claims nothing; the
+    /// rod wears on a catch.
+    Reel,
+}
+
+impl Asked {
+    /// C3c-2 — the weapon a `Shoot` wears, as an item ([`same_item`] knows
+    /// it by type and material, whatever its durability).
+    pub fn shot_weapon(self) -> Option<Item> {
+        let Asked::Shoot { weapon, material } = self else { return None };
+        let tool_type = match weapon {
+            crate::protocol::ShotWeapon::Bow => crate::crafting::ToolType::Bow,
+            crate::protocol::ShotWeapon::Slingshot => crate::crafting::ToolType::Slingshot,
+        };
+        Some(Item::Tool(crate::crafting::Tool::new(tool_type, material)))
+    }
 }
 
 /// One request awaiting its outcome.
@@ -382,11 +413,16 @@ pub fn uses(kind: Asked) -> u8 {
             | InteractKind::LeadAttach
             | InteractKind::LeadToPost { .. },
         )
-        | Asked::Eat => 1,
+        | Asked::Eat
+        | Asked::Shoot { .. }
+        | Asked::PlaceCart { .. } => 1,
         Asked::Interact(InteractKind::Shear | InteractKind::LeadDetach | InteractKind::SitToggle)
         | Asked::Swing
-        | Asked::Sleep { .. } => 0,
+        | Asked::Sleep { .. }
+        | Asked::Cast
+        | Asked::Reel => 0,
         Asked::UseBlock { claim, .. } => claim,
+        Asked::Light { lighter, .. } => u8::from(lighter != crate::block_use::Lighter::Firestarter),
     }
 }
 
@@ -651,14 +687,23 @@ pub fn apply_outcome(
             applied.consumed = take_owed_held(inv, ui, request.hotbar_slot, held, outcome.consume_held)
         }
         // Not an interaction's answer.
-        Asked::Eat | Asked::Sleep { .. } | Asked::UseBlock { .. } => {}
+        Asked::Eat
+        | Asked::Sleep { .. }
+        | Asked::UseBlock { .. }
+        | Asked::Shoot { .. }
+        | Asked::PlaceCart { .. }
+        | Asked::Light { .. }
+        | Asked::Cast
+        | Asked::Reel => {}
     }
     applied
 }
 
 /// C2a — apply an item action's outcome to the joiner's inventory: an
 /// accepted one takes `consume_held` of what it claimed (the eaten food;
-/// C3b-2, what a block use took), owed like an interaction's
+/// C3b-2, what a block use took; C3c-2, a shot's ammo — searched from the
+/// weapon's slot, which never holds it, so by the shared search alone — and
+/// a placed cart), owed like an interaction's
 /// ([`take_owed_held`]: the 36 slots, then `ui`'s grid, then its cursor —
 /// C2a verify L6). Nothing on a refusal. Returns how many were taken.
 pub fn apply_item_outcome(
@@ -667,7 +712,17 @@ pub fn apply_item_outcome(
     request: &Pending,
     outcome: &ItemActionOutcomePacket,
 ) -> u8 {
-    if !outcome.accepted || !matches!(request.kind, Asked::Eat | Asked::Sleep { .. } | Asked::UseBlock { .. }) {
+    if !outcome.accepted
+        || !matches!(
+            request.kind,
+            Asked::Eat
+                | Asked::Sleep { .. }
+                | Asked::UseBlock { .. }
+                | Asked::Light { .. }
+                | Asked::Shoot { .. }
+                | Asked::PlaceCart { .. }
+        )
+    {
         return 0;
     }
     let Some(held) = request.held.as_ref() else {
@@ -677,19 +732,25 @@ pub fn apply_item_outcome(
 }
 
 /// C3b-2 — an accepted block use that wore its tool (`wear_held`: shears on
-/// a hive) wears it where it now is ([`where_now`]), as an accepted swing
-/// does; the server wears its copy at the same point (the outcome's window
-/// event). `None` when nothing wore.
+/// a hive; C3c-2 flint and steel on a campfire) wears it where it now is
+/// ([`where_now`]), as an accepted swing does; the server wears its copy at
+/// the same point (the outcome's window event). C3c-2 — a shot wears its
+/// weapon ([`Asked::shot_weapon`]), a reel that caught its rod. `None` when
+/// nothing wore.
 pub fn apply_use_wear(
     inv: &mut Inventory,
     request: &Pending,
     outcome: &ItemActionOutcomePacket,
 ) -> Option<crate::inventory::ToolUseInfo> {
-    if !outcome.accepted || !outcome.wear_held || !matches!(request.kind, Asked::UseBlock { .. }) {
+    if !outcome.accepted || !outcome.wear_held {
         return None;
     }
-    let held = request.held.as_ref()?;
-    let at = where_now(inv, request.hotbar_slot, held)?;
+    let tool = match request.kind {
+        Asked::UseBlock { .. } | Asked::Light { .. } | Asked::Reel => request.held.clone()?,
+        Asked::Shoot { .. } => request.kind.shot_weapon()?,
+        _ => return None,
+    };
+    let at = where_now(inv, request.hotbar_slot, &tool)?;
     inv.use_tool_at(at)
 }
 
@@ -738,11 +799,49 @@ mod tests {
             note: 0,
             window_event: 7,
             wear_held,
+            bite_after: 0,
         };
         assert!(apply_use_wear(&mut inv, &req, &out(false, true)).is_none(), "refused: no wear");
         assert!(apply_use_wear(&mut inv, &req, &out(true, false)).is_none(), "not told to wear");
         assert!(apply_use_wear(&mut inv, &req, &out(true, true)).is_some(), "worn");
         assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &req, &out(true, true)), 0, "nothing taken");
+    }
+
+    /// C3c-2 — a shot claims its AMMO (one arrow in flight per arrow held),
+    /// and its accepted outcome takes the arrow by the shared search and
+    /// wears the bow where it now is; a refusal changes nothing.
+    #[test]
+    fn a_shot_claims_its_ammo_takes_it_and_wears_the_bow() {
+        use crate::protocol::ShotWeapon;
+        let bow = Tool::new(ToolType::Bow, ToolMaterial::Wood);
+        let arrow = Item::Material(MaterialId::Arrow);
+        let mut inv = inv_with(0, ItemStack::new_tool(bow));
+        inv.set_slot(20, Some(ItemStack { item: arrow.clone(), count: 1 }));
+        let shoot = Asked::Shoot { weapon: ShotWeapon::Bow, material: ToolMaterial::Wood };
+        assert_eq!(shoot.shot_weapon(), Some(Item::Tool(bow)));
+        let mut a = JoinerActions::default();
+        let ui = CraftingUi::new();
+        assert!(a.can_afford(&inv, &ui, shoot, Some(&arrow)));
+        let req = Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()) };
+        a.record(req.clone(), 3);
+        assert!(!a.can_afford(&inv, &ui, shoot, Some(&arrow)), "the only arrow is in flight");
+        assert!(!a.can_spend(&inv, &ui, &arrow, 1), "and can't be dropped meanwhile");
+        let out = |accepted| ItemActionOutcomePacket {
+            seq: 1,
+            accepted,
+            consume_held: 1,
+            note: 0,
+            window_event: 4,
+            wear_held: accepted,
+            bite_after: 0,
+        };
+        let mut ui = CraftingUi::new();
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &req, &out(false)), 0);
+        assert!(apply_use_wear(&mut inv, &req, &out(false)).is_none());
+        assert_eq!(apply_item_outcome(&mut inv, &mut ui, &req, &out(true)), 1);
+        assert!(inv.slot(20).is_none(), "the arrow, from wherever it is");
+        assert!(apply_use_wear(&mut inv, &req, &out(true)).is_some());
+        assert_eq!(durability(&inv, 0), u32::from(bow.durability) - 1, "the bow wore once");
     }
 
     /// C2b verify L6 — a worn armour piece pays from the unworn shadow copy.
@@ -1092,7 +1191,7 @@ mod tests {
         let bread = Item::Material(MaterialId::Bread);
         let mut inv = inv_with(4, ItemStack::new_material(MaterialId::Bread, 3));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
-        let out = |accepted, consume_held| ItemActionOutcomePacket { seq: 1, accepted, consume_held, note: 0, window_event: 0, wear_held: false };
+        let out = |accepted, consume_held| ItemActionOutcomePacket { seq: 1, accepted, consume_held, note: 0, window_event: 0, wear_held: false, bite_after: 0 };
         assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &eat, &out(false, 0)), 0);
         assert_eq!(inv.hotbar_slot(4).unwrap().count, 3);
         assert_eq!(apply_item_outcome(&mut inv, &mut CraftingUi::new(), &eat, &out(true, 1)), 1);
@@ -1221,7 +1320,7 @@ mod tests {
         // Eat: the bread is on the cursor mid-drag when the outcome lands.
         ui.cursor_item = Some(ItemStack::new_material(MaterialId::Bread, 2));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
-        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0, wear_held: false };
+        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0, wear_held: false, bite_after: 0 };
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(1), "paid from the cursor");
         // With bread back in the 36 slots, they pay first.
@@ -1242,7 +1341,7 @@ mod tests {
         ui.open_player_crafting(&Inventory::new(), &[None; 4]);
         ui.grid[0][1] = Some(ItemStack::new_material(MaterialId::Bread, 2));
         let eat = Pending { kind: Asked::Eat, mob: None, hotbar_slot: 4, held: Some(bread) };
-        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0, wear_held: false };
+        let out = ItemActionOutcomePacket { seq: 1, accepted: true, consume_held: 1, note: 0, window_event: 0, wear_held: false, bite_after: 0 };
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);
         assert_eq!(ui.grid[0][1].as_ref().map(|s| s.count), Some(1), "one bite taken from the grid cell");
         assert_eq!(apply_item_outcome(&mut inv, &mut ui, &eat, &out), 1);

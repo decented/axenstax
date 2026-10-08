@@ -34,32 +34,32 @@ use super::joiners_act::floor_and_stand;
 use super::lent_world::{join_guest_lent, start_lent};
 
 /// One joiner's client half.
-struct Client {
-    transport: ChannelClientTransport,
-    slot: usize,
-    inv: Inventory,
-    ui: CraftingUi,
-    armour: [Option<ArmourItem>; 4],
+pub(super) struct Client {
+    pub(super) transport: ChannelClientTransport,
+    pub(super) slot: usize,
+    pub(super) inv: Inventory,
+    pub(super) ui: CraftingUi,
+    pub(super) armour: [Option<ArmourItem>; 4],
     /// The highest window event applied.
-    events: u32,
-    actions: JoinerActions,
-    input_seq: u64,
+    pub(super) events: u32,
+    pub(super) actions: JoinerActions,
+    pub(super) input_seq: u64,
     /// Its own world: only what block views put in it.
-    world: crate::world::World,
+    pub(super) world: crate::world::World,
     /// Every view received, in order.
-    views: Vec<BlockEntityView>,
+    pub(super) views: Vec<BlockEntityView>,
     /// Every outcome received, in order.
-    outcomes: Vec<ItemActionOutcomePacket>,
+    pub(super) outcomes: Vec<ItemActionOutcomePacket>,
     /// Every block change received, in order.
-    changes: Vec<protocol::BlockChange>,
+    pub(super) changes: Vec<protocol::BlockChange>,
     /// Shears' wear applied (accepted uses that wore the tool).
-    wore: u32,
+    pub(super) wore: u32,
     /// `GrantUnfit` units reported.
-    unfit: u32,
+    pub(super) unfit: u32,
 }
 
 impl Client {
-    fn new((transport, slot): (ChannelClientTransport, usize)) -> Self {
+    pub(super) fn new((transport, slot): (ChannelClientTransport, usize)) -> Self {
         Client {
             transport,
             slot,
@@ -81,7 +81,7 @@ impl Client {
     /// Apply everything the server sent, in arrival order, as the game loop
     /// does: outcomes and grants change the window (each a window event),
     /// block views change its world.
-    fn receive(&mut self, registry: &block::BlockRegistry) {
+    pub(super) fn receive(&mut self, registry: &block::BlockRegistry) {
         while let Some(pkt) = self.transport.try_recv_from_server() {
             let Some((ptype, payload)) = protocol::deserialize_header(&pkt) else { continue };
             match ptype {
@@ -132,7 +132,7 @@ impl Client {
     /// Right-click the `kind` block at `cell` with what is in hotbar slot
     /// `hot`, as `GameState::send_block_use` does: claimed, recorded, sent.
     /// `false` when the claim stops it (nothing sent).
-    fn use_block(&mut self, cell: [i32; 3], kind: UseKind, hot: usize) -> bool {
+    pub(super) fn use_block(&mut self, cell: [i32; 3], kind: UseKind, hot: usize) -> bool {
         let held = self.inv.hotbar_slot(hot).map(|s| s.item.clone());
         let asked = Asked::UseBlock { cell, kind, claim: crate::block_use::claim(kind, held.as_ref()) };
         if !self.actions.can_afford(&self.inv, &self.ui, asked, held.as_ref()) {
@@ -155,7 +155,7 @@ impl Client {
     /// A modified client's use: it claims `held` from hotbar slot `hot`
     /// whatever its window holds, unrecorded (no claim of its own), with
     /// request number `seq`.
-    fn use_raw(&mut self, seq: u32, cell: [i32; 3], hot: usize, held: &Item) {
+    pub(super) fn use_raw(&mut self, seq: u32, cell: [i32; 3], hot: usize, held: &Item) {
         let (held_kind, held_id) = crate::inventory::item_to_ref(held).to_wire();
         let held_full = crate::inventory::item_to_wire_full(held);
         let pkt = protocol::ItemActionPacket {
@@ -166,16 +166,16 @@ impl Client {
         self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 
-    fn count(&self, item: &Item) -> u32 {
+    pub(super) fn count(&self, item: &Item) -> u32 {
         self.inv.slots_iter().flatten().filter(|s| crate::joiner_actions::same_item(&s.item, item)).map(|s| u32::from(s.count)).sum()
     }
 
-    fn last(&self) -> &ItemActionOutcomePacket {
+    pub(super) fn last(&self) -> &ItemActionOutcomePacket {
         self.outcomes.last().expect("an outcome")
     }
 
     /// The last view received for `cell`.
-    fn view_at(&self, cell: [i32; 3]) -> Option<&BlockView> {
+    pub(super) fn view_at(&self, cell: [i32; 3]) -> Option<&BlockView> {
         self.views.iter().rev().find(|v| v.cell == cell).map(|v| &v.view)
     }
 }
@@ -183,16 +183,16 @@ impl Client {
 /// Joiners standing on a stone floor round (40, 80, 40), each holding the
 /// column there as pushed (`hold_column_for_test`), on a dedicated server or
 /// a lending host (`host`: the host client's world and ECS).
-struct Rig {
-    hs: HostedServer,
-    host: Option<OwnedSimParts>,
-    cs: Vec<Client>,
-    at: Vec3,
-    registry: block::BlockRegistry,
+pub(super) struct Rig {
+    pub(super) hs: HostedServer,
+    pub(super) host: Option<OwnedSimParts>,
+    pub(super) cs: Vec<Client>,
+    pub(super) at: Vec3,
+    pub(super) registry: block::BlockRegistry,
 }
 
 impl Rig {
-    fn dedicated(tag: &str, joiners: usize) -> Self {
+    pub(super) fn dedicated(tag: &str, joiners: usize) -> Self {
         let mut hs = HostedServer::start(
             0,
             format!("block-use-{tag}-{}", std::process::id()),
@@ -205,13 +205,13 @@ impl Rig {
         Self::stand(hs, None, joined)
     }
 
-    fn lent(tag: &str, joiners: usize) -> Self {
+    pub(super) fn lent(tag: &str, joiners: usize) -> Self {
         let (mut hs, mut host) = start_lent(&format!("block-use-{tag}"));
         let joined: Vec<_> = (0..joiners).map(|n| join_guest_lent(&mut hs, &mut host, &format!("Gardener{n}"))).collect();
         Self::stand(hs, Some(host), joined)
     }
 
-    fn stand(mut hs: HostedServer, mut host: Option<OwnedSimParts>, joined: Vec<(ChannelClientTransport, usize)>) -> Self {
+    pub(super) fn stand(mut hs: HostedServer, mut host: Option<OwnedSimParts>, joined: Vec<(ChannelClientTransport, usize)>) -> Self {
         hs.server.column_streamer = None;
         hs.server.column_refill_per_tick = 0;
         hs.server.difficulty = crate::survival::Difficulty::Peaceful;
@@ -237,7 +237,7 @@ impl Rig {
 
     /// One server tick; then every client reads what it was sent and sends
     /// its input, reporting the window events it applied.
-    fn tick(&mut self) {
+    pub(super) fn tick(&mut self) {
         match self.host.as_mut() {
             Some(h) => h.lend_tick(&mut self.hs),
             None => self.hs.tick(),
@@ -248,14 +248,14 @@ impl Rig {
         }
     }
 
-    fn ticks(&mut self, n: usize) {
+    pub(super) fn ticks(&mut self, n: usize) {
         for _ in 0..n {
             self.tick();
         }
     }
 
     /// Joiner `n`'s input: standing still, reporting its window events.
-    fn input(&mut self, n: usize) {
+    pub(super) fn input(&mut self, n: usize) {
         let c = &mut self.cs[n];
         c.input_seq += 1;
         let sp = &self.hs.server.players[c.slot];
@@ -274,7 +274,7 @@ impl Rig {
     }
 
     /// Joiner `n`'s input carrying the edit `b` at `pos` (a break with AIR).
-    fn edit(&mut self, n: usize, pos: (i32, i32, i32), b: block::BlockId) {
+    pub(super) fn edit(&mut self, n: usize, pos: (i32, i32, i32), b: block::BlockId) {
         let c = &mut self.cs[n];
         c.input_seq += 1;
         let sp = &self.hs.server.players[c.slot];
@@ -295,7 +295,7 @@ impl Rig {
 
     /// Joiner `n` uses the `kind` block at `cell` from hotbar slot `hot`;
     /// the server answers and the window events land on both sides.
-    fn use_block(&mut self, n: usize, cell: [i32; 3], kind: UseKind, hot: usize) -> &ItemActionOutcomePacket {
+    pub(super) fn use_block(&mut self, n: usize, cell: [i32; 3], kind: UseKind, hot: usize) -> &ItemActionOutcomePacket {
         let before = self.cs[n].outcomes.len();
         assert!(self.cs[n].use_block(cell, kind, hot), "sent");
         self.ticks(3);
@@ -303,14 +303,14 @@ impl Rig {
         self.cs[n].last()
     }
 
-    fn world(&mut self) -> &mut crate::world::World {
+    pub(super) fn world(&mut self) -> &mut crate::world::World {
         match self.host.as_mut() {
             Some(h) => &mut h.world,
             None => &mut self.hs.server.world,
         }
     }
 
-    fn ecs(&self) -> &hecs::World {
+    pub(super) fn ecs(&self) -> &hecs::World {
         match self.host.as_ref() {
             Some(h) => &h.ecs,
             None => &self.hs.server.ecs,
@@ -320,14 +320,14 @@ impl Rig {
     /// The cell `dz` blocks ahead of the joiners' feet, holding `b` (in the
     /// world the server simulates and, as its column's push would, in every
     /// joiner's world).
-    fn place(&mut self, dz: i32, b: block::BlockId) -> [i32; 3] {
+    pub(super) fn place(&mut self, dz: i32, b: block::BlockId) -> [i32; 3] {
         let cell = [self.at.x.floor() as i32, self.at.y as i32, self.at.z.floor() as i32 + dz];
         self.set(cell, b);
         cell
     }
 
     /// `cell` holds `b`, everywhere (as [`Self::place`]).
-    fn set(&mut self, cell: [i32; 3], b: block::BlockId) {
+    pub(super) fn set(&mut self, cell: [i32; 3], b: block::BlockId) {
         self.world().set_block(cell[0], cell[1], cell[2], b);
         for c in &mut self.cs {
             c.world.set_block(cell[0], cell[1], cell[2], b);
@@ -335,7 +335,7 @@ impl Rig {
     }
 
     /// Put `count` of `item` in slot `slot` on both sides of joiner `n`'s window.
-    fn give(&mut self, n: usize, slot: usize, item: Item, count: u8) {
+    pub(super) fn give(&mut self, n: usize, slot: usize, item: Item, count: u8) {
         let stack = ItemStack { item, count };
         self.cs[n].inv.set_slot(slot, Some(stack.clone()));
         let s = self.cs[n].slot;
@@ -344,7 +344,7 @@ impl Rig {
 
     /// The server's copy of joiner `n`'s window is the client's, slot for
     /// slot, with equal digests, no event left waiting and no mismatch.
-    fn assert_lockstep(&self, n: usize, what: &str) {
+    pub(super) fn assert_lockstep(&self, n: usize, what: &str) {
         let c = &self.cs[n];
         let sp = &self.hs.server.players[c.slot];
         let slots = |inv: &Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
@@ -361,7 +361,7 @@ impl Rig {
     }
 
     /// Ground items in the world the server simulates.
-    fn ground(&self, item: &Item) -> u32 {
+    pub(super) fn ground(&self, item: &Item) -> u32 {
         self.ecs()
             .query::<&crate::entity::ItemEntity>()
             .iter()
@@ -371,7 +371,7 @@ impl Rig {
     }
 }
 
-fn mat(m: MaterialId) -> Item {
+pub(super) fn mat(m: MaterialId) -> Item {
     Item::Material(m)
 }
 
@@ -379,13 +379,13 @@ fn shears() -> Item {
     Item::Tool(Tool::new(ToolType::Shears, ToolMaterial::Iron))
 }
 
-fn accepted(out: &ItemActionOutcomePacket, consume: u8) {
+pub(super) fn accepted(out: &ItemActionOutcomePacket, consume: u8) {
     assert!(out.accepted, "accepted: {out:?}");
     assert_eq!(out.consume_held, consume, "{out:?}");
     assert_eq!(out.note, 0);
 }
 
-fn refused(out: &ItemActionOutcomePacket, note: ItemNote) {
+pub(super) fn refused(out: &ItemActionOutcomePacket, note: ItemNote) {
     assert!(!out.accepted, "refused: {out:?}");
     assert_eq!((out.consume_held, out.window_event, out.wear_held), (0, 0, false), "a refusal changes nothing");
     assert_eq!(ItemNote::from_wire(out.note), note);

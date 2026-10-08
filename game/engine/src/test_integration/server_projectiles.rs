@@ -172,13 +172,23 @@ fn a_dedicated_servers_arrow_with_no_target_comes_down_and_despawns_once() {
     assert_eq!(projectiles_on_server(&hs), 0);
 }
 
+/// C3c-2 — a server runs the projectile sim wherever it owns its entities'
+/// physics: a dedicated (machine-ticking) server, and an OWNING (`--no-lend`)
+/// host's server, where a joiner's shot lives (the host's own seats' shots
+/// and machines live in its client's separate sim). A LENT world's
+/// projectiles are the host CLIENT's: the server moving the same arrow would
+/// be a second sim. (Changed on purpose by C3c-2: an owning host's server
+/// used to tick none, so a joiner's arrow would hang in the air.)
 #[test]
-fn only_a_machine_ticking_server_runs_the_projectile_sim() {
-    // A LAN host's CLIENT owns its projectiles (and its dispensers); the
-    // server side moving the same arrow would be a second sim.
-    for (machines, should_move) in [(true, true), (false, false)] {
+fn only_a_server_that_owns_its_entities_runs_the_projectile_sim() {
+    for (machines, lent, should_move) in [(true, false, true), (false, false, true), (false, true, false)] {
         let mut h = TestHost::start_with(TestConfig::default());
         h.server.simulates_block_machines = machines;
+        if lent {
+            h.server.column_refill_per_tick = 0;
+            h.server.column_streamer = None;
+        }
+        h.server.lent = lent;
         let start = Vec3::new(0.5, 90.0, 0.5);
         crate::entity::spawn_arrow(&mut h.server.ecs, start, Vec3::new(0.5, 0.0, 0.0), 4.0, None);
         h.tick(1);
@@ -190,6 +200,6 @@ fn only_a_machine_ticking_server_runs_the_projectile_sim() {
             .map(|(_, (p, _))| p.0)
             .next()
             .expect("still in flight after one tick");
-        assert_eq!(pos != start, should_move, "machines={machines}: arrow at {pos:?}");
+        assert_eq!(pos != start, should_move, "machines={machines} lent={lent}: arrow at {pos:?}");
     }
 }

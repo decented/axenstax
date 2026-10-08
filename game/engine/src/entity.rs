@@ -62,12 +62,34 @@ pub struct ProjectileEntity {
     /// stun effect alongside the damage application. Arrows leave
     /// this `false`.
     pub is_blunt: bool,
-    /// Player index that fired this projectile, if any. On a mob hit
-    /// the projectile-tick stamps `LastAttacker(owner)` so kill
-    /// attribution (bounties, kill_counter) credits the shooter rather
-    /// than falling back to the nearest-living-player proximity guess.
-    /// `None` for mob-fired or test projectiles.
-    pub owner: Option<usize>,
+    /// The player that fired this projectile, if any. On a mob hit the
+    /// projectile-tick stamps `LastAttacker(owner.who)` so kill attribution
+    /// (bounties, kill_counter; a joiner's `KillEvent`) credits the shooter
+    /// rather than falling back to the nearest-living-player proximity
+    /// guess. `None` for dispenser-fired, mob-fired or test projectiles.
+    /// C3c-2 — a joiner's shot is fired by the server and carries the
+    /// joiner (`Attacker::Remote`), so it follows exactly the rules a host's
+    /// arrow follows.
+    pub owner: Option<Shooter>,
+}
+
+/// C3c-2 — who fired a projectile: the kill-attribution key and the
+/// pet-owner key its 1C no-friendly-fire shield compares against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shooter {
+    /// A local seat (`Attacker::Local`) or a joiner (`Attacker::Remote`,
+    /// `Departed` once it has left).
+    pub who: crate::combat::Attacker,
+    /// The shooter's pet-owner key: `tameable::local_owner_key` for a local
+    /// seat, a joiner's verified npub (empty for a guest, who owns no pet).
+    pub owner_key: String,
+}
+
+impl Shooter {
+    /// Local player slot `pidx` of the sim that owns this ECS.
+    pub fn local(pidx: usize) -> Self {
+        Shooter { who: crate::combat::Attacker::Local(pidx), owner_key: crate::tameable::local_owner_key(pidx) }
+    }
 }
 
 /// Arrow flight constants.
@@ -743,11 +765,26 @@ pub fn spawn_arrow(
     damage: f32,
     owner: Option<usize>,
 ) {
+    spawn_projectile(ecs, position, velocity, damage, false, owner.map(Shooter::local));
+}
+
+/// C3c-2 — spawn one projectile (an arrow, or with `is_blunt` a rubber
+/// ball) fired by `owner`: the one spawn every seat uses — single-player and
+/// a host's seats ([`spawn_arrow`], [`spawn_blunt_projectile`]) and the
+/// server for a joiner's `Shoot` (`shot::spawn`).
+pub fn spawn_projectile(
+    ecs: &mut hecs::World,
+    position: Vec3,
+    velocity: Vec3,
+    damage: f32,
+    is_blunt: bool,
+    owner: Option<Shooter>,
+) {
     ecs.spawn((
         Position(position),
         Velocity(velocity),
         Hitbox { width: ARROW_HITBOX, height: ARROW_HEIGHT },
-        ProjectileEntity { damage, is_blunt: false, owner },
+        ProjectileEntity { damage, is_blunt, owner },
         Lifetime(ARROW_LIFETIME_TICKS),
     ));
 }
@@ -755,6 +792,8 @@ pub fn spawn_arrow(
 /// Rubber feature — spawn a slingshot rubber-ball projectile. Mirrors
 /// `spawn_arrow` but stamps `is_blunt: true` on the projectile so the
 /// combat hit handler can route the stun effect alongside the damage.
+/// C3c-2 — the slingshot arm spawns through `shot::spawn` now; tests only.
+#[cfg(test)]
 pub fn spawn_blunt_projectile(
     ecs: &mut hecs::World,
     position: Vec3,
@@ -762,13 +801,7 @@ pub fn spawn_blunt_projectile(
     damage: f32,
     owner: Option<usize>,
 ) {
-    ecs.spawn((
-        Position(position),
-        Velocity(velocity),
-        Hitbox { width: ARROW_HITBOX, height: ARROW_HEIGHT },
-        ProjectileEntity { damage, is_blunt: true, owner },
-        Lifetime(ARROW_LIFETIME_TICKS),
-    ));
+    spawn_projectile(ecs, position, velocity, damage, true, owner.map(Shooter::local));
 }
 
 /// Run one physics tick for every projectile in the world. Applies gravity,
@@ -781,6 +814,13 @@ pub fn spawn_blunt_projectile(
 /// pet/steed embeds harmlessly (no damage, no `LastAttacker` stamp) unless
 /// the shooter was sneaking at the moment of impact, which reads as a
 /// deliberate hit. Mirrors the melee bypass in `game_loop`'s attack path.
+/// C3c-2 — keyed by the shooter's slot (`Attacker::slot`): a local seat's,
+/// or a joiner's server slot (a lending host adds its joiners'
+/// `ServerPlayer::last_sneak`, a dedicated server its own players').
+///
+/// What a projectile can hit: blocks (it stops) and mobs (`MobKind`
+/// entities). Never a player — a player's body is no `MobKind` entity on any
+/// seat — so neither a host's arrow nor a joiner's hurts another player.
 ///
 /// Returns the number of projectiles that hit a mob this tick (informational;
 /// counts shielded friendly-fire hits too, since the projectile still
@@ -793,10 +833,10 @@ pub fn tick_projectiles(
 ) -> u32 {
     // Pass 1: snapshot projectiles + mob targets so we can mutate without
     // overlapping borrows in the second pass.
-    let projectiles: Vec<(hecs::Entity, Vec3, Vec3, f32, bool, Option<usize>)> = ecs
+    let projectiles: Vec<(hecs::Entity, Vec3, Vec3, f32, bool, Option<Shooter>)> = ecs
         .query::<(&Position, &Velocity, &ProjectileEntity)>()
         .iter()
-        .map(|(id, (p, v, pe))| (id, p.0, v.0, pe.damage, pe.is_blunt, pe.owner))
+        .map(|(id, (p, v, pe))| (id, p.0, v.0, pe.damage, pe.is_blunt, pe.owner.clone()))
         .collect();
     if projectiles.is_empty() {
         return 0;
@@ -810,7 +850,7 @@ pub fn tick_projectiles(
     // Pass 2: per-projectile decisions.
     let mut updates: Vec<(hecs::Entity, Vec3, Vec3)> = Vec::new();
     let mut to_despawn: Vec<hecs::Entity> = Vec::new();
-    let mut hits: Vec<(hecs::Entity, f32, bool, Option<usize>)> = Vec::new();
+    let mut hits: Vec<(hecs::Entity, f32, bool, Option<Shooter>)> = Vec::new();
     let mut hit_count = 0u32;
 
     for (proj_id, pos, vel, damage, is_blunt, owner) in projectiles {
@@ -867,14 +907,9 @@ pub fn tick_projectiles(
         // tamed pet/steed does nothing unless they were sneaking when it
         // landed (a deliberate hit). Ownerless projectiles (mob-fired /
         // test) can't be a player's own pet's shooter, so they're exempt.
-        let shielded = owner.is_some_and(|pidx| {
-            !shooter_sneaking.get(&pidx).copied().unwrap_or(false)
-                && crate::tameable::is_players_own_pet(
-                    ecs,
-                    mob_id,
-                    &format!("local-player-{pidx}"),
-                    pidx,
-                )
+        let shielded = owner.as_ref().is_some_and(|s| {
+            let sneaking = s.who.slot().and_then(|slot| shooter_sneaking.get(&slot)).copied().unwrap_or(false);
+            !sneaking && crate::tameable::is_own_pet(ecs, mob_id, &s.owner_key, s.who.local_slot())
         });
         if shielded {
             continue;
@@ -886,16 +921,15 @@ pub fn tick_projectiles(
         // attributed to the shooter (bounties / kill_counter), matching
         // the melee path in `combat::player_attack`. Most-recent
         // damaging hit wins, so this overwrites any prior attacker.
-        if let Some(pidx) = owner {
-            let _ = ecs.insert_one(
-                mob_id,
-                crate::combat::LastAttacker(crate::combat::Attacker::Local(pidx)),
-            );
+        if let Some(shooter) = owner {
+            let _ = ecs.insert_one(mob_id, crate::combat::LastAttacker(shooter.who));
             // Task 13 (bug-hardening, 2026-07-07) — an arrow landing on a
             // Bear or Hyena provokes it the same as a melee hit. See
             // `combat::notify_hit_bear_or_hyena` and its wiring in
             // `combat::player_attack` for the melee side.
-            crate::combat::notify_hit_bear_or_hyena(ecs, mob_id, pidx);
+            if let Some(slot) = shooter.who.slot() {
+                crate::combat::notify_hit_bear_or_hyena(ecs, mob_id, slot);
+            }
         }
         // Rubber feature — slingshot stun. If the projectile is blunt
         // and damage >= midpoint (proxy for "at least half charge"),
@@ -1980,6 +2014,56 @@ mod tests {
         tick_projectiles(&mut ecs, &world, &registry, &not_sneaking);
         let after = ecs.get::<&crate::combat::Health>(wolf).unwrap().current;
         assert!(after < before, "a non-owner's arrow must still land");
+    }
+
+    /// C3c-2 — a joiner's arrow (fired by the server for its `Shoot`)
+    /// follows a host's rules: it credits the joiner (`Attacker::Remote`,
+    /// never a local slot), its shield compares the joiner's own pet key and
+    /// reads the joiner's sneak by its server slot.
+    #[test]
+    fn a_joiners_arrow_credits_the_joiner_and_spares_its_pet_unless_sneaking() {
+        use crate::combat::Attacker;
+        use crate::mob::MobType;
+        let world = crate::world::World::new();
+        let registry = crate::block::BlockRegistry::new();
+        let joiner = Shooter { who: Attacker::Remote { slot: 2, generation: 7 }, owner_key: "npub1joiner".into() };
+        let shoot = |ecs: &mut hecs::World| {
+            spawn_projectile(ecs, Vec3::new(4.7, 70.5, 0.0), Vec3::new(0.4, 0.0, 0.0), 5.0, false, Some(joiner.clone()))
+        };
+        // A cow: struck, credited to the joiner.
+        let mut ecs = hecs::World::new();
+        let cow = spawn_mob(&mut ecs, MobType::Cow, Vec3::new(5.0, 70.0, 0.0));
+        shoot(&mut ecs);
+        tick_projectiles(&mut ecs, &world, &registry, &Default::default());
+        assert_eq!(ecs.get::<&crate::combat::LastAttacker>(cow).unwrap().0, Attacker::Remote { slot: 2, generation: 7 });
+        // Its own wolf: shielded while it isn't sneaking (slot 2's sneak), hit when it is.
+        for (sneak, lands) in [(false, false), (true, true)] {
+            let mut ecs = hecs::World::new();
+            let wolf = spawn_mob(&mut ecs, MobType::Wolf, Vec3::new(5.0, 70.0, 0.0));
+            let mut wd = crate::wolf::WolfData::untamed();
+            wd.ownership.owner_pubkey = "npub1joiner".into();
+            let _ = ecs.insert_one(wolf, wd);
+            shoot(&mut ecs);
+            let before = ecs.get::<&crate::combat::Health>(wolf).unwrap().current;
+            let map: std::collections::HashMap<usize, bool> = [(2usize, sneak), (0usize, !sneak)].into_iter().collect();
+            tick_projectiles(&mut ecs, &world, &registry, &map);
+            let after = ecs.get::<&crate::combat::Health>(wolf).unwrap().current;
+            assert_eq!(after < before, lands, "sneaking {sneak}");
+        }
+    }
+
+    /// C3c-2 — what a projectile can hit: a mob, never a player's body (no
+    /// `MobKind` entity on any seat), whoever fired it.
+    #[test]
+    fn a_projectile_flies_through_anything_that_is_not_a_mob() {
+        let mut ecs = hecs::World::new();
+        let world = crate::world::World::new();
+        let registry = crate::block::BlockRegistry::new();
+        // A body-shaped entity with health and a hitbox but no MobKind.
+        let body = ecs.spawn((Position(Vec3::new(5.0, 70.0, 0.0)), Hitbox { width: 0.6, height: 1.8 }, crate::combat::Health::new(20.0)));
+        spawn_arrow(&mut ecs, Vec3::new(4.7, 70.5, 0.0), Vec3::new(0.4, 0.0, 0.0), 5.0, Some(0));
+        assert_eq!(tick_projectiles(&mut ecs, &world, &registry, &Default::default()), 0);
+        assert_eq!(ecs.get::<&crate::combat::Health>(body).unwrap().current, 20.0);
     }
 
     #[test]

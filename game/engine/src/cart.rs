@@ -554,6 +554,16 @@ pub fn spawn_cart(ecs: &mut hecs::World, cell: Cell) -> hecs::Entity {
     spawn_cart_with_hull(ecs, cell, Hull::default())
 }
 
+/// C3c-2 — the placement guard: does a cart already stand on track cell
+/// `cell` in `ecs` (parked there, or passing through it)? A cart item may be
+/// placed only where none does, so carts never stack. Every seat asks its OWN
+/// sim's entities: single-player and a host's seats their ECS, the server
+/// (for a joiner's `PlaceCart`) the world's real one — a joined client's ECS
+/// holds no carts (it mirrors the server's, `remote_mobs`).
+pub fn cart_here(ecs: &hecs::World, cell: Cell) -> bool {
+    ecs.query::<&CartData>().iter().any(|(_, c)| c.cell == cell)
+}
+
 /// Spawn a parked cart on track cell `cell` with a specific [`Hull`] armour tier
 /// (CA1). Identical to [`spawn_cart`] in every other respect (a parked
 /// `Position` + `CartEntity` + `CartData`, no `OnGround`); only the hull differs.
@@ -669,6 +679,16 @@ pub fn tick_carts(ecs: &mut hecs::World, world: &mut crate::world::World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C3c-2 — the guard sees a cart on its cell, and only there.
+    #[test]
+    fn a_cart_here_guards_its_cell_alone() {
+        let mut ecs = hecs::World::new();
+        assert!(!cart_here(&ecs, (1, 2, 3)));
+        spawn_cart_with_hull(&mut ecs, (1, 2, 3), Hull::Iron);
+        assert!(cart_here(&ecs, (1, 2, 3)));
+        assert!(!cart_here(&ecs, (1, 2, 4)));
+    }
 
     /// Treat the listed cells as the only track, everything else air.
     fn line(cells: &[Cell]) -> impl Fn(Cell) -> bool + '_ {

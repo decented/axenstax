@@ -19,9 +19,11 @@
 //!   gain, and what its client can't hold comes back to the world as a
 //!   ground item (`ItemAction::GrantUnfit`; the C2b-fix BRIDGE until C3d).
 //!
-//! Lighting a campfire (flint and steel, friction) is not a use here: it is a
-//! block edit (FU3), and C3c's local uses. The item frame's "take" is
-//! breaking it ([`take_on_break`]).
+//! C3c-2 (protocol v81) — lighting an unlit campfire is a use too, chosen by
+//! the held item ([`lighter_of`]: a stick's friction, flint and steel, the
+//! Magnesium Firestarter; [`light_block`]): it changes only the block
+//! (`Used::relit`), and a joiner asks it as a `UseBlock` like the rest. The
+//! item frame's "take" is breaking it ([`take_on_break`]).
 
 use crate::block::{self, BlockId};
 use crate::item::{Item, ItemStack, MaterialId};
@@ -135,6 +137,28 @@ pub enum Effect {
     Scooped,
     /// Hive: honeycomb sheared.
     Sheared,
+    /// C3c-2 — campfire: lit by flint and steel or the Firestarter.
+    Lit,
+    /// C3c-2 — campfire: lit by a stick's friction.
+    FrictionLit,
+    /// C3c-2 — campfire: the stick's friction missed (the stick is spent).
+    FrictionMissed,
+    /// C3c-2 — campfire: flint and steel struck a fire with no fuel (the
+    /// flint wears; nothing lights).
+    Unfuelled,
+}
+
+impl Effect {
+    /// C3c-2 — what an ACCEPTED use that did this tells the player besides
+    /// (`ItemActionOutcomePacket.note`): a missed friction or an unfuelled
+    /// strike still spends the stick or wears the flint.
+    pub fn note(self) -> ItemNote {
+        match self {
+            Effect::FrictionMissed => ItemNote::NotDryEnough,
+            Effect::Unfuelled => ItemNote::NeedsFuel,
+            _ => ItemNote::None,
+        }
+    }
 }
 
 /// What a use costs and gives the player.
@@ -142,13 +166,14 @@ pub enum Effect {
 pub struct Used {
     /// Units of the held item it takes (0 or 1).
     pub pay: u8,
-    /// The held tool wears once (shears on a hive) instead.
+    /// The held tool wears once (shears on a hive; C3c-2 flint and steel on
+    /// an unlit campfire) instead.
     pub wear: bool,
     /// What the player gains, in order.
     pub gain: Vec<ItemStack>,
-    /// A smouldering campfire was fuelled: it is lit again, and its block
-    /// must go `CAMPFIRE_UNLIT → CAMPFIRE` (the caller's, with the light and
-    /// the smoke pillar that go with it).
+    /// A smouldering campfire was fuelled — or (C3c-2) an unlit one lit: its
+    /// block must go `CAMPFIRE_UNLIT → CAMPFIRE` (the caller's, with the
+    /// light and the smoke pillar that go with it).
     pub relit: bool,
     pub effect: Effect,
 }
@@ -290,6 +315,82 @@ pub fn use_hive(hive: &mut crate::bee_hive::HiveData, held: Option<&ItemStack>) 
     }
 }
 
+/// C3c-2 — what lights an unlit campfire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lighter {
+    /// A stick, after the five-second hold: [`crate::campfire::friction_strikes`].
+    Friction,
+    /// Flint and steel: it wears on every strike.
+    FlintAndSteel,
+    /// The Magnesium Firestarter (Spec 37): a reusable material, never worn.
+    Firestarter,
+}
+
+/// The lighter `held` is, if any.
+pub fn lighter_of(held: Option<&Item>) -> Option<Lighter> {
+    match held? {
+        Item::Material(MaterialId::Stick) => Some(Lighter::Friction),
+        Item::Material(MaterialId::MagnesiumFirestarter) => Some(Lighter::Firestarter),
+        Item::Tool(t) if t.tool_type == crate::crafting::ToolType::FlintAndSteel => Some(Lighter::FlintAndSteel),
+        _ => None,
+    }
+}
+
+/// C3c-2 — light an unlit campfire whose state is `cf` with `lighter`;
+/// `struck` is the friction's roll ([`crate::campfire::friction_strikes`],
+/// read only for a stick). Every gesture needs fuel to light
+/// ([`crate::campfire::can_ignite`]):
+/// - a stick on an unfuelled fire does nothing ([`ItemNote::FrictionNeedsFuel`]:
+///   the stick is kept); on a fuelled one it is spent, hit or miss, and lights
+///   it on a strike;
+/// - flint and steel wears on every strike, and lights a fuelled fire (an
+///   unfuelled one: [`Effect::Unfuelled`]);
+/// - the Firestarter lights a fuelled fire and never wears (an unfuelled one:
+///   [`ItemNote::NeedsFuel`]).
+///
+/// Lighting changes no state: only the block, the caller's (`relit`).
+pub fn light_campfire(cf: &crate::campfire::CampfireData, lighter: Lighter, struck: bool) -> UseResult {
+    let fuelled = crate::campfire::can_ignite(Some(cf));
+    match lighter {
+        Lighter::Friction if !fuelled => Err(ItemNote::FrictionNeedsFuel),
+        Lighter::Friction if struck => Ok(Used { pay: 1, relit: true, effect: Effect::FrictionLit, ..Used::default() }),
+        Lighter::Friction => Ok(Used { pay: 1, effect: Effect::FrictionMissed, ..Used::default() }),
+        Lighter::FlintAndSteel => Ok(Used {
+            wear: true,
+            relit: fuelled,
+            effect: if fuelled { Effect::Lit } else { Effect::Unfuelled },
+            ..Used::default()
+        }),
+        Lighter::Firestarter if fuelled => Ok(Used { relit: true, effect: Effect::Lit, ..Used::default() }),
+        Lighter::Firestarter => Err(ItemNote::NeedsFuel),
+    }
+}
+
+/// C3c-2 — a right-click on the campfire at `cell` in `world` with `held`,
+/// when it is a lighting: the block is `CAMPFIRE_UNLIT` and `held` lights it
+/// ([`lighter_of`]). `None` otherwise (the use is [`use_block`]'s). `struck`
+/// is the friction's roll. [`light_block_admitted`] with nothing to admit.
+pub fn light_block(world: &World, cell: (i32, i32, i32), held: Option<&ItemStack>, struck: bool) -> Option<UseResult> {
+    light_block_admitted(world, cell, held, struck, &mut |_| Ok(()))
+}
+
+/// [`light_block`], with `admit` shown what an accepted lighting would do
+/// (the server's believed-pay bound for a stick, as [`use_block_admitted`]'s).
+pub fn light_block_admitted(
+    world: &World,
+    cell: (i32, i32, i32),
+    held: Option<&ItemStack>,
+    struck: bool,
+    admit: &mut dyn FnMut(&Used) -> Result<(), ItemNote>,
+) -> Option<UseResult> {
+    if world.get_block(cell.0, cell.1, cell.2) != block::CAMPFIRE_UNLIT {
+        return None;
+    }
+    let lighter = lighter_of(held.map(|s| &s.item))?;
+    let fire = world.campfire_at(cell).cloned().unwrap_or_default();
+    Some(light_campfire(&fire, lighter, struck).and_then(|used| admit(&used).map(|()| used)))
+}
+
 /// Use the `kind` block at `cell` in `world` with `held`: its rule runs on
 /// the cell's state (a fresh one if it has none yet), and the state is kept
 /// only when the rule accepts — a refusal (`NothingToTake`, `HiveEmpty`,
@@ -370,6 +471,7 @@ pub fn effect_toast(effect: &Effect) -> Option<&'static str> {
         Effect::Seasoned => Some("Seasoned log!"),
         Effect::Scooped => Some("Scooped a Honey Jar from the hive."),
         Effect::Sheared => Some("Sheared 3 Honeycomb from the hive."),
+        Effect::FrictionLit => Some("Friction fire started!"),
         _ => None,
     }
 }
@@ -399,7 +501,9 @@ pub fn rack_note_toast(note: ItemNote, rack: Option<&crate::drying_rack::DryingR
 /// rule could take (a compostable, a green log, a fuel or raw food, anything
 /// for a frame, a bucket for a hive) or wear (shears on a hive, C3b-2-fix L5:
 /// two shears uses in flight on worn-out shears can't both pay); 0 for an
-/// empty hand.
+/// empty hand. (C3c-2 — a lighting's claim is `joiner_actions::Asked::Light`'s:
+/// the stick, or flint and steel's wear; flint on a LIT fire does nothing and
+/// claims nothing here, so a joined client sends nothing for it.)
 pub fn claim(kind: UseKind, held: Option<&Item>) -> u8 {
     let Some(item) = held else { return 0 };
     let stack = ItemStack { item: item.clone(), count: 1 };
@@ -735,5 +839,45 @@ mod tests {
         w.insert_hive(hive, HiveData { bees_inside: 1, honey_level: 2 });
         assert!(take_on_break(&mut w, hive, block::BEE_HIVE, true).is_empty());
         assert!(w.hive_at(hive).is_none(), "a hive's state goes too: the next hive here starts empty");
+    }
+
+    /// C3c-2 — lighting an unlit campfire, by lighter: every gesture needs
+    /// fuel; a stick is spent on every resolve and lights on a strike; flint
+    /// and steel wears on every strike; the Firestarter never wears. A lit
+    /// fire, or a hand that lights nothing, is not a lighting.
+    #[test]
+    fn lighting_needs_fuel_spends_the_stick_and_wears_only_flint() {
+        let flint = ItemStack::new_tool(Tool::new(ToolType::FlintAndSteel, ToolMaterial::Iron));
+        let stick = mat(MaterialId::Stick);
+        let starter = mat(MaterialId::MagnesiumFirestarter);
+        let cell = (4, 70, 4);
+        let mut world = World::new();
+        world.set_block(cell.0, cell.1, cell.2, block::CAMPFIRE_UNLIT);
+        // No fuel: the stick and the Firestarter are refused, flint wears.
+        assert_eq!(light_block(&world, cell, Some(&stick), true), Some(Err(ItemNote::FrictionNeedsFuel)));
+        assert_eq!(light_block(&world, cell, Some(&starter), true), Some(Err(ItemNote::NeedsFuel)));
+        let unfuelled = light_block(&world, cell, Some(&flint), true).unwrap().unwrap();
+        assert_eq!((unfuelled.pay, unfuelled.wear, unfuelled.relit), (0, true, false));
+        assert_eq!(unfuelled.effect.note(), ItemNote::NeedsFuel);
+        // Fuelled.
+        world.insert_campfire(cell, CampfireData { fuel_ticks: 40, ..Default::default() });
+        let hit = light_block(&world, cell, Some(&stick), true).unwrap().unwrap();
+        assert_eq!((hit.pay, hit.wear, hit.relit, hit.effect), (1, false, true, Effect::FrictionLit));
+        let miss = light_block(&world, cell, Some(&stick), false).unwrap().unwrap();
+        assert_eq!((miss.pay, miss.relit, miss.effect.note()), (1, false, ItemNote::NotDryEnough));
+        let struck = light_block(&world, cell, Some(&flint), false).unwrap().unwrap();
+        assert_eq!((struck.pay, struck.wear, struck.relit, struck.effect), (0, true, true, Effect::Lit));
+        let started = light_block(&world, cell, Some(&starter), false).unwrap().unwrap();
+        assert_eq!((started.pay, started.wear, started.relit), (0, false, true));
+        assert_eq!(world.campfire_at(cell).map(|c| c.fuel_ticks), Some(40), "lighting changes no state");
+        // Not a lighting: a coal, an empty hand, or a lit fire.
+        assert!(light_block(&world, cell, Some(&mat(MaterialId::Coal)), true).is_none());
+        assert!(light_block(&world, cell, None, true).is_none());
+        world.set_block(cell.0, cell.1, cell.2, block::CAMPFIRE);
+        assert!(light_block(&world, cell, Some(&stick), true).is_none(), "a stick on a lit fire is fuel");
+        // A lit fire's use claims neither (the lighting's claim is
+        // `Asked::Light`'s): a joined client sends nothing for them.
+        assert_eq!(claim(UseKind::Campfire, Some(&flint.item)), 0);
+        assert_eq!(claim(UseKind::Campfire, Some(&starter.item)), 0);
     }
 }

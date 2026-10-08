@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `80`** (C3c-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `81`** (C3c-2) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -39,6 +39,7 @@
 - **v78** (2026-10-08, C3b-fix-a): **Container corrections that conserve items across container ops.** Every container view the server sends a joiner is a numbered window event: `ContainerOpenedPacket` appends `window_event: u32` (0 for a refusal), and every `WindowSlotSetPacket`, a push too, is numbered. A set names container slots only; a correction's player part is an item delta, appended after `window_event`: `take: Vec<(u8 hint, WireStack)>` (≤ 122: take `count` of the item, from inventory slot `hint` first, then wherever it is) and `give: Vec<WireStack>` (≤ 122: each added; the part that doesn't fit comes back as `ItemAction::GrantUnfit` naming the event, one report per give, in order). `WindowOpPacket` appends, after `claims`, `client_ok: bool` (the client's own `ClickResult::ok()`). Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g "Shared containers". C3b-fix-c (no wire change and no protocol bump: it landed on v79, before any v78 or v79 build shipped): a correction's take also searches the armour slots and every owed take prefers an exact match (durability included) — since C3b-fix-e (landed on v80 with no wire change and no protocol bump, before any v80 build shipped), in every place it looks before one of its kind in any — a LOCKSTEP rule client and server share (`joiner_actions::take_owed_search`), so a build from before either change must not meet one from after it; the conservation invariant holds for container ops, not for a phantom spent another way inside the round trip (§4.2g).
 - **v79** (2026-10-08, C3b-2): **Composters, drying racks, campfires, item frames and bee hives for joiners.** `ItemAction` appends `UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; `Eat`'s held claim): a right-click on one of the five blocks, applied by the server to its REAL block entity by the shared rule (`block_use`) and answered with an `ItemActionOutcome`, which appends `wear_held: bool` after `window_event` (shears on a hive wear instead of being taken; the wear is the outcome's window event). `ItemNote` appends codes 9–18 (`OutOfReach`, `NotHere`, `NotThatBlock`, `NothingToTake`, `RackFull`, `NotReady`, `HiveEmpty`, `HiveNeedsTool`, `FireFull`, `InventoryFull` — the last single-player only). `StateUpdatePacket` appends `block_views: Vec<BlockEntityView { cell: [i32; 3], kind: BlockViewKind, view: BlockView }>` after `own_hunger` (`BlockViewKind` and `BlockView` append only: ItemFrame 0, Campfire 1, DryingRack 2, Composter 3, Hive 4): what joiners are shown of those blocks, reliable and in line with the chunk pushes, sent whenever a view changes (whoever changed it) and after each push of its chunk. No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `block_entity_views_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Block uses".
 - **v80** (2026-10-08, C3c-1): **A joiner's block-edit uses are mirrored.** `InputPacket` appends, after v76's `edit_hands`, `use_tags: Vec<UseTag>` (`UseTag { x, y, z: i32, kind: u8, slot: u8, used: WireSlot, tool: WireItem }`; `kind` is `use_edits::UseKind`, append-only: BucketFill 0, BucketEmpty 1, Sow 2, PlantPapyrus 3, GrowGrass 4, GrowCrop 5, Salt 6, Erase 7, TapRubber 8, Till 9, DoorUpper 10): the uses among the input's edits, each with the hand BEFORE the use (its hotbar slot, one of what it consumed, the tool it wore). A use tag pairs with the LAST edit of its cell in its input, and counts with `mined` against one per-input limit (`MAX_MINED_PER_INPUT` = 16 in all; the server reads `mined` first, then use tags up to it). The server runs the use's rule on its copy of the joiner's inventory (log-only; `PossessionTally::use_mirrored` / `use_mismatch`). A door's top half now travels as its own edit (`DoorUpper`). Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `input_packet_roundtrip`) and `use_edits::tests::use_kind_wire_bytes_are_pinned`. See §4.2e "Block-edit uses".
+- **v81** (2026-10-08, C3c-2): **A joiner's bow, slingshot, cart placement, fishing and campfire lighting run on the server.** `ItemAction` appends `Shoot { weapon: ShotWeapon, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem, yaw: f32, pitch: f32, charge: u16 }` (= 6; `ShotWeapon` append-only: Bow 0, Slingshot 1), `PlaceCart { cell: [i32; 3], hotbar_slot, held_kind, held_id, held_full }` (= 7), `Cast { hotbar_slot, held_kind, held_id, held_full }` (= 8) and `Reel { hotbar_slot, held_kind, held_id, held_full }` (= 9). `ItemActionOutcome` appends `bite_after: u16` after `wear_held` (an accepted cast's wait for the server's bite; 0 otherwise). Lighting an unlit campfire (a stick's friction, flint and steel, the Magnesium Firestarter) is a campfire `UseBlock`, run by the lighting rule (`block_use::light_block`). `ItemNote` appends codes 19–26 (`NoAmmo`, `CartHere`, `NoWater`, `NothingBit`, `NoLine`, `NeedsFuel`, `FrictionNeedsFuel`, `NotDryEnough`). No new `PacketType`. Pinned by `protocol::tests::item_action_packets_round_trip` and `item_actions::tests::notes_round_trip_and_unknown_codes_read_as_nothing`. See §4.2f "Use requests".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -529,11 +530,11 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak, events_applied: u32 }` (`events_applied` v76). **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) or `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop and GrantUnfit are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, UseBlock from v79). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop and GrantUnfit are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, UseBlock from v79). See §4.2f. |
 | 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, WireSlot)>, client_ok: bool }` (`events_applied` v76; `touched` and `claims` v77, ≤ 122 each, in that order; `client_ok` v78, the client's own verdict), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3; v77: OpenContainer { cell }=4, Container(ContainerClick)=5). Never answered, except an `OpenContainer` (by `ContainerOpened`) and a `Container` op that earns a correction (by a `WindowSlotSet`). **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
 | 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal>, window_event: u32 }` (`window_event` v78: an opened view is a numbered window event; 0 for a refusal). **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
 | 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named container slots of a joiner's open container, and a correction's item delta: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32, take: Vec<(u8, WireStack)> (≤ 122), give: Vec<WireStack> (≤ 122) }` (`take` and `give` v78) — a correction of a container op, or a push of what changed in the open container. Never a whole window, never a player slot's value (v78). Every set is a numbered window event (v78; v77 numbered only a set of player slots). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
-| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32, wear_held: bool }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's or block use's take, 0 for none; `wear_held` v79: an accepted block use wore the held tool — shears on a hive — as that window event). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
+| 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32, wear_held: bool, bite_after: u16 }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's or block use's take, 0 for none; `wear_held` v79: an accepted block use wore the held tool — shears on a hive; v81 a shot's weapon, a catch's rod, flint and steel — as that window event; `bite_after` v81: an accepted cast's ticks until the server's bite). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
 > discriminants live in `game/engine/src/protocol.rs` and are the wire-stable
@@ -1139,8 +1140,9 @@ cooldown): that tick is a swing, not a break; between swings the held break
 goes on, as single-player mining beside a mob does. A right-click is sent only
 when what is in hand would do something to that mob in single-player
 (`MirrorTarget::right_click_action`); anything else goes ahead with the item's
-own use: eating (a server request since C2a, §4.2f), a bow, a bucket at
-water, a block placed beside a cow.
+own use: eating (a server request since C2a, §4.2f), a bow (a server request
+since C3c-2, §4.2f "Use requests"), a bucket at water, a block placed beside
+a cow.
 
 **Server-side damage on joiners (`GameServer::tick_player_hazards`).** After
 the per-player combat timers, for every server-simulated body that is present,
@@ -1501,9 +1503,10 @@ client fires `BreedAnimals { offspring }`; the host client fires its own
 `BreedAnimals` only when one of its players fed a parent (or a feeder is
 unknown). A breed only joiners fed never completes the host's trial step.
 
-Not closed (open): a joiner's bow or slingshot shot still flies only in its
-own world and hits nothing of the server's; a dedicated server runs no species
-AI, breeding or Leads, so feeding, taming, Leads and pet commands are refused
+Closed by C3c-2 (v81): a joiner's bow or slingshot shot is the server's
+projectile, owned by the joiner (`entity::Shooter`, `Attacker::Remote`), so
+it lands on the server's mobs and credits the joiner (§4.2f "Use requests").
+Not closed (open): a dedicated server runs no species AI, breeding or Leads, so feeding, taming, Leads and pet commands are refused
 there (above) until D4 moves those systems into `GameServer::tick`.
 
 
@@ -1736,8 +1739,9 @@ bought blocks):
   the composter's aged output — the "keg / aged output" this list used to
   name — an item frame's mount, a campfire's cooked pickup and a drying
   rack's withdraw are server-applied requests now);
-- fishing; a wallpaper peel; vendor, auction and market purchases; raid
-  rewards; a pack unequip; armour taken off;
+- a wallpaper peel; vendor, auction and market purchases; raid
+  rewards; a pack unequip; armour taken off (fishing left this list in
+  C3c-2: a catch is the server's roll and grant, §4.2f "Use requests");
 - face-attachment recovery on a break (wallpaper, blueprint paper and Plans
   go straight into the breaker's inventory; the server spills no
   attachments, so nothing is granted twice);
@@ -1799,8 +1803,10 @@ than the client's (log-only; the same direction as the gaps below):
 The other direction — the shadow holds MORE (composter, rack, campfire,
 frame and hive deposits left this list in C3b-2: each is an owed take, a
 window event; the bucket, seed, reed, bone-meal, fertiliser, salt and
-hoe consumes and wear left it in C3c-1, "Block-edit uses" below): flint
-and steel's wear and the friction stick lighting a campfire (C3c-2); and **death** (C1 verify N3): off a keep-inventory world the client
+hoe consumes and wear left it in C3c-1, "Block-edit uses" below; a shot's
+ammo and the weapon's wear, a placed cart, a rod's wear, flint and steel's
+wear and the friction stick lighting a campfire in C3c-2, §4.2f "Use
+requests"): **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow
 keeps everything — once the per-npub sidecar step persists the shadow, a
 death and a grave retrieval would duplicate the whole inventory. No refusal
@@ -1940,8 +1946,8 @@ blueprint paper (`Erase`), an empty bucket on a live rubber log
   the other half stays standing on the server and for every other player —
   open, with the door's break rule for a later phase.
 - *Not uses (C3c-2, C3c-3).* Lighting a campfire by friction, flint and steel
-  or a Firestarter, the bow, the slingshot, carts and fishing become requests
-  in C3c-2; Plans, face attachments (wallpaper, blank paper, a Plan laid
+  or a Firestarter, the bow, the slingshot, carts and fishing are requests
+  since C3c-2 (§4.2f "Use requests"); Plans, face attachments (wallpaper, blank paper, a Plan laid
   flat, `capture_art`, a capture's commit), a latent print lifted, a
   cyanotype hung and Plan Build in C3c-3. Flint on a flammable block (FIRE)
   and the hand-lit keg fuse are unreachable code (nested under the campfire
@@ -1985,11 +1991,13 @@ appends `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }`
 and `ItemAction::Drop { hotbar_slot: u8, held_kind: u8, held_id: u16,
 held_full: WireItem }`; v76 appends `GrantUnfit { event: u32, count: u8 }`
 (§4.2g) and v79 `UseBlock { cell, hotbar_slot, held_kind, held_id,
-held_full }` ("Block uses" below). The enum is append only: Eat = 0, Sleep =
-1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5
+held_full }` ("Block uses" below); v81 appends `Shoot`, `PlaceCart`, `Cast`
+and `Reel` ("Use requests" below). The enum is append only: Eat = 0, Sleep =
+1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6, PlaceCart =
+7, Cast = 8, Reel = 9
 (`protocol::item_action_variant`, pinned on the wire bytes). `ItemActionOutcome = 63` (S→C, to the asker alone):
 `{ seq, accepted, consume_held: u8, note: u8 }` (v76 appends `window_event:
-u32`, v79 `wear_held: bool`). The `seq` is shared with
+u32`, v79 `wear_held: bool`, v81 `bite_after: u16`). The `seq` is shared with
 `EntityAttack` / `EntityInteract` (one `JoinerActions` sequence), and the
 client queues both kinds of outcome in one list in arrival order
 (`remote_client::RequestOutcome`): answering a later request first would
@@ -2221,9 +2229,11 @@ campfire relit — or the note that says why nothing happened:
 | Hive | a bucket | scoops (needs honey: `HiveEmpty`) | 1 | a Honey Jar |
 | Hive | shears | cuts (needs honey) | wear | 3 Honeycomb |
 
-Lighting a campfire (flint and steel, friction) is not a use: it stays a
-block edit (FU3; C3c's local uses). The joined client sends a campfire use
-only with a fuel, raw food or an empty hand, and a rack use only with a green
+Lighting an unlit campfire (a stick's friction, flint and steel, the
+Magnesium Firestarter) is a campfire use too since C3c-2, by its own rule
+("Use requests" below). The joined client sends a campfire use
+only with a fuel, raw food or an empty hand (a lighter on an unlit fire is a
+lighting, sent by its own arms), and a rack use only with a green
 log or an empty hand (anything else does nothing, as in single-player); it
 sends nothing with a Plan in hand (a Plan never leaves its holder, C3 design
 §5: "Put the Plan away first.").
@@ -2387,6 +2397,75 @@ host's server copy of these blocks is not mirrored from the host
 slated for deletion). The joiner's held claim is believed within the
 believed bound (C3b-2-fix M2; refused past it, enforced at C3d). Pinned by
 `test_integration::block_use`.
+
+**Use requests (C3c-2, protocol v81; log-only for costs, like all
+of C3a–C3c).** The non-edit local uses that still ran only in a joiner's own
+world — the bow, the slingshot, placing a cart, fishing, and lighting an
+unlit campfire — are requests on the "Block uses" template: each holds a
+claim (`JoinerActions`), goes out through `send_request` (ordered behind
+unsent edits, settled by `JoinerActions::settle`), and is answered by an
+`ItemActionOutcome`; what the hand pays is a numbered window event (§4.2g)
+and what it gains an `InventoryGrant`. Each use's decision is ONE pure rule
+that single-player and a host's own seats call too: the shot (`shot`: the
+ammo search `find_ammo` — the first Arrow / Rubber Ball stack in any of the
+36 slots — and `launch`), the cart guard and hull (`cart::cart_here`,
+`cart::cart_hull_for_item`), the cast's water ray and the catch
+(`fishing::finds_water`, `wait_ticks`, `roll_catch`), the friction roll
+(`campfire::friction_strikes`, 70 %) and the lighting conditions
+(`block_use::light_campfire`: every gesture needs fuel, `campfire::can_ignite`).
+**The joined client changes nothing locally for these**: no projectile or
+cart in its own ECS, no ammo, cart, stick or wear spent, no catch rolled, no
+fire lit, until the outcome. The server's random rolls use its own seed
+(`GameServer::use_seed`: the world's Proof-of-Play secret, the server tick,
+the slot and a salt per roll), which no client can foresee.
+
+| Use | Request | Server | Pays (window event) | Gains | Refusals |
+|---|---|---|---|---|---|
+| Bow / slingshot | `Shoot { weapon, held claim, yaw, pitch, charge }` (= 6) | spawns the projectile in ITS world from ITS position for that player at eye height (never a client origin), along the request's yaw/pitch, `charge` clamped to the weapon's maximum (`shot::launch`), owned by the joiner | one ammo (owed take), then the weapon's wear: TWO events in a row, the outcome carries the second's number (the client applies both with it; the server applies both when the client reports it) | — | `TooSoon` inside `shot::SHOT_COOLDOWN_TICKS` (8) less `SHOT_JITTER_TICKS` (3); `NoAmmo` (silent) when the server's copy holds none and the believed bound can't pay; `NothingToTake` when the claim isn't the weapon |
+| Cart | `PlaceCart { cell, held claim }` (= 7) | the cell must be a `TRACK` in reach and allowed (`remote_may_touch`); the server's OWN entities are checked (`cart::cart_here`; a joined client's ECS holds no carts); spawns the cart of the item's hull | the cart (owed take) | — | `CartHere`, `NotThatBlock`, `OutOfReach`, `NotHere`, `NothingToTake` |
+| Cast | `Cast { held claim }` (= 8) | water along the 24-step ray from ITS eye along ITS look for that player; records the cast (`ServerPlayer::fishing`, the bite tick) and draws the wait on its seed | — | `bite_after` | `NoWater` |
+| Reel | `Reel { held claim }` (= 9) | hooked when the server's bite tick has passed, less `fishing::REEL_SLACK_TICKS` (20, clock skew only — the client shows the bite `bite_after` after the outcome ARRIVES); a hooked line has no closing window (single-player's never had one); rolls the catch on its seed | the rod's wear | the catch (`grant_to_joiner`; an unfit part comes back as `GrantUnfit` and is spilled, never lost) | `NothingBit` before the bite (nothing caught or spent; the line comes in); `NoLine` (silent) with no cast |
+| Light (a campfire `UseBlock` on `CAMPFIRE_UNLIT` with a lighter) | `UseBlock` (= 5) | stick: friction after the client's 5 s hold, rolled 70 % on the server's seed; flint and steel; Magnesium Firestarter. The rule runs before the campfire's (a stick on an unlit fire is friction, never fuel); a lit fire's block goes `CAMPFIRE_UNLIT → CAMPFIRE` by `relight_campfire` → `derive_campfire_edit` (the one smoke-pillar source) | stick: one, hit or miss (`NotDryEnough` rides an ACCEPTED miss); flint: wear, also with no fuel (`NeedsFuel` rides that accepted outcome); Firestarter: nothing | — | `FrictionNeedsFuel` (stick kept), `NeedsFuel` (Firestarter) |
+
+Pays are judged as a block use's are (C3b-2-fix M2): what the server's copy
+of the window can't cover is believed within the joiner's bound
+(`window_ops::believe_pay`) and past it refused. The requests count against
+the existing per-tick item-action limit (`MAX_ITEM_ACTIONS_PER_TICK`); a
+shot also against its weapon's cooldown on the server's schedule
+(`ServerPlayer::next_shot_tick`, the swing's shape). Notes (append-only
+`ItemNote` codes): `NoAmmo` 19 (silent, as single-player's bow with no arrow),
+`CartHere` 20, `NoWater` 21, `NothingBit` 22, `NoLine` 23 (silent),
+`NeedsFuel` 24, `FrictionNeedsFuel` 25, `NotDryEnough` 26; `TooSoon` 3 also
+refuses a shot.
+
+*Client.* `GameState::send_shot` (claims one AMMO: `Asked::Shoot { weapon,
+material }` with `Pending.held` the ammo, the request's slot the weapon's),
+`send_place_cart` (`Asked::PlaceCart`, claims the cart), `send_fishing`
+(`Asked::Cast` puts a line out waiting for the server's bite — `catch_at_tick`
+unknown until the outcome, then now + `bite_after`; `Asked::Reel` takes the
+line in at once; neither claims), and `send_light` (a campfire `UseBlock`
+remembered as `Asked::Light { lighter }`, client-only, for the feedback;
+claims the stick or flint and steel's wear, the Firestarter nothing). The
+outcome's take and wear are applied by `joiner_actions::apply_item_outcome`
+/ `apply_use_wear`; the catch arrives as a grant.
+
+*A joiner's shot is a host's shot.* The server's projectile carries its
+shooter (`entity::ProjectileEntity.owner: Option<Shooter { who: Attacker,
+owner_key }>`): the same `tick_projectiles` flies it — on a dedicated or an
+owning (`--no-lend`) server in `GameServer::tick` (wherever the server owns
+its entities' physics), on a lending host in the host client's tick on the
+lent world — with the same damage (no knockback), slingshot stun, kill credit
+to the shooter (`LastAttacker(Remote)` → `KillEvent`), 1C no-friendly-fire
+shield (the joiner's own pet key, its sneak read by slot: a lending host adds
+its joiners' `ServerPlayer::last_sneak`, a server its players'), Bear/Hyena
+provocation, and the same targets: blocks stop it and mobs take it; no
+projectile ever hits a player (a body is no `MobKind` entity on any seat), so
+neither a host's arrow nor a joiner's hurts another player, and none is
+picked up. A departed joiner's shot in flight credits nobody
+(`forget_released_joiners` rewrites its shooter to `Departed`). Joiners see
+it through `remote_entities::RemoteProjectiles`. Pinned by
+`test_integration::use_requests` and
+`test_game_harness::game_harness_a_joiners_bow_cart_rod_and_flint_ask_the_server`.
 
 ### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1; v77, C3b-1)
 
@@ -2696,7 +2775,9 @@ several players' moves meet in one chest, so a mismatched op there is
 corrected per slot (§4 of the C3 design).
 
 **Known divergences (all tallied, none refused).** The client's local uses
-(bucket, seeds, bone meal… C3c), chests and other containers (C3b), its
+(the block-edit uses are mirrored since C3c-1 and the bow, slingshot, carts,
+fishing and campfire lighting are server requests since C3c-2; Plans and face
+attachments wait for C3c-3), chests and other containers (C3b), its
 death (the death phase), the inventory it joined with (the sidecar), and
 creative gives are not mirrored, so the next op after one mismatches. A
 client-held Plan is a slot the server sees as empty (Plans have no wire form
@@ -2833,7 +2914,8 @@ piece above one; `container_window::claims_fit_stacks`). Otherwise:
   and `PossessionTally::container_believed` counts the units (logged at the
   possession-check rate). BRIDGE until C3d, which refuses and corrects from
   the server's window: the same fabrication class as a claimed Q-drop. The
-  honest case is a locally fished or filled item, unmirrored until C3c.
+  honest case was a locally fished or filled item (a filled bucket is
+  mirrored since C3c-1; a catch is the server's grant since C3c-2).
   **Bounded (C-L3):** each joiner has a believed-units bucket
   (`window_ops::BelievedBucket`: `BELIEVED_BUCKET_UNITS` = 64, refilled at
   `BELIEVED_REFILL_PER_SECOND` = 4); an op whose believed units it can't pay
@@ -2849,9 +2931,9 @@ piece above one; `container_window::claims_fit_stacks`). Otherwise:
   it wears) is believed — bounded and tallied — never paid by taking a
   different piece (which repaired a tool) or by a take that can't reach it
   (which minted armour silently). **Durability drift is a swap (C3b-fix-e,
-  C-M1).** A joiner's client wears tools in uses the server's copy doesn't
-  mirror until C3c (a bow or slingshot, flint and steel, the Eraser, hoe
-  tilling), so its hoe can be at 90 on the client and 100 in the copy, in the
+  C-M1).** A joiner's client wore tools in uses the server's copy didn't
+  mirror before C3c (the Eraser and hoe tilling until C3c-1; a bow or
+  slingshot, flint and steel and a fishing rod until C3c-2), so its hoe can be at 90 on the client and 100 in the copy, in the
   same slot. When an op deposits such a piece believed (by `==`) and the
   copy's own run deposits its own piece of the same kind
   (`joiner_actions::same_item`) in the same op — one its give-back would
@@ -3089,8 +3171,8 @@ made in between are not tallied as mismatches). **Smaller known limits
   comes back by the correction's give; if the client filled the vacated slot
   inside the round trip it reports the give unfit, and the server's copy,
   which never held the fish, backs none of it (`unfit_unbacked`): the fish are
-  gone. Rare (the give usually lands where the deposit left room); it ends at
-  C3c, when the copy holds what the client caught. **`--no-lend`:** a `--no-lend` host
+  gone. Rare (the give usually lands where the deposit left room); for fish
+  it ended with C3c-2: a catch is the server's grant, so the copy holds it. **`--no-lend`:** a `--no-lend` host
 mirrors its own block entities over the server's each tick
 (`HostedServer::mirror_host_world_state`, BRIDGE, deleted with the flag), so a
 joiner's change to a container there is overwritten.

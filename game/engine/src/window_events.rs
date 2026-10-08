@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     fn eat(seq: u32, window_event: u32) -> RequestOutcome {
-        RequestOutcome::Item(ItemActionOutcomePacket { seq, accepted: true, consume_held: 1, note: 0, window_event, wear_held: false })
+        RequestOutcome::Item(ItemActionOutcomePacket { seq, accepted: true, consume_held: 1, note: 0, window_event, wear_held: false, bite_after: 0 })
     }
 
     fn grant(window_event: u32) -> InventoryGrantPacket {

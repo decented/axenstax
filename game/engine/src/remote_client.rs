@@ -3194,7 +3194,7 @@ mod tests {
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::KillEvent, &kill));
         // C2a — an item action's answer joins the same queue, in order.
-        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3, window_event: 0, wear_held: false };
+        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3, window_event: 0, wear_held: false, bite_after: 0 };
         srv.send_to_client(&protocol::serialize_packet(PacketType::ItemActionOutcome, &item));
         rc.poll();
         assert_eq!(

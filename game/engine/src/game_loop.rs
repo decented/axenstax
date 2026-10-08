@@ -4328,6 +4328,20 @@ impl super::GameState {
     /// finished joining. With each slot's look yaw, and the pet-owner key
     /// (verified npub) → slot of every joiner in the world that has one (a
     /// departed joiner's pets have no owner here to walk to).
+    /// C3c-2 — every shooter's live sneak by slot, for the projectiles this
+    /// client ticks (`entity::tick_projectiles`' 1C shield): its own seats'
+    /// (`local_sneak`) and, on a lending host, every joiner's at its server
+    /// slot (`ServerPlayer::last_sneak`): a joiner's shot flies in this ECS.
+    fn shooter_sneaking(&self) -> std::collections::HashMap<usize, bool> {
+        let mut map = self.local_sneak.clone();
+        if let Some(hs) = self.hosted_server.as_ref().filter(|hs| hs.lends_host_world()) {
+            for (slot, sp) in hs.server.players.iter().enumerate().skip(self.players.len()) {
+                map.insert(slot, sp.last_sneak);
+            }
+        }
+        map
+    }
+
     fn species_bodies(&self) -> (Vec<glam::Vec3>, Vec<f32>, Vec<(String, usize)>) {
         let mut bodies: Vec<glam::Vec3> = self.players.iter().map(|s| s.player.pos).collect();
         let mut yaws: Vec<f32> = self.players.iter().map(|s| s.camera.yaw).collect();
@@ -6832,13 +6846,11 @@ impl super::GameState {
         }
 
         // Projectile physics (Wave 23). Runs before item-pickup so a
-        // killed mob's drops can still be picked up the same tick.
-        crate::entity::tick_projectiles(
-            &mut self.ecs,
-            &self.world,
-            &self.registry,
-            &self.local_sneak,
-        );
+        // killed mob's drops can still be picked up the same tick. C3c-2 — on
+        // a lending host this ECS is the world's, and a joiner's shots fly in
+        // it: their shield reads the joiner's sneak too.
+        let sneaking = self.shooter_sneaking();
+        crate::entity::tick_projectiles(&mut self.ecs, &self.world, &self.registry, &sneaking);
 
         // Item entity housekeeping: lifetime decay (5-min despawn) + magnet/pickup.
         // The lifetimes are the server's on a lent world (D1); pickups stay
@@ -12959,25 +12971,20 @@ impl super::GameState {
                         crate::item::Item::Tool(t)
                             if t.tool_type == crate::crafting::ToolType::FishingRod
                     ));
-                if holding_rod {
+                if holding_rod && self.joined() {
+                    // C3c-2 — a joiner's cast and reel are the server's: it
+                    // casts from its body, draws the bite and rolls the catch.
+                    self.send_fishing(pidx);
+                    fished = true;
+                } else if holding_rod {
                     match self.players[pidx].fishing {
                         None => {
                             // Cast — require water within a short aim ray (so you
                             // can only fish into actual water).
                             let eye = self.players[pidx].player.eye_pos();
                             let dir = self.players[pidx].camera.forward();
-                            let mut found_water = false;
-                            for step in 1..=24 {
-                                let p = eye + dir * (step as f32 * 0.5);
-                                if self.world.is_water(
-                                    p.x.floor() as i32,
-                                    p.y.floor() as i32,
-                                    p.z.floor() as i32,
-                                ) {
-                                    found_water = true;
-                                    break;
-                                }
-                            }
+                            let world = &self.world;
+                            let found_water = crate::fishing::finds_water(eye, dir, |x, y, z| world.is_water(x, y, z));
                             if found_water {
                                 let seed = self
                                     .tick_counter
@@ -13018,20 +13025,22 @@ impl super::GameState {
                                     .wrapping_mul(0x2545F49)
                                     .wrapping_add(pidx as u64 * 0xC2B2);
                                 self.fire_challenge(crate::scenario::ChallengeEvent::CatchFish);
-                                let catch = crate::fishing::roll_catch(seed);
-                                let name = catch.item.name(&self.registry);
-                                let n = catch.count;
-                                let leftover = self.players[pidx].inventory.add_item(catch);
-                                // A landed catch costs one rod durability.
-                                if let Some(slot) =
-                                    self.players[pidx].inventory.hotbar_slot_mut(hot)
-                                    && let crate::item::Item::Tool(t) = &mut slot.item {
-                                        t.durability = t.durability.saturating_sub(1);
-                                    }
+                                // C3c-2 — the shared reel: the catch in, then the
+                                // rod's wear by `use_hotbar_tool` (a rod at 0
+                                // breaks); what doesn't fit drops at the player.
+                                let reeled = crate::fishing::reel_in(&mut self.players[pidx].inventory, hot, seed);
+                                let name = reeled.catch.item.name(&self.registry);
+                                let n = reeled.catch.count;
+                                let full = reeled.leftover.is_some();
+                                if let Some(leftover) = reeled.leftover {
+                                    let at = self.players[pidx].player.pos;
+                                    crate::entity::spawn_item(&mut self.ecs, at, leftover, (self.tick_counter as u32).wrapping_mul(2_654_435_761));
+                                }
+                                self.handle_tool_use(reeled.wear);
                                 self.audio.play_place();
                                 if pidx == 0 {
-                                    let msg = if leftover.is_some() {
-                                        "Caught something — but your bag is full!".to_string()
+                                    let msg = if full {
+                                        "Caught something — but your bag is full! It dropped at your feet.".to_string()
                                     } else {
                                         format!("You caught {n}× {name}!")
                                     };
@@ -13440,129 +13449,42 @@ impl super::GameState {
                         self.players[pidx].start_eat_cooldown(); // 0.8 s
                         ate = true;
                     }
-                // Bow firing (Wave 23): if the held tool is a Bow AND there's
-                // at least one Arrow material somewhere in the inventory,
-                // consume one arrow + spawn a projectile flying along the
-                // player's look direction. Pre-empts the place-block fall-
-                // through so the click isn't double-counted.
+                // Bow firing (Wave 23) and the Slingshot (Rubber feature): if
+                // the held tool shoots AND there's ammo somewhere in the
+                // inventory (an Arrow, a Rubber Ball: `shot::find_ammo`),
+                // consume one + spawn a projectile flying along the player's
+                // look direction (`shot::launch`: the bow at full speed, the
+                // slingshot at full charge — both fire on the click; a true
+                // charge would need PlayerSlot state). Pre-empts the
+                // place-block fall-through so the click isn't double-counted.
+                // C3c-2 — one rule (`shot`) for every seat: a joiner asks the
+                // server, which spawns the real projectile from its body and
+                // takes the ammo and wears the weapon on the outcome; a
+                // joined client spawns and spends nothing here.
                 if !ate {
-                    let is_bow = self.players[pidx]
-                        .inventory
-                        .hotbar_slot(hotbar)
-                        .map(|s| matches!(
-                            &s.item,
-                            crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Bow
-                        ))
-                        .unwrap_or(false);
-                    if is_bow {
-                        // Find an arrow stack to consume.
-                        let arrow_slot = (0..36).find(|&i| {
-                            self.players[pidx]
-                                .inventory
-                                .slot(i)
-                                .map(|s| matches!(
-                                    s.item,
-                                    crate::item::Item::Material(crate::item::MaterialId::Arrow)
-                                ))
-                                .unwrap_or(false)
-                        });
-                        if let Some(slot_idx) = arrow_slot {
-                            // Consume one arrow.
-                            let mut consumed = false;
-                            if let Some(stack) = self.players[pidx].inventory.slot(slot_idx).cloned() {
-                                let new_count = stack.count.saturating_sub(1);
-                                if new_count == 0 {
-                                    self.players[pidx].inventory.set_slot(slot_idx, None);
-                                } else {
-                                    let mut s = stack.clone();
-                                    s.count = new_count;
-                                    self.players[pidx].inventory.set_slot(slot_idx, Some(s));
-                                }
-                                consumed = true;
-                            }
-                            if consumed {
-                                // Fire the arrow from the player's eye position
-                                // along the camera-forward direction.
-                                let eye = self.players[pidx].player.eye_pos();
-                                let dir = self.players[pidx].camera.forward();
-                                // Small offset so the arrow doesn't spawn
-                                // inside the player's hitbox.
-                                let spawn_pos = eye + dir * 0.5;
-                                let velocity = dir * crate::entity::ARROW_INITIAL_SPEED;
-                                crate::entity::spawn_arrow(
-                                    &mut self.ecs,
-                                    spawn_pos,
-                                    velocity,
-                                    crate::entity::ARROW_DAMAGE,
-                                    Some(pidx),
-                                );
-                                // Bow durability + draw cooldown.
-                                let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
-                                self.handle_tool_use(info);
+                    let held = self.players[pidx].inventory.hotbar_slot(hotbar).map(|s| s.item.clone());
+                    if let Some(weapon) = crate::shot::weapon_of(held.as_ref()) {
+                        if self.joined() {
+                            if self.send_shot(pidx, weapon) {
                                 self.players[pidx].place_cooldown = 8; // ~0.4s between shots
                                 fired_arrow = true;
                             }
-                        }
-                    }
-                    // Rubber feature — Slingshot use. Right-click fires
-                    // a Rubber Ball projectile. Matches Bow's "instant
-                    // fire" pattern rather than a charge cycle (a true
-                    // charge would need PlayerSlot state + frame-tick
-                    // logic; consistency with Bow keeps v1 small).
-                    // Damage = SLINGSHOT_MAX_DAMAGE (always-full-charge
-                    // proxy); stun applies to passive mobs at every shot.
-                    let is_slingshot = self.players[pidx]
-                        .inventory
-                        .hotbar_slot(hotbar)
-                        .map(|s| matches!(
-                            &s.item,
-                            crate::item::Item::Tool(t) if t.tool_type == crate::crafting::ToolType::Slingshot
-                        ))
-                        .unwrap_or(false);
-                    if is_slingshot && !fired_arrow {
-                        // Find a RubberBall stack to consume.
-                        let ball_slot = (0..36).find(|&i| {
-                            self.players[pidx]
-                                .inventory
-                                .slot(i)
-                                .map(|s| matches!(
-                                    s.item,
-                                    crate::item::Item::Material(crate::item::MaterialId::RubberBall)
-                                ))
-                                .unwrap_or(false)
-                        });
-                        if let Some(slot_idx) = ball_slot {
-                            let mut consumed = false;
-                            if let Some(stack) = self.players[pidx].inventory.slot(slot_idx).cloned() {
-                                let new_count = stack.count.saturating_sub(1);
-                                if new_count == 0 {
-                                    self.players[pidx].inventory.set_slot(slot_idx, None);
-                                } else {
-                                    let mut s = stack.clone();
-                                    s.count = new_count;
-                                    self.players[pidx].inventory.set_slot(slot_idx, Some(s));
-                                }
-                                consumed = true;
-                            }
-                            if consumed {
-                                let eye = self.players[pidx].player.eye_pos();
-                                let dir = self.players[pidx].camera.forward();
-                                let spawn_pos = eye + dir * 0.4;
-                                let charge = crate::slingshot::SLINGSHOT_MAX_CHARGE_TICKS;
-                                let velocity = dir * crate::slingshot::slingshot_velocity(charge);
-                                let damage = crate::slingshot::slingshot_damage(charge);
-                                crate::entity::spawn_blunt_projectile(
-                                    &mut self.ecs,
-                                    spawn_pos,
-                                    velocity,
-                                    damage,
-                                    Some(pidx),
-                                );
-                                let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
-                                self.handle_tool_use(info);
-                                self.players[pidx].place_cooldown = 8;
-                                fired_arrow = true;
-                            }
+                        } else if let Some(slot_idx) = crate::shot::find_ammo(&self.players[pidx].inventory, weapon)
+                            && let Some(mut stack) = self.players[pidx].inventory.slot(slot_idx).cloned()
+                        {
+                            // Consume one from that stack (no auto-refill).
+                            stack.count = stack.count.saturating_sub(1);
+                            self.players[pidx].inventory.set_slot(slot_idx, (stack.count > 0).then_some(stack));
+                            // Fire from the player's eye along the camera.
+                            let eye = self.players[pidx].player.eye_pos();
+                            let dir = self.players[pidx].camera.forward();
+                            let shot = crate::shot::launch(weapon, eye, dir, crate::shot::max_charge(weapon));
+                            crate::shot::spawn(&mut self.ecs, &shot, Some(crate::entity::Shooter::local(pidx)));
+                            // Weapon durability + draw cooldown.
+                            let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                            self.handle_tool_use(info);
+                            self.players[pidx].place_cooldown = 8; // ~0.4s between shots
+                            fired_arrow = true;
                         }
                     }
                 }
@@ -14294,11 +14216,7 @@ impl super::GameState {
                                 _ => None,
                             })
                             .is_some()
-                        && !self
-                            .ecs
-                            .query::<&crate::cart::CartData>()
-                            .iter()
-                            .any(|(_, c)| c.cell == (pos[0], pos[1], pos[2]))
+                        && !crate::cart::cart_here(&self.ecs, (pos[0], pos[1], pos[2]))
                     {
                         // Craftable armoured carts (CA3) — right-clicking a TRACK
                         // cell that has NO cart on it while holding a Cart item
@@ -14317,6 +14235,16 @@ impl super::GameState {
                         // item + the ECS query), let those drop, THEN take the
                         // mutable `&mut self.ecs` spawn — same sequential pattern
                         // the dispatch arm uses.
+                        //
+                        // C3c-2 — a joiner's ECS holds no carts (the server's
+                        // are mirrored, `remote_mobs`), so its guard always
+                        // passes: it asks the server, which checks ITS
+                        // entities (`cart::cart_here`), spawns the real cart
+                        // and takes the item on the outcome.
+                        if self.joined() {
+                            self.send_place_cart(pidx, [pos[0], pos[1], pos[2]]);
+                            continue;
+                        }
                         let cell = (pos[0], pos[1], pos[2]);
                         let hotbar = self.players[pidx].hotbar_slot;
                         // Re-resolve the hull + its material id from the held item.
@@ -14400,14 +14328,28 @@ impl super::GameState {
                             Some(crate::item::Item::Material(crate::item::MaterialId::MagnesiumFirestarter))
                         );
                         if is_fas && target_blk == block::CAMPFIRE_UNLIT {
+                            // C3c-2 — a joiner's strike is the server's: it runs
+                            // the lighting rule on its real campfire, wears the
+                            // flint on the outcome, and the lit block comes back
+                            // as a block change.
+                            if self.joined() {
+                                self.players[pidx].friction_target = None;
+                                self.send_light(pidx, pos_arr);
+                                continue;
+                            }
                             // Ensure a Campfire entry exists at this position
                             // (creates a default one if missing).
                             self.world.campfire_at_mut_or_default(pos_key);
-                            let has_fuel = self.world
-                                .campfire_at(pos_key)
-                                .map(|cf| cf.fuel_ticks > 0)
-                                .unwrap_or(false);
-                            if has_fuel {
+                            // C3c-2 — the shared lighting rule: it lights a
+                            // fuelled fire; flint and steel wears either way.
+                            let lit = crate::block_use::light_block(&self.world, pos_key, held.as_ref(), false);
+                            let wore = matches!(&lit, Some(Ok(used)) if used.wear);
+                            let note = match &lit {
+                                Some(Ok(used)) => used.effect.note(),
+                                Some(Err(note)) => *note,
+                                None => crate::item_actions::ItemNote::None,
+                            };
+                            if matches!(&lit, Some(Ok(used)) if used.relit) {
                                 self.world.set_block(pos[0], pos[1], pos[2], block::CAMPFIRE);
                                 // Spec 30 bugfix — lit campfire emits
                                 // light 14; propagate via the lighting
@@ -14433,6 +14375,8 @@ impl super::GameState {
                                 // campfire (`campfire::on_block_edit`) and
                                 // broadcasts it: this copy's smoke state is not
                                 // the world's.
+                                // (Always true here since C3c-2: a joiner's strike is a request and
+                                // never reaches this arm.)
                                 if !self.edits_reach_server() {
                                     let placed = crate::campfire::smoke_on_light(
                                         &mut self.world, pos[0], pos[1], pos[2],
@@ -14446,18 +14390,19 @@ impl super::GameState {
                                     }
                                 }
                                 self.audio.play_place();
-                            } else {
-                                self.toast = Some((
-                                    "The campfire needs fuel first.".to_string(),
-                                    Instant::now() + Duration::from_secs(2),
-                                ));
+                            } else if let Some(msg) = note.toast() {
+                                // "The campfire needs fuel first."
+                                self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
                             }
                             // Decrement the tool's durability regardless
                             // (you struck — the steel wore down). Use the
                             // standard use_hotbar_tool path so a broken
-                            // F&S clears the slot.
-                            let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
-                            self.handle_tool_use(info);
+                            // F&S clears the slot. (The Firestarter never
+                            // wears.)
+                            if wore {
+                                let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                                self.handle_tool_use(info);
+                            }
                             self.players[pidx].place_cooldown = 8;
                             self.players[pidx].friction_target = None;
                         } else if is_fas && target_blk == block::BLASTING_KEG {
@@ -14576,21 +14521,32 @@ impl super::GameState {
                                         None
                                     }
                                 };
+                                if resolve.is_some() && self.joined() {
+                                    // C3c-2 — the hold is ours, the strike the
+                                    // server's: it rolls on its own seed and
+                                    // takes the stick, hit or miss, on the
+                                    // outcome; a lit fire comes back as a block
+                                    // change.
+                                    self.players[pidx].friction_target = None;
+                                    self.send_light(pidx, pos_arr);
+                                    self.players[pidx].place_cooldown = 16;
+                                    continue;
+                                }
                                 if resolve.is_some() {
-                                    // 70% success roll seeded by tick + pos.
-                                    let seed = self.tick_counter
-                                        ^ ((pos[0] as u64).wrapping_mul(73856093))
-                                        ^ ((pos[1] as u64).wrapping_mul(19349663))
-                                        ^ ((pos[2] as u64).wrapping_mul(83492791));
-                                    let roll = seed
-                                        .wrapping_mul(6364136223846793005)
-                                        .wrapping_add(1442695040888963407);
-                                    let success = (roll % 100) < 70;
+                                    // 70% success roll seeded by tick + pos —
+                                    // C3c-2: the shared roll and rule
+                                    // (`campfire::friction_strikes`,
+                                    // `block_use::light_block`).
+                                    let struck = crate::campfire::friction_strikes(crate::campfire::friction_seed(self.tick_counter, pos_key));
+                                    let lit = crate::block_use::light_block(&self.world, pos_key, held.as_ref(), struck);
+                                    let success = matches!(&lit, Some(Ok(used)) if used.relit);
                                     // Consume one stick regardless.
-                                    self.players[pidx].inventory.consume_one_material(
-                                        hotbar,
-                                        crate::item::MaterialId::Stick,
-                                    );
+                                    if matches!(&lit, Some(Ok(used)) if used.pay > 0) {
+                                        self.players[pidx].inventory.consume_one_material(
+                                            hotbar,
+                                            crate::item::MaterialId::Stick,
+                                        );
+                                    }
                                     if success {
                                         self.world.set_block(pos[0], pos[1], pos[2], block::CAMPFIRE);
                                         // Spec 30 bugfix — friction-ignite must
@@ -14612,6 +14568,8 @@ impl super::GameState {
                                         // — friction is the explicit ignition moment.
                                         // FU3 — a joiner whose edits reach its server
                                         // leaves it to the server (`on_block_edit`).
+                                        // (Always true here since C3c-2: a joiner's strike is a request and
+                                        // never reaches this arm.)
                                         if !self.edits_reach_server() {
                                             let placed = crate::campfire::smoke_on_light(
                                                 &mut self.world, pos[0], pos[1], pos[2],
@@ -14642,10 +14600,16 @@ impl super::GameState {
                                             Instant::now() + Duration::from_secs(2),
                                         ));
                                     } else {
-                                        self.toast = Some((
-                                            "The stick wasn't dry enough.".to_string(),
-                                            Instant::now() + Duration::from_secs(2),
-                                        ));
+                                        // "The stick wasn't dry enough." (or, no
+                                        // fuel left, "Add fuel first …").
+                                        let note = match &lit {
+                                            Some(Ok(used)) => used.effect.note(),
+                                            Some(Err(note)) => *note,
+                                            None => crate::item_actions::ItemNote::None,
+                                        };
+                                        if let Some(msg) = note.toast() {
+                                            self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
+                                        }
                                     }
                                     self.players[pidx].friction_target = None;
                                     self.players[pidx].place_cooldown = 16;
@@ -22230,20 +22194,60 @@ impl super::GameState {
     /// claimed. A Plan never leaves its holder (C3 design §5): with one in
     /// hand nothing is sent.
     pub(crate) fn send_block_use(&mut self, pidx: usize, cell: [i32; 3], kind: crate::block_use::UseKind) {
+        self.send_block_request(pidx, cell, |held| crate::joiner_actions::Asked::UseBlock {
+            cell,
+            kind,
+            claim: crate::block_use::claim(kind, held),
+        });
+    }
+
+    /// C3c-2 — player `pidx` (a joiner) strikes the unlit campfire at `cell`
+    /// with the lighter in hand (a stick whose five-second hold resolved,
+    /// flint and steel, the Magnesium Firestarter): a campfire `UseBlock`,
+    /// which the server runs by the lighting rule (`block_use::light_block`,
+    /// its own friction roll). Nothing changes here until the outcome.
+    pub(crate) fn send_light(&mut self, pidx: usize, cell: [i32; 3]) {
+        let hot = self.players[pidx].hotbar_slot;
+        let held = self.players[pidx].inventory.hotbar_slot(hot).map(|s| s.item.clone());
+        let Some(lighter) = crate::block_use::lighter_of(held.as_ref()) else { return };
+        self.send_block_request(pidx, cell, |_| crate::joiner_actions::Asked::Light { cell, lighter });
+    }
+
+    /// One `ItemAction::UseBlock` at `cell` with what is in hand, claimed as
+    /// `asked` says ([`Self::send_block_use`], [`Self::send_light`]).
+    fn send_block_request(
+        &mut self,
+        pidx: usize,
+        cell: [i32; 3],
+        asked: impl FnOnce(Option<&crate::item::Item>) -> crate::joiner_actions::Asked,
+    ) {
         self.players[pidx].place_cooldown = 8;
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
         if matches!(held, Some(crate::item::Item::Plan(_))) {
             self.toast = Some(("Put the Plan away first.".to_string(), Instant::now() + Duration::from_secs(2)));
             return;
         }
-        let asked = crate::joiner_actions::Asked::UseBlock {
-            cell,
-            kind,
-            claim: crate::block_use::claim(kind, held.as_ref()),
-        };
+        let asked = asked(held.as_ref());
+        let action = crate::protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full };
+        self.send_use_request(pidx, asked, held, hot, action);
+    }
+
+    /// C3c-2 — record and send player `pidx`'s (a joiner's) item action
+    /// `action`, made from hotbar slot `hot`, claiming what `asked` uses of
+    /// `held` (`JoinerActions::can_afford`: nothing is sent while every one
+    /// held is already claimed by requests in flight). Returns whether it
+    /// was sent.
+    fn send_use_request(
+        &mut self,
+        pidx: usize,
+        asked: crate::joiner_actions::Asked,
+        held: Option<crate::item::Item>,
+        hot: usize,
+        action: crate::protocol::ItemAction,
+    ) -> bool {
         let p = &self.players[pidx];
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
-            return;
+            return false;
         }
         let next_input = self.request_input_seq();
         let seq = self.joiner_actions.record(
@@ -22252,10 +22256,73 @@ impl super::GameState {
         );
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
             seq,
-            action: crate::protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full },
+            action,
             // Stamped by `RemoteClient::send_item_action`.
             events_applied: 0,
         }));
+        true
+    }
+
+    /// C3c-2 — player `pidx` (a joiner) shoots the `weapon` in hand along its
+    /// camera (`ItemAction::Shoot`), if it holds ammo (`shot::find_ammo`, the
+    /// single-player search) not already claimed by shots in flight. It
+    /// spawns nothing and spends nothing here: the server spawns the real
+    /// projectile from its body and the outcome takes the ammo and wears the
+    /// weapon. Returns whether the shot was asked for (otherwise the click
+    /// goes on, as single-player's with no arrow does).
+    pub(crate) fn send_shot(&mut self, pidx: usize, weapon: crate::protocol::ShotWeapon) -> bool {
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let Some(crate::item::Item::Tool(tool)) = held else { return false };
+        if crate::shot::find_ammo(&self.players[pidx].inventory, weapon).is_none() {
+            return false;
+        }
+        let ammo = crate::item::Item::Material(crate::shot::ammo_for(weapon));
+        let cam = &self.players[pidx].camera;
+        let action = crate::protocol::ItemAction::Shoot {
+            weapon,
+            hotbar_slot: hot as u8,
+            held_kind,
+            held_id,
+            held_full,
+            yaw: cam.yaw,
+            pitch: cam.pitch,
+            charge: crate::shot::max_charge(weapon),
+        };
+        let asked = crate::joiner_actions::Asked::Shoot { weapon, material: tool.material };
+        self.send_use_request(pidx, asked, Some(ammo), hot, action)
+    }
+
+    /// C3c-2 — player `pidx` (a joiner) places the cart in hand on the rail
+    /// at `cell` (`ItemAction::PlaceCart`): the server checks its own
+    /// entities for a cart there and spawns the real one, which reaches us
+    /// through the entity mirror; the outcome takes the item.
+    pub(crate) fn send_place_cart(&mut self, pidx: usize, cell: [i32; 3]) {
+        self.players[pidx].place_cooldown = 8;
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let action = crate::protocol::ItemAction::PlaceCart { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full };
+        self.send_use_request(pidx, crate::joiner_actions::Asked::PlaceCart { cell }, held, hot, action);
+    }
+
+    /// C3c-2 — player `pidx` (a joiner) casts the rod in hand
+    /// (`ItemAction::Cast`) or, with a line out, reels it in (`Reel`). The
+    /// server casts from its body and rolls the bite and the catch; here a
+    /// cast puts a line out waiting for the server's bite time (the outcome's
+    /// `bite_after`), and a reel takes it in at once, as single-player's does.
+    pub(crate) fn send_fishing(&mut self, pidx: usize) {
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let slot = hot as u8;
+        let reel = self.players[pidx].fishing.is_some();
+        let (asked, action) = if reel {
+            (crate::joiner_actions::Asked::Reel, crate::protocol::ItemAction::Reel { hotbar_slot: slot, held_kind, held_id, held_full })
+        } else {
+            (crate::joiner_actions::Asked::Cast, crate::protocol::ItemAction::Cast { hotbar_slot: slot, held_kind, held_id, held_full })
+        };
+        self.players[pidx].place_cooldown = 10;
+        if self.send_use_request(pidx, asked, held, hot, action) {
+            // A cast's line waits for the server's bite; a reel's comes in.
+            self.players[pidx].fishing =
+                (!reel).then_some(crate::fishing::FishingLine { catch_at_tick: u64::MAX, hooked: false });
+        }
     }
 
     /// C3b-2 — what an accepted block use of ours shows: the sound and words
@@ -22302,6 +22369,32 @@ impl super::GameState {
         }
     }
 
+    /// C3c-2 — what an accepted lighting of ours shows, as single-player's
+    /// strike does: a fire lit (the sound; friction says so), or the note of
+    /// a strike that spent or wore without lighting it.
+    fn light_feedback(&mut self, lighter: crate::block_use::Lighter, note: crate::item_actions::ItemNote) {
+        if let Some(msg) = note.toast() {
+            self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
+            return;
+        }
+        self.audio.play_place();
+        if lighter == crate::block_use::Lighter::Friction
+            && let Some(msg) = crate::block_use::effect_toast(&crate::block_use::Effect::FrictionLit)
+        {
+            self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
+        }
+    }
+
+    /// C3c-2 — the server accepted our cast: the line waits `bite_after`
+    /// ticks for its bite from now (unless it was reeled in meanwhile).
+    fn line_cast(&mut self, bite_after: u16) {
+        let now = self.tick_counter;
+        let Some(line) = self.players.first_mut().and_then(|p| p.fishing.as_mut()) else { return };
+        line.catch_at_tick = now + u64::from(bite_after);
+        self.audio.play_place();
+        self.toast = Some(("Line cast. Wait for a bite…".to_string(), Instant::now() + Duration::from_secs(2)));
+    }
+
     /// C2a — the server's decision on one of our item actions. An accepted
     /// eat takes the food we claimed (owed, `joiner_actions::take_owed`) and
     /// fires the challenge event single-player fires — the server already
@@ -22317,11 +22410,13 @@ impl super::GameState {
         }
         let p = &mut self.players[0];
         crate::joiner_actions::apply_item_outcome(&mut p.inventory, &mut p.crafting_ui, &request, out);
-        // C3b-2 — shears on a hive wear where they now are.
+        // C3b-2 — shears on a hive wear where they now are (C3c-2: and a
+        // shot's weapon, a reel's rod, flint and steel).
         let wear = crate::joiner_actions::apply_use_wear(&mut p.inventory, &request, out);
         if wear.is_some() {
             self.handle_tool_use(wear);
         }
+        let note = crate::item_actions::ItemNote::from_wire(out.note);
         if out.accepted {
             match request.kind {
                 crate::joiner_actions::Asked::Eat => {
@@ -22335,11 +22430,22 @@ impl super::GameState {
                     ));
                 }
                 crate::joiner_actions::Asked::UseBlock { .. } => self.block_use_feedback(&request, out),
+                crate::joiner_actions::Asked::Light { lighter, .. } => self.light_feedback(lighter, note),
+                crate::joiner_actions::Asked::Cast => self.line_cast(out.bite_after),
+                crate::joiner_actions::Asked::Reel => {
+                    // The catch itself arrives as an `InventoryGrant`.
+                    self.fire_challenge(crate::scenario::ChallengeEvent::CatchFish);
+                    self.audio.play_place();
+                    self.toast = Some(("You landed a catch!".to_string(), Instant::now() + Duration::from_secs(3)));
+                }
                 _ => {}
             }
             return;
         }
-        let note = crate::item_actions::ItemNote::from_wire(out.note);
+        // C3c-2 — a refused cast puts no line out.
+        if request.kind == crate::joiner_actions::Asked::Cast {
+            self.players[0].fishing = None;
+        }
         // C3b-2 — a rack's "not ready yet" says how far it is, from our view
         // of the server's rack.
         let msg = match request.kind {

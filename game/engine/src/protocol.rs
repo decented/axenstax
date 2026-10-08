@@ -1018,9 +1018,10 @@ pub struct EntityInteractPacket {
 }
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
-/// `GrantUnfit`; v79 `UseBlock`). Wire-stable, APPEND ONLY: Eat = 0, Sleep =
-/// 1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5 (pinned on the wire
-/// bytes by `item_action_packets_round_trip`).
+/// `GrantUnfit`; v79 `UseBlock`; v81 `Shoot`, `PlaceCart`, `Cast`, `Reel`).
+/// Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2, Drop = 3,
+/// GrantUnfit = 4, UseBlock = 5, Shoot = 6, PlaceCart = 7, Cast = 8, Reel = 9
+/// (pinned on the wire bytes by `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
@@ -1062,6 +1063,50 @@ pub enum ItemAction {
     /// player gains rides `InventoryGrant`s. The client changes nothing
     /// until then.
     UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// C3c-2 (v81) — shoot the bow or slingshot in hotbar slot `hotbar_slot`
+    /// (the held claim mirrors `Eat`'s) along `yaw` / `pitch` (the client's
+    /// camera), drawn for `charge` ticks (clamped to the weapon's maximum,
+    /// `shot::launch`). The server spends one ammo by the shared search
+    /// (`shot::ammo_for`, an owed take), wears the weapon (`wear_held`) and
+    /// spawns the real projectile in ITS world, from ITS position for this
+    /// player at eye height. The client spawns nothing: it sees the shot as
+    /// the server's projectile (`remote_entities::RemoteProjectiles`).
+    Shoot {
+        weapon: ShotWeapon,
+        hotbar_slot: u8,
+        held_kind: u8,
+        held_id: u16,
+        held_full: WireItem,
+        yaw: f32,
+        pitch: f32,
+        charge: u16,
+    },
+    /// C3c-2 (v81) — place the cart item in hotbar slot `hotbar_slot` on the
+    /// rail at `cell`: the server checks the rail and ITS entities for a cart
+    /// there (`cart::cart_here`), spawns the cart of the item's hull
+    /// (`cart::cart_hull_for_item`) and takes the item (owed). The client
+    /// spawns nothing: it sees the cart through the entity mirror.
+    PlaceCart { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// C3c-2 (v81) — cast the fishing rod in hotbar slot `hotbar_slot`: the
+    /// server looks for water along the cast from ITS position and look for
+    /// this player (`fishing::finds_water`), records the cast and draws the
+    /// bite's wait on its own seed (`ItemActionOutcomePacket::bite_after`).
+    Cast { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// C3c-2 (v81) — reel the line in: after the server's bite, the server
+    /// rolls the catch on its own seed (`fishing::roll_catch`) and grants it,
+    /// and the rod wears (`wear_held`). Before the bite nothing is caught or
+    /// spent; with no cast recorded it is refused.
+    Reel { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+}
+
+/// C3c-2 (v81) — the weapon an [`ItemAction::Shoot`] fires. Wire-stable,
+/// APPEND ONLY: Bow = 0, Slingshot = 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShotWeapon {
+    /// An arrow (`MaterialId::Arrow`).
+    Bow,
+    /// A rubber ball (`MaterialId::RubberBall`).
+    Slingshot,
 }
 
 /// Wire index of an [`ItemAction`] variant the server reads before decoding
@@ -1403,8 +1448,15 @@ pub struct ItemActionOutcomePacket {
     /// v79 (C3b-2) — an accepted `UseBlock` wore the held tool once (shears
     /// on a hive) instead of taking it: `window_event` is that wear, applied
     /// where the tool now is (`joiner_actions::where_now`), as an accepted
-    /// swing's. `false` for everything else.
+    /// swing's. `false` for everything else. C3c-2 (v81) — also an accepted
+    /// `Shoot` (the weapon), `Reel` that caught something (the rod), and
+    /// flint and steel on an unlit campfire (`UseBlock`).
     pub wear_held: bool,
+    /// v81 (C3c-2) — an accepted `Cast`: the ticks from now until the
+    /// server's fish bites (`fishing::wait_ticks` on the server's seed). The
+    /// client shows the bite that long after this arrives. 0 for everything
+    /// else, and for a refusal.
+    pub bite_after: u16,
 }
 
 /// Server → Client: the decision on one attack or interaction (MP-D2b).
@@ -2424,7 +2476,18 @@ pub struct ServerAnnouncePacket {
 ///   input, and counts with `mined` against [`MAX_MINED_PER_INPUT`] (16 in
 ///   all). The server runs the use's rule on its copy of the joiner's
 ///   inventory (take what it used, add what it made, wear its tool), log-only.
-pub const PROTOCOL_VERSION: u32 = 80;
+/// - v81 (2026-10-08, C3c-2): a joiner's
+///   bow, slingshot, cart placement and fishing are requests the server runs.
+///   `ItemAction` appends `Shoot { weapon: ShotWeapon, hotbar_slot,
+///   held_kind, held_id, held_full, yaw, pitch, charge: u16 }` (= 6;
+///   [`ShotWeapon`] Bow = 0, Slingshot = 1), `PlaceCart { cell, hotbar_slot,
+///   held_kind, held_id, held_full }` (= 7), `Cast { hotbar_slot, held_kind,
+///   held_id, held_full }` (= 8) and `Reel { … }` (= 9).
+///   [`ItemActionOutcomePacket`] appends `bite_after: u16` (an accepted
+///   cast's wait for the server's bite). Lighting an unlit campfire (a
+///   stick's friction, flint and steel, the Magnesium Firestarter) is a
+///   `UseBlock`. New `item_actions::ItemNote` codes 19..=25.
+pub const PROTOCOL_VERSION: u32 = 81;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2596,8 +2659,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3c-1 — v80.
-        assert_eq!(super::PROTOCOL_VERSION, 80);
+        // C3c-2 — v81.
+        assert_eq!(super::PROTOCOL_VERSION, 81);
     }
 
     #[test]
@@ -3292,7 +3355,12 @@ mod tests {
         // v80 (2026-10-08, C3c-1):
         //   `InputPacket.use_tags` (after `edit_hands`) — a joiner's
         //   block-edit uses, mirrored on the server's copy of its inventory.
-        assert_eq!(PROTOCOL_VERSION, 80);
+        // v81 (2026-10-08, C3c-2):
+        //   `ItemAction::Shoot` (= 6), `PlaceCart` (= 7), `Cast` (= 8),
+        //   `Reel` (= 9), `ItemActionOutcomePacket.bite_after` (after
+        //   `wear_held`) — a joiner's bow, slingshot, carts and fishing run on
+        //   the server.
+        assert_eq!(PROTOCOL_VERSION, 81);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3582,6 +3650,59 @@ mod tests {
         assert_eq!(&payload[4..8], &5u32.to_le_bytes(), "UseBlock = 5");
         assert_eq!(&payload[8..12], &(-3i32).to_le_bytes(), "the cell leads it");
         assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
+        // v81 (C3c-2) — Shoot = 6, PlaceCart = 7, Cast = 8, Reel = 9,
+        // appended after UseBlock; ShotWeapon Bow = 0, Slingshot = 1.
+        let claim = || (item_kind::TOOL, 3u16, WireItem::Tool { tool_type: 12, material: 0, durability: 300 });
+        let (held_kind, held_id, held_full) = claim();
+        let shoot = ItemActionPacket {
+            seq: 17,
+            action: ItemAction::Shoot {
+                weapon: ShotWeapon::Slingshot,
+                hotbar_slot: 4,
+                held_kind,
+                held_id,
+                held_full,
+                yaw: 1.25,
+                pitch: -0.5,
+                charge: 20,
+            },
+            events_applied: 7,
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &shoot);
+        assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), shoot);
+        assert_eq!(&payload[4..8], &6u32.to_le_bytes(), "Shoot = 6");
+        assert_eq!(&payload[8..12], &1u32.to_le_bytes(), "the weapon leads it: Slingshot = 1");
+        assert_eq!(payload[12], 4, "then the hotbar slot");
+        assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
+        let (held_kind, held_id, held_full) = claim();
+        let bow = ItemAction::Shoot { weapon: ShotWeapon::Bow, hotbar_slot: 0, held_kind, held_id, held_full, yaw: 0.0, pitch: 0.0, charge: 0 };
+        let bytes = serialize_packet(PacketType::ItemAction, &ItemActionPacket { seq: 18, action: bow, events_applied: 0 });
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(&payload[8..12], &0u32.to_le_bytes(), "Bow = 0");
+        let (held_kind, held_id, held_full) = claim();
+        let cart = ItemActionPacket {
+            seq: 19,
+            action: ItemAction::PlaceCart { cell: [9, -64, 3], hotbar_slot: 2, held_kind, held_id, held_full },
+            events_applied: 0,
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &cart);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), cart);
+        assert_eq!(&payload[4..8], &7u32.to_le_bytes(), "PlaceCart = 7");
+        assert_eq!(&payload[8..12], &9i32.to_le_bytes(), "the cell leads it");
+        for (n, action) in [
+            (8u32, ItemAction::Cast { hotbar_slot: 5, held_kind: item_kind::TOOL, held_id: 1, held_full: WireItem::None }),
+            (9, ItemAction::Reel { hotbar_slot: 5, held_kind: item_kind::TOOL, held_id: 1, held_full: WireItem::None }),
+        ] {
+            let pkt = ItemActionPacket { seq: 20, action, events_applied: 0 };
+            let bytes = serialize_packet(PacketType::ItemAction, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), pkt);
+            assert_eq!(&payload[4..8], &n.to_le_bytes(), "Cast = 8, Reel = 9");
+            assert_eq!(payload[8], 5, "the hotbar slot leads it");
+        }
 
         let outcome = ItemActionOutcomePacket {
             seq: 12,
@@ -3590,15 +3711,18 @@ mod tests {
             note: 5,
             window_event: 0x0102_0304,
             wear_held: true,
+            bite_after: 0x0A0B,
         };
         let bytes = serialize_packet(PacketType::ItemActionOutcome, &outcome);
         assert_eq!(bytes[0], 63, "wire-stable tag");
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(ptype, PacketType::ItemActionOutcome);
         assert_eq!(safe_deserialize::<ItemActionOutcomePacket>(payload).unwrap(), outcome);
-        // v76's window_event, then (v79) wear_held closes it.
-        assert_eq!(&payload[payload.len() - 5..payload.len() - 1], &0x0102_0304u32.to_le_bytes(), "v76 window_event");
-        assert_eq!(payload[payload.len() - 1], 1, "v79 wear_held closes it");
+        // v76's window_event, then (v79) wear_held, then (v81) bite_after
+        // closes it.
+        assert_eq!(&payload[payload.len() - 7..payload.len() - 3], &0x0102_0304u32.to_le_bytes(), "v76 window_event");
+        assert_eq!(payload[payload.len() - 3], 1, "v79 wear_held");
+        assert_eq!(&payload[payload.len() - 2..], &0x0A0Bu16.to_le_bytes(), "v81 bite_after closes it");
         for (tag, t) in [(62u8, PacketType::ItemAction), (63, PacketType::ItemActionOutcome)] {
             assert_eq!(t as u8, tag, "wire-stable tag");
             assert_eq!(deserialize_header(&[tag, 0]).map(|(p, _)| p), Some(t));

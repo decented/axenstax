@@ -85,7 +85,9 @@ pub enum ItemNote {
     /// Eat refused: the claimed item isn't food.
     NotFood = 2,
     /// Eat refused: inside the server's eating cooldown. Silent (no toast):
-    /// the client paces itself, so this only follows arrival skew.
+    /// the client paces itself, so this only follows arrival skew. C3c-2 —
+    /// also a `Shoot` inside the weapon's cooldown (`shot::SHOT_COOLDOWN_TICKS`
+    /// less `shot::SHOT_JITTER_TICKS`).
     TooSoon = 3,
     /// Refused: the body is dead or not in the world.
     NotNow = 4,
@@ -129,6 +131,30 @@ pub enum ItemNote {
     /// stack and what doesn't fit comes back to the world as a ground item
     /// (`ItemAction::GrantUnfit`, the C2b-fix BRIDGE until C3d).
     InventoryFull = 18,
+    /// C3c-2 (v81) — a `Shoot` refused: no arrow (bow) or rubber ball
+    /// (slingshot) the server's copy of the window holds or can believe
+    /// (`window_ops::believe_pay`). Silent, as single-player's bow click with
+    /// no arrow is.
+    NoAmmo = 19,
+    /// C3c-2 — a `PlaceCart` refused: a cart already stands on that rail.
+    CartHere = 20,
+    /// C3c-2 — a `Cast` refused: no water along the cast.
+    NoWater = 21,
+    /// C3c-2 — a `Reel` before the bite: nothing caught, nothing spent.
+    NothingBit = 22,
+    /// C3c-2 — a `Reel` with no cast recorded on the server. Silent.
+    NoLine = 23,
+    /// C3c-2 — flint and steel or the Magnesium Firestarter on an unlit
+    /// campfire with no fuel: it doesn't light. Flint and steel still wears
+    /// (an ACCEPTED outcome carrying this note); the Firestarter's is a
+    /// refusal.
+    NeedsFuel = 24,
+    /// C3c-2 — a stick's friction on an unlit campfire with no fuel: refused,
+    /// the stick is kept.
+    FrictionNeedsFuel = 25,
+    /// C3c-2 — a stick's friction missed its roll: the stick is spent all the
+    /// same (an ACCEPTED outcome carrying this note).
+    NotDryEnough = 26,
 }
 
 impl ItemNote {
@@ -158,6 +184,14 @@ impl ItemNote {
             16 => HiveNeedsTool,
             17 => FireFull,
             18 => InventoryFull,
+            19 => NoAmmo,
+            20 => CartHere,
+            21 => NoWater,
+            22 => NothingBit,
+            23 => NoLine,
+            24 => NeedsFuel,
+            25 => FrictionNeedsFuel,
+            26 => NotDryEnough,
             _ => None,
         }
     }
@@ -166,7 +200,7 @@ impl ItemNote {
     pub fn toast(self) -> Option<&'static str> {
         use ItemNote::*;
         match self {
-            None | NotNow | TooSoon | NothingToTake => Option::None,
+            None | NotNow | TooSoon | NothingToTake | NoAmmo | NoLine => Option::None,
             NotHungry => Some("You're not hungry."),
             NotFood => Some("You can't eat that."),
             NotNight => Some("You can only sleep at night."),
@@ -182,6 +216,12 @@ impl ItemNote {
             HiveNeedsTool => Some("Use a Bucket (honey) or Shears (honeycomb) on the hive."),
             FireFull => Some("There's no room on the fire."),
             InventoryFull => Some("Inventory full"),
+            CartHere => Some("There's already a cart there."),
+            NoWater => Some("Aim at water to fish."),
+            NothingBit => Some("You reeled in early — nothing bit."),
+            NeedsFuel => Some("The campfire needs fuel first."),
+            FrictionNeedsFuel => Some("Add fuel first (wood), then strike to light."),
+            NotDryEnough => Some("The stick wasn't dry enough."),
         }
     }
 }
@@ -688,9 +728,23 @@ mod tests {
             ItemNote::HiveNeedsTool,
             ItemNote::FireFull,
             ItemNote::InventoryFull,
+            ItemNote::NoAmmo,
+            ItemNote::CartHere,
+            ItemNote::NoWater,
+            ItemNote::NothingBit,
+            ItemNote::NoLine,
+            ItemNote::NeedsFuel,
+            ItemNote::FrictionNeedsFuel,
+            ItemNote::NotDryEnough,
         ] {
             assert_eq!(ItemNote::from_wire(n.to_wire()), n);
         }
+        // C3c-2 (v81) — the use-request codes follow InventoryFull, in order.
+        assert_eq!(ItemNote::NoAmmo.to_wire(), 19);
+        assert_eq!(ItemNote::NotDryEnough.to_wire(), 26);
+        assert_eq!(ItemNote::NoAmmo.toast(), None, "silent, as single-player's bow with no arrow is");
+        assert_eq!(ItemNote::NothingBit.toast(), Some("You reeled in early — nothing bit."));
+        assert_eq!(ItemNote::NotDryEnough.toast(), Some("The stick wasn't dry enough."));
         // C3b-2 — the block-use codes are appended after NotABed (8), in order.
         assert_eq!(ItemNote::OutOfReach.to_wire(), 9);
         assert_eq!(ItemNote::InventoryFull.to_wire(), 18);

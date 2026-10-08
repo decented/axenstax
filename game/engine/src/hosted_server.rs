@@ -2120,16 +2120,312 @@ impl HostedServer {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 return self.serve_block_use(i, req.seq, *cell, *hotbar_slot, held);
             }
+            // C3c-2 (v81) — a joiner's bow or slingshot shot, cart placement,
+            // cast and reel, run on the server.
+            protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                let aim = Aim { yaw: *yaw, pitch: *pitch, charge: *charge };
+                return self.serve_shoot(i, req.seq, *weapon, *hotbar_slot, held, aim);
+            }
+            protocol::ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                return self.serve_place_cart(i, req.seq, *cell, *hotbar_slot, held);
+            }
+            protocol::ItemAction::Cast { held_kind, held_id, held_full, .. } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                return self.serve_cast(i, req.seq, held);
+            }
+            protocol::ItemAction::Reel { hotbar_slot, held_kind, held_id, held_full } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                return self.serve_reel(i, req.seq, *hotbar_slot, held);
+            }
         };
         let (accepted, consume_held, note) = match served {
             Ok(n) => (true, n, ItemNote::None.to_wire()),
             Err(note) => (false, 0, note.to_wire()),
         };
-        let pkt = protocol::serialize_packet(
-            protocol::PacketType::ItemActionOutcome,
-            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note, window_event, wear_held: false },
+        self.send_item_outcome(
+            i,
+            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note, window_event, wear_held: false, bite_after: 0 },
         );
+    }
+
+    /// Send joiner `i` the outcome `out` of one of its item actions.
+    fn send_item_outcome(&mut self, i: usize, out: &protocol::ItemActionOutcomePacket) {
+        let pkt = protocol::serialize_packet(protocol::PacketType::ItemActionOutcome, out);
         self.send_to_joined_slot(i, &pkt);
+    }
+
+    /// Refuse joiner `i`'s item action `seq` with `note`: nothing changes.
+    fn refuse_item_action(&mut self, i: usize, seq: u32, note: crate::item_actions::ItemNote) {
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: false,
+            consume_held: 0,
+            note: note.to_wire(),
+            window_event: 0,
+            wear_held: false,
+            bite_after: 0,
+        };
+        self.send_item_outcome(i, &out);
+    }
+
+    /// C3c-2 — the hotbar slot an item action of joiner `i` names, or its
+    /// current one when the slot it names is out of the hotbar.
+    fn action_slot(&self, i: usize, hotbar_slot: u8) -> usize {
+        self.server.players.get(i).map_or(0, |sp| if hotbar_slot < 9 { usize::from(hotbar_slot) } else { sp.hotbar_slot })
+    }
+
+    /// C3c-2 — may joiner `i` act with its hands now: a server-simulated
+    /// body in the world and alive.
+    fn joiner_may_act(&self, i: usize) -> bool {
+        self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.is_present_and_alive())
+    }
+
+    /// C3c-2 (v81) — joiner `i` shoots its bow or slingshot (`ItemAction::
+    /// Shoot`), claimed from hotbar slot `hotbar_slot` as `held`. The shared
+    /// rules (`shot`), run by the SERVER for this player:
+    /// - the claim must be the weapon it names, and the shot due on the
+    ///   server's schedule ([`crate::shot::SHOT_COOLDOWN_TICKS`] less
+    ///   [`crate::shot::SHOT_JITTER_TICKS`]; sooner: `TooSoon`);
+    /// - the ammo (`shot::ammo_for`) is judged as a block use's pay is: what
+    ///   the server's copy of the window can't hold is believed within the
+    ///   joiner's bound (`window_ops::believe_pay`), and past it the shot is
+    ///   refused (`NoAmmo`, silent). A creative joiner is unbounded;
+    /// - the projectile is spawned in the server's world, from the server's
+    ///   own position for this player at eye height (never a client-sent
+    ///   origin), along the request's yaw and pitch, at its charge clamped to
+    ///   the weapon's maximum (`shot::launch`), owned by the joiner
+    ///   (`Attacker::Remote`), so it follows a host's arrow's rules;
+    /// - accepted, the outcome is TWO window events in a row: the owed take of
+    ///   one ammo (none for a believed unit), then the weapon's wear; it
+    ///   carries the second's number, so the client applies both with it and
+    ///   the server's copy applies both once the client says so.
+    fn serve_shoot(
+        &mut self,
+        i: usize,
+        seq: u32,
+        weapon: protocol::ShotWeapon,
+        hotbar_slot: u8,
+        held: Option<crate::item::Item>,
+        aim: Aim,
+    ) {
+        use crate::item_actions::ItemNote;
+        let now = self.server.tick_counter;
+        let creative = self.server.play_mode.is_creative();
+        if !self.joiner_may_act(i) {
+            return self.refuse_item_action(i, seq, ItemNote::NotNow);
+        }
+        let tool = match &held {
+            Some(crate::item::Item::Tool(t)) if crate::shot::weapon_of(held.as_ref()) == Some(weapon) => *t,
+            _ => return self.refuse_item_action(i, seq, ItemNote::NothingToTake),
+        };
+        if !aim.yaw.is_finite() || !aim.pitch.is_finite() {
+            return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+        }
+        let slot = self.action_slot(i, hotbar_slot);
+        let ammo = crate::item::Item::Material(crate::shot::ammo_for(weapon));
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        if now + crate::shot::SHOT_JITTER_TICKS < sp.next_shot_tick {
+            return self.refuse_item_action(i, seq, ItemNote::TooSoon);
+        }
+        let believed = if creative {
+            0
+        } else {
+            match crate::window_ops::believe_pay(sp, &ammo, 1, now) {
+                Ok(n) => n,
+                Err(over) => {
+                    self.note_believed_use(i, 0, over, now);
+                    return self.refuse_item_action(i, seq, ItemNote::NoAmmo);
+                }
+            }
+        };
+        sp.next_shot_tick = sp.next_shot_tick.max(now) + crate::shot::SHOT_COOLDOWN_TICKS;
+        let shooter = crate::entity::Shooter {
+            who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
+            owner_key: sp.pet_owner_key().unwrap_or_default(),
+        };
+        let eye = sp.player.eye_pos();
+        let dir = crate::camera::forward_from(aim.yaw, aim.pitch);
+        crate::shot::spawn(&mut self.server.ecs, &crate::shot::launch(weapon, eye, dir, aim.charge), Some(shooter));
+        if believed > 0 {
+            self.note_believed_use(i, believed, 0, now);
+        } else {
+            self.shadow_take_owed(i, slot, &ammo, 1, "on a shot");
+        }
+        let window_event = match self.server.players.get_mut(i) {
+            Some(sp) => crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { slot, tool }, now),
+            None => 0,
+        };
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: 1,
+            note: 0,
+            window_event,
+            wear_held: window_event != 0,
+            bite_after: 0,
+        };
+        self.send_item_outcome(i, &out);
+    }
+
+    /// C3c-2 (v81) — joiner `i` places the cart item claimed from hotbar slot
+    /// `hotbar_slot` (`held`) on the rail at `cell` (`ItemAction::PlaceCart`).
+    /// Judged as a block use is (in the world and alive, the cell a TRACK on
+    /// the server, within the server body's reach, the play mode and plots
+    /// allow it) and by the shared guard on the SERVER's entities
+    /// (`cart::cart_here`: one cart a cell, `CartHere`). The cart of the
+    /// item's hull (`cart::cart_hull_for_item`) is spawned in the server's
+    /// world, which every joiner sees through the entity mirror. The item is
+    /// paid as a block use's is: an owed take, or believed within the bound
+    /// (past it refused, `NothingToTake`).
+    fn serve_place_cart(&mut self, i: usize, seq: u32, cell: [i32; 3], hotbar_slot: u8, held: Option<crate::item::Item>) {
+        use crate::item_actions::ItemNote;
+        let now = self.server.tick_counter;
+        let creative = self.server.play_mode.is_creative();
+        let pos = (cell[0], cell[1], cell[2]);
+        let judged = (|| {
+            let sp = self.server.players.get(i).ok_or(ItemNote::NotNow)?;
+            if !sp.server_simulated || !sp.is_present_and_alive() {
+                return Err(ItemNote::NotNow);
+            }
+            if self.server.world.get_block(pos.0, pos.1, pos.2) != crate::rail::TRACK {
+                return Err(ItemNote::NotThatBlock);
+            }
+            if !crate::container_window::container_in_server_reach(sp.player.eye_pos(), cell) {
+                return Err(ItemNote::OutOfReach);
+            }
+            if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+                return Err(ItemNote::NotHere);
+            }
+            let hull = match &held {
+                Some(crate::item::Item::Material(m)) => crate::cart::cart_hull_for_item(*m),
+                _ => None,
+            };
+            let hull = hull.ok_or(ItemNote::NothingToTake)?;
+            if crate::cart::cart_here(&self.server.ecs, pos) {
+                return Err(ItemNote::CartHere);
+            }
+            Ok(hull)
+        })();
+        let hull = match judged {
+            Ok(hull) => hull,
+            Err(note) => return self.refuse_item_action(i, seq, note),
+        };
+        let Some(item) = held else { return };
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let believed = if creative {
+            0
+        } else {
+            match crate::window_ops::believe_pay(sp, &item, 1, now) {
+                Ok(n) => n,
+                Err(over) => {
+                    self.note_believed_use(i, 0, over, now);
+                    return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+                }
+            }
+        };
+        crate::cart::spawn_cart_with_hull(&mut self.server.ecs, pos, hull);
+        let window_event = if believed > 0 {
+            self.note_believed_use(i, believed, 0, now);
+            0
+        } else {
+            let slot = self.action_slot(i, hotbar_slot);
+            self.shadow_take_owed(i, slot, &item, 1, "placing a cart")
+        };
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: 1,
+            note: 0,
+            window_event,
+            wear_held: false,
+            bite_after: 0,
+        };
+        self.send_item_outcome(i, &out);
+    }
+
+    /// C3c-2 (v81) — joiner `i` casts the fishing rod it claims (`held`,
+    /// `ItemAction::Cast`). The server looks for water along the cast from
+    /// ITS position and look for this player (`fishing::finds_water`;
+    /// `NoWater`), records the cast (`ServerPlayer::fishing`: the tick its
+    /// fish bites, drawn by `fishing::wait_ticks` on the server's seed) and
+    /// answers with the wait (`bite_after`). A cast replaces a line already
+    /// out. It costs nothing.
+    fn serve_cast(&mut self, i: usize, seq: u32, held: Option<crate::item::Item>) {
+        use crate::item_actions::ItemNote;
+        if !self.joiner_may_act(i) {
+            return self.refuse_item_action(i, seq, ItemNote::NotNow);
+        }
+        if !is_rod(held.as_ref()) {
+            return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+        }
+        let seed = self.server.use_seed(i, SEED_BITE);
+        let now = self.server.tick_counter;
+        let Some((eye, dir)) =
+            self.server.players.get(i).map(|sp| (sp.player.eye_pos(), crate::camera::forward_from(sp.yaw, sp.pitch)))
+        else {
+            return;
+        };
+        let world = &self.server.world;
+        if !crate::fishing::finds_water(eye, dir, |x, y, z| world.is_water(x, y, z)) {
+            return self.refuse_item_action(i, seq, ItemNote::NoWater);
+        }
+        let wait = crate::fishing::wait_ticks(seed);
+        if let Some(sp) = self.server.players.get_mut(i) {
+            sp.fishing = Some(now + wait);
+        }
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: 0,
+            note: 0,
+            window_event: 0,
+            wear_held: false,
+            bite_after: u16::try_from(wait).unwrap_or(u16::MAX),
+        };
+        self.send_item_outcome(i, &out);
+    }
+
+    /// C3c-2 (v81) — joiner `i` reels its line in with the rod it claims
+    /// from hotbar slot `hotbar_slot` (`held`, `ItemAction::Reel`). With no
+    /// cast recorded it is refused (`NoLine`, silent). The line comes in
+    /// either way. Before the server's bite (less `fishing::REEL_SLACK_TICKS`)
+    /// nothing is caught or spent (`NothingBit`); after it the server rolls
+    /// the catch on its own seed (`fishing::roll_catch`) and grants it
+    /// (`grant_to_joiner`: what the client can't hold comes back as a ground
+    /// item, never lost), and the rod wears once (`wear_held`, a window
+    /// event).
+    fn serve_reel(&mut self, i: usize, seq: u32, hotbar_slot: u8, held: Option<crate::item::Item>) {
+        use crate::item_actions::ItemNote;
+        if !self.joiner_may_act(i) {
+            return self.refuse_item_action(i, seq, ItemNote::NotNow);
+        }
+        let Some(crate::item::Item::Tool(rod)) = held.filter(|h| is_rod(Some(h))) else {
+            return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+        };
+        let now = self.server.tick_counter;
+        let seed = self.server.use_seed(i, SEED_CATCH);
+        let slot = self.action_slot(i, hotbar_slot);
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let Some(bite) = sp.fishing.take() else {
+            return self.refuse_item_action(i, seq, ItemNote::NoLine);
+        };
+        if !crate::fishing::hooked(now, bite) {
+            return self.refuse_item_action(i, seq, ItemNote::NothingBit);
+        }
+        let window_event = crate::window_events::queue(sp, crate::window_events::WindowEvent::WearWeapon { slot, tool: rod }, now);
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: 0,
+            note: 0,
+            window_event,
+            wear_held: true,
+            bite_after: 0,
+        };
+        self.send_item_outcome(i, &out);
+        self.grant_to_joiner(i, vec![crate::fishing::roll_catch(seed)]);
     }
 
     /// C3b-2 — joiner `i` right-clicked the composter, drying rack,
@@ -2161,6 +2457,8 @@ impl HostedServer {
         let stack = held.clone().map(|item| crate::item::ItemStack { item, count: 1 });
         let creative = self.server.play_mode.is_creative();
         let now = self.server.tick_counter;
+        // C3c-2 — a stick's friction strikes on the server's roll.
+        let struck = crate::campfire::friction_strikes(self.server.use_seed(i, SEED_FRICTION));
         let (mut believed, mut over_bound) = (0u32, 0u32);
         let used = self.judge_block_use(i, cell).and_then(|kind| {
             let server = &mut self.server;
@@ -2178,6 +2476,14 @@ impl HostedServer {
                     }
                 }
             };
+            // C3c-2 — an unlit campfire and a lighter in hand: the lighting
+            // rule, before the campfire's (a stick there is friction, never
+            // fuel).
+            if kind == crate::block_use::UseKind::Campfire
+                && let Some(lit) = crate::block_use::light_block_admitted(&server.world, pos, stack.as_ref(), struck, &mut admit)
+            {
+                return lit;
+            }
             // BRIDGE: the joiner's room is not checked — replace when C3d makes
             // the server window the truth (then a gain that doesn't fit the
             // server's window is refused, as single-player leaves it in place).
@@ -2186,8 +2492,13 @@ impl HostedServer {
         if believed > 0 || over_bound > 0 {
             self.note_believed_use(i, believed, over_bound, now);
         }
+        // C3c-2 — an accepted use can carry a note too: a missed friction or
+        // an unfuelled flint strike still spent or wore.
         let (used, note) = match used {
-            Ok(used) => (Some(used), ItemNote::None),
+            Ok(used) => {
+                let note = used.effect.note();
+                (Some(used), note)
+            }
             Err(note) => (None, note),
         };
         if used.is_some() && self.lends_host_world() {
@@ -2227,6 +2538,7 @@ impl HostedServer {
                 note: note.to_wire(),
                 window_event,
                 wear_held: window_event != 0 && wear,
+                bite_after: 0,
             },
         );
         self.send_to_joined_slot(i, &pkt);
@@ -5330,6 +5642,26 @@ pub(crate) enum EditRefusal {
 /// form when present (a tool's type, material and durability), else the
 /// `ItemRef` pair; `None` for an empty hand or anything this build can't
 /// decode.
+/// C3c-2 — the salts of the server's rolls for a joiner's uses
+/// (`GameServer::use_seed`): a friction strike, a fish's bite, a catch.
+const SEED_FRICTION: u64 = 0xF1C7;
+const SEED_BITE: u64 = 0xB17E;
+const SEED_CATCH: u64 = 0xCA7C;
+
+/// C3c-2 — a `Shoot`'s aim: the client camera's yaw and pitch, and the
+/// draw in ticks.
+#[derive(Clone, Copy, Debug)]
+struct Aim {
+    yaw: f32,
+    pitch: f32,
+    charge: u16,
+}
+
+/// C3c-2 — is `held` a fishing rod?
+fn is_rod(held: Option<&crate::item::Item>) -> bool {
+    matches!(held, Some(crate::item::Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::FishingRod)
+}
+
 fn held_item_from_wire(
     kind: u8,
     id: u16,

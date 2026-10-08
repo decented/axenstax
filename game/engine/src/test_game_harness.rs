@@ -2142,4 +2142,166 @@ mod tests {
         assert_eq!(hg.state.world.plots.len(), 1, "no claim");
         assert!(hg.state.toast.as_ref().is_some_and(|(t, _)| t == "Too close to another player's plot."));
     }
+
+    // ─── C3c-2 ─────────────────────────────────────────────────────────────
+
+    /// C3c-2 — a joined client's bow, cart, rod and flint and steel, each
+    /// through its REAL click arm: the arm asks the server and changes
+    /// nothing of its own — no projectile or cart in its own ECS, no ammo,
+    /// cart or wear spent, no fire lit, no catch rolled — until the outcome;
+    /// the server's world holds the real arrow (owned by the joiner), the
+    /// real cart and the lit fire, and the outcome pays on both copies. The
+    /// joined client sees the arrow through its projectile mirror.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_bow_cart_rod_and_flint_ask_the_server() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("c3c2-uses");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let give = |hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, k: usize, stack: ItemStack| {
+            hg.state.players[0].inventory.set_slot(k, Some(stack.clone()));
+            server.server.players[slot].inventory.set_slot(k, Some(stack));
+        };
+        let count = |hg: &HeadlessGame, m: MaterialId| -> u32 {
+            hg.state.players[0].inventory.slots_iter().flatten().filter(|s| s.item == Item::Material(m)).map(|s| u32::from(s.count)).sum()
+        };
+        let durability = |hg: &HeadlessGame, k: usize| match hg.state.players[0].inventory.slot(k).map(|s| &s.item) {
+            Some(Item::Tool(t)) => t.durability,
+            _ => 0,
+        };
+        let own_projectiles = |hg: &HeadlessGame| hg.state.ecs.query::<&crate::entity::ProjectileEntity>().iter().count();
+
+        // The bow, aimed high over the pad.
+        let bow = Tool::new(ToolType::Bow, ToolMaterial::Wood);
+        give(&mut hg, &mut server, 0, ItemStack::new_tool(bow));
+        give(&mut hg, &mut server, 9, ItemStack::new_material(MaterialId::Arrow, 2));
+        hg.state.players[0].hotbar_slot = 0;
+        aim_at(&mut hg, glam::Vec3::new(feet[0] as f32 + 0.5, feet[1] as f32 + 30.0, feet[2] as f32 - 6.0));
+        harness_step(&mut server, &mut hg);
+        right_click(&mut hg);
+        assert_eq!(own_projectiles(&hg), 0, "a joined client spawns no arrow of its own");
+        assert_eq!(count(&hg, MaterialId::Arrow), 2, "nor spends one before the server answers");
+        settle(&mut server, &mut hg);
+        let owners: Vec<_> = server
+            .server
+            .ecs
+            .query::<&crate::entity::ProjectileEntity>()
+            .iter()
+            .map(|(_, p)| p.owner.as_ref().map(|s| s.who))
+            .collect();
+        assert_eq!(owners.len(), 1, "the server's real arrow: {owners:?}");
+        assert!(matches!(owners[0], Some(crate::combat::Attacker::Remote { slot: s, .. }) if s == slot));
+        assert_eq!(own_projectiles(&hg), 0);
+        assert!(!hg.state.remote_projectiles.is_empty(), "the joiner sees it through its mirror");
+        assert_eq!(count(&hg, MaterialId::Arrow), 1, "the outcome took the arrow");
+        assert_eq!(durability(&hg, 0), bow.durability - 1, "and wore the bow");
+
+        // A cart on a rail.
+        let rail = [feet[0], feet[1], feet[2] - 2];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(rail[0], rail[1], rail[2], crate::rail::TRACK);
+        }
+        give(&mut hg, &mut server, 1, ItemStack::new_material(MaterialId::WoodCart, 1));
+        hg.state.players[0].hotbar_slot = 1;
+        aim_at(&mut hg, glam::Vec3::new(rail[0] as f32 + 0.5, rail[1] as f32 + 0.1, rail[2] as f32 + 0.5));
+        harness_step(&mut server, &mut hg);
+        right_click(&mut hg);
+        assert_eq!(hg.state.ecs.query::<&crate::cart::CartData>().iter().count(), 0, "no cart of its own");
+        assert_eq!(count(&hg, MaterialId::WoodCart), 1);
+        settle(&mut server, &mut hg);
+        assert!(crate::cart::cart_here(&server.server.ecs, (rail[0], rail[1], rail[2])), "the server's real cart");
+        assert_eq!(count(&hg, MaterialId::WoodCart), 0, "the outcome took the cart");
+
+        // A rod at a pond: the line waits for the server's bite.
+        let eye = hg.state.players[0].player.eye_pos();
+        let pond = [feet[0] + 3, eye.y.floor() as i32, feet[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(pond[0], pond[1], pond[2], crate::block::WATER);
+        }
+        server.server.water.add_source(pond[0], pond[1], pond[2]);
+        let rod = Tool::new(ToolType::FishingRod, ToolMaterial::Wood);
+        give(&mut hg, &mut server, 2, ItemStack::new_tool(rod));
+        hg.state.players[0].hotbar_slot = 2;
+        aim_at(&mut hg, glam::Vec3::new(pond[0] as f32 + 0.5, pond[1] as f32 + 0.5, pond[2] as f32 + 0.5));
+        harness_step(&mut server, &mut hg);
+        right_click(&mut hg);
+        assert_eq!(hg.state.players[0].fishing.map(|l| l.catch_at_tick), Some(u64::MAX), "the line waits for the server's word");
+        settle(&mut server, &mut hg);
+        let line = hg.state.players[0].fishing.expect("the server accepted the cast");
+        assert!(line.catch_at_tick < u64::MAX && !line.hooked, "its bite is the server's: {line:?}");
+        assert!(server.server.players[slot].fishing.is_some(), "the server holds the cast");
+        right_click(&mut hg);
+        assert!(hg.state.players[0].fishing.is_none(), "an early reel takes the line in");
+        settle(&mut server, &mut hg);
+        assert!(server.server.players[slot].fishing.is_none());
+        assert_eq!(durability(&hg, 2), rod.durability, "an early reel costs nothing");
+
+        // Flint and steel on a fuelled unlit campfire.
+        let fire = [feet[0] - 2, feet[1], feet[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(fire[0], fire[1], fire[2], crate::block::CAMPFIRE_UNLIT);
+            w.insert_campfire((fire[0], fire[1], fire[2]), crate::campfire::CampfireData { fuel_ticks: 4_000, ..Default::default() });
+        }
+        let flint = Tool::new(ToolType::FlintAndSteel, ToolMaterial::Iron);
+        give(&mut hg, &mut server, 3, ItemStack::new_tool(flint));
+        hg.state.players[0].hotbar_slot = 3;
+        aim_at(&mut hg, glam::Vec3::new(fire[0] as f32 + 0.5, fire[1] as f32 + 0.3, fire[2] as f32 + 0.5));
+        harness_step(&mut server, &mut hg);
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(fire[0], fire[1], fire[2]), crate::block::CAMPFIRE_UNLIT, "nothing lit here");
+        assert_eq!(durability(&hg, 3), flint.durability, "nothing worn before the outcome");
+        settle(&mut server, &mut hg);
+        assert_eq!(server.server.world.get_block(fire[0], fire[1], fire[2]), crate::block::CAMPFIRE, "the server lit its fire");
+        assert_eq!(hg.state.world.get_block(fire[0], fire[1], fire[2]), crate::block::CAMPFIRE, "and the joiner sees it");
+        assert_eq!(durability(&hg, 3), flint.durability - 1, "the outcome wore the flint");
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.possession.mismatched, 0, "the server's copy paid every take");
+        assert_eq!(sp.possession.wear_mismatch, 0, "and wore every tool");
+    }
+
+    /// C3c-2 — single-player's reel through the REAL rod arm: a rod at 0
+    /// durability breaks on a catch (it used to stay at 0 for ever), and a
+    /// catch a full bag can't hold drops at the player (it used to vanish).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_rod_at_zero_breaks_and_a_full_bags_catch_drops() {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-c3c2-reel");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        let feet = clear_pad(&mut hg, None);
+        let eye = hg.state.players[0].player.eye_pos();
+        let pond = [feet[0] + 3, eye.y.floor() as i32, feet[2]];
+        hg.state.world.set_block(pond[0], pond[1], pond[2], crate::block::WATER);
+        hg.state.water.add_source(pond[0], pond[1], pond[2]);
+        let inv = &mut hg.state.players[0].inventory;
+        *inv = crate::inventory::Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_tool(Tool { durability: 0, ..Tool::new(ToolType::FishingRod, ToolMaterial::Wood) })));
+        for k in 1..36 {
+            inv.set_slot(k, Some(ItemStack::new_block(crate::block::STONE, 64)));
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        aim_at(&mut hg, glam::Vec3::new(pond[0] as f32 + 0.5, pond[1] as f32 + 0.5, pond[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert!(hg.state.players[0].fishing.is_some(), "cast");
+        hg.state.players[0].fishing = Some(crate::fishing::FishingLine { catch_at_tick: 0, hooked: true });
+        right_click(&mut hg);
+        assert!(hg.state.players[0].fishing.is_none(), "reeled in");
+        assert!(hg.state.players[0].inventory.slot(0).is_none(), "the rod at 0 broke");
+        let dropped: u32 = hg
+            .state
+            .ecs
+            .query::<&crate::entity::ItemEntity>()
+            .iter()
+            .filter(|(_, it)| {
+                matches!(it.stack.item, Item::Material(MaterialId::RawFish | MaterialId::Bone | MaterialId::Leather))
+            })
+            .map(|(_, it)| u32::from(it.stack.count))
+            .sum();
+        assert!(dropped >= 1, "the catch dropped at the player");
+    }
 }

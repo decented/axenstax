@@ -202,6 +202,15 @@ pub struct ServerPlayer {
     /// `ATTACK_COOLDOWN_JITTER_TICKS` early. Swings may bunch with network
     /// jitter, but never beat the client's own rate on average.
     pub next_swing_tick: u64,
+    /// C3c-2 — the server tick from which this joiner's next `Shoot` is due:
+    /// each accepted shot moves it a full `shot::SHOT_COOLDOWN_TICKS` on, and
+    /// a shot is taken up to `shot::SHOT_JITTER_TICKS` early (the swing's
+    /// shape, [`Self::next_swing_tick`]).
+    pub next_shot_tick: u64,
+    /// C3c-2 — this joiner's line in the water: the server tick its fish
+    /// bites (`ItemAction::Cast`, drawn on the server's seed); `None` with no
+    /// cast. A `Reel` ends it.
+    pub fishing: Option<u64>,
     /// C2b — the pacing of this joiner's Q-drops
     /// (`item_actions::DropBucket`): a drop past it waits in the client's
     /// inbound queue.
@@ -485,6 +494,8 @@ impl ServerPlayer {
             interact_cooldown: 0,
             attach_gen: 0,
             next_swing_tick: 0,
+            next_shot_tick: 0,
+            fishing: None,
             drop_bucket: crate::item_actions::DropBucket::default(),
             possession: crate::joiner_inventory::PossessionTally::default(),
             eat_cooldown: 0,
@@ -997,6 +1008,27 @@ impl GameServer {
             pop_secret: crate::proof_of_play::gen_world_secret(),
             pop_epoch: 0,
         }
+    }
+
+    /// C3c-2 — a seed for a roll the server makes for player slot `slot` on
+    /// this tick (a joiner's friction strike, its fish's bite and catch):
+    /// this world's Proof-of-Play secret, the server's tick, the slot and
+    /// `salt` (one per kind of roll), mixed (splitmix64). The secret never
+    /// leaves the server, so no client can foresee a roll.
+    pub fn use_seed(&self, slot: usize, salt: u64) -> u64 {
+        fn mix(mut z: u64) -> u64 {
+            z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        let mut h = mix(salt);
+        for chunk in self.pop_secret.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            h = mix(h ^ u64::from_le_bytes(word));
+        }
+        mix(h ^ self.tick_counter.rotate_left(17) ^ (slot as u64).wrapping_mul(0xA24B_AED4_963E_E407))
     }
 
     /// C1 — the keys a joiner's break is rolled with (`break_drops`): this
@@ -1639,20 +1671,21 @@ impl GameServer {
         //
         // Projectiles (MP-A3) — the SAME pure tick the client runs, in the same
         // place (after entity physics, before item lifetimes), wherever the
-        // server owns the machines that fire them (a dispenser's arrows). Hits
-        // land on mobs through `combat::Health` and `despawn_dead` below, the
-        // server's ordinary damage path; the entity diff (`entity_broadcast`)
-        // broadcasts the flight. Shooter-sneak map empty: every server-fired
-        // projectile today is ownerless, so no friendly-fire shield applies.
-        // A LAN host's projectiles live in its CLIENT sim — a second tick here
-        // would be a second sim, hence the same flag as the machines.
-        if self.simulates_block_machines {
-            crate::entity::tick_projectiles(
-                &mut self.ecs,
-                &self.world,
-                &self.registry,
-                &std::collections::HashMap::new(),
-            );
+        // server owns its entities' physics: a dedicated server (a
+        // dispenser's arrows, C3c-2 a joiner's shots) and a `--no-lend` host's
+        // owning server (a joiner's shots: its machines and its own seats'
+        // shots live in the host CLIENT's sim). Hits land on mobs through
+        // `combat::Health` and `despawn_dead` below, the server's ordinary
+        // damage path; the entity diff (`entity_broadcast`) broadcasts the
+        // flight. A lent world's projectiles are the host client's to tick
+        // (with its joiners' sneak, `GameState::shooter_sneaking`) — a second
+        // tick here would be a second sim. C3c-2 — the shooter-sneak map is
+        // every present player's sneak by slot, for a joiner's shot's 1C
+        // no-friendly-fire shield.
+        if self.simulates_block_machines || !self.lent {
+            let sneaking: std::collections::HashMap<usize, bool> =
+                self.players.iter().enumerate().map(|(i, sp)| (i, sp.last_sneak)).collect();
+            crate::entity::tick_projectiles(&mut self.ecs, &self.world, &self.registry, &sneaking);
         }
         if self.runs(SimSystem::ItemLifetimes) {
             crate::entity::tick_item_lifetimes(&mut self.ecs);
@@ -2220,6 +2253,14 @@ impl GameServer {
         for (_, love) in self.ecs.query_mut::<&mut crate::breeding::InLove>() {
             if love.fed_by.is_some_and(gone) {
                 love.fed_by = Some(Attacker::Departed);
+            }
+        }
+        // C3c-2 — a departed joiner's shots still in flight credit nobody.
+        for (_, shot) in self.ecs.query_mut::<&mut crate::entity::ProjectileEntity>() {
+            if let Some(shooter) = shot.owner.as_mut()
+                && gone(shooter.who)
+            {
+                shooter.who = Attacker::Departed;
             }
         }
         let slot_gone = |pidx: usize| released.iter().any(|&(s, _)| s == pidx);

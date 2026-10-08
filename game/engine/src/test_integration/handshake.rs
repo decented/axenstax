@@ -234,7 +234,11 @@ fn protocol_version_is_the_pinned_value() {
     //   item frames and hives for joiners.
     // v80 (2026-10-08, C3c-1):
     //   `InputPacket.use_tags` — a joiner's block-edit uses, mirrored.
-    assert_eq!(protocol::PROTOCOL_VERSION, 80);
+    // v81 (2026-10-08, C3c-2):
+    //   `ItemAction::Shoot`, `PlaceCart`, `Cast`, `Reel`,
+    //   `ItemActionOutcomePacket.bite_after` — a joiner's bow, slingshot,
+    //   carts and fishing run on the server.
+    assert_eq!(protocol::PROTOCOL_VERSION, 81);
 }
 
 #[test]

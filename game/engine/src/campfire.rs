@@ -150,6 +150,26 @@ pub fn can_ignite(cf: Option<&CampfireData>) -> bool {
     cf.map(|c| c.fuel_ticks > 0).unwrap_or(false)
 }
 
+/// C3c-2 — how often a stick's friction lights a fuelled campfire, in
+/// percent (Spec 17 P6).
+pub const FRICTION_SUCCESS_PERCENT: u64 = 70;
+
+/// C3c-2 — does a stick's friction strike, by `seed`? The one roll every
+/// seat makes ([`FRICTION_SUCCESS_PERCENT`]): single-player's seed is its
+/// tick and the cell ([`friction_seed`]); the server's, for a joiner, its own
+/// (`GameServer::use_seed`), which no client can see.
+pub fn friction_strikes(seed: u64) -> bool {
+    let roll = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    roll % 100 < FRICTION_SUCCESS_PERCENT
+}
+
+/// Single-player's friction seed: its tick and the campfire's cell.
+pub fn friction_seed(tick: u64, cell: (i32, i32, i32)) -> u64 {
+    tick ^ (cell.0 as u64).wrapping_mul(73856093)
+        ^ (cell.1 as u64).wrapping_mul(19349663)
+        ^ (cell.2 as u64).wrapping_mul(83492791)
+}
+
 /// Burn-time per fuel item, in 20-TPS ticks. Returns `None` if the
 /// material/block isn't a recognised fuel. Fuel ladder (Wave 17 + 29):
 /// leaves 1 s / sticks 2 s / green log 30 s / planks 12 s / placed-oak-log
@@ -1007,5 +1027,17 @@ mod tests {
         world.insert_campfire(at, CampfireData { fuel_ticks: 1_000, ..Default::default() });
         assert_eq!(on_block_edit(&mut world, at, block::CAMPFIRE_UNLIT, block::CAMPFIRE), CampfireEdit::default(), "a clean fire: no smoke");
         assert_eq!(on_block_edit(&mut world, at, block::STONE, block::AIR), CampfireEdit::default(), "not a campfire: nothing");
+    }
+
+    /// C3c-2 — the friction roll every seat makes: about 70% strike.
+    #[test]
+    fn friction_strikes_about_seven_times_in_ten() {
+        let hits = (0..10_000u64).filter(|&s| friction_strikes(s)).count();
+        assert!((6_500..7_500).contains(&hits), "{hits}");
+        // Single-player's seed is its tick and the cell, as it always was.
+        let cell = (-3, 64, 9);
+        let seed = 77u64 ^ ((cell.0 as u64).wrapping_mul(73856093)) ^ ((cell.1 as u64).wrapping_mul(19349663))
+            ^ ((cell.2 as u64).wrapping_mul(83492791));
+        assert_eq!(friction_seed(77, cell), seed);
     }
 }
