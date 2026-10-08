@@ -1647,9 +1647,18 @@ grant; a grant it can't name, or a count past the grant, gives nothing and is
 tallied `unfit_clamped`), gives back what its copy holds of the grant beyond
 what the client kept (`window_events::return_unfit`: none in lockstep, where
 its own `add_item` left the same part out; the overflow the client confirmed
-stops counting as `grant_overflow`), and spawns it at the server body's feet
-by the shared spill rule (`break_drops::spill_at_feet`): a real item everyone
-sees and anyone can take. For `window_events::UNFIT_HOLD_TICKS` = 100 after a
+stops counting as `grant_overflow`), and spawns it at the server body's feet:
+a real item everyone sees and anyone else can take. Since C3b-fix-b (B-M2) it
+spawns only what came back: the grant's overflow (never landed; the pickup
+took that item out of the world) plus what the copy gave up
+(`take_owed_window`), `min(n, (count - landed) + taken)`; a gap (units that
+moved on, say into a chest) spawns nothing and is tallied `unfit_unbacked`,
+so a report cannot make items. The stack is thrown as the joiner's own
+(`window_events::spawn_unfit`, `dropper = Some(joiner)`, the Q-drop pickup
+delay), so it doesn't take it straight back where the server's copy has room
+the client's lacks. That slows the honest-drift loop (pick up, refuse, throw
+down) from ten ticks to the delay's thirty; it ends only when the server owns
+the window (C3d). For `window_events::UNFIT_HOLD_TICKS` = 100 after a
 report, that joiner's pickups follow its window (the effective window, waiting
 events applied) instead of the whole-stack rule, so the item it just gave back
 is not picked up, refused and respawned in a loop. Pinned by
@@ -2005,6 +2014,19 @@ most the honest rate (one quarter token per silent tick). Before, a backlog of
 cheap or replayed inputs earned up to 16 times the honest rate, and the
 bucket was all that capped the fabricated Drop (the known C3 debt).
 
+**The credit is not banked (C3b-fix-b, A-M1).** The allowance is the silence
+just ended, no more: a new silence REPLACES it with the ticks since the
+previous tick that had packets waiting (it was summed over the whole session,
+so a client silent every other tick for an hour held ~36,000 and could then
+run its Drops at the per-tick action budget, 16 times the honest rate, for
+minutes). It is capped at `MAX_CREDITED_SILENCE_TICKS` = 60 (a three-second
+stall), and the ticks server time already refilled during the silence
+(`level(now)` less `level(last)`, 4 ticks a token) are taken off, since the
+clock credited them once. Ticks that follow with no silence leave it alone, so
+one catch-up spends it over the several ticks its backlog takes to read; a tick
+with packets waiting that is not a catch-up forfeits what is left
+(`DropBucket::note_not_catching_up`).
+
 **Known limits (C2b).** A modified client can drop an item it doesn't hold,
 and that item is then real for everyone (`// BRIDGE: possession check`);
 likewise it could report a craft it never made, and the shadow mirrored it
@@ -2081,12 +2103,29 @@ reach the server as Close, Drop (the drop finds the stack the close put
 back). Pinned on the real client by the GPU harness
 (`game_harness_a_close_then_a_drop_in_one_tick_reach_the_server_in_order`,
 `game_harness_a_placement_then_e_in_one_tick_reach_the_server_in_order`) and
-the split by `window_ops::tests`. A request made after an unsent edit in the
-same tick still goes out ahead of the input carrying the edit (the server
-waits a request only behind edits it already holds); only a Q-drop's or a
-`GrantUnfit`'s take applies at receipt, and neither can follow an unsent edit
-in practice (a drop needs the screen closed after it; a `GrantUnfit` is sent
-only when no edit waits). When not joined `flush_window_ops` drops every log
+the split by `window_ops::tests`. **Requests wait behind unsent edits (C3b-fix-b, B-M1, B-L2).** A request made
+mid-frame while edits are unsent (this tick's, or a packet's overflow waiting
+in `RemoteClient`'s carry-over) is not sent: it is queued with an order stamp
+(`GameState::send_request`, `RemoteClient::queue_request`) and goes right
+after the input that carries those edits, each after the ops logged before it
+and before the ops logged after it (`flush_window_ops`). A request made with
+no edit unsent goes at once, after the ops logged before it. The client's own
+local effect (the Q-drop's take from the hotbar) stays where it is; only the
+send moves. So a placement that emptied the slot and auto-refilled it, then
+Q, reaches the server as the placement, then the drop: its 36 slots are the
+client's (before, the drop overtook the edit, took the slot's last item with
+no refill, and the placement then found nothing: the layouts split and stayed
+split). While edits still wait in the carry-over the requests, and the ops
+logged after the first of them, wait too: `RemoteClient` keeps the stamp of
+the first carried edit (the run's original first; the edits carry no stamp of
+their own, so after a partial send it is earlier than exact). Limit: an edit
+made after a queued request in the same tick still rides the same input
+ahead of it (the input is one packet). Pinned by
+`test_integration::window_ops::a_q_drop_after_a_placement_leaves_the_servers_layout_the_clients`,
+`remote_client::tests::a_request_behind_unsent_edits_goes_out_after_the_input_carrying_them`
+and, on the real client, the GPU harness
+(`game_harness_a_placement_then_q_in_one_tick_reach_the_server_in_order`).
+A `GrantUnfit` is sent only when no edit waits. When not joined `flush_window_ops` drops every log
 and forgets the setting (so a join always starts by sending it). Single-player, a host's own slots and a
 split-screen seat send nothing. A rule refusal is still sent: the server runs
 the same rule to the same refusal. The craft result click is gated by the
@@ -2134,7 +2173,9 @@ table's cell stops being a crafting table, a table that is gone. The server
 counts that grace once a tick (`window_ops::watch_table`,
 `ServerPlayer::table_gone_ticks`): the client acts on a world a few ticks
 behind the server's, and a body is a little further from the table than the
-client's eye after knockback. The grace never extends reach. A drag is bounded
+client's eye after knockback. The grace never extends reach, and is for a table that was there
+(C3b-fix-b, A-L1): an `OpenTable` at a cell that isn't a crafting table sets
+`table_gone_ticks` past the grace from the start. A drag is bounded
 by the station's grid exactly as a click is (B-L3): at the player's 2×2 the
 hidden row and column take nothing and give nothing
 (`window::distribute_one`, `gather`).
@@ -2207,7 +2248,12 @@ mismatched steadily. Now:
   their requests' claims (joiner_actions N4), until just after the input
   carrying the edits goes out — so every edit of an input is made at the one
   count the input reports. Before applying them it sends the ops logged
-  before them.
+  before them. (A request queued behind those edits, C3b-fix-b, counts as
+  unsent too.) **A numbered carrier is never dropped** (C3b-fix-b, B-L1):
+  the per-poll caps (16 own-life events, 256 outcomes, 256 grants) no longer
+  apply to a carrier with `window_event != 0` — a skipped number would leave
+  the server applying an event the client never did; only the transport's
+  byte bound limits them. Unnumbered carriers keep the caps.
 - **Every C→S packet the server judges against the window reports the
   count** (`events_applied`, stamped by `RemoteClient` as it sends):
   `InputPacket`, `WindowOpPacket`, `ItemActionPacket`, `EntityInteractPacket`

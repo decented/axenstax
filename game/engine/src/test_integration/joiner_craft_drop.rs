@@ -563,17 +563,55 @@ fn a_joiner_with_a_full_shadow_still_picks_up_a_ground_item() {
 
 // ─── The drop bucket in client time (C2b verify M4) ────────────────────────
 
-/// After a stall, an honest backlog of 25 drops interleaved with ~100 inputs
-/// drains in a few ticks of catch-up, not at one drop per
-/// `DROP_INTERVAL_TICKS` of server time: each input read credits the bucket
-/// a quarter token. None is lost.
+/// After a stall, an honest backlog of drops interleaved with inputs drains
+/// in a few ticks of catch-up, not at one drop per `DROP_INTERVAL_TICKS` of
+/// server time: each input read credits the bucket a quarter token. None is
+/// lost.
+///
+/// C3b-fix-b (A-M1) — the credit is for at most `MAX_CREDITED_SILENCE_TICKS`
+/// (60: a three-second stall), so this honest stall is that long (it was 100
+/// ticks with 25 drops: the 40 ticks past the cap are no longer credited; see
+/// the next test). Changed on purpose, with the cap.
 #[test]
 fn a_stalled_backlog_of_drops_and_inputs_drains_in_catch_up_time() {
+    let stall = crate::item_actions::MAX_CREDITED_SILENCE_TICKS;
+    let drops = stall / DROP_INTERVAL_TICKS;
     let mut rig = Rig::dedicated("drop-catch-up", 1);
     rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 64));
     // D-M1: the credit is for ticks the client was really silent, so the
-    // stall is real: one input is read, then 100 server ticks pass with none
-    // before the backlog of 100 client ticks arrives.
+    // stall is real: one input is read, then `stall` server ticks pass with
+    // none before the backlog of `stall` client ticks arrives.
+    rig.send_input(0, 1);
+    rig.tick();
+    rig.ticks(stall as u32);
+    let mut tick = 1;
+    for _ in 0..drops {
+        for _ in 0..DROP_INTERVAL_TICKS {
+            tick += 1;
+            rig.send_input(0, tick);
+        }
+        rig.drop(0, &stick());
+    }
+    let mut spawned_by = None;
+    for t in 1..=60u32 {
+        rig.tick();
+        if u64::from(rig.tally(0).drops) == drops && spawned_by.is_none() {
+            spawned_by = Some(t);
+        }
+    }
+    let t = spawned_by.expect("every one of the drops spawned");
+    assert!(t <= 12, "drained in {t} ticks; server time alone would take about {}", drops * DROP_INTERVAL_TICKS);
+    assert_eq!(rig.sp(0).last_input_tick, stall + 1, "and every input was read");
+}
+
+/// C3b-fix-b (A-M1) — a stall longer than the cap is credited for the cap
+/// only: a 100-tick stall with 25 drops no longer drains in a dozen ticks,
+/// but in the cap's credit plus server time (still far short of the 92 ticks
+/// of server time alone), and none is lost.
+#[test]
+fn a_stall_past_the_cap_is_credited_for_the_cap_only() {
+    let mut rig = Rig::dedicated("drop-catch-up-long", 1);
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 64));
     rig.send_input(0, 1);
     rig.tick();
     rig.ticks(100);
@@ -586,14 +624,15 @@ fn a_stalled_backlog_of_drops_and_inputs_drains_in_catch_up_time() {
         rig.drop(0, &stick());
     }
     let mut spawned_by = None;
-    for t in 1..=60u32 {
+    for t in 1..=120u32 {
         rig.tick();
         if rig.tally(0).drops == 25 && spawned_by.is_none() {
             spawned_by = Some(t);
         }
     }
     let t = spawned_by.expect("every one of the 25 drops spawned");
-    assert!(t <= 12, "drained in {t} ticks; server time alone would take about 92");
+    assert!(t > 12, "the cap is real: {t} ticks");
+    assert!(t <= 40, "but a stall still earns its catch-up: {t} ticks, server time alone is about 92");
     assert_eq!(rig.sp(0).last_input_tick, 101, "and every input was read");
 }
 

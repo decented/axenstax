@@ -127,6 +127,11 @@ pub struct EventTally {
     /// D-M2 — units a `GrantUnfit` claimed beyond what its grant gave (or
     /// for a grant it can't name): never spawned.
     pub unfit_clamped: u32,
+    /// C3b-fix-b (B-M2) — units a `GrantUnfit` claimed within its grant that
+    /// the server could not back with anything: neither overflow the grant
+    /// never landed nor units its copy of the window still held. Never
+    /// spawned.
+    pub unfit_unbacked: u32,
 }
 
 /// One joiner's ordered window events and the window-mirror state that goes
@@ -192,10 +197,11 @@ impl WindowEvents {
             "window events: {} sent, {} applied without the client's word, {} window op(s) lost",
             t.sent, t.forced, t.ops_lost
         );
-        if t.unfit_returned > 0 || t.unfit_clamped > 0 {
+        if t.unfit_returned > 0 || t.unfit_clamped > 0 || t.unfit_unbacked > 0 {
             line.push_str(&format!(
-                "; {} unfit granted unit(s) given back as ground items, {} claimed beyond the grant",
-                t.unfit_returned, t.unfit_clamped
+                "; {} unfit granted unit(s) given back as ground items, {} claimed beyond the grant, \
+                 {} not backed by anything the server held",
+                t.unfit_returned, t.unfit_clamped, t.unfit_unbacked
             ));
         }
         if self.baseline == Some(false) {
@@ -365,9 +371,16 @@ pub fn effective_inventory(sp: &ServerPlayer) -> Inventory {
 /// `unfit_clamped`). The server's copy gives back what it holds of the grant
 /// beyond what the client kept — none in lockstep, where its own `add_item`
 /// left the same part out — and the overflow the client confirmed stops
-/// counting as `grant_overflow`. Returns the stack to spawn as a real ground
-/// item at the joiner's feet, and starts the pickup hold
-/// ([`UNFIT_HOLD_TICKS`]).
+/// counting as `grant_overflow`.
+///
+/// C3b-fix-b (B-M2) — what is returned as a ground item is only what came
+/// back: the grant's overflow (the part its `add_item` never landed: the
+/// pickup removed that item from the world and nothing else holds it) plus
+/// what the server's copy gave up (`take_owed_window` took it). A claim the
+/// server cannot back with either (the units moved on, say deposited in a
+/// chest) spawns nothing for the gap, tallied `unfit_unbacked`: the report
+/// cannot make items. Returns the stack to spawn at the joiner's feet
+/// ([`spawn_unfit`]) and starts the pickup hold ([`UNFIT_HOLD_TICKS`]).
 pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> Option<ItemStack> {
     let ev = &mut sp.window_events;
     let Some(g) = ev.grants.iter_mut().find(|g| g.seq == event && !g.returned) else {
@@ -380,14 +393,12 @@ pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> O
     if n == 0 {
         return None;
     }
-    ev.tally.unfit_returned = ev.tally.unfit_returned.saturating_add(u32::from(n));
-    ev.unfit_hold_until = now + UNFIT_HOLD_TICKS;
     let kept = g.stack.count - n;
     let give_back = g.landed.saturating_sub(kept);
     let overflow = g.stack.count - g.landed;
     let item = g.stack.item.clone();
     sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_sub(u32::from(overflow.min(n)));
-    if give_back > 0 {
+    let taken = if give_back > 0 {
         crate::joiner_actions::take_owed_window(
             &mut sp.inventory,
             &mut sp.craft_grid,
@@ -395,9 +406,35 @@ pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> O
             0,
             &item,
             give_back,
-        );
+        )
+    } else {
+        0
+    };
+    let ev = &mut sp.window_events;
+    let backed = n.min(overflow.saturating_add(taken));
+    ev.tally.unfit_unbacked = ev.tally.unfit_unbacked.saturating_add(u32::from(n - backed));
+    if backed == 0 {
+        return None;
     }
-    Some(ItemStack { item, count: n })
+    ev.tally.unfit_returned = ev.tally.unfit_returned.saturating_add(u32::from(backed));
+    ev.unfit_hold_until = now + UNFIT_HOLD_TICKS;
+    Some(ItemStack { item, count: backed })
+}
+
+/// C3b-fix-b (B-M2) — put the stack [`return_unfit`] gave back on the ground
+/// at joiner `player_index`'s feet, thrown like its own Q-drop: it is the
+/// dropper, so it can't take it again for `ITEM_DROP_PICKUP_DELAY_TICKS` (a
+/// grant refused for want of room would otherwise come straight back, again
+/// and again, wherever the server's copy has room the client's lacks), while
+/// anyone else may take it at once.
+pub fn spawn_unfit(ecs: &mut hecs::World, feet: glam::Vec3, stack: ItemStack, player_index: usize) {
+    crate::entity::spawn_thrown_item(
+        ecs,
+        feet + glam::Vec3::new(0.0, 0.4, 0.0),
+        glam::Vec3::new(0.0, 0.22, 0.0),
+        stack,
+        player_index.min(usize::from(u8::MAX)) as u8,
+    );
 }
 
 // ─── Client: the carriers, applied in arrival order ───────────────────
@@ -469,6 +506,14 @@ impl WindowInbox {
     /// requests', `JoinerActions::take`) — where it falls against grants and
     /// wear no number says, and it changes no window. Then the
     /// acknowledgement.
+    ///
+    /// MUST: an event-0 carrier never touches player slots (B-L3). It is
+    /// merged by queue position only, so it can run ahead of a lower-numbered
+    /// grant or armour item that arrived before it; that commutes today
+    /// because a refusal, `ContainerOpened` and a container-only
+    /// `WindowSlotSet` touch container state, never the inventory, armour,
+    /// cursor or grid. A new unnumbered carrier that changes any of those
+    /// must be numbered instead.
     pub fn take_ordered(&mut self) -> (Vec<InboxItem>, Option<u64>) {
         let mut outcomes: VecDeque<InboxItem> = self.outcomes.drain(..).map(InboxItem::Outcome).collect();
         let mut grants: VecDeque<InboxItem> = self.grants.drain(..).map(InboxItem::Grant).collect();
@@ -630,6 +675,72 @@ mod tests {
         assert_eq!(sp.inventory.slot(0), Some(&bread(4)));
         assert_eq!(return_unfit(&mut sp, seq, 4, 0), Some(bread(4)));
         assert!(sp.inventory.slot(0).is_none(), "the server's copy follows the client's");
+    }
+
+    /// B-M2 — the modified client's scenario: a grant lands and is acked, the
+    /// units move on in the server's copy (a real move into a chest), then a
+    /// `GrantUnfit` claims them all. Nothing came back, so nothing is
+    /// spawned, and the gap is tallied.
+    #[test]
+    fn a_grant_unfit_for_units_that_moved_on_spawns_nothing() {
+        let mut sp = joiner();
+        let seq = queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::COBBLESTONE, 64)), 0);
+        apply_through(&mut sp, seq, 0);
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(64), "landed");
+        sp.inventory.set_slot(0, None);
+        assert_eq!(return_unfit(&mut sp, seq, 64, 10), None, "no stack from nothing");
+        let t = sp.window_events.tally;
+        assert_eq!((t.unfit_returned, t.unfit_unbacked), (0, 64));
+        assert!(sp.window_events.grants_whole(10), "and no pickup hold for a stack that was never thrown");
+    }
+
+    /// B-M2 — a claim is backed by the grant's overflow (never landed: the
+    /// pickup took that item out of the world) plus whatever the server's
+    /// copy still holds; the rest is the gap.
+    #[test]
+    fn a_grant_unfit_spawns_the_overflow_and_what_the_copy_gave_up_and_no_more() {
+        let full = |sp: &mut ServerPlayer| {
+            for i in 0..36 {
+                sp.inventory.set_slot(i, Some(ItemStack::new_block(crate::block::STONE, 64)));
+            }
+            sp.inventory.set_slot(7, Some(bread(61)));
+        };
+        // Honest drift: 3 landed on the server's copy, 4 overflowed; the
+        // client, full, kept none: 7 back.
+        let mut sp = joiner();
+        full(&mut sp);
+        let seq = queue(&mut sp, WindowEvent::Grant(bread(7)), 0);
+        apply_through(&mut sp, seq, 0);
+        assert_eq!(return_unfit(&mut sp, seq, 7, 0), Some(bread(7)));
+        assert_eq!(sp.inventory.slot(7), Some(&bread(61)), "the 3 that landed are taken back");
+        assert_eq!(sp.window_events.tally.unfit_unbacked, 0);
+        // Modified: the bread moved on first (the owed search is by item, so
+        // it takes the grant's units wherever the copy still holds that item);
+        // only the overflow is real.
+        let mut sp = joiner();
+        full(&mut sp);
+        let seq = queue(&mut sp, WindowEvent::Grant(bread(7)), 0);
+        apply_through(&mut sp, seq, 0);
+        sp.inventory.set_slot(7, None);
+        assert_eq!(return_unfit(&mut sp, seq, 7, 0), Some(bread(4)), "the overflow, no more");
+        assert_eq!((sp.window_events.tally.unfit_returned, sp.window_events.tally.unfit_unbacked), (4, 3));
+    }
+
+    /// B-M2 — the stack goes down thrown from the joiner: it is the dropper,
+    /// so it waits out the Q-drop delay; anyone else may take it at once.
+    #[test]
+    fn the_unfit_stack_is_thrown_by_the_joiner_with_the_drop_delay() {
+        let mut ecs = hecs::World::new();
+        spawn_unfit(&mut ecs, glam::Vec3::new(1.0, 70.0, 1.0), bread(3), 2);
+        let (dropper, delay, stack) = ecs
+            .query::<&crate::entity::ItemEntity>()
+            .iter()
+            .map(|(_, i)| (i.dropper, i.pickup_delay, i.stack.clone()))
+            .next()
+            .unwrap();
+        assert_eq!(dropper, Some(2));
+        assert_eq!(delay, crate::entity::ITEM_DROP_PICKUP_DELAY_TICKS);
+        assert_eq!(stack, bread(3));
     }
 
     #[test]

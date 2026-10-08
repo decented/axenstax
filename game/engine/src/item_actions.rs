@@ -292,6 +292,10 @@ pub const DROP_INTERVAL_TICKS: u64 = 4;
 /// [`DROP_INTERVAL_TICKS`] apart can arrive in one tick after jitter.
 pub const DROP_BUCKET_CAPACITY: u8 = 2;
 
+/// C3b-fix-b (A-M1) — the longest silence (server ticks) a catch-up is
+/// credited for: three seconds of stall, as long as an honest hitch lasts.
+pub const MAX_CREDITED_SILENCE_TICKS: u64 = 60;
+
 /// The server's pacing of one joiner's Q-drops: a token bucket of
 /// [`DROP_BUCKET_CAPACITY`], refilled one per [`DROP_INTERVAL_TICKS`]. A
 /// drop that finds it empty waits in the client's inbound queue (with
@@ -309,6 +313,14 @@ pub const DROP_BUCKET_CAPACITY: u8 = 2;
 /// or stale inputs earns nothing, and a client that never goes silent earns
 /// nothing: at most one quarter-token per silent tick, which is the honest
 /// rate.
+///
+/// C3b-fix-b (A-M1) — and it is not banked: each new silence REPLACES the
+/// last allowance (a client silent every other tick for an hour holds one
+/// tick of credit, not 36,000), the silence is capped at
+/// [`MAX_CREDITED_SILENCE_TICKS`], the ticks server time already refilled
+/// during it are taken off (they were credited once by the clock), and a tick
+/// that is not a catch-up forfeits what is left
+/// ([`DropBucket::note_not_catching_up`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropBucket {
     tokens: u8,
@@ -322,7 +334,10 @@ pub struct DropBucket {
     /// `None` before the first.
     last_read: Option<u64>,
     /// Client ticks of credit still allowed: the server ticks this client was
-    /// silent (nothing waiting) before its packets arrived, summed.
+    /// silent (nothing waiting) before its latest packets arrived, less the
+    /// ticks server time already refilled, at most
+    /// [`MAX_CREDITED_SILENCE_TICKS`]. Replaced at each tick with packets
+    /// waiting ([`DropBucket::note_inbound`]), never summed.
     allowance: u64,
     /// The highest client input tick credited so far.
     last_credited: u64,
@@ -360,11 +375,33 @@ impl DropBucket {
     /// ([`Self::credit_client_input`]). A tick on which the client's own Drop
     /// holds the head of its queue still counts as waiting: that is the
     /// client's backlog, not silence.
+    ///
+    /// C3b-fix-b (A-M1) — the allowance is the silence just ended and no
+    /// more: a new silence REPLACES the last allowance (never adds to it), is
+    /// capped at [`MAX_CREDITED_SILENCE_TICKS`], and has the ticks the clock
+    /// already refilled during it taken off (`level(now)` against
+    /// `level(last)`, [`DROP_INTERVAL_TICKS`] a token): the same silent ticks
+    /// were credited once by server time. Ticks that follow with no silence
+    /// leave it alone, so a catch-up spends it over as many ticks as the
+    /// backlog takes to read.
     pub fn note_inbound(&mut self, now: u64) {
-        if let Some(last) = self.last_read {
-            self.allowance = self.allowance.saturating_add(now.saturating_sub(last).saturating_sub(1));
+        let Some(last) = self.last_read else {
+            self.last_read = Some(now);
+            return;
+        };
+        let silence = now.saturating_sub(last).saturating_sub(1).min(MAX_CREDITED_SILENCE_TICKS);
+        if silence > 0 {
+            let refilled = u64::from(self.level(now).0.saturating_sub(self.level(last).0)) * DROP_INTERVAL_TICKS;
+            self.allowance = silence.saturating_sub(refilled);
         }
-        self.last_read = Some(self.last_read.map_or(now, |last| last.max(now)));
+        self.last_read = Some(last.max(now));
+    }
+
+    /// C3b-fix-b (A-M1) — this client has packets waiting at this tick but is
+    /// not catching up on a backlog (an ordinary tick's reading): whatever
+    /// allowance is left is forfeit. The catch-up it was for is over.
+    pub fn note_not_catching_up(&mut self) {
+        self.allowance = 0;
     }
 
     /// C2b verify M4 — credit one `ClientInput` read during a catch-up: one
@@ -767,6 +804,102 @@ mod tests {
             }
         }
         assert!(taken <= 2 + 100 / DROP_INTERVAL_TICKS as u32, "honest rate only: {taken}");
+    }
+
+    /// A-M1 — silence is not banked. A client silent every other tick for an
+    /// hour holds one tick of credit, not 36,000: when it then keeps a
+    /// standing backlog of fresh inputs, it earns no more than the honest
+    /// rate (a token per interval, the capacity to start).
+    #[test]
+    fn an_hour_of_every_other_tick_silence_banks_nothing() {
+        let mut b = DropBucket::default();
+        let mut client_tick = 0;
+        for now in (2..=72_000u64).step_by(2) {
+            // One packet a tick it is heard: not a catch-up, so no credit is
+            // asked for, but each silence is noted.
+            b.note_inbound(now);
+            client_tick += 1;
+        }
+        let start = 72_000u64;
+        let mut taken = 0u32;
+        for now in start + 1..=start + 100 {
+            b.note_inbound(now);
+            for _ in 0..16 {
+                client_tick += 1;
+                b.credit_client_input(now, client_tick);
+            }
+            while b.take(now) {
+                taken += 1;
+            }
+        }
+        assert!(taken <= 2 + 100 / DROP_INTERVAL_TICKS as u32, "honest rate only, not a banked hour: {taken}");
+    }
+
+    /// A-M1 — the ticks server time already refilled during a silence are not
+    /// credited a second time: eight silent ticks refilled two tokens by the
+    /// clock, so the catch-up that follows adds nothing to them.
+    #[test]
+    fn the_clocks_refill_during_the_silence_is_not_credited_again() {
+        let mut b = DropBucket::default();
+        b.note_inbound(0);
+        b.take(0);
+        b.take(0);
+        b.note_inbound(9);
+        assert!(b.take(9) && b.take(9), "the clock refilled both");
+        for t in 1..=100 {
+            b.credit_client_input(9, t);
+        }
+        assert!(!b.ready(9), "and the catch-up adds none");
+    }
+
+    /// A-M1 — a tick with packets waiting that is not a catch-up forfeits
+    /// what is left of the allowance; a catch-up that goes on over several
+    /// ticks keeps it between them.
+    #[test]
+    fn an_allowance_survives_a_catch_up_and_not_the_end_of_one() {
+        let mut b = after_silence(40);
+        b.take(0);
+        b.take(0);
+        b.credit_client_input(0, 1);
+        b.note_inbound(0); // the next tick of the same backlog: no new silence
+        for t in 2..=8 {
+            b.credit_client_input(0, t);
+        }
+        assert!(b.take(0), "eight quarters across two ticks: two tokens");
+        let mut b = after_silence(40);
+        b.take(0);
+        b.take(0);
+        b.note_not_catching_up();
+        for t in 1..=100 {
+            b.credit_client_input(0, t);
+        }
+        assert!(!b.ready(0), "forfeit when the catch-up is over");
+    }
+
+    /// A-M1 — a long silence is credited for at most
+    /// [`MAX_CREDITED_SILENCE_TICKS`], less what the clock refilled.
+    #[test]
+    fn a_long_silence_is_credited_for_three_seconds_at_most() {
+        let mut b = DropBucket::default();
+        b.note_inbound(0);
+        b.take(0);
+        b.take(0);
+        b.note_inbound(1001);
+        // The clock has refilled both tokens; spend them, then catch up.
+        let mut taken = 0u32;
+        while b.take(1001) {
+            taken += 1;
+        }
+        assert_eq!(taken, 2);
+        for t in 1..=500 {
+            b.credit_client_input(1001, t);
+            while b.take(1001) {
+                taken += 1;
+            }
+        }
+        let credit_tokens = (MAX_CREDITED_SILENCE_TICKS / DROP_INTERVAL_TICKS) as u32;
+        assert!(taken - 2 <= credit_tokens, "{} tokens of credit for a 1000-tick silence", taken - 2);
+        assert!(taken - 2 > 0, "but a real stall is still credited");
     }
 
     #[test]

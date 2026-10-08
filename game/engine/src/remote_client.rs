@@ -287,6 +287,32 @@ pub enum RequestOutcome {
     SlotSet(protocol::WindowSlotSetPacket),
 }
 
+/// C3b-fix-b (B-M1) — a request this client sends mid-frame, in the one
+/// order everything it sends keeps: it waits behind unsent edits
+/// ([`RemoteClient::queue_request`]) and goes right after the input that
+/// carries them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    Attack(protocol::EntityAttackPacket),
+    Interact(protocol::EntityInteractPacket),
+    Item(protocol::ItemActionPacket),
+    Device((i32, i32, i32)),
+}
+
+/// Most unnumbered carriers of one kind a poll keeps; a numbered window
+/// event (`window_event != 0`) is never dropped (C3b-fix-b, B-L1): the
+/// server applies its side when the client reports the number, so a carrier
+/// skipped here would leave the client's window behind the server's.
+const MAX_UNNUMBERED_PER_POLL: usize = 256;
+/// Most own-life events (deaths, births, respawns) a poll keeps.
+const MAX_LIFE_EVENTS_PER_POLL: usize = 16;
+
+/// Room for one more carrier in a queue holding `held`: numbered ones always
+/// fit, the rest up to `cap`.
+fn has_room(held: usize, cap: usize, window_event: u32) -> bool {
+    window_event != 0 || held < cap
+}
+
 /// MP-D2b — the death cause a `DiedOf` names, as the death screen reads it.
 /// A species this build doesn't know reads as a generic death.
 pub fn damage_cause_from_wire(cause: protocol::WireDamageCause) -> crate::survival::DamageCause {
@@ -432,6 +458,21 @@ pub struct RemoteClient {
     /// could never refuse and un-ghost it on this client); a tag rides only
     /// with its own edit. At most [`INPUT_CARRY_OVER_MAX_CHANGES`].
     input_carry_over: Vec<PairedEdit>,
+    /// C3b-fix-b (B-L2) — the order stamp (`window_ops::order_stamp`) of the
+    /// first edit in `input_carry_over`, or an earlier edit of the same run:
+    /// the ops and requests logged after it wait for the input that carries
+    /// it. `None` while nothing is carried over. After a partial send it is
+    /// the run's original first edit (earlier than the exact one: the edits
+    /// don't carry a stamp each).
+    carry_over_stamp: Option<u64>,
+    /// C3b-fix-b (B-L2) — the stamp of the first edit of the NEXT input,
+    /// noted by the game loop just before it ([`Self::note_first_edit_stamp`]).
+    next_edit_stamp: Option<u64>,
+    /// C3b-fix-b (B-M1) — requests made while edits were unsent, each with
+    /// its order stamp, oldest first: they go right after the input that
+    /// carries those edits ([`Self::queue_request`],
+    /// [`Self::take_queued_requests`]).
+    queued_requests: Vec<(u64, Request)>,
     /// World chat (Phase 2) — lines the server delivered to us this poll,
     /// drained by the game loop each frame into `ChatState`. Bounded like
     /// `pending_grants`: a hostile server can't grow this without limit
@@ -710,6 +751,9 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
+            carry_over_stamp: None,
+            next_edit_stamp: None,
+            queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -757,6 +801,9 @@ impl RemoteClient {
             pending_entity_batches: Vec::new(),
             pending_block_changes: Vec::new(),
             input_carry_over: Vec::new(),
+            carry_over_stamp: None,
+            next_edit_stamp: None,
+            queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
         }
@@ -951,7 +998,7 @@ impl RemoteClient {
                                 | protocol::PlayerEventType::DiedOf { .. } => {
                                     if self.player_index() == Some(event.player_index)
                                         && self.respawn_resend_from.is_none()
-                                        && self.pending_life_events.len() < 16
+                                        && self.pending_life_events.len() < MAX_LIFE_EVENTS_PER_POLL
                                     {
                                         let cause = match event.event {
                                             protocol::PlayerEventType::DiedOf { cause } => {
@@ -965,7 +1012,7 @@ impl RemoteClient {
                                 }
                                 protocol::PlayerEventType::ArmourWorn { hits } => {
                                     if self.player_index() == Some(event.player_index)
-                                        && self.pending_life_events.len() < 16
+                                        && has_room(self.pending_life_events.len(), MAX_LIFE_EVENTS_PER_POLL, event.window_event)
                                     {
                                         self.pending_life_events
                                             .push(OwnLifeEvent::ArmourWorn(*hits, event.window_event));
@@ -976,7 +1023,7 @@ impl RemoteClient {
                                 // server) is ignored.
                                 protocol::PlayerEventType::Bred { offspring } => {
                                     if self.player_index() == Some(event.player_index)
-                                        && self.pending_life_events.len() < 16
+                                        && self.pending_life_events.len() < MAX_LIFE_EVENTS_PER_POLL
                                         && let Some(kind) = crate::remote_mobs::mob_type_for(*offspring)
                                     {
                                         self.pending_life_events.push(OwnLifeEvent::Bred(kind));
@@ -994,7 +1041,7 @@ impl RemoteClient {
                                         let at = glam::Vec3::new(*x, *y, *z);
                                         if at.is_finite()
                                             && join_spawn_in_range(at)
-                                            && self.pending_life_events.len() < 16
+                                            && self.pending_life_events.len() < MAX_LIFE_EVENTS_PER_POLL
                                         {
                                             self.pending_life_events
                                                 .push(OwnLifeEvent::Respawned(at));
@@ -1061,7 +1108,7 @@ impl RemoteClient {
                         if let Ok(out) = protocol::safe_deserialize::<
                             protocol::InteractOutcomePacket,
                         >(payload)
-                            && self.pending_outcomes.len() < 256
+                            && has_room(self.pending_outcomes.len(), MAX_UNNUMBERED_PER_POLL, out.window_event)
                         {
                             self.pending_outcomes.push(RequestOutcome::Interact(out));
                             changed = true;
@@ -1071,7 +1118,7 @@ impl RemoteClient {
                         if let Ok(out) = protocol::safe_deserialize::<
                             protocol::ItemActionOutcomePacket,
                         >(payload)
-                            && self.pending_outcomes.len() < 256
+                            && has_room(self.pending_outcomes.len(), MAX_UNNUMBERED_PER_POLL, out.window_event)
                         {
                             self.pending_outcomes.push(RequestOutcome::Item(out));
                             changed = true;
@@ -1082,7 +1129,7 @@ impl RemoteClient {
                         if let Ok(opened) = protocol::safe_deserialize::<
                             protocol::ContainerOpenedPacket,
                         >(payload)
-                            && self.pending_outcomes.len() < 256
+                            && self.pending_outcomes.len() < MAX_UNNUMBERED_PER_POLL
                         {
                             self.pending_outcomes.push(RequestOutcome::ContainerOpened(opened));
                             changed = true;
@@ -1092,7 +1139,7 @@ impl RemoteClient {
                         if let Ok(set) = protocol::safe_deserialize::<
                             protocol::WindowSlotSetPacket,
                         >(payload)
-                            && self.pending_outcomes.len() < 256
+                            && has_room(self.pending_outcomes.len(), MAX_UNNUMBERED_PER_POLL, set.window_event)
                         {
                             self.pending_outcomes.push(RequestOutcome::SlotSet(set));
                             changed = true;
@@ -1115,9 +1162,11 @@ impl RemoteClient {
                             protocol::InventoryGrantPacket,
                         >(payload)
                         {
-                            // Bounded: a hostile server can't
-                            // grow this without limit between frames.
-                            if self.pending_grants.len() < 256 {
+                            // Bounded: a hostile server can't grow this
+                            // without limit between frames (a numbered
+                            // grant is never dropped, B-L1: the transport's
+                            // byte bound still holds for those).
+                            if has_room(self.pending_grants.len(), MAX_UNNUMBERED_PER_POLL, grant.window_event) {
                                 self.pending_grants.push(grant);
                                 changed = true;
                             }
@@ -1246,6 +1295,9 @@ impl RemoteClient {
         let mut hands = std::mem::take(&mut input.edit_hands);
         hands.resize(fresh_edits.len(), (u8::MAX, input.held_kind, input.held_id));
         let fresh = pair_tags_with_edits(fresh_edits.into_iter().zip(hands).collect(), std::mem::take(&mut input.mined));
+        let carried_before = !self.input_carry_over.is_empty();
+        let fresh_len = fresh.len();
+        let fresh_stamp = self.next_edit_stamp.take();
         let mut edits = std::mem::take(&mut self.input_carry_over);
         edits.extend(fresh);
         // C1 (review LOW-3) / FU1 (C1 verify N4) — the edits from the first
@@ -1261,9 +1313,71 @@ impl RemoteClient {
             );
             trimmed.drain(..drop);
         }
+        // C3b-fix-b (B-L2) — what waits keeps the stamp of its first edit.
+        // `trimmed` is the tail of (carried ++ fresh): if it is longer than
+        // the fresh edits it still starts with a carried one (the run's
+        // stamp stands); otherwise it starts among the fresh.
+        self.carry_over_stamp = if trimmed.is_empty() {
+            None
+        } else if carried_before && trimmed.len() > fresh_len && self.carry_over_stamp.is_some() {
+            self.carry_over_stamp
+        } else {
+            Some(fresh_stamp.unwrap_or_else(crate::window_ops::order_stamp))
+        };
         self.input_carry_over = trimmed;
         self.transport.send_to_server(&packet);
         Some(seq)
+    }
+
+    /// C3b-fix-b (B-L2) — the order stamp of the first edit of the input
+    /// about to be sent (`PendingEdits::first_stamp`; `None` if it has no
+    /// edits), noted just before [`Self::send_input`]: if the packet can't
+    /// carry them all, the stamp stays with the edits that wait.
+    pub fn note_first_edit_stamp(&mut self, stamp: Option<u64>) {
+        self.next_edit_stamp = stamp;
+    }
+
+    /// C3b-fix-b (B-L2) — the order stamp of the first edit waiting in the
+    /// carry-over, if any: an op or request logged after it goes after the
+    /// input that carries it.
+    pub fn first_carried_stamp(&self) -> Option<u64> {
+        if self.input_carry_over.is_empty() { None } else { self.carry_over_stamp }
+    }
+
+    /// C3b-fix-b (B-M1) — hold `request`, made at order stamp `stamp` while
+    /// edits are unsent: it goes right after the input that carries them
+    /// ([`Self::take_queued_requests`]), so the server reads it after them.
+    /// Dropped before the join completes, as a send would be.
+    pub fn queue_request(&mut self, stamp: u64, request: Request) {
+        if matches!(self.state, ConnectionState::Connected { .. }) {
+            self.queued_requests.push((stamp, request));
+        }
+    }
+
+    /// C3b-fix-b (B-M1) — are requests waiting for an input?
+    pub fn has_queued_requests(&self) -> bool {
+        !self.queued_requests.is_empty()
+    }
+
+    /// C3b-fix-b (B-M1) — the queued requests with their stamps, oldest
+    /// first, once the edits they waited behind are all sent (none, while
+    /// some still wait in the carry-over: they were made after those).
+    pub fn take_queued_requests(&mut self) -> Vec<(u64, Request)> {
+        if self.has_carry_over() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.queued_requests)
+    }
+
+    /// C3b-fix-b (B-M1) — send `request` now, stamped with the window events
+    /// applied (as each `send_*` does).
+    pub fn send_request(&mut self, request: Request) {
+        match request {
+            Request::Attack(pkt) => self.send_entity_attack(&pkt),
+            Request::Interact(pkt) => self.send_entity_interact(&pkt),
+            Request::Item(pkt) => self.send_item_action(&pkt),
+            Request::Device(pos) => self.send_device_interact(pos),
+        }
     }
 
     /// Ask the server to apply a right-click to the power device in `pos`
@@ -3087,5 +3201,140 @@ mod tests {
             matches!(&rc.state, ConnectionState::Failed(why) if why.contains("more world data")),
             "the session ends with a reason instead of losing part of the world"
         );
+    }
+
+    // ── C3b-fix-b: one send order, numbered carriers never dropped ─────────
+
+    fn drop_request(seq: u32) -> Request {
+        Request::Item(protocol::ItemActionPacket {
+            seq,
+            action: protocol::ItemAction::Drop {
+                hotbar_slot: 0,
+                held_kind: 0,
+                held_id: 0,
+                held_full: protocol::WireItem::None,
+            },
+            events_applied: 0,
+        })
+    }
+
+    /// The packet types the server end holds, in the order they were sent.
+    fn packet_types(srv: &dyn ServerTransport) -> Vec<PacketType> {
+        std::iter::from_fn(|| srv.try_recv_from_client())
+            .map(|pkt| protocol::deserialize_header(&pkt).expect("a packet").0)
+            .collect()
+    }
+
+    /// B-M1 — a request made while edits were unsent is held, and goes right
+    /// after the input that carries them: the server reads the placement,
+    /// then the Q-drop.
+    #[test]
+    fn a_request_behind_unsent_edits_goes_out_after_the_input_carrying_them() {
+        let (srv, mut rc) = connected_client();
+        rc.queue_request(10, drop_request(0));
+        assert!(rc.has_queued_requests());
+        assert!(packet_types(&*srv).is_empty(), "queued, not sent");
+        rc.send_input(&input_with([1, 2]));
+        // The edits all went, so the request follows at once.
+        let due = rc.take_queued_requests();
+        assert_eq!(due.iter().map(|(stamp, _)| *stamp).collect::<Vec<_>>(), vec![10]);
+        for (_, request) in due {
+            rc.send_request(request);
+        }
+        assert_eq!(packet_types(&*srv), vec![PacketType::ClientInput, PacketType::ItemAction]);
+        assert!(!rc.has_queued_requests());
+    }
+
+    /// B-L2 — edits still waiting in the carry-over keep the stamp of the
+    /// first of them; requests (and ops) made after it wait for the input
+    /// that carries it, and are released once the last has gone.
+    #[test]
+    fn the_carry_over_keeps_its_first_stamp_and_holds_requests_until_it_drains() {
+        let (srv, mut rc) = connected_client();
+        assert_eq!(rc.first_carried_stamp(), None);
+        rc.note_first_edit_stamp(Some(5));
+        rc.send_input(&input_with(0..10_000));
+        assert_eq!(rc.first_carried_stamp(), Some(5), "the burst was trimmed: its first edit's stamp stays");
+        rc.queue_request(8, drop_request(0));
+        // A later input's own edits don't move it while older ones wait.
+        rc.note_first_edit_stamp(Some(9));
+        rc.send_input(&input_with([50_000]));
+        assert_eq!(rc.first_carried_stamp(), Some(5));
+        assert!(rc.take_queued_requests().is_empty(), "made after edits that are still waiting");
+        assert!(rc.has_queued_requests(), "kept for later");
+        let mut guard = 0;
+        while rc.has_carry_over() {
+            rc.send_input(&protocol::InputPacket::default());
+            guard += 1;
+            assert!(guard < 100, "the carry-over drains");
+        }
+        assert_eq!(rc.first_carried_stamp(), None);
+        assert_eq!(rc.take_queued_requests().len(), 1, "released once the last edit went");
+        let _ = srv;
+    }
+
+    fn numbered_grant(window_event: u32) -> protocol::InventoryGrantPacket {
+        protocol::InventoryGrantPacket {
+            item_kind: protocol::item_kind::MATERIAL,
+            item_id: 4,
+            count: 1,
+            full_item: protocol::WireItem::None,
+            window_event,
+        }
+    }
+
+    /// B-L1 — a numbered carrier is never dropped by the per-poll caps: a
+    /// hitch that batches 300 grants into one poll applies all 300 (the
+    /// server applies its side of each number the client reports). The caps
+    /// still bound the unnumbered ones.
+    #[test]
+    fn three_hundred_numbered_grants_in_one_poll_are_all_kept() {
+        let (srv, mut rc) = joined_as(3);
+        for n in 1..=300 {
+            srv.send_to_client(&protocol::serialize_packet(PacketType::InventoryGrant, &numbered_grant(n)));
+        }
+        rc.poll();
+        assert_eq!(rc.pending_grants.len(), 300);
+        assert_eq!(rc.pending_grants.last().map(|g| g.window_event), Some(300), "in order, none skipped");
+        rc.pending_grants.clear();
+        for _ in 0..300 {
+            srv.send_to_client(&protocol::serialize_packet(PacketType::InventoryGrant, &numbered_grant(0)));
+        }
+        rc.poll();
+        assert_eq!(rc.pending_grants.len(), MAX_UNNUMBERED_PER_POLL, "unnumbered ones keep the cap");
+    }
+
+    /// B-L1 — the same for the outcomes (a furnace screen pushes every tick)
+    /// and for the own-life events: armour wear is numbered, a death is not.
+    #[test]
+    fn numbered_outcomes_and_armour_wear_survive_a_long_hitch() {
+        let (srv, mut rc) = joined_as(3);
+        for n in 1..=300 {
+            let set = protocol::WindowSlotSetPacket {
+                op_seq_applied: 0,
+                reason: protocol::slot_set_reason::CORRECTION,
+                sets: Vec::new(),
+                furnace: None,
+                window_event: n,
+            };
+            srv.send_to_client(&protocol::serialize_packet(PacketType::WindowSlotSet, &set));
+        }
+        for _ in 0..40 {
+            life_event(&srv, 3, protocol::PlayerEventType::Died);
+        }
+        for n in 1..=40u32 {
+            let ev = protocol::PlayerEventPacket {
+                player_index: 3,
+                event: protocol::PlayerEventType::ArmourWorn { hits: 1 },
+                window_event: 1000 + n,
+            };
+            srv.send_to_client(&protocol::serialize_packet(PacketType::PlayerEvent, &ev));
+        }
+        rc.poll();
+        assert_eq!(rc.pending_outcomes.len(), 300);
+        let worn = rc.pending_life_events.iter().filter(|e| matches!(e, OwnLifeEvent::ArmourWorn(..))).count();
+        let died = rc.pending_life_events.iter().filter(|e| matches!(e, OwnLifeEvent::Died(_))).count();
+        assert_eq!(worn, 40, "every numbered wear");
+        assert_eq!(died, MAX_LIFE_EVENTS_PER_POLL, "the unnumbered ones keep their cap");
     }
 }

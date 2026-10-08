@@ -2144,8 +2144,8 @@ pub struct ServerAnnouncePacket {
 ///   FU3 (2026-10-07, NO bump — no shape change): `entity_flags::
 ///   PRODUCT_NOT_READY` (bit 32) on a mirrored cow or sheep whose milk or
 ///   wool isn't ready; 0 means ready or unknown, so either side may be older.
-/// - v74 (2026-10-07, C2b — PROVISIONAL, the final number is assigned at
-///   merge): a joiner's crafting and Q-drops are mirrored on the server.
+/// - v74 (2026-10-07, C2b): a joiner's crafting and Q-drops are mirrored on
+///   the server.
 ///   `ItemAction` appends `Craft { grid, table }` (= 2) and `Drop` (= 3,
 ///   the held claim of `Eat`); both fire-and-forget (no outcome). The server
 ///   mirrors a craft on its shadow of the joiner's inventory and spawns a
@@ -2997,7 +2997,7 @@ mod tests {
         // v73 (2026-10-07, C2a): `ItemAction = 62` (Eat, Sleep),
         //   `ItemActionOutcome = 63`, `StateUpdatePacket.own_hunger` — a
         //   joiner's hunger, eating and sleep are the server's.
-        // v74 (2026-10-07, C2b, PROVISIONAL — renumbered at merge):
+        // v74 (2026-10-07, C2b):
         //   `ItemAction::Craft` (= 2) and `ItemAction::Drop` (= 3), both
         //   unanswered — a joiner's crafting and Q-drops are mirrored on the
         //   server.

@@ -2120,11 +2120,12 @@ impl HostedServer {
     /// Clamped to that grant (`window_events::return_unfit`, which also takes
     /// it back out of the server's copy of the window as far as that copy
     /// holds it), then spawned as a real ground item at the server body's
-    /// feet by the shared spill rule (`break_drops::spill_at_feet`, what a
-    /// full single-player breaker gets): everyone sees it and anyone can take
-    /// it; the joiner's own pickups follow its window for a while
+    /// feet, thrown as the joiner's own (`window_events::spawn_unfit`):
+    /// everyone sees it and anyone else can take it; the joiner can't for the
+    /// drop delay, and its own pickups follow its window for a while
     /// (`window_events::UNFIT_HOLD_TICKS`), so it isn't vacuumed straight
-    /// back. A body not in the world gets nothing spawned.
+    /// back. Only what came back is spawned (C3b-fix-b, B-M2). A body not in
+    /// the world gets nothing spawned.
     fn return_joiner_unfit(&mut self, i: usize, event: u32, count: u8) {
         let now = self.server.tick_counter;
         let Some(sp) = self.server.players.get_mut(i) else { return };
@@ -2132,9 +2133,10 @@ impl HostedServer {
             return;
         }
         let Some(stack) = crate::window_events::return_unfit(sp, event, count, now) else { return };
+        // C3b-fix-b (B-M2) — thrown from the joiner (it can't take it back
+        // for the Q-drop delay), and only what came back.
         let feet = sp.player.pos;
-        let seed = crate::break_drops::drop_seed(now, feet.x as i32, feet.y as i32, feet.z as i32);
-        crate::break_drops::spill_at_feet(&mut self.server.ecs, feet, &[stack], seed);
+        crate::window_events::spawn_unfit(&mut self.server.ecs, feet, stack, i);
     }
 
     /// C1 — joiner `i`'s accepted request (an interaction, C2a an eat) used
@@ -2901,6 +2903,11 @@ impl HostedServer {
                 && let Some(sp) = self.server.players.get_mut(i)
             {
                 sp.drop_bucket.note_inbound(self.server.tick_counter);
+                // C3b-fix-b (A-M1) — a tick that is not a catch-up forfeits
+                // what is left of the credit.
+                if !catching_up {
+                    sp.drop_bucket.note_not_catching_up();
+                }
             }
             // C2b verify M4 — a transport that is closed now (read after the
             // fill, which has taken every frame it handed over before it closed).

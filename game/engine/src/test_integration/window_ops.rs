@@ -234,6 +234,40 @@ impl Rig {
         self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
     }
 
+    /// C3b-fix-b — one input carrying a placement of `placed` at `cell` from
+    /// hotbar slot 0, whose hand holds `held` (as the game loop's input does:
+    /// the edit and its own hand).
+    fn send_placement(&mut self, cell: (i32, i32, i32), placed: block::BlockId, held: &Item) {
+        self.c.input_seq += 1;
+        let sp = &self.hs.server.players[self.c.slot];
+        let (kind, id) = crate::inventory::item_to_ref(held).to_wire();
+        let input = protocol::InputPacket {
+            tick: self.c.input_seq,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            yaw: sp.yaw,
+            pitch: sp.pitch,
+            health: 20.0,
+            held_kind: kind,
+            held_id: id,
+            hotbar_slot: Some(0),
+            block_changes: vec![protocol::BlockChange { x: cell.0, y: cell.1, z: cell.2, new_block: placed, meta: 0 }],
+            edit_hands: vec![(0, kind, id)],
+            events_applied: self.c.events,
+            ..Default::default()
+        };
+        self.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    }
+
+    /// A Q-drop of one `held` from hotbar slot `slot`, as `send_drop_request`
+    /// sends it.
+    fn send_drop(&mut self, slot: u8, held: &Item) {
+        let (held_kind, held_id) = crate::inventory::item_to_ref(held).to_wire();
+        let held_full = crate::inventory::item_to_wire_full(held);
+        self.send_action(protocol::ItemAction::Drop { hotbar_slot: slot, held_kind, held_id, held_full });
+    }
+
     /// The client asks to eat `held` from hotbar slot `slot` (claimed until
     /// the outcome, as `GameState::send_eat_request` does).
     fn eat(&mut self, slot: usize, held: Item) {
@@ -1120,4 +1154,146 @@ fn no_client_site_sends_an_item_action_craft() {
         });
         assert!(!raw.contains("ItemAction::Craft"), "{file} names ItemAction::Craft: the craft is a window op since v75");
     }
+}
+
+// ─── C3b-fix-b ───────────────────────────────────────────────────────────────
+
+/// The cell over the floor in front of the rig's joiner (air, in reach).
+const PLACE_AT: (i32, i32, i32) = (41, 80, 40);
+
+/// A joiner whose hotbar slot 0 holds one dirt, with 64 more in the bag and
+/// auto-refill on, places it and Q-drops: on the client the placement empties
+/// the slot, auto-refill moves the bag's 64 in, and the drop takes one of
+/// them. `placement_first` is the order the server reads them in. Returns
+/// the client's 36 slots and the server's.
+fn place_then_q(tag: &str, placement_first: bool) -> (Vec<Option<ItemStack>>, Vec<Option<ItemStack>>) {
+    let mut rig = Rig::dedicated(tag);
+    let dirt = Item::Block(block::DIRT);
+    rig.give(0, dirt.clone(), 1);
+    rig.give(20, dirt.clone(), 64);
+    rig.c.inv.auto_refill = true;
+    rig.sp().inventory.auto_refill = true;
+    // The client's own effects, in the order it made them.
+    assert!(rig.c.inv.take_placeable_from_hotbar(0).is_some(), "the placement");
+    assert!(rig.c.inv.take_one_from_hotbar(0).is_some(), "the Q-drop, from the refilled slot");
+    assert_eq!(rig.c.inv.slot(0).map(|s| s.count), Some(63));
+    if placement_first {
+        rig.send_placement(PLACE_AT, block::DIRT, &dirt);
+        rig.send_drop(0, &dirt);
+    } else {
+        rig.send_drop(0, &dirt);
+        rig.send_placement(PLACE_AT, block::DIRT, &dirt);
+    }
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.world().get_block(PLACE_AT.0, PLACE_AT.1, PLACE_AT.2), block::DIRT, "placed");
+    let slots = |inv: &Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
+    (slots(&rig.c.inv), slots(&rig.sp().inventory))
+}
+
+/// B-M1 — a placement, then Q, in one window: the server reads the placement
+/// first (the send path queues the request behind the unsent edit and sends
+/// it right after the input carrying it), so its auto-refill and its drop
+/// leave the layout the client's did. Read the other way round (the old
+/// order: the request overtook the edit) the layouts split and stay split.
+#[test]
+fn a_q_drop_after_a_placement_leaves_the_servers_layout_the_clients() {
+    let (client, server) = place_then_q("place-then-q", true);
+    assert_eq!(server, client, "placement, then drop: the same 36 slots");
+    let (client, server) = place_then_q("q-overtakes", false);
+    assert_ne!(server, client, "the old order (drop, then placement) split them: nothing was refilled");
+}
+
+/// B-M2 — the reviewer's modified-client scenario: a grant landed and was
+/// acked, its units then moved on in the server's copy (a real deposit), and
+/// a `GrantUnfit` claims them all. No item is made from the report.
+#[test]
+fn a_grant_unfit_for_units_the_server_no_longer_holds_spawns_nothing() {
+    let mut rig = Rig::dedicated("unfit-moved-on");
+    rig.drop_at_feet(ItemStack::new_block(block::COBBLESTONE, 64));
+    for _ in 0..4 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.grants, 1);
+    assert!(rig.ground_items().is_empty(), "the pickup took the item out of the world");
+    let event = rig.c.events;
+    for i in 0..36 {
+        rig.sp().inventory.set_slot(i, None);
+    }
+    rig.send_action(protocol::ItemAction::GrantUnfit { event, count: 64 });
+    rig.tick();
+    rig.tick();
+    assert!(rig.ground_items().is_empty(), "64 cobblestone were not made from a report");
+    let t = rig.sp().window_events.tally;
+    assert_eq!((t.unfit_returned, t.unfit_unbacked), (0, 64));
+}
+
+/// B-M2 — the honest ping-pong: the server's copy has room the client's
+/// lacks. The stack goes back down, thrown by the joiner, which then waits
+/// out the Q-drop delay instead of taking it straight back (it used to be
+/// picked up again after ten ticks, granted again, refused again). The loop
+/// is slowed to the delay's period, not closed (see the residual below).
+#[test]
+fn a_full_client_against_a_roomier_server_copy_does_not_pick_its_refusal_straight_back_up() {
+    let mut rig = Rig::dedicated("unfit-pingpong");
+    for i in 0..36 {
+        rig.c.inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
+    }
+    rig.drop_at_feet(ItemStack::new_material(MaterialId::Stick, 3));
+    for _ in 0..4 {
+        rig.tick();
+    }
+    assert_eq!((rig.c.grants, rig.c.unfit), (1, 3));
+    let thrown = rig.ground_items();
+    assert_eq!(thrown.len(), 1, "back on the ground");
+    assert_eq!(thrown[0].1, ItemStack::new_material(MaterialId::Stick, 3));
+    assert!(rig.sp().inventory.slot(0).is_none(), "and out of the server's copy, which had room");
+    // Not granted again while the dropper delay lasts (it used to be ten
+    // ticks: the all-player pickup delay of a natural drop).
+    for tick in 1..=25 {
+        rig.tick();
+        assert_eq!(rig.c.grants, 1, "not granted again {tick} ticks later");
+    }
+    // Residual (open until C3d): under this drift the server's copy has room
+    // for the whole hold, so once the delay (30 ticks) ends the joiner takes
+    // it again and the cycle repeats at that period, not at ten. Only the
+    // server owning the window ends it.
+    assert_eq!(rig.ground_items().len(), 1, "still there for anyone");
+}
+
+/// A-L1 — the table grace is for a table that was there. A modified client
+/// opens a "table" at an air cell in reach and clicks a result: the server
+/// has no table to be kind about, and refuses.
+#[test]
+fn an_open_at_a_cell_that_is_not_a_table_earns_no_grace() {
+    let mut rig = Rig::dedicated("grace-never-there");
+    rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let cell = [rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32 - 2];
+    assert_eq!(rig.world().get_block(cell[0], cell[1], cell[2]), block::AIR);
+    rig.open_table(cell);
+    rig.flush();
+    rig.tick();
+    let gone = rig.sp().table_gone_ticks;
+    assert!(gone.is_some_and(|n| n > window::SERVER_TABLE_GRACE_TICKS), "past the grace from the start: {gone:?}");
+    // The client believes in its table; the server refuses what it crafts.
+    let eye = rig.sp().player.eye_pos();
+    let fill = WindowClick::Autofill { example: example("Iron Pickaxe") };
+    let crafted = {
+        let c = &mut rig.c;
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &fill, false, eye, |_| block::CRAFTING_TABLE);
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+    };
+    assert!(matches!(crafted, ClickResult::Crafted(_)), "the client crafts at its imagined table");
+    rig.flush();
+    rig.tick();
+    assert!(rig.sp().cursor.is_none(), "the server crafted nothing");
+    assert!(rig.tally().window_refused >= 1, "and counts the refusal");
+    // A real table gets it, as ever.
+    let table = rig.place_table(-3);
+    rig.open_table(table);
+    rig.flush();
+    rig.tick();
+    assert_eq!(rig.sp().table_gone_ticks, None);
 }

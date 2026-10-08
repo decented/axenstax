@@ -36,7 +36,7 @@ It never refuses anything. The evidence shows the gap is wider than the shadow-g
 
 Only a server-owned layout gives both. Don't reopen this.
 
-**Ordering.** Window ops are requests: they wait behind the same client's earlier edits (FU4a) and are processed in arrival order with its inputs. That is what keeps placements, auto-refill and ops in the same order on both sides — given that the client sends them in the order it made them (C3a-fix-1: the ops logged before a tick's first unsent edit go before its input, the rest after; a mid-frame request sends the ops logged before it first) and that the server's own events apply at the client's count (above).
+**Ordering.** Window ops are requests: they wait behind the same client's earlier edits (FU4a) and are processed in arrival order with its inputs. That is what keeps placements, auto-refill and ops in the same order on both sides — given that the client sends them in the order it made them (C3a-fix-1: the ops logged before a tick's first unsent edit go before its input, the rest after; C3b-fix-b: a mid-frame request made while edits are unsent waits and goes right after the input carrying them, each after the ops logged before it — an edit made after it in the same tick still rides ahead of it) and that the server's own events apply at the client's count (above).
 
 ## 3. Rules that hold across every phase
 

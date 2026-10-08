@@ -22086,6 +22086,18 @@ impl super::GameState {
         self.remote_client.as_ref().map_or(0, |c| c.next_input_seq())
     }
 
+    /// C3b-fix-b (B-M1) — the input a request made now goes out ahead of: the
+    /// next one, or, when edits are unsent and it will be queued behind them
+    /// ([`Self::send_request`]), the one after (it goes right after the input
+    /// carrying those edits, so only that later input's acknowledgement
+    /// proves the server read it).
+    ///
+    /// Open: a request held past one input by a carry-over (a packet's
+    /// overflow, rare) is released a few ticks early.
+    fn request_input_seq(&self) -> u64 {
+        self.next_input_seq() + u64::from(self.edits_unsent())
+    }
+
     /// MP-D2b — the item in player `pidx`'s active hotbar slot, and the
     /// wire form a request claims it with (`ItemRef` pair + full fidelity).
     fn held_for_request(&self, pidx: usize) -> (usize, Option<crate::item::Item>, u8, u16, crate::protocol::WireItem) {
@@ -22104,7 +22116,7 @@ impl super::GameState {
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
     pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
-        let next_input = self.next_input_seq();
+        let next_input = self.request_input_seq();
         let seq = self.joiner_actions.record(
             crate::joiner_actions::Pending {
                 kind: crate::joiner_actions::Asked::Swing,
@@ -22114,23 +22126,20 @@ impl super::GameState {
             },
             next_input,
         );
-        self.flush_ops_before_edits();
-        if let Some(client) = self.remote_client.as_mut() {
-            client.send_entity_attack(&crate::protocol::EntityAttackPacket {
-                seq,
-                entity: target.id,
-                held_kind,
-                held_id,
-                held_full,
-                sprint,
-                sneak,
-                // C3a-fix-1 (C-L2) — the slot the swing was made from: the
-                // server's weapon wear starts there, as ours does.
-                hotbar_slot: hot.min(usize::from(u8::MAX)) as u8,
-                // Stamped by `RemoteClient::send_entity_attack`.
-                events_applied: 0,
-            });
-        }
+        self.send_request(crate::remote_client::Request::Attack(crate::protocol::EntityAttackPacket {
+            seq,
+            entity: target.id,
+            held_kind,
+            held_id,
+            held_full,
+            sprint,
+            sneak,
+            // C3a-fix-1 (C-L2) — the slot the swing was made from: the
+            // server's weapon wear starts there, as ours does.
+            hotbar_slot: hot.min(usize::from(u8::MAX)) as u8,
+            // Stamped by `RemoteClient::send_entity_attack`.
+            events_applied: 0,
+        }));
     }
 
     /// MP-D2b — ask the server for interaction `kind` with its mob `target`
@@ -22169,26 +22178,23 @@ impl super::GameState {
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
-        let next_input = self.next_input_seq();
+        let next_input = self.request_input_seq();
         let seq = self.joiner_actions.record(
             crate::joiner_actions::Pending { kind: asked, mob, hotbar_slot: hot, held },
             next_input,
         );
-        self.flush_ops_before_edits();
-        if let Some(client) = self.remote_client.as_mut() {
-            client.send_entity_interact(&crate::protocol::EntityInteractPacket {
-                seq,
-                entity,
-                kind,
-                held_kind,
-                held_id,
-                held_full,
-                hotbar_slot: hot as u8,
-                sneak,
-                // Stamped by `RemoteClient::send_entity_interact`.
-                events_applied: 0,
-            });
-        }
+        self.send_request(crate::remote_client::Request::Interact(crate::protocol::EntityInteractPacket {
+            seq,
+            entity,
+            kind,
+            held_kind,
+            held_id,
+            held_full,
+            hotbar_slot: hot as u8,
+            sneak,
+            // Stamped by `RemoteClient::send_entity_interact`.
+            events_applied: 0,
+        }));
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) eat the food in
@@ -22203,25 +22209,22 @@ impl super::GameState {
         if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
             return;
         }
-        let next_input = self.next_input_seq();
+        let next_input = self.request_input_seq();
         let seq = self.joiner_actions.record(
             crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
             next_input,
         );
-        self.flush_ops_before_edits();
-        if let Some(client) = self.remote_client.as_mut() {
-            client.send_item_action(&crate::protocol::ItemActionPacket {
-                seq,
-                action: crate::protocol::ItemAction::Eat {
-                    hotbar_slot: hot as u8,
-                    held_kind,
-                    held_id,
-                    held_full,
-                },
-                // Stamped by `RemoteClient::send_item_action`.
-                events_applied: 0,
-            });
-        }
+        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
+            seq,
+            action: crate::protocol::ItemAction::Eat {
+                hotbar_slot: hot as u8,
+                held_kind,
+                held_id,
+                held_full,
+            },
+            // Stamped by `RemoteClient::send_item_action`.
+            events_applied: 0,
+        }));
     }
 
     /// C2b — player `pidx` (a joiner) Q-drops one of what is in hotbar slot
@@ -22249,15 +22252,16 @@ impl super::GameState {
         let held_full = crate::inventory::item_to_wire_full(&stack.item);
         let seq = self.joiner_actions.unanswered();
         // C3a-fix-1 (B-L1) — a close logged before this drop reaches the
-        // server first: it put the stack back in the slot the drop takes from.
-        self.flush_ops_before_edits();
-        if let Some(client) = self.remote_client.as_mut() {
-            client.send_item_action(&crate::protocol::ItemActionPacket {
-                seq,
-                action: crate::protocol::ItemAction::Drop { hotbar_slot: slot as u8, held_kind, held_id, held_full },
-                events_applied: 0,
-            });
-        }
+        // server first: it put the stack back in the slot the drop takes
+        // from. C3b-fix-b (B-M1) — and the placements made before it go
+        // first too (the hand's take above is local, at its place; only the
+        // send waits): a placement that emptied the slot and auto-refilled
+        // it, then Q, is the server's order as well.
+        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
+            seq,
+            action: crate::protocol::ItemAction::Drop { hotbar_slot: slot as u8, held_kind, held_id, held_full },
+            events_applied: 0,
+        }));
     }
 
     /// C2a — ask the server to let player `pidx` (a joiner) sleep in the bed
@@ -22265,7 +22269,7 @@ impl super::GameState {
     /// there (the server set its own).
     pub(crate) fn send_sleep_request(&mut self, pidx: usize, bed: [i32; 3]) {
         let hot = self.players[pidx].hotbar_slot;
-        let next_input = self.next_input_seq();
+        let next_input = self.request_input_seq();
         let seq = self.joiner_actions.record(
             crate::joiner_actions::Pending {
                 kind: crate::joiner_actions::Asked::Sleep { bed },
@@ -22275,14 +22279,11 @@ impl super::GameState {
             },
             next_input,
         );
-        self.flush_ops_before_edits();
-        if let Some(client) = self.remote_client.as_mut() {
-            client.send_item_action(&crate::protocol::ItemActionPacket {
-                seq,
-                action: crate::protocol::ItemAction::Sleep { bed },
-                events_applied: 0,
-            });
-        }
+        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
+            seq,
+            action: crate::protocol::ItemAction::Sleep { bed },
+            events_applied: 0,
+        }));
     }
 
     /// C2a — the server's decision on one of our item actions. An accepted
@@ -22394,6 +22395,13 @@ impl super::GameState {
     /// ([`Self::flush_ops_before_edits`]), so what is left was logged after
     /// an edit the input carries and must reach the server after it (a
     /// placement, then E: the edit, then `OpenPlayer`).
+    ///
+    /// C3b-fix-b (B-M1, B-L2) — the requests queued behind those edits
+    /// ([`Self::send_request`]) go out here too, each after the ops logged
+    /// before it and before the ops logged after it: the one order this
+    /// client made them in. While edits still wait in the carry-over (a
+    /// packet's overflow), the ops and requests made after the first of them
+    /// wait for the input that carries it.
     fn flush_window_ops(&mut self) {
         let connected = self.remote_client.as_ref().is_some_and(|c| c.is_connected());
         for (pidx, p) in self.players.iter_mut().enumerate() {
@@ -22401,39 +22409,76 @@ impl super::GameState {
                 && connected
                 && let Some(client) = self.remote_client.as_mut()
             {
-                for logged in p.crafting_ui.take_ops(&p.inventory, &p.armour_slots) {
+                for (stamp, request) in client.take_queued_requests() {
+                    for logged in p.crafting_ui.ops.take_before(Some(stamp)) {
+                        client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
+                    }
+                    client.send_request(request);
+                }
+                let ops = match client.first_carried_stamp() {
+                    Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
+                    None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
+                };
+                for logged in ops {
                     client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
                 }
             } else {
                 p.crafting_ui.ops.discard();
             }
         }
+        if !connected && let Some(client) = self.remote_client.as_mut() {
+            // Not connected: nothing is sent, so nothing waits for it.
+            let _ = client.take_queued_requests();
+        }
     }
 
     /// C3a-fix-1 (B-L1) — one ordered send path: send player 0's window ops
     /// logged before its first unsent edit (all of them, if it has none),
-    /// when joined and connected. Called before every request that goes out
-    /// mid-frame (`EntityAttack`, `EntityInteract`, `ItemAction`,
-    /// `DeviceInteract`), ahead of the tick's input, and before window events
-    /// are applied: so the server reads ops, edits and requests in the order
-    /// this client made them (a Close, then a Q-drop: the Close first).
-    /// The ops logged after an unsent edit wait for the input carrying it.
+    /// when joined and connected, ahead of the tick's input and before
+    /// window events are applied. C3b-fix-b (B-L2) — an edit waiting in
+    /// `RemoteClient`'s carry-over counts as unsent, by its stamp.
+    ///
+    /// What the order covers: ops, edits and requests reach the server in the
+    /// order they were made, except that an edit made AFTER a queued request
+    /// in the same tick still rides the input ahead of it (the input is one
+    /// packet; the request follows it). A request made while edits are unsent
+    /// is queued, not sent ([`Self::send_request`]); one made with none goes
+    /// at once, after the ops logged before it.
     fn flush_ops_before_edits(&mut self) {
-        let first_edit = self.pending_block_changes.first_stamp();
         let Some(client) = self.remote_client.as_mut().filter(|c| c.is_connected()) else { return };
+        let first_edit = [self.pending_block_changes.first_stamp(), client.first_carried_stamp()]
+            .into_iter()
+            .flatten()
+            .min();
         let Some(p) = self.players.first_mut() else { return };
         for logged in p.crafting_ui.ops.take_before(first_edit) {
             client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
         }
     }
 
+    /// C3b-fix-b (B-M1) — send a request this client makes mid-frame
+    /// (`EntityAttack`, `EntityInteract`, `ItemAction`, `DeviceInteract`).
+    /// With edits unsent it waits, in the op log's order, and goes right
+    /// after the input that carries them ([`Self::flush_window_ops`]);
+    /// otherwise it goes now, after the ops logged before it.
+    fn send_request(&mut self, request: crate::remote_client::Request) {
+        let must_wait = self.edits_unsent();
+        if must_wait {
+            if let Some(client) = self.remote_client.as_mut() {
+                client.queue_request(crate::window_ops::order_stamp(), request);
+            }
+            return;
+        }
+        self.flush_ops_before_edits();
+        if let Some(client) = self.remote_client.as_mut() {
+            client.send_request(request);
+        }
+    }
+
     /// Wind/Copper/Electricity Task 2b — ask the host to right-click the power
     /// device at `pos` (a joiner). C3a-fix-1 — after the ops logged before it.
     fn send_device_interact(&mut self, pos: (i32, i32, i32)) {
-        self.flush_ops_before_edits();
-        if let Some(rc) = self.remote_client.as_mut() {
-            rc.send_device_interact(pos);
-        }
+        self.send_request(crate::remote_client::Request::Device(pos));
     }
 
     /// C3a-fix-1 — player 0's hotbar slot and the item in it, as an edit's
@@ -22461,8 +22506,12 @@ impl super::GameState {
     /// yet (this tick's, or a packet's overflow waiting in `RemoteClient`)?
     /// While it does it applies no window event: every edit of an input is
     /// made at the one count the input reports (`InputPacket.events_applied`).
+    ///
+    /// C3b-fix-b (B-M1) — and requests queued behind such edits count too:
+    /// they were made at the count they will go out with.
     fn edits_unsent(&self) -> bool {
-        !self.pending_block_changes.is_empty() || self.remote_client.as_ref().is_some_and(|c| c.has_carry_over())
+        !self.pending_block_changes.is_empty()
+            || self.remote_client.as_ref().is_some_and(|c| c.has_carry_over() || c.has_queued_requests())
     }
 
     /// C3a-fix-1 — apply the window-event carriers waiting in the inbox, in
@@ -22608,6 +22657,7 @@ impl super::GameState {
         // C3a-fix-1 — the edits, each with the slot and hand it was made
         // with (stamped when the selection changed; the rest are this one's).
         let hand_now = self.edit_hand_now();
+        let first_edit_stamp = self.pending_block_changes.first_stamp();
         let (block_changes, edit_hands) = self.pending_block_changes.take(hand_now);
         let slot = &self.players[0];
         let input = crate::protocol::InputPacket {
@@ -22685,6 +22735,9 @@ impl super::GameState {
             // B2b — once a local column's generation did not hash as the
             // server's note said, every input asks for everything pushed.
             joined_input.column_mismatch = self.chunk_intake.column_mismatch();
+            // C3b-fix-b (B-L2) — if the packet can't carry every edit, the
+            // first one's stamp stays with those that wait.
+            client.note_first_edit_stamp(first_edit_stamp);
             let slot = &mut self.players[0];
             let riding = slot.riding.is_some();
             let seq = self.own_prediction.send(

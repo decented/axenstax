@@ -16,10 +16,12 @@
 //! the ops logged before the input's first edit go before the input and the
 //! rest after it ([`OpLog::take_before`], `GameState::network_send_input`);
 //! a request sent mid-frame (`EntityAttack`, `EntityInteract`, `ItemAction`,
-//! `DeviceInteract`) first sends the ops logged before any unsent edit
-//! (`GameState::flush_ops_before_edits`). So a Close then a Q-drop in one
-//! tick reach the server as Close, Drop; a placement then E as the input,
-//! then `OpenPlayer`.
+//! `DeviceInteract`) with no edit unsent first sends the ops logged before
+//! it (`GameState::flush_ops_before_edits`); with edits unsent (C3b-fix-b) it
+//! waits and goes right after the input carrying them, in the op log's order
+//! (`GameState::send_request`). So a Close then a Q-drop in one tick reach
+//! the server as Close, Drop; a placement then E as the input, then
+//! `OpenPlayer`; a placement then a Q-drop as the input, then the drop.
 //!
 //! **Server.** [`serve_op`] applies the op to its copy of that joiner's
 //! window (`ServerPlayer`'s 36 slots, armour, cursor, craft grid and
@@ -473,7 +475,11 @@ pub fn serve_op(
         }
         WireWindowOp::OpenTable { cell } => {
             station = Station::Table { cell: *cell };
-            sp.table_gone_ticks = None;
+            // C3b-fix-b (A-L1) — the grace is for a table that WAS there: an
+            // open at a cell that isn't a crafting table gets none (counted
+            // past it from the start; `watch_table` only counts up).
+            sp.table_gone_ticks = (world.get_block(cell[0], cell[1], cell[2]) != crate::block::CRAFTING_TABLE)
+                .then_some(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1));
             None
         }
         WireWindowOp::SetAutoRefill { on } => {

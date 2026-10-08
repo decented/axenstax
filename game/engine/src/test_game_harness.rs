@@ -860,6 +860,52 @@ mod tests {
         assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(2));
     }
 
+    /// C3b-fix-b (B-M1) — a placement then a Q-drop in one tick, through the
+    /// REAL send path, with auto-refill on: the drop is queued behind the
+    /// unsent edit and goes right after the input carrying it, so the server
+    /// places (its auto-refill moves the bag's stack in), then drops: its 36
+    /// slots are the client's. (It used to read the drop first, find the
+    /// slot's last dirt, and never refill.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_placement_then_q_in_one_tick_reach_the_server_in_order() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("place-then-q");
+        let dirt = crate::item::ItemStack::new_block(crate::block::DIRT, 1);
+        let bag = crate::item::ItemStack::new_block(crate::block::DIRT, 64);
+        for (inv, s) in [(&mut hg.state.players[0].inventory, 0), (&mut server.server.players[slot].inventory, 0)] {
+            inv.set_slot(s, Some(dirt.clone()));
+            inv.set_slot(20, Some(bag.clone()));
+            inv.auto_refill = true;
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        let body = server.server.players[slot].player.pos;
+        let cell = (body.x.floor() as i32, body.y.floor() as i32 + 2, body.z.floor() as i32);
+        assert_eq!(server.server.world.get_block(cell.0, cell.1, cell.2), crate::block::AIR);
+        // One tick: the place arm's edit, then Q.
+        hg.state.players[0].inventory.take_placeable_from_hotbar(0);
+        hg.state.world.set_block(cell.0, cell.1, cell.2, crate::block::DIRT);
+        hg.state.pending_block_changes.push(crate::protocol::BlockChange {
+            x: cell.0,
+            y: cell.1,
+            z: cell.2,
+            new_block: crate::block::DIRT,
+            meta: 0,
+        });
+        hg.state.players[0].drop_ready_tick = 0;
+        hg.state.send_drop_request(0, 0);
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(63), "refilled, then one thrown");
+        for _ in 0..4 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        let slots = |inv: &crate::inventory::Inventory| inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>();
+        assert_eq!(slots(&sp.inventory), slots(&hg.state.players[0].inventory), "the same 36 slots");
+        assert_eq!(sp.possession.drops, 1, "the drop was spawned");
+        assert_eq!((sp.possession.matched, sp.possession.mismatched), (1, 0), "the placement matched its slot");
+    }
+
     /// C1 — a joiner's break through its REAL client: the survival break arm
     /// mines the block under its feet, tags it (`InputPacket.mined`) and takes
     /// nothing itself (`break_drops::take_yield`); the server yields the break
