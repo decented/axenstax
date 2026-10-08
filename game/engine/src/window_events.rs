@@ -364,6 +364,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             c.view.apply(&mut sp.container_sent.seen);
             if let Some(a) = applied.as_ref() {
                 note_correction_short(sp, &a.short, now);
+                note_correction_paid(sp, &a.paid);
             }
             note_correction_gives(sp, w.seq, &c, applied.map(|a| a.settled));
             if forced {
@@ -401,10 +402,25 @@ pub fn note_correction_short(sp: &mut ServerPlayer, short: &[(Item, u32)], now: 
 /// C3b-fix-c — apply a container op's own delta (R − own) to joiner `sp`'s
 /// server copy now, with the copy's correction debt (`window_ops`: when
 /// nothing reaches the client, its window already is its prediction), and
-/// tally a take that fell short ([`note_correction_short`]).
+/// tally a take that fell short ([`note_correction_short`]) and a give that
+/// paid a debt ([`note_correction_paid`], C3b-fix-e L4).
 pub fn apply_own_now(sp: &mut ServerPlayer, own: &crate::container_window::ItemDelta, now: u64) {
     let applied = sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, own);
     note_correction_short(sp, &applied.short, now);
+    note_correction_paid(sp, &applied.paid);
+}
+
+/// C3b-fix-e (L4) — a correction give paid a debt a short take left on
+/// joiner `sp`'s server copy (`paid`, item by item): the phantom came back
+/// another way (deposited back inside the round trip, its own correction's
+/// give paying the take that found it gone), so the shortfall is settled and
+/// comes off `correction_short` again (never below 0). The tally is the NET
+/// shortfall: honest fast looting leaves it at 0, and what stays counted is
+/// a shortfall nothing paid — the C3d signal.
+pub fn note_correction_paid(sp: &mut ServerPlayer, paid: &[(Item, u32)]) {
+    for (_, n) in paid {
+        sp.possession.correction_short = sp.possession.correction_short.saturating_sub(*n);
+    }
 }
 
 /// A correction applied to the server's copy: each give of the CLIENT's

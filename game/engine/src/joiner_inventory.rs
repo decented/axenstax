@@ -280,6 +280,16 @@ pub struct PossessionTally {
     /// deposits (BRIDGE until C3d; a locally fished item, unmirrored until
     /// C3c, is the honest case).
     pub container_believed: u32,
+    /// C3b-fix-e (C-M1) — units a container op put in by the client's claim
+    /// of a tool or armour piece the server's copy holds only at another
+    /// durability (worn on the client by a use not mirrored until C3c),
+    /// paired with the copy's own piece of that kind that its own run of the
+    /// op deposited: a swap — the container keeps the claimed piece and the
+    /// copy gives up its own (`window_ops::serve_container`). Each costs the
+    /// believed bound like a believed unit, but is tallied here, not in
+    /// `container_believed` (C3d gate 2's counter), so honest drift doesn't
+    /// pollute it.
+    pub durability_swap: u32,
     /// C3b-2-fix (M2) — units an accepted block use (`ItemAction::UseBlock`)
     /// took that the server's copy of the joiner's window didn't hold:
     /// believed within the joiner's bound (`window_ops::believe_pay`; BRIDGE
@@ -293,6 +303,11 @@ pub struct PossessionTally {
     /// other way (placed, dropped, eaten, crafted) before the correction
     /// landed. Owed (`container_window::CorrectionDebt`), and a dupe unless a
     /// later correction give pays it; it conserves nothing until C3d.
+    /// C3b-fix-e (L4) — the NET shortfall: a later correction give that pays
+    /// such a debt (the phantom was deposited back inside the round trip)
+    /// takes what it paid off again (`window_events::note_correction_paid`),
+    /// so honest fast looting leaves it at 0 and what stays counted is a
+    /// shortfall nothing paid.
     pub correction_short: u32,
     /// C3a-2a — ops after which the server's window digest differed from the
     /// one the client sent (log-only). Not counted for a creative joiner,
@@ -386,6 +401,7 @@ impl PossessionTally {
             self.container_refused,
             self.container_corrected,
             self.container_believed,
+            self.durability_swap,
             self.correction_short,
             self.use_believed,
             self.use_refused,
@@ -429,11 +445,13 @@ impl PossessionTally {
         if c3b.iter().any(|&n| n > 0) {
             line.push_str(&format!(
                 "; {} container op(s) refused, {} container correction(s) sent, {} unit(s) deposited believed, \
-                 {} unit(s) a container correction took short; {} unit(s) a block use took believed, \
+                 {} drifted tool(s) or armour piece(s) deposited as a swap, \
+                 {} unit(s) a container correction took short (net of later gives); {} unit(s) a block use took believed, \
                  {} block use(s) refused past the believed bound",
                 self.container_refused,
                 self.container_corrected,
                 self.container_believed,
+                self.durability_swap,
                 self.correction_short,
                 self.use_believed,
                 self.use_refused
@@ -581,10 +599,12 @@ mod tests {
         t.drops = 5;
         t.grant_overflow = 7;
         t.correction_short = 4;
+        t.durability_swap = 2;
         t.use_believed = 6;
         t.use_refused = 2;
         let line = t.summary("Crafter").unwrap();
         assert!(line.contains("4 unit(s) a container correction took short"), "{line}");
+        assert!(line.contains("2 drifted tool(s) or armour piece(s) deposited as a swap"), "{line}");
         assert!(line.contains("6 unit(s) a block use took believed, 2 block use(s) refused past the believed bound"), "{line}");
         assert!(
             line.contains(

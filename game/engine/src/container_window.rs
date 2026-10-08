@@ -787,13 +787,15 @@ impl CorrectionDebt {
 
     /// Apply `delta` to a window (`inv`, `grid`, `cursor`, `armour`): every
     /// take (`joiner_actions::take_correction`: its hint, the 36 slots, the
-    /// grid, the cursor, then the armour slots, an exact match first in each;
-    /// what it can't pay is owed), then every give (what is owed of its item
+    /// grid, the cursor, then the armour slots, an exact match first in all of
+    /// them, C3b-fix-e L1, then one of its kind; what it can't pay is owed), then every give (what is owed of its item
     /// first, then `Inventory::add_item`). Returns, per give in order, how
     /// many of its units were settled — a debt paid or landed in the window;
     /// the rest didn't fit (the client reports it, `ItemAction::GrantUnfit`)
     /// — and, per take that fell short, what it couldn't pay (C3b-fix-c:
-    /// the server tallies it, `correction_short`).
+    /// the server tallies it, `correction_short`), and per give that paid a
+    /// debt, what it paid (C3b-fix-e L4: the server takes it off that tally
+    /// again).
     pub fn apply(
         &mut self,
         inv: &mut Inventory,
@@ -824,6 +826,9 @@ impl CorrectionDebt {
                     paid += pay;
                 }
             }
+            if paid > 0 {
+                out.paid.push((stack.item.clone(), u32::from(paid)));
+            }
             self.owed.retain(|(_, n)| *n > 0);
             let rest = stack.count - paid;
             let unfit = if rest > 0 {
@@ -846,6 +851,9 @@ pub struct DebtApplied {
     /// C3b-fix-c (B-M1) — per take that fell short, in order: its item and
     /// the units it couldn't pay (now owed).
     pub short: Vec<(Item, u32)>,
+    /// C3b-fix-e (L4) — per give that paid a debt, in order: its item and the
+    /// units it paid (a shortfall settled after all).
+    pub paid: Vec<(Item, u32)>,
 }
 
 impl ContainerData {
@@ -1327,11 +1335,14 @@ mod tests {
         // Take 16: 10 found, 6 owed — and reported short (C3b-fix-c).
         let take = ItemDelta { take: vec![(0, stone(16))], give: vec![] };
         let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &take);
-        assert_eq!(applied, DebtApplied { settled: vec![], short: vec![(Item::Block(block::STONE), 6)] });
+        assert_eq!(applied, DebtApplied { settled: vec![], short: vec![(Item::Block(block::STONE), 6)], paid: vec![] });
         assert_eq!((inv.slot(9), debt.owed(&Item::Block(block::STONE))), (None, 6));
-        // Give 16: 6 pay the debt, 10 land.
+        // Give 16: 6 pay the debt, 10 land — and the 6 are reported paid
+        // (C3b-fix-e L4: the server nets them off `correction_short`).
         let give = ItemDelta { take: vec![], give: vec![stone(16)] };
-        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &give).settled, vec![16], "all 16 settled");
+        let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &give);
+        assert_eq!(applied.settled, vec![16], "all 16 settled");
+        assert_eq!(applied.paid, vec![(Item::Block(block::STONE), 6)]);
         assert_eq!((inv.slot(0), debt.is_empty()), (Some(&stone(10)), true));
         // A full window: the give's rest doesn't fit.
         for i in 0..SLOTS {

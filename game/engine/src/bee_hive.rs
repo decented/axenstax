@@ -298,4 +298,36 @@ mod tests {
         assert!(leave_hive(&mut h));
         assert!(!leave_hive(&mut h), "empty hive shouldn't permit bee exit");
     }
+
+    /// C3b-fix-e (decision 6) — a hive broken and placed again fills again.
+    /// A break drops the hive's state (C3b-2-fix M4, so the next hive there
+    /// starts empty), and since C3b-2-fix L7 a refused click creates none, so
+    /// a re-placed hive never got state and the honey sweep (which walks the
+    /// hives' states) never filled it. Placing one now gives it an empty
+    /// state (`World::set_block`, the path every seat's placement takes).
+    #[test]
+    fn a_hive_broken_and_placed_again_fills_with_a_bee_nearby() {
+        use crate::block::{AIR, BEE_HIVE};
+        let mut w = crate::world::World::new();
+        let cell = (4, 70, 1);
+        // A found hive, full of honey; single-player breaks it.
+        w.set_block(cell.0, cell.1, cell.2, BEE_HIVE);
+        w.insert_hive(cell, HiveData { bees_inside: 1, honey_level: MAX_HONEY_LEVEL });
+        w.set_block(cell.0, cell.1, cell.2, AIR);
+        let _ = crate::block_use::take_on_break(&mut w, cell, BEE_HIVE, false);
+        assert!(w.hive_at(cell).is_none(), "the broken hive's state went with it");
+        // Placed again, as a player places a block.
+        w.place_player_block(cell.0, cell.1, cell.2, BEE_HIVE);
+        assert_eq!(w.hive_at(cell), Some(&HiveData::default()), "a placed hive starts empty");
+        let mut ecs = hecs::World::new();
+        ecs.spawn((
+            crate::entity::Position(glam::Vec3::new(6.0, 70.0, 2.0)),
+            crate::entity::MobKind(crate::mob::MobType::Bee),
+        ));
+        accumulate_honey(&mut w, &ecs, HONEY_ACCUM_INTERVAL_TICKS);
+        assert_eq!(w.hive_at(cell).map(|h| h.honey_level), Some(1), "a bee nearby fills it");
+        // A hive that already has state keeps it when the block is set again.
+        w.set_block(cell.0, cell.1, cell.2, BEE_HIVE);
+        assert_eq!(w.hive_at(cell).map(|h| h.honey_level), Some(1));
+    }
 }

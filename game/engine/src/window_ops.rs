@@ -69,9 +69,15 @@
 //!   (placed, dropped, eaten, crafted) before its correction lands is a real
 //!   item until C3d; the correction's short take shows it
 //!   (`correction_short`). A correction's take is the one owed search
-//!   (`joiner_actions::take_owed_search`: an exact match first, the armour
-//!   slots too), and a believed deposit counts as held only what that take
-//!   can pay ([`believed_units`]).
+//!   (`joiner_actions::take_owed_search`: an exact match first everywhere,
+//!   C3b-fix-e L1, the armour slots too), and a believed deposit counts as
+//!   held only what that take can pay ([`believed_units`]).
+//! - C3b-fix-e (C-M1) — a tool or armour piece deposited at a durability
+//!   the copy doesn't hold (worn on the client by a use not mirrored until
+//!   C3c), while the copy's own run deposits its own piece of that kind, is
+//!   a swap ([`durability_swaps`]): the copy gives that piece up, so honest
+//!   drift duplicates nothing; it costs the bound and is tallied
+//!   `durability_swap`.
 //!
 //! [`container_push`] sends what others changed in an open container, once
 //! a tick.
@@ -400,7 +406,15 @@ pub struct Served {
     /// C3b-1 — units a container op put into the real container, by the
     /// client's claims, beyond what the server's own copy of its window held:
     /// believed deposits (a locally fished item, unmirrored until C3c).
+    /// C3b-fix-e (C-M1) — the swaps (`swapped`) are not among them.
     pub believed: u32,
+    /// C3b-fix-e (C-M1) — of the units the op put in beyond what the copy
+    /// held, those that were a swap: a tool or armour piece claimed at a
+    /// durability the copy doesn't hold, paired with the copy's own piece of
+    /// that kind that its own run deposited ([`durability_swaps`]). Charged
+    /// to the believed bound like `believed`, tallied apart
+    /// (`PossessionTally::durability_swap`).
+    pub swapped: u32,
     /// C3b-fix-a (C-L3) — units a container op would have put in believed
     /// beyond the joiner's bound ([`BelievedBucket`]): the op was refused.
     pub over_bound: u32,
@@ -413,7 +427,7 @@ impl Served {
     }
 
     fn plain(result: Option<ClickResult>, digest: u32) -> Self {
-        Served { result, digest, container_refused: false, correction: None, believed: 0, over_bound: 0 }
+        Served { result, digest, container_refused: false, correction: None, believed: 0, swapped: 0, over_bound: 0 }
     }
 }
 
@@ -752,7 +766,11 @@ enum Refusal {
 ///   joiner's bound ([`BelievedBucket`]; creative is unbounded): past it the
 ///   op is refused. BRIDGE: C3d refuses and corrects from the server's
 ///   window — replace when the flip lands (C3d). The same fabrication class
-///   as a claimed Q-drop (Spec 04 §4.2e).
+///   as a claimed Q-drop (Spec 04 §4.2e). C3b-fix-e (C-M1) — a believed tool
+///   or armour piece the copy holds only at another durability, whose own
+///   run deposits its piece of that kind in the same op, is a SWAP
+///   ([`durability_swaps`]): the copy gives up its piece, charged and
+///   tallied apart (`swapped`).
 /// - **The server's own copy** (`ServerPlayer`'s window) applies the op as
 ///   usual over a copy of the view the client predicted on (own): in
 ///   lockstep exactly the client's prediction, so its digest — taken with
@@ -846,6 +864,13 @@ fn serve_container(
     let believed_back: container_window::ItemCounts =
         believed_by_item.iter().map(|(item, n)| (item.clone(), -i64::from(*n))).collect();
     let own_net = container_window::counts_minus(&container_window::counts_minus(&r_gain, &own_gain), &believed_back);
+    // C3b-fix-e (C-M1) — a believed tool or armour piece the copy holds only
+    // at another durability, deposited by its own run in the same op, is a
+    // swap: the copy gives up its own piece (the give-back no longer returns
+    // it) and the container keeps the claimed one.
+    let swaps = durability_swaps(&believed_by_item, &own_gain, &own_net);
+    let swapped: u32 = swaps.iter().map(|(_, n)| u32::try_from(*n).unwrap_or(u32::MAX)).fold(0, u32::saturating_add);
+    let own_net = container_window::counts_minus(&own_net, &swaps);
     let own_delta = ItemDelta::from_counts(&own_net, hint);
     // The model: the client's mirror after its own prediction.
     sp.container_sent.seen = Some(MirrorView { cell, kind, contents: p.after.clone() });
@@ -863,7 +888,58 @@ fn serve_container(
         }
         None
     };
-    Served { result: Some(own.result), digest, container_refused: false, correction, believed, over_bound: 0 }
+    Served { result: Some(own.result), digest, container_refused: false, correction, believed: believed.saturating_sub(swapped), swapped, over_bound: 0 }
+}
+
+/// C3b-fix-e (C-M1) — the swaps in a container op. A tool or armour piece
+/// the op put in BELIEVED (`believed`: claimed at a durability the server's
+/// copy doesn't hold — worn on the client by a use not mirrored until C3c,
+/// or a modified client's "repair") is paired, one unit for one, with a unit
+/// of the same kind (`joiner_actions::same_item`) at another durability that
+/// the copy's own run of the op gave up (`own_gain`'s negative counts) and
+/// its give-back would return (`own_net`'s positive counts: R didn't put
+/// that exact piece in). Each pair is a swap: the container keeps the claimed
+/// piece, the copy gives up its own (the caller drops these units from the
+/// give-back), so honest drift conserves — one hoe in the world, not two
+/// (C3b-fix-c verify C-M1). A swap still costs the believed bound, so a
+/// modified client's repair stays bounded; it is tallied
+/// `durability_swap`, not `container_believed`. A believed unit with no
+/// partner stays believed. Returns the copy's paired units, as positive
+/// counts. Only a tool or armour piece can pair: for any other item a match
+/// by kind is the same item.
+fn durability_swaps(
+    believed: &[(crate::item::Item, u32)],
+    own_gain: &container_window::ItemCounts,
+    own_net: &container_window::ItemCounts,
+) -> container_window::ItemCounts {
+    let mut partners: Vec<(crate::item::Item, i64)> = own_gain
+        .iter()
+        .filter(|(_, n)| *n < 0)
+        .map(|(item, n)| {
+            let back = own_net.iter().find(|(i, _)| i == item).map_or(0, |(_, m)| (*m).max(0));
+            (item.clone(), n.abs().min(back))
+        })
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    let mut swaps: container_window::ItemCounts = Vec::new();
+    for (item, n) in believed {
+        let mut left = i64::from(*n);
+        for (own, k) in partners.iter_mut() {
+            if left == 0 {
+                break;
+            }
+            if own != item && crate::joiner_actions::same_item(own, item) && *k > 0 {
+                let m = left.min(*k);
+                *k -= m;
+                left -= m;
+                match swaps.iter_mut().find(|(i, _)| i == own) {
+                    Some((_, c)) => *c += m,
+                    None => swaps.push((own.clone(), m)),
+                }
+            }
+        }
+    }
+    swaps
 }
 
 /// The client's prediction of a container op, run by the server.
@@ -923,7 +999,9 @@ fn view_correction(sp: &ServerPlayer, real: container_window::ContainerRef, invo
 /// a waiting correction's take is already off it, so a phantom never counts
 /// as held), and by exact identity (`==`): a tool or armour piece counts only
 /// at its own durability, so a claimed piece unlike any the copy holds is
-/// believed (bounded, tallied) instead of paid with a different one.
+/// believed (bounded, tallied) instead of paid with a different one — or,
+/// when the copy's own run deposited its own piece of that kind in the same
+/// op, swapped for it (C3b-fix-e, [`durability_swaps`]).
 fn believed_units(sp: &ServerPlayer, r_gain: &container_window::ItemCounts) -> Vec<(crate::item::Item, u32)> {
     let w = crate::window_events::effective_window(sp);
     r_gain
@@ -1002,7 +1080,7 @@ fn refused_container_op(
     }
     let shown = sp.container_sent.seen.as_ref().map(|v| v.contents.as_ref());
     let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, shown);
-    Served { result: Some(ClickResult::Refused), digest, container_refused: true, correction, believed: 0, over_bound }
+    Served { result: Some(ClickResult::Refused), digest, container_refused: true, correction, believed: 0, swapped: 0, over_bound }
 }
 
 /// C3b-1 / C3b-fix-a — what changed in joiner `sp`'s open container beyond

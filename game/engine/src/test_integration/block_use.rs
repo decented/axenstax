@@ -538,6 +538,36 @@ fn a_joiner_scoops_and_shears_the_servers_hive() {
     rig.assert_lockstep(0, "after shearing (the server's shears wore the same)");
 }
 
+/// C3b-fix-e (decision 6) — a joiner breaks a filled hive and places it
+/// again: the server's re-placed hive starts with an empty state
+/// (`World::set_block`), so a bee nearby fills it, and the joiner is shown
+/// the honey. Before, a re-placed hive had no state (a refused click creates
+/// none since C3b-2-fix L7) and never filled.
+#[test]
+fn a_hive_a_joiner_breaks_and_places_again_fills_on_the_server() {
+    let mut rig = Rig::dedicated("hive-replaced", 1);
+    let cell = rig.place(2, block::BEE_HIVE);
+    let pos = (cell[0], cell[1], cell[2]);
+    rig.world().insert_hive(pos, crate::bee_hive::HiveData { bees_inside: 0, honey_level: 5 });
+    rig.edit(0, pos, block::AIR);
+    rig.ticks(2);
+    assert_eq!(rig.world().get_block(cell[0], cell[1], cell[2]), block::AIR, "broken");
+    assert!(rig.world().hive_at(pos).is_none(), "its state went with it");
+    rig.edit(0, pos, block::BEE_HIVE);
+    rig.ticks(2);
+    assert_eq!(rig.world().get_block(cell[0], cell[1], cell[2]), block::BEE_HIVE, "placed again");
+    assert_eq!(rig.world().hive_at(pos), Some(&crate::bee_hive::HiveData::default()), "the server's hive starts empty");
+    let mut bees = hecs::World::new();
+    bees.spawn((
+        crate::entity::Position(Vec3::new(cell[0] as f32 + 2.5, cell[1] as f32, cell[2] as f32 + 0.5)),
+        crate::entity::MobKind(crate::mob::MobType::Bee),
+    ));
+    crate::bee_hive::accumulate_honey(rig.world(), &bees, crate::bee_hive::HONEY_ACCUM_INTERVAL_TICKS);
+    assert_eq!(rig.world().hive_at(pos).map(|h| h.honey_level), Some(1), "a bee nearby fills it");
+    rig.ticks(2);
+    assert_eq!(rig.cs[0].view_at(cell), Some(&BlockView::Hive { honey_level: 1 }), "the joiner is shown the honey");
+}
+
 // ─── Refusals ──────────────────────────────────────────────────────────────
 
 /// Out of reach, in a foreign plot, a cell holding none of these blocks,

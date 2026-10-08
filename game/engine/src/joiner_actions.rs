@@ -76,8 +76,9 @@ use crate::protocol::{InteractKind, InteractOutcomePacket, ItemActionOutcomePack
 /// reads, in the order sent (one past its per-tick budget waits for its next
 /// tick, FU1); one it never answers — lost with a connection, or skipped by a
 /// per-type budget no honest client reaches — is forgotten when a later one
-/// is answered ([`JoinerActions::take`]), and the oldest waiting entry is
-/// forgotten once this many are outstanding.
+/// is answered ([`JoinerActions::take`]), and one entry is forgotten once
+/// this many are outstanding — C3b-fix-e (L5): never one whose claim still
+/// holds while another will do ([`JoinerActions::record`]).
 pub const MAX_PENDING: usize = 64;
 
 /// What a request asked the server for.
@@ -120,6 +121,19 @@ pub struct Pending {
 /// ([`JoinerActions::release`]).
 pub const UNTIL_SENT: u64 = u64::MAX;
 
+/// C3b-fix-e (L7) — what the send path did with a request
+/// ([`JoinerActions::settle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestFate {
+    /// It went out from the queue, ahead of input `next_input_seq`
+    /// (`RemoteClient::next_input_seq` right after the send).
+    Sent { next_input_seq: u64 },
+    /// It was dropped from the queue unsent: the link closed.
+    Discarded,
+    /// There was no connection to send it on.
+    NoConnection,
+}
+
 /// One remembered request.
 #[derive(Debug)]
 struct Entry {
@@ -148,10 +162,15 @@ impl JoinerActions {
     /// ahead of it, so once the server acknowledges that input it has read
     /// (and answered, or skipped) the request. C3b-fix-d (A-L1) — a request
     /// that will wait in the queue is recorded with [`UNTIL_SENT`] instead.
+    ///
+    /// C3b-fix-e (L5) — at [`MAX_PENDING`] one entry is forgotten to make
+    /// room, never one whose claim still holds while another will do
+    /// ([`Self::evict_one`]); a caller that would CLAIM an item asks
+    /// [`Self::can_afford`] first, which says no while every entry claims.
     pub fn record(&mut self, request: Pending, next_input_seq: u64) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
         if self.pending.len() >= MAX_PENDING {
-            self.pending.pop_front();
+            self.evict_one();
         }
         self.pending.push_back(Entry {
             seq: self.next_seq,
@@ -160,6 +179,46 @@ impl JoinerActions {
             request,
         });
         self.next_seq
+    }
+
+    /// C3b-fix-e (L5) — forget one entry to make room (the ledger is at
+    /// [`MAX_PENDING`]), the oldest of the first kind there is:
+    /// 1. one whose claim has ended (`claims == false`: the server has read
+    ///    it; its answer, if still to come, is lost);
+    /// 2. one already sent that claims no item (a swing, a sleep, a shear:
+    ///    only its answer is lost);
+    /// 3. one already sent (not [`UNTIL_SENT`]): its claim ends within a
+    ///    round trip anyway;
+    /// 4. one still queued that claims no item;
+    /// 5. the oldest of all — every entry is queued and claims an item, which
+    ///    only a caller that records without asking can meet (a request that
+    ///    claims is refused first, [`Self::can_afford`]).
+    ///
+    /// So a queued request's claim — which lives until it is sent, however
+    /// long a carry-over keeps it waiting — is never ended early by the
+    /// requests made behind it (C3b-fix-d verify L5: a queued Eat evicted by
+    /// 64 swings let a Q-drop of its bread pass, and the server ate it AND
+    /// dropped it).
+    fn evict_one(&mut self) {
+        let rank = |e: &Entry| -> u8 {
+            match (e.claims, e.ends_at_input == UNTIL_SENT, claims_an_item(&e.request)) {
+                (false, ..) => 1,
+                (true, false, false) => 2,
+                (true, false, true) => 3,
+                (true, true, false) => 4,
+                (true, true, true) => 5,
+            }
+        };
+        let at = (0..self.pending.len()).min_by_key(|&i| (rank(&self.pending[i]), i));
+        if let Some(at) = at {
+            self.pending.remove(at);
+        }
+    }
+
+    /// Is the ledger full with every entry still claiming
+    /// ([`Self::can_afford`]: no room for a new claim without ending one)?
+    fn full_of_claims(&self) -> bool {
+        self.pending.len() >= MAX_PENDING && self.pending.iter().all(|e| e.claims)
     }
 
     /// C2b — the sequence number for a request the server never answers
@@ -213,6 +272,23 @@ impl JoinerActions {
         self.pending.retain(|e| e.seq != seq);
     }
 
+    /// C3b-fix-e (L7) — the send path's one decision about request `seq`'s
+    /// claim, by what became of it (`GameState::flush_window_ops`,
+    /// `GameState::send_request`): sent from the queue ahead of input
+    /// `next_input_seq` → its claim ends with that input's acknowledgement
+    /// ([`Self::rebase`]); discarded from the queue (the link closed) or made
+    /// with no connection to send it on → it will never be answered, so it
+    /// is released at once ([`Self::release`]). `None` (a `DeviceInteract`,
+    /// which claims nothing): nothing to settle. A request sent at once was
+    /// recorded with the input it goes ahead of and needs none of this.
+    pub fn settle(&mut self, seq: Option<u32>, fate: RequestFate) {
+        let Some(seq) = seq else { return };
+        match fate {
+            RequestFate::Sent { next_input_seq } => self.rebase(seq, next_input_seq),
+            RequestFate::Discarded | RequestFate::NoConnection => self.release(seq),
+        }
+    }
+
     /// Forget everything (the session ended: leaving the world, and so every
     /// reconnect — `world_exit`).
     pub fn clear(&mut self) {
@@ -224,13 +300,18 @@ impl JoinerActions {
     /// holds (`inv`, plus `ui`'s grid and cursor, C2b) more of the item than
     /// the requests still claiming would use (N4: a request claims until the
     /// server acknowledges the input sent after it).
+    ///
+    /// C3b-fix-e (L5) — and, for one that would claim, only while the ledger
+    /// has room for it without ending a claim: at [`MAX_PENDING`] with every
+    /// entry still claiming, the answer is no, so the use does nothing here,
+    /// exactly as when it can't be afforded.
     pub fn can_afford(&self, inv: &Inventory, ui: &CraftingUi, kind: Asked, held: Option<&Item>) -> bool {
         let need = uses(kind);
         if need == 0 {
             return true;
         }
         let Some(item) = held else { return false };
-        self.can_spend(inv, ui, item, u32::from(need))
+        !self.full_of_claims() && self.can_spend(inv, ui, item, u32::from(need))
     }
 
     /// C2b — may the client spend `n` of `item` itself (a Q-drop, a craft)?
@@ -309,6 +390,12 @@ pub fn uses(kind: Asked) -> u8 {
     }
 }
 
+/// C3b-fix-e (L5) — does `request` claim an item while in flight (it uses
+/// one, and was made with one in hand)?
+fn claims_an_item(request: &Pending) -> bool {
+    uses(request.kind) > 0 && request.held.is_some()
+}
+
 /// Is `a` the item `b` was, for an outcome's purposes? A tool is the same
 /// tool by type and material, and an armour piece by slot and material
 /// (durability is what wears; the shadow's copy never does — C2b verify L6).
@@ -364,15 +451,16 @@ pub fn where_now(inv: &crate::inventory::Inventory, slot: usize, held: &Item) ->
 /// C3b-fix-c (decision 2) — THE owed-take search, one fn for every take of a
 /// joiner's window, run the same way by both copies of it (a LOCKSTEP rule:
 /// client and server must call this, or they diverge). It looks, in order:
-/// the hint slot `hint` (when it holds `held` by kind), then the 36 slots,
-/// then the crafting grid (row-major), then the cursor, then the armour
-/// slots — each only where the caller passes it. In each place an exact
-/// match (`==`, durability included) wins over a match by kind
-/// ([`same_item`]), so a tool owed is that tool wherever it can be told
-/// apart, never the player's own better one of its kind (C3b-fix verify
-/// B-L1, A-L4). Takes up to `n` units, one at a time, and returns the units
-/// it took, as stacks of equal items in the order taken: a tool or armour
-/// piece can differ from `held` by its durability.
+/// the hint slot `hint`, then the 36 slots, then the crafting grid
+/// (row-major), then the cursor, then the armour slots — each only where the
+/// caller passes it. C3b-fix-e (L1) — first for an exact match (`==`,
+/// durability included) in every one of those places, and only then, in the
+/// same order, for a match by kind ([`same_item`]): so a tool owed is that
+/// tool wherever it can be told apart, never the player's own one of its
+/// kind, not even one moved into the hint slot (C3b-fix verify B-L1, A-L4;
+/// C3b-fix-c verify L1). Takes up to `n` units, one at a time, and returns
+/// the units it took, as stacks of equal items in the order taken: a tool or
+/// armour piece can differ from `held` by its durability.
 pub(crate) fn take_owed_search(
     inv: &mut Inventory,
     mut grid: Option<&mut crate::window::CraftGrid>,
@@ -397,21 +485,41 @@ pub(crate) fn take_owed_search(
 }
 
 /// One unit of [`take_owed_search`]: the item it took, or `None` when no
-/// place it searches holds `held`.
+/// place it searches holds `held`. C3b-fix-e (L1) — two passes over the same
+/// places in the same order (the hint slot, the 36 slots, the grid, the
+/// cursor, the armour slots): an exact match (`==`) first EVERYWHERE, and
+/// only then one of its kind ([`same_item`]). So no place's kind match beats
+/// another place's exact one — the hint slot's included, where a worn tool
+/// swapped in inside the round trip was taken for the fresh phantom.
 fn take_one_owed(
     inv: &mut Inventory,
-    grid: Option<&mut crate::window::CraftGrid>,
-    cursor: Option<&mut Option<ItemStack>>,
-    armour: Option<&mut [Option<ArmourItem>; 4]>,
+    mut grid: Option<&mut crate::window::CraftGrid>,
+    mut cursor: Option<&mut Option<ItemStack>>,
+    mut armour: Option<&mut [Option<ArmourItem>; 4]>,
     hint: Option<usize>,
     held: &Item,
 ) -> Option<Item> {
     let exact = |s: &ItemStack| &s.item == held;
     let kind = |s: &ItemStack| same_item(&s.item, held);
+    let passes: [&dyn Fn(&ItemStack) -> bool; 2] = [&exact, &kind];
+    passes.into_iter().find_map(|matches| {
+        take_one_where(inv, grid.as_deref_mut(), cursor.as_deref_mut(), armour.as_deref_mut(), hint, matches)
+    })
+}
+
+/// One pass of [`take_one_owed`]: the first place, in the search's order,
+/// holding a stack `matches` accepts gives up one unit.
+fn take_one_where(
+    inv: &mut Inventory,
+    grid: Option<&mut crate::window::CraftGrid>,
+    cursor: Option<&mut Option<ItemStack>>,
+    armour: Option<&mut [Option<ArmourItem>; 4]>,
+    hint: Option<usize>,
+    matches: &dyn Fn(&ItemStack) -> bool,
+) -> Option<Item> {
     let slot = hint
-        .filter(|&h| h < 36 && inv.slot(h).is_some_and(kind))
-        .or_else(|| (0..36).find(|&i| inv.slot(i).is_some_and(exact)))
-        .or_else(|| (0..36).find(|&i| inv.slot(i).is_some_and(kind)));
+        .filter(|&h| h < 36 && inv.slot(h).is_some_and(matches))
+        .or_else(|| (0..36).find(|&i| inv.slot(i).is_some_and(matches)));
     if let Some(at) = slot {
         let mut stack = inv.take_slot(at)?;
         let item = stack.item.clone();
@@ -421,22 +529,18 @@ fn take_one_owed(
         }
         return Some(item);
     }
-    if let Some(grid) = grid {
-        let find = |f: &dyn Fn(&ItemStack) -> bool| (0..9).find(|&k| grid[k / 3][k % 3].as_ref().is_some_and(f));
-        if let Some(k) = find(&exact).or_else(|| find(&kind)) {
-            return take_one_from(&mut grid[k / 3][k % 3]);
-        }
+    if let Some(grid) = grid
+        && let Some(k) = (0..9).find(|&k| grid[k / 3][k % 3].as_ref().is_some_and(matches))
+    {
+        return take_one_from(&mut grid[k / 3][k % 3]);
     }
     if let Some(cursor) = cursor
-        && cursor.as_ref().is_some_and(kind)
+        && cursor.as_ref().is_some_and(matches)
     {
         return take_one_from(cursor);
     }
     let armour = armour?;
-    let find = |f: &dyn Fn(&ItemStack) -> bool| {
-        (0..armour.len()).find(|&i| armour[i].is_some_and(|p| f(&ItemStack { item: Item::Armour(p), count: 1 })))
-    };
-    let at = find(&exact).or_else(|| find(&kind))?;
+    let at = (0..armour.len()).find(|&i| armour[i].is_some_and(|p| matches(&ItemStack { item: Item::Armour(p), count: 1 })))?;
     armour[at].take().map(Item::Armour)
 }
 
@@ -471,8 +575,9 @@ pub fn take_owed(inv: &mut crate::inventory::Inventory, slot: usize, held: &Item
 /// The owed payment (C2b decision 5; C3a-2a: one rule for both copies of a
 /// joiner's window): `n` of `held`, from the 36 slots first ([`take_owed`]:
 /// the request's slot if it still holds one, else wherever one is), then the
-/// crafting grid (row-major), then the cursor — an exact match first in each
-/// ([`take_owed_search`], C3b-fix-c). Returns how many were taken.
+/// crafting grid (row-major), then the cursor — an exact match first in all
+/// of them, then one of its kind ([`take_owed_search`], C3b-fix-c; C3b-fix-e
+/// L1). Returns how many were taken.
 /// The client runs it on its own window ([`take_owed_held`]) when the
 /// outcome arrives, the server on its copy (`hosted_server::shadow_take_owed`,
 /// a `window_events::WindowEvent::Take`) once the client reports it applied
@@ -673,6 +778,49 @@ mod tests {
         // No exact one: one of its kind still pays.
         assert_eq!(take_owed(&mut inv, 0, &Item::Tool(fresh), 1), 1);
         assert!(inv.slot(3).is_none());
+    }
+
+    /// C3b-fix-e (L1) — exact before kind EVERYWHERE: a worn pickaxe swapped
+    /// into the hint slot is not taken for the fresh phantom elsewhere (the
+    /// hint used to be matched by kind before any exact match, which turned
+    /// worn into fresh). Then the grid, cursor and armour are searched
+    /// exactly before any place is searched by kind.
+    #[test]
+    fn an_exact_match_anywhere_beats_one_of_its_kind_in_the_hint_slot() {
+        use crate::armour::{ArmourItem, ArmourMaterial, ArmourSlot};
+        let fresh = Tool::new(ToolType::Pickaxe, ToolMaterial::Diamond);
+        let worn = Tool { durability: fresh.durability - 100, ..fresh };
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_tool(worn)));
+        inv.set_slot(10, Some(ItemStack::new_tool(fresh)));
+        // Both sides run the one search: the server's copy and the client.
+        assert_eq!(take_owed(&mut inv, 0, &Item::Tool(fresh), 1), 1);
+        assert_eq!(inv.slot(0), Some(&ItemStack::new_tool(worn)), "the worn one in the hint slot stays: no repair");
+        assert!(inv.slot(10).is_none(), "the fresh phantom was taken");
+        // The fresh one on the cursor, the worn one in the hint slot and a
+        // worn one in the grid: the cursor's exact match wins.
+        let mut inv = inv_with(0, ItemStack::new_tool(worn));
+        let mut grid: crate::window::CraftGrid = Default::default();
+        grid[0][0] = Some(ItemStack::new_tool(worn));
+        let mut cursor = Some(ItemStack::new_tool(fresh));
+        assert_eq!(take_owed_window(&mut inv, &mut grid, &mut cursor, 0, &Item::Tool(fresh), 1), 1);
+        assert_eq!(cursor, None, "the exact one on the cursor");
+        assert!(inv.slot(0).is_some() && grid[0][0].is_some(), "neither worn one was touched");
+        // An equipped exact chestplate beats a worn one in the hint slot.
+        let plate = ArmourItem::new(ArmourSlot::Chestplate, ArmourMaterial::Iron);
+        let mut worn_plate = plate;
+        worn_plate.durability = worn_plate.durability.saturating_sub(7);
+        let mut inv = inv_with(0, ItemStack { item: Item::Armour(worn_plate), count: 1 });
+        let mut armour = [None, Some(plate), None, None];
+        let (mut grid, mut cursor) = (Default::default(), None);
+        assert_eq!(take_correction(&mut inv, &mut grid, &mut cursor, &mut armour, 0, &Item::Armour(plate), 1), 1);
+        assert_eq!(armour[1], None, "the exact piece, taken off");
+        assert!(inv.slot(0).is_some(), "the worn one in the hint slot stays");
+        // No exact one anywhere: the hint slot's kind match pays first.
+        let mut inv = inv_with(0, ItemStack::new_tool(worn));
+        inv.set_slot(4, Some(ItemStack::new_tool(worn)));
+        assert_eq!(take_owed(&mut inv, 4, &Item::Tool(fresh), 1), 1);
+        assert!(inv.slot(4).is_none() && inv.slot(0).is_some(), "by kind, the hint first");
     }
 
     /// C3b-fix-c (decision 2) — a correction's take searches the hint, the
@@ -1146,5 +1294,82 @@ mod tests {
         }
         assert_eq!(a.len(), MAX_PENDING);
         assert!(a.take(s1).is_none(), "the oldest unanswered request was forgotten");
+    }
+
+    /// C3b-fix-e (L5) — a claim is never evicted: an Eat queued behind a
+    /// long carry-over, then 64 more requests while it waits (swings, each
+    /// still claiming). The ledger stays bounded by forgetting the oldest
+    /// swing, never the Eat: a Q-drop of its bread is refused locally, and
+    /// so is a new request that would claim an item while every entry still
+    /// claims. Once the Eat is sent and read, the bread is free.
+    #[test]
+    fn a_full_ledger_never_evicts_a_claim_and_refuses_a_new_claiming_request() {
+        let bread = Item::Material(MaterialId::Bread);
+        let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 2));
+        let ui = CraftingUi::new();
+        let mut a = JoinerActions::default();
+        let eat = a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT);
+        let swing = Pending { kind: Asked::Swing, mob: Some(MobType::Pig), hotbar_slot: 1, held: Some(sword()) };
+        let first_swing = a.record(swing.clone(), 7);
+        for _ in 0..MAX_PENDING {
+            a.record(swing.clone(), 7);
+        }
+        assert_eq!(a.len(), MAX_PENDING, "bounded");
+        assert!(a.take(first_swing).is_none(), "the oldest sent swing was forgotten, not the queued Eat");
+        // `take` drained nothing older than an entry it didn't find: the Eat
+        // still claims one of the two loaves.
+        assert!(a.eat_in_flight(), "the Eat still claims");
+        assert!(a.can_spend(&inv, &ui, &bread, 1), "one loaf is unclaimed");
+        assert!(!a.can_spend(&inv, &ui, &bread, 2), "a Q-drop of the claimed loaf is refused");
+        assert!(
+            !a.can_afford(&inv, &ui, Asked::Interact(InteractKind::Feed), Some(&bread)),
+            "full, and every entry still claims: a new claiming request is refused (it would evict a claim)"
+        );
+        assert!(a.can_afford(&inv, &ui, Asked::Swing, Some(&sword())), "one that claims nothing may still go");
+        // The queue drains: the Eat goes out ahead of input 8, and the
+        // server reads every input up to it.
+        a.rebase(eat, 8);
+        a.acknowledged(8);
+        assert!(!a.eat_in_flight());
+        assert!(a.can_spend(&inv, &ui, &bread, 2), "the claims ended: both loaves are free");
+        assert!(a.can_afford(&inv, &ui, Asked::Interact(InteractKind::Feed), Some(&bread)), "and a new claim may go");
+    }
+
+    /// C3b-fix-e (L7) — the send path's one decision about a request's
+    /// claim: sent (now from the queue) → rebased to the input after it;
+    /// discarded unsent, or no connection to send it on → released. A
+    /// request with no seq (a device interact) settles nothing.
+    #[test]
+    fn the_send_path_rebases_a_sent_request_and_releases_one_never_sent() {
+        let bread = Item::Material(MaterialId::Bread);
+        let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 1));
+        let ui = CraftingUi::new();
+        let eat = |a: &mut JoinerActions| {
+            a.record(Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) }, UNTIL_SENT)
+        };
+        // Sent from the queue ahead of input 12: claims until 12 is read.
+        let mut a = JoinerActions::default();
+        let seq = eat(&mut a);
+        a.settle(Some(seq), RequestFate::Sent { next_input_seq: 12 });
+        a.acknowledged(11);
+        assert!(!a.can_spend(&inv, &ui, &bread, 1), "an acknowledgement from before the send ends nothing");
+        a.acknowledged(12);
+        assert!(a.can_spend(&inv, &ui, &bread, 1), "read: free");
+        assert!(a.take(seq).is_some(), "the entry stays for its answer");
+        // Discarded from the queue (the link closed): released at once.
+        let mut a = JoinerActions::default();
+        let seq = eat(&mut a);
+        a.settle(Some(seq), RequestFate::Discarded);
+        assert!(a.can_spend(&inv, &ui, &bread, 1) && a.len() == 0, "released");
+        // No connection to send it on: released at once.
+        let mut a = JoinerActions::default();
+        let seq = eat(&mut a);
+        a.settle(Some(seq), RequestFate::NoConnection);
+        assert!(a.can_spend(&inv, &ui, &bread, 1) && a.len() == 0, "released");
+        // No seq: nothing settles.
+        let mut a = JoinerActions::default();
+        eat(&mut a);
+        a.settle(None, RequestFate::NoConnection);
+        assert_eq!(a.len(), 1);
     }
 }

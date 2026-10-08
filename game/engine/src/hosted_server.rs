@@ -2369,7 +2369,8 @@ impl HostedServer {
     ///   delta (none for a refusal) when the client reports it applied it;
     ///   its container slots are already the real ones. Container
     ///   convergence is tallied apart from lockstep (C-L4):
-    ///   `container_corrected`, `container_believed`, `container_refused`.
+    ///   `container_corrected`, `container_believed`, `container_refused`
+    ///   (C3b-fix-e: and `durability_swap`).
     fn handle_window_op(&mut self, i: usize, pkt: &protocol::WindowOpPacket) {
         let creative = self.server.play_mode.is_creative();
         let now = self.server.tick_counter;
@@ -2388,6 +2389,18 @@ impl HostedServer {
         crate::window_ops::note_served(sp, pkt, &served, creative);
         if served.container_refused {
             sp.possession.container_refused = sp.possession.container_refused.saturating_add(1);
+        }
+        if served.swapped > 0 {
+            // C3b-fix-e (C-M1) — a drifted tool or armour piece deposited as
+            // a swap: honest until C3c mirrors the wearing uses, so a debug
+            // line, tallied apart from `container_believed` (C3d gate 2).
+            sp.possession.durability_swap = sp.possession.durability_swap.saturating_add(served.swapped);
+            log::debug!(
+                "possession check (log-only): {} put {} tool(s) or armour piece(s) in a shared container at a \
+                 durability the server's copy didn't hold — swapped for the copy's own",
+                sp.display_name,
+                served.swapped,
+            );
         }
         if served.believed > 0 {
             sp.possession.container_believed = sp.possession.container_believed.saturating_add(served.believed);

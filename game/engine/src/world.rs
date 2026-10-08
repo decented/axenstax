@@ -2036,6 +2036,19 @@ impl World {
                 log.push((x, y, z));
             }
         }
+        // C3b-fix-e (decision 6) — a hive written where no hive state is gets
+        // an empty one, so the honey sweep (`bee_hive::accumulate_honey`,
+        // which walks hive states) fills it. Every seat's placement passes
+        // here (single-player's and a host's `place_player_block`, a joiner's
+        // edit on the server, a broadcast on a client). A break drops the
+        // old state (`block_use::take_on_break` / `drop_left_state`), and
+        // since C3b-2-fix (L7) a refused click creates none, so a re-placed
+        // hive never filled. World-gen's found hive overwrites this at once
+        // with its stocked one; a save restore's hive (`insert_hive`) does the
+        // same, and one already restored is kept.
+        if block == crate::block::BEE_HIVE && self.hive_at((x, y, z)).is_none() {
+            self.insert_hive((x, y, z), crate::bee_hive::HiveData::default());
+        }
     }
 
     // ── Spec 06 §2.2 — player-placed mask (anti-farming) ─────────────

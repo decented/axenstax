@@ -1117,6 +1117,10 @@ fn a_loser_depositing_its_phantom_back_inside_the_round_trip_duplicates_nothing(
     assert_eq!(rig.cs[loser].count(&stone_item), 0, "the loser holds none");
     assert_eq!(rig.world_total(&stone_item, chest), (16, 16), "16 stone in the world (clients' view, servers' view)");
     assert_eq!(rig.tally(loser).container_believed, 0, "the phantom was never believed");
+    // C3b-fix-e (L4) — the correction's take fell short (the phantom was
+    // back in the chest), and the deposit's own give paid that debt: no
+    // net shortfall, so honest fast looting leaves C3d's signal at 0.
+    assert_eq!(rig.tally(loser).correction_short, 0, "the shortfall a later give paid is not counted");
 }
 
 /// C-H1 scenario 2 — the loser's phantom stack sits in its slot when, inside
@@ -1754,6 +1758,42 @@ fn a_claimed_fresh_pickaxe_while_the_copy_holds_a_worn_one_is_believed() {
     assert_eq!(real_slot(&rig, chest, 0), Some(ItemStack::new_tool(fresh)));
     assert_eq!(rig.tally(0).container_believed, 1, "believed, tallied");
     assert_eq!(rig.sp(0).inventory.slot(5), Some(&ItemStack::new_tool(worn)), "the worn one stays: no repair");
+}
+
+/// C3b-fix-e (C-M1, decision 1) — an honest joiner's hoe wore on its client
+/// (tilling, unmirrored until C3c) but not in the server's copy, which holds
+/// it fresh in the same slot. The joiner shift-deposits it. The chest gets
+/// the client's worn hoe (believed by `==`), and the copy's own run deposited
+/// ITS fresh one: the two are a swap, so the copy gives up its piece instead
+/// of being handed it back — one hoe in the world, not two. A swap still
+/// costs the bound, and is tallied `durability_swap`, never
+/// `container_believed` (C3d gate 2's counter).
+#[test]
+fn a_deposit_of_a_tool_whose_durability_drifted_is_a_swap_not_a_dupe() {
+    let mut rig = Rig::dedicated("drifted-hoe", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest(chest_cell(chest), ChestData::new());
+    rig.open(0, chest);
+    let fresh = crate::crafting::Tool::new(crate::crafting::ToolType::Hoe, crate::crafting::ToolMaterial::Iron);
+    let worn = crate::crafting::Tool { durability: fresh.durability - 10, ..fresh };
+    rig.sp(0).inventory.set_slot(3, Some(ItemStack::new_tool(fresh)));
+    rig.cs[0].inv.set_slot(3, Some(ItemStack::new_tool(worn)));
+    let eye = rig.eye(0);
+    assert_eq!(rig.cs[0].click(ContainerClick::Deposit { slot: 3, all: true }, eye), ClickResult::Done);
+    rig.cs[0].flush();
+    rig.tick();
+    rig.tick();
+    rig.report(0);
+    assert_eq!(real_slot(&rig, chest, 0), Some(ItemStack::new_tool(worn)), "the chest holds the client's hoe");
+    assert_eq!(rig.cs[0].inv.slot(3), None, "the client's slot is not reverted");
+    let hoes = |inv: &Inventory| {
+        inv.slots_iter().flatten().filter(|s| matches!(&s.item, Item::Tool(t) if t.tool_type == fresh.tool_type)).count()
+    };
+    assert_eq!(hoes(&rig.sp(0).inventory), 0, "the server's copy gave up its own hoe: no second hoe");
+    let t = rig.tally(0);
+    assert_eq!((t.durability_swap, t.container_believed), (1, 0), "a swap, not a believed deposit");
+    assert_eq!(t.correction_short, 0);
+    assert_eq!(rig.sp(0).container_sent.believed.units(), crate::window_ops::BELIEVED_BUCKET_UNITS - 1, "it cost the bound");
 }
 
 /// B-M1 scenario 2 (decision 2) — the loser of a race for an iron

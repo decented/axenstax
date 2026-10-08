@@ -22438,7 +22438,8 @@ impl super::GameState {
     /// C3b-fix-d (A-L1) — a queued request's claim is rebased as it goes, to
     /// the input after it (`RemoteClient::next_input_seq` now): only that
     /// input's acknowledgement proves the server read it. Not connected,
-    /// every queued request is discarded and its claim released.
+    /// every queued request is discarded and its claim released. C3b-fix-e
+    /// (L7) — both decisions are `JoinerActions::settle`'s (unit-tested).
     fn flush_window_ops(&mut self) {
         let connected = self.remote_client.as_ref().is_some_and(|c| c.is_connected());
         for (pidx, p) in self.players.iter_mut().enumerate() {
@@ -22452,9 +22453,8 @@ impl super::GameState {
                     }
                     let seq = request.seq();
                     client.send_request(request);
-                    if let Some(seq) = seq {
-                        self.joiner_actions.rebase(seq, client.next_input_seq());
-                    }
+                    let fate = crate::joiner_actions::RequestFate::Sent { next_input_seq: client.next_input_seq() };
+                    self.joiner_actions.settle(seq, fate);
                 }
                 let ops = match client.first_carried_stamp() {
                     Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
@@ -22472,9 +22472,7 @@ impl super::GameState {
             // behind a carry-over — and nothing it would have used stays
             // claimed (C3b-fix-d, A-L1).
             for (_, request) in client.discard_queued_requests() {
-                if let Some(seq) = request.seq() {
-                    self.joiner_actions.release(seq);
-                }
+                self.joiner_actions.settle(request.seq(), crate::joiner_actions::RequestFate::Discarded);
             }
         }
     }
@@ -22513,12 +22511,11 @@ impl super::GameState {
     /// otherwise it goes now, after the ops logged before it.
     ///
     /// C3b-fix-d (A-L1) — with no connection it is dropped unsent, and its
-    /// claim released: nothing will ever answer it.
+    /// claim released: nothing will ever answer it (C3b-fix-e L7:
+    /// `JoinerActions::settle`).
     fn send_request(&mut self, request: crate::remote_client::Request) {
         if !self.remote_client.as_ref().is_some_and(|c| c.is_connected()) {
-            if let Some(seq) = request.seq() {
-                self.joiner_actions.release(seq);
-            }
+            self.joiner_actions.settle(request.seq(), crate::joiner_actions::RequestFate::NoConnection);
             return;
         }
         let must_wait = self.edits_unsent();
