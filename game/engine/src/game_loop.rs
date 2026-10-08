@@ -4127,6 +4127,59 @@ impl super::GameState {
         self.remote_client.is_some()
     }
 
+    /// C3c-3r — a joiner's refusal: the toast, and nothing else. Callers
+    /// have checked [`Self::joined`] before changing the inventory or the
+    /// world.
+    fn refuse_joined(&mut self, msg: &str) {
+        self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
+    }
+
+    /// The Plan Build panel's "Auto" choice. C3c-3r — refused while joined
+    /// (the build locks the bag's blocks and places cells with no server
+    /// mirror yet): the panel stays open, so Guided is one click away.
+    pub(crate) fn choose_auto_build(&mut self, pidx: usize, plan: &crate::plan::PlanData, anchor: [i32; 3], rot: u8) {
+        if self.joined() {
+            self.refuse_joined(crate::remote_mobs::JOINED_AUTO_BUILD_TOAST);
+            return;
+        }
+        let player_positions: Vec<(i32, i32, i32)> = self
+            .players
+            .iter()
+            .map(|p| {
+                (
+                    p.player.pos.x.floor() as i32,
+                    p.player.pos.y.floor() as i32,
+                    p.player.pos.z.floor() as i32,
+                )
+            })
+            .collect();
+        let mode = if self.is_creative { "creative" } else { "survival" };
+        let inv = &mut self.players[pidx].inventory;
+        let res = crate::plan::start_build(
+            &mut self.world,
+            &self.registry,
+            mode,
+            plan.clone(),
+            rot,
+            (anchor[0], anchor[1], anchor[2]),
+            inv,
+            &player_positions,
+        );
+        if pidx == 0 {
+            self.toast = Some((
+                match res {
+                    Ok(_) => format!("Building «{}»…", plan.name),
+                    Err(_) => "Couldn't build that here.".to_string(),
+                },
+                Instant::now() + std::time::Duration::from_secs(3),
+            ));
+        }
+        self.players[pidx].pending_build_choice = None;
+        if pidx == 0 {
+            self.capture_cursor();
+        }
+    }
+
     /// C3b-2-fix (M1) — may player `pidx`'s hand spend one of what its
     /// selected hotbar slot holds (a placement, a sown seed or reed, a crop
     /// accelerator)? Always, unless joined and every one its window holds is
@@ -5218,26 +5271,39 @@ impl super::GameState {
         // credits owner escrow). MUST use `tick_counter` (monotonic).
         // GameState-tick only (the Furnace single-player precedent;
         // multiplayer settlement is v2).
-        let _ = crate::auction::tick_auctions(
-            &mut self.world, &mut self.ecs, self.tick_counter,
-        );
+        // C3c-3r — not on a joined client: its economy blocks are refused
+        // (a lot can't be set), and a settlement would act on its private copy.
+        if !self.joined() {
+            let _ = crate::auction::tick_auctions(
+                &mut self.world, &mut self.ecs, self.tick_counter,
+            );
+        }
         // Spec 38 (Blueprint / Cyanotype) — advance every laid-out
         // Latent Print's develop_state by one sun-tick when conditions
         // allow (full sky-light at the cell above + daytime per
         // `brigand::is_night_at`). Transitions are ignored here for v1;
         // future polish can broadcast them as block-updates.
-        let _ = crate::latent_print::tick_develop(
-            &mut self.world, eff_world_time,
-        );
+        // C3c-3r — neither develop tick runs on a joined client: a stub
+        // attachment it was pushed would flip to Developed in its own copy,
+        // independent of the host's (the server owns attachments from C3c-3b).
+        if !self.joined() {
+            let _ = crate::latent_print::tick_develop(
+                &mut self.world, eff_world_time,
+            );
+        }
         // Phase E (survival develop step) — advance every laid Blueprint
         // face-attachment whose embedded plan is still Latent and which
         // catches full direct sun. Unlike the retired block-entity path
         // above, we DO consume the transitions: each Latent → Developed
         // flip rebuilds its chunk so the decal recolours pale → blue
         // immediately.
-        let developed_attachments = crate::latent_print::tick_develop_attachments(
-            &mut self.world, eff_world_time,
-        );
+        let developed_attachments = if self.joined() {
+            Vec::new()
+        } else {
+            crate::latent_print::tick_develop_attachments(
+                &mut self.world, eff_world_time,
+            )
+        };
         for (pos, _face_idx) in developed_attachments {
             self.rebuild_chunk_at(pos.0, pos.1, pos.2);
         }
@@ -10649,8 +10715,8 @@ impl super::GameState {
             // Drop one of the held hotbar item (Q key). Requires the cursor
             // to be captured so a Q-press during chat/inventory doesn't leak
             // through. Tosses the dropped stack along the look direction.
-            // C2b — a joiner's drop is the server's (`send_drop_request`),
-            // except a Plan's, which has no wire form.
+            // C2b — a joiner's drop is the server's (`send_drop_request`).
+            // C3c-3r — a Plan has no wire form: a joiner keeps it (toast).
             if intent.drop_item
                 && intent.cursor_captured
                 && !self.players[pidx].crafting_ui.open
@@ -10660,8 +10726,12 @@ impl super::GameState {
                     self.players[pidx].inventory.hotbar_slot(slot_idx).map(|s| &s.item),
                     Some(crate::item::Item::Plan(_))
                 );
-                if self.joined() && !plan {
-                    self.send_drop_request(pidx, slot_idx);
+                if self.joined() {
+                    if plan {
+                        self.refuse_joined(crate::remote_mobs::JOINED_PLAN_DROP_TOAST);
+                    } else {
+                        self.send_drop_request(pidx, slot_idx);
+                    }
                 } else if let Some(stack) = self.players[pidx].inventory.take_one_from_hotbar(slot_idx) {
                     let eye = self.players[pidx].player.eye_pos();
                     let fwd = self.players[pidx].camera.forward();
@@ -11579,7 +11649,26 @@ impl super::GameState {
                                     .world
                                     .face_attachment_at((pos[0], pos[1], pos[2]), fi)
                                     .map(crate::blueprint_attach::recovered_item_for);
-                                if let Some(item) = peel_item {
+                                // C3c-3r — a joiner can't lift a laid Blueprint:
+                                // attachments are the server's (C3c-3b), so the
+                                // peel would hand it a body-less stub of a Plan
+                                // the host still owns. The strike is spent (no
+                                // break behind it) and the latch holds a held
+                                // click to one toast.
+                                let joined_blueprint = self.joined()
+                                    && matches!(
+                                        self.world.face_attachment_at((pos[0], pos[1], pos[2]), fi),
+                                        Some(crate::world::FaceAttachment::Blueprint(_))
+                                    );
+                                if joined_blueprint {
+                                    if !self.players[pidx].peel_latch {
+                                        self.refuse_joined(crate::remote_mobs::JOINED_BLUEPRINT_LIFT_TOAST);
+                                        self.players[pidx].breaking_pos = None;
+                                        self.players[pidx].break_progress = 0;
+                                        self.players[pidx].peel_latch = true;
+                                    }
+                                    true
+                                } else if let Some(item) = peel_item {
                                     self.world.remove_face_attachment((pos[0], pos[1], pos[2]), fi);
                                     let stack = crate::item::ItemStack {
                                         item,
@@ -11786,14 +11875,16 @@ impl super::GameState {
                                 // blueprint paper → BLUEPRINT_PAPER, captured
                                 // plan → the Plan item. `recovered_item_for`
                                 // covers all three variants.
-                                for att in self
-                                    .world
-                                    .remove_face_attachments_at((pos[0], pos[1], pos[2]))
-                                    .into_iter()
-                                    .flatten()
-                                {
+                                // C3c-3r — a joined client grants nothing for a laid Blueprint and
+                                // leaves it standing in its world copy (`take_recoverable_attachments`).
+                                let joined = self.joined();
+                                for item in crate::blueprint_attach::take_recoverable_attachments(
+                                    &mut self.world,
+                                    (pos[0], pos[1], pos[2]),
+                                    joined,
+                                ) {
                                     let stack = crate::item::ItemStack {
-                                        item: crate::blueprint_attach::recovered_item_for(&att),
+                                        item,
                                         count: 1,
                                     };
                                     if self.players[pidx].inventory.add_item(stack.clone()).is_some() {
@@ -12092,14 +12183,16 @@ impl super::GameState {
                                     // block, blank blueprint paper →
                                     // BLUEPRINT_PAPER, captured plan → the Plan
                                     // item. `recovered_item_for` covers all three.
-                                    for att in self
-                                        .world
-                                        .remove_face_attachments_at((pos[0], pos[1], pos[2]))
-                                        .into_iter()
-                                        .flatten()
-                                    {
+                                    // C3c-3r — a joined client grants nothing for a laid Blueprint and
+                                    // leaves it standing in its world copy (`take_recoverable_attachments`).
+                                    let joined = self.joined();
+                                    for item in crate::blueprint_attach::take_recoverable_attachments(
+                                        &mut self.world,
+                                        (pos[0], pos[1], pos[2]),
+                                        joined,
+                                    ) {
                                         let stack = crate::item::ItemStack {
-                                            item: crate::blueprint_attach::recovered_item_for(&att),
+                                            item,
                                             count: 1,
                                         };
                                         if self.players[pidx].inventory.add_item(stack.clone()).is_some() {
@@ -13397,6 +13490,12 @@ impl super::GameState {
                                     // Satoshi the guide — his own warm, scripted
                                     // dialogue, not the generic quest one.
                                     self.players[pidx].dialogue_satoshi = Some(target);
+                                } else if builder_workstation.is_some() && self.joined() {
+                                    // C3c-3r — a commission is an economy
+                                    // action: refused for a joiner, no dialogue.
+                                    self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                                    self.players[pidx].place_cooldown = 8;
+                                    continue;
                                 } else if let Some(ws) = builder_workstation {
                                     self.players[pidx].open_commission_villager = Some(target);
                                     self.players[pidx].pending_commission =
@@ -13671,6 +13770,14 @@ impl super::GameState {
                                 // made the captured build a block too tall.
                                 // Quietly no-op if the player isn't aiming at
                                 // a top face of a solid block.
+                                // C3c-3r — a joiner lays nothing: attachments
+                                // are the server's to own (C3c-3b), so the
+                                // Plan stays in hand and the world copy as is.
+                                if self.joined() {
+                                    self.refuse_joined(crate::remote_mobs::JOINED_PLAN_LAY_TOAST);
+                                    self.players[pidx].place_cooldown = 8;
+                                    continue;
+                                }
                                 if self.play_mode.can_edit_world()
                                     && let Some(pos) = self.players[pidx].target_block {
                                         let face = self.players[pidx].target_face;
@@ -13822,6 +13929,11 @@ impl super::GameState {
                         }
                         self.players[pidx].place_cooldown = 8;
                     } else if target_blk == block::VENDOR_BLOCK {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 21 Phase 5 — open the vendor dialog. Owner
                         // vs buyer view is chosen inside the dialog hook
                         // by comparing vendor.owner to LocalPlayer(pidx).
@@ -13833,7 +13945,7 @@ impl super::GameState {
                         // are never the real ones (a worldgen loot chest's
                         // generated copy, or nothing), so a pull would move a
                         // private copy of shared loot. Economy blocks are
-                        // refused for joiners at C3d.
+                        // refused for joiners (C3c-3r).
                         let depot = (!self.joined())
                             .then(|| crate::rail::depot_chest_for(vpos, |c| self.world.chest_at((c.0, c.1, c.2)).is_some()))
                             .flatten();
@@ -13851,6 +13963,11 @@ impl super::GameState {
                         if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::BOUNTY_BOARD {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 33 Phase 8 — open the Mob Bounty Board
                         // dialog. Server-issued; no owner/buyer split.
                         self.players[pidx].open_bounty_board =
@@ -13858,6 +13975,11 @@ impl super::GameState {
                         if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::TIP_JAR {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 34 — open the Tip Jar dialog. Owner vs
                         // tipper view chosen inside the dialog hook by
                         // comparing TipJarData.owner with the current
@@ -13867,6 +13989,11 @@ impl super::GameState {
                         if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::REPAIR_BENCH {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 35 — open the Repair Bench dialog. Stateless;
                         // repairs the player's currently-held tool.
                         self.players[pidx].open_repair_bench =
@@ -13874,12 +14001,22 @@ impl super::GameState {
                         if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::MARKET_BELL {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 37 — open the Market Hub directory panel.
                         self.players[pidx].open_market_hub =
                             Some((pos[0], pos[1], pos[2]));
                         if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::AUCTION_BLOCK {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 38 — open the Auction dialog (owner config /
                         // status, or bidder bid view).
                         self.players[pidx].open_auction =
@@ -13887,6 +14024,11 @@ impl super::GameState {
                         if pidx == 0 { self.release_cursor(); }
                         continue;
                     } else if target_blk == block::BAZAAR_BLOCK {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 39 — open the Bazaar sell dialog.
                         self.players[pidx].open_bazaar =
                             Some((pos[0], pos[1], pos[2]));
@@ -13924,6 +14066,11 @@ impl super::GameState {
                         self.players[pidx].place_cooldown = 8;
                         continue;
                     } else if target_blk == block::DRAFTING_TABLE {
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_ECONOMY_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         // Spec 26 — right-clicking a Drafting Table looks
                         // for the Builder villager who has claimed it and
                         // opens the Commission dialog. Falls through to
@@ -17379,42 +17526,7 @@ impl super::GameState {
                 );
                 match choice {
                     crate::hud_ui::BuildChoice::Auto => {
-                        let player_positions: Vec<(i32, i32, i32)> = self
-                            .players
-                            .iter()
-                            .map(|p| {
-                                (
-                                    p.player.pos.x.floor() as i32,
-                                    p.player.pos.y.floor() as i32,
-                                    p.player.pos.z.floor() as i32,
-                                )
-                            })
-                            .collect();
-                        let mode = if self.is_creative { "creative" } else { "survival" };
-                        let inv = &mut self.players[pidx].inventory;
-                        let res = crate::plan::start_build(
-                            &mut self.world,
-                            &self.registry,
-                            mode,
-                            plan.clone(),
-                            rot,
-                            (anchor[0], anchor[1], anchor[2]),
-                            inv,
-                            &player_positions,
-                        );
-                        if pidx == 0 {
-                            self.toast = Some((
-                                match res {
-                                    Ok(_) => format!("Building «{}»…", plan.name),
-                                    Err(_) => "Couldn't build that here.".to_string(),
-                                },
-                                Instant::now() + std::time::Duration::from_secs(3),
-                            ));
-                        }
-                        self.players[pidx].pending_build_choice = None;
-                        if pidx == 0 {
-                            self.capture_cursor();
-                        }
+                        self.choose_auto_build(pidx, &plan, anchor, rot);
                     }
                     crate::hud_ui::BuildChoice::GuideBlocks
                     | crate::hud_ui::BuildChoice::GuideLayers => {

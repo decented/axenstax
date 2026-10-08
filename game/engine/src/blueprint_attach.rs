@@ -80,6 +80,29 @@ pub fn recovered_item_for(att: &FaceAttachment) -> crate::item::Item {
     }
 }
 
+/// C3c-3r — take every face attachment off the block at `pos` and return what
+/// each recovers to. A single-player or host seat gets all of them
+/// (`recovered_item_for`). A JOINED client's copy of a laid Blueprint is the
+/// server's to own (C3c-3b): it grants nothing for one and leaves it standing
+/// in the client's world copy. Wallpaper and blank paper are unchanged.
+pub fn take_recoverable_attachments(
+    world: &mut World,
+    pos: (i32, i32, i32),
+    joined: bool,
+) -> Vec<crate::item::Item> {
+    let mut items = Vec::new();
+    for (face_idx, att) in world.remove_face_attachments_at(pos).into_iter().enumerate() {
+        match att {
+            Some(att @ FaceAttachment::Blueprint(_)) if joined => {
+                world.set_face_attachment(pos, face_idx, att);
+            }
+            Some(att) => items.push(recovered_item_for(&att)),
+            None => {}
+        }
+    }
+    items
+}
+
 /// Resolve the blueprint paper tile beneath a clicked block by scanning straight
 /// down its column. Returns the first `(x, y, z)` at or below `clicked` whose TOP
 /// face carries a `BlueprintBlank` attachment — scanning from `clicked.1` down to
@@ -322,5 +345,34 @@ mod tests {
         if let crate::item::Item::Plan(p) = recovered {
             assert_eq!(p.name, plan.name, "recovered plan should carry the same data");
         }
+    }
+
+    // ── C3c-3r ──
+
+    fn attachments_on(world: &mut World, pos: (i32, i32, i32)) {
+        world.set_face_attachment(pos, 0, FaceAttachment::Blueprint(Box::new(PlanData::debug_3x3_stone())));
+        world.set_face_attachment(pos, 2, FaceAttachment::Wallpaper(block::OAK_PLANKS));
+        world.set_face_attachment(pos, 4, FaceAttachment::BlueprintBlank);
+    }
+
+    #[test]
+    fn a_seat_that_owns_its_world_recovers_every_attachment() {
+        let (mut world, _r, pos) = solid_floor();
+        attachments_on(&mut world, pos);
+        let items = take_recoverable_attachments(&mut world, pos, false);
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().any(|i| matches!(i, crate::item::Item::Plan(_))));
+        assert!(world.remove_face_attachments_at(pos).iter().all(Option::is_none), "all removed");
+    }
+
+    #[test]
+    fn a_joiner_recovers_wallpaper_and_paper_but_leaves_a_blueprint_standing() {
+        let (mut world, _r, pos) = solid_floor();
+        attachments_on(&mut world, pos);
+        let items = take_recoverable_attachments(&mut world, pos, true);
+        assert_eq!(items.len(), 2, "wallpaper and blank paper only: {items:?}");
+        assert!(!items.iter().any(|i| matches!(i, crate::item::Item::Plan(_))), "no Plan granted");
+        assert!(matches!(world.face_attachment_at(pos, 0), Some(FaceAttachment::Blueprint(_))), "left in place");
+        assert!(world.face_attachment_at(pos, 2).is_none() && world.face_attachment_at(pos, 4).is_none());
     }
 }

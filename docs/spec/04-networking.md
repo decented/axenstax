@@ -2042,6 +2042,20 @@ blueprint paper (`Erase`), an empty bucket on a live rubber log
   export carries other people's inventories. Left until the per-npub sidecar
   step replaces them.
 
+#### Plan and economy refusals (C3c-3r, 2026-10-08; no wire change)
+
+The server cannot yet mirror a Plan (it has no wire form: `WireItem` carries no Plan) or an economy block's private state, so a joined client (`GameState::joined()`) is refused these actions. Each refusal changes nothing on the client (no take, no world change, no sound, no edit or request sent) and shows a toast; the texts are constants in `remote_mobs` beside `JOINED_INTERACTION_TOAST`. Single-player and a host's own seats are unchanged.
+
+| Action | Toast |
+|---|---|
+| Q on a held Plan (it used to be thrown into the client's own world and picked up again) | "A Plan stays with you here." |
+| Laying a Latent Plan flat | "Lay Plans flat in your own worlds." |
+| First-strike peel of a laid Blueprint attachment (the strike is spent; the block is not broken behind it) | "Only the one who laid it can lift it here." |
+| Plan Build, Auto (the panel stays open; Guided build-along is unchanged) | "Auto build works in your own worlds. Use Guided here." |
+| Opening a vendor, tip jar, auction, market hub, bazaar, bounty board, repair bench or drafting table (commission), or clicking a Builder villager | "Shops and markets work in your own worlds for now." |
+
+Also for a joined client: breaking a block that carries a laid Blueprint grants no Plan and leaves the attachment standing in the client's world copy (`blueprint_attach::take_recoverable_attachments`; wallpaper and blank paper still come back, the server owns attachments from C3c-3b); the Latent-to-Developed sun tick (`tick_develop`, `tick_develop_attachments`) and the auction settlement sweep do not run on it (a render stub pushed as Latent would otherwise develop on its own clock, independent of the host's). Pinned by `test_integration::joiner_refusals` (source lint: each refused arm tests `joined()` before its first inventory or world change) and the `game_harness_a_joiner_cannot_*` / `game_harness_a_joiners_plan_is_not_dropped` GPU tests. Not changed here: the capture, hang and capture-commit arms (C3c-3a) and wallpaper and blank-paper recoveries (C3c-3b).
+
 ### 4.2f Item actions (as built, protocol v73, C2a; v74, C2b; v79, C3b-2)
 
 A joiner's eating and sleeping are requests the server decides, because the

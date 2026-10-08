@@ -42,6 +42,7 @@ pub mod window_ops; // C3a-2a — the server mirrors a joiner's inventory window
 pub mod shared_containers; // C3b-1 — shared chests, dispensers and furnaces for joiners.
 pub mod block_use; // C3b-2 — composters, drying racks, campfires, item frames and hives for joiners.
 pub mod use_requests; // C3c-2 — a joiner's bow, slingshot, carts, fishing and campfire lighting run on the server.
+pub mod joiner_refusals; // C3c-3r — joiners are refused the Plan and economy actions the server cannot mirror yet.
 pub mod state_budget; // T1-5 — bounded server→client StateUpdates.
 pub mod joiner_authority;
 // D1 — a host lends its world to its server: one world, one sim.

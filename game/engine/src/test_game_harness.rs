@@ -2610,4 +2610,339 @@ mod tests {
             );
         }
     }
+
+    // ─── C3c-3r ────────────────────────────────────────────────────────────
+
+    /// C3c-3r — the toast text on a client now, if any.
+    fn toast_text(hg: &HeadlessGame) -> Option<String> {
+        hg.state.toast.as_ref().map(|(t, _)| t.clone())
+    }
+
+    /// C3c-3r — a latent Plan (the lay-flat kind).
+    fn latent_plan() -> crate::item::ItemStack {
+        let mut data = crate::plan::PlanData::debug_3x3_stone();
+        data.develop_state = crate::plan::DevelopState::Latent { exposure_ticks: 0 };
+        crate::item::ItemStack { item: crate::item::Item::Plan(data), count: 1 }
+    }
+
+    /// C3c-3r (decision 1) — Q on a held Plan while joined: the Plan stays in
+    /// the slot, nothing is thrown, nothing is asked of the server, and the
+    /// toast says so. Alone, the same Q throws it.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_plan_is_not_dropped() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("plan-q");
+        let plan = crate::item::ItemStack { item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()), count: 1 };
+        hg.state.players[0].inventory.set_slot(0, Some(plan.clone()));
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        let press_q = |hg: &mut HeadlessGame| {
+            hg.state.players[0].drop_ready_tick = 0;
+            hg.state.input.cursor_captured = true;
+            hg.state.input.drop_item = true;
+            hg.frames(1);
+        };
+        press_q(&mut hg);
+        assert_eq!(hg.state.players[0].inventory.slot(0), Some(&plan), "the Plan is still in hand");
+        assert_eq!(ground_units(&hg.state.ecs, &plan.item), 0, "nothing thrown into the client's own world");
+        assert_eq!(hg.state.joiner_actions.len(), 0, "no request sent");
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_PLAN_DROP_TOAST));
+        harness_step(&mut server, &mut hg);
+        assert_eq!(ground_units(&server.server.ecs, &plan.item), 0, "and nothing on the server's ground");
+        assert_eq!(server.server.players[slot].possession.drops, 0);
+        // The same Q alone throws it.
+        hg.state.remote_client = None;
+        hg.state.toast = None;
+        press_q(&mut hg);
+        assert!(hg.state.players[0].inventory.slot(0).is_none(), "alone, the Plan is thrown");
+        assert_eq!(ground_units(&hg.state.ecs, &plan.item), 1);
+    }
+
+    /// C3c-3r (decision 2) — right-clicking a floor with a Latent Plan while
+    /// joined lays nothing: the Plan stays in hand and the floor is bare.
+    /// Alone, the same click lays it.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_cannot_lay_a_plan_flat() {
+        isolate_saves();
+        let (mut hg, mut server, _slot) = joined_window_client("plan-lay");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let floor = (feet[0], feet[1] - 1, feet[2] - 2);
+        let plan = latent_plan();
+        hg.state.players[0].inventory.set_slot(0, Some(plan.clone()));
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        aim_at(&mut hg, glam::Vec3::new(floor.0 as f32 + 0.5, floor.1 as f32 + 1.02, floor.2 as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.players[0].inventory.slot(0), Some(&plan), "the Plan is still in hand");
+        assert!(hg.state.world.face_attachment_at(floor, crate::mesh::Face::Top.index()).is_none(), "nothing laid");
+        assert_eq!(hg.state.joiner_actions.len(), 0);
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_PLAN_LAY_TOAST));
+        // Alone, the same click lays it.
+        hg.state.remote_client = None;
+        hg.state.toast = None;
+        right_click(&mut hg);
+        assert!(
+            matches!(hg.state.world.face_attachment_at(floor, crate::mesh::Face::Top.index()), Some(crate::world::FaceAttachment::Blueprint(_))),
+            "alone, the Plan is laid"
+        );
+        assert!(hg.state.players[0].inventory.slot(0).is_none(), "and spent");
+    }
+
+    /// Hold the left button on `cell` for `frames` frames (the server body
+    /// held where the client stands), the break arm's own clock.
+    fn strike(hg: &mut HeadlessGame, aim: glam::Vec3, frames: u32) {
+        aim_at(hg, aim);
+        hg.state.input.cursor_captured = true;
+        hg.state.input.left_held = true;
+        for _ in 0..frames {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+        }
+        hg.state.input.left_held = false;
+        hg.frames(2);
+    }
+
+    /// C3c-3r (decision 3, peel) — a joiner's strike on a face that carries
+    /// a laid Blueprint lifts nothing: the attachment stays, the block stays,
+    /// the bag gains no Plan, and the toast says so. Alone, the same strike
+    /// peels it into a Plan.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_cannot_peel_a_blueprint() {
+        isolate_saves();
+        let (mut hg, mut server, _slot) = joined_window_client("peel");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let floor = (feet[0], feet[1] - 1, feet[2] - 2);
+        let top = crate::mesh::Face::Top.index();
+        hg.state.world.set_face_attachment(
+            floor,
+            top,
+            crate::world::FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(false))),
+        );
+        harness_step(&mut server, &mut hg);
+        let aim = glam::Vec3::new(floor.0 as f32 + 0.5, floor.1 as f32 + 1.02, floor.2 as f32 + 0.5);
+        strike(&mut hg, aim, 30);
+        assert!(
+            matches!(hg.state.world.face_attachment_at(floor, top), Some(crate::world::FaceAttachment::Blueprint(_))),
+            "the Blueprint is still laid"
+        );
+        assert_eq!(hg.state.world.get_block(floor.0, floor.1, floor.2), crate::block::STONE, "and the block under it");
+        let plans = hg.state.players[0].inventory.slots_iter().flatten().filter(|s| matches!(s.item, crate::item::Item::Plan(_))).count();
+        assert_eq!(plans, 0, "no Plan in the bag");
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_BLUEPRINT_LIFT_TOAST));
+        // Alone, the same strike peels it.
+        hg.state.remote_client = None;
+        strike(&mut hg, aim, 30);
+        assert!(hg.state.world.face_attachment_at(floor, top).is_none(), "alone, it is peeled");
+        let plans = hg.state.players[0].inventory.slots_iter().flatten().filter(|s| matches!(s.item, crate::item::Item::Plan(_))).count();
+        assert_eq!(plans, 1, "into a Plan");
+    }
+
+    /// C3c-3r (decision 3, break arms) — a joiner breaking a block that
+    /// carries a laid Blueprint (on a face it didn't strike) and a wallpaper
+    /// gets the wallpaper and no Plan; the Blueprint stays in its world copy.
+    /// Both the survival and the creative break arm.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_break_grants_no_plan_for_a_laid_blueprint() {
+        use crate::item::Item;
+        for creative in [false, true] {
+            isolate_saves();
+            let tag = if creative { "break-bp-creative" } else { "break-bp-survival" };
+            let (mut hg, mut server, slot) = joined_window_client(tag);
+            if creative {
+                hg.state.set_play_mode(crate::play_mode::PlayMode::Creative);
+            }
+            let feet = clear_pad(&mut hg, Some(&mut server));
+            let cell = [feet[0], feet[1], feet[2] - 2];
+            let pos = (cell[0], cell[1], cell[2]);
+            for w in [&mut hg.state.world, &mut server.server.world] {
+                w.set_block(cell[0], cell[1], cell[2], crate::block::STONE);
+            }
+            // Blueprint on the top face, wallpaper on the west face: the strike
+            // is on the front (+z) face, which carries neither.
+            hg.state.world.set_face_attachment(
+                pos,
+                crate::mesh::Face::Top.index(),
+                crate::world::FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(false))),
+            );
+            hg.state.world.set_face_attachment(pos, crate::mesh::Face::West.index(), crate::world::FaceAttachment::Wallpaper(crate::block::OAK_PLANKS));
+            harness_step(&mut server, &mut hg);
+            mine_joined(&mut hg, &mut server, slot, cell);
+            assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR, "the block broke ({tag})");
+            assert!(
+                matches!(hg.state.world.face_attachment_at(pos, crate::mesh::Face::Top.index()), Some(crate::world::FaceAttachment::Blueprint(_))),
+                "the Blueprint stands in the client's copy ({tag})"
+            );
+            let inv = &hg.state.players[0].inventory;
+            let plans = inv.slots_iter().flatten().filter(|s| matches!(s.item, Item::Plan(_))).count();
+            assert_eq!(plans, 0, "no Plan granted ({tag})");
+            assert_eq!(held_units(inv, &Item::Block(crate::block::OAK_PLANKS)), 1, "the wallpaper still comes back ({tag})");
+            assert!(hg.state.world.face_attachment_at(pos, crate::mesh::Face::West.index()).is_none(), "and is gone from the wall ({tag})");
+        }
+    }
+
+    /// C3c-3r (decision 4) — the Plan Build panel's Auto choice while joined:
+    /// refused, nothing locked, no anchor, no cells; the panel's pending
+    /// choice stays so Guided is one click away. Alone it starts a build.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_cannot_auto_build() {
+        isolate_saves();
+        let (mut hg, mut server, _slot) = joined_window_client("auto-build");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Creative);
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let anchor = [feet[0], feet[1] - 1, feet[2] - 4];
+        let plan = crate::plan::PlanData::debug_3x3_stone();
+        hg.state.players[0].pending_build_choice = Some((plan.clone(), anchor, 0));
+        let blocks_before = hg.state.world.get_block(anchor[0], anchor[1], anchor[2]);
+        hg.state.choose_auto_build(0, &plan, anchor, 0);
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_AUTO_BUILD_TOAST));
+        assert!(hg.state.world.construction_anchors.is_empty(), "no build started");
+        assert_eq!(hg.state.world.get_block(anchor[0], anchor[1], anchor[2]), blocks_before);
+        assert!(hg.state.players[0].pending_build_choice.is_some(), "the panel stays for Guided");
+        assert_eq!(hg.state.joiner_actions.len(), 0);
+        // Alone, Auto starts the build.
+        hg.state.remote_client = None;
+        hg.state.choose_auto_build(0, &plan, anchor, 0);
+        assert_eq!(hg.state.world.construction_anchors.len(), 1, "alone, the build starts");
+        assert!(hg.state.players[0].pending_build_choice.is_none());
+    }
+
+    /// C3c-3r (decision 5) — right-clicking each economy block while joined
+    /// opens nothing and says so; alone, the same click opens it.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_cannot_open_an_economy_block() {
+        use crate::block;
+        type Open = fn(&crate::player_slot::PlayerSlot) -> bool;
+        let cases: [(block::BlockId, Open); 7] = [
+            (block::VENDOR_BLOCK, |p| p.open_vendor.is_some()),
+            (block::BOUNTY_BOARD, |p| p.open_bounty_board.is_some()),
+            (block::TIP_JAR, |p| p.open_tip_jar.is_some()),
+            (block::REPAIR_BENCH, |p| p.open_repair_bench.is_some()),
+            (block::MARKET_BELL, |p| p.open_market_hub.is_some()),
+            (block::AUCTION_BLOCK, |p| p.open_auction.is_some()),
+            (block::BAZAAR_BLOCK, |p| p.open_bazaar.is_some()),
+        ];
+        isolate_saves();
+        let (mut hg, mut server, _slot) = joined_window_client("economy-open");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let cell = [feet[0], feet[1], feet[2] - 2];
+        let aim = glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.3, cell[2] as f32 + 0.5);
+        for (b, is_open) in cases {
+            hg.state.world.set_block(cell[0], cell[1], cell[2], b);
+            harness_step(&mut server, &mut hg);
+            hg.state.toast = None;
+            aim_at(&mut hg, aim);
+            right_click(&mut hg);
+            assert!(!is_open(&hg.state.players[0]), "{b}: nothing opens for a joiner");
+            assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_ECONOMY_TOAST), "{b}");
+            assert_eq!(hg.state.joiner_actions.len(), 0, "{b}: nothing asked of the server");
+            assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), b);
+        }
+        // The drafting table (commission) too, while still joined.
+        hg.state.world.set_block(cell[0], cell[1], cell[2], block::DRAFTING_TABLE);
+        hg.state.toast = None;
+        aim_at(&mut hg, aim);
+        right_click(&mut hg);
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_ECONOMY_TOAST), "drafting table");
+        // Alone, the same clicks open them. Each block gets a fresh game: an
+        // open screen leaves egui holding the pointer, which would swallow the
+        // next block's click.
+        drop(server);
+        drop(hg);
+        for (b, is_open) in cases {
+            let mut solo = HeadlessGame::boot_into_world(&format!("harness-economy-alone-{b}"));
+            solo.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+            // The tip jar, auction, bounty board, market hub and bazaar are
+            // sats-only screens: `economy::close_sats_only_uis` shuts them every
+            // frame while sats are off (the default), so switch them on here.
+            solo.state.sats_policy.bitcoin_enabled = true;
+            solo.state.players[0].charter_allows_sats = true;
+            solo.frames(5);
+            let feet = clear_pad(&mut solo, None);
+            let cell = [feet[0], feet[1], feet[2] - 2];
+            let at = (cell[0], cell[1], cell[2]);
+            solo.state.world.set_block(cell[0], cell[1], cell[2], b);
+            // The screens close themselves on a block with no data behind it.
+            match b {
+                block::VENDOR_BLOCK => solo.state.world.insert_vendor(
+                    at,
+                    crate::vendor::VendorData { owner: Some(crate::vendor::VendorOwner::LocalPlayer(0)), ..Default::default() },
+                ),
+                block::TIP_JAR => solo.state.world.insert_tip_jar(
+                    at,
+                    crate::tip_jar::TipJarData {
+                        owner: Some(crate::tip_jar::TipJarOwner::LocalPlayer(0)),
+                        escrow_sats: 0,
+                        last_tip_tick: 0,
+                        lifetime_tips_received: 0,
+                    },
+                ),
+                block::AUCTION_BLOCK => solo.state.world.insert_auction(at, crate::auction::AuctionData::new(crate::auction::AuctionOwner::LocalPlayer(0))),
+                block::MARKET_BELL => solo.state.world.market_hubs.push(crate::market_hub::MarketHubData::from_bell(
+                    crate::market_hub::HubOwner::LocalPlayer(0),
+                    cell[0],
+                    cell[1],
+                    cell[2],
+                )),
+                _ => {}
+            }
+            // Some of these blocks are thin: try a few heights until the ray
+            // lands on the block itself (a miss with an empty hand does nothing).
+            for dy in [0.3, 0.5, 0.8, 0.1] {
+                let aim = glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + dy, cell[2] as f32 + 0.5);
+                aim_at(&mut solo, aim);
+                right_click(&mut solo);
+                if is_open(&solo.state.players[0]) {
+                    break;
+                }
+            }
+            assert!(
+                is_open(&solo.state.players[0]),
+                "{b}: alone, it opens (toast {:?}, target {:?}, cell {cell:?}, block there {}, cursor {}, cooldown {}, pad hit {:?})",
+                toast_text(&solo),
+                solo.state.players[0].target_block,
+                solo.state.world.get_block(cell[0], cell[1], cell[2]),
+                solo.state.input.cursor_captured,
+                solo.state.players[0].place_cooldown,
+                solo.state.players[0].target_face
+            );
+        }
+    }
+
+    /// C3c-3r (decision 6) — a laid Blueprint attachment on a joined client
+    /// does not develop in the sun; alone, the same ticks advance it.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joined_clients_attachment_does_not_develop() {
+        isolate_saves();
+        let (mut hg, mut server, _slot) = joined_window_client("develop");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let floor = (feet[0], feet[1] - 1, feet[2] - 2);
+        let top = crate::mesh::Face::Top.index();
+        hg.state.world.set_face_attachment(
+            floor,
+            top,
+            crate::world::FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(false))),
+        );
+        let exposure = |hg: &HeadlessGame| match hg.state.world.face_attachment_at(floor, top) {
+            Some(crate::world::FaceAttachment::Blueprint(p)) => match p.develop_state {
+                crate::plan::DevelopState::Latent { exposure_ticks } => Some(exposure_ticks),
+                crate::plan::DevelopState::Developed => None,
+            },
+            _ => None,
+        };
+        hg.state.world_time = 12000;
+        hg.state.world_time_step = 0;
+        hg.ticks(20);
+        assert_eq!(exposure(&hg), Some(0), "joined: no exposure counted");
+        // Alone, the same ticks advance it (so the sun reaches the cell).
+        hg.state.remote_client = None;
+        hg.ticks(20);
+        assert!(exposure(&hg).is_some_and(|e| e > 0), "alone it develops: {:?}", exposure(&hg));
+    }
 }

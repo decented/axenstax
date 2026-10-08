@@ -474,6 +474,22 @@ pub fn purge_private_mobs(ecs: &mut hecs::World) -> usize {
 pub const JOINED_INTERACTION_TOAST: &str =
     "Riding and trading aren't available in someone else's world yet.";
 
+// C3c-3r — what a joiner sees when it tries a Plan or economy action the
+// server can't mirror yet. Each refusal changes nothing on the client.
+
+/// Q on a held Plan while joined: a Plan has no wire form to throw.
+pub const JOINED_PLAN_DROP_TOAST: &str = "A Plan stays with you here.";
+/// Laying a Latent Plan flat while joined: attachments are the server's
+/// from C3c-3b.
+pub const JOINED_PLAN_LAY_TOAST: &str = "Lay Plans flat in your own worlds.";
+/// The first-strike peel of a laid Blueprint while joined.
+pub const JOINED_BLUEPRINT_LIFT_TOAST: &str = "Only the one who laid it can lift it here.";
+/// Plan Build's Auto choice while joined (Guided build-along still works).
+pub const JOINED_AUTO_BUILD_TOAST: &str = "Auto build works in your own worlds. Use Guided here.";
+/// Opening or using a vendor, tip jar, auction, market hub, bazaar, bounty
+/// board, commission or repair bench while joined.
+pub const JOINED_ECONOMY_TOAST: &str = "Shops and markets work in your own worlds for now.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
