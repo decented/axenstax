@@ -228,7 +228,11 @@ fn protocol_version_is_the_pinned_value() {
     //   `ContainerOpenedPacket.window_event`, `WindowSlotSetPacket.take`/
     //   `.give`, `WindowOpPacket.client_ok` — numbered container views and
     //   item-delta corrections.
-    assert_eq!(protocol::PROTOCOL_VERSION, 78);
+    // v79 (2026-10-08, C3b-2):
+    //   `ItemAction::UseBlock` (= 5), `ItemActionOutcomePacket.wear_held`,
+    //   `StateUpdatePacket.block_views` — composters, drying racks, campfires,
+    //   item frames and hives for joiners.
+    assert_eq!(protocol::PROTOCOL_VERSION, 79);
 }
 
 #[test]

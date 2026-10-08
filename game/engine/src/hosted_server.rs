@@ -2103,6 +2103,12 @@ impl HostedServer {
             protocol::ItemAction::GrantUnfit { event, count } => {
                 return self.return_joiner_unfit(i, *event, *count);
             }
+            // C3b-2 (v79) — a right-click on a composter, drying rack,
+            // campfire, item frame or hive, on the server's real one.
+            protocol::ItemAction::UseBlock { cell, hotbar_slot, held_kind, held_id, held_full } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                return self.serve_block_use(i, req.seq, *cell, *hotbar_slot, held);
+            }
         };
         let (accepted, consume_held, note) = match served {
             Ok(n) => (true, n, ItemNote::None.to_wire()),
@@ -2110,9 +2116,118 @@ impl HostedServer {
         };
         let pkt = protocol::serialize_packet(
             protocol::PacketType::ItemActionOutcome,
-            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note, window_event },
+            &protocol::ItemActionOutcomePacket { seq: req.seq, accepted, consume_held, note, window_event, wear_held: false },
         );
         self.send_to_joined_slot(i, &pkt);
+    }
+
+    /// C3b-2 — joiner `i` right-clicked the composter, drying rack,
+    /// campfire, item frame or hive at `cell` with `held`, from hotbar slot
+    /// `hotbar_slot` (`ItemAction::UseBlock`). Judged as a container open is
+    /// ([`Self::judge_block_use`]), then the shared rule (`block_use`) runs on
+    /// the server's REAL block entity, created if missing. Accepted: what the
+    /// hand pays is the outcome's window event — the owed take of one
+    /// (`shadow_take_owed`), or shears' wear (`WindowEvent::WearWeapon`, as an
+    /// accepted swing's) — and what it gains rides `InventoryGrant`s after it
+    /// (`grant_to_joiner`: the whole stack, whatever the window holds; what
+    /// the client can't hold comes back as a ground item). A smouldering fire
+    /// it fuelled relights ([`Self::relight_campfire`]). Refused: nothing
+    /// changes; the note says why. Every joiner sees the block's new state
+    /// through its view (`block_views`, sent from [`Self::broadcast_state`]).
+    fn serve_block_use(&mut self, i: usize, seq: u32, cell: [i32; 3], hotbar_slot: u8, held: Option<crate::item::Item>) {
+        use crate::item_actions::ItemNote;
+        let pos = (cell[0], cell[1], cell[2]);
+        let stack = held.clone().map(|item| crate::item::ItemStack { item, count: 1 });
+        let used = self.judge_block_use(i, cell).and_then(|kind| {
+            // BRIDGE: the joiner's room is not checked — replace when C3d makes
+            // the server window the truth (then a gain that doesn't fit the
+            // server's window is refused, as single-player leaves it in place).
+            crate::block_use::use_block(&mut self.server.world, pos, kind, stack.as_ref(), &|_| true)
+        });
+        let (used, note) = match used {
+            Ok(used) => (Some(used), ItemNote::None),
+            Err(note) => (None, note),
+        };
+        if used.as_ref().is_some_and(|u| u.relit) {
+            self.relight_campfire(pos);
+        }
+        let mut window_event = 0;
+        let (pay, wear) = used.as_ref().map_or((0, false), |u| (u.pay, u.wear));
+        if let Some(held) = &held {
+            let slot = self
+                .server
+                .players
+                .get(i)
+                .map_or(0, |sp| if hotbar_slot < 9 { usize::from(hotbar_slot) } else { sp.hotbar_slot });
+            if pay > 0 {
+                window_event = self.shadow_take_owed(i, slot, held, pay, "on a block");
+            } else if wear
+                && let crate::item::Item::Tool(tool) = held
+                && let Some(sp) = self.server.players.get_mut(i)
+            {
+                let now = self.server.tick_counter;
+                let event = crate::window_events::WindowEvent::WearWeapon { slot, tool: *tool };
+                window_event = crate::window_events::queue(sp, event, now);
+            }
+        }
+        let pkt = protocol::serialize_packet(
+            protocol::PacketType::ItemActionOutcome,
+            &protocol::ItemActionOutcomePacket {
+                seq,
+                accepted: used.is_some(),
+                consume_held: pay,
+                note: note.to_wire(),
+                window_event,
+                wear_held: window_event != 0 && wear,
+            },
+        );
+        self.send_to_joined_slot(i, &pkt);
+        if let Some(used) = used {
+            self.grant_to_joiner(i, used.gain);
+        }
+    }
+
+    /// C3b-2 — may joiner `i` use the block at `cell`, and what is it? In the
+    /// world and alive; the cell holds a composter, drying rack, campfire,
+    /// item frame or hive on the server; within the server body's reach (the
+    /// block-edit envelope with C3a-fix-2's server slack,
+    /// `container_window::container_in_server_reach`); and the play mode and
+    /// plot rules let it touch the cell ([`Self::remote_may_touch`]).
+    fn judge_block_use(&self, i: usize, cell: [i32; 3]) -> Result<crate::block_use::UseKind, crate::item_actions::ItemNote> {
+        use crate::item_actions::ItemNote;
+        let sp = self.server.players.get(i).ok_or(ItemNote::NotNow)?;
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            return Err(ItemNote::NotNow);
+        }
+        let block_at = self.server.world.get_block(cell[0], cell[1], cell[2]);
+        let kind = crate::block_use::UseKind::of_block(block_at).ok_or(ItemNote::NotThatBlock)?;
+        if !crate::container_window::container_in_server_reach(sp.player.eye_pos(), cell) {
+            return Err(ItemNote::OutOfReach);
+        }
+        if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+            return Err(ItemNote::NotHere);
+        }
+        Ok(kind)
+    }
+
+    /// C3b-2 — fuel brought the smouldering campfire at `cell` back to life:
+    /// its block goes `CAMPFIRE_UNLIT → CAMPFIRE` the way a joiner's own
+    /// lighting edit lands — broadcast to everyone, remeshed by a lending
+    /// host's client, and its smoke pillar raised from the server's campfire
+    /// ([`Self::derive_campfire_edit`]).
+    fn relight_campfire(&mut self, cell: (i32, i32, i32)) {
+        let (x, y, z) = cell;
+        let old = self.server.world.get_block(x, y, z);
+        if old != crate::block::CAMPFIRE_UNLIT {
+            return;
+        }
+        self.server.world.set_block(x, y, z, crate::block::CAMPFIRE);
+        let meta = self.server.world.meta_at(x, y, z);
+        self.pending_block_changes.push(protocol::BlockChange { x, y, z, new_block: crate::block::CAMPFIRE, meta });
+        if self.lends_host_world() {
+            self.lent_edit_cells.push(cell);
+        }
+        self.derive_campfire_edit(cell, old, crate::block::CAMPFIRE);
     }
 
     /// C3a-fix-1 (D-M2) — joiner `i`'s client says `count` of the stack its
@@ -3914,6 +4029,25 @@ impl HostedServer {
         // host's own edits carry their smoke already.
         if remote {
             self.derive_campfire_edit(cell, old_block, bc.new_block);
+            self.spill_used_block(cell, old_block, bc.new_block);
+        }
+    }
+
+    /// C3b-2 — a joiner's accepted edit broke (or replaced) a composter,
+    /// drying rack, item frame or hive at `cell`: what it held — the framed
+    /// item (the frame's "take"), the rack's logs, the composter's input and
+    /// output — spills into the world from the SERVER's state
+    /// (`block_use::take_on_break`), where everyone sees it; the joined
+    /// client spills nothing of its own view of it. Before C3b-2 nothing
+    /// spilled here and the server's state stayed behind the broken block.
+    fn spill_used_block(&mut self, cell: (i32, i32, i32), old: crate::block::BlockId, new: crate::block::BlockId) {
+        let kind = crate::block_use::UseKind::of_block(old);
+        if kind.is_none() || kind == crate::block_use::UseKind::of_block(new) {
+            return;
+        }
+        let at = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.5, cell.2 as f32 + 0.5);
+        for (k, stack) in crate::block_use::take_on_break(&mut self.server.world, cell, old).into_iter().enumerate() {
+            crate::entity::spawn_item(&mut self.server.ecs, at, stack, k as u32 * 7349);
         }
     }
 
@@ -4458,6 +4592,7 @@ impl HostedServer {
             storm_ticks_left,
             // Per client — stamped in the loop below (C2a).
             own_hunger: 0,
+            block_views: Vec::new(),
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
 
@@ -4481,10 +4616,17 @@ impl HostedServer {
             self.verdicts.touch((cx, cz));
         }
         self.decide_verdicts(push_limit);
+        // C3b-2 — the views of every composter, drying rack, campfire, item
+        // frame and hive as they stand after this tick (whoever changed them),
+        // taken once; each joiner is sent the ones it hasn't been shown.
+        let any_joiner = (self.num_local_players..self.transports.len())
+            .any(|i| self.handshake_done[i] && !self.disconnected[i]);
+        let views = if any_joiner { crate::block_views::views_in(&self.server.world) } else { Vec::new() };
         for i in 0..self.transports.len() {
             if !self.handshake_done[i] || self.disconnected[i] {
                 continue;
             }
+            let filters = self.filters_changes(i);
             // MP-D2a — this client's share of the entity events: a joiner
             // hears about entities near its body, changed-only (a late
             // joiner's empty interest set doubles as its backfill).
@@ -4493,7 +4635,7 @@ impl HostedServer {
             // B2a — a remote client hears of changes only to chunks it has
             // been sent (queued counts): the rest arrive inside their push.
             let filtered: Vec<protocol::BlockChange>;
-            let changes: &[protocol::BlockChange] = if self.filters_changes(i) {
+            let changes: &[protocol::BlockChange] = if filters {
                 let push = &self.chunk_pushes[i];
                 filtered = block_changes
                     .iter()
@@ -4527,6 +4669,18 @@ impl HostedServer {
                     push_limit,
                     verdicts,
                 );
+            }
+            // C3b-2 — then the block views this joiner hasn't been shown as
+            // they stand, in the chunks it holds (pushed or noted local): after
+            // this tick's pushes, so a view lands after the snapshot it
+            // updates, and once more after each new push of its chunk. A
+            // host's own seat shares the world and is sent none.
+            if i >= self.num_local_players
+                && let Some(sp) = self.server.players.get_mut(i)
+            {
+                let push = &self.chunk_pushes[i];
+                let changed = sp.block_views.take_changed(&views, |c| if filters { push.push_number(c) } else { Some(0) });
+                outbox.push_views(&changed);
             }
             // The last input of THIS client's that its server state includes
             // — its prediction drops those and replays the rest (§5.3).

@@ -1604,4 +1604,67 @@ mod tests {
             "and the server's"
         );
     }
+
+    /// C3b-2 — a joiner's block use through its REAL client: the server's
+    /// hive reaches the joiner's world as a view; a bucket on it asks the
+    /// server (`send_block_use`) and changes nothing locally — the bucket
+    /// goes, the Honey Jar comes and the hive's honey drops only when the
+    /// server's outcome, grant and view arrive.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_scoops_the_servers_hive_by_asking() {
+        use crate::item::{ItemStack, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-joiner-hive");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0,
+            format!("harness-joiner-hive-server-{}", std::process::id()),
+            42,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        )
+        .expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport),
+            crate::remote_client::build_join_request_guest("Beekeeper", 0),
+            None,
+        ));
+        let step = |server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame| {
+            server.tick();
+            hg.frames(1);
+            hg.ticks(1);
+            hg.state.network_send_input();
+        };
+        for _ in 0..5 {
+            step(&mut server, &mut hg);
+        }
+        assert!(hg.state.joined());
+
+        let body = server.server.players.last().unwrap().player.pos;
+        let cell = [body.x.floor() as i32 + 1, body.y.floor() as i32, body.z.floor() as i32];
+        let pos = (cell[0], cell[1], cell[2]);
+        server.server.world.set_block(cell[0], cell[1], cell[2], crate::block::BEE_HIVE);
+        server.server.world.insert_hive(pos, crate::bee_hive::HiveData { bees_inside: 0, honey_level: 2 });
+        for _ in 0..6 {
+            step(&mut server, &mut hg);
+        }
+        assert_eq!(hg.state.world.hive_at(pos).map(|h| h.honey_level), Some(2), "the server's hive, shown to the joiner");
+
+        let hot = hg.state.players[0].hotbar_slot;
+        hg.state.players[0].inventory.set_slot(hot, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        hg.state.send_block_use(0, cell, crate::block_use::UseKind::Hive);
+        let count = |hg: &HeadlessGame, m| hg.state.players[0].inventory.count_material(m);
+        assert_eq!(count(&hg, MaterialId::Bucket), 1, "nothing taken before the server answers");
+        assert_eq!(hg.state.world.hive_at(pos).unwrap().honey_level, 2, "its copy untouched");
+        for _ in 0..4 {
+            step(&mut server, &mut hg);
+        }
+        assert_eq!(server.server.world.hive_at(pos).unwrap().honey_level, 1, "the server scooped its real hive");
+        assert_eq!(count(&hg, MaterialId::Bucket), 0, "the accepted outcome took the bucket");
+        assert_eq!(count(&hg, MaterialId::HoneyBottle), 1, "the grant brought the jar");
+        assert_eq!(hg.state.world.hive_at(pos).unwrap().honey_level, 1, "and the hive's view came back");
+    }
 }

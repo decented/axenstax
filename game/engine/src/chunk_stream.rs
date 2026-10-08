@@ -875,6 +875,28 @@ impl super::GameState {
                         self.rebuild_chunk_at(bc.x, bc.y, bc.z);
                     }
                 }
+                crate::chunk_intake::Delta::View(v) => {
+                    // C3b-2 — a block entity's view lands like a change: in a
+                    // column this client holds (a local one not generated yet
+                    // is generated first), after the snapshot it updates.
+                    let [x, y, z] = v.cell;
+                    if let Some(col) = self.chunk_intake.generate_before_at(x, z, &self.loaded_columns, &self.world) {
+                        self.load_one_column(col.0, col.1);
+                    }
+                    if !remote_change_is_loaded(&self.loaded_columns, &self.world, x, z)
+                        && !self.chunk_intake.holds_chunk(crate::state_outbox::chunk_of_cell((x, y, z)))
+                    {
+                        continue;
+                    }
+                    if crate::block_views::apply_view(&mut self.world, &self.registry, &v) {
+                        // A frame's item is drawn; a campfire's raid tint is
+                        // drawn on its smoke pillar above.
+                        self.rebuild_chunk_at(x, y, z);
+                        if v.kind == crate::protocol::BlockViewKind::Campfire {
+                            self.rebuild_chunk_at(x, y + crate::campfire::SMOKE_PILLAR_HEIGHT, z);
+                        }
+                    }
+                }
             }
         }
         // B2b fix LOW-3 — the queued column checks, within the frame's budget.

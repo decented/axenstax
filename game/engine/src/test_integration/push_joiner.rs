@@ -64,6 +64,8 @@ pub(super) struct Joiner {
     pub registry: crate::block::BlockRegistry,
     /// Every server block change that reached this client.
     pub changes_seen: Vec<BlockChange>,
+    /// C3b-2 — every block view that reached this client, in order.
+    pub views_seen: Vec<protocol::BlockEntityView>,
     pub slot: usize,
     /// The render distance its inputs carry (`InputPacket.render_distance`).
     pub render_distance: u8,
@@ -129,6 +131,7 @@ impl Joiner {
             intake: ChunkIntake::default(),
             registry: crate::block::BlockRegistry::new(),
             changes_seen: Vec::new(),
+            views_seen: Vec::new(),
             slot: usize::MAX,
             render_distance,
             biome: None,
@@ -245,6 +248,20 @@ impl Joiner {
                         self.intake.column_held(col);
                     } else if self.generate_on_note && self.intake.is_local(col) {
                         self.generate(col);
+                    }
+                }
+                // C3b-2 — a block view lands like a change
+                // (`GameState::apply_world_deltas`).
+                IntakeStep::View(v) => {
+                    self.views_seen.push((*v).clone());
+                    let [x, y, z] = v.cell;
+                    if let Some(col) = self.intake.generate_before_at(x, z, &self.loaded, &self.world) {
+                        self.generate(col);
+                    }
+                    if crate::chunk_stream::remote_change_is_loaded(&self.loaded, &self.world, x, z)
+                        || self.intake.holds_chunk(crate::state_outbox::chunk_of_cell((x, y, z)))
+                    {
+                        crate::block_views::apply_view(&mut self.world, &self.registry, &v);
                     }
                 }
                 IntakeStep::Changes(r) => {

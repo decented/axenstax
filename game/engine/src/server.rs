@@ -256,6 +256,10 @@ pub struct ServerPlayer {
     /// C3b-1 — the `op_seq` of the last window op applied from this joiner
     /// (`WindowSlotSetPacket::op_seq_applied`).
     pub last_window_op_seq: u32,
+    /// C3b-2 — the composter, drying rack, campfire, item frame and hive
+    /// views this joiner has been shown (`block_views::ViewsSent`). Fresh
+    /// per attach.
+    pub block_views: crate::block_views::ViewsSent,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -494,6 +498,7 @@ impl ServerPlayer {
             open_container: None,
             container_sent: Default::default(),
             last_window_op_seq: 0,
+            block_views: Default::default(),
         }
     }
 

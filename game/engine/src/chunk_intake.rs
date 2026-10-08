@@ -82,6 +82,10 @@ pub enum StreamItem {
     /// "Column `(cx, cz)` is local" (`ColumnLocal`, Phase B2b), with the
     /// hash of the server's column.
     Local((i32, i32), u32),
+    /// C3b-2 — a block entity's view (`StateUpdatePacket::block_views`),
+    /// after the block changes of the same packet. Not part of the numbered
+    /// chunk stream: it never counts towards the acknowledgement.
+    View(Box<crate::protocol::BlockEntityView>),
 }
 
 /// One step of a frame's world intake, in arrival order (see [`interleave`]).
@@ -91,6 +95,8 @@ pub enum IntakeStep {
     Chunk(Box<ChunkDataPacket>),
     /// Take in a "column is local" note (Phase B2b), with its hash.
     Local((i32, i32), u32),
+    /// C3b-2 — apply one block entity's view.
+    View(Box<crate::protocol::BlockEntityView>),
     /// Apply these block changes (indices into the frame's
     /// `pending_block_changes`).
     Changes(std::ops::Range<usize>),
@@ -108,6 +114,8 @@ pub enum Delta {
     Local((i32, i32), u32),
     /// Apply one block change from the server.
     Change(crate::protocol::BlockChange),
+    /// C3b-2 — apply one block entity's view (`block_views::apply_view`).
+    View(Box<crate::protocol::BlockEntityView>),
 }
 
 /// Lay a frame's chunk-stream packets between its block changes in the order
@@ -125,6 +133,7 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
         steps.push(match item {
             StreamItem::Chunk(chunk) => IntakeStep::Chunk(Box::new(chunk)),
             StreamItem::Local(col, hash) => IntakeStep::Local(col, hash),
+            StreamItem::View(v) => IntakeStep::View(v),
         });
     }
     if changes > done {
@@ -349,6 +358,7 @@ impl ChunkIntake {
             match step {
                 IntakeStep::Chunk(p) => steps.push_back(Delta::Chunk(p)),
                 IntakeStep::Local(col, hash) => steps.push_back(Delta::Local(col, hash)),
+                IntakeStep::View(v) => steps.push_back(Delta::View(v)),
                 IntakeStep::Changes(range) => {
                     steps.extend(changes[range].iter().cloned().map(Delta::Change));
                 }
@@ -520,10 +530,21 @@ impl ChunkIntake {
         loaded: &ahash::AHashSet<(i32, i32)>,
         world: &World,
     ) -> Option<(i32, i32)> {
-        let col = crate::chunk_stream::column_of_block(bc.x, bc.z);
-        (self.local.contains(&col)
-            && !crate::chunk_stream::remote_change_is_loaded(loaded, world, bc.x, bc.z))
-        .then_some(col)
+        self.generate_before_at(bc.x, bc.z, loaded, world)
+    }
+
+    /// [`Self::generate_before`] for the block at `(x, z)` (C3b-2: a block
+    /// view lands like a change).
+    pub fn generate_before_at(
+        &self,
+        x: i32,
+        z: i32,
+        loaded: &ahash::AHashSet<(i32, i32)>,
+        world: &World,
+    ) -> Option<(i32, i32)> {
+        let col = crate::chunk_stream::column_of_block(x, z);
+        (self.local.contains(&col) && !crate::chunk_stream::remote_change_is_loaded(loaded, world, x, z))
+            .then_some(col)
     }
 
     /// B2b fix D3 (review MEDIUM-1) — must column `pkt` lands in be
@@ -865,6 +886,56 @@ mod tests {
         protocol::safe_deserialize(payload).unwrap()
     }
 
+    /// C3b-2 — a block view sits in the world stream where its packet
+    /// arrived: after the snapshot pushed before it (whose side data it
+    /// updates, so the snapshot can't wipe it), between the changes around
+    /// it, and before a later snapshot. It is not a numbered stream packet.
+    #[test]
+    fn a_view_lands_after_the_snapshot_it_updates() {
+        use crate::protocol::{BlockEntityView, BlockViewKind};
+        let mut host = World::new();
+        host.set_block(1, 1, 1, block::ITEM_FRAME);
+        host.insert_item_frame((1, 1, 1), crate::item_frame::ItemFrameData::new());
+        let snapshot = packet_of(&host, (0, 0, 0));
+        // The server then framed a stone: the view that says so.
+        let mut framed = crate::item_frame::ItemFrameData::new();
+        framed.try_insert(crate::item::ItemStack::new_block(block::STONE, 1));
+        let view = crate::block_views::view_of(&crate::world::BlockEntityData::ItemFrame(framed)).unwrap();
+        let view = BlockEntityView { cell: [1, 1, 1], kind: BlockViewKind::ItemFrame, view };
+        let shape: Vec<String> = interleave(
+            vec![(0, StreamItem::Chunk(snapshot.clone())), (1, StreamItem::View(Box::new(view.clone())))],
+            2,
+        )
+        .iter()
+        .map(|s| match s {
+            IntakeStep::Chunk(_) => "C".to_string(),
+            IntakeStep::View(_) => "V".to_string(),
+            IntakeStep::Local(..) => "L".to_string(),
+            IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
+        })
+        .collect();
+        assert_eq!(shape, ["C", "0..1", "V", "1..2"]);
+        let mut intake = ChunkIntake::default();
+        let mut joiner = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let steps = intake.plan_deltas(vec![(0, StreamItem::Chunk(snapshot)), (0, StreamItem::View(Box::new(view)))], &[], 4);
+        assert_eq!(steps.len(), 2);
+        for step in steps {
+            match step {
+                Delta::Chunk(p) => {
+                    intake.apply(&mut joiner, &mut loaded, &reg(), &p);
+                }
+                Delta::View(v) => {
+                    crate::block_views::apply_view(&mut joiner, &reg(), &v);
+                }
+                _ => unreachable!(),
+            }
+        }
+        let frame = joiner.item_frame_at((1, 1, 1)).expect("the frame");
+        assert!(!frame.is_empty(), "the view's stone, not the older snapshot's empty frame");
+        assert_eq!(intake.applied(), 1, "the view is not a numbered stream packet");
+    }
+
     #[test]
     fn interleave_keeps_each_snapshot_between_the_changes_around_it() {
         let world = World::new();
@@ -878,6 +949,7 @@ mod tests {
             .map(|s| match s {
                 IntakeStep::Chunk(p) => format!("C{}", p.cx),
                 IntakeStep::Local(col, _) => format!("L{}", col.0),
+                IntakeStep::View(v) => format!("V{}", v.cell[0]),
                 IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
             })
             .collect();
@@ -1034,7 +1106,7 @@ mod tests {
                 IntakeStep::Chunk(p) => {
                     intake.apply(&mut joiner, &mut loaded, &reg(), &p);
                 }
-                IntakeStep::Local(..) => unreachable!(),
+                IntakeStep::Local(..) | IntakeStep::View(..) => unreachable!(),
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         joiner.apply_remote_block_change(bc);

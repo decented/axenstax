@@ -959,9 +959,9 @@ pub struct EntityInteractPacket {
 }
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
-/// `GrantUnfit`). Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2,
-/// Drop = 3, GrantUnfit = 4 (pinned on the wire bytes by
-/// `item_action_packets_round_trip`).
+/// `GrantUnfit`; v79 `UseBlock`). Wire-stable, APPEND ONLY: Eat = 0, Sleep =
+/// 1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5 (pinned on the wire
+/// bytes by `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
@@ -994,12 +994,22 @@ pub enum ItemAction {
     /// joiner's feet, which everyone can see and pick up. Never more than the
     /// grant gave (the server clamps it). Fire-and-forget (no outcome).
     GrantUnfit { event: u32, count: u8 },
+    /// C3b-2 (v79) — right-click the composter, drying rack, campfire, item
+    /// frame or bee hive at `cell` with what is in hotbar slot `hotbar_slot`
+    /// (the held claim mirrors `Eat`'s). The server applies the shared rule
+    /// (`block_use`) to its REAL block entity and answers with an
+    /// `ItemActionOutcome`: what the hand pays (`consume_held`, or
+    /// `wear_held` for shears) is a numbered window event, and what the
+    /// player gains rides `InventoryGrant`s. The client changes nothing
+    /// until then.
+    UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
 }
 
 /// Wire index of an [`ItemAction`] variant the server reads before decoding
 /// (bincode writes it as a `u32` right after the packet's `seq`,
 /// [`peek_item_action_variant`]). The order is Eat = 0, Sleep = 1, Craft = 2,
-/// Drop = 3, GrantUnfit = 4 (v76), pinned by `item_action_packets_round_trip`.
+/// Drop = 3, GrantUnfit = 4 (v76), UseBlock = 5 (v79), pinned by
+/// `item_action_packets_round_trip`.
 pub mod item_action_variant {
     /// `ItemAction::Drop`, paced by the joiner's drop bucket.
     pub const DROP: u32 = 3;
@@ -1331,6 +1341,11 @@ pub struct ItemActionOutcomePacket {
     /// ([`InventoryGrantPacket::window_event`]); 0 when it changes nothing
     /// in the window (a refusal, a sleep).
     pub window_event: u32,
+    /// v79 (C3b-2) — an accepted `UseBlock` wore the held tool once (shears
+    /// on a hive) instead of taking it: `window_event` is that wear, applied
+    /// where the tool now is (`joiner_actions::where_now`), as an accepted
+    /// swing's. `false` for everything else.
+    pub wear_held: bool,
 }
 
 /// Server → Client: the decision on one attack or interaction (MP-D2b).
@@ -1618,6 +1633,14 @@ pub struct StateUpdatePacket {
     /// local slot, whose hunger is its own client's. APPEND-ONLY: last.
     #[serde(default)]
     pub own_hunger: u8,
+    /// C3b-2 (v79) — the render-relevant state of block entities in chunks
+    /// this client has been sent, each time it changes (whoever changed it)
+    /// and once after each push of its chunk ([`BlockEntityView`]). Reliable
+    /// and in line with the block changes and chunk pushes (`state_outbox`),
+    /// so a view always lands after the snapshot it updates. APPEND-ONLY:
+    /// last.
+    #[serde(default)]
+    pub block_views: Vec<BlockEntityView>,
 }
 
 // ─── Chunk data (Server → Client, reliable stream) ───
@@ -1691,6 +1714,69 @@ pub enum PushedEntity {
     /// A campfire's burn state (the lit/smoke pillar and the raid-warning
     /// smoke tint) — not what is cooking on it.
     Campfire { fuel_ticks: u32, smoke_ticks: u32, smoulder_ticks: u32, raid_warning: bool },
+}
+
+/// C3b-2 (v79) — which block entity a [`BlockEntityView`] shows.
+/// Wire-stable, APPEND ONLY: ItemFrame = 0, Campfire = 1, DryingRack = 2,
+/// Composter = 3, Hive = 4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockViewKind {
+    ItemFrame,
+    Campfire,
+    DryingRack,
+    Composter,
+    Hive,
+}
+
+/// C3b-2 (v79) — what a joiner is shown of one block entity: only what its
+/// block id and meta don't already carry (a campfire's lit flag is its block,
+/// `CAMPFIRE` or `CAMPFIRE_UNLIT`; a frame's facing is its meta). Counters
+/// that run every tick are carried to the second (`block_views::view_of`),
+/// so a burning fire changes its view about once a second, not every tick.
+/// Wire-stable, APPEND ONLY (same order as [`BlockViewKind`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockView {
+    /// The framed item (the held-item pair plus [`WireItem`] fidelity; a
+    /// framed Plan shows as an empty frame) and its rotation.
+    ItemFrame { item_kind: u8, item_id: u16, full_item: WireItem, rotation: u8 },
+    /// A campfire's fuel, smoke and smoulder left, its raid-warning tint, and
+    /// what is on the fire (each slot's raw item and cooking progress).
+    Campfire {
+        fuel_ticks: u32,
+        smoke_ticks: u32,
+        smoulder_ticks: u32,
+        raid_warning: bool,
+        slots: [crate::campfire::CookSlot; crate::campfire::CAMPFIRE_SLOTS],
+    },
+    /// The logs on a drying rack and how far each has seasoned.
+    DryingRack { slots: [crate::drying_rack::RackSlot; crate::drying_rack::RACK_SLOTS] },
+    /// A composter's fill: what is ageing in it and what is ready.
+    Composter { input: WireSlot, output: WireSlot },
+    /// A hive's honey level, 0..=5.
+    Hive { honey_level: u8 },
+}
+
+impl BlockView {
+    /// The kind this view shows.
+    pub fn kind(&self) -> BlockViewKind {
+        match self {
+            BlockView::ItemFrame { .. } => BlockViewKind::ItemFrame,
+            BlockView::Campfire { .. } => BlockViewKind::Campfire,
+            BlockView::DryingRack { .. } => BlockViewKind::DryingRack,
+            BlockView::Composter { .. } => BlockViewKind::Composter,
+            BlockView::Hive { .. } => BlockViewKind::Hive,
+        }
+    }
+}
+
+/// C3b-2 (v79) — one block entity's view, sent on
+/// [`StateUpdatePacket::block_views`]. A client applies it only when `kind`
+/// is `view`'s own kind (`block_views::apply_view`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEntityView {
+    pub cell: [i32; 3],
+    pub kind: BlockViewKind,
+    pub view: BlockView,
 }
 
 /// One face attachment in a pushed chunk (v69). `face` is
@@ -2255,7 +2341,19 @@ pub struct ServerAnnouncePacket {
 ///   `ItemAction::GrantUnfit` naming the event, one per give in order).
 ///   [`WindowOpPacket`] appends `client_ok: bool` (the client's own
 ///   `ClickResult::ok()`).
-pub const PROTOCOL_VERSION: u32 = 78;
+/// - v79 (2026-10-08, C3b-2):
+///   composters, drying racks, campfires, item frames and bee hives for
+///   joiners. `ItemAction` appends `UseBlock { cell, hotbar_slot, held_kind,
+///   held_id, held_full }` (= 5): a right-click on one of them, applied by
+///   the server to its real block entity (`block_use`). [`ItemActionOutcomePacket`]
+///   appends `wear_held: bool` (shears on a hive wear instead of being
+///   taken). [`StateUpdatePacket`] appends `block_views:
+///   Vec<BlockEntityView>` (`{ cell, kind, view }`: a frame's item and
+///   rotation, a campfire's fuel, smoke, smoulder, raid tint and cooking
+///   slots, a rack's logs, a composter's input and output, a hive's honey),
+///   reliable and in line with the chunk pushes, sent whenever a view
+///   changes and after each push of its chunk.
+pub const PROTOCOL_VERSION: u32 = 79;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2427,8 +2525,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3b-fix-a — v78.
-        assert_eq!(super::PROTOCOL_VERSION, 78);
+        // C3b-2 — v79.
+        assert_eq!(super::PROTOCOL_VERSION, 79);
     }
 
     #[test]
@@ -2752,6 +2850,7 @@ mod tests {
             rain_ticks_left: 900,
             storm_ticks_left: 300,
             own_hunger: 0,
+            block_views: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -2799,6 +2898,7 @@ mod tests {
             rain_ticks_left: 0,
             storm_ticks_left: 0,
             own_hunger: 0,
+            block_views: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -2855,6 +2955,7 @@ mod tests {
             rain_ticks_left: 1_800,
             storm_ticks_left: 600,
             own_hunger: 0,
+            block_views: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3080,7 +3181,12 @@ mod tests {
         //   and `.give` (after `window_event`), `WindowOpPacket.client_ok`
         //   (after `claims`) — numbered container views, item-delta
         //   corrections.
-        assert_eq!(PROTOCOL_VERSION, 78);
+        // v79 (2026-10-08, C3b-2):
+        //   `ItemAction::UseBlock` (= 5), `ItemActionOutcomePacket.wear_held`
+        //   (after `window_event`), `StateUpdatePacket.block_views` (after
+        //   `own_hunger`) — composters, drying racks, campfires, item frames
+        //   and hives for joiners.
+        assert_eq!(PROTOCOL_VERSION, 79);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3350,17 +3456,99 @@ mod tests {
         assert_eq!(&payload[8..12], &0x0506_0708u32.to_le_bytes());
         assert_eq!(payload[12], 9);
         assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
+        // v79 (C3b-2) — UseBlock = 5, appended after GrantUnfit: the cell,
+        // then the held claim in `Eat`'s shape.
+        let use_block = ItemActionPacket {
+            seq: 16,
+            action: ItemAction::UseBlock {
+                cell: [-3, 64, 1_000_001],
+                hotbar_slot: 7,
+                held_kind: item_kind::TOOL,
+                held_id: 1,
+                held_full: WireItem::Tool { tool_type: 9, material: 2, durability: 40 },
+            },
+            events_applied: 6,
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &use_block);
+        assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), use_block);
+        assert_eq!(&payload[4..8], &5u32.to_le_bytes(), "UseBlock = 5");
+        assert_eq!(&payload[8..12], &(-3i32).to_le_bytes(), "the cell leads it");
+        assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
 
-        let outcome = ItemActionOutcomePacket { seq: 12, accepted: false, consume_held: 0, note: 5, window_event: 0x0102_0304 };
+        let outcome = ItemActionOutcomePacket {
+            seq: 12,
+            accepted: false,
+            consume_held: 0,
+            note: 5,
+            window_event: 0x0102_0304,
+            wear_held: true,
+        };
         let bytes = serialize_packet(PacketType::ItemActionOutcome, &outcome);
         assert_eq!(bytes[0], 63, "wire-stable tag");
         let (ptype, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(ptype, PacketType::ItemActionOutcome);
         assert_eq!(safe_deserialize::<ItemActionOutcomePacket>(payload).unwrap(), outcome);
-        assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes(), "v76 window_event closes it");
+        // v76's window_event, then (v79) wear_held closes it.
+        assert_eq!(&payload[payload.len() - 5..payload.len() - 1], &0x0102_0304u32.to_le_bytes(), "v76 window_event");
+        assert_eq!(payload[payload.len() - 1], 1, "v79 wear_held closes it");
         for (tag, t) in [(62u8, PacketType::ItemAction), (63, PacketType::ItemActionOutcome)] {
             assert_eq!(t as u8, tag, "wire-stable tag");
             assert_eq!(deserialize_header(&[tag, 0]).map(|(p, _)| p), Some(t));
+        }
+    }
+
+    /// C3b-2 (v79) — a `StateUpdate` carries block-entity views, last; every
+    /// view round-trips, and the kinds' and views' variant orders are pinned
+    /// on the wire bytes (both are append-only).
+    #[test]
+    fn block_entity_views_round_trip() {
+        use crate::campfire::CookSlot;
+        use crate::drying_rack::{LogSpecies, RackSlot};
+        use crate::item::MaterialId;
+        let mut cook: [CookSlot; crate::campfire::CAMPFIRE_SLOTS] = Default::default();
+        cook[2] = CookSlot { item: Some(MaterialId::RawBeef), progress_ticks: 120 };
+        let mut rack = [RackSlot::default(); crate::drying_rack::RACK_SLOTS];
+        rack[0] = RackSlot { species: Some(LogSpecies::Oak), seasoning_ticks: 600 };
+        let views = vec![
+            BlockView::ItemFrame { item_kind: item_kind::BLOCK, item_id: 5, full_item: WireItem::None, rotation: 3 },
+            BlockView::Campfire { fuel_ticks: 40, smoke_ticks: 0, smoulder_ticks: 600, raid_warning: true, slots: cook },
+            BlockView::DryingRack { slots: rack },
+            BlockView::Composter {
+                input: Some(WireStack { item_kind: item_kind::MATERIAL, item_id: 3, count: 7, full_item: WireItem::None }),
+                output: None,
+            },
+            BlockView::Hive { honey_level: 4 },
+        ];
+        for (index, view) in views.into_iter().enumerate() {
+            let v = BlockEntityView { cell: [1, -2, 3], kind: view.kind(), view };
+            let bytes = bincode::serialize(&v).unwrap();
+            assert_eq!(&bytes[12..16], &(index as u32).to_le_bytes(), "kind {index}, after the cell");
+            assert_eq!(&bytes[16..20], &(index as u32).to_le_bytes(), "view {index}, after the kind");
+            assert_eq!(bincode::deserialize::<BlockEntityView>(&bytes).unwrap(), v);
+            let pkt = StateUpdatePacket {
+                tick: 1,
+                players: Vec::new(),
+                block_changes: Vec::new(),
+                world_time: 0,
+                last_acked_input: 0,
+                entity_spawns: Vec::new(),
+                entity_updates: Vec::new(),
+                entity_despawns: Vec::new(),
+                reserve_richness: 1.0,
+                reserve_target_sats: 0,
+                reserve_current_sats: 0,
+                rain_ticks_left: 0,
+                storm_ticks_left: 0,
+                own_hunger: 20,
+                block_views: vec![v.clone()],
+            };
+            let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            let back = safe_deserialize::<StateUpdatePacket>(payload).unwrap();
+            assert_eq!(back.block_views, vec![v]);
+            assert_eq!(back.own_hunger, 20, "own_hunger stays before the views");
         }
     }
 
@@ -3751,7 +3939,8 @@ mod tests {
 
     /// bincode 1 is positional, so `StateUpdatePacket`'s trailing fields must
     /// sit in the order each bump appended them: P9's weather windows (v59),
-    /// then C2a's `own_hunger` (v73). Pinned on the wire bytes.
+    /// then C2a's `own_hunger` (v73), then C3b-2's `block_views` (v79).
+    /// Pinned on the wire bytes.
     #[test]
     fn state_update_trailing_fields_are_in_append_order() {
         let pkt = StateUpdatePacket {
@@ -3769,6 +3958,7 @@ mod tests {
             rain_ticks_left: 0x0102_0304,
             storm_ticks_left: 0x0506_0708,
             own_hunger: 0x11,
+            block_views: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let mut tail = Vec::new();
@@ -3777,6 +3967,8 @@ mod tests {
         tail.extend_from_slice(&0x0506_0708u32.to_le_bytes());
         // v73 (C2a): own_hunger u8.
         tail.push(0x11);
+        // v79 (C3b-2): block_views, an empty Vec (u64 length 0).
+        tail.extend_from_slice(&0u64.to_le_bytes());
         assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..]);
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.own_hunger, 0x11);

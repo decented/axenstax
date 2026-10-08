@@ -4,9 +4,11 @@
 //! §4.2g).
 //!
 //! The server changes a joiner's window by itself four ways: a grant (a
-//! break's yield, an interaction's product, a pickup), the owed take of an
-//! accepted request (an eat, a D2b interaction), an armour-wear hit and an
-//! accepted swing's weapon wear. C3b-1 (v77) added a fifth, a container op's
+//! break's yield, an interaction's product, a pickup; C3b-2, a block use's
+//! gain), the owed take of an accepted request (an eat, a D2b interaction;
+//! C3b-2, a block use's take), an armour-wear hit and an accepted swing's
+//! weapon wear (C3b-2: and shears' wear on a hive, `WearWeapon` on an
+//! `ItemActionOutcome` with `wear_held`). C3b-1 (v77) added a fifth, a container op's
 //! correction. C3b-fix-a (v78) makes it a change by item, never by slot
 //! ([`WindowEvent::Correction`]: take N of X, give N of X, resolved where
 //! the client applies it), and numbers every container VIEW the server sends
@@ -855,7 +857,7 @@ mod tests {
     }
 
     fn eat(seq: u32, window_event: u32) -> RequestOutcome {
-        RequestOutcome::Item(ItemActionOutcomePacket { seq, accepted: true, consume_held: 1, note: 0, window_event })
+        RequestOutcome::Item(ItemActionOutcomePacket { seq, accepted: true, consume_held: 1, note: 0, window_event, wear_held: false })
     }
 
     fn grant(window_event: u32) -> InventoryGrantPacket {

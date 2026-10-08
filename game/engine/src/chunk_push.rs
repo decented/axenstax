@@ -279,6 +279,14 @@ impl ClientChunkPush {
         self.sent.contains_key(&c)
     }
 
+    /// C3b-2 — the number of the first packet of chunk `c`'s latest push (or
+    /// of its column's "local" note), if this client holds it: a block view
+    /// is shown again after each new push of its chunk
+    /// (`block_views::ViewsSent`), since the push replaces what the client held.
+    pub fn push_number(&self, c: ChunkCoord) -> Option<u32> {
+        self.sent.get(&c).copied()
+    }
+
     /// How many chunks this client holds as pushed. Test-only.
     #[cfg(test)]
     pub fn sent_len(&self) -> usize {

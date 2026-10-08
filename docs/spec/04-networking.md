@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `77`** (C3b-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `79`** (C3b-2) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -37,6 +37,7 @@
 - **v76** (2026-10-08, C3a-fix-1): **A joiner's window stays in lockstep: ordered server window events, one ordered send path, per-edit hands.** The server numbers every change it makes to a joiner's window — a grant (a pickup's too), an accepted request's owed take (an eat, a D2b interaction), an armour-wear hit, a swing's weapon wear — as a window event (1, 2, 3… per connection), queues it and applies it to its copy only once the client reports it applied it too, so both sides apply it at the same point among the client's ops and edits (the content is the server's; only the order follows the client; no replay). Appended, in this order: `InventoryGrantPacket`, `InteractOutcomePacket`, `ItemActionOutcomePacket` and `PlayerEventPacket` gain trailing `window_event: u32` (0 = changes nothing; on `PlayerEvent` only `ArmourWorn` sets it); `InputPacket` gains trailing `events_applied: u32` then `edit_hands: Vec<(u8 slot, u8 held_kind, u16 held_id)>` (parallel to `block_changes`); `WindowOpPacket`, `ItemActionPacket` and `EntityInteractPacket` gain trailing `events_applied: u32`; `EntityAttackPacket` gains trailing `hotbar_slot: u8` then `events_applied: u32`; `ItemAction` appends `GrantUnfit { event: u32, count: u8 }` (= 4, fire-and-forget). `window::digest` now covers the session locks and the station. The client applies a grant's unfit part nowhere: it reports it (`GrantUnfit`) and the server spawns it as a real ground item at the joiner's feet. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `joiner_action_packets_round_trip`, `item_action_packets_round_trip`, `window_op_packets_round_trip`, `respawn_request_and_life_events_round_trip`, `inventory_grant_roundtrip`). See §4.2g.
 - **v77** (2026-10-08, C3b-1): **Shared chests, dispensers and furnaces for joiners.** `WireWindowOp` appends `OpenContainer { cell: [i32; 3] }` (= 4) and `Container(container_window::ContainerClick)` (= 5; `ContainerClick` = `Withdraw { slot, all }` 0, `Deposit { slot, all }` 1, `Sort` 2, `DumpMatching` 3, `Restock` 4, `TakeAll` 5, `Furnace { kind: furnace::SlotKind, mode: furnace::ClickMode, hotbar }` 6, append only; `SlotKind` Input/Fuel/Output = 0/1/2, `ClickMode` Single/Stack = 0/1). `WindowOpPacket` appends, after v76's `events_applied`, `touched: Vec<WireWindowSlot>` (≤ 122: the slots a container op changed on the client) then `claims: Vec<(WireWindowSlot, WireSlot)>` (≤ 122: the client's values before a container op of the player slots it acts on); both empty for every other op. Appended S→C: `ContainerOpened = 65` (`{ cell, kind: container_window::ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal> }`; `ContainerKind` = `Chest { tier }` 0, `Dispenser` 1, `Dropper` 2, `Furnace` 3; `OpenRefusal` = `OutOfReach` 0, `Protected` 1, `NotAContainer` 2, `NotInWorld` 3) and `WindowSlotSet = 66` (`{ op_seq_applied: u32, reason: u8 (Correction 0 | Changed 1), sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32 }`; `WireWindowSlot` = `Inv(u8)` 0, `Armour(u8)` 1, `Cursor` 2, `Grid(u8, u8)` 3, `Container(u8)` 4; `window_event` ≠ 0 when the set changes player slots: a numbered window event, as v76's carriers). `WireSlot` = `Option<WireStack { item_kind, item_id, count, full_item: WireItem }>`; `item_kind::PLAN = 4` is reserved for a Plan placeholder. A container op's window digest covers the container. A player-slot correction is the op re-run over the client's claimed slots and the real container, never the server's drifted copy. Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g.
 - **v78** (2026-10-08, C3b-fix-a): **Container corrections that can't duplicate or lose an item.** Every container view the server sends a joiner is a numbered window event: `ContainerOpenedPacket` appends `window_event: u32` (0 for a refusal), and every `WindowSlotSetPacket`, a push too, is numbered. A set names container slots only; a correction's player part is an item delta, appended after `window_event`: `take: Vec<(u8 hint, WireStack)>` (≤ 122: take `count` of the item, from inventory slot `hint` first, then wherever it is) and `give: Vec<WireStack>` (≤ 122: each added; the part that doesn't fit comes back as `ItemAction::GrantUnfit` naming the event, one report per give, in order). `WindowOpPacket` appends, after `claims`, `client_ok: bool` (the client's own `ClickResult::ok()`). Pinned by `protocol::tests` (`window_op_packets_round_trip`, `container_packets_round_trip`). See §4.2g "Shared containers".
+- **v79** (2026-10-08, C3b-2): **Composters, drying racks, campfires, item frames and bee hives for joiners.** `ItemAction` appends `UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; `Eat`'s held claim): a right-click on one of the five blocks, applied by the server to its REAL block entity by the shared rule (`block_use`) and answered with an `ItemActionOutcome`, which appends `wear_held: bool` after `window_event` (shears on a hive wear instead of being taken; the wear is the outcome's window event). `ItemNote` appends codes 9–18 (`OutOfReach`, `NotHere`, `NotThatBlock`, `NothingToTake`, `RackFull`, `NotReady`, `HiveEmpty`, `HiveNeedsTool`, `FireFull`, `InventoryFull` — the last single-player only). `StateUpdatePacket` appends `block_views: Vec<BlockEntityView { cell: [i32; 3], kind: BlockViewKind, view: BlockView }>` after `own_hunger` (`BlockViewKind` and `BlockView` append only: ItemFrame 0, Campfire 1, DryingRack 2, Composter 3, Hive 4): what joiners are shown of those blocks, reliable and in line with the chunk pushes, sent whenever a view changes (whoever changed it) and after each push of its chunk. No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `block_entity_views_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Block uses".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -1688,19 +1689,24 @@ interaction; several give placeable blocks — logs, wallpaper, item frames,
 bought blocks):
 
 - the inventory the joiner arrived with (not on the wire);
-- what it takes from composters, drying racks, campfires, item frames and
-  hives (C3b-2; chests, dispensers and furnaces left this list in C3b-1,
-  §4.2g); client-side pickups of what its own client spilled (a bucket's or a purchase's
-  overflow, a death scatter); a grant's overflow (above: the client holds
-  what the shadow had no room for, so the shadow holds less);
-- fishing; a beehive's honey (bottle or bucket); keg / aged output; an item
-  frame's take and refund; a campfire's cooked pickup; a drying rack's
-  withdraw; a wallpaper peel; vendor, auction and market purchases; raid
+- client-side pickups of what its own client spilled (a bucket's or a
+  purchase's overflow, a death scatter); a grant's overflow (above: the
+  client holds what the shadow had no room for, so the shadow holds less).
+  (What a joiner takes from chests, dispensers and furnaces left this list
+  in C3b-1, §4.2g; from composters, drying racks, campfires, item frames
+  and hives in C3b-2, §4.2f "Block uses": a beehive's honey and honeycomb,
+  the composter's aged output — the "keg / aged output" this list used to
+  name — an item frame's mount, a campfire's cooked pickup and a drying
+  rack's withdraw are server-applied requests now);
+- fishing; a wallpaper peel; vendor, auction and market purchases; raid
   rewards; a pack unequip; armour taken off;
 - face-attachment recovery on a break (wallpaper, blueprint paper and Plans
   go straight into the breaker's inventory; the server spills no
   attachments, so nothing is granted twice);
-- drying-rack recovery on a break (its logs; likewise no double grant);
+- (drying-rack recovery on a break closed in C3b-2: a joiner's accepted
+  break of a rack, an item frame or a composter spills what the SERVER's
+  holds as ground items, `block_use::take_on_break`, and the joined client
+  adds nothing of its view of it);
 - slot layout: moving stacks between slots, the client's `auto_refill`
   setting and locked slots (the shadow always auto-refills and locks
   nothing), and a placement charged to the hotbar slot named in the input (a
@@ -1752,8 +1758,9 @@ than the client's (log-only; the same direction as the gaps below):
 - queue truncation: an edit past the queue's bound is dropped;
 - an unpaired `mined` tag: it becomes `Unchecked` and wears nothing.
 
-The other direction — the shadow holds MORE: composter, rack, campfire,
-frame and hive deposits (C3b-2) and the
+The other direction — the shadow holds MORE (composter, rack, campfire,
+frame and hive deposits left this list in C3b-2: each is an owed take, a
+window event): the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
 cells; and **death** (C1 verify N3): off a keep-inventory world the client
 empties all 36 slots into a grave or a scatter, client-side, while the shadow
@@ -1816,7 +1823,7 @@ C2b's Q-drop in `spawn_joiner_drop`) stay until enforcement.
   export carries other people's inventories. Left until the per-npub sidecar
   step replaces them.
 
-### 4.2f Item actions (as built, protocol v73, C2a; v74, C2b)
+### 4.2f Item actions (as built, protocol v73, C2a; v74, C2b; v79, C3b-2)
 
 A joiner's eating and sleeping are requests the server decides, because the
 server runs the joiner's hunger and owns its health (§5.3.2). C2b adds
@@ -1833,9 +1840,13 @@ held_id: u16, held_full: WireItem }` (the held-food claim, mirroring
 `EntityInteractPacket`'s) or `ItemAction::Sleep { bed: [i32; 3] }`; C2b
 appends `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }`
 and `ItemAction::Drop { hotbar_slot: u8, held_kind: u8, held_id: u16,
-held_full: WireItem }`. The enum is append only: Eat = 0, Sleep = 1, Craft =
-2, Drop = 3 (`protocol::item_action_variant`, pinned on the wire bytes). `ItemActionOutcome = 63` (S→C, to the asker alone):
-`{ seq, accepted, consume_held: u8, note: u8 }`. The `seq` is shared with
+held_full: WireItem }`; v76 appends `GrantUnfit { event: u32, count: u8 }`
+(§4.2g) and v79 `UseBlock { cell, hotbar_slot, held_kind, held_id,
+held_full }` ("Block uses" below). The enum is append only: Eat = 0, Sleep =
+1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5
+(`protocol::item_action_variant`, pinned on the wire bytes). `ItemActionOutcome = 63` (S→C, to the asker alone):
+`{ seq, accepted, consume_held: u8, note: u8 }` (v76 appends `window_event:
+u32`, v79 `wear_held: bool`). The `seq` is shared with
 `EntityAttack` / `EntityInteract` (one `JoinerActions` sequence), and the
 client queues both kinds of outcome in one list in arrival order
 (`remote_client::RequestOutcome`): answering a later request first would
@@ -2035,6 +2046,131 @@ likewise it could report a craft it never made, and the shadow mirrored it
 craft the server's window can't make is refused there, tallied, and makes
 nothing on the server). Both close with enforcement (C3). Crafting is not enforced: a refused craft is
 only counted, and the client keeps what it made.
+
+**Block uses (C3b-2, v79).** A joiner's right-click on a
+**composter, drying rack, campfire, item frame or bee hive** is a request the
+server applies to its REAL block entity — there is no private copy on a
+joined client any more. `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot:
+u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; the held claim
+is `Eat`'s). One rule per block, `block_use` (`use_composter`,
+`use_drying_rack`, `use_campfire`, `use_item_frame`, `use_hive`, dispatched by
+`use_block`, which creates the block entity if the cell has none, as the
+client's open always did), and every path calls it: single-player and a
+host's own seats from their right-click arms (behaviour unchanged), the
+server for a joiner. Each rule returns what the hand pays (0 or 1 of the held
+item, or shears' wear), what the player gains, and whether a smouldering
+campfire relit — or the note that says why nothing happened:
+
+| Block | Held | Effect (server's entity) | Pays | Gains |
+|---|---|---|---|---|
+| Composter | a compostable it takes | loads one | 1 | — |
+| Composter | anything else / empty | collects the aged output | — | the output |
+| Drying rack | a green log | hangs it (`RackFull` when full) | 1 | — |
+| Drying rack | empty hand | takes down the first seasoned log (`NotReady` when none) | — | a seasoned log |
+| Campfire | a fuel | burns it; a smouldering fire relights; leaves and green logs smoke | 1 | — |
+| Campfire | raw food | cooks it in the first empty slot (`FireFull` when full) | 1 | — |
+| Campfire | empty hand | takes the first cooked item off | — | it |
+| Item frame | anything (empty frame) | mounts one | 1 | — |
+| Item frame | anything (filled frame) | turns it a step | — | — |
+| Hive | a bucket | scoops (needs honey: `HiveEmpty`) | 1 | a Honey Jar |
+| Hive | shears | cuts (needs honey) | wear | 3 Honeycomb |
+
+Lighting a campfire (flint and steel, friction) is not a use: it stays a
+block edit (FU3; C3c's local uses). The joined client sends a campfire use
+only with a fuel, raw food or an empty hand, and a rack use only with a green
+log or an empty hand (anything else does nothing, as in single-player); it
+sends nothing with a Plan in hand (a Plan never leaves its holder, C3 design
+§5: "Put the Plan away first.").
+
+*Server* (`HostedServer::serve_block_use`). Judged as a container open is
+(`judge_block_use`): a body in the world and alive (`NotNow`), the cell holds
+one of the five blocks (`NotThatBlock`), within reach of the server body by
+the block-edit envelope with C3a-fix-2's server slack
+(`container_window::container_in_server_reach`; `OutOfReach`), and the play
+mode and plot rules let it touch the cell (`remote_may_touch`; `NotHere`).
+Then the rule runs on the real entity. **Accepted:** the hand's cost is the
+`ItemActionOutcome`'s window event (§4.2g) — the owed take of one
+(`shadow_take_owed`, `WindowEvent::Take`, `consume_held` = 1), or shears' wear
+(`WindowEvent::WearWeapon`, as an accepted swing's; `wear_held` = true) — and
+the gain rides `InventoryGrant`s queued after it, so both copies of the window
+apply them in the client's order. A relit campfire's block goes
+`CAMPFIRE_UNLIT → CAMPFIRE` the way a joiner's own lighting edit lands
+(broadcast, remeshed by a lending host, the smoke pillar raised from the
+server's campfire, `relight_campfire` → `derive_campfire_edit`). **Refused:**
+nothing changes (no entity is created), the outcome carries the note and no
+window event. **The joiner's room is not checked** (BRIDGE until C3d, as every
+grant's): single-player leaves a seasoned log on the rack and cooked food on
+the fire when they don't fit (`ItemNote::InventoryFull`, single-player only);
+a joiner is given the whole gain, and what its client can't hold comes back
+to the world as a ground item at its feet (`ItemAction::GrantUnfit`).
+
+*Client* (`GameState::send_block_use`). Claimed like an eat:
+`Asked::UseBlock { cell, kind, claim }` with `claim = block_use::claim(kind,
+held)` (1 for anything the rule could take — a compostable, a green log, a
+fuel or raw food, anything for a frame, a bucket for a hive; 0 for shears and
+an empty hand), so a use isn't sent while every one in hand is claimed (one
+bucket can't scoop two hives on a slow link). Nothing changes locally until
+the outcome (`joiner_actions::apply_item_outcome` takes `consume_held` owed;
+`apply_use_wear` wears the tool where it now is) and the grants arrive;
+single-player's sound, toast and `CookAtCampfire` challenge then play
+(`block_use_feedback`). A refusal toasts its note; a rack's "not ready yet"
+adds its progress from the joiner's view of the rack. New notes (append-only
+`ItemNote` codes): `OutOfReach` 9, `NotHere` 10, `NotThatBlock` 11,
+`NothingToTake` 12 (silent, as single-player's click), `RackFull` 13,
+`NotReady` 14, `HiveEmpty` 15, `HiveNeedsTool` 16, `FireFull` 17,
+`InventoryFull` 18 (single-player only).
+
+*Everyone sees the change* — **block views.** None of these changes is a
+block edit, so before v79 no joiner saw one. Now every StateUpdate may carry
+`block_views: Vec<BlockEntityView { cell, kind: BlockViewKind, view:
+BlockView }>` (appended after `own_hunger`). A view carries only what the
+block id and meta don't: an item frame's item (the held-item pair plus
+`WireItem`; a framed Plan shows as empty) and rotation; a campfire's fuel,
+smoke and smoulder left, its raid-warning tint and its four cooking slots
+(lit is the block, `CAMPFIRE` / `CAMPFIRE_UNLIT`); a drying rack's eight
+slots; a composter's input and output stacks; a hive's honey level.
+Countdowns are carried to the second (fuel, smoke and smoulder rounded up, so
+any fuel reads lit; cooking rounded down, so "cooked" is exact; seasoning to
+1 %), so a burning fire changes its view about once a second, not every tick.
+Once a tick, after the world's machines ran, the server takes every such view
+(`block_views::views_in`) and each remote joiner's `ViewsSent` picks the ones
+it hasn't been shown as they stand in chunks of its sent-set (pushed, or
+noted local) — whoever changed them: a joiner's use, a host's click on its
+lent world, another joiner, the server's own ticks — and once more after each
+new push of the chunk (the push's render stubs carry only a frame's item and a
+fire's burn state, and its install replaces the client's side data). They go
+into that joiner's outbox **in line** after the tick's chunk pushes
+(`ClientOutbox::push_views`, never coalesced, kept on overflow): a view sent
+outside the FIFO could overtake a queued snapshot whose install would wipe
+it. The client puts a packet's views in its world stream after the packet's
+block changes (`chunk_intake::StreamItem::View`, not numbered, never
+acknowledged) and applies each where it lands (`block_views::apply_view`; a
+local column not generated yet is generated first, a column it doesn't hold
+is skipped), remeshing a frame and a campfire whose raid tint changed. A
+host's own seat shares the world and is sent none. Composter, rack and hive
+views have no renderer yet (no mesh or HUD reads them); they are carried so a
+joiner's world holds the server's state (and its rack toast its progress).
+
+*Breaking one.* A joiner's accepted break of a composter, drying rack, item
+frame or hive spills what the SERVER's held (`spill_used_block` →
+`block_use::take_on_break`: the framed item — the frame's "take" — the rack's
+logs, the composter's input and output) as ground items everyone sees; a
+campfire's cooking spills from `derive_campfire_edit` as before. The joined
+client's break arms spill nothing of their own view of those blocks.
+
+*Joined-client sims off.* A joined client runs no composter sweep, honey
+accumulation or drying-rack seasoning (`remote_client.is_none()` gates;
+pinned by `test_integration::block_use::a_joined_client_runs_no_composter_hive_or_rack_sim`);
+the campfire sweep was gated by FU3.
+
+*Known limits (C3b-2).* The dedicated server still ticks no campfires or
+drying racks (tick parity, D4): a dedicated server's fires don't burn down or
+cook and its racks don't season; a lending host's client ticks them on the
+lent world. Its composters age on the block-machine cadence. A `--no-lend`
+host's server copy of these blocks is not mirrored from the host
+(`mirror_host_world_state` copies mirrored families only; the flag is
+slated for deletion). The joiner's held claim is believed (log-only until
+C3d). Pinned by `test_integration::block_use`.
 
 ### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1; v77, C3b-1)
 
@@ -2239,8 +2375,11 @@ mismatched steadily. Now:
   connection, `ServerPlayer::window_events`, fresh per attach) and sends the
   number on its carrier as `window_event`: `InventoryGrant` (one per stack),
   `InteractOutcome` (an accepted interaction's take, or an accepted swing's
-  wear when a tool was in hand), `ItemActionOutcome` (an accepted eat's take)
-  and the `ArmourWorn` `PlayerEvent`; 0 when the packet changes nothing. An
+  wear when a tool was in hand), `ItemActionOutcome` (an accepted eat's take;
+  C3b-2, v79: an accepted block use's take, or shears' wear with
+  `wear_held` set, §4.2f "Block uses") and the `ArmourWorn` `PlayerEvent`; 0
+  when the packet changes nothing. A block use's take or wear is numbered
+  before its gains, as an interaction's is. An
   interaction's take is numbered before its products, so the outcome precedes
   their grants on the wire, as the client applies them. A Q-drop is not an
   event: the client takes its item when it sends the drop and the server when

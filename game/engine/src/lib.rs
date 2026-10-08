@@ -343,6 +343,8 @@ mod transport;
 mod server;
 mod server_stream; // Phase B1 — the dedicated server's column streamer.
 mod block_machines; // T1-3 — GameServer's block-machine pass + the shared MachineCtx.
+mod block_use; // C3b-2 — composters, drying racks, campfires, item frames and hives: one rule per block.
+mod block_views; // C3b-2 — what joiners are shown of those blocks (`BlockEntityView`).
 mod hosted_server;
 // FU3 — a client's block edits waiting past the server's per-tick budget.
 mod edit_queue;

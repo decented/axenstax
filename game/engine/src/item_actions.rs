@@ -27,6 +27,12 @@
 //!   (log-only), becomes a real ground item thrown from the server body
 //!   ([`serve_drop`]), paced by a token bucket ([`DropBucket`]).
 //!
+//! - **UseBlock** (C3b-2, v79): a right-click on a composter, drying rack,
+//!   campfire, item frame or bee hive. The rules are `block_use` (shared
+//!   with single-player); the server applies them to its real block entity
+//!   in `HostedServer::serve_block_use`, and refuses with the block-use
+//!   notes below (`OutOfReach` … `FireFull`).
+//!
 //! Pure rules first (unit-tested here), then the server-side steps that
 //! apply them to a [`ServerPlayer`]. `hosted_server` holds only the dispatch
 //! and the shadow / outcome glue.
@@ -91,6 +97,35 @@ pub enum ItemNote {
     BedTooFar = 7,
     /// Sleep refused: the cell holds no bed on the server.
     NotABed = 8,
+    /// C3b-2 (v79) — a block use refused: the block is beyond the server
+    /// body's reach.
+    OutOfReach = 9,
+    /// C3b-2 — a block use refused: the play mode or a plot the joiner
+    /// doesn't own forbids touching it.
+    NotHere = 10,
+    /// C3b-2 — a block use refused: the cell holds no composter, drying
+    /// rack, campfire, item frame or hive on the server.
+    NotThatBlock = 11,
+    /// C3b-2 — a block use did nothing: nothing to collect, nothing to put
+    /// in, or an item it doesn't take. Silent, as single-player's click is.
+    NothingToTake = 12,
+    /// C3b-2 — a log for a drying rack with every slot taken.
+    RackFull = 13,
+    /// C3b-2 — an empty hand on a drying rack with nothing seasoned yet (the
+    /// client adds the progress from its view of the rack).
+    NotReady = 14,
+    /// C3b-2 — a bucket or shears on a hive with no honey.
+    HiveEmpty = 15,
+    /// C3b-2 — anything but a bucket or shears on a hive with honey.
+    HiveNeedsTool = 16,
+    /// C3b-2 — raw food for a campfire with every cooking slot taken.
+    FireFull = 17,
+    /// C3b-2 — single-player only: what the use would give doesn't fit the
+    /// inventory, so it stays (a seasoned log back on the rack, cooked food
+    /// on the fire). The server never sends it: a joiner is given the whole
+    /// stack and what doesn't fit comes back to the world as a ground item
+    /// (`ItemAction::GrantUnfit`, the C2b-fix BRIDGE until C3d).
+    InventoryFull = 18,
 }
 
 impl ItemNote {
@@ -110,6 +145,16 @@ impl ItemNote {
             6 => SleptTonight,
             7 => BedTooFar,
             8 => NotABed,
+            9 => OutOfReach,
+            10 => NotHere,
+            11 => NotThatBlock,
+            12 => NothingToTake,
+            13 => RackFull,
+            14 => NotReady,
+            15 => HiveEmpty,
+            16 => HiveNeedsTool,
+            17 => FireFull,
+            18 => InventoryFull,
             _ => None,
         }
     }
@@ -118,13 +163,22 @@ impl ItemNote {
     pub fn toast(self) -> Option<&'static str> {
         use ItemNote::*;
         match self {
-            None | NotNow | TooSoon => Option::None,
+            None | NotNow | TooSoon | NothingToTake => Option::None,
             NotHungry => Some("You're not hungry."),
             NotFood => Some("You can't eat that."),
             NotNight => Some("You can only sleep at night."),
             SleptTonight => Some("You've already slept tonight."),
             BedTooFar => Some("That bed is too far away."),
             NotABed => Some("There's no bed there."),
+            OutOfReach => Some("That's too far away."),
+            NotHere => Some("You can't use that here."),
+            NotThatBlock => Some("There's nothing to use there."),
+            RackFull => Some("Rack full"),
+            NotReady => Some("Not ready yet"),
+            HiveEmpty => Some("The hive has no honey yet — bees fill it over time."),
+            HiveNeedsTool => Some("Use a Bucket (honey) or Shears (honeycomb) on the hive."),
+            FireFull => Some("There's no room on the fire."),
+            InventoryFull => Some("Inventory full"),
         }
     }
 }
@@ -621,9 +675,24 @@ mod tests {
             ItemNote::SleptTonight,
             ItemNote::BedTooFar,
             ItemNote::NotABed,
+            ItemNote::OutOfReach,
+            ItemNote::NotHere,
+            ItemNote::NotThatBlock,
+            ItemNote::NothingToTake,
+            ItemNote::RackFull,
+            ItemNote::NotReady,
+            ItemNote::HiveEmpty,
+            ItemNote::HiveNeedsTool,
+            ItemNote::FireFull,
+            ItemNote::InventoryFull,
         ] {
             assert_eq!(ItemNote::from_wire(n.to_wire()), n);
         }
+        // C3b-2 — the block-use codes are appended after NotABed (8), in order.
+        assert_eq!(ItemNote::OutOfReach.to_wire(), 9);
+        assert_eq!(ItemNote::InventoryFull.to_wire(), 18);
+        assert_eq!(ItemNote::NothingToTake.toast(), None, "silent, as single-player's click is");
+        assert_eq!(ItemNote::RackFull.toast(), Some("Rack full"));
         assert_eq!(ItemNote::from_wire(200), ItemNote::None);
         assert_eq!(ItemNote::NotHungry.toast(), Some("You're not hungry."));
         assert_eq!(ItemNote::NotNight.toast(), Some("You can only sleep at night."));

@@ -904,6 +904,16 @@ impl RemoteClient {
                                 self.pending_entity_batches.push(deltas);
                             }
                             self.pending_block_changes.append(&mut state.block_changes);
+                            // C3b-2 — this packet's block views go in the world
+                            // stream after its block changes (and after every
+                            // chunk push that arrived before it). Not numbered
+                            // stream packets: no bound, no acknowledgement.
+                            for view in state.block_views.drain(..) {
+                                self.chunk_queue.push((
+                                    self.pending_block_changes.len(),
+                                    crate::chunk_intake::StreamItem::View(Box::new(view)),
+                                ));
+                            }
                             self.latest_state = Some(state);
                             changed = true;
                         }
@@ -2010,6 +2020,7 @@ mod tests {
                 rain_ticks_left: 0,
                 storm_ticks_left: 0,
                 own_hunger: 0,
+                block_views: Vec::new(),
             };
             protocol::serialize_packet(PacketType::StateUpdate, &state)
         }
@@ -2108,6 +2119,7 @@ mod tests {
                     rain_ticks_left: 0,
                     storm_ticks_left: 0,
                     own_hunger: 0,
+                    block_views: Vec::new(),
                 },
             )
         };
@@ -2958,7 +2970,7 @@ mod tests {
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::KillEvent, &kill));
         // C2a — an item action's answer joins the same queue, in order.
-        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3, window_event: 0 };
+        let item = protocol::ItemActionOutcomePacket { seq: 5, accepted: false, consume_held: 0, note: 3, window_event: 0, wear_held: false };
         srv.send_to_client(&protocol::serialize_packet(PacketType::ItemActionOutcome, &item));
         rc.poll();
         assert_eq!(
@@ -3126,6 +3138,7 @@ mod tests {
             rain_ticks_left: 0,
             storm_ticks_left: 0,
             own_hunger: 0,
+            block_views: Vec::new(),
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[1, 2])));
         // More than the old 256-packet cap, which dropped the rest silently.
@@ -3155,6 +3168,7 @@ mod tests {
             .map(|(_, item)| match item {
                 crate::chunk_intake::StreamItem::Chunk(p) => format!("C{}", p.cx),
                 crate::chunk_intake::StreamItem::Local((x, z), hash) => format!("L{x},{z}#{hash:x}"),
+                crate::chunk_intake::StreamItem::View(v) => format!("V{}", v.cell[0]),
             })
             .collect();
         assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);

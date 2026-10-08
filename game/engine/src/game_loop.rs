@@ -5638,7 +5638,11 @@ impl super::GameState {
             // Honey accumulation (2026-07-04) — every HONEY_ACCUM_INTERVAL
             // ticks, a hive with a bee working nearby gains one honey level.
             // Shared with the dedicated server (block_machines.rs, T1-3).
-            crate::bee_hive::accumulate_honey(&mut self.world, &self.ecs, self.tick_counter);
+            // C3b-2 — a JOINER runs none: its hives are the server's, shown
+            // to it as views (`block_views`), and it has no bees of its own.
+            if self.remote_client.is_none() {
+                crate::bee_hive::accumulate_honey(&mut self.world, &self.ecs, self.tick_counter);
+            }
 
             if self.sim_runs(SimSystem::LeafDecay) {
                 // Leaf decay
@@ -6017,7 +6021,11 @@ impl super::GameState {
             // (no lit variant), so this is a pure per-tick state advance — no
             // block flip, no audio for v1. Output is collected by right-click.
             // Shared with the dedicated server (block_machines.rs, T1-3).
-            crate::composter::tick_all(&mut self.world);
+            // C3b-2 — a JOINER runs none: its composters are the server's,
+            // shown to it as views (`block_views`).
+            if self.remote_client.is_none() {
+                crate::composter::tick_all(&mut self.world);
+            }
 
             // Spec 49 (Explosives) — Blasting Keg fuse sweep. The pure
             // `tick_keg_fuses` counts every lit keg's fuse down and returns the
@@ -6044,8 +6052,14 @@ impl super::GameState {
             // a player-facing toast through the existing single-toast
             // slot — multiple racks maturing in the same tick collapse
             // into one toast (the latest wins; alpha-acceptable).
-            let rack_positions: Vec<(i32, i32, i32)> =
-                self.world.drying_racks.keys().copied().collect();
+            // C3b-2 — a JOINER seasons nothing itself: its racks are the
+            // server's (or its lending host's), shown to it as views
+            // (`block_views`).
+            let rack_positions: Vec<(i32, i32, i32)> = if self.remote_client.is_none() {
+                self.world.drying_racks.keys().copied().collect()
+            } else {
+                Vec::new()
+            };
             let mut any_matured = false;
             for pos in rack_positions {
                 let operating = crate::drying_rack::is_operating(&self.world, pos.0, pos.1, pos.2);
@@ -11695,7 +11709,11 @@ impl super::GameState {
                                 {
                                     let framed = frame.take();
                                     self.world.block_entities.remove(&(pos[0], pos[1], pos[2]));
-                                    if let Some(stack) = framed {
+                                    // C3b-2 — a joined client's frame is the server's
+                                    // view: the server spills the real item.
+                                    if let Some(stack) = framed
+                                        && !self.edits_reach_server()
+                                    {
                                         crate::entity::spawn_item(
                                             &mut self.ecs,
                                             glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
@@ -11711,12 +11729,13 @@ impl super::GameState {
                                 // plot) can't leave a restored fire with no smoke
                                 // on this screen. Others clear it themselves.
                                 let (campfire_spill, cleared) = if self.edits_reach_server() {
-                                    (
-                                        crate::campfire::cleanup_campfire_keep_smoke(
-                                            &mut self.world, pos[0], pos[1], pos[2],
-                                        ),
-                                        Vec::new(),
-                                    )
+                                    // C3b-2 — and what was cooking spills from the
+                                    // server's fire (`on_block_edit`): this copy's
+                                    // slots are its view of it.
+                                    let _ = crate::campfire::cleanup_campfire_keep_smoke(
+                                        &mut self.world, pos[0], pos[1], pos[2],
+                                    );
+                                    (Vec::new(), Vec::new())
                                 } else {
                                     crate::campfire::cleanup_campfire(
                                         &mut self.world, pos[0], pos[1], pos[2],
@@ -11956,8 +11975,12 @@ impl super::GameState {
                                     let rack_spill = crate::drying_rack::cleanup_drying_rack(
                                         &mut self.world, pos[0], pos[1], pos[2],
                                     );
-                                    for stack in rack_spill {
-                                        self.players[pidx].inventory.add_item(stack);
+                                    // C3b-2 — a joined client's rack is the server's
+                                    // view: the server spills the real logs.
+                                    if !self.edits_reach_server() {
+                                        for stack in rack_spill {
+                                            self.players[pidx].inventory.add_item(stack);
+                                        }
                                     }
                                     // HP-2 — Chest break: spill contents as
                                     // ground ItemEntities at the block
@@ -12013,7 +12036,11 @@ impl super::GameState {
                                     {
                                         let framed = frame.take();
                                         self.world.block_entities.remove(&(pos[0], pos[1], pos[2]));
-                                        if let Some(stack) = framed {
+                                        // C3b-2 — a joined client's frame is the server's
+                                        // view: the server spills the real item.
+                                        if let Some(stack) = framed
+                                            && !self.edits_reach_server()
+                                        {
                                             crate::entity::spawn_item(
                                                 &mut self.ecs,
                                                 glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5),
@@ -12051,12 +12078,13 @@ impl super::GameState {
                                 // plot) can't leave a restored fire with no smoke
                                 // on this screen. Others clear it themselves.
                                 let (campfire_spill, cleared_smoke) = if self.edits_reach_server() {
-                                    (
-                                        crate::campfire::cleanup_campfire_keep_smoke(
-                                            &mut self.world, pos[0], pos[1], pos[2],
-                                        ),
-                                        Vec::new(),
-                                    )
+                                    // C3b-2 — and what was cooking spills from the
+                                    // server's fire (`on_block_edit`): this copy's
+                                    // slots are its view of it.
+                                    let _ = crate::campfire::cleanup_campfire_keep_smoke(
+                                        &mut self.world, pos[0], pos[1], pos[2],
+                                    );
+                                    (Vec::new(), Vec::new())
                                 } else {
                                     crate::campfire::cleanup_campfire(
                                         &mut self.world, pos[0], pos[1], pos[2],
@@ -13982,71 +14010,53 @@ impl super::GameState {
                         // fully tested since Spec 28d but had no live caller.
                         // Bucket → 1 Honey Jar (bucket consumed); Shears → 3
                         // Honeycomb (durability); empty/other/empty-hive → no-op.
-                        let pos_key = (pos[0], pos[1], pos[2]);
-                        if self.world.hive_at(pos_key).is_none() {
-                            self.world
-                                .insert_hive(pos_key, crate::bee_hive::HiveData::default());
+                        // C3b-2 — the rule is `block_use::use_hive`, shared
+                        // with the server; a joiner asks it to use the real hive.
+                        if self.joined() {
+                            self.send_block_use(pidx, pos, crate::block_use::UseKind::Hive);
+                            continue;
                         }
+                        let pos_key = (pos[0], pos[1], pos[2]);
                         let hotbar = self.players[pidx].hotbar_slot;
-                        let held_item = self.players[pidx]
-                            .inventory
-                            .hotbar_slot(hotbar)
-                            .map(|s| s.item.clone());
-                        let outcome = {
-                            let hive = self.world.hive_at_mut(pos_key).expect("just inserted");
-                            crate::bee_hive::resolve_right_click(hive, held_item.as_ref())
-                        };
-                        match outcome {
-                            crate::bee_hive::HiveRightClickOutcome::Give { item, .. } => {
-                                // Bucket consumed (the milking idiom).
-                                let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
-                                if let Some(leftover) =
-                                    self.players[pidx].inventory.add_item(item)
-                                {
-                                    let p = self.players[pidx].player.pos;
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs, p, leftover, self.tick_counter as u32,
-                                    );
+                        let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
+                        let used = crate::block_use::use_block(
+                            &mut self.world,
+                            pos_key,
+                            crate::block_use::UseKind::Hive,
+                            held.as_ref(),
+                            &|_| true,
+                        );
+                        match used {
+                            Ok(used) => {
+                                // A bucket is taken (the milking idiom).
+                                if used.pay > 0 {
+                                    let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
+                                }
+                                for item in used.gain {
+                                    if let Some(leftover) = self.players[pidx].inventory.add_item(item) {
+                                        let p = self.players[pidx].player.pos;
+                                        crate::entity::spawn_item(
+                                            &mut self.ecs, p, leftover, self.tick_counter as u32,
+                                        );
+                                    }
+                                }
+                                // Shears wear.
+                                if used.wear {
+                                    let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
+                                    self.handle_tool_use(info);
                                 }
                                 self.audio.play_place();
-                                if pidx == 0 {
-                                    self.toast = Some((
-                                        "Scooped a Honey Jar from the hive.".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                }
-                            }
-                            crate::bee_hive::HiveRightClickOutcome::GiveAndUseTool { item } => {
-                                if let Some(leftover) =
-                                    self.players[pidx].inventory.add_item(item)
+                                if pidx == 0
+                                    && let Some(msg) = crate::block_use::effect_toast(&used.effect)
                                 {
-                                    let p = self.players[pidx].player.pos;
-                                    crate::entity::spawn_item(
-                                        &mut self.ecs, p, leftover, self.tick_counter as u32,
-                                    );
-                                }
-                                let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
-                                self.handle_tool_use(info);
-                                self.audio.play_place();
-                                if pidx == 0 {
-                                    self.toast = Some((
-                                        "Sheared 3 Honeycomb from the hive.".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
+                                    self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
                                 }
                             }
-                            crate::bee_hive::HiveRightClickOutcome::Nothing => {
-                                if pidx == 0 {
-                                    let hive = self.world.hive_at(pos_key).copied().unwrap_or_default();
-                                    let msg = if hive.is_empty() {
-                                        "The hive has no honey yet — bees fill it over time."
-                                    } else {
-                                        "Use a Bucket (honey) or Shears (honeycomb) on the hive."
-                                    };
-                                    self.toast = Some((
-                                        msg.to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
+                            Err(note) => {
+                                if pidx == 0
+                                    && let Some(msg) = note.toast()
+                                {
+                                    self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
                                 }
                             }
                         }
@@ -14094,30 +14104,30 @@ impl super::GameState {
                         // for the saltpetre stage) loads one unit; right-click with
                         // an empty/other hand collects the aged output. Lazily
                         // creates the block-entity (furnace/chest pattern).
-                        let pos_key = (pos[0], pos[1], pos[2]);
-                        if self.world.composter_at(pos_key).is_none() {
-                            self.world.insert_composter(
-                                pos_key,
-                                crate::workstation::WorkstationState::new(),
-                            );
+                        // C3b-2 — the rule is `block_use::use_composter`, shared
+                        // with the server; a joiner asks it to use the real one.
+                        if self.joined() {
+                            self.send_block_use(pidx, pos, crate::block_use::UseKind::Composter);
+                            continue;
                         }
+                        let pos_key = (pos[0], pos[1], pos[2]);
                         let hot = self.players[pidx].hotbar_slot;
                         let held = self.players[pidx].inventory.hotbar_slot(hot).cloned();
-                        let loaded = match &held {
-                            Some(stack) if crate::composter::is_compostable(stack) => self
-                                .world
-                                .composter_at_mut(pos_key)
-                                .is_some_and(|c| crate::composter::try_load_input(c, stack)),
-                            _ => false,
-                        };
-                        if loaded {
-                            let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
-                            self.audio.play_place();
-                        } else if let Some(stack) =
-                            self.world.composter_at_mut(pos_key).and_then(|c| c.output.take())
-                        {
-                            let _ = self.players[pidx].inventory.add_item(stack);
-                            self.audio.play_gem_pickup();
+                        if let Ok(used) = crate::block_use::use_block(
+                            &mut self.world,
+                            pos_key,
+                            crate::block_use::UseKind::Composter,
+                            held.as_ref(),
+                            &|_| true,
+                        ) {
+                            if used.pay > 0 {
+                                let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
+                                self.audio.play_place();
+                            }
+                            for stack in used.gain {
+                                let _ = self.players[pidx].inventory.add_item(stack);
+                                self.audio.play_gem_pickup();
+                            }
                         }
                         self.players[pidx].place_cooldown = 8;
                         continue;
@@ -14133,31 +14143,27 @@ impl super::GameState {
                     } else if target_blk == block::ITEM_FRAME {
                         // Wave 2c — right-click an Item Frame: mount the held item
                         // into an empty frame, else rotate the framed item.
-                        let pos_key = (pos[0], pos[1], pos[2]);
-                        if self.world.item_frame_at(pos_key).is_none() {
-                            self.world.insert_item_frame(
-                                pos_key, crate::item_frame::ItemFrameData::new());
+                        // C3b-2 — the rule is `block_use::use_item_frame`, shared
+                        // with the server; a joiner asks it to use the real frame
+                        // (the frame redraws when its view comes back).
+                        if self.joined() {
+                            self.send_block_use(pidx, pos, crate::block_use::UseKind::ItemFrame);
+                            continue;
                         }
-                        let is_empty = self.world.item_frame_at(pos_key)
-                            .map(|f| f.is_empty()).unwrap_or(true);
-                        if is_empty {
-                            let hot = self.players[pidx].hotbar_slot;
-                            if let Some(stack) =
-                                self.players[pidx].inventory.take_one_from_hotbar(hot)
-                            {
-                                // Only consume the item if the frame actually
-                                // accepts it; otherwise refund (the frame vanished
-                                // or was full) so a held item is never lost.
-                                let framed = match self.world.item_frame_at_mut(pos_key) {
-                                    Some(f) => f.try_insert(stack.clone()),
-                                    None => false,
-                                };
-                                if !framed {
-                                    let _ = self.players[pidx].inventory.add_item(stack);
-                                }
-                            }
-                        } else if let Some(f) = self.world.item_frame_at_mut(pos_key) {
-                            f.rotate();
+                        let pos_key = (pos[0], pos[1], pos[2]);
+                        let hot = self.players[pidx].hotbar_slot;
+                        let held = self.players[pidx].inventory.hotbar_slot(hot).cloned();
+                        // The item is taken only once the frame has it, so a
+                        // held item is never lost.
+                        if let Ok(used) = crate::block_use::use_block(
+                            &mut self.world,
+                            pos_key,
+                            crate::block_use::UseKind::ItemFrame,
+                            held.as_ref(),
+                            &|_| true,
+                        ) && used.pay > 0
+                        {
+                            let _ = self.players[pidx].inventory.take_one_from_hotbar(hot);
                         }
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         self.players[pidx].place_cooldown = 8;
@@ -14608,58 +14614,38 @@ impl super::GameState {
                                 // Not in friction — reset any stale state
                                 // and fall through to P5 fuel/meat/pickup.
                                 self.players[pidx].friction_target = None;
-
-                                // Resolve fuel value from the held item, if any.
-                                let (fuel_material, fuel_block) = match held.as_ref().map(|s| &s.item) {
-                                    Some(crate::item::Item::Material(m)) => (Some(*m), None),
-                                    Some(crate::item::Item::Block(b)) => (None, Some(*b)),
-                                    _ => (None, None),
-                                };
-                                let fuel = crate::campfire::fuel_value(fuel_material, fuel_block);
-
-                                if let Some(ticks) = fuel {
-                                    // Fuel branch.
-                                    let consumed = match (fuel_material, fuel_block) {
-                                        (Some(m), _) => self.players[pidx]
-                                            .inventory
-                                            .consume_one_material(hotbar, m),
-                                        (_, Some(_)) => self.players[pidx]
-                                            .inventory
-                                            .take_block_from_hotbar(hotbar)
-                                            .is_some(),
-                                        _ => false,
-                                    };
-                                    if consumed {
-                                        // Spec 30 — check smoulder BEFORE add_fuel so
-                                        // we can decide whether to instant-relight.
-                                        let was_smouldering = self.world
-                                            .campfire_at(pos_key)
-                                            .map(|cf| cf.is_smouldering())
-                                            .unwrap_or(false);
-                                        if let Some(cf) = self.world.campfire_at_mut(pos_key) {
-                                            cf.add_fuel(ticks);
-                                            if was_smouldering {
-                                                // Smouldering campfire + fuel = instant relight,
-                                                // no friction or flint-and-steel needed.
-                                                cf.smoulder_ticks = 0;
-                                            }
-                                            // Smoky fuels bump the smoke pillar
-                                            // for the friend-signal beacon: leaves
-                                            // (Wave 28) + green logs (Wave 29).
-                                            // Seasoned + kiln-dried logs burn
-                                            // clean.
-                                            if crate::campfire::is_smoky_fuel(fuel_material, fuel_block) {
-                                                let smoke_bump = match (fuel_material, fuel_block) {
-                                                    (_, Some(block::OAK_LEAVES)) => crate::campfire::SMOKE_TICKS_PER_LEAF,
-                                                    (Some(crate::item::MaterialId::GreenLog), _) => crate::campfire::SMOKE_TICKS_PER_GREEN_LOG,
-                                                    _ => 0,
-                                                };
-                                                cf.smoke_ticks = cf.smoke_ticks.saturating_add(smoke_bump);
-                                            }
+                                // C3b-2 — fuel, raw food and the cooked pickup are
+                                // `block_use::use_campfire`, shared with the
+                                // server; a joiner asks it to use the real fire
+                                // (only with fuel, raw food or an empty hand:
+                                // anything else does nothing, as here).
+                                if self.joined() {
+                                    if crate::block_use::claim(crate::block_use::UseKind::Campfire, held.as_ref().map(|s| &s.item)) > 0
+                                        || held.is_none()
+                                    {
+                                        self.send_block_use(pidx, pos_arr, crate::block_use::UseKind::Campfire);
+                                    }
+                                    continue;
+                                }
+                                let inv = &self.players[pidx].inventory;
+                                let room = |s: &crate::item::ItemStack| crate::block_use::has_room(inv, s);
+                                let used = crate::block_use::use_block(
+                                    &mut self.world,
+                                    pos_key,
+                                    crate::block_use::UseKind::Campfire,
+                                    held.as_ref(),
+                                    &room,
+                                );
+                                match used {
+                                    Ok(used) => {
+                                        if used.pay > 0 {
+                                            let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
                                         }
-                                        // If smouldering, also flip the block back to CAMPFIRE so
-                                        // the renderer sees it as lit on the next mesh build.
-                                        if was_smouldering {
+                                        // Spec 30 — a smouldering campfire + fuel =
+                                        // instant relight: flip the block back to
+                                        // CAMPFIRE so the renderer sees it lit, with
+                                        // its light.
+                                        if used.relit {
                                             self.world.set_block(pos_key.0, pos_key.1, pos_key.2, block::CAMPFIRE);
                                             crate::lighting::update_for_block_change(
                                                 &mut self.world,
@@ -14673,67 +14659,34 @@ impl super::GameState {
                                             #[cfg(not(target_arch = "wasm32"))]
                                             self.pending_block_changes.push(broadcast_change(&self.world, pos_key.0, pos_key.1, pos_key.2, block::CAMPFIRE));
                                         }
+                                        let took_cooked = used.effect == crate::block_use::Effect::TookCooked;
+                                        for stack in used.gain {
+                                            let _ = self.players[pidx].inventory.add_item(stack);
+                                        }
                                         self.audio.play_place();
                                         self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
-                                    }
-                                } else if let Some(m) = held.as_ref().and_then(|s| match &s.item {
-                                    crate::item::Item::Material(m) => Some(*m),
-                                    _ => None,
-                                }) {
-                                    if crate::campfire::is_raw_cookable(m) {
-                                        // Raw-meat branch — place in first empty slot.
-                                        let placed = self
-                                            .world
-                                            .campfire_at_mut(pos_key)
-                                            .map(|cf| cf.try_place_raw(m))
-                                            .unwrap_or(false);
-                                        if placed {
-                                            self.players[pidx]
-                                                .inventory
-                                                .consume_one_material(hotbar, m);
-                                            self.audio.play_place();
-                                            self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
+                                        if used.effect == crate::block_use::Effect::OnTheFire {
                                             // Immediate feedback so meat-on-fire is
                                             // never silent: it only cooks on a lit,
                                             // fuelled fire — otherwise nudge to light it.
-                                            let cooking = self.world.get_block(pos[0], pos[1], pos[2])
-                                                == block::CAMPFIRE
-                                                && crate::campfire::can_ignite(self.world.campfire_at(pos_key));
                                             self.toast = Some((
-                                                if cooking {
-                                                    "On the fire — cooking…".to_string()
-                                                } else {
-                                                    "On the fire — light it to start cooking".to_string()
-                                                },
+                                                crate::block_use::on_the_fire_toast(&self.world, pos_arr).to_string(),
                                                 Instant::now() + Duration::from_secs(2),
                                             ));
                                         }
-                                    }
-                                } else if held.is_none() {
-                                    // Empty-hand branch — pick up first cooked slot.
-                                    let cooked = self.world
-                                        .campfire_at(pos_key)
-                                        .and_then(|cf| cf.first_cooked_slot());
-                                    if let Some((slot_idx, cooked_mat)) = cooked {
-                                        let stack = crate::item::ItemStack::new_material(cooked_mat, 1);
-                                        if self.players[pidx].inventory.add_item(stack).is_none() {
-                                            if let Some(cf) = self.world.campfire_at_mut(pos_key) {
-                                                cf.slots[slot_idx] = crate::campfire::CookSlot::default();
-                                            }
-                                            self.audio.play_place();
-                                            self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
-                                            // Phase 3 — coverage-challenge CookAtCampfire event
-                                            // (a cooked item was taken off the fire).
-                                            if let Some(scenario) = &mut self.scenario {
-                                                scenario.on_event(crate::scenario::ChallengeEvent::CookAtCampfire);
-                                            }
-                                        } else {
-                                            self.toast = Some((
-                                                "Inventory full".to_string(),
-                                                Instant::now() + Duration::from_secs(2),
-                                            ));
+                                        // Phase 3 — coverage-challenge CookAtCampfire event
+                                        // (a cooked item was taken off the fire).
+                                        if took_cooked && let Some(scenario) = &mut self.scenario {
+                                            scenario.on_event(crate::scenario::ChallengeEvent::CookAtCampfire);
                                         }
                                     }
+                                    Err(crate::item_actions::ItemNote::InventoryFull) => {
+                                        self.toast = Some((
+                                            "Inventory full".to_string(),
+                                            Instant::now() + Duration::from_secs(2),
+                                        ));
+                                    }
+                                    Err(_) => {}
                                 }
                             }
                         }
@@ -14742,92 +14695,56 @@ impl super::GameState {
                         // Held GreenLog → deposit into first empty slot.
                         // Empty hand → withdraw first mature slot as
                         //   SeasonedLog material; toast progress if none ready.
-                        // Anything else → fall through (block-place branch
-                        //   won't fire on a solid target_blk, so the click
-                        //   is just consumed).
-                        let pos_key = (pos[0], pos[1], pos[2]);
+                        // Anything else → nothing (the click is just consumed).
+                        // C3b-2 — the rule is `block_use::use_drying_rack`,
+                        // shared with the server; a joiner asks it to use the
+                        // real rack (only with a green log or an empty hand).
                         let hotbar = self.players[pidx].hotbar_slot;
                         let held = self.players[pidx].inventory.hotbar_slot(hotbar).cloned();
-                        let held_material = held.as_ref().and_then(|s| match &s.item {
-                            crate::item::Item::Material(m) => Some(*m),
-                            _ => None,
-                        });
-                        // Ensure the rack has a state entry — the place
-                        // path drops it on world reset but a freshly-placed
-                        // rack might not yet have an entry from save data.
-                        self.world.drying_racks.entry(pos_key).or_default();
-                        if let Some(m) = held_material {
-                            if let Some(species) = crate::drying_rack::species_of_green(m) {
-                                let placed = self.world.drying_racks
-                                    .get_mut(&pos_key)
-                                    .map(|d| d.try_place_green(species))
-                                    .unwrap_or(false);
-                                if placed {
-                                    self.players[pidx]
-                                        .inventory
-                                        .consume_one_material(hotbar, m);
-                                    self.audio.play_place();
-                                    self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
-                                    self.toast = Some((
-                                        "Log added — drying".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                } else {
-                                    self.toast = Some((
-                                        "Rack full".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                    self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
+                        if self.joined() {
+                            if held.is_none()
+                                || crate::block_use::claim(crate::block_use::UseKind::DryingRack, held.as_ref().map(|s| &s.item)) > 0
+                            {
+                                self.send_block_use(pidx, pos, crate::block_use::UseKind::DryingRack);
+                            }
+                            continue;
+                        }
+                        let pos_key = (pos[0], pos[1], pos[2]);
+                        // A seasoned log that doesn't fit stays on the rack, so
+                        // the seasoning work is never lost.
+                        let inv = &self.players[pidx].inventory;
+                        let room = |s: &crate::item::ItemStack| crate::block_use::has_room(inv, s);
+                        let used = crate::block_use::use_block(
+                            &mut self.world,
+                            pos_key,
+                            crate::block_use::UseKind::DryingRack,
+                            held.as_ref(),
+                            &room,
+                        );
+                        match used {
+                            Ok(used) => {
+                                if used.pay > 0 {
+                                    let _ = self.players[pidx].inventory.take_one_from_hotbar(hotbar);
+                                }
+                                for stack in used.gain {
+                                    let _ = self.players[pidx].inventory.add_item(stack);
+                                }
+                                self.audio.play_place();
+                                self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
+                                if let Some(msg) = crate::block_use::effect_toast(&used.effect) {
+                                    self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
                                 }
                             }
-                        } else if held.is_none() {
-                            // Empty-hand → withdraw mature.
-                            let species = self.world.drying_racks
-                                .get_mut(&pos_key)
-                                .and_then(|d| d.take_mature());
-                            if let Some(species) = species {
-                                let mat = crate::drying_rack::mature_output(species);
-                                let stack = crate::item::ItemStack::new_material(mat, 1);
-                                if self.players[pidx].inventory.add_item(stack).is_none() {
-                                    self.audio.play_place();
-                                    self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
-                                    self.toast = Some((
-                                        "Seasoned log!".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
-                                } else {
-                                    // Inventory full — put it back so the
-                                    // player doesn't lose the seasoning
-                                    // work. The slot we just emptied is the
-                                    // first empty one, so try_place succeeds.
-                                    if let Some(d) = self.world.drying_racks.get_mut(&pos_key) {
-                                        // Restore as mature (not green) so
-                                        // re-clicking with space immediately
-                                        // works. Reuse the slot directly to
-                                        // preserve "mature" state.
-                                        if let Some(idx) = d.empty_slot() {
-                                            d.slots[idx] = crate::drying_rack::RackSlot {
-                                                species: Some(species),
-                                                seasoning_ticks: crate::drying_rack::SEASON_TICKS,
-                                            };
-                                        }
-                                    }
-                                    self.toast = Some((
-                                        "Inventory full".to_string(),
-                                        Instant::now() + Duration::from_secs(2),
-                                    ));
+                            Err(note) => {
+                                if let Some(msg) = crate::block_use::rack_note_toast(note, self.world.drying_racks.get(&pos_key)) {
+                                    self.toast = Some((msg, Instant::now() + Duration::from_secs(2)));
                                 }
-                            } else {
-                                // Nothing ready — surface progress.
-                                let pct = self.world.drying_racks
-                                    .get(&pos_key)
-                                    .map(|d| (d.max_progress() * 100.0).round() as u32)
-                                    .unwrap_or(0);
-                                self.toast = Some((
-                                    format!("Not ready yet — {pct}%"),
-                                    Instant::now() + Duration::from_secs(2),
-                                ));
-                                self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
+                                if matches!(
+                                    note,
+                                    crate::item_actions::ItemNote::RackFull | crate::item_actions::ItemNote::NotReady
+                                ) {
+                                    self.players[pidx].place_cooldown = crate::player_slot::PLACE_COOLDOWN_TICKS;
+                                }
                             }
                         }
                     } else if target_blk == block::ARCHITECT_PLAQUE {
@@ -22291,6 +22208,90 @@ impl super::GameState {
         }));
     }
 
+    /// C3b-2 — player `pidx` (a joiner) right-clicked the `kind` block at
+    /// `cell` (a composter, drying rack, campfire, item frame or hive): ask
+    /// the server, which runs the shared rule (`block_use`) on its REAL one.
+    /// Nothing changes here — no private copy is touched or created — until
+    /// the outcome (what the hand pays: a take, or shears' wear) and the
+    /// grants (what it gains) arrive, each a window event in arrival order;
+    /// the block's new state comes back as its view (`block_views`). Claimed
+    /// like an eat (`JoinerActions::can_afford`: one bucket can't scoop two
+    /// hives on a slow link), so nothing is sent while every one in hand is
+    /// claimed. A Plan never leaves its holder (C3 design §5): with one in
+    /// hand nothing is sent.
+    pub(crate) fn send_block_use(&mut self, pidx: usize, cell: [i32; 3], kind: crate::block_use::UseKind) {
+        self.players[pidx].place_cooldown = 8;
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        if matches!(held, Some(crate::item::Item::Plan(_))) {
+            self.toast = Some(("Put the Plan away first.".to_string(), Instant::now() + Duration::from_secs(2)));
+            return;
+        }
+        let asked = crate::joiner_actions::Asked::UseBlock {
+            cell,
+            kind,
+            claim: crate::block_use::claim(kind, held.as_ref()),
+        };
+        let p = &self.players[pidx];
+        if !self.joiner_actions.can_afford(&p.inventory, &p.crafting_ui, asked, held.as_ref()) {
+            return;
+        }
+        let next_input = self.request_input_seq();
+        let seq = self.joiner_actions.record(
+            crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held },
+            next_input,
+        );
+        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
+            seq,
+            action: crate::protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full },
+            // Stamped by `RemoteClient::send_item_action`.
+            events_applied: 0,
+        }));
+    }
+
+    /// C3b-2 — what an accepted block use of ours shows: the sound and words
+    /// single-player's click has, chosen by what we asked with and what the
+    /// server took (`consume_held`) or wore.
+    fn block_use_feedback(&mut self, request: &crate::joiner_actions::Pending, out: &crate::protocol::ItemActionOutcomePacket) {
+        use crate::block_use::{Effect, UseKind};
+        let crate::joiner_actions::Asked::UseBlock { cell, kind, .. } = request.kind else { return };
+        let paid = out.consume_held > 0;
+        let effect = match kind {
+            UseKind::Composter if paid => Effect::Loaded,
+            UseKind::Composter => Effect::Collected,
+            UseKind::DryingRack if paid => Effect::Hung,
+            UseKind::DryingRack => Effect::Seasoned,
+            UseKind::Campfire if request.held.is_none() => Effect::TookCooked,
+            UseKind::Campfire
+                if request.held.as_ref().is_some_and(|i| match i {
+                    crate::item::Item::Material(m) => crate::campfire::is_raw_cookable(*m),
+                    _ => false,
+                }) =>
+            {
+                Effect::OnTheFire
+            }
+            UseKind::Campfire => Effect::Fuelled,
+            UseKind::ItemFrame if paid => Effect::Framed,
+            UseKind::ItemFrame => Effect::Rotated,
+            UseKind::Hive if out.wear_held => Effect::Sheared,
+            UseKind::Hive => Effect::Scooped,
+        };
+        match effect {
+            Effect::Collected => self.audio.play_gem_pickup(),
+            Effect::Framed | Effect::Rotated => {}
+            _ => self.audio.play_place(),
+        }
+        let msg = match effect {
+            Effect::OnTheFire => Some(crate::block_use::on_the_fire_toast(&self.world, cell)),
+            ref e => crate::block_use::effect_toast(e),
+        };
+        if let Some(msg) = msg {
+            self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
+        }
+        if effect == Effect::TookCooked {
+            self.fire_challenge(crate::scenario::ChallengeEvent::CookAtCampfire);
+        }
+    }
+
     /// C2a — the server's decision on one of our item actions. An accepted
     /// eat takes the food we claimed (owed, `joiner_actions::take_owed`) and
     /// fires the challenge event single-player fires — the server already
@@ -22306,6 +22307,11 @@ impl super::GameState {
         }
         let p = &mut self.players[0];
         crate::joiner_actions::apply_item_outcome(&mut p.inventory, &mut p.crafting_ui, &request, out);
+        // C3b-2 — shears on a hive wear where they now are.
+        let wear = crate::joiner_actions::apply_use_wear(&mut p.inventory, &request, out);
+        if wear.is_some() {
+            self.handle_tool_use(wear);
+        }
         if out.accepted {
             match request.kind {
                 crate::joiner_actions::Asked::Eat => {
@@ -22318,12 +22324,22 @@ impl super::GameState {
                         Instant::now() + Duration::from_secs(3),
                     ));
                 }
+                crate::joiner_actions::Asked::UseBlock { .. } => self.block_use_feedback(&request, out),
                 _ => {}
             }
             return;
         }
-        if let Some(msg) = crate::item_actions::ItemNote::from_wire(out.note).toast() {
-            self.toast = Some((msg.to_string(), Instant::now() + Duration::from_secs(2)));
+        let note = crate::item_actions::ItemNote::from_wire(out.note);
+        // C3b-2 — a rack's "not ready yet" says how far it is, from our view
+        // of the server's rack.
+        let msg = match request.kind {
+            crate::joiner_actions::Asked::UseBlock { cell, .. } => {
+                crate::block_use::rack_note_toast(note, self.world.drying_racks.get(&(cell[0], cell[1], cell[2])))
+            }
+            _ => note.toast().map(str::to_string),
+        };
+        if let Some(msg) = msg {
+            self.toast = Some((msg, Instant::now() + Duration::from_secs(2)));
         }
     }
 
