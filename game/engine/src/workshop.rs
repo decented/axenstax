@@ -902,6 +902,7 @@ pub fn capture_box_as_plan(
         authored_in: "workshop".to_string(),
         develop_state: DevelopState::Developed,
         kind: PlanKind::Building,
+        marker: None,
     })
 }
 

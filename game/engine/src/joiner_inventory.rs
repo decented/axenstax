@@ -356,6 +356,16 @@ pub struct PossessionTally {
     /// C3c-1 — the use kinds already logged a mismatch for
     /// (`use_edits::UseKind::bit`): one line per kind per connection.
     uses_logged: u16,
+    /// C3c-3a — Plans a joiner reported minting (`ItemAction::PlanMinted`)
+    /// mirrored on the copy as marker placeholders (`plan_mint::mirror_mint`).
+    pub plan_minted: u32,
+    /// C3c-3a — of them, mints with a shortfall: what it spent the copy
+    /// didn't hold, the placeholder didn't fit (dropped, never spilled), or
+    /// the report named no Plan or an unknown source. Mirrored all the same
+    /// (log-only; believed until C3d).
+    pub plan_mismatch: u32,
+    /// C3c-3a — a Plan-mint mismatch was logged this connection.
+    plan_logged: bool,
     /// Mismatches since the last warning.
     suppressed: u32,
     /// When the last warning went out.
@@ -401,6 +411,17 @@ impl PossessionTally {
         first
     }
 
+    /// C3c-3a — count a mirrored Plan mint (`clean` = no shortfall). `true`
+    /// when this is the first mismatch this connection, so it is logged.
+    pub fn note_plan_mint(&mut self, clean: bool) -> bool {
+        self.plan_minted = self.plan_minted.saturating_add(1);
+        if clean {
+            return false;
+        }
+        self.plan_mismatch = self.plan_mismatch.saturating_add(1);
+        !std::mem::replace(&mut self.plan_logged, true)
+    }
+
     /// C3a-2a — count a window op whose digest differed; `true` for the
     /// first one this connection.
     pub fn note_window_mismatch(&mut self, kind: crate::window_ops::OpKind) -> bool {
@@ -432,9 +453,11 @@ impl PossessionTally {
             self.use_unfit_refused,
             self.use_edit_refused,
         ];
+        let plans = [self.plan_minted, self.plan_mismatch];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
             .chain(&uses)
+            .chain(&plans)
             .chain(&window)
             .chain(&c2b)
             .chain(&c3b)
@@ -464,6 +487,12 @@ impl PossessionTally {
                 self.use_unfit_believed,
                 self.use_unfit_refused,
                 self.use_edit_refused
+            ));
+        }
+        if plans.iter().any(|&n| n > 0) {
+            line.push_str(&format!(
+                "; {} Plan mint(s) mirrored by marker, {} with a shortfall",
+                self.plan_minted, self.plan_mismatch
             ));
         }
         if window.iter().any(|&n| n > 0) {
@@ -648,6 +677,21 @@ mod tests {
         assert!(line.contains("5 Q-drop(s) spawned"), "{line}");
         assert!(line.contains("7 granted unit(s) didn't fit"), "{line}");
         assert!(line.contains("1 pre-v75 craft message(s) ignored"), "{line}");
+    }
+
+    /// C3c-3a — reported Plan mints are counted, a shortfall too (logged
+    /// once a connection), and summarised.
+    #[test]
+    fn plan_mints_are_counted_in_the_summary() {
+        let mut t = PossessionTally::default();
+        assert!(!t.note_plan_mint(true));
+        assert!(t.summary("Drafter").is_some(), "a mint alone is worth a line");
+        assert!(t.note_plan_mint(false), "the first shortfall is logged");
+        assert!(!t.note_plan_mint(false), "and only the first");
+        assert_eq!((t.plan_minted, t.plan_mismatch), (3, 2));
+        let line = t.summary("Drafter").unwrap();
+        assert!(line.contains("3 Plan mint(s) mirrored by marker, 2 with a shortfall"), "{line}");
+        assert!(!line.contains("block-edit use"), "{line}");
     }
 
     /// Review LOW-6 — the shadow starts empty, so a building joiner

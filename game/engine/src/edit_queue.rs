@@ -54,9 +54,11 @@ use crate::protocol::{BlockChange, EditHand, EditTag, MinedBlock, UseTag};
 /// change and the four-byte hand it was made with), as many group headers (a
 /// group holds at least one edit: 72 B each), a tag for each edit at most
 /// (C3c-1: a mined or a use tag, `(u32, EditTag)`, 40 B since a use tag
-/// carries the stack it used and the tool it wore; 24 B before), and the
-/// front group's processed slack (one input's edits at most, about 4,370):
-/// **under 2.5 MB of capacity per client** (about 2.25 MB), plus
+/// carries the stack it used and the tool it wore; 24 B before; 92 B since
+/// C3c-3a, when a `WireItem::Plan` marker made each of those two 36 B), and
+/// the front group's processed slack (one input's edits at most, about
+/// 4,370): **under 3.5 MB of capacity per client** (about 3.1 MB worst case;
+/// about 2.2 MB measured at the cap; 2.25 MB before C3c-3a), plus
 /// the allocator's own overhead of a few dozen bytes for each of a group's
 /// one or two allocations. FU3's "about 256 KiB" counted the edits alone.
 /// Pinned by
@@ -629,7 +631,7 @@ mod tests {
                 size_of::<(BlockChange, Hand)>(),
                 size_of::<(u32, EditTag)>(),
             );
-            assert!(bound < 2_500_000, "the bound the docs state: under 2.5 MB ({bound})");
+            assert!(bound < 3_500_000, "the bound the docs state: under 3.5 MB ({bound})");
         }
     }
 }

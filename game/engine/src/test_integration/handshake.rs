@@ -241,7 +241,10 @@ fn protocol_version_is_the_pinned_value() {
     // v82 (2026-10-08, C3c-1-fix):
     //   `UseTag.unfit`, `StateUpdatePacket.refused_uses` — a use's overflow
     //   is the client's, a refused use is undone.
-    assert_eq!(protocol::PROTOCOL_VERSION, 82);
+    // v83 (2026-10-08, C3c-3a):
+    //   `WireItem::Plan`, `ItemAction::PlanMinted`, `UseKind::HangPrint` — a
+    //   joiner's Plans are tracked by marker.
+    assert_eq!(protocol::PROTOCOL_VERSION, 83);
 }
 
 #[test]

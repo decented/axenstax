@@ -222,9 +222,42 @@ pub struct PlanData {
     /// the capture path (`capture` → Building, `capture_art` → Art).
     #[serde(default = "default_plan_kind")]
     pub kind: PlanKind,
+    /// C3c-3a (protocol v83) — `Some` only on the server's
+    /// stand-in for a joiner's Plan ([`PlanData::marker_placeholder`]): the
+    /// [`marker`] of the client's Plan, which the server never holds the body
+    /// of. `None` on every real Plan. `#[serde(skip)]`, so no saved or wire
+    /// encoding of a `PlanData` (or an `Item`) changes: a placeholder that is
+    /// ever bincoded (a dedicated server's `WorldSave.players` rows,
+    /// `save::serialize_inventory`) comes back WITHOUT its marker, as a
+    /// body-less "Plan" — the sidecar lane stores Plans in
+    /// `protocol::WireItem::Plan` form instead.
+    #[serde(skip)]
+    pub marker: Option<[u8; 32]>,
 }
 
 fn default_authored_in() -> String { "survival".to_string() }
+
+/// C3c-3a — a Plan's identity on the wire and in the server's copy of a
+/// joiner's inventory: SHA-256 of the bincode of the WHOLE `PlanData`, every
+/// field included (`develop_state`, `kind`, `derivation_chain`,
+/// `authored_in`), so two Plans that behave or read differently never share
+/// one (unlike [`content_hash`], which leaves those four out). A marker
+/// placeholder ([`PlanData::marker_placeholder`]) answers the marker it
+/// stands for, never a hash of its own stub body.
+pub fn marker(data: &PlanData) -> [u8; 32] {
+    if let Some(m) = data.marker {
+        return m;
+    }
+    let bytes = bincode::serialize(data).expect("PlanData bincode");
+    Sha256::digest(&bytes).into()
+}
+
+/// Bincode of a [`PlanData`] — `marker` is `#[serde(skip)]`, so this is the
+/// same bytes a Plan always saved as.
+#[cfg(test)]
+fn plan_bytes(data: &PlanData) -> Vec<u8> {
+    bincode::serialize(data).expect("PlanData bincode")
+}
 
 impl PlanData {
     /// What a joiner holds for a blueprint the host laid on a wall (Phase
@@ -250,7 +283,30 @@ impl PlanData {
                 DevelopState::Latent { exposure_ticks: 0 }
             },
             kind: PlanKind::Building,
+            marker: None,
         }
+    }
+
+    /// C3c-3a — the server's stand-in for a joiner's Plan in its copy of the
+    /// joiner's inventory: a body-less Plan carrying the client's Plan's
+    /// [`marker`] (`protocol::WireItem::Plan`) and its develop state. It
+    /// moves under window clicks and digests exactly as the client's Plan
+    /// does (a Plan digests content-free, `window::digest_parts`), and an
+    /// owed take matches it by marker (`joiner_actions::same_item`). Never in
+    /// a client's own window, never spilled into the world.
+    pub fn marker_placeholder(marker: [u8; 32], developed: bool) -> Self {
+        PlanData { name: "Plan".to_string(), marker: Some(marker), ..PlanData::render_stub(developed) }
+    }
+
+    /// C3c-3a — the same Plan as `other`, by [`marker`]: two real Plans are
+    /// the same when they are equal (which is the same thing, without
+    /// hashing either); a marker placeholder is the Plan whose marker it
+    /// carries.
+    pub fn same_plan(&self, other: &PlanData) -> bool {
+        if self.marker.is_none() && other.marker.is_none() {
+            return self == other;
+        }
+        marker(self) == marker(other)
     }
 
     /// C3b-1 — what a joiner's mirror of a shared container holds for a
@@ -290,6 +346,7 @@ impl PlanData {
             // legacy 3D capture); art-kind plans only come from the
             // `capture_art` path.
             kind: PlanKind::Building,
+            marker: None,
         };
         let hash = content_hash(&data);
         data.derivation_chain.push(DerivationLink {
@@ -344,6 +401,7 @@ impl PlanData {
             authored_in: "creative".to_string(),
             develop_state: DevelopState::Developed,
             kind: PlanKind::Building,
+            marker: None,
         };
         let hash = content_hash(&data);
         data.derivation_chain.push(DerivationLink {
@@ -381,6 +439,7 @@ impl PlanData {
             authored_in: "creative".to_string(),
             develop_state: DevelopState::Developed,
             kind: PlanKind::Building,
+            marker: None,
         };
         let hash = content_hash(&data);
         data.derivation_chain.push(DerivationLink {
@@ -411,10 +470,18 @@ impl PlanData {
     }
 }
 
-/// Content-hash for Save-As detection. SHA-256 over the bincode-
-/// serialised PlanData with the `derivation_chain` zeroed out — so a
-/// derivative whose cells match the parent shares the same hash, which
-/// is what we want for derivation suggestion.
+/// Content-hash for Save-As detection (and the provenance links' `plan_hash`).
+/// SHA-256 over the bincode of a copy of the PlanData with four fields
+/// zeroed: `derivation_chain` (emptied), `authored_in` (emptied),
+/// `develop_state` (forced `Developed`) and `kind` (forced `Building`). So it
+/// HASHES `version`, `name`, `author_npub`, `license`, `is_master`, the size
+/// (`width`, `depth`, `height`) and `cells` in their stored order (not
+/// sorted: the same cells in another order hash differently), and two Plans
+/// that differ only in those four zeroed fields share it — a derivative whose
+/// cells match its parent is detected, and a Latent plan and the same plan
+/// once Developed share a hash. It is NOT an identity for a Plan item: two
+/// Plans with one hash can behave differently (a Latent one lays flat, a
+/// Developed one hangs). The item's identity is [`marker`] (C3c-3a).
 pub fn content_hash(data: &PlanData) -> [u8; 32] {
     // `authored_in` is zeroed alongside derivation_chain so that two
     // structurally identical plans match across modes — a survival
@@ -438,10 +505,11 @@ pub fn content_hash(data: &PlanData) -> [u8; 32] {
         authored_in: String::new(),
         develop_state: DevelopState::Developed,
         // Spec 38 art-capture — zero `kind` alongside derivation_chain
-        // + authored_in + develop_state so the hash represents the
-        // cells alone. A Building-kind plan and an Art-kind plan with
-        // identical cells share a content hash; the kind is metadata.
+        // + authored_in + develop_state. A Building-kind plan and an
+        // Art-kind plan with otherwise identical content share a content
+        // hash; the kind is metadata.
         kind: PlanKind::Building,
+        marker: None,
     };
     let bytes = bincode::serialize(&zeroed).expect("PlanData bincode");
     let mut hasher = Sha256::new();
@@ -496,10 +564,9 @@ pub fn commit_capture(
             data.derivation_chain = parent.derivation_chain.clone();
         }
 
-    // Compute the content hash AFTER setting derivation_chain to the
-    // parent's chain (or empty), since content_hash zeroes the
-    // derivation_chain anyway — but having the chain pre-set lets the
-    // hash represent the cells alone.
+    // The content hash ignores the derivation_chain (it zeroes it, with
+    // authored_in, develop_state and kind; `content_hash`), so setting the
+    // parent's chain first changes nothing about it.
     let hash = content_hash(&data);
     data.derivation_chain.push(DerivationLink {
         author_npub: String::new(),
@@ -740,6 +807,7 @@ pub fn capture(
         // flood-fill; `capture_art` (Spec 38 R5) is the vertical
         // 2D-wall-slice sibling that produces Art-kind plans.
         kind: PlanKind::Building,
+        marker: None,
     };
     Ok(PlanCaptureCandidate { data, tile_positions: tiles })
 }
@@ -872,6 +940,7 @@ pub fn capture_art(
         authored_in: authored_in.to_string(),
         develop_state: DevelopState::Latent { exposure_ticks: 0 },
         kind: PlanKind::Art,
+        marker: None,
     };
     Ok(PlanCaptureCandidate {
         data,
@@ -1794,6 +1863,73 @@ mod tests {
         assert_ne!(content_hash(&a), content_hash(&b));
     }
 
+    // ─── C3c-3a — the marker ─────────────────────────────────────────────
+
+    /// The marker covers EVERY field: two Plans that differ only in what the
+    /// content hash leaves out (develop state, derivation chain, kind,
+    /// authored-in) have different markers; the same Plan cloned has the same.
+    #[test]
+    fn a_plans_marker_covers_every_field_the_content_hash_leaves_out() {
+        let a = PlanData::debug_3x3_stone();
+        assert_eq!(marker(&a), marker(&a.clone()), "the same Plan cloned");
+        let latent = PlanData { develop_state: DevelopState::Latent { exposure_ticks: 0 }, ..a.clone() };
+        let mut chain = a.clone();
+        chain.derivation_chain.push(DerivationLink {
+            author_npub: String::new(),
+            plan_name: "parent".to_string(),
+            license: PlanLicense::CC0,
+            captured_at: 0,
+            plan_hash: [7; 32],
+        });
+        let art = PlanData { kind: PlanKind::Art, ..a.clone() };
+        let creative = PlanData { authored_in: "creative".to_string(), ..a.clone() };
+        for (what, b) in [("develop_state", &latent), ("derivation_chain", &chain), ("kind", &art), ("authored_in", &creative)] {
+            assert_eq!(content_hash(&a), content_hash(b), "{what}: the content hash leaves it out");
+            assert_ne!(marker(&a), marker(b), "{what}: the marker does not");
+            assert!(!a.same_plan(b) && !b.same_plan(&a), "{what}: not the same Plan");
+        }
+        let other_cells = PlanData { cells: a.cells[1..].to_vec(), ..a.clone() };
+        assert_ne!(marker(&a), marker(&other_cells));
+    }
+
+    /// A marker placeholder answers the marker it stands for (never a hash
+    /// of its stub body), carries the develop state, and is the same Plan as
+    /// the real one by marker.
+    #[test]
+    fn a_marker_placeholder_is_the_plan_whose_marker_it_carries() {
+        let real = PlanData { develop_state: DevelopState::Latent { exposure_ticks: 0 }, ..PlanData::debug_3x3_stone() };
+        let m = marker(&real);
+        let p = PlanData::marker_placeholder(m, false);
+        assert!(p.marker.is_some() && real.marker.is_none());
+        assert_eq!(marker(&p), m);
+        assert_eq!(p.develop_state, DevelopState::Latent { exposure_ticks: 0 });
+        assert!(p.cells.is_empty(), "body-less");
+        assert!(p.same_plan(&real) && real.same_plan(&p));
+        assert!(p.same_plan(&p.clone()));
+        let other = PlanData::marker_placeholder([1; 32], false);
+        assert!(!other.same_plan(&real) && !other.same_plan(&p));
+        assert_eq!(
+            PlanData::marker_placeholder(m, true).develop_state,
+            DevelopState::Developed
+        );
+    }
+
+    /// The carrier changes no encoding: the marker is `#[serde(skip)]`, so a
+    /// placeholder bincodes exactly as the same stub without it, and a real
+    /// Plan as it always did — and a placeholder that is bincoded comes back
+    /// without its marker (the open question the sidecar lane closes).
+    #[test]
+    fn the_marker_changes_no_encoding_and_is_lost_through_bincode() {
+        let p = PlanData::marker_placeholder([3; 32], true);
+        let bare = PlanData { marker: None, ..p.clone() };
+        assert_eq!(plan_bytes(&p), plan_bytes(&bare));
+        let back: PlanData = bincode::deserialize(&plan_bytes(&p)).unwrap();
+        assert_eq!(back.marker, None, "lost through bincode");
+        let real = PlanData::debug_3x3_stone();
+        let back: PlanData = bincode::deserialize(&plan_bytes(&real)).unwrap();
+        assert_eq!(back, real);
+    }
+
     fn build_test_world_with_tiles(positions: &[(i32, i32, i32)]) -> World {
         let mut w = World::new();
         // New model: each tile cell is itself a solid floor block carrying a
@@ -2695,6 +2831,7 @@ mod tests {
             authored_in: "survival".to_string(),
             develop_state: DevelopState::Developed,
             kind: PlanKind::Building,
+            marker: None,
         };
         let result = detect_parent(&candidate, [(0, &parent)]);
         assert!(result.is_none());
@@ -2731,6 +2868,7 @@ mod tests {
             authored_in: "survival".to_string(),
             develop_state: DevelopState::Developed,
             kind: PlanKind::Building,
+            marker: None,
         }
     }
 

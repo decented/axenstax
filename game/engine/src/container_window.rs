@@ -497,7 +497,7 @@ impl ClaimedWindow {
             }
             let stack = match value {
                 None => None,
-                Some(wire) => match crate::inventory::stack_from_wire(wire, registry, true) {
+                Some(wire) => match crate::inventory::stack_from_wire(wire, registry, crate::inventory::PlanDecode::Placeholder) {
                     Some(s) => Some(s),
                     None => continue,
                 },
@@ -623,7 +623,7 @@ pub fn claims_fit_stacks(claims: &[(WireWindowSlot, WireSlot)], registry: &crate
     claims.iter().all(|(_, value)| {
         value
             .as_ref()
-            .and_then(|w| crate::inventory::stack_from_wire(w, registry, true))
+            .and_then(|w| crate::inventory::stack_from_wire(w, registry, crate::inventory::PlanDecode::Placeholder))
             .is_none_or(|s| s.count <= s.item.max_stack())
     })
 }
@@ -747,7 +747,7 @@ impl ItemDelta {
     /// item's stack is left out.
     pub fn from_wire(take: &[(u8, WireStack)], give: &[WireStack], registry: &crate::block::BlockRegistry) -> Self {
         let decode = |w: &WireStack| {
-            crate::inventory::stack_from_wire(w, registry, false)
+            crate::inventory::stack_from_wire(w, registry, crate::inventory::PlanDecode::Refuse)
                 .filter(|s| !matches!(s.item, Item::Plan(_)) && s.count <= s.item.max_stack())
         };
         ItemDelta {
@@ -915,7 +915,7 @@ impl SharedContainer {
             return None;
         }
         let slots: Vec<Option<ItemStack>> =
-            pkt.slots.iter().map(|s| s.as_ref().and_then(|w| crate::inventory::stack_from_wire(w, registry, true))).collect();
+            pkt.slots.iter().map(|s| s.as_ref().and_then(|w| crate::inventory::stack_from_wire(w, registry, crate::inventory::PlanDecode::Placeholder))).collect();
         let contents = match pkt.kind {
             ContainerKind::Furnace => {
                 let mut f = FurnaceData::default();
@@ -1004,7 +1004,7 @@ pub fn apply_slot_set(
         let WireWindowSlot::Container(i) = *at else { continue };
         let stack = match value {
             None => None,
-            Some(w) => match crate::inventory::stack_from_wire(w, registry, true) {
+            Some(w) => match crate::inventory::stack_from_wire(w, registry, crate::inventory::PlanDecode::Placeholder) {
                 Some(s) => Some(s),
                 None => continue,
             },

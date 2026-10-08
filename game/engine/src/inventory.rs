@@ -198,10 +198,10 @@ fn armour_material_from_wire(b: u8) -> Option<crate::armour::ArmourMaterial> {
 /// [`item_to_ref`]'s lossy `(kind, id)` pair.
 ///
 /// Blocks and materials return `WireItem::None`: the pair already carries
-/// them losslessly, so there is nothing to add. `Item::Plan` also returns
-/// `None` — plans stay floor-bound by design (`plan::PlanData` is far too
-/// heavy for a per-tick broadcast); the append-only enum leaves room to add
-/// them later without renumbering anything.
+/// them losslessly, so there is nothing to add. C3c-3a (v83) — a Plan is
+/// [`WireItem::Plan`](crate::protocol::WireItem::Plan): its `plan::marker`
+/// (a marker placeholder's own stored marker) and whether it is developed,
+/// never its body (`plan::PlanData` is far too heavy for the wire).
 pub fn item_to_wire_full(item: &crate::item::Item) -> crate::protocol::WireItem {
     use crate::item::Item;
     use crate::protocol::WireItem;
@@ -216,7 +216,18 @@ pub fn item_to_wire_full(item: &crate::item::Item) -> crate::protocol::WireItem 
             material: armour_material_to_wire(a.material),
             durability: a.durability,
         },
-        Item::Block(_) | Item::Material(_) | Item::Plan(_) => WireItem::None,
+        Item::Plan(p) => plan_to_wire(p),
+        Item::Block(_) | Item::Material(_) => WireItem::None,
+    }
+}
+
+/// C3c-3a — a Plan on the wire, by reference
+/// ([`WireItem::Plan`](crate::protocol::WireItem::Plan)): its `plan::marker`
+/// (a marker placeholder's own stored marker) and whether it is developed.
+pub fn plan_to_wire(p: &crate::plan::PlanData) -> crate::protocol::WireItem {
+    crate::protocol::WireItem::Plan {
+        marker: crate::plan::marker(p),
+        developed: p.develop_state == crate::plan::DevelopState::Developed,
     }
 }
 
@@ -224,8 +235,10 @@ pub fn item_to_wire_full(item: &crate::item::Item) -> crate::protocol::WireItem 
 /// [`Item`](crate::item::Item) — the inverse of [`item_to_wire_full`].
 ///
 /// Returns `None` for `WireItem::None` (the caller falls back to the legacy
-/// `(kind, id)` pair via [`item_from_ref`]) and for anything that fails
-/// validation:
+/// `(kind, id)` pair via [`item_from_ref`]), for `WireItem::Plan` (C3c-3a: a
+/// Plan's body never crosses the wire, so nothing here can rebuild it; the
+/// server's own-window decodes use [`plan_from_wire`]) and for anything that
+/// fails validation:
 ///
 /// - an unrecognised tool type / material / armour slot / armour tier byte —
 ///   a newer or tampered peer; never guess at a substitute,
@@ -263,13 +276,46 @@ pub fn item_from_wire_full(w: &crate::protocol::WireItem) -> Option<crate::item:
             piece.durability = durability.min(crate::armour::max_durability(slot, material));
             Some(Item::Armour(piece))
         }
+        WireItem::Plan { .. } => None,
     }
+}
+
+/// C3c-3a — the server's decode of a Plan a joiner's own window names
+/// ([`WireItem::Plan`](crate::protocol::WireItem::Plan): a use tag's `used`,
+/// an `ItemAction::PlanMinted`, a held claim): the marker placeholder
+/// (`plan::PlanData::marker_placeholder`) its copy of the window holds for
+/// it. `None` for anything else.
+pub fn plan_from_wire(w: &crate::protocol::WireItem) -> Option<crate::item::Item> {
+    match *w {
+        crate::protocol::WireItem::Plan { marker, developed } => {
+            Some(crate::item::Item::Plan(crate::plan::PlanData::marker_placeholder(marker, developed)))
+        }
+        _ => None,
+    }
+}
+
+/// C3c-3a — what a [`stack_from_wire`] makes of a stack of
+/// `item_kind::PLAN`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanDecode {
+    /// Nothing: a correction's item delta, a block view, a grant — a Plan
+    /// never arrives that way.
+    Refuse,
+    /// The body-less stand-in a shared container's mirror shows
+    /// (`plan::PlanData::placeholder`, C3b-1): a container slot, a
+    /// container op's claimed player slots. Shared-container paths keep it.
+    Placeholder,
+    /// The server's marker placeholder ([`plan_from_wire`]), where a joiner's
+    /// own window names the Plan (a use tag's `used`, a `PlanMinted`'s
+    /// `spent`). A Plan stack without a [`WireItem::Plan`](crate::protocol::WireItem::Plan)
+    /// `full_item` (an older peer's) is nothing.
+    Marker,
 }
 
 /// C3b-1 — a stack on the wire at full fidelity
 /// ([`crate::protocol::WireStack`]): the `(kind, id)` pair, the count, and
-/// the tool/armour state ([`item_to_wire_full`]). A Plan, which has no wire
-/// form, goes as the reserved `item_kind::PLAN` (id 0): a placeholder.
+/// the tool/armour state ([`item_to_wire_full`]). A Plan goes as the reserved
+/// `item_kind::PLAN` (id 0), its `full_item` the Plan by marker (C3c-3a).
 pub fn stack_to_wire(stack: &ItemStack) -> crate::protocol::WireStack {
     let (item_kind, item_id) = match &stack.item {
         crate::item::Item::Plan(_) => (crate::protocol::item_kind::PLAN, 0),
@@ -279,26 +325,28 @@ pub fn stack_to_wire(stack: &ItemStack) -> crate::protocol::WireStack {
 }
 
 /// C3b-1 — the inverse of [`stack_to_wire`]: the full-fidelity payload wins,
-/// then the pair ([`item_from_ref`]). A Plan placeholder decodes to
-/// `plan::PlanData::placeholder` only where `allow_plan` (a container slot);
-/// a zero count, or anything that doesn't decode faithfully, is `None`.
+/// then the pair ([`item_from_ref`]). A stack of `item_kind::PLAN` decodes as
+/// `plan` says ([`PlanDecode`]); a zero count, or anything that doesn't
+/// decode faithfully, is `None`.
 pub fn stack_from_wire(
     w: &crate::protocol::WireStack,
     registry: &crate::block::BlockRegistry,
-    allow_plan: bool,
+    plan: PlanDecode,
 ) -> Option<ItemStack> {
     if w.count == 0 {
         return None;
     }
-    let item = match item_from_wire_full(&w.full_item) {
-        Some(item) => item,
-        None if w.item_kind == crate::protocol::item_kind::PLAN => {
-            if !allow_plan {
-                return None;
-            }
-            crate::item::Item::Plan(crate::plan::PlanData::placeholder())
+    let item = if w.item_kind == crate::protocol::item_kind::PLAN {
+        match plan {
+            PlanDecode::Refuse => return None,
+            PlanDecode::Placeholder => crate::item::Item::Plan(crate::plan::PlanData::placeholder()),
+            PlanDecode::Marker => plan_from_wire(&w.full_item)?,
         }
-        None => item_from_ref(w.item_kind, w.item_id, registry)?,
+    } else {
+        match item_from_wire_full(&w.full_item) {
+            Some(item) => item,
+            None => item_from_ref(w.item_kind, w.item_id, registry)?,
+        }
     };
     Some(ItemStack { item, count: w.count })
 }
@@ -1321,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_full_is_none_for_blocks_materials_and_plans() {
+    fn wire_full_is_none_for_blocks_and_materials() {
         use crate::item::Item;
         use crate::protocol::WireItem;
         assert_eq!(
@@ -1333,12 +1381,51 @@ mod tests {
             super::item_to_wire_full(&Item::Material(crate::item::MaterialId::Bone)),
             WireItem::None
         );
-        assert_eq!(
-            super::item_to_wire_full(&Item::Plan(crate::plan::PlanData::debug_3x3_stone())),
-            WireItem::None,
-            "plans stay floor-bound by design (heavy PlanData)"
-        );
         assert!(super::item_from_wire_full(&WireItem::None).is_none());
+    }
+
+    /// C3c-3a (v83) — a Plan goes by reference: its marker and develop
+    /// state, never its body. `item_from_wire_full` rebuilds nothing from it
+    /// (the body isn't there); the server's own-window decode is the marker
+    /// placeholder, which re-encodes to the same marker.
+    #[test]
+    fn a_plan_goes_on_the_wire_by_marker() {
+        use crate::item::Item;
+        use crate::plan::{DevelopState, PlanData};
+        use crate::protocol::WireItem;
+        let real = PlanData { develop_state: DevelopState::Latent { exposure_ticks: 5 }, ..PlanData::debug_3x3_stone() };
+        let m = crate::plan::marker(&real);
+        let wire = super::item_to_wire_full(&Item::Plan(real.clone()));
+        assert_eq!(wire, WireItem::Plan { marker: m, developed: false });
+        assert!(super::item_from_wire_full(&wire).is_none(), "no body to rebuild");
+        let placeholder = super::plan_from_wire(&wire).expect("the server's stand-in");
+        assert_eq!(placeholder, Item::Plan(PlanData::marker_placeholder(m, false)));
+        assert_eq!(super::item_to_wire_full(&placeholder), wire, "it re-encodes to the marker it carries");
+        assert!(super::plan_from_wire(&WireItem::None).is_none());
+        let developed = super::item_to_wire_full(&Item::Plan(PlanData::debug_3x3_stone()));
+        assert!(matches!(developed, WireItem::Plan { developed: true, .. }));
+    }
+
+    /// C3c-3a — a Plan stack decodes as the caller says: nothing (a
+    /// correction, a block view), the shared-container stand-in, or (the
+    /// server, a joiner's own window) the marker placeholder.
+    #[test]
+    fn a_plan_stack_decodes_by_the_callers_plan_rule() {
+        use super::PlanDecode;
+        use crate::item::Item;
+        use crate::plan::PlanData;
+        let registry = crate::block::BlockRegistry::new();
+        let real = PlanData::debug_3x3_stone();
+        let wire = super::stack_to_wire(&ItemStack { item: Item::Plan(real.clone()), count: 1 });
+        assert_eq!((wire.item_kind, wire.item_id), (crate::protocol::item_kind::PLAN, 0));
+        assert!(super::stack_from_wire(&wire, &registry, PlanDecode::Refuse).is_none());
+        let shown = super::stack_from_wire(&wire, &registry, PlanDecode::Placeholder).unwrap();
+        assert_eq!(shown.item, Item::Plan(PlanData::placeholder()), "a shared container's stand-in, unchanged");
+        let held = super::stack_from_wire(&wire, &registry, PlanDecode::Marker).unwrap();
+        assert_eq!(held.item, Item::Plan(PlanData::marker_placeholder(crate::plan::marker(&real), true)));
+        // An older peer's Plan stack (no marker) is nothing to the server.
+        let bare = crate::protocol::WireStack { full_item: crate::protocol::WireItem::None, ..wire };
+        assert!(super::stack_from_wire(&bare, &registry, PlanDecode::Marker).is_none());
     }
 
     #[test]

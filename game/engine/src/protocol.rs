@@ -820,11 +820,14 @@ pub mod item_kind {
     pub const BLOCK: u8 = 1;
     pub const TOOL: u8 = 2;
     pub const MATERIAL: u8 = 3;
-    /// C3b-1 — reserved for [`super::WireStack`]: a Plan the receiver holds
-    /// only as a placeholder it can't take. A Plan's body has no wire form
-    /// (it can reach about 160 KB), so a host's Plan in a shared container
-    /// reaches a joiner as this kind (id 0) and decodes to a body-less
-    /// stand-in (`plan::PlanData::placeholder`).
+    /// C3b-1 — reserved for [`super::WireStack`]: a Plan (id 0). A Plan's
+    /// body has no wire form (it can reach about 160 KB): a host's Plan in a
+    /// shared container reaches a joiner as this kind and decodes to a
+    /// body-less stand-in it can't take (`plan::PlanData::placeholder`).
+    /// C3c-3a (v83) — the stack's `full_item` carries the Plan by reference
+    /// ([`super::WireItem::Plan`]), which the server decodes to a marker
+    /// placeholder where a joiner's own window names it
+    /// (`inventory::PlanDecode::Marker`).
     pub const PLAN: u8 = 4;
 }
 
@@ -871,8 +874,8 @@ impl ItemRef {
 /// **Bincode-positional — append-only forever**, exactly like `EntityKind`.
 /// `None` MUST stay variant 0 so a payload that carries no extra fidelity
 /// (mobs, carts, block/material drops) encodes as the cheapest discriminant.
-/// `Plan` is a deliberate FUTURE append — `plan::PlanData` is heavy and plans
-/// stay floor-bound for now.
+/// C3c-3a (v83) appends `Plan` (= 3): a Plan by reference, never
+/// its body (which can reach about 160 KB).
 ///
 /// The inner fields are plain `u8`s, not the gameplay enums, so a newer peer's
 /// unknown tool type or armour tier decodes to "unrecognised" rather than a
@@ -894,6 +897,19 @@ pub enum WireItem {
         slot: u8,
         material: u8,
         durability: u16,
+    },
+    /// C3c-3a (v83) — a Plan, by reference: its `plan::marker`
+    /// (SHA-256 of the whole `PlanData`) and whether it is developed. Sent
+    /// where a joiner's own window names a Plan (a use tag's `used`,
+    /// [`ItemAction::PlanMinted`], a held claim); the server decodes it to a
+    /// marker placeholder (`plan::PlanData::marker_placeholder`,
+    /// `inventory::plan_from_wire`). `inventory::item_from_wire_full` decodes
+    /// it to nothing: a Plan's body never crosses the wire, so a host's Plan
+    /// in a shared container, on the ground or in a frame is still the
+    /// body-less stand-in (or nothing) it was.
+    Plan {
+        marker: [u8; 32],
+        developed: bool,
     },
 }
 
@@ -1043,10 +1059,11 @@ pub struct EntityInteractPacket {
 }
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
-/// `GrantUnfit`; v79 `UseBlock`; v81 `Shoot`, `PlaceCart`, `Cast`, `Reel`).
-/// Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2, Drop = 3,
-/// GrantUnfit = 4, UseBlock = 5, Shoot = 6, PlaceCart = 7, Cast = 8, Reel = 9
-/// (pinned on the wire bytes by `item_action_packets_round_trip`).
+/// `GrantUnfit`; v79 `UseBlock`; v81 `Shoot`, `PlaceCart`, `Cast`, `Reel`;
+/// v83 `PlanMinted`). Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2,
+/// Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6, PlaceCart = 7, Cast = 8,
+/// Reel = 9, PlanMinted = 10 (pinned on the wire bytes by
+/// `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
@@ -1122,6 +1139,29 @@ pub enum ItemAction {
     /// and the rod wears (`wear_held`). Before the bite nothing is caught or
     /// spent; with no cast recorded it is refused.
     Reel { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// C3c-3a (v83) — the client minted a Plan in its own
+    /// window (it already holds it): `source` is `plan_mint::MintSource`
+    /// (CaptureCommit = 0, CaptureArt = 1, a `u8`, append-only); `x, y, z`
+    /// and `face` (`mesh::Face::index`) are the capture's clicked cell and
+    /// face (a commit's stamped tile, Top); `hotbar_slot` is the hand the
+    /// mint was made from; `spent` is what it took from that hand, read
+    /// BEFORE the take (a `CaptureArt`'s one Blueprint Paper; `None` for a
+    /// commit, whose paper was spent when it was laid); `plan` is the Plan
+    /// minted, as [`WireItem::Plan`]. The server mirrors it on its copy of
+    /// the joiner's window by the client's steps in the client's order (add
+    /// the marker placeholder by `Inventory::add_item`, then the owed take
+    /// of `spent`), log-only. Never answered (as `Drop`); it is routed and
+    /// ordered as `Drop` is.
+    PlanMinted {
+        source: u8,
+        x: i32,
+        y: i32,
+        z: i32,
+        face: u8,
+        hotbar_slot: u8,
+        spent: WireSlot,
+        plan: WireItem,
+    },
 }
 
 /// C3c-2 (v81) — the weapon an [`ItemAction::Shoot`] fires. Wire-stable,
@@ -1137,7 +1177,8 @@ pub enum ShotWeapon {
 /// Wire index of an [`ItemAction`] variant the server reads before decoding
 /// (bincode writes it as a `u32` right after the packet's `seq`,
 /// [`peek_item_action_variant`]). The order is Eat = 0, Sleep = 1, Craft = 2,
-/// Drop = 3, GrantUnfit = 4 (v76), UseBlock = 5 (v79), pinned by
+/// Drop = 3, GrantUnfit = 4 (v76), UseBlock = 5 (v79), Shoot = 6,
+/// PlaceCart = 7, Cast = 8, Reel = 9 (v81), PlanMinted = 10 (v83), pinned by
 /// `item_action_packets_round_trip`.
 pub mod item_action_variant {
     /// `ItemAction::Drop`, paced by the joiner's drop bucket.
@@ -1156,8 +1197,8 @@ pub fn peek_item_action_variant(payload: &[u8]) -> Option<u32> {
 pub struct ItemActionPacket {
     /// The client's request number, echoed in the outcome. Shares its
     /// sequence with `EntityAttack` / `EntityInteract` (`joiner_actions`).
-    /// A `Craft`, `Drop` or `GrantUnfit` takes a number too, and is never
-    /// answered.
+    /// A `Craft`, `Drop`, `GrantUnfit` or `PlanMinted` takes a number too,
+    /// and is never answered.
     pub seq: u32,
     pub action: ItemAction,
     /// v76 — the highest window event the client had applied when it sent
@@ -1228,7 +1269,8 @@ pub enum WireWindowSlot {
 /// C3b-1 — a full-fidelity stack on the wire: the `(item_kind, item_id)`
 /// pair (`inventory::item_to_ref`), its count, and the tool/armour state the
 /// pair loses (`WireItem`, which wins on decode, as `InventoryGrantPacket`'s
-/// does). `item_kind::PLAN` is reserved for a Plan placeholder.
+/// does). `item_kind::PLAN` is reserved for a Plan (C3c-3a: its `full_item`
+/// is [`WireItem::Plan`], the Plan by marker).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireStack {
     pub item_kind: u8,
@@ -2504,7 +2546,7 @@ pub struct ServerAnnouncePacket {
 ///   u8, used: WireSlot, tool: WireItem }`; `kind` is `use_edits::UseKind`,
 ///   append-only: BucketFill 0, BucketEmpty 1, Sow 2, PlantPapyrus 3,
 ///   GrowGrass 4, GrowCrop 5, Salt 6, Erase 7, TapRubber 8, Till 9,
-///   DoorUpper 10). A use tag pairs with the last edit of its cell in its
+///   DoorUpper 10; v83 HangPrint 11). A use tag pairs with the last edit of its cell in its
 ///   input, and counts with `mined` against [`MAX_MINED_PER_INPUT`] (16 in
 ///   all). The server runs the use's rule on its copy of the joiner's
 ///   inventory (take what it used, add what it made, wear its tool), log-only.
@@ -2530,7 +2572,18 @@ pub struct ServerAnnouncePacket {
 ///   `note` an `item_actions::ItemNote` code): each use-tagged edit the
 ///   server refused, once, per client, in line after its send-back; the
 ///   client undoes the use from its own record.
-pub const PROTOCOL_VERSION: u32 = 82;
+/// - v83 (2026-10-08, C3c-3a): a joiner's Plans are tracked by
+///   marker. [`WireItem`] appends `Plan { marker: [u8; 32], developed: bool }`
+///   (= 3; `plan::marker`, SHA-256 of the whole `PlanData`): a Plan's
+///   `full_item` in a [`WireStack`] (still `item_kind::PLAN`, id 0) and in
+///   every `WireItem` field. `ItemAction` appends `PlanMinted { source: u8,
+///   x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan:
+///   WireItem }` (= 10; `plan_mint::MintSource` CaptureCommit 0, CaptureArt
+///   1), never answered. `use_edits::UseKind` appends `HangPrint` (= 11): a
+///   developed Plan hung as a cyanotype print, its `used` the Plan. The
+///   server holds a joiner's Plan as a marker placeholder
+///   (`plan::PlanData::marker_placeholder`) and takes it by marker, log-only.
+pub const PROTOCOL_VERSION: u32 = 83;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2702,8 +2755,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3c-1-fix — v82 (on C3c-2's v81).
-        assert_eq!(super::PROTOCOL_VERSION, 82);
+        // C3c-3a — v83 (on C3c-1-fix's v82).
+        assert_eq!(super::PROTOCOL_VERSION, 83);
     }
 
     #[test]
@@ -2736,6 +2789,8 @@ mod tests {
             WireItem::None,
             WireItem::Tool { tool_type: 3, material: 2, durability: 37 },
             WireItem::Armour { slot: 1, material: 4, durability: 165 },
+            // C3c-3a (v83) — a Plan by marker.
+            WireItem::Plan { marker: [0x5A; 32], developed: true },
         ] {
             let pkt = InventoryGrantPacket {
                 item_kind: item_kind::EMPTY,
@@ -2767,12 +2822,27 @@ mod tests {
             let back: EntitySpawn = safe_deserialize(payload).unwrap();
             assert_eq!(back.full_item, w, "spawn carries {w:?} intact");
         }
+        // C3c-3a — `Plan` is variant 3 (after Armour), its marker's 32 bytes
+        // then `developed`, ahead of the grant's trailing `window_event`.
+        let pkt = InventoryGrantPacket {
+            item_kind: item_kind::PLAN,
+            item_id: 0,
+            count: 1,
+            full_item: WireItem::Plan { marker: [0x5A; 32], developed: true },
+            window_event: 0,
+        };
+        let bytes = serialize_packet(PacketType::InventoryGrant, &pkt);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        let n = payload.len();
+        assert_eq!(&payload[n - 41..n - 37], &3u32.to_le_bytes(), "Plan = 3");
+        assert_eq!(&payload[n - 37..n - 5], &[0x5A; 32]);
+        assert_eq!(payload[n - 5], 1, "developed");
     }
 
     #[test]
     fn wire_item_unknown_discriminant_is_an_error_not_a_panic() {
-        // A NEWER peer's appended variant (e.g. a future `Plan`) must fail the
-        // decode cleanly. The join-time version gate is what actually keeps
+        // A NEWER peer's appended variant (v83 appended `Plan` = 3; 9 is
+        // still unassigned) must fail the decode cleanly. The join-time version gate is what actually keeps
         // such a peer out; this pins that the decoder never panics if one
         // slips through.
         let pkt = InventoryGrantPacket {
@@ -3415,7 +3485,11 @@ mod tests {
         //   `UseTag.unfit` (after `tool`), `StateUpdatePacket.refused_uses`
         //   (after `block_views`) — a use's overflow is the client's, and a
         //   refused use is undone on the joiner.
-        assert_eq!(PROTOCOL_VERSION, 82);
+        // v83 (2026-10-08, C3c-3a):
+        //   `WireItem::Plan` (= 3), `ItemAction::PlanMinted` (= 10),
+        //   `UseKind::HangPrint` (= 11) — a joiner's Plans are tracked by
+        //   marker on the server's copy of its inventory.
+        assert_eq!(PROTOCOL_VERSION, 83);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3758,6 +3832,42 @@ mod tests {
             assert_eq!(&payload[4..8], &n.to_le_bytes(), "Cast = 8, Reel = 9");
             assert_eq!(payload[8], 5, "the hotbar slot leads it");
         }
+        // v83 (C3c-3a) — PlanMinted = 10, appended after Reel:
+        // the source byte, the cell, the face, the hotbar slot, what it
+        // spent (a WireSlot), then the Plan as `WireItem::Plan` (= 3: its
+        // marker, then `developed`); never answered, never paced as a drop.
+        let paper = WireStack { item_kind: item_kind::BLOCK, item_id: 56, count: 1, full_item: WireItem::None };
+        let minted = ItemActionPacket {
+            seq: 21,
+            action: ItemAction::PlanMinted {
+                source: 1,
+                x: -7,
+                y: 64,
+                z: 1_000_002,
+                face: 2,
+                hotbar_slot: 4,
+                spent: Some(paper),
+                plan: WireItem::Plan { marker: [0xAB; 32], developed: false },
+            },
+            events_applied: 0x0A0B_0C0D,
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &minted);
+        assert_eq!(bytes[0], 62, "still the ItemAction tag: no new PacketType");
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), minted);
+        assert_eq!(&payload[4..8], &10u32.to_le_bytes(), "PlanMinted = 10");
+        assert_eq!(payload[8], 1, "the source leads it: CaptureArt = 1");
+        assert_eq!(&payload[9..13], &(-7i32).to_le_bytes(), "then the cell");
+        assert_eq!(&payload[17..21], &1_000_002i32.to_le_bytes());
+        assert_eq!((payload[21], payload[22]), (2, 4), "the face, the hotbar slot");
+        assert_eq!(payload[23], 1, "spent: Some");
+        assert_eq!((payload[24], &payload[25..27], payload[27]), (item_kind::BLOCK, &56u16.to_le_bytes()[..], 1));
+        assert_eq!(&payload[28..32], &0u32.to_le_bytes(), "the paper's full_item: None");
+        assert_eq!(&payload[32..36], &3u32.to_le_bytes(), "the plan: WireItem::Plan = 3");
+        assert_eq!(&payload[36..68], &[0xAB; 32], "its marker");
+        assert_eq!(payload[68], 0, "not developed");
+        assert_eq!(&payload[69..], &0x0A0B_0C0Du32.to_le_bytes(), "events_applied closes it");
+        assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
 
         let outcome = ItemActionOutcomePacket {
             seq: 12,

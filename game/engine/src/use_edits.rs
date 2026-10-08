@@ -1,8 +1,9 @@
 //! C3c-1 (2026-10-08, protocol v80) — a player's block-edit USES: the
 //! right-clicks that change one cell and the hand together (a bucket filled
 //! or emptied, a seed or a papyrus reed planted, bone meal on grass or a
-//! crop, fertiliser, salt, an Eraser on paper, a rubber tap, a hoe), and a
-//! door's top half.
+//! crop, fertiliser, salt, an Eraser on paper, a rubber tap, a hoe), a
+//! door's top half, and (C3c-3a, v83) a developed Plan hung as a cyanotype
+//! print, its `used` the Plan by marker (`protocol::WireItem::Plan`).
 //!
 //! Three things live here, one rule each, run by every side that needs it:
 //!
@@ -96,11 +97,16 @@ pub enum UseKind {
     /// A door's top half, placed with its bottom half (the bottom's generic
     /// placement paid for the door): no cost, no gain.
     DoorUpper,
+    /// C3c-3a (v83) — a developed Plan hung on a wall: the AIR (or water)
+    /// cell before a wall face becomes a CYANOTYPE_PRINT and the Plan is
+    /// spent (its body is gone: the print keeps no plan data). The tag's
+    /// `used` is the Plan by marker; the server takes its marker placeholder.
+    HangPrint,
 }
 
 impl UseKind {
     /// Every kind, in wire order: `ALL[k].to_wire() == k`.
-    pub const ALL: [UseKind; 11] = [
+    pub const ALL: [UseKind; 12] = [
         UseKind::BucketFill,
         UseKind::BucketEmpty,
         UseKind::Sow,
@@ -112,6 +118,7 @@ impl UseKind {
         UseKind::TapRubber,
         UseKind::Till,
         UseKind::DoorUpper,
+        UseKind::HangPrint,
     ];
 
     /// The wire byte. APPEND-ONLY: pinned by
@@ -129,6 +136,7 @@ impl UseKind {
             UseKind::TapRubber => 8,
             UseKind::Till => 9,
             UseKind::DoorUpper => 10,
+            UseKind::HangPrint => 11,
         }
     }
 
@@ -149,6 +157,7 @@ impl UseKind {
                 | UseKind::GrowGrass
                 | UseKind::GrowCrop
                 | UseKind::Salt
+                | UseKind::HangPrint
         )
     }
 
@@ -171,6 +180,7 @@ impl UseKind {
             UseKind::TapRubber => "rubber tap",
             UseKind::Till => "hoe",
             UseKind::DoorUpper => "door top half",
+            UseKind::HangPrint => "cyanotype hang",
         }
     }
 
@@ -217,6 +227,17 @@ pub fn tills(target: BlockId) -> bool {
 /// Rubber feature — an Eraser lifts `target` back to a Papyrus Sheet.
 pub fn erases(target: BlockId) -> bool {
     target == block::BLUEPRINT_PAPER
+}
+
+/// C3c-3a — a cyanotype print can hang in the cell `(x, y, z)`: one of its
+/// four sides is a wall (a block that isn't AIR or a fluid). The client hangs
+/// it on the wall face it aimed at; the server, which sees only the cell,
+/// asks for a wall on some side (the nearest faithful form of "on a wall
+/// face").
+pub fn hangs_on_wall(world: &World, x: i32, y: i32, z: i32) -> bool {
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .any(|&(dx, dz)| !matches!(world.get_block(x + dx, y, z + dz), block::AIR | block::WATER | block::LAVA))
 }
 
 /// F1 Wave 2 — a door's top half's meta, from its bottom half's: the same
@@ -377,6 +398,7 @@ pub fn explains(kind: UseKind, new: BlockId, meta: u8) -> bool {
         UseKind::TapRubber => new == block::RUBBER_LOG_TAPPED,
         UseKind::Till => new == block::TILLED_SOIL,
         UseKind::DoorUpper => new == block::OAK_DOOR && crate::block_shape::door_is_top(meta),
+        UseKind::HangPrint => new == block::CYANOTYPE_PRINT,
     }
 }
 
@@ -399,6 +421,11 @@ fn possible(kind: UseKind, used: Option<&Item>, new: BlockId, meta: u8) -> bool 
         }
         UseKind::Salt => material(MaterialId::Salt) && new == block::SALT_PATH,
         UseKind::Erase | UseKind::TapRubber | UseKind::Till | UseKind::DoorUpper => explains(kind, new, meta),
+        // C3c-3a — only a developed Plan hangs (a latent one lays flat).
+        UseKind::HangPrint => {
+            matches!(used, Some(Item::Plan(p)) if p.develop_state == crate::plan::DevelopState::Developed)
+                && new == block::CYANOTYPE_PRINT
+        }
     }
 }
 
@@ -468,6 +495,12 @@ pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Befor
                 && old == block::AIR
                 && crate::block_shape::door_is_top(bc.meta)
                 && below() == block::OAK_DOOR
+        }
+        UseKind::HangPrint => {
+            matches!(used, Some(Item::Plan(p)) if p.develop_state == crate::plan::DevelopState::Developed)
+                && new == block::CYANOTYPE_PRINT
+                && matches!(old, block::AIR | block::WATER)
+                && hangs_on_wall(world, bc.x, bc.y, bc.z)
         }
     };
     let verdict = if legal {
@@ -759,11 +792,12 @@ mod tests {
     #[test]
     fn use_kind_wire_bytes_are_pinned() {
         let bytes: Vec<u8> = UseKind::ALL.iter().map(|k| k.to_wire()).collect();
-        assert_eq!(bytes, (0..11).collect::<Vec<u8>>());
+        // C3c-3a (v83) appends HangPrint = 11.
+        assert_eq!(bytes, (0..12).collect::<Vec<u8>>());
         for k in UseKind::ALL {
             assert_eq!(UseKind::from_wire(k.to_wire()), Some(k));
         }
-        assert_eq!(UseKind::from_wire(11), None);
+        assert_eq!(UseKind::from_wire(12), None);
         assert_eq!(UseKind::from_wire(u8::MAX), None);
     }
 
@@ -841,7 +875,7 @@ mod tests {
         // The client's fill (`fill_bucket_at`).
         assert!(client.consume_one_material(1, MaterialId::Bucket));
         assert!(client.add_item(ItemStack::new_material(MaterialId::WaterBucket, 1)).is_none());
-        let used = crate::inventory::stack_from_wire(t.used.as_ref().unwrap(), &crate::block::BlockRegistry::new(), false)
+        let used = crate::inventory::stack_from_wire(t.used.as_ref().unwrap(), &crate::block::BlockRegistry::new(), crate::inventory::PlanDecode::Marker)
             .map(|s| s.item);
         let w = World::new();
         let j = judge(UseKind::BucketFill, used.as_ref(), &bc(0, 70, 0, block::AIR), before(block::WATER), &w);
@@ -1147,5 +1181,47 @@ mod tests {
         assert_eq!(undo(&mut inv, &mut ui, &tap), Undone::default());
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
         assert!(inv.slot(1).is_none());
+    }
+
+    /// C3c-3a — a hang's tag carries the Plan by marker; the server judges a
+    /// developed Plan into an AIR (or water) cell beside a wall, and takes
+    /// the copy's marker placeholder by marker (the other Plan stays).
+    #[test]
+    fn a_hung_print_is_judged_on_a_wall_and_takes_its_plan_by_marker() {
+        use crate::plan::{marker, DevelopState, PlanData};
+        let developed = PlanData::debug_3x3_stone();
+        let latent = PlanData { develop_state: DevelopState::Latent { exposure_ticks: 0 }, ..developed.clone() };
+        let t = tag(UseKind::HangPrint, [5, 71, 5], 2, Some(&Item::Plan(developed.clone())));
+        assert_eq!(t.kind, 11);
+        let used = crate::inventory::stack_from_wire(t.used.as_ref().expect("the Plan"), &crate::block::BlockRegistry::new(), crate::inventory::PlanDecode::Marker)
+            .map(|s| s.item);
+        let m = marker(&developed);
+        assert_eq!(used, Some(Item::Plan(PlanData::marker_placeholder(m, true))), "the server's stand-in");
+        assert_eq!(t.tool, WireItem::None);
+        let mut w = World::new();
+        let hang = bc(5, 71, 5, block::CYANOTYPE_PRINT);
+        let verdict = |used: Option<&Item>, change: &BlockChange, old: BlockId, w: &World| judge(UseKind::HangPrint, used, change, before(old), w).verdict;
+        assert_eq!(verdict(used.as_ref(), &hang, block::AIR, &w), Verdict::Drift, "no wall on the server: drift");
+        w.set_block(6, 71, 5, block::STONE);
+        let j = judge(UseKind::HangPrint, used.as_ref(), &hang, before(block::AIR), &w);
+        assert!(j.legal() && j.product.is_none());
+        assert_eq!(verdict(used.as_ref(), &hang, block::WATER, &w), Verdict::Legal);
+        assert_eq!(verdict(used.as_ref(), &hang, block::DIRT, &w), Verdict::Drift, "an occupied cell on the server");
+        assert_eq!(verdict(used.as_ref(), &bc(5, 71, 5, block::STONE), block::AIR, &w), Verdict::Unexplained, "not a print");
+        let latent_used = Item::Plan(PlanData::marker_placeholder(marker(&latent), false));
+        assert_eq!(verdict(Some(&latent_used), &hang, block::AIR, &w), Verdict::Impossible, "a latent Plan doesn't hang");
+        assert_eq!(verdict(Some(&mat(MaterialId::Stick)), &hang, block::AIR, &w), Verdict::Impossible);
+        // The copy: the latent Plan's placeholder in the tag's slot, the
+        // developed one's in the bag. The right one goes.
+        let mut copy = Inventory::new();
+        copy.set_slot(2, Some(ItemStack { item: latent_used.clone(), count: 1 }));
+        copy.set_slot(20, Some(ItemStack { item: Item::Plan(PlanData::marker_placeholder(m, true)), count: 1 }));
+        let s = settle(&mut copy, UseKind::HangPrint, &t, used.as_ref(), &j);
+        assert_eq!((s.miss, s.copy_overflow, s.unfit), (None, 0, None));
+        assert!(copy.slot(20).is_none(), "the hung Plan went");
+        assert_eq!(copy.slot(2).map(|s| s.item.clone()), Some(latent_used), "the other stayed");
+        let s = settle(&mut copy, UseKind::HangPrint, &t, used.as_ref(), &j);
+        assert_eq!(s.miss, Some(UseMiss::NothingToTake), "no second one to hang");
+        assert_eq!(t.unfit, 0, "a hang makes nothing, so nothing is unfit");
     }
 }

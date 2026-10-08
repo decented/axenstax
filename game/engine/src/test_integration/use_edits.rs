@@ -11,6 +11,12 @@
 //! The tests compare the server's copy with the client's, slot for slot.
 //! Two tests drive the real `RemoteClient` send path (its pairing, its
 //! hold-back and its order cut).
+//!
+//! C3c-3a (v83) — a joiner's Plans, tracked by marker: the hung
+//! print (a use edit, `UseKind::HangPrint`) and the reported mints
+//! (`ItemAction::PlanMinted`) land on and leave the server's copy as marker
+//! placeholders, which then move under window ops in lockstep. The joined
+//! client's own arms are the GPU harness's to drive.
 
 use glam::Vec3;
 
@@ -354,6 +360,11 @@ fn client_steps(inv: &mut Inventory, kind: UseKind, hot: usize, old: BlockId) ->
             None
         }
         UseKind::DoorUpper => None,
+        // C3c-3a — the hang arm's `take_one_from_hotbar`: the Plan is spent.
+        UseKind::HangPrint => {
+            assert!(inv.take_one_from_hotbar(hot).is_some(), "the hang spends the Plan");
+            None
+        }
     }
 }
 
@@ -1189,4 +1200,223 @@ fn a_joined_client_runs_no_rubber_clock() {
         "game_loop.rs:{}: a joined client runs its own rubber clock — gate it behind `self.remote_client.is_none()`",
         i + 1
     );
+}
+
+// ─── C3c-3a — Plans by marker ──────────────────────────────────────────
+
+/// A developed Plan (its marker differs from `latent_plan`'s and from
+/// another named one's).
+fn developed_plan(name: &str) -> crate::plan::PlanData {
+    crate::plan::PlanData { name: name.to_string(), ..crate::plan::PlanData::debug_3x3_stone() }
+}
+
+/// The server's stand-in for `plan`.
+fn placeholder_of(plan: &crate::plan::PlanData) -> Item {
+    let developed = plan.develop_state == crate::plan::DevelopState::Developed;
+    Item::Plan(crate::plan::PlanData::marker_placeholder(crate::plan::marker(plan), developed))
+}
+
+/// Does `slot` of `inv` hold `plan` (a real Plan or its placeholder, by
+/// marker)?
+fn holds_plan(inv: &Inventory, slot: usize, plan: &crate::plan::PlanData) -> bool {
+    matches!(inv.slot(slot).map(|s| &s.item), Some(Item::Plan(p)) if p.same_plan(plan))
+}
+
+impl Rig {
+    /// The client sends item action `action` (as `GameState::send_request`
+    /// sends a never-answered one), then one tick.
+    fn send_action(&mut self, action: protocol::ItemAction) {
+        let c = &mut self.c;
+        // Any request number (it is never answered); not the op sequence.
+        let pkt = protocol::ItemActionPacket { seq: 1000 + c.input_seq as u32, action, events_applied: c.events };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+        self.tick();
+    }
+
+    /// The client's window ops so far, sent.
+    fn send_ops(&mut self) {
+        let c = &mut self.c;
+        for logged in c.ui.take_ops(&c.inv, &c.armour) {
+            c.seq += 1;
+            let pkt = logged.packet(c.seq, c.events);
+            c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
+        }
+        self.tick();
+    }
+
+    /// The client's window digest, and the server's copy's.
+    fn digests(&self) -> (u32, u32) {
+        let sp = &self.hs.server.players[self.c.slot];
+        let c = &self.c;
+        (
+            window::digest_parts(&c.inv, &c.armour, &c.ui.cursor_item, &c.ui.grid, c.ui.station()),
+            window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station),
+        )
+    }
+}
+
+/// A joiner hangs a developed Plan (its tag names it by marker): the edit is
+/// applied as a use, never a placement, and the server's copy loses THAT
+/// Plan's placeholder by marker — with two Plans in the copy and the other
+/// one in the tag's slot (a drifted copy), the right one goes.
+#[test]
+fn a_joiners_hung_print_takes_its_plan_by_marker() {
+    let mut rig = Rig::dedicated("hang");
+    let wall = [ABOVE[0] + 1, ABOVE[1], ABOVE[2]];
+    rig.set(wall, block::STONE);
+    let (hung, kept) = (developed_plan("Hung"), developed_plan("Kept"));
+    rig.c.inv.set_slot(0, Some(ItemStack { item: Item::Plan(hung.clone()), count: 1 }));
+    rig.c.inv.set_slot(1, Some(ItemStack { item: Item::Plan(kept.clone()), count: 1 }));
+    rig.sp().inventory.set_slot(0, Some(ItemStack { item: placeholder_of(&kept), count: 1 }));
+    rig.sp().inventory.set_slot(1, Some(ItemStack { item: placeholder_of(&hung), count: 1 }));
+    rig.use_at(UseKind::HangPrint, ABOVE, block::CYANOTYPE_PRINT, 0);
+    assert_eq!(rig.block(ABOVE), block::CYANOTYPE_PRINT, "the edit is applied");
+    let t = rig.tally();
+    assert_eq!((t.use_mirrored, t.use_mismatch), (1, 0), "one use mirrored");
+    assert_eq!((t.matched, t.mismatched), (0, 0), "never classified as a placement");
+    let copy = &rig.hs.server.players[rig.c.slot].inventory;
+    assert!(copy.slot(1).is_none(), "the hung Plan's placeholder went, by marker");
+    assert!(holds_plan(copy, 0, &kept), "the other one stayed in the tag's slot");
+    assert!(rig.c.inv.slot(0).is_none() && holds_plan(&rig.c.inv, 1, &kept));
+}
+
+/// A hang in someone else's plot (C3c-1-fix M-4): refused, told, and undone
+/// from the client's own record — the client's Plan comes back whole into
+/// its slot (never a marker placeholder); the server's copy never applied
+/// it, so its placeholder stays where it was.
+#[test]
+fn a_refused_hang_gives_the_plan_back_and_the_copy_keeps_its_placeholder() {
+    let mut rig = Rig::dedicated("hang-refused");
+    rig.set([ABOVE[0] + 1, ABOVE[1], ABOVE[2]], block::STONE);
+    foreign_plot(&mut rig, ABOVE);
+    let plan = developed_plan("Refused");
+    rig.c.inv.set_slot(0, Some(ItemStack { item: Item::Plan(plan.clone()), count: 1 }));
+    rig.sp().inventory.set_slot(0, Some(ItemStack { item: placeholder_of(&plan), count: 1 }));
+    rig.use_at(UseKind::HangPrint, ABOVE, block::CYANOTYPE_PRINT, 0);
+    rig.tick();
+    assert_eq!(rig.block(ABOVE), block::AIR, "never hung on the server");
+    assert_eq!(rig.c.undone, 1, "undone from the client's own record");
+    assert_eq!(rig.c.inv.slot(0).map(|s| s.item.clone()), Some(Item::Plan(plan.clone())), "the real Plan is back");
+    assert!(holds_plan(&rig.hs.server.players[rig.c.slot].inventory, 0, &plan), "the copy kept its placeholder");
+    let (client, server) = rig.digests();
+    assert_eq!(server, client);
+    let t = rig.tally();
+    assert_eq!((t.use_edit_refused, t.use_mirrored, t.use_mismatch), (1, 0, 0));
+}
+
+/// A latent Plan doesn't hang: the outcome is tallied (log-only), applied,
+/// and the Plan still spent on the copy as the client says.
+#[test]
+fn a_latent_plans_hang_is_tallied_and_still_applied() {
+    let mut rig = Rig::dedicated("hang-latent");
+    rig.set([ABOVE[0] + 1, ABOVE[1], ABOVE[2]], block::STONE);
+    let latent = crate::plan::PlanData {
+        develop_state: crate::plan::DevelopState::Latent { exposure_ticks: 0 },
+        ..developed_plan("Latent")
+    };
+    rig.c.inv.set_slot(0, Some(ItemStack { item: Item::Plan(latent.clone()), count: 1 }));
+    rig.sp().inventory.set_slot(0, Some(ItemStack { item: placeholder_of(&latent), count: 1 }));
+    rig.use_at(UseKind::HangPrint, ABOVE, block::CYANOTYPE_PRINT, 0);
+    assert_eq!(rig.block(ABOVE), block::CYANOTYPE_PRINT, "log-only: applied");
+    let t = rig.tally();
+    assert_eq!((t.use_mirrored, t.use_mismatch), (0, 1));
+    assert!(rig.hs.server.players[rig.c.slot].inventory.slot(0).is_none(), "spent as the client says");
+}
+
+/// A joiner's art capture, reported (`PlanMinted { CaptureArt }`): the
+/// server's copy gains the Plan's marker placeholder in the slot the client's
+/// Plan landed in (the first empty one, BEFORE the last paper of slot 0 was
+/// taken) and loses the paper; then the Plan moves between slots and into the
+/// hotbar with no window mismatch.
+#[test]
+fn a_joiners_art_capture_lands_its_marker_where_the_client_did_and_moves_in_lockstep() {
+    let mut rig = Rig::dedicated("art-mint");
+    rig.give(0, Item::Block(block::BLUEPRINT_PAPER), 1);
+    rig.give(1, Item::Block(block::STONE), 5);
+    let art = crate::plan::PlanData {
+        develop_state: crate::plan::DevelopState::Latent { exposure_ticks: 0 },
+        kind: crate::plan::PlanKind::Art,
+        ..developed_plan("Cyanotype: 1×1")
+    };
+    // The client's art-capture arm: add the Plan, then take the paper.
+    let paper = rig.c.inv.hotbar_slot(0).cloned().map(|s| ItemStack { count: 1, ..s });
+    assert!(rig.c.inv.add_item(ItemStack { item: Item::Plan(art.clone()), count: 1 }).is_none());
+    assert!(rig.c.inv.take_one_from_hotbar(0).is_some());
+    assert!(holds_plan(&rig.c.inv, 2, &art) && rig.c.inv.slot(0).is_none());
+    rig.send_action(protocol::ItemAction::PlanMinted {
+        source: crate::plan_mint::MintSource::CaptureArt.to_wire(),
+        x: ABOVE[0],
+        y: ABOVE[1],
+        z: ABOVE[2] - 1,
+        face: crate::mesh::Face::South.index() as u8,
+        hotbar_slot: 0,
+        spent: paper.as_ref().map(crate::inventory::stack_to_wire),
+        plan: crate::inventory::plan_to_wire(&art),
+    });
+    let copy = &rig.hs.server.players[rig.c.slot].inventory;
+    assert!(holds_plan(copy, 2, &art), "the placeholder, in the client's slot");
+    assert!(copy.slot(0).is_none(), "the paper went");
+    assert!(matches!(copy.slot(2).map(|s| &s.item), Some(Item::Plan(p)) if p.marker.is_some() && p.cells.is_empty()), "body-less");
+    let t = rig.tally();
+    assert_eq!((t.plan_minted, t.plan_mismatch), (1, 0));
+    let (client, server) = rig.digests();
+    assert_eq!(server, client, "it digests like the real one");
+    // The Plan moves: slot 2 → slot 20 → hotbar slot 7.
+    rig.c.ui.open_player_crafting(&rig.c.inv, &rig.c.armour);
+    for slot in [2, 20, 20, 7] {
+        let c = &mut rig.c;
+        let r = c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Slot { slot, right: false }, false, Vec3::ZERO, |_| block::AIR);
+        assert!(r.ok(), "click {slot}");
+    }
+    let c = &mut rig.c;
+    assert!(c.ui.close(&mut c.inv, &mut c.armour));
+    rig.send_ops();
+    let t = rig.tally();
+    assert!(t.window_ops >= 6, "the open, four clicks and the close were mirrored: {}", t.window_ops);
+    assert_eq!(t.window_mismatch, 0, "the placeholder moved as the Plan did");
+    assert!(holds_plan(&rig.c.inv, 7, &art));
+    assert!(holds_plan(&rig.hs.server.players[rig.c.slot].inventory, 7, &art));
+}
+
+/// A joiner's capture commit, reported (`PlanMinted { CaptureCommit }`):
+/// the copy gains the placeholder and spends nothing (the paper was spent
+/// when it was laid). A mint whose paper the copy doesn't hold is counted
+/// (log-only) and mirrored as reported.
+#[test]
+fn a_joiners_capture_commit_lands_its_marker_and_a_short_mint_is_counted() {
+    let mut rig = Rig::dedicated("commit-mint");
+    rig.give(0, Item::Block(block::STONE), 5);
+    let house = developed_plan("House");
+    assert!(rig.c.inv.add_item(ItemStack { item: Item::Plan(house.clone()), count: 1 }).is_none());
+    rig.send_action(protocol::ItemAction::PlanMinted {
+        source: crate::plan_mint::MintSource::CaptureCommit.to_wire(),
+        x: FLOOR[0],
+        y: FLOOR[1],
+        z: FLOOR[2],
+        face: crate::mesh::Face::Top.index() as u8,
+        hotbar_slot: 0,
+        spent: None,
+        plan: crate::inventory::plan_to_wire(&house),
+    });
+    let copy = &rig.hs.server.players[rig.c.slot].inventory;
+    assert!(holds_plan(copy, 1, &house));
+    assert_eq!(copy.slot(0).map(|s| s.count), Some(5), "nothing spent");
+    assert_eq!((rig.tally().plan_minted, rig.tally().plan_mismatch), (1, 0));
+    // An art capture whose paper the copy never had: counted, mirrored.
+    let art = crate::plan::PlanData { kind: crate::plan::PlanKind::Art, ..developed_plan("Short") };
+    rig.send_action(protocol::ItemAction::PlanMinted {
+        source: crate::plan_mint::MintSource::CaptureArt.to_wire(),
+        x: ABOVE[0],
+        y: ABOVE[1],
+        z: ABOVE[2],
+        face: crate::mesh::Face::North.index() as u8,
+        hotbar_slot: 3,
+        spent: Some(crate::inventory::stack_to_wire(&ItemStack::new_block(block::BLUEPRINT_PAPER, 1))),
+        plan: crate::inventory::plan_to_wire(&art),
+    });
+    let t = rig.tally();
+    assert_eq!((t.plan_minted, t.plan_mismatch), (2, 1));
+    assert!(holds_plan(&rig.hs.server.players[rig.c.slot].inventory, 2, &art), "mirrored as reported");
+    let summary = t.summary("Drafter").unwrap();
+    assert!(summary.contains("2 Plan mint(s) mirrored by marker, 1 with a shortfall"), "{summary}");
 }

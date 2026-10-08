@@ -435,10 +435,15 @@ fn claims_an_item(request: &Pending) -> bool {
 /// Is `a` the item `b` was, for an outcome's purposes? A tool is the same
 /// tool by type and material, and an armour piece by slot and material
 /// (durability is what wears; the shadow's copy never does — C2b verify L6).
+/// C3c-3a — a Plan is the same Plan by its marker (`plan::PlanData::same_plan`):
+/// the server's copy holds a joiner's Plan as a marker placeholder, so an
+/// owed take of a Plan (a hung print's) finds it by marker, in the exact
+/// pass and the kind pass of [`take_owed_search`] alike.
 pub(crate) fn same_item(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::Tool(a), Item::Tool(b)) => a.tool_type == b.tool_type && a.material == b.material,
         (Item::Armour(a), Item::Armour(b)) => a.slot == b.slot && a.material == b.material,
+        (Item::Plan(a), Item::Plan(b)) => a.same_plan(b),
         (a, b) => a == b,
     }
 }
@@ -527,6 +532,8 @@ pub(crate) fn take_owed_search(
 /// only then one of its kind ([`same_item`]). So no place's kind match beats
 /// another place's exact one — the hint slot's included, where a worn tool
 /// swapped in inside the round trip was taken for the fresh phantom.
+/// C3c-3a — a Plan matches exactly by its marker (`plan::PlanData::same_plan`):
+/// the copy's marker placeholder is the Plan the claim names.
 fn take_one_owed(
     inv: &mut Inventory,
     mut grid: Option<&mut crate::window::CraftGrid>,
@@ -535,7 +542,10 @@ fn take_one_owed(
     hint: Option<usize>,
     held: &Item,
 ) -> Option<Item> {
-    let exact = |s: &ItemStack| &s.item == held;
+    let exact = |s: &ItemStack| match (&s.item, held) {
+        (Item::Plan(a), Item::Plan(b)) => a.same_plan(b),
+        (a, b) => a == b,
+    };
     let kind = |s: &ItemStack| same_item(&s.item, held);
     let passes: [&dyn Fn(&ItemStack) -> bool; 2] = [&exact, &kind];
     passes.into_iter().find_map(|matches| {
@@ -1470,5 +1480,30 @@ mod tests {
         eat(&mut a);
         a.settle(None, RequestFate::NoConnection);
         assert_eq!(a.len(), 1);
+    }
+
+    /// C3c-3a — an owed take of a Plan finds the server's marker placeholder
+    /// by marker: with two Plans in the copy and the OTHER one in the hint
+    /// slot, the named one goes, from wherever it is.
+    #[test]
+    fn an_owed_plan_is_taken_by_its_marker() {
+        use crate::plan::{marker, DevelopState, PlanData};
+        let a = PlanData::debug_3x3_stone();
+        let b = PlanData { develop_state: DevelopState::Latent { exposure_ticks: 0 }, ..a.clone() };
+        let (ma, mb) = (marker(&a), marker(&b));
+        assert_ne!(ma, mb);
+        let placeholder = |m, developed| Item::Plan(PlanData::marker_placeholder(m, developed));
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack { item: placeholder(mb, false), count: 1 }));
+        inv.set_slot(5, Some(ItemStack { item: placeholder(ma, true), count: 1 }));
+        // The claim decodes to A's placeholder; the hint (slot 0) holds B.
+        assert_eq!(take_owed(&mut inv, 0, &placeholder(ma, true), 1), 1);
+        assert!(inv.slot(5).is_none(), "A went");
+        assert_eq!(inv.slot(0).map(|s| s.item.clone()), Some(placeholder(mb, false)), "B stayed");
+        // A real Plan claim matches its placeholder too (by marker).
+        assert_eq!(take_owed(&mut inv, 3, &Item::Plan(b.clone()), 1), 1);
+        assert!(inv.slot(0).is_none());
+        assert_eq!(take_owed(&mut inv, 0, &Item::Plan(b), 1), 0, "none left");
+        assert!(same_item(&placeholder(ma, true), &Item::Plan(a)));
     }
 }

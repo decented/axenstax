@@ -2945,4 +2945,225 @@ mod tests {
         hg.ticks(20);
         assert!(exposure(&hg).is_some_and(|e| e > 0), "alone it develops: {:?}", exposure(&hg));
     }
+
+    // ─── C3c-3a ────────────────────────────────────────────────────────────
+
+    /// C3c-3a — a stone wall block two blocks ahead (-z) at eye height, in
+    /// both worlds, clear of the floor (so an art capture finds it alone).
+    fn wall_ahead(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, feet: [i32; 3]) -> [i32; 3] {
+        let wall = [feet[0], feet[1] + 1, feet[2] - 2];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(wall[0], wall[1], wall[2], crate::block::STONE);
+        }
+        wall
+    }
+
+    /// C3c-3a — aim player 0's camera at `wall`'s +z face.
+    fn aim_at_wall(hg: &mut HeadlessGame, wall: [i32; 3]) {
+        aim_at(hg, glam::Vec3::new(wall[0] as f32 + 0.5, wall[1] as f32 + 0.5, wall[2] as f32 + 0.9));
+    }
+
+    /// C3c-3a — the Plan in `slot` of `inv`, if one is there.
+    fn plan_in(inv: &crate::inventory::Inventory, slot: usize) -> Option<crate::plan::PlanData> {
+        match inv.slot(slot).map(|s| &s.item) {
+            Some(crate::item::Item::Plan(p)) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    /// C3c-3a — a joiner's art capture through the REAL arm (Blueprint Paper
+    /// on a wall): the client mints the Plan into its first empty slot and
+    /// takes its last paper; the server's copy gains the Plan's marker
+    /// placeholder in the same slot and loses the paper. Then the Plan moves
+    /// between slots and into the hotbar: no window mismatch.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_art_capture_mints_a_plan_the_server_tracks_by_marker() {
+        use crate::item::ItemStack;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("art-capture");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            inv.set_slot(0, Some(ItemStack::new_block(crate::block::BLUEPRINT_PAPER, 1)));
+            inv.set_slot(1, Some(ItemStack::new_block(crate::block::STONE, 5)));
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        let wall = wall_ahead(&mut hg, &mut server, feet);
+        harness_step(&mut server, &mut hg);
+        aim_at_wall(&mut hg, wall);
+        right_click(&mut hg);
+        let p = &hg.state.players[0];
+        let plan = plan_in(&p.inventory, 2).expect("the art Plan, in the first empty slot");
+        assert_eq!(plan.kind, crate::plan::PlanKind::Art);
+        assert!(p.inventory.slot(0).is_none(), "the last paper went");
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        let held = plan_in(&sp.inventory, 2).expect("the server's copy holds it in the same slot");
+        assert_eq!(held.marker, Some(crate::plan::marker(&plan)), "as its marker placeholder");
+        assert!(held.cells.is_empty(), "body-less");
+        assert!(sp.inventory.slot(0).is_none(), "and lost the paper");
+        assert_eq!((sp.possession.plan_minted, sp.possession.plan_mismatch), (1, 0));
+        // The Plan moves: slot 2 → slot 20 → hotbar slot 7.
+        let p = &mut hg.state.players[0];
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        let eye = p.player.eye_pos();
+        for at in [2, 20, 20, 7] {
+            let click = crate::window::WindowClick::Slot { slot: at, right: false };
+            let r = p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, false, eye, |_| crate::block::AIR);
+            assert!(r.ok(), "click {at}");
+        }
+        assert!(p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots));
+        // Step until the ops land (the loopback transport is real-time: a
+        // loaded machine can take more than three ticks to deliver them).
+        for _ in 0..40 {
+            harness_step(&mut server, &mut hg);
+            if server.server.players[slot].possession.window_ops >= 6 {
+                break;
+            }
+        }
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        assert!(sp.possession.window_ops >= 6, "the open, four clicks and the close: {}", sp.possession.window_ops);
+        assert_eq!(sp.possession.window_mismatch, 0, "the placeholder moved as the Plan did");
+        assert_eq!(plan_in(&sp.inventory, 7).and_then(|p| p.marker), Some(crate::plan::marker(&plan)));
+        assert!(plan_in(&hg.state.players[0].inventory, 7).is_some_and(|p| p == plan));
+    }
+
+    /// C3c-3a — a joiner confirms a capture (the dialog's Confirm,
+    /// `confirm_capture`): with a full bag it is refused BEFORE anything
+    /// happens (the toast; the tile keeps its paper; no Plan on either side);
+    /// with room the client's Plan lands in its first empty slot and the
+    /// server's copy gains its marker placeholder there, spending nothing.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_capture_commit_mints_a_marker_and_a_full_bag_refuses_it() {
+        use crate::item::ItemStack;
+        use crate::world::FaceAttachment;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("capture-commit");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        // One blank-paper tile with a block built on it, in the client's world.
+        let tile = (feet[0] + 2, feet[1] - 1, feet[2]);
+        let top = crate::mesh::Face::Top.index();
+        hg.state.world.set_face_attachment(tile, top, FaceAttachment::BlueprintBlank);
+        hg.state.world.set_block(tile.0, tile.1 + 1, tile.2, crate::block::OAK_PLANKS);
+        let candidate = crate::plan::capture(&hg.state.world, tile, "survival").expect("a capture");
+        let pending = || crate::plan::PendingCapture { candidate: candidate.clone(), parent_match: None, mark_as_derivative: false };
+        let stone = ItemStack::new_block(crate::block::STONE, 64);
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            for k in 0..36 {
+                inv.set_slot(k, Some(stone.clone()));
+            }
+        }
+        // 1. A full bag: refused before anything happens.
+        hg.state.players[0].pending_capture = Some(pending());
+        hg.state.confirm_capture(0);
+        assert!(hg.state.toast.as_ref().is_some_and(|(t, _)| t == crate::plan_mint::MAKE_ROOM_TOAST));
+        assert!(hg.state.players[0].pending_capture.is_none(), "the dialog closed");
+        assert!(hg.state.players[0].inventory.slots_iter().flatten().all(|s| s.item == stone.item), "no Plan");
+        assert_eq!(hg.state.world.face_attachment_at(tile, top), Some(&FaceAttachment::BlueprintBlank), "the tile keeps its paper");
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        assert_eq!(server.server.players[slot].possession.plan_minted, 0, "nothing reported");
+        // 2. Room (slot 5): the Plan lands on both sides.
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            inv.set_slot(5, None);
+        }
+        hg.state.players[0].pending_capture = Some(pending());
+        hg.state.confirm_capture(0);
+        let plan = plan_in(&hg.state.players[0].inventory, 5).expect("the client's Plan");
+        assert!(hg.state.world.face_attachment_at(tile, top).is_none(), "the tile's paper was consumed");
+        for _ in 0..3 {
+            harness_step(&mut server, &mut hg);
+        }
+        let sp = &server.server.players[slot];
+        assert_eq!(plan_in(&sp.inventory, 5).and_then(|p| p.marker), Some(crate::plan::marker(&plan)));
+        assert_eq!(sp.inventory.slots_iter().flatten().filter(|s| s.item == stone.item).count(), 35, "nothing spent");
+        assert_eq!((sp.possession.plan_minted, sp.possession.plan_mismatch), (1, 0));
+    }
+
+    /// C3c-3a — a joiner hangs a developed Plan through the REAL arm: the
+    /// print reaches the server as a use edit tagged `HangPrint` (never a
+    /// placement), and the server's copy loses THAT Plan's placeholder by
+    /// marker — two Plans in the copy, the other one in the hand's slot (a
+    /// drifted copy): the right one goes.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_hung_print_takes_its_plan_by_marker() {
+        use crate::item::{Item, ItemStack};
+        use crate::plan::PlanData;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("hang-print");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let hung = PlanData { name: "Hung".to_string(), ..PlanData::debug_3x3_stone() };
+        let kept = PlanData { name: "Kept".to_string(), ..PlanData::debug_3x3_stone() };
+        let placeholder = |p: &PlanData| Item::Plan(PlanData::marker_placeholder(crate::plan::marker(p), true));
+        let one = |item: Item| Some(ItemStack { item, count: 1 });
+        hg.state.players[0].inventory.set_slot(0, one(Item::Plan(hung.clone())));
+        hg.state.players[0].inventory.set_slot(1, one(Item::Plan(kept.clone())));
+        server.server.players[slot].inventory.set_slot(0, one(placeholder(&kept)));
+        server.server.players[slot].inventory.set_slot(1, one(placeholder(&hung)));
+        hg.state.players[0].hotbar_slot = 0;
+        let wall = wall_ahead(&mut hg, &mut server, feet);
+        harness_step(&mut server, &mut hg);
+        aim_at_wall(&mut hg, wall);
+        right_click(&mut hg);
+        let print = [wall[0], wall[1], wall[2] + 1];
+        assert_eq!(hg.state.world.get_block(print[0], print[1], print[2]), crate::block::CYANOTYPE_PRINT, "hung");
+        assert!(hg.state.players[0].inventory.slot(0).is_none(), "the Plan is spent");
+        for _ in 0..4 {
+            harness_step(&mut server, &mut hg);
+        }
+        assert_eq!(server.server.world.get_block(print[0], print[1], print[2]), crate::block::CYANOTYPE_PRINT, "the edit is applied");
+        let sp = &server.server.players[slot];
+        assert_eq!((sp.possession.use_mirrored, sp.possession.use_mismatch), (1, 0), "one use mirrored");
+        assert_eq!((sp.possession.matched, sp.possession.mismatched), (0, 0), "never a placement");
+        assert!(sp.inventory.slot(1).is_none(), "the hung Plan's placeholder went, by marker");
+        assert_eq!(plan_in(&sp.inventory, 0).and_then(|p| p.marker), Some(crate::plan::marker(&kept)), "the other stayed");
+    }
+
+    /// C3c-3a — a joiner right-clicks an empty item frame with its ONLY
+    /// Blueprint Paper (the frame use's request claims it), then, inside the
+    /// round trip, a wall with it (the REAL art-capture arm): nothing happens
+    /// — no Plan, the paper still in hand, nothing reported. The server ends
+    /// with the paper in the frame and no Plan.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_art_capture_waits_for_the_claim_on_its_paper() {
+        use crate::item::{Item, ItemStack};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("art-claimed");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let paper = ItemStack::new_block(crate::block::BLUEPRINT_PAPER, 1);
+        hg.state.players[0].inventory.set_slot(0, Some(paper.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(paper));
+        hg.state.players[0].hotbar_slot = 0;
+        let frame = [feet[0] + 2, feet[1] + 1, feet[2]];
+        hg.state.world.set_block(frame[0], frame[1], frame[2], crate::block::ITEM_FRAME);
+        server.server.world.set_block(frame[0], frame[1], frame[2], crate::block::ITEM_FRAME);
+        let wall = wall_ahead(&mut hg, &mut server, feet);
+        harness_step(&mut server, &mut hg);
+        // 1. The frame, through the real arm: the request claims the paper.
+        aim_at(&mut hg, glam::Vec3::new(frame[0] as f32 + 0.5, frame[1] as f32 + 0.5, frame[2] as f32 + 0.5));
+        right_click(&mut hg);
+        // 2. Inside the round trip: the wall, through the real art-capture arm.
+        aim_at_wall(&mut hg, wall);
+        right_click(&mut hg);
+        let has_plan = |inv: &crate::inventory::Inventory| inv.slots_iter().flatten().any(|s| matches!(s.item, Item::Plan(_)));
+        assert!(!has_plan(&hg.state.players[0].inventory), "no Plan: the paper is claimed");
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(1), "still in hand until the frame's outcome");
+        settle(&mut server, &mut hg);
+        let pos = (frame[0], frame[1], frame[2]);
+        let framed = server.server.world.item_frame_at(pos).and_then(|f| f.item.as_ref().map(|s| s.item.clone()));
+        assert_eq!(framed, Some(Item::Block(crate::block::BLUEPRINT_PAPER)), "the frame has it");
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.possession.plan_minted, 0, "nothing reported");
+        assert!(!has_plan(&sp.inventory) && !has_plan(&hg.state.players[0].inventory));
+        assert!(hg.state.players[0].inventory.slot(0).is_none() && sp.inventory.slot(0).is_none(), "the paper is in the frame");
+    }
 }

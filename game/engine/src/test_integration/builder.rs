@@ -37,6 +37,7 @@ fn fixture_plan(cells: Vec<CapturedCell>) -> PlanData {
         authored_in: "survival".into(),
         develop_state: crate::plan::DevelopState::Developed,
             kind: crate::plan::PlanKind::Building,
+        marker: None,
     }
 }
 

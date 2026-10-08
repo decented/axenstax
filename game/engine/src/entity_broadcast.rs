@@ -803,22 +803,23 @@ mod tests {
     }
 
     #[test]
-    fn dropped_plan_broadcasts_no_payload_on_either_channel() {
+    fn dropped_plan_broadcasts_a_marker_never_a_body() {
         let (mut ecs, mut b) = fresh();
         let mut all = ClientInterest::default();
+        let data = crate::plan::PlanData::debug_3x3_stone();
         entity::spawn_item(
             &mut ecs,
             Vec3::new(1.0, 65.0, 2.0),
-            crate::item::ItemStack {
-                item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),
-                count: 1,
-            },
+            crate::item::ItemStack { item: crate::item::Item::Plan(data.clone()), count: 1 },
             0,
         );
         let (spawns, _, _) = global(&mut ecs, &mut b, &mut all);
         let plan = spawns.iter().find(|s| s.kind == EntityKind::Item).unwrap();
         assert_eq!(plan.item_kind, crate::protocol::item_kind::EMPTY);
-        assert_eq!(plan.full_item, WireItem::None);
+        // C3c-3a (v83): the full-fidelity channel names the Plan by marker
+        // (never its body) — the same reference a joiner's own Plan rides as.
+        assert_eq!(plan.full_item, crate::inventory::plan_to_wire(&data));
+        assert!(matches!(plan.full_item, WireItem::Plan { .. }));
     }
 
     #[test]

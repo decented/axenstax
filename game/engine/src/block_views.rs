@@ -211,7 +211,7 @@ pub fn apply_view(world: &mut World, registry: &crate::block::BlockRegistry, v: 
         }
         BlockView::Composter { input, output } => {
             let decode = |w: &Option<crate::protocol::WireStack>| {
-                w.as_ref().and_then(|w| crate::inventory::stack_from_wire(w, registry, false))
+                w.as_ref().and_then(|w| crate::inventory::stack_from_wire(w, registry, crate::inventory::PlanDecode::Refuse))
             };
             let mut state = world.composter_at(cell).cloned().unwrap_or_default();
             state.input = decode(input);

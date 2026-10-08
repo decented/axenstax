@@ -275,6 +275,7 @@ mod workstation;
 mod drying_rack;
 mod papyrus;
 mod plan;
+mod plan_mint; // C3c-3a — a joiner's Plans on the server's copy of its inventory, by marker.
 mod plan_registry;
 mod plan_ui;
 mod latent_print;

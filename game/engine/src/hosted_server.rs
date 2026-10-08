@@ -2148,6 +2148,11 @@ impl HostedServer {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 return self.serve_reel(i, req.seq, *hotbar_slot, held);
             }
+            // C3c-3a (v83) — a Plan the client minted in its own window,
+            // mirrored on the server's copy by marker. Never answered.
+            protocol::ItemAction::PlanMinted { source, x, y, z, hotbar_slot, spent, plan, .. } => {
+                return self.mirror_joiner_mint(i, *source, [*x, *y, *z], *hotbar_slot, spent.as_ref(), plan);
+            }
         };
         let (accepted, consume_held, note) = match served {
             Ok(n) => (true, n, ItemNote::None.to_wire()),
@@ -2177,6 +2182,56 @@ impl HostedServer {
             bite_after: 0,
         };
         self.send_item_outcome(i, &out);
+    }
+
+    /// C3c-3a (v83) — joiner `i` minted a Plan in its own window
+    /// (`ItemAction::PlanMinted`: a capture's commit, or an art capture that
+    /// spent the Blueprint Paper `spent` from hotbar slot `hotbar_slot`).
+    /// Mirrored on the server's copy by the client's steps in the client's
+    /// order (`plan_mint::mirror_mint`): the marker placeholder lands by
+    /// `add_item`, then `spent` is taken by the owed search. Log-only
+    /// (`PossessionTally::plan_minted` / `plan_mismatch`, the first shortfall
+    /// logged): a mint is believed until C3d. Never answered; it reached the
+    /// server in the client's order with its edits, ops and requests (sent as
+    /// a Q-drop is). A placeholder that doesn't fit is dropped, never spilled.
+    /// The capture commit's paper tiles stay in the server's world until
+    /// C3c-3b.
+    fn mirror_joiner_mint(
+        &mut self,
+        i: usize,
+        source: u8,
+        cell: [i32; 3],
+        hotbar_slot: u8,
+        spent: Option<&protocol::WireStack>,
+        plan: &protocol::WireItem,
+    ) {
+        let slot = self.action_slot(i, hotbar_slot);
+        let decoded = spent.and_then(|w| {
+            crate::inventory::stack_from_wire(w, &self.server.registry, crate::inventory::PlanDecode::Marker)
+        });
+        let spent_unread = spent.is_some() && decoded.is_none();
+        let spent = decoded.map(|s| s.item);
+        let source = crate::plan_mint::MintSource::from_wire(source);
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        if !crate::item_actions::can_mirror(sp) {
+            return;
+        }
+        let placeholder = crate::inventory::plan_from_wire(plan);
+        let mirrored = crate::plan_mint::mirror_mint(&mut sp.inventory, slot, placeholder, spent.as_ref());
+        let clean = mirrored.clean() && source.is_some() && !spent_unread;
+        if sp.possession.note_plan_mint(clean) {
+            log::info!(
+                "plan mirror (log-only): {}'s {} at ({}, {}, {}) from hotbar slot {slot} didn't match the server's copy \
+                 (placed: {}, paid: {}) — mirrored as reported (further mismatches are counted, not logged)",
+                sp.display_name,
+                source.map_or("Plan mint of an unknown source", crate::plan_mint::MintSource::label),
+                cell[0],
+                cell[1],
+                cell[2],
+                mirrored.placed,
+                mirrored.paid && !spent_unread,
+            );
+        }
     }
 
     /// C3c-2 — the hotbar slot an item action of joiner `i` names, or its
@@ -4562,7 +4617,7 @@ impl HostedServer {
         let used = tag
             .used
             .as_ref()
-            .and_then(|w| crate::inventory::stack_from_wire(w, &self.server.registry, false))
+            .and_then(|w| crate::inventory::stack_from_wire(w, &self.server.registry, crate::inventory::PlanDecode::Marker))
             .map(|s| s.item);
         let source = match old {
             crate::block::WATER => self.server.water.is_source(bc.x, bc.y, bc.z),
@@ -5810,6 +5865,10 @@ fn is_rod(held: Option<&crate::item::Item>) -> bool {
     matches!(held, Some(crate::item::Item::Tool(t)) if t.tool_type == crate::crafting::ToolType::FishingRod)
 }
 
+/// A request's held claim (`held_kind`/`held_id` pair plus `held_full`): the
+/// full-fidelity payload, else (C3c-3a) a Plan as its marker placeholder
+/// (`inventory::plan_from_wire`: the joiner's own window names it), else the
+/// pair.
 fn held_item_from_wire(
     kind: u8,
     id: u16,
@@ -5817,6 +5876,7 @@ fn held_item_from_wire(
     registry: &crate::block::BlockRegistry,
 ) -> Option<crate::item::Item> {
     crate::inventory::item_from_wire_full(full)
+        .or_else(|| crate::inventory::plan_from_wire(full))
         .or_else(|| crate::inventory::item_from_ref(kind, id, registry))
 }
 

@@ -4234,7 +4234,31 @@ impl super::GameState {
         &mut self,
         cell: [i32; 3],
         new_block: block::BlockId,
+        tag: crate::protocol::UseTag,
+        product: Option<crate::item::ItemStack>,
+        unfit: u8,
+    ) {
+        // What it spent, as its tag names it (a Plan's body isn't on the tag:
+        // the hang names its cost itself, `push_use_edit_costing`).
+        let cost = tag
+            .used
+            .as_ref()
+            .and_then(|w| crate::inventory::stack_from_wire(w, &self.registry, crate::inventory::PlanDecode::Refuse))
+            .map(|s| s.item);
+        self.push_use_edit_costing(cell, new_block, tag, cost, product, unfit);
+    }
+
+    /// C3c-3a — [`Self::push_use_edit`] with what the use spent given
+    /// (`cost`): a hung Plan's tag names it by marker only, so the hang arm
+    /// records the real Plan it spent, and a refused hang gives the Plan
+    /// back whole (`use_edits::undo`) — a joined client never holds a marker
+    /// placeholder.
+    fn push_use_edit_costing(
+        &mut self,
+        cell: [i32; 3],
+        new_block: block::BlockId,
         mut tag: crate::protocol::UseTag,
+        cost: Option<crate::item::Item>,
         product: Option<crate::item::ItemStack>,
         unfit: u8,
     ) {
@@ -4246,11 +4270,6 @@ impl super::GameState {
                     let n = p.count.saturating_sub(unfit);
                     (n > 0).then_some(crate::item::ItemStack { item: p.item, count: n })
                 });
-                let cost = tag
-                    .used
-                    .as_ref()
-                    .and_then(|w| crate::inventory::stack_from_wire(w, &self.registry, false))
-                    .map(|s| s.item);
                 let made_at = self.remote_client.as_ref().map_or(0, |c| c.next_input_seq());
                 self.sent_uses.record(crate::use_edits::UseRecord {
                     cell,
@@ -4264,7 +4283,7 @@ impl super::GameState {
             self.pending_block_changes.push_use(broadcast_change(&self.world, cell[0], cell[1], cell[2], new_block), tag);
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = (cell, new_block, tag, product);
+        let _ = (cell, new_block, tag, cost, product);
     }
 
     /// C3c-1-fix (M-4) — the server refused these use-tagged edits of ours
@@ -13733,6 +13752,11 @@ impl super::GameState {
                                             existing,
                                             crate::block::AIR | crate::block::WATER
                                         ) {
+                                            // C3c-3a — the hand before the hang
+                                            // spends the Plan (its tag names it
+                                            // by marker).
+                                            let cell = [place.0, place.1, place.2];
+                                            let tag = self.use_tag(pidx, crate::use_edits::UseKind::HangPrint, cell);
                                             // Spec 06 §2.2 — a mounted print is
                                             // player-placed: no work when re-mined.
                                             self.world.place_player_block(
@@ -13742,8 +13766,8 @@ impl super::GameState {
                                             let _ = self.players[pidx]
                                                 .inventory
                                                 .take_one_from_hotbar(hot);
-                                            #[cfg(not(target_arch = "wasm32"))]
-                                            self.pending_block_changes.push(broadcast_change(&self.world, place.0, place.1, place.2, crate::block::CYANOTYPE_PRINT));
+                                            let spent = Some(crate::item::Item::Plan(plan.clone()));
+                                            self.push_use_edit_costing(cell, crate::block::CYANOTYPE_PRINT, tag, spent, None, 0);
                                             self.rebuild_chunk_at(place.0, place.1, place.2);
                                             self.audio.play_place();
                                             self.players[pidx].place_cooldown = 8;
@@ -15528,26 +15552,50 @@ impl super::GameState {
                                 face,
                                 mode,
                             ) {
+                                // C3c-3a — a joined client mints only what its
+                                // bag can hold, refused BEFORE anything happens
+                                // (single-player falls through below, as ever).
+                                let joined = self.joined();
+                                if joined && !crate::plan_mint::plan_fits(&self.players[pidx].inventory) {
+                                    if pidx == 0 {
+                                        self.toast = Some((
+                                            crate::plan_mint::MAKE_ROOM_TOAST.to_string(),
+                                            Instant::now() + Duration::from_secs(3),
+                                        ));
+                                    }
+                                    self.players[pidx].place_cooldown = 8;
+                                    continue;
+                                }
+                                // The Plan the server is told of (by marker).
+                                let minted = joined.then(|| crate::inventory::plan_to_wire(&candidate.data));
                                 let plan_stack = crate::item::ItemStack {
                                     item: crate::item::Item::Plan(candidate.data),
                                     count: 1,
                                 };
-                                let inserted = self.players[pidx]
-                                    .inventory
-                                    .add_item(plan_stack).is_none();
-                                if inserted {
-                                    let _ = self.players[pidx]
-                                        .inventory
-                                        .take_one_from_hotbar(hot_art);
+                                // C3c-3a — a paper a request in flight claims
+                                // (joined) can't pay twice: nothing happens.
+                                if !self.hand_may_spend(pidx) {
+                                    continue;
+                                }
+                                if self.players[pidx].inventory.add_item(plan_stack).is_none() {
+                                    let paper = self.players[pidx].inventory.take_one_from_hotbar(hot_art);
+                                    // C3c-3a — the server mirrors the mint on its
+                                    // copy of our window: the Plan's marker
+                                    // placeholder lands, then the paper goes.
+                                    if let Some(plan) = minted {
+                                        let face = crate::mesh::Face::from_normal(face).unwrap_or(crate::mesh::Face::North);
+                                        let cell = (pos[0], pos[1], pos[2]);
+                                        let source = crate::plan_mint::MintSource::CaptureArt;
+                                        self.send_plan_minted(source, cell, face, hot_art, paper.as_ref(), plan);
+                                    }
                                     self.audio.play_place();
                                     self.players[pidx].place_cooldown = 8;
                                     continue;
                                 }
                             }
-                            // capture_art refused or inventory full → fall
-                            // through to the generic place handler so the
-                            // player can still place the paper flat next
-                            // to the wall as a regular block.
+                            // capture_art refused, or (single-player) the bag
+                            // is full → fall through to the blank-paper arm
+                            // below, a no-op on a wall face.
                         }
 
                         // Spec 38 R2 — lay blank cream draughting paper. Holding
@@ -19809,74 +19857,7 @@ impl super::GameState {
                                 Instant::now() + Duration::from_secs(3),
                             ));
                         }
-                        crate::plan_ui::CaptureDialogOutcome::Confirmed => {
-                            // Look up parent plan if Save-As ticked.
-                            let parent_plan: Option<crate::plan::PlanData> = self.players[pidx]
-                                .pending_capture
-                                .as_ref()
-                                .and_then(|p| {
-                                    if p.mark_as_derivative {
-                                        p.parent_match.and_then(|(slot_idx, _)| {
-                                            self.players[pidx].inventory.slot(slot_idx).and_then(|s| {
-                                                if let crate::item::Item::Plan(pd) = &s.item {
-                                                    Some(pd.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                });
-                            // Take the pending so commit can consume it.
-                            let pending = self.players[pidx].pending_capture.take().unwrap();
-                            let last_lic = pending.candidate.data.license;
-                            let result = crate::plan::commit_capture(
-                                &mut self.world,
-                                &mut self.players[pidx].inventory,
-                                &pending,
-                                parent_plan.as_ref(),
-                            );
-                            // Sticky licence pref for next capture.
-                            self.players[pidx].last_chosen_license = Some(last_lic);
-                            // Attachment-only change — re-mesh locally to drop
-                            // the consumed decal. NOT broadcast as a BlockChange:
-                            // the floor block is unchanged, and attachments don't
-                            // sync via BlockChange (same posture as wallpaper).
-                            for &(tx, ty, tz) in &result.tile_positions {
-                                self.rebuild_chunk_at(tx, ty, tz);
-                            }
-                            if result.plan_inserted {
-                                self.toast = Some((
-                                    format!("Captured «{}» — saved", result.committed_plan.name),
-                                    Instant::now() + Duration::from_secs(3),
-                                ));
-                                // UX polish sweep Task 1 — capture-commit burst
-                                // at the player so the moment reads.
-                                self.particles.poof_green(
-                                    self.players[pidx].player.pos,
-                                    8,
-                                    self.tick_counter ^ (pidx as u64).wrapping_mul(0x2545_F491_4F6C_DD1D),
-                                );
-                                // BUGFIX (schematics save): a captured blueprint
-                                // is a deliberate, hard-won artifact — persist it
-                                // NOW rather than waiting up to 5 min for the next
-                                // autosave. On the web build there's no save-on-
-                                // tab-close, so without this a capture made just
-                                // before closing the tab was lost. Forcing the
-                                // counter past the threshold makes the next tick
-                                // autosave (same idiom as the workshop-clear path).
-                                self.autosave_counter = 6000;
-                            } else {
-                                self.toast = Some((
-                                    "Inventory full — plan dropped (paper still spent)".to_string(),
-                                    Instant::now() + Duration::from_secs(5),
-                                ));
-                            }
-                            // Dialog done — re-lock the cursor for gameplay.
-                            if pidx == 0 { self.capture_cursor(); }
-                        }
+                        crate::plan_ui::CaptureDialogOutcome::Confirmed => self.confirm_capture(pidx),
                     }
                 }
             } else if self.players[pidx].explorer_state.is_some() {
@@ -22382,6 +22363,148 @@ impl super::GameState {
         self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
             seq,
             action: crate::protocol::ItemAction::Drop { hotbar_slot: slot as u8, held_kind, held_id, held_full },
+            events_applied: 0,
+        }));
+    }
+
+    /// Spec 24 Phase 5 — player `pidx` confirmed the Capture dialog: commit
+    /// its pending capture (`plan::commit_capture`: the Plan to the bag, the
+    /// paper tiles consumed), as the dialog's Confirm button does.
+    ///
+    /// C3c-3a — a joined client mints only what its bag can hold: a Plan
+    /// that wouldn't fit is refused BEFORE anything happens ("Make room for
+    /// the Plan first"; the tiles stay, nothing is minted on either side),
+    /// and a minted one is reported to the server
+    /// ([`Self::send_plan_minted`], `MintSource::CaptureCommit`), which lands
+    /// its marker placeholder in its copy of our window. Single-player keeps
+    /// its full-bag rule (the Plan is lost, the paper still spent).
+    pub(crate) fn confirm_capture(&mut self, pidx: usize) {
+        if self.players[pidx].pending_capture.is_none() {
+            return;
+        }
+        if self.joined() && !crate::plan_mint::plan_fits(&self.players[pidx].inventory) {
+            self.players[pidx].pending_capture = None;
+            if pidx == 0 { self.capture_cursor(); }
+            self.toast = Some((
+                crate::plan_mint::MAKE_ROOM_TOAST.to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+        // Look up parent plan if Save-As ticked.
+        let parent_plan: Option<crate::plan::PlanData> = self.players[pidx]
+            .pending_capture
+            .as_ref()
+            .and_then(|p| {
+                if p.mark_as_derivative {
+                    p.parent_match.and_then(|(slot_idx, _)| {
+                        self.players[pidx].inventory.slot(slot_idx).and_then(|s| {
+                            if let crate::item::Item::Plan(pd) = &s.item {
+                                Some(pd.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                } else {
+                    None
+                }
+            });
+        // Take the pending so commit can consume it.
+        let pending = self.players[pidx].pending_capture.take().unwrap();
+        let last_lic = pending.candidate.data.license;
+        let result = crate::plan::commit_capture(
+            &mut self.world,
+            &mut self.players[pidx].inventory,
+            &pending,
+            parent_plan.as_ref(),
+        );
+        // Sticky licence pref for next capture.
+        self.players[pidx].last_chosen_license = Some(last_lic);
+        // C3c-3a — joined: the server mirrors the mint on
+        // its copy of our window (the Plan's marker
+        // placeholder; the paper was spent when laid).
+        // The stamped tile is the capture's first
+        // (`plan::flood_fill_tiles` starts there).
+        if self.joined() && result.plan_inserted {
+            let cell = result.tile_positions.first().copied().unwrap_or_default();
+            let hot = self.players[pidx].hotbar_slot;
+            let plan = crate::inventory::plan_to_wire(&result.committed_plan);
+            let source = crate::plan_mint::MintSource::CaptureCommit;
+            self.send_plan_minted(source, cell, crate::mesh::Face::Top, hot, None, plan);
+        }
+        // Attachment-only change — re-mesh locally to drop
+        // the consumed decal. NOT broadcast as a BlockChange:
+        // the floor block is unchanged, and attachments don't
+        // sync via BlockChange (same posture as wallpaper).
+        for &(tx, ty, tz) in &result.tile_positions {
+            self.rebuild_chunk_at(tx, ty, tz);
+        }
+        if result.plan_inserted {
+            self.toast = Some((
+                format!("Captured «{}» — saved", result.committed_plan.name),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            // UX polish sweep Task 1 — capture-commit burst
+            // at the player so the moment reads.
+            self.particles.poof_green(
+                self.players[pidx].player.pos,
+                8,
+                self.tick_counter ^ (pidx as u64).wrapping_mul(0x2545_F491_4F6C_DD1D),
+            );
+            // BUGFIX (schematics save): a captured blueprint
+            // is a deliberate, hard-won artifact — persist it
+            // NOW rather than waiting up to 5 min for the next
+            // autosave. On the web build there's no save-on-
+            // tab-close, so without this a capture made just
+            // before closing the tab was lost. Forcing the
+            // counter past the threshold makes the next tick
+            // autosave (same idiom as the workshop-clear path).
+            self.autosave_counter = 6000;
+        } else {
+            self.toast = Some((
+                "Inventory full — plan dropped (paper still spent)".to_string(),
+                Instant::now() + Duration::from_secs(5),
+            ));
+        }
+        // Dialog done — re-lock the cursor for gameplay.
+        if pidx == 0 { self.capture_cursor(); }
+    }
+
+    /// C3c-3a (v83) — tell the server this joined client minted `plan` (its
+    /// `inventory::plan_to_wire`) in its own window (it already holds it)
+    /// from hotbar slot `slot`, spending
+    /// `spent` (read BEFORE the take; `None` for a commit): an
+    /// `ItemAction::PlanMinted`, never answered, routed and ordered exactly as
+    /// a Q-drop's `ItemAction::Drop` ([`Self::send_drop_request`]): its own
+    /// unanswered seq, through [`Self::send_request`], so it reaches the
+    /// server in the order it was made among the edits, ops and requests. The
+    /// server lands the Plan's marker placeholder in its copy of our window
+    /// and takes `spent`, by our steps in our order (`plan_mint`).
+    fn send_plan_minted(
+        &mut self,
+        source: crate::plan_mint::MintSource,
+        cell: (i32, i32, i32),
+        face: crate::mesh::Face,
+        slot: usize,
+        spent: Option<&crate::item::ItemStack>,
+        plan: crate::protocol::WireItem,
+    ) {
+        let spent = spent.map(crate::inventory::stack_to_wire);
+        let seq = self.joiner_actions.unanswered();
+        self.send_request(crate::remote_client::Request::Item(crate::protocol::ItemActionPacket {
+            seq,
+            action: crate::protocol::ItemAction::PlanMinted {
+                source: source.to_wire(),
+                x: cell.0,
+                y: cell.1,
+                z: cell.2,
+                face: face.index() as u8,
+                hotbar_slot: slot.min(usize::from(u8::MAX)) as u8,
+                spent,
+                plan,
+            },
+            // Stamped by `RemoteClient::send_item_action`.
             events_applied: 0,
         }));
     }

@@ -973,10 +973,12 @@ fn each_joined_block_use_arm_asks_the_server_and_goes_no_further() {
 
 /// M1 — source lint: when joined, every hand spend a block-use claim could
 /// race (a placement, a sown seed or reed, a crop accelerator; C3c-1-fix M-1:
-/// a bucket filled or emptied, bone meal on grass, salt) first asks
-/// `hand_may_spend` (`JoinerActions::can_spend`, as the Q-drop does), so one
-/// block can't be framed AND placed on a slow link. The real arms are driven
-/// by `game_harness_a_joiners_placement_waits_for_the_claim_of_a_frame_use_in_flight`.
+/// a bucket filled or emptied, bone meal on grass, salt; C3c-3a: an art
+/// capture's Blueprint Paper) first asks `hand_may_spend`
+/// (`JoinerActions::can_spend`, as the Q-drop does), so one block can't be
+/// framed AND placed on a slow link. The real arms are driven by
+/// `game_harness_a_joiners_placement_waits_for_the_claim_of_a_frame_use_in_flight`
+/// and `game_harness_a_joiners_art_capture_waits_for_the_claim_on_its_paper`.
 #[test]
 fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
@@ -993,6 +995,8 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
         ".consume_one_material(hotbar, filled)",
         ".consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)",
         ".consume_one_material(hotbar, crate::item::MaterialId::Salt)",
+        // C3c-3a — the art capture's paper.
+        ".take_one_from_hotbar(hot_art)",
     ] {
         let hits: Vec<usize> = lines
             .iter()

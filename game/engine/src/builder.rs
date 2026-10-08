@@ -786,6 +786,7 @@ mod tests {
             authored_in: "survival".to_string(),
             develop_state: crate::plan::DevelopState::Developed,
             kind: crate::plan::PlanKind::Building,
+            marker: None,
         }
     }
 

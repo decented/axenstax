@@ -903,8 +903,9 @@ pub fn digest(view: &WindowMut, station: Station) -> u32 {
 /// agrees. A slot is a presence byte, then kind, id (u16), count and
 /// durability (u16): Block = 1 (block id), Tool = 2 (type << 8 | tier),
 /// Material = 3 (material id), Armour = 4 (slot << 8 | tier), Plan = 5 (no
-/// id: a Plan has no wire form yet, so the server sees that slot empty and
-/// the digest says so).
+/// id, content-free: the server's copy holds a joiner's Plan as a body-less
+/// marker placeholder, C3c-3a, which digests exactly like the real Plan; a
+/// Plan the copy never saw is a slot it sees empty, and the digest says so).
 ///
 /// C3a-fix-1 (B-L6) — then the session locks (a u64 mask, bit `i` = slot `i`
 /// locked, little-endian) and the station (`Player` = 0; `Table` = 1, then
@@ -1925,11 +1926,17 @@ mod tests {
         let mut b = Win::new();
         b.inv.set_slot(10, Some(stone(5)));
         assert_ne!(a.digest(), b.digest());
-        // A Plan is no empty slot (the server, which can't hold one yet,
-        // sees the slot empty: the digest tells them apart).
+        // A Plan is no empty slot (a server copy that never saw it sees the
+        // slot empty: the digest tells them apart), and C3c-3a — its
+        // marker placeholder digests exactly like it.
         let mut p = Win::new();
-        p.inv.set_slot(3, Some(ItemStack { item: Item::Plan(crate::satoshi::starter_hut_plan()), count: 1 }));
+        let hut = crate::satoshi::starter_hut_plan();
+        p.inv.set_slot(3, Some(ItemStack { item: Item::Plan(hut.clone()), count: 1 }));
         assert_ne!(p.digest(), Win::new().digest());
+        let mut q = Win::new();
+        let placeholder = crate::plan::PlanData::marker_placeholder(crate::plan::marker(&hut), true);
+        q.inv.set_slot(3, Some(ItemStack { item: Item::Plan(placeholder), count: 1 }));
+        assert_eq!(q.digest(), p.digest());
     }
 
     #[test]
