@@ -49,6 +49,15 @@ struct Client {
     input_seq: u64,
     /// The selected hotbar slot.
     hot: usize,
+    /// C3c-1-fix — every block change received, in order.
+    changes: Vec<protocol::BlockChange>,
+    /// C3c-1-fix (M-4) — every refusal notice received, in order.
+    refused: Vec<protocol::RefusedUse>,
+    /// C3c-1-fix (M-4) — the client's own records of its uses
+    /// (`use_edits::SentUses`), as the game loop keeps them, and how many
+    /// refusals found one and were undone.
+    uses: crate::use_edits::SentUses,
+    undone: u32,
 }
 
 struct Rig {
@@ -103,6 +112,10 @@ impl Rig {
             events: 0,
             input_seq: 0,
             hot: 0,
+            changes: Vec::new(),
+            refused: Vec::new(),
+            uses: Default::default(),
+            undone: 0,
         };
         let mut rig = Rig { hs, host, c, used_on: 0 };
         rig.c.inv.auto_refill = rig.hs.server.players[slot].inventory.auto_refill;
@@ -159,17 +172,36 @@ impl Rig {
     }
 
     /// One server tick; the client applies what changes its window (grants)
-    /// and reports the events it applied on an empty input.
+    /// and reports the events it applied on an empty input. C3c-1-fix — a
+    /// StateUpdate's block changes and refusals are kept, and each refusal
+    /// is undone from the client's own record before the update's
+    /// acknowledgement lets records go (`GameState::network_receive`).
     fn tick(&mut self) {
         match self.host.as_mut() {
             Some(h) => h.lend_tick(&mut self.hs),
             None => self.hs.tick(),
         }
         while let Some(pkt) = self.c.transport.try_recv_from_server() {
-            if let Some((protocol::PacketType::InventoryGrant, payload)) = protocol::deserialize_header(&pkt) {
-                let grant: protocol::InventoryGrantPacket = protocol::safe_deserialize(payload).unwrap();
-                let _ = crate::remote_entities::apply_inventory_grant(&mut self.c.inv, &grant, &self.hs.server.registry);
-                self.c.events = self.c.events.max(grant.window_event);
+            match protocol::deserialize_header(&pkt) {
+                Some((protocol::PacketType::InventoryGrant, payload)) => {
+                    let grant: protocol::InventoryGrantPacket = protocol::safe_deserialize(payload).unwrap();
+                    let _ = crate::remote_entities::apply_inventory_grant(&mut self.c.inv, &grant, &self.hs.server.registry);
+                    self.c.events = self.c.events.max(grant.window_event);
+                }
+                Some((protocol::PacketType::StateUpdate, payload)) => {
+                    let state: protocol::StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
+                    self.c.changes.extend(state.block_changes);
+                    for r in &state.refused_uses {
+                        if let Some(record) = self.c.uses.take([r.x, r.y, r.z], r.kind) {
+                            let c = &mut self.c;
+                            crate::use_edits::undo(&mut c.inv, &mut c.ui, &record);
+                            c.undone += 1;
+                        }
+                    }
+                    self.c.refused.extend(state.refused_uses);
+                    self.c.uses.acknowledged(state.last_acked_input);
+                }
+                _ => {}
             }
         }
         self.send_input(Vec::new(), Vec::new(), Vec::new());
@@ -233,9 +265,25 @@ impl Rig {
     ) -> (UseTag, protocol::BlockChange, protocol::EditHand, Option<ItemStack>) {
         let hot = self.c.hot;
         let held = self.c.inv.hotbar_slot(hot).map(|s| s.item.clone());
-        let tag = crate::use_edits::tag(kind, cell, hot, held.as_ref());
+        let mut tag = crate::use_edits::tag(kind, cell, hot, held.as_ref());
         let old = self.block(cell);
         let leftover = client_steps(&mut self.c.inv, kind, hot, old);
+        // C3c-1-fix (M-2) — the arm says what didn't fit (`push_use_edit`),
+        // and (M-4) keeps its own record of the use.
+        tag.unfit = leftover.as_ref().map_or(0, |l| l.count);
+        let landed = product_of(kind, old).and_then(|p| {
+            let n = p.count - tag.unfit;
+            (n > 0).then_some(ItemStack { item: p.item, count: n })
+        });
+        let cost = kind.consumes().then(|| held.clone()).flatten();
+        self.c.uses.record(crate::use_edits::UseRecord {
+            cell,
+            kind: tag.kind,
+            slot: hot,
+            cost,
+            landed,
+            made_at: self.c.input_seq + 1,
+        });
         let (slot, (k, id)) = self.hand_now();
         let edit = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
         (tag, edit, (slot as u8, k, id), leftover)
@@ -296,9 +344,9 @@ fn client_steps(inv: &mut Inventory, kind: UseKind, hot: usize, old: BlockId) ->
         }
         UseKind::Erase => {
             assert!(inv.use_hotbar_tool(hot).is_some(), "the eraser wears");
-            // The arm's own `let _ =`: a full bag loses the sheet.
-            let _ = inv.add_item(ItemStack::new_material(MaterialId::PapyrusSheet, 1));
-            None
+            // A full bag loses the sheet (single-player); joined, the tag
+            // says it didn't fit (C3c-1-fix).
+            inv.add_item(ItemStack::new_material(MaterialId::PapyrusSheet, 1))
         }
         UseKind::TapRubber => inv.add_item(ItemStack::new_material(MaterialId::Rubber, 1)),
         UseKind::Till => {
@@ -307,6 +355,18 @@ fn client_steps(inv: &mut Inventory, kind: UseKind, hot: usize, old: BlockId) ->
         }
         UseKind::DoorUpper => None,
     }
+}
+
+/// What a use of `kind` on a cell holding `old` gives back, by the arm.
+fn product_of(kind: UseKind, old: BlockId) -> Option<ItemStack> {
+    let m = match kind {
+        UseKind::BucketFill => crate::bucket::fill_result(&Item::Material(MaterialId::Bucket), old, true)?,
+        UseKind::BucketEmpty => MaterialId::Bucket,
+        UseKind::Erase => MaterialId::PapyrusSheet,
+        UseKind::TapRubber => MaterialId::Rubber,
+        _ => return None,
+    };
+    Some(ItemStack::new_material(m, 1))
 }
 
 fn mat(m: MaterialId) -> Item {
@@ -422,11 +482,13 @@ fn a_joiners_rubber_tap_is_mirrored_and_the_server_stamps_its_own_cooldown() {
         let stamped = rig.world().tapped_rubber_logs.get(&(ABOVE[0], ABOVE[1], ABOVE[2])).copied();
         assert_eq!(stamped, Some(rig.used_on), "the server's own tick (lent: {lent})");
         // A second tap while the server holds it on cooldown: a mismatch,
-        // applied all the same, the stamp kept.
+        // applied all the same, the stamp kept. C3c-1-fix (L-1) — honest
+        // drift: the copy tracks the client (its rubber mirrored too).
         rig.set(ABOVE, block::RUBBER_LOG);
         rig.use_at(UseKind::TapRubber, ABOVE, block::RUBBER_LOG_TAPPED, 0);
         assert_eq!(rig.tally().use_mismatch, 1, "on the server's cooldown (lent: {lent})");
         assert_eq!(rig.world().tapped_rubber_logs.get(&(ABOVE[0], ABOVE[1], ABOVE[2])).copied(), stamped);
+        rig.assert_lockstep("drift tracks the client");
     }
 }
 
@@ -526,9 +588,10 @@ fn a_use_the_copy_cant_pay_for_makes_nothing() {
 // ─── Overflow ─────────────────────────────────────────────────────────
 
 /// A full joiner fills a bucket: the client keeps no ground item of its own
-/// (`GameState::spill_use_leftover`); the server spills its copy's overflow,
-/// one real water bucket at the joiner's feet. In lockstep, the same unit:
-/// the world's buckets are conserved.
+/// (`GameState::spill_use_leftover`); its tag says one didn't fit (C3c-1-fix:
+/// `UseTag::unfit`), and the server, whose full copy agrees, spawns exactly
+/// that, one real water bucket at the joiner's feet: the world's buckets are
+/// conserved.
 #[test]
 fn a_full_joiners_fill_spills_one_real_bucket_from_the_servers_copy() {
     let mut rig = Rig::dedicated("overflow");
@@ -718,4 +781,412 @@ fn through_the_real_send_path_uses_keep_their_tags_and_their_order() {
     client_steps(&mut wrong, UseKind::TapRubber, 5, block::RUBBER_LOG);
     client_steps(&mut wrong, UseKind::Erase, 6, block::BLUEPRINT_PAPER);
     assert_eq!(wrong.slot(3), Some(&ItemStack::new_material(MaterialId::PapyrusSheet, 1)));
+}
+
+// ─── C3c-1-fix ────────────────────────────────────────────────────────────
+
+/// Units of `item` in `inv`.
+fn units(inv: &Inventory, item: &Item) -> u32 {
+    inv.slots_iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum()
+}
+
+/// Fill every slot from `from` on with stone, on the client only.
+fn fill_client_bag(rig: &mut Rig, from: usize) {
+    for k in from..36 {
+        rig.c.inv.set_slot(k, Some(ItemStack::new_block(block::STONE, 64)));
+    }
+}
+
+/// M-2 scenario A — a joiner arrives with a full bag (five buckets among it)
+/// and its server copy is EMPTY (the copy starts empty at attach). It fills a
+/// bucket from water: its bag can't take the water bucket, so its tag says
+/// one didn't fit, and the server spawns exactly that, one real water bucket
+/// at the joiner, though its copy could neither pay nor corroborate it
+/// (believed, within the joiner's bound). The world's buckets are conserved:
+/// before C3c-1-fix the server spawned only its copy's overflow, none, and
+/// one bucket was lost for good.
+#[test]
+fn a_full_bag_joiner_whose_copy_is_empty_gets_its_unfit_bucket_as_a_real_item() {
+    let mut rig = Rig::dedicated("unfit-empty-copy");
+    rig.water_source(ABOVE);
+    rig.c.inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 5)));
+    fill_client_bag(&mut rig, 1);
+    assert!(rig.sp().inventory.slots_iter().all(|s| s.is_none()), "the copy is empty");
+    let leftover = rig.use_at(UseKind::BucketFill, ABOVE, block::AIR, 0);
+    assert_eq!(leftover, Some(ItemStack::new_material(MaterialId::WaterBucket, 1)));
+    assert_eq!(rig.block(ABOVE), block::AIR);
+    assert_eq!(rig.ground_items(), vec![ItemStack::new_material(MaterialId::WaterBucket, 1)], "one real water bucket");
+    let held = units(&rig.c.inv, &mat(MaterialId::Bucket)) + units(&rig.c.inv, &mat(MaterialId::WaterBucket));
+    assert_eq!(held + 1, 5, "the world's buckets are conserved");
+    assert_eq!(rig.tally().use_unfit_believed, 1, "believed: the copy couldn't back it");
+    assert!(rig.sp().inventory.slots_iter().all(|s| s.is_none()), "and nothing lands on the copy");
+}
+
+/// M-2 scenario B — the copy is FULLER than the client (a spend not
+/// mirrored left stacks the client emptied): the client's bag takes the
+/// product, so its tag says nothing didn't fit, and the server spawns
+/// nothing, though its own copy has no room. Before C3c-1-fix it spilled its
+/// copy's overflow: a real item the client also kept.
+#[test]
+fn a_copy_fuller_than_the_client_spawns_nothing_extra() {
+    let mut rig = Rig::dedicated("unfit-fuller-copy");
+    rig.water_source(ABOVE);
+    rig.give(0, mat(MaterialId::Bucket), 2);
+    for k in 1..36 {
+        rig.sp().inventory.set_slot(k, Some(ItemStack::new_block(block::STONE, 64)));
+    }
+    let leftover = rig.use_at(UseKind::BucketFill, ABOVE, block::AIR, 0);
+    assert_eq!(leftover, None, "the client's bag took it");
+    assert!(rig.ground_items().is_empty(), "nothing spawned");
+    assert_eq!(rig.c.inv.slot(1), Some(&ItemStack::new_material(MaterialId::WaterBucket, 1)));
+    let t = rig.tally();
+    assert_eq!((t.use_copy_overflow, t.use_unfit_believed), (1, 0), "the copy's overflow is only counted");
+}
+
+/// M-2 — a modified client claims one unfit water bucket on every fill, with
+/// no bucket in its server copy: each spawn is believed, charged to the
+/// joiner's bound (64 deep, 4 a second), and past it nothing is spawned.
+#[test]
+fn a_modified_clients_unfit_claims_stop_at_the_believed_bound() {
+    let mut rig = Rig::dedicated("unfit-bound");
+    let bucket = mat(MaterialId::Bucket);
+    let start = rig.hs.server.tick_counter;
+    let fills = 90;
+    let at = rig.sp().player.pos;
+    for _ in 0..fills {
+        // The water spreads and would push the body out of reach: hold it.
+        rig.sp().player.pos = at;
+        rig.sp().player.velocity = Vec3::ZERO;
+        rig.water_source(ABOVE);
+        let mut tag = crate::use_edits::tag(UseKind::BucketFill, ABOVE, 0, Some(&bucket));
+        tag.unfit = 1;
+        let edit = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 };
+        let (k, id) = crate::inventory::item_to_ref(&bucket).to_wire();
+        rig.send_input(vec![edit], vec![(0, k, id)], vec![tag]);
+        rig.tick();
+    }
+    let secs = (rig.hs.server.tick_counter - start).div_ceil(20) as usize;
+    let t = rig.tally();
+    let spawned = t.use_unfit_believed as usize;
+    assert!(spawned >= 64, "the bound's depth is believed: {spawned} ({t:?})");
+    assert!(spawned <= 64 + 4 * secs + 1, "no more than 64 + 4/s ({secs} s): {spawned}");
+    assert_eq!(t.use_unfit_refused as usize, fills - spawned, "past the bound, nothing spawned");
+    assert!(t.use_unfit_refused > 0);
+    // What was spawned is on the ground or (past its hold) picked up: never
+    // more than the believed units.
+    let water = mat(MaterialId::WaterBucket);
+    let ground = rig.ground_items().iter().filter(|s| s.item == water).map(|s| s.count as usize).sum::<usize>();
+    assert_eq!(ground + units(&rig.c.inv, &water) as usize, spawned);
+}
+
+/// A plot of someone else's (the host's seat 1) over `cell`'s column, in the
+/// world the server simulates.
+fn foreign_plot(rig: &mut Rig, cell: [i32; 3]) {
+    let plot = crate::plot::PlotData::from_marker(crate::plot::PlotOwner::LocalPlayer(1), cell[0], cell[1] - 3, cell[2]);
+    rig.world().plots.push(plot);
+}
+
+/// M-4 — a rubber tap in someone else's plot: refused, the log sent back,
+/// and the joiner TOLD (`refused_uses`: the cell, the tap's kind, "you can't
+/// use that here"). It undoes the tap from its own record — no rubber, its
+/// bucket kept — and the server's copy is untouched, nothing spawned. Held
+/// down, it repeats and is undone each time: no rubber from nothing.
+#[test]
+fn a_tap_in_a_foreign_plot_is_refused_told_and_undone() {
+    let mut rig = Rig::dedicated("refused-tap");
+    rig.set(ABOVE, block::RUBBER_LOG);
+    foreign_plot(&mut rig, ABOVE);
+    rig.give(0, mat(MaterialId::Bucket), 1);
+    let before = rig.sp().inventory.clone();
+    for _ in 0..5 {
+        // The client sees its log restored by the send-back before each tap.
+        let log = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::RUBBER_LOG, meta: 0 };
+        assert!(rig.c.changes.is_empty() || rig.c.changes.last() == Some(&log), "the log is sent back");
+        rig.use_at(UseKind::TapRubber, ABOVE, block::RUBBER_LOG_TAPPED, 0);
+        rig.tick();
+    }
+    assert_eq!(rig.block(ABOVE), block::RUBBER_LOG, "never tapped on the server");
+    assert_eq!(rig.c.refused.len(), 5);
+    let want = protocol::RefusedUse {
+        x: ABOVE[0],
+        y: ABOVE[1],
+        z: ABOVE[2],
+        kind: UseKind::TapRubber.to_wire(),
+        note: crate::item_actions::ItemNote::NotHere.to_wire(),
+    };
+    assert!(rig.c.refused.iter().all(|r| *r == want), "{:?}", rig.c.refused);
+    assert_eq!(rig.c.undone, 5, "each undone from the client's own record");
+    assert_eq!(units(&rig.c.inv, &mat(MaterialId::Rubber)), 0, "no rubber");
+    assert_eq!(rig.c.inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "its bucket kept");
+    rig.assert_lockstep("the copy never moved, the client is back to it");
+    assert_eq!(rig.sp().inventory.slot(0), before.slot(0));
+    assert!(rig.ground_items().is_empty());
+    let t = rig.tally();
+    assert_eq!((t.use_edit_refused, t.use_mirrored, t.use_mismatch), (5, 0, 0));
+}
+
+/// M-4 — a bucket fill of a protected lava source (a foreign plot), from a
+/// full bag (its tag says the lava bucket didn't fit): refused, told, the
+/// source sent back; nothing spawned for the unfit part, the copy untouched;
+/// the client gets its bucket back.
+#[test]
+fn a_fill_of_a_protected_lava_source_is_refused_and_undone() {
+    let mut rig = Rig::dedicated("refused-lava");
+    rig.set(ABOVE, block::LAVA);
+    rig.hs.server.lava.add_source(ABOVE[0], ABOVE[1], ABOVE[2]);
+    foreign_plot(&mut rig, ABOVE);
+    rig.give(0, mat(MaterialId::Bucket), 1);
+    for k in 1..36 {
+        rig.give(k, Item::Block(block::STONE), 64);
+    }
+    let leftover = rig.use_at(UseKind::BucketFill, ABOVE, block::AIR, 0);
+    assert_eq!(leftover, None, "the last bucket's slot took the lava bucket");
+    rig.tick();
+    assert_eq!(rig.block(ABOVE), block::LAVA, "the source stands");
+    assert!(rig.c.changes.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (ABOVE[0], ABOVE[1], ABOVE[2], block::LAVA)), "sent back");
+    assert_eq!(rig.c.refused.iter().map(|r| r.kind).collect::<Vec<_>>(), vec![UseKind::BucketFill.to_wire()]);
+    assert_eq!(rig.c.inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "the bucket back, the lava bucket gone");
+    assert_eq!(units(&rig.c.inv, &mat(MaterialId::LavaBucket)), 0);
+    rig.assert_lockstep("undone");
+    assert!(rig.ground_items().is_empty());
+    // The same from a bag with no room at all: unfit 1, nothing spawned.
+    rig.c.inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+    rig.sp().inventory.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+    let leftover = rig.use_at(UseKind::BucketFill, ABOVE, block::AIR, 0);
+    assert!(leftover.is_some());
+    rig.tick();
+    assert!(rig.ground_items().is_empty(), "a refused use's unfit is never spawned");
+    assert_eq!(rig.c.inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 2)));
+    rig.assert_lockstep("undone again");
+    assert_eq!(rig.tally().use_unfit_believed, 0);
+}
+
+/// M-4 ordering — five uses in one input, past the server's per-tick edit
+/// budget (four): the fifth, in a foreign plot, is processed (and refused) a
+/// tick after the input's acknowledgement can arrive. The client's record of
+/// it is held past that acknowledgement (`USE_RECORD_HOLD_INPUTS`), so the
+/// undo still has it.
+#[test]
+fn a_refused_use_deferred_past_the_edit_budget_is_still_undone() {
+    let mut rig = Rig::dedicated("refused-deferred");
+    let logs: Vec<[i32; 3]> = (0..5).map(|k| [ABOVE[0] - 2 + k, ABOVE[1], ABOVE[2] - 1]).collect();
+    for &cell in &logs {
+        rig.set(cell, block::RUBBER_LOG);
+    }
+    foreign_plot(&mut rig, logs[4]);
+    // The plot covers only the fifth log's column? Then the others are in
+    // it too unless it is small: check by the server's own rule.
+    let refusable: Vec<bool> = logs
+        .iter()
+        .map(|c| crate::plot::is_in_foreign_plot_for_npub(&rig.world().plots, c[0], c[2], None))
+        .collect();
+    assert!(refusable[4]);
+    rig.give(0, mat(MaterialId::Bucket), 1);
+    let (mut edits, mut hands, mut tags) = (Vec::new(), Vec::new(), Vec::new());
+    for &cell in &logs {
+        let (tag, edit, hand, _) = rig.make_use(UseKind::TapRubber, cell, block::RUBBER_LOG_TAPPED, 0);
+        edits.push(edit);
+        hands.push(hand);
+        tags.push(tag);
+    }
+    rig.send_input(edits, hands, tags);
+    for _ in 0..4 {
+        rig.tick();
+    }
+    let refused = refusable.iter().filter(|&&r| r).count();
+    assert_eq!(rig.c.refused.len(), refused);
+    assert_eq!(rig.c.undone as usize, refused, "every refusal found its record");
+    assert_eq!(units(&rig.c.inv, &mat(MaterialId::Rubber)) as usize, 5 - refused);
+    rig.assert_lockstep("the accepted taps mirrored, the refused undone");
+}
+
+/// M-3 — a door's top half with no door below it (its bottom half refused,
+/// or never sent): refused now (it costs nothing), sent back, and the joiner
+/// told. Before C3c-1-fix it was applied: a floating top half.
+#[test]
+fn a_door_top_half_over_air_is_refused() {
+    let mut rig = Rig::dedicated("door-over-air");
+    let top = [ABOVE[0], ABOVE[1] + 1, ABOVE[2]];
+    let tag = crate::use_edits::tag(UseKind::DoorUpper, top, 0, None);
+    let upper = protocol::BlockChange { x: top[0], y: top[1], z: top[2], new_block: block::OAK_DOOR, meta: crate::use_edits::door_top_meta(0) };
+    let (_, (k, id)) = rig.hand_now();
+    rig.send_input(vec![upper], vec![(0, k, id)], vec![tag]);
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.block(top), block::AIR, "no floating half");
+    assert!(rig.c.changes.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (top[0], top[1], top[2], block::AIR)), "sent back");
+    assert_eq!(rig.c.refused.iter().map(|r| (r.kind, r.note)).collect::<Vec<_>>(), vec![(UseKind::DoorUpper.to_wire(), 0)]);
+    assert_eq!(rig.tally().use_edit_refused, 1);
+}
+
+/// M-3 — a joiner breaks one half of its door: its break arm sends the other
+/// half's AIR as its own untagged edit beside the broken half's (with its
+/// `mined` tag). The server and another joiner lose both halves, the breaker
+/// gets one door (the tagged half's yield), and there is no second door
+/// anywhere. Both halves, each way round.
+#[test]
+fn a_joiner_breaking_either_half_of_a_door_takes_the_whole_door_everywhere() {
+    for broken_top in [false, true] {
+        let mut rig = Rig::dedicated(if broken_top { "door-break-top" } else { "door-break-bottom" });
+        let (other, other_slot) = join_guest(&mut rig.hs, "Neighbour");
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        rig.hs.hold_column_for_test(other_slot, (ABOVE[0].div_euclid(cs), ABOVE[2].div_euclid(cs)));
+        let top = [ABOVE[0], ABOVE[1] + 1, ABOVE[2]];
+        rig.set(ABOVE, block::OAK_DOOR);
+        rig.set(top, block::OAK_DOOR);
+        rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        rig.tick();
+        let _ = super::joiner_authority::block_changes_seen(&other);
+        let (broken, rest) = if broken_top { (top, ABOVE) } else { (ABOVE, top) };
+        let air = |c: [i32; 3]| protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: block::AIR, meta: 0 };
+        // The survival break arm: the other half first (untagged), then the
+        // broken half with its `mined` tag.
+        let (_, (k, id)) = rig.hand_now();
+        let mined = protocol::MinedBlock { x: broken[0], y: broken[1], z: broken[2], tool: protocol::WireItem::None };
+        let input = protocol::InputPacket {
+            tick: { rig.c.input_seq += 1; rig.c.input_seq },
+            x: rig.sp().player.pos.x,
+            y: rig.sp().player.pos.y,
+            z: rig.sp().player.pos.z,
+            health: 20.0,
+            held_kind: k,
+            held_id: id,
+            block_changes: vec![air(rest), air(broken)],
+            edit_hands: vec![(0, k, id), (0, k, id)],
+            mined: vec![mined],
+            events_applied: rig.c.events,
+            ..Default::default()
+        };
+        rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        for _ in 0..3 {
+            rig.tick();
+        }
+        assert_eq!((rig.block(ABOVE), rig.block(top)), (block::AIR, block::AIR), "the server lost both halves (top broken: {broken_top})");
+        let seen = super::joiner_authority::block_changes_seen(&other);
+        for c in [ABOVE, top] {
+            assert!(seen.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (c[0], c[1], c[2], block::AIR)), "the other joiner lost {c:?}");
+        }
+        let door = Item::Block(block::OAK_DOOR);
+        assert_eq!(units(&rig.c.inv, &door), 1, "one door in the breaker's bag (top broken: {broken_top})");
+        assert!(rig.ground_items().iter().all(|s| s.item != door), "no second door anywhere");
+        assert_eq!(rig.tally().breaks, 1);
+    }
+}
+
+/// L-1 — a fill of a source that flowed on the server (honest drift): the
+/// copy tracks the client — the bucket spent and the water bucket made —
+/// tallied as a drift mismatch.
+#[test]
+fn a_fill_of_a_source_the_server_saw_flow_is_mirrored_as_drift() {
+    let mut rig = Rig::dedicated("drift-fill");
+    rig.set(ABOVE, block::WATER);
+    rig.give(0, mat(MaterialId::Bucket), 2);
+    rig.use_at(UseKind::BucketFill, ABOVE, block::AIR, 0);
+    assert_eq!(rig.block(ABOVE), block::AIR);
+    rig.assert_lockstep("drift tracks the client");
+    assert_eq!(rig.c.inv.slot(1), Some(&ItemStack::new_material(MaterialId::WaterBucket, 1)));
+    let t = rig.tally();
+    assert_eq!((t.use_mirrored, t.use_mismatch), (0, 1));
+}
+
+/// L-1 — a hoe tag on an ordinary stone placement can't explain it: the
+/// edit is classified as the placement it is, so the possession check sees
+/// it (one stone charged), never as a use.
+#[test]
+fn a_tag_that_cant_explain_its_edit_falls_back_to_the_ordinary_check() {
+    let mut rig = Rig::dedicated("unexplained");
+    rig.give(0, Item::Block(block::STONE), 3);
+    rig.c.inv.set_slot(0, Some(ItemStack::new_block(block::STONE, 2)));
+    let tag = crate::use_edits::tag(UseKind::Till, ABOVE, 0, rig.c.inv.slot(0).map(|s| &s.item));
+    let place = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::STONE, meta: 0 };
+    let (_, (k, id)) = rig.hand_now();
+    rig.send_input(vec![place], vec![(0, k, id)], vec![tag]);
+    rig.tick();
+    assert_eq!(rig.block(ABOVE), block::STONE);
+    rig.assert_lockstep("the placement charged");
+    let t = rig.tally();
+    assert_eq!((t.matched, t.mismatched), (1, 0), "checked as a placement");
+    assert_eq!((t.use_mirrored, t.use_mismatch), (0, 1), "and counted as a use that didn't explain itself");
+}
+
+/// L-1 — bone meal the client sent for a crop the server had already grown
+/// past: the server's crop is NOT set back, no refusal is sent (no undo), and
+/// the bone meal is spent on both sides, tallied as drift.
+#[test]
+fn bone_meal_on_a_crop_the_server_grew_first_doesnt_set_it_back() {
+    let mut rig = Rig::dedicated("crop-ahead");
+    rig.set(FLOOR, block::TILLED_SOIL);
+    rig.set(ABOVE, block::WHEAT_STAGE_0);
+    rig.give(0, mat(MaterialId::Bonemeal), 3);
+    let (tag, edit, hand, _) = rig.make_use(UseKind::GrowCrop, ABOVE, block::WHEAT_STAGE_1, 0);
+    // The server's crop grew to stage 3 meanwhile.
+    rig.set(ABOVE, block::WHEAT_STAGE_3);
+    rig.send_input(vec![edit], vec![hand], vec![tag]);
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.block(ABOVE), block::WHEAT_STAGE_3, "not set back");
+    assert!(rig.c.refused.is_empty() && rig.c.undone == 0, "not a refusal");
+    assert!(!rig.c.changes.iter().any(|b| (b.x, b.y, b.z) == (ABOVE[0], ABOVE[1], ABOVE[2])), "no send-back");
+    rig.assert_lockstep("the bone meal spent on both sides");
+    assert_eq!(rig.tally().use_mismatch, 1);
+}
+
+/// L-2 — one rubber clock, the server's: a joiner taps, the server restores
+/// the log once its cooldown runs out on the server's clock, and queues the
+/// change, so a second joiner (and on a lending host, the host's screen)
+/// sees the log regrow.
+#[test]
+fn the_servers_rubber_clock_regrows_a_tapped_log_for_everyone() {
+    for lent in [false, true] {
+        let mut rig = if lent { Rig::lent("regrow") } else { Rig::dedicated("regrow") };
+        let (other, other_slot) = match rig.host.as_mut() {
+            Some(h) => join_guest_lent(&mut rig.hs, h, "Neighbour"),
+            None => join_guest(&mut rig.hs, "Neighbour"),
+        };
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        rig.hs.hold_column_for_test(other_slot, (ABOVE[0].div_euclid(cs), ABOVE[2].div_euclid(cs)));
+        rig.set(ABOVE, block::RUBBER_LOG);
+        rig.give(0, mat(MaterialId::Bucket), 1);
+        rig.use_at(UseKind::TapRubber, ABOVE, block::RUBBER_LOG_TAPPED, 0);
+        assert_eq!(rig.block(ABOVE), block::RUBBER_LOG_TAPPED);
+        let _ = super::joiner_authority::block_changes_seen(&other);
+        if let Some(h) = rig.host.as_mut() {
+            let _ = rig.hs.take_lent_changes();
+            h.clock.tick_counter += crate::rubber::TAP_COOLDOWN_TICKS;
+        } else {
+            rig.hs.server.tick_counter += crate::rubber::TAP_COOLDOWN_TICKS;
+        }
+        rig.tick();
+        assert_eq!(rig.block(ABOVE), block::RUBBER_LOG, "the server's clock restored it (lent: {lent})");
+        let regrown = |b: &protocol::BlockChange| (b.x, b.y, b.z, b.new_block) == (ABOVE[0], ABOVE[1], ABOVE[2], block::RUBBER_LOG);
+        assert!(super::joiner_authority::block_changes_seen(&other).iter().any(regrown), "the other joiner sees it (lent: {lent})");
+        assert!(rig.c.changes.iter().any(regrown), "and so does the tapper");
+        if lent {
+            assert!(rig.hs.take_lent_changes().0.iter().any(regrown), "the host's screen remeshes it");
+        }
+    }
+}
+
+/// L-2 — source lint, in `a_joined_client_runs_no_composter_hive_or_rack_sim`'s
+/// tradition (the client tick needs a GPU): a joined client runs no rubber
+/// regrowth of its own (`remote_client.is_none()` beside the driver).
+#[test]
+fn a_joined_client_runs_no_rubber_clock() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("rubber-clock lint: cannot read {} ({e})", path.display()));
+    let lines: Vec<&str> = raw.lines().collect();
+    let needle = "crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter)";
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("//") && l.contains(needle))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "rubber-clock lint: `{needle}` should appear once in game_loop.rs, found {hits:?}");
+    let i = hits[0];
+    assert!(
+        lines[i.saturating_sub(2)..=i].iter().any(|l| l.contains("remote_client.is_none()")),
+        "game_loop.rs:{}: a joined client runs its own rubber clock — gate it behind `self.remote_client.is_none()`",
+        i + 1
+    );
 }

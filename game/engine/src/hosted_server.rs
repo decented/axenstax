@@ -341,7 +341,16 @@ struct JoinerUse {
     kind: Option<crate::use_edits::UseKind>,
     /// What the tag says the use consumed, decoded.
     used: Option<crate::item::Item>,
-    judged: Option<crate::use_edits::Judged>,
+    /// C3c-1-fix (L-1) — `Unexplained` for an unknown kind.
+    judged: crate::use_edits::Judged,
+}
+
+impl JoinerUse {
+    /// Does the tag explain its edit as a use at all (L-1)? If not, the
+    /// edit is classified as an ordinary one.
+    fn explained(&self) -> bool {
+        self.judged.verdict != crate::use_edits::Verdict::Unexplained
+    }
 }
 
 /// FU4a — one client's edit counters for one tick
@@ -2464,6 +2473,25 @@ impl HostedServer {
             let server = &mut self.server;
             let Some(sp) = server.players.get_mut(i) else { return Err(ItemNote::NotNow) };
             let mut admit = |u: &crate::block_use::Used| -> Result<(), ItemNote> {
+                // C3c-1-fix (L-3) — a use that only wears its tool (shears on
+                // a hive) with a tool the copy doesn't hold is believed within
+                // the same bound, and refused past it.
+                if u.pay == 0
+                    && u.wear
+                    && !creative
+                    && let Some(crate::item::Item::Tool(tool)) = held.as_ref()
+                {
+                    return match crate::window_ops::believe_wear(sp, tool, now) {
+                        Ok(n) => {
+                            believed = n;
+                            Ok(())
+                        }
+                        Err(n) => {
+                            over_bound = n;
+                            Err(ItemNote::NothingToTake)
+                        }
+                    };
+                }
                 let Some(item) = held.as_ref().filter(|_| u.pay > 0 && !creative) else { return Ok(()) };
                 match crate::window_ops::believe_pay(sp, item, u32::from(u.pay), now) {
                     Ok(n) => {
@@ -4255,11 +4283,18 @@ impl HostedServer {
         slot: usize,
         budget: &mut EditTickBudget,
     ) {
+        let remote = self.server.players[i].server_simulated;
+        let use_tag = tag.as_ref().and_then(|t| t.use_tag()).filter(|_| remote);
         if let Err(why) = self.validate_block_edit(i, bc, hand) {
             log::debug!("Refused slot {i}'s edit at ({}, {}, {}): {why:?}", bc.x, bc.y, bc.z);
             // Un-ghost the refused edit on the sender: re-send what is
             // really there.
             self.send_back_authoritative_block(bc, budget);
+            // C3c-1-fix (M-4) — and a use's: tell the joiner, which undoes it
+            // (its cost back, its product taken back) from its own record.
+            if let Some(use_tag) = use_tag {
+                self.refuse_use(i, bc, use_tag.kind, why.note());
+            }
             return;
         }
         let old_block =
@@ -4267,24 +4302,54 @@ impl HostedServer {
         // A container broken out from under the host
         // spills its contents instead of stranding them
         // as an orphan block entity (audit 2026-09-27).
-        let remote = self.server.players[i].server_simulated;
         // C3c-1 — a joiner's use (its edit carried a use tag): judged by the
         // use's own rule on the world as it is BEFORE the edit (the soil
         // under a seed, a fill's source, a door's bottom half, a tap's
         // cooldown), and mirrored on its copy once the edit is in. Never
-        // classified as a placement.
-        let joiner_use = match tag.as_ref().and_then(|t| t.use_tag()) {
-            Some(use_tag) if remote => Some(self.judge_joiner_use(bc, old_block, use_tag)),
-            _ => None,
-        };
+        // classified as a placement — unless (C3c-1-fix, L-1) its kind can't
+        // explain the edit at all: then it is an ordinary edit.
+        let joiner_use = use_tag.map(|use_tag| self.judge_joiner_use(bc, old_block, use_tag));
+        if let Some(u) = &joiner_use {
+            // C3c-1-fix (M-3) — a door's top half with no door below it (its
+            // bottom half was refused, or never sent) costs nothing, so it is
+            // refused now: sent back, and the joiner told.
+            if u.kind == Some(crate::use_edits::UseKind::DoorUpper)
+                && u.explained()
+                && self.server.world.get_block(bc.x, bc.y - 1, bc.z) != crate::block::OAK_DOOR
+            {
+                self.send_back_authoritative_block(bc, budget);
+                self.refuse_use(i, bc, u.tag.kind, crate::item_actions::ItemNote::None);
+                return;
+            }
+        }
+        if let Some(u) = joiner_use.as_ref().filter(|u| u.judged.keeps_server_cell) {
+            // C3c-1-fix (L-1) — a crop accelerator (or bone meal on grass)
+            // the server's crop already stands at or past: the server's cell
+            // is left as it is (applying it would set the crop back) and the
+            // joiner gets it through the block diff it is already sent. Not a
+            // refusal (no notice, no send-back, no undo): the cost settles on
+            // the copy as it did on the client, tallied as drift.
+            log::debug!(
+                "Slot {i}'s {} at ({}, {}, {}) is behind the server's crop: its cell is kept",
+                u.kind.map_or("use", |k| k.label()),
+                bc.x,
+                bc.y,
+                bc.z,
+            );
+            if let Some(u) = joiner_use {
+                self.settle_joiner_use(i, bc, u);
+            }
+            return;
+        }
         // C1 — what a server-simulated player's edit is to
         // its inventory (`joiner_inventory`): a break it
         // mined, a plain placement, or neither. A break's
         // yield is read now, before the block leaves the
         // world (`break_drops`).
         let mined = tag.as_ref().and_then(|t| t.mined());
+        let as_use = joiner_use.as_ref().is_some_and(JoinerUse::explained);
         let joiner_edit =
-            (remote && joiner_use.is_none()).then(|| self.classify_joiner_edit(bc, old_block, mined, hand));
+            (remote && !as_use).then(|| self.classify_joiner_edit(bc, old_block, mined, hand));
         let break_yield = match joiner_edit {
             Some(crate::joiner_inventory::JoinerEdit::Break { tool }) => {
                 self.joiner_break_yield(bc, old_block, tool)
@@ -4505,7 +4570,9 @@ impl HostedServer {
             _ => false,
         };
         let before = crate::use_edits::Before { old, source };
-        let judged = kind.map(|k| crate::use_edits::judge(k, used.as_ref(), bc, before, &self.server.world));
+        let judged = kind.map_or_else(crate::use_edits::Judged::unknown_kind, |k| {
+            crate::use_edits::judge(k, used.as_ref(), bc, before, &self.server.world)
+        });
         JoinerUse { tag: tag.clone(), kind, used, judged }
     }
 
@@ -4515,24 +4582,43 @@ impl HostedServer {
     /// wear its tool there, add its product with the client's `add_item`),
     /// and tally the verdict (`PossessionTally::use_mirrored` /
     /// `use_mismatch`, a mismatch logged once per kind per connection;
-    /// log-only, the edit stands). The product the copy has no room for is
-    /// spilled as a real ground item at the joiner's feet, thrown as its
-    /// own: a joined client spills nothing of its own, so in lockstep the
-    /// two overflows are the same units. A rubber tap stamps the SERVER's
-    /// cooldown with the server's tick, so the log regrows on the server's
-    /// world (a log still on cooldown keeps its stamp).
+    /// log-only, the edit stands). A rubber tap stamps the SERVER's cooldown
+    /// with the server's tick, so the log regrows on the server's world (a
+    /// log still on cooldown keeps its stamp).
+    ///
+    /// C3c-1-fix (M-2) — the overflow is what the client said didn't fit its
+    /// bag (`UseTag::unfit`): exactly that is spawned as a real ground item at
+    /// the joiner's feet, thrown as its own (`window_events::spawn_unfit`);
+    /// the copy added the rest, and what of that didn't fit the copy is only
+    /// tallied (`use_copy_overflow`). An unfit spawn the copy can't
+    /// corroborate (it couldn't pay the use's cost — empty at attach, or a
+    /// modified client — or it had room for the product) is believed: charged
+    /// 1 a unit to the joiner's believed bound (`window_ops::BelievedBucket`)
+    /// and tallied (`use_unfit_believed`); past the bound nothing is spawned
+    /// (`use_unfit_refused`). A creative joiner is unbounded, as its believed
+    /// deposits are. BRIDGE: until InventorySync gives the copy what a joiner
+    /// arrived with, an honest full-bag joiner just after attach pays a few
+    /// units of the bound here — replace when the copy is the truth (C3d).
+    /// (L-1) A tag that can't explain its edit was classified as an ordinary
+    /// edit: tallied here only.
     fn settle_joiner_use(&mut self, i: usize, bc: &protocol::BlockChange, joiner_use: JoinerUse) {
+        use crate::use_edits::{Settled, UseMiss, Verdict};
         let JoinerUse { tag, kind, used, judged } = joiner_use;
         let tick = self.server.tick_counter;
+        let creative = self.server.play_mode.is_creative();
         let Some(sp) = self.server.players.get_mut(i) else { return };
-        let (Some(kind), Some(judged)) = (kind, judged) else {
+        let Some(kind) = kind else {
             // An unknown kind: a modified peer's (the version gate keeps a
-            // newer one out). Counted, applied, not mirrored.
+            // newer one out). Counted, classified as an ordinary edit.
             sp.possession.use_mismatch = sp.possession.use_mismatch.saturating_add(1);
-            log::debug!("{} sent a use of unknown kind {} — applied, not mirrored", sp.display_name, tag.kind);
+            log::debug!("{} sent a use of unknown kind {} — an ordinary edit, not mirrored", sp.display_name, tag.kind);
             return;
         };
-        let settled = crate::use_edits::settle(&mut sp.inventory, kind, &tag, used.as_ref(), judged);
+        let settled = if judged.verdict == Verdict::Unexplained {
+            Settled { miss: Some(UseMiss::Unexplained), copy_overflow: 0, unfit: None }
+        } else {
+            crate::use_edits::settle(&mut sp.inventory, kind, &tag, used.as_ref(), &judged)
+        };
         if sp.possession.note_use(kind, settled.miss) {
             let miss = settled.miss.map_or("", |m| m.label());
             log::info!(
@@ -4546,15 +4632,54 @@ impl HostedServer {
                 tag.slot,
             );
         }
-        if let Some(stack) = settled.overflow
+        if settled.copy_overflow > 0 {
+            sp.possession.use_copy_overflow = sp.possession.use_copy_overflow.saturating_add(u32::from(settled.copy_overflow));
+            log::debug!(
+                "{}'s {}: {} of its product didn't fit the server's copy (the client holds it) — counted, not spawned",
+                sp.display_name,
+                kind.label(),
+                settled.copy_overflow,
+            );
+        }
+        if let Some(unfit) = settled.unfit
             && sp.is_in_world()
         {
-            let feet = sp.player.pos;
-            crate::window_events::spawn_unfit(&mut self.server.ecs, feet, stack, i);
+            let n = u32::from(unfit.stack.count);
+            let spawn = if unfit.corroborated {
+                true
+            } else if creative || sp.container_sent.believed.try_take(n, tick) {
+                sp.possession.use_unfit_believed = sp.possession.use_unfit_believed.saturating_add(n);
+                true
+            } else {
+                sp.possession.use_unfit_refused = sp.possession.use_unfit_refused.saturating_add(1);
+                log::debug!(
+                    "{}'s {}: an unfit product its server copy can't back, past the believed bound — not spawned",
+                    sp.display_name,
+                    kind.label(),
+                );
+                false
+            };
+            if spawn {
+                let feet = sp.player.pos;
+                crate::window_events::spawn_unfit(&mut self.server.ecs, feet, unfit.stack, i);
+            }
         }
         if kind == crate::use_edits::UseKind::TapRubber && bc.new_block == crate::block::RUBBER_LOG_TAPPED {
             self.server.world.tapped_rubber_logs.entry((bc.x, bc.y, bc.z)).or_insert(tick);
         }
+    }
+
+    /// C3c-1-fix (M-4) — joiner `i`'s use-tagged edit `bc` (a use of wire
+    /// kind `kind`) was refused for `note`'s reason: queue the notice
+    /// (`StateUpdatePacket::refused_uses`, sent in line after the tick's
+    /// block changes, so after the edit's send-back) and count it
+    /// (`use_edit_refused`). The server's copy is untouched and nothing is
+    /// spawned for the use's `unfit`: it never happened here. The joiner
+    /// undoes it from its own record (`use_edits::SentUses`).
+    fn refuse_use(&mut self, i: usize, bc: &protocol::BlockChange, kind: u8, note: crate::item_actions::ItemNote) {
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        sp.possession.use_edit_refused = sp.possession.use_edit_refused.saturating_add(1);
+        sp.refused_uses.push(protocol::RefusedUse { x: bc.x, y: bc.y, z: bc.z, kind, note: note.to_wire() });
     }
 
     /// C1 — what slot `i`'s accepted edit `old → bc.new_block` is to its
@@ -5078,6 +5203,7 @@ impl HostedServer {
             // Per client — stamped in the loop below (C2a).
             own_hunger: 0,
             block_views: Vec::new(),
+            refused_uses: Vec::new(),
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
 
@@ -5171,6 +5297,9 @@ impl HostedServer {
                 let push = &self.chunk_pushes[i];
                 let changed = sp.block_views.take_changed(&views, |c| if filters { push.push_number(c) } else { Some(0) });
                 outbox.push_views(&changed);
+                // C3c-1-fix (M-4) — its refused uses, after this tick's block
+                // changes (each one's send-back among them), once each.
+                outbox.push_refused(&std::mem::take(&mut sp.refused_uses));
             }
             // The last input of THIS client's that its server state includes
             // — its prediction drops those and replays the rest (§5.3).
@@ -5636,6 +5765,25 @@ pub(crate) enum EditRefusal {
     EconomyOwner,
     /// Inside a plot the joiner doesn't own.
     ForeignPlot,
+}
+
+impl EditRefusal {
+    /// C3c-1-fix (M-4) — the note a refused use's notice carries
+    /// (`RefusedUse::note`), an existing `ItemNote` code: out of reach for
+    /// reach; "you can't use that here" for the play mode, a plot, an
+    /// economy block or bedrock (as a refused block use says); silent for an
+    /// edit no honest client sends (malformed, outside the world, an
+    /// unloaded column).
+    pub(crate) fn note(self) -> crate::item_actions::ItemNote {
+        use crate::item_actions::ItemNote;
+        match self {
+            EditRefusal::Reach => ItemNote::OutOfReach,
+            EditRefusal::PlayMode | EditRefusal::ForeignPlot | EditRefusal::EconomyOwner | EditRefusal::Protected => {
+                ItemNote::NotHere
+            }
+            EditRefusal::Malformed | EditRefusal::OutOfWorld | EditRefusal::Unloaded => ItemNote::None,
+        }
+    }
 }
 
 /// MP-D2b — the item a joiner's request claims to hold: the full-fidelity

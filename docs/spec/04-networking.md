@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `81`** (C3c-2) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `82`** (C3c-1-fix) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -40,6 +40,7 @@
 - **v79** (2026-10-08, C3b-2): **Composters, drying racks, campfires, item frames and bee hives for joiners.** `ItemAction` appends `UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 5; `Eat`'s held claim): a right-click on one of the five blocks, applied by the server to its REAL block entity by the shared rule (`block_use`) and answered with an `ItemActionOutcome`, which appends `wear_held: bool` after `window_event` (shears on a hive wear instead of being taken; the wear is the outcome's window event). `ItemNote` appends codes 9–18 (`OutOfReach`, `NotHere`, `NotThatBlock`, `NothingToTake`, `RackFull`, `NotReady`, `HiveEmpty`, `HiveNeedsTool`, `FireFull`, `InventoryFull` — the last single-player only). `StateUpdatePacket` appends `block_views: Vec<BlockEntityView { cell: [i32; 3], kind: BlockViewKind, view: BlockView }>` after `own_hunger` (`BlockViewKind` and `BlockView` append only: ItemFrame 0, Campfire 1, DryingRack 2, Composter 3, Hive 4): what joiners are shown of those blocks, reliable and in line with the chunk pushes, sent whenever a view changes (whoever changed it) and after each push of its chunk. No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `block_entity_views_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Block uses".
 - **v80** (2026-10-08, C3c-1): **A joiner's block-edit uses are mirrored.** `InputPacket` appends, after v76's `edit_hands`, `use_tags: Vec<UseTag>` (`UseTag { x, y, z: i32, kind: u8, slot: u8, used: WireSlot, tool: WireItem }`; `kind` is `use_edits::UseKind`, append-only: BucketFill 0, BucketEmpty 1, Sow 2, PlantPapyrus 3, GrowGrass 4, GrowCrop 5, Salt 6, Erase 7, TapRubber 8, Till 9, DoorUpper 10): the uses among the input's edits, each with the hand BEFORE the use (its hotbar slot, one of what it consumed, the tool it wore). A use tag pairs with the LAST edit of its cell in its input, and counts with `mined` against one per-input limit (`MAX_MINED_PER_INPUT` = 16 in all; the server reads `mined` first, then use tags up to it). The server runs the use's rule on its copy of the joiner's inventory (log-only; `PossessionTally::use_mirrored` / `use_mismatch`). A door's top half now travels as its own edit (`DoorUpper`). Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `input_packet_roundtrip`) and `use_edits::tests::use_kind_wire_bytes_are_pinned`. See §4.2e "Block-edit uses".
 - **v81** (2026-10-08, C3c-2): **A joiner's bow, slingshot, cart placement, fishing and campfire lighting run on the server.** `ItemAction` appends `Shoot { weapon: ShotWeapon, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem, yaw: f32, pitch: f32, charge: u16 }` (= 6; `ShotWeapon` append-only: Bow 0, Slingshot 1), `PlaceCart { cell: [i32; 3], hotbar_slot, held_kind, held_id, held_full }` (= 7), `Cast { hotbar_slot, held_kind, held_id, held_full }` (= 8) and `Reel { hotbar_slot, held_kind, held_id, held_full }` (= 9). `ItemActionOutcome` appends `bite_after: u16` after `wear_held` (an accepted cast's wait for the server's bite; 0 otherwise). Lighting an unlit campfire (a stick's friction, flint and steel, the Magnesium Firestarter) is a campfire `UseBlock`, run by the lighting rule (`block_use::light_block`). `ItemNote` appends codes 19–26 (`NoAmmo`, `CartHere`, `NoWater`, `NothingBit`, `NoLine`, `NeedsFuel`, `FrictionNeedsFuel`, `NotDryEnough`). No new `PacketType`. Pinned by `protocol::tests::item_action_packets_round_trip` and `item_actions::tests::notes_round_trip_and_unknown_codes_read_as_nothing`. See §4.2f "Use requests".
+- **v82** (2026-10-08, C3c-1-fix): **A use's overflow is the client's, and a refused use is undone.** `UseTag` appends `unfit: u8` after `tool`: how many of the use's product the client's bag could NOT take (its `add_item` leftover, 0 or 1; 0 for a use that makes nothing). The server spawns exactly that as a real ground item at the joiner (one its copy can't corroborate is believed, charged to the joiner's believed bound) and its copy adds the rest; what of that doesn't fit the copy is only counted. `StateUpdatePacket` appends `refused_uses: Vec<RefusedUse>` after `block_views` (`RefusedUse { x, y, z: i32, kind: u8, note: u8 }`; `kind` the `UseKind`, `note` an existing `ItemNote` code: `OutOfReach` for reach, `NotHere` for the play mode, a plot, an economy block or bedrock, `None` otherwise; no new code): each use-tagged edit the server refused, once, per client, in line after the tick's block changes (its send-back among them), never in the repeated template. The joined client undoes the use from its OWN record of it. No new `PacketType`. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `state_update_trailing_fields_are_in_append_order`). See §4.2e "Block-edit uses".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -507,11 +508,11 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x03 | `ClientReady` | C->S | Reliable | Client capabilities, protocol version. |
 | 0x04 | `WorldInfo` | S->C | Reliable | World configuration, seed, tick rate. |
 | 0x05 | `Disconnect` | Both | Best-effort | Reason code. |
-| 0x10 | `Input` | C->S | Unreliable | Player input for a single tick. As built: `PacketType::ClientInput` (`InputPacket`); its trailing appends in the version list above — v72 `mined`, v76 `events_applied` + `edit_hands`, v80 `use_tags` (§4.2e "Block-edit uses"). |
+| 0x10 | `Input` | C->S | Unreliable | Player input for a single tick. As built: `PacketType::ClientInput` (`InputPacket`); its trailing appends in the version list above — v72 `mined`, v76 `events_applied` + `edit_hands`, v80 `use_tags`, v82 each `UseTag`'s `unfit` (§4.2e "Block-edit uses"). |
 | 0x11 | `InputAck` | S->C | Unreliable | Server confirms processing of input up to sequence N. |
 | 0x12 | `EntityState` | S->C | Unreliable | Batch of entity state updates. |
 | 0x13 | `PlayerState` | S->C | Reliable | Full authoritative state for the player (position, health, inventory snapshot). |
-| 0x14 | `BlockChange` | S->C | Reliable | Confirmed block mutations in the world. |
+| 0x14 | `BlockChange` | S->C | Reliable | Confirmed block mutations in the world. As built: `StateUpdatePacket.block_changes` (the server's world deltas, per client through `state_outbox`); v82 appends `refused_uses` beside them — the joiner's own use-tagged edits the server refused, each after its send-back (§4.2e "Block-edit uses"). |
 | 0x15 | `BlockAction` | C->S | Reliable | Client requests a block placement/break. |
 | 0x16 | `ChunkData` | S->C | Reliable | Compressed chunk payload. |
 | 0x17 | `ChunkRequest` | C->S | Reliable | Client requests specific chunks (rare; server mostly pushes proactively). |
@@ -1656,7 +1657,7 @@ client made before the event finds the server's copy as the client's was.
 The rows the client originates (a placement, a window op, a Q-drop) apply in
 the client's order already.
 | A Q-drop (C2b, `ItemAction::Drop`) | §4.2f | takes the item, owed; the item becomes a real ground item |
-| A block-edit use (C3c-1, v80: a bucket filled or emptied, a seed or reed planted, bone meal, fertiliser, salt, an Eraser, a rubber tap, a hoe) | the use edit and its `UseTag`, "Block-edit uses" below | takes what it used (owed, from the tag's slot first), wears its tool, adds its product (`add_item`); the overflow is a real ground item |
+| A block-edit use (C3c-1, v80: a bucket filled or emptied, a seed or reed planted, bone meal, fertiliser, salt, an Eraser, a rubber tap, a hoe) | the use edit and its `UseTag`, "Block-edit uses" below | takes what it used (owed, from the tag's slot first), wears its tool, adds its product less what the client's bag couldn't take (`add_item`); that part (`UseTag.unfit`, C3c-1-fix v82) is a real ground item; a refused use is undone on the client from its own record |
 
 **Grant overflow (C2b, reversed by the C2b-fix, 2026-10-07; no wire change).**
 `HostedServer::grant_to_joiner` (a break's yield, an interaction's products)
@@ -1867,7 +1868,10 @@ blueprint paper (`Erase`), an empty bucket on a live rubber log
   later, after the use spent its item, so the last bone meal reads as an
   empty hand. The tag rides beside its edit from the moment it is made
   (`window_ops::PendingEdits::push_use`, `RemoteClient::note_edit_uses`,
-  the carry-over), never apart.
+  the carry-over), never apart. C3c-1-fix (v82) — the arm sets `unfit` once
+  its `add_item` has said how many of the product didn't fit (0 or 1;
+  `GameState::push_use_edit`), and a joiner keeps its own record of the use
+  (below, *Refused*).
 - *Pairing.* The server pairs a use tag with the LAST edit of its cell in its
   input (`edit_queue::pair_use_tags`), before it pairs the `mined` tags among
   the rest (a mined tag never takes a use's edit, even a fill that empties the
@@ -1910,41 +1914,107 @@ blueprint paper (`Erase`), an empty bucket on a live rubber log
   kept). The rubber tap stamps the SERVER's `tapped_rubber_logs` with the
   server's own tick (a log still on cooldown keeps its stamp), so the log
   regrows on the server's world (a lending host's clock is the server's).
-- *Mismatches, log-only.* An outcome the rule can't produce, an item the copy
-  doesn't hold, a tool not in the slot: each is a
-  `PossessionTally::use_mismatch` (one log line per kind per connection;
-  counted in the leave summary beside `use_mirrored`), and the edit stands.
-  The mirror never makes an item from nothing: an illegal outcome still takes
-  what the client says it spent and wears its tool, but adds no product, and
-  a use whose cost (or, for a tap, its bucket; for an Eraser, its tool) the
-  copy can't pay adds no product either. A kind byte this build doesn't know
-  is counted and not mirrored.
-- *Overflow.* A joined client spills nothing of a use's product its bag
-  can't hold (`GameState::spill_use_leftover`; single-player and a web
-  joiner, whose edits never reach a server, still drop it locally); the
-  server spills its copy's overflow as a real ground item at the joiner's
-  feet, thrown as its own (`window_events::spawn_unfit`), which reaches the
-  joiner by the entity broadcast. In lockstep the two overflows are the same
-  units, so the world's items are conserved. (If the copy has drifted fuller
-  than the client, the server spills an item the client also kept; if
-  emptier, the client's overflow is lost — log-only drift, closed at C3d.)
-  The Eraser's sheet: single-player still loses it on a full bag; a joiner's
-  is spilled by the server.
-- *Refused and creative.* A use edit the server refuses (reach, plot, play
-  mode) is sent back unsettled: the block reverts on the client, which keeps
-  what it spent and made (the same gap as a refused break's tool wear,
-  below). A creative joiner's uses are mirrored too: its arms spend a seed,
-  a bucket or a hoe's durability in creative as in survival.
+- *One rubber clock (C3c-1-fix, L-2).* A joined client runs no rubber
+  regrowth of its own (`tick_rubber_cooldowns` behind
+  `remote_client.is_none()`); the server's driver (`GameServer::tick`,
+  `rubber::restore_expired_taps`) queues each restore as a block change, so
+  the tapper, every other joiner and a lending host's screen
+  (`lent_sim_changes`) see the log regrow at the same moment, on the clock
+  the server judges taps by.
+- *Mismatches, log-only: the copy TRACKS the client (C3c-1-fix, L-1).* What
+  isn't legal on the server's world is one of three verdicts
+  (`use_edits::Verdict`). **Drift**: an outcome the rule makes for what was
+  used, but not from the server's world as it stands — a source that
+  flowed, a crop that grew, a cell another player changed, a log on the
+  server's cooldown: the cost AND the product are mirrored (the product by
+  the server's cell: a drifted fill whose cell holds no fluid any more has
+  none, since the tag doesn't say which fluid). **Impossible**: a combination
+  the rule never makes (water poured from an empty bucket, salt "sown"):
+  the cost is mirrored, no product. **Unexplained**: the kind can't explain
+  the edit at all (`use_edits::explains`: a `DoorUpper` or `Till` tag on an
+  ordinary placement) — not a use: the edit falls back to its ordinary
+  classification, so `check_placement` sees it. A kind byte this build
+  doesn't know is unexplained too. Each is a `PossessionTally::use_mismatch`
+  (one log line per kind per connection; counted in the leave summary beside
+  `use_mirrored`), and the edit stands, with one exception: bone meal or
+  fertiliser on a crop the server already holds at or past the stage sent
+  (or bone meal on grass where tall grass already stands) leaves the
+  server's cell as it is (applying it would set the crop BACK); the joiner
+  gets the server's crop through the block diff it is already sent. That is
+  not a refusal (no notice, no send-back, no undo): the cost stays spent on
+  both sides. The mirror never makes an item from nothing: a use whose cost
+  (or, for a tap, its bucket; for an Eraser, its tool) the copy can't pay
+  adds no product.
+- *Overflow: what the CLIENT says didn't fit (C3c-1-fix, M-2, v82).* A
+  joined client spills nothing of a use's product its bag can't hold
+  (`GameState::spill_use_leftover`; single-player and a web joiner, whose
+  edits never reach a server, still drop it locally); its tag says how many
+  (`UseTag.unfit`), and the server spawns exactly that as a real ground item
+  at the joiner's feet, thrown as its own (`window_events::spawn_unfit`),
+  whatever its copy holds; the copy adds `product − unfit` by `add_item`, and
+  what of that doesn't fit the copy is only counted (`use_copy_overflow`),
+  never spawned (the client holds it). So the world's items are conserved
+  whichever way the copy has drifted: a copy FULLER than the client (a spend
+  not mirrored) spawns nothing extra, and a copy EMPTIER than the client
+  (empty at attach) no longer loses the client's overflow. An unfit spawn the
+  copy can't corroborate — it couldn't pay the use's cost (empty at attach,
+  or a modified client claiming a bucket it doesn't hold), or it had room
+  for the product — is believed: 1 a unit charged to the joiner's believed
+  bound (`BelievedBucket`, 64 deep, 4 a second; creative unbounded),
+  tallied `use_unfit_believed`; past the bound nothing is spawned
+  (`use_unfit_refused`). Only an unfit the copy also failed to fit after
+  paying the cost spawns free. An honest full-bag joiner just after attach
+  pays a few units of the bound (BRIDGE until `InventorySync` gives the copy
+  what the joiner arrived with). A refused use spawns nothing. The Eraser's
+  sheet: single-player still loses it on a full bag; a joiner's tag carries
+  it as `unfit`, and the server spawns it.
+- *Refused: told, and undone on the client (C3c-1-fix, M-4, v82).* A use
+  edit the server refuses (reach, a plot, the play mode, an economy block,
+  bedrock; a door's top half with no door below) is sent back unsettled —
+  its copy untouched, nothing spawned for its `unfit` — and the joiner is
+  TOLD: a `RefusedUse { x, y, z, kind, note }` in its next `StateUpdate`
+  (`refused_uses`, queued per joiner by `HostedServer::refuse_use` and sent
+  in line after the tick's block changes, so after the send-back; tallied
+  `use_edit_refused`). `note` is an existing `ItemNote` (`EditRefusal::note`:
+  `OutOfReach`, `NotHere`, or silent `None`). The honest client undoes the
+  use from its OWN record (`use_edits::SentUses`, recorded where the use is
+  made: the cost it spent, the product that LANDED, `product − unfit`),
+  never from the notice: it takes the landed product back with the shared
+  owed-take search, exact first (`take_owed_held`: the slots, the grid, the
+  cursor), gives the cost back (to its own slot when that is empty or joins
+  it), and shows the note's toast (`GameState::undo_refused_uses`). A product
+  already gone (emptied, dropped) is a shortfall, logged. Joiners are never
+  sent plots, so before this a tap, fill or erase in a foreign plot repeated
+  with no limit; now each repeat is undone. *The record's hold.* The server
+  acknowledges an input once it has simulated its movement, but its edits
+  can wait in the edit queue past the per-tick edit budget (four), and a
+  notice can wait behind chunk pushes in the client's outbox, so a refusal
+  can arrive AFTER the acknowledgement of the input that carried the use:
+  each record is kept `USE_RECORD_HOLD_INPUTS` (100 inputs, 5 s) past the
+  input it could first ride (`RemoteClient::next_input_seq` when it was
+  made; at most 64 records), refusals are applied before an update's
+  acknowledgement lets records go, and a notice matches the NEWEST record of
+  its cell and kind. Not undone: tool wear (the same bounded gap as a
+  refused break's wear), and the edits of a joiner's earlier life or of a
+  dead joiner, which are sent back with no notice (its inventory was not
+  the one they spent). A creative joiner's uses are mirrored too: its arms
+  spend a seed, a bucket or a hoe's durability in creative as in survival.
 - *Doors.* A door is placed as two edits: the bottom half (a plain placement,
   which pays for the door) and then the top half, tagged `DoorUpper` (no cost,
   no gain), so the server and every other player see a whole door (before
   C3c-1 only the bottom half was sent). A door with no headroom, or a Plot
   Marker whose claim would overlap a foreign plot, is refused BEFORE the item
-  is taken (Spec 05): nothing is taken, refunded or sent. Breaking one half
-  of a door still sends only that half's edit (`game_loop.rs` break arms
-  remove the other half client-side; `hosted_server.rs` has no door rule), so
-  the other half stays standing on the server and for every other player —
-  open, with the door's break rule for a later phase.
+  is taken (Spec 05): nothing is taken, refunded or sent. **Doors break
+  whole on every seat (C3c-1-fix, M-3):** both break arms (creative and
+  survival) push the other half's AIR as its own UNTAGGED edit, beside the
+  broken half's (which carries the `mined` tag in survival), so the server,
+  every other joiner and a lending host's joiners lose both halves; the
+  untagged half is classified unchecked and yields nothing, so one door comes
+  back, never two. On the server a `DoorUpper` with no door below it (its
+  bottom half refused, or never sent) is refused and sent back (it costs
+  nothing, so it can be refused now; the joiner is told, silently). The
+  robust rule — a remote edit that takes a door half out clears its pair on
+  the server, whoever sent it — is C3d's (gate list).
 - *Not uses (C3c-2, C3c-3).* Lighting a campfire by friction, flint and steel
   or a Firestarter, the bow, the slingshot, carts and fishing are requests
   since C3c-2 (§4.2f "Use requests"); Plans, face attachments (wallpaper, blank paper, a Plan laid
@@ -2271,6 +2341,14 @@ believe; silent, no wire change), tallied `use_refused`, and nothing changes.
 So a modified client that claims an item it doesn't hold can make at most
 64 + 4 a second of it by framing, composting or cooking and then breaking
 the block, as through a shared container (BRIDGE until C3d, gate list).
+**A use that only wears its tool is bounded too (C3c-1-fix, L-3):** a use
+with nothing to pay that wears the claimed tool (shears on a hive) whose
+copy holds no tool of that type and material anywhere an owed take looks
+(`window_ops::believe_wear`, on the effective window; by type and material,
+not exact identity, since durability drifts honestly) charges the same bound
+1, tallied `use_believed`, and is refused past it (`NothingToTake`,
+`use_refused`): a modified client claiming shears it doesn't hold harvests
+until the bound refuses.
 **Refused:** nothing changes (no entity is created, L7), the outcome carries
 the note and no window event. **The joiner's room is not checked** (BRIDGE until C3d, as every
 grant's): single-player leaves a seasoned log on the rack and cooked food on
@@ -2287,12 +2365,18 @@ fuel or raw food, anything for a frame, a bucket for a hive — or wear: shears
 on a hive since C3b-2-fix L5, so two shears uses in flight on worn-out shears
 can't both cut; 0 for an empty hand), so a use isn't sent while every one in
 hand is claimed (one bucket can't scoop two hives on a slow link). **The
-claim also holds the hand's other spends (C3b-2-fix, M1):** a joined client's
-place arm, its seed and papyrus-reed arms and its crop-accelerator arm ask
+claim also holds the hand's other spends (C3b-2-fix, M1; C3c-1-fix, M-1):**
+every arm of a joined client that spends a claimable item from the hand asks
 `GameState::hand_may_spend` (`JoinerActions::can_spend`, as the Q-drop asks)
-before taking the item and do nothing while every one held is claimed — a
-diamond block on its way into a frame can't also be placed inside the round
-trip (the server side of that race is C3d gate 1). Nothing changes locally until
+before taking it and does nothing while every one held is claimed: the place
+arm, the seed and papyrus-reed arms, the crop-accelerator arm, the bucket fill
+(`fill_bucket_at`: the click is claimed and does nothing), the bucket empty,
+bone meal on grass and salt (a source lint,
+`block_use::a_joined_hand_spends_nothing_a_block_use_in_flight_claims`, holds
+every one of them to it). So a diamond block on its way into a frame can't
+also be placed inside the round trip, and one bucket can't both scoop a hive
+and fill from water (the server side of that race is C3d gate 1). The rubber
+tap keeps its bucket and needs no gate. Nothing changes locally until
 the outcome (`joiner_actions::apply_item_outcome` takes `consume_held` owed;
 `apply_use_wear` wears the tool where it now is) and the grants arrive;
 single-player's sound, toast and `CookAtCampfire` challenge then play

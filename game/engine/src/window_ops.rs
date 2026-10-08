@@ -1047,6 +1047,34 @@ pub fn believe_pay(sp: &mut ServerPlayer, item: &crate::item::Item, n: u32, now:
     }
 }
 
+/// C3c-1-fix (L-3) — joiner `sp`'s accepted block use wears `tool` and takes
+/// nothing (`block_use::Used` with `pay` 0 and `wear`: shears on a hive). A
+/// tool the server's copy of its window doesn't hold — no tool of that type
+/// and material anywhere an owed take looks (the 36 slots, the grid, the
+/// cursor), in the window as it will be once its waiting events land
+/// (`window_events::effective_window`) — is BELIEVED: 1 charged to the same
+/// per-joiner bound as believed deposits and block-use pays
+/// ([`BelievedBucket`]). By type and material, not exact identity: a tool is
+/// the same tool by those (`joiner_inventory::wear_tool`), and its durability
+/// drifts honestly. `Ok(believed)` (0 when the copy holds one); `Err(1)` past
+/// the bound: the caller refuses the use. BRIDGE: C3d refuses a use with a
+/// tool the server's window doesn't hold — replace when the flip lands.
+pub fn believe_wear(sp: &mut ServerPlayer, tool: &crate::crafting::Tool, now: u64) -> Result<u32, u32> {
+    let w = crate::window_events::effective_window(sp);
+    let like = |s: Option<&ItemStack>| {
+        matches!(s.map(|s| &s.item), Some(crate::item::Item::Tool(t)) if t.tool_type == tool.tool_type && t.material == tool.material)
+    };
+    let held = w.inv.slots_iter().any(like) || w.grid.iter().flatten().any(|c| like(c.as_ref())) || like(w.cursor.as_ref());
+    if held {
+        return Ok(0);
+    }
+    if sp.container_sent.believed.try_take(1, now) {
+        Ok(1)
+    } else {
+        Err(1)
+    }
+}
+
 /// C3b-1 / C3b-fix-a (C-M2, C-L1) — a container op refused before its rule
 /// ran. The server's copy never moved, and neither did the real container.
 /// The client's prediction (P, over the view it predicted on) is undone by

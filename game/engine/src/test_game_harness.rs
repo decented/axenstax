@@ -2304,4 +2304,310 @@ mod tests {
             .sum();
         assert!(dropped >= 1, "the catch dropped at the player");
     }
+
+    // ─── C3c-1-fix ─────────────────────────────────────────────────────────
+
+    /// Units of `item` in `inv`'s 36 slots.
+    fn held_units(inv: &crate::inventory::Inventory, item: &crate::item::Item) -> u32 {
+        inv.slots_iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum()
+    }
+
+    /// A water or lava source at `cell` in a client's world and the server's.
+    fn fluid_source_both(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, cell: [i32; 3], b: crate::block::BlockId) {
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(cell[0], cell[1], cell[2], b);
+        }
+        if b == crate::block::WATER {
+            hg.state.water.add_source(cell[0], cell[1], cell[2]);
+            server.server.water.add_source(cell[0], cell[1], cell[2]);
+        } else {
+            hg.state.lava.add_source(cell[0], cell[1], cell[2]);
+            server.server.lava.add_source(cell[0], cell[1], cell[2]);
+        }
+    }
+
+    /// C3c-1-fix (M-1) — a joiner right-clicks a hive with honey holding its
+    /// ONLY bucket (the REAL hive arm: the request claims it), then, inside the
+    /// round trip, right-clicks a pond with the same slot (the REAL fill arm):
+    /// the fill waits for the claim and does nothing. The server ends with one
+    /// honey bottle and no water bucket. (It used to fill too: a honey bottle
+    /// AND a water bucket from one bucket.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_fill_waits_for_the_claim_of_a_hive_use_in_flight() {
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("hive-then-fill");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let bucket = ItemStack::new_material(MaterialId::Bucket, 1);
+        hg.state.players[0].inventory.set_slot(0, Some(bucket.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(bucket));
+        hg.state.players[0].hotbar_slot = 0;
+        let hive = [feet[0] - 2, feet[1] + 1, feet[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(hive[0], hive[1], hive[2], crate::block::BEE_HIVE);
+        }
+        server.server.world.insert_hive((hive[0], hive[1], hive[2]), crate::bee_hive::HiveData { bees_inside: 0, honey_level: 2 });
+        let pond = [feet[0] + 2, feet[1], feet[2]];
+        fluid_source_both(&mut hg, &mut server, pond, crate::block::WATER);
+        harness_step(&mut server, &mut hg);
+        // 1. The hive, through the real arm: the bucket is claimed.
+        aim_at(&mut hg, glam::Vec3::new(hive[0] as f32 + 0.5, hive[1] as f32 + 0.5, hive[2] as f32 + 0.5));
+        right_click(&mut hg);
+        // 2. Inside the round trip: the pond.
+        aim_at(&mut hg, glam::Vec3::new(pond[0] as f32 + 0.5, pond[1] as f32 + 0.5, pond[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(pond[0], pond[1], pond[2]), crate::block::WATER, "no fill: the bucket is claimed");
+        let water_bucket = Item::Material(MaterialId::WaterBucket);
+        assert_eq!(held_units(&hg.state.players[0].inventory, &water_bucket), 0);
+        settle(&mut server, &mut hg);
+        assert_eq!(server.server.world.get_block(pond[0], pond[1], pond[2]), crate::block::WATER, "the pond is untouched on the server");
+        let honey = Item::Material(MaterialId::HoneyBottle);
+        let sp = &server.server.players[slot];
+        assert_eq!(held_units(&sp.inventory, &honey), 1, "one honey bottle on the server");
+        assert_eq!(held_units(&sp.inventory, &water_bucket), 0, "and no water bucket");
+        assert_eq!(held_units(&sp.inventory, &Item::Material(MaterialId::Bucket)), 0);
+        let inv = &hg.state.players[0].inventory;
+        assert_eq!((held_units(inv, &honey), held_units(inv, &water_bucket)), (1, 0), "the client agrees");
+    }
+
+    /// A foreign plot (seat 1's) over the column of `cell`, on the server only:
+    /// a joiner is never sent plots.
+    fn foreign_plot_on_server(server: &mut crate::hosted_server::HostedServer, cell: [i32; 3]) {
+        let plot = crate::plot::PlotData::from_marker(crate::plot::PlotOwner::LocalPlayer(1), cell[0], cell[1] - 3, cell[2]);
+        server.server.world.plots.push(plot);
+    }
+
+    /// C3c-1-fix (M-4) — a joiner holds right-click with a bucket on a rubber
+    /// log inside someone else's plot (it is never sent plots, so it can't
+    /// know). Each tap is refused by the server, sent back, and the joiner is
+    /// told: it undoes the tap from its own record (the rubber taken back) and
+    /// shows why. It ends with no rubber and its bucket, and the log is
+    /// untapped everywhere. Then the same for a bucket of a protected lava
+    /// source: the bucket back, no lava bucket, the source standing.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiners_refused_tap_and_fill_are_undone() {
+        use crate::item::{Item, ItemStack, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("refused-uses");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let log = [feet[0], feet[1] + 1, feet[2] - 2];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(log[0], log[1], log[2], crate::block::RUBBER_LOG);
+        }
+        foreign_plot_on_server(&mut server, log);
+        let bucket = ItemStack::new_material(MaterialId::Bucket, 1);
+        hg.state.players[0].inventory.set_slot(0, Some(bucket.clone()));
+        server.server.players[slot].inventory.set_slot(0, Some(bucket.clone()));
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        let rubber = Item::Material(MaterialId::Rubber);
+        let mut tapped = 0;
+        for _ in 0..4 {
+            aim_at(&mut hg, glam::Vec3::new(log[0] as f32 + 0.5, log[1] as f32 + 0.5, log[2] as f32 + 0.5));
+            if hg.state.world.get_block(log[0], log[1], log[2]) == crate::block::RUBBER_LOG {
+                right_click(&mut hg);
+                if hg.state.world.get_block(log[0], log[1], log[2]) == crate::block::RUBBER_LOG_TAPPED {
+                    tapped += 1;
+                }
+            }
+            // Until the send-back lands (it queues behind the join's chunk
+            // pushes in the joiner's stream), and the notice with it.
+            for _ in 0..60 {
+                harness_step(&mut server, &mut hg);
+                if hg.state.world.get_block(log[0], log[1], log[2]) == crate::block::RUBBER_LOG && hg.state.sent_uses.len() == 0 {
+                    break;
+                }
+            }
+        }
+        assert!(tapped >= 2, "held down, the client tapped again after each send-back: {tapped}");
+        assert_eq!(hg.state.world.get_block(log[0], log[1], log[2]), crate::block::RUBBER_LOG, "untapped on the client");
+        assert_eq!(server.server.world.get_block(log[0], log[1], log[2]), crate::block::RUBBER_LOG, "and on the server");
+        let inv = &hg.state.players[0].inventory;
+        assert_eq!(held_units(inv, &rubber), 0, "no rubber from nothing");
+        assert_eq!(inv.slot(0), Some(&bucket), "its bucket kept");
+        assert!(hg.state.toast.as_ref().is_some_and(|(t, _)| t == "You can't use that here."), "{:?}", hg.state.toast);
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.possession.use_edit_refused, tapped);
+        assert_eq!(held_units(&sp.inventory, &rubber), 0);
+
+        // A protected lava source.
+        let pool = [feet[0] + 2, feet[1], feet[2]];
+        fluid_source_both(&mut hg, &mut server, pool, crate::block::LAVA);
+        foreign_plot_on_server(&mut server, pool);
+        harness_step(&mut server, &mut hg);
+        aim_at(&mut hg, glam::Vec3::new(pool[0] as f32 + 0.5, pool[1] as f32 + 0.5, pool[2] as f32 + 0.5));
+        right_click(&mut hg);
+        let lava_bucket = Item::Material(MaterialId::LavaBucket);
+        assert_eq!(held_units(&hg.state.players[0].inventory, &lava_bucket), 1, "the client filled it");
+        for _ in 0..60 {
+            harness_step(&mut server, &mut hg);
+            if hg.state.sent_uses.len() == 0 {
+                break;
+            }
+        }
+        let inv = &hg.state.players[0].inventory;
+        assert_eq!((held_units(inv, &lava_bucket), inv.slot(0)), (0, Some(&bucket)), "undone: the bucket back");
+        assert_eq!(hg.state.world.get_block(pool[0], pool[1], pool[2]), crate::block::LAVA, "the source sent back");
+        assert_eq!(server.server.world.get_block(pool[0], pool[1], pool[2]), crate::block::LAVA);
+        assert_eq!(held_units(&server.server.players[slot].inventory, &lava_bucket), 0);
+    }
+
+    /// Hold the left button on `cell` until the client's own world breaks it
+    /// (one tick a frame; the server body held where the client stands).
+    fn mine_joined(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, slot: usize, cell: [i32; 3]) {
+        let p = hg.state.players[0].player.pos;
+        aim_at(hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5));
+        hg.state.input.cursor_captured = true;
+        hg.state.input.left_held = true;
+        let before = hg.state.world.get_block(cell[0], cell[1], cell[2]);
+        let mut broke = false;
+        for _ in 0..600 {
+            let body = &mut server.server.players[slot].player;
+            body.pos = p;
+            body.velocity = glam::Vec3::ZERO;
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+            if hg.state.world.get_block(cell[0], cell[1], cell[2]) != before {
+                broke = true;
+                break;
+            }
+        }
+        hg.state.input.left_held = false;
+        assert!(broke, "the joiner's client broke {cell:?}");
+        for _ in 0..10 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+        }
+    }
+
+    /// C3c-1-fix (M-3) — a joiner breaks one half of a door through the REAL
+    /// survival break arm: the other half goes too, on every seat. The server
+    /// and another joiner have no half left, the breaker has one door (the
+    /// server's grant for the half it mined), and there is no second door
+    /// anywhere. (Before, the other half stayed on the server: a floating
+    /// half door, and a second door for whoever broke it.) Both halves.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_breaks_a_door_whole_on_every_seat() {
+        use crate::item::Item;
+        for broken_top in [false, true] {
+            isolate_saves();
+            let tag = if broken_top { "door-whole-top" } else { "door-whole-bottom" };
+            let (mut hg, mut server, slot) = joined_window_client(tag);
+            let feet = clear_pad(&mut hg, Some(&mut server));
+            // The neighbour: a second joined client, holding the door's column.
+            let mut neighbour = crate::remote_client::RemoteClient::from_transport(
+                Box::new(server.attach_test_remote()),
+                crate::remote_client::build_join_request_guest("Neighbour", 0),
+                None,
+            );
+            for _ in 0..5 {
+                harness_step(&mut server, &mut hg);
+                neighbour.poll();
+            }
+            let n_slot = neighbour.player_index().expect("the neighbour joined") as usize;
+            let bottom = [feet[0], feet[1], feet[2] - 2];
+            let top = [bottom[0], bottom[1] + 1, bottom[2]];
+            let cs = crate::chunk::CHUNK_SIZE as i32;
+            server.hold_column_for_test(n_slot, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+            for w in [&mut hg.state.world, &mut server.server.world] {
+                w.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+                w.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+                w.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+            }
+            harness_step(&mut server, &mut hg);
+            neighbour.poll();
+            neighbour.pending_block_changes.clear();
+            let broken = if broken_top { top } else { bottom };
+            mine_joined(&mut hg, &mut server, slot, broken);
+            neighbour.poll();
+            for c in [bottom, top] {
+                assert_eq!(hg.state.world.get_block(c[0], c[1], c[2]), crate::block::AIR, "the breaker's world ({tag})");
+                assert_eq!(server.server.world.get_block(c[0], c[1], c[2]), crate::block::AIR, "the server ({tag})");
+                assert!(
+                    neighbour.pending_block_changes.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (c[0], c[1], c[2], crate::block::AIR)),
+                    "the neighbour lost {c:?} ({tag})"
+                );
+            }
+            let door = Item::Block(crate::block::OAK_DOOR);
+            assert_eq!(held_units(&hg.state.players[0].inventory, &door), 1, "one door in the breaker's bag ({tag})");
+            assert_eq!(ground_units(&server.server.ecs, &door), 0, "no second door on the server's ground ({tag})");
+            assert_eq!(ground_units(&hg.state.ecs, &door), 0, "nor the client's own ({tag})");
+            assert_eq!(server.server.players[slot].possession.breaks, 1, "one break yielded ({tag})");
+        }
+    }
+
+    /// C3c-1-fix (M-3) — a lending host breaks the bottom half of its door
+    /// (the REAL break arm): both halves reach a joiner. (Before, the other
+    /// half was cleared in the shared world but never broadcast: the joiner
+    /// kept a stale half.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_lending_hosts_door_break_reaches_a_joiner_whole() {
+        use crate::transport::ClientTransport;
+        isolate_saves();
+        let name = "harness-lend-door";
+        let mut hg = HeadlessGame::boot_into_world(name);
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Creative);
+        let seed = hg.state.biome_gen.seed;
+        let hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            name.to_string(),
+            seed,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Lent,
+        )
+        .expect("lending host starts");
+        hg.state.hosted_server = Some(hs);
+        assert!(hg.state.sim_lent());
+        let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Visitor", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(crate::protocol::PacketType::JoinRequest, &req));
+        hg.hosted_ticks(8);
+        let feet = clear_pad(&mut hg, None);
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        hg.state.world.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+        hg.state.world.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+        hg.state.world.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        let hs = hg.state.hosted_server.as_mut().unwrap();
+        let joiner = hs.server.players.len() - 1;
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        hs.hold_column_for_test(joiner, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+        hg.hosted_ticks(2);
+        while client.try_recv_from_server().is_some() {}
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        hg.state.input.cursor_captured = true;
+        hg.state.input.left_held = true;
+        for _ in 0..40 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            if hg.state.world.get_block(bottom[0], bottom[1], bottom[2]) != crate::block::OAK_DOOR {
+                break;
+            }
+        }
+        hg.state.input.left_held = false;
+        assert_eq!(hg.state.world.get_block(bottom[0], bottom[1], bottom[2]), crate::block::AIR, "the host broke the bottom half");
+        assert_eq!(hg.state.world.get_block(top[0], top[1], top[2]), crate::block::AIR, "and its top half went too");
+        hg.hosted_ticks(3);
+        let mut seen = Vec::new();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((crate::protocol::PacketType::StateUpdate, payload)) = crate::protocol::deserialize_header(&pkt)
+                && let Ok(s) = crate::protocol::safe_deserialize::<crate::protocol::StateUpdatePacket>(payload)
+            {
+                seen.extend(s.block_changes);
+            }
+        }
+        for c in [bottom, top] {
+            assert!(
+                seen.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (c[0], c[1], c[2], crate::block::AIR)),
+                "the joiner lost {c:?}: {seen:?}"
+            );
+        }
+    }
 }

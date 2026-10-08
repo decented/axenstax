@@ -153,6 +153,10 @@ enum Delta {
     /// C3b-2 — one block entity's view (`StateUpdatePacket::block_views`),
     /// in line after the chunk push it updates.
     View(Box<protocol::BlockEntityView>),
+    /// C3c-1-fix (M-4) — one of this client's refused use-tagged edits
+    /// (`StateUpdatePacket::refused_uses`), in line after the send-back of
+    /// its cell: sent once, never folded into a template that repeats.
+    Refused(protocol::RefusedUse),
 }
 
 #[derive(Debug)]
@@ -267,7 +271,7 @@ impl ClientOutbox {
             match e.delta {
                 Delta::Block(_) => self.queued_block_bytes -= e.size,
                 Delta::Chunk { .. } => self.queued_chunk_bytes -= e.size,
-                Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) => {}
+                Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) => {}
             }
         }
     }
@@ -356,6 +360,16 @@ impl ClientOutbox {
         }
     }
 
+    /// C3c-1-fix (M-4) — queue this client's refused use-tagged edits
+    /// (`RefusedUse`), in line: after everything queued so far, this tick's
+    /// block changes (their send-backs) included. Never coalesced and kept on
+    /// overflow (at most the per-tick edit budget's worth a tick).
+    pub fn push_refused(&mut self, refused: &[protocol::RefusedUse]) {
+        for r in refused {
+            self.push_entry(Delta::Refused(*r));
+        }
+    }
+
     /// Serialized chunk-push bytes waiting to go out. Test-only.
     #[cfg(test)]
     pub fn queued_chunk_bytes(&self) -> usize {
@@ -369,6 +383,7 @@ impl ClientOutbox {
             Delta::Despawn(id) => wire_size(id),
             Delta::Chunk { packet, .. } => packet.len(),
             Delta::View(v) => wire_size(v.as_ref()),
+            Delta::Refused(r) => wire_size(r),
         };
         match delta {
             Delta::Block(_) => self.queued_block_bytes += size,
@@ -517,7 +532,8 @@ impl ClientOutbox {
                 && template.entity_spawns.is_empty()
                 && template.entity_updates.is_empty()
                 && template.entity_despawns.is_empty()
-                && template.block_views.is_empty(),
+                && template.block_views.is_empty()
+                && template.refused_uses.is_empty(),
             "the template carries snapshot fields only"
         );
         let base = 1 + wire_size(template);
@@ -565,7 +581,8 @@ impl ClientOutbox {
             moved |= !(pkt.block_changes.is_empty()
                 && pkt.entity_spawns.is_empty()
                 && pkt.entity_despawns.is_empty()
-                && pkt.block_views.is_empty());
+                && pkt.block_views.is_empty()
+                && pkt.refused_uses.is_empty());
             // A chunk push next in line keeps its room: entity updates past
             // the reserve take only what it leaves (else a heavy entity load
             // would crowd it, and everything behind it, out tick after tick).
@@ -580,7 +597,8 @@ impl ClientOutbox {
                 && pkt.entity_spawns.is_empty()
                 && pkt.entity_updates.is_empty()
                 && pkt.entity_despawns.is_empty()
-                && pkt.block_views.is_empty());
+                && pkt.block_views.is_empty()
+                && pkt.refused_uses.is_empty());
             if !out.is_empty() && !carried {
                 break;
             }
@@ -637,6 +655,7 @@ impl ClientOutbox {
                     pkt.entity_despawns.push(id);
                 }
                 Delta::View(v) => pkt.block_views.push(*v),
+                Delta::Refused(r) => pkt.refused_uses.push(r),
                 Delta::Chunk { .. } => unreachable!("a chunk push is never folded into a StateUpdate"),
             }
         }
@@ -702,6 +721,7 @@ mod tests {
             storm_ticks_left: 0,
             own_hunger: 0,
             block_views: Vec::new(),
+            refused_uses: Vec::new(),
         }
     }
 

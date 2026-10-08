@@ -432,7 +432,7 @@ mod tests {
     }
 
     fn use_tag(x: i32) -> UseTag {
-        UseTag { x, y: 70, z: 0, kind: 2, slot: 0, used: None, tool: WireItem::None }
+        UseTag { x, y: 70, z: 0, kind: 2, slot: 0, used: None, tool: WireItem::None, unfit: 0 }
     }
 
     /// C3c-1 — each edit with its tag of either kind, in order.

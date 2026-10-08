@@ -269,6 +269,10 @@ pub struct ServerPlayer {
     /// views this joiner has been shown (`block_views::ViewsSent`). Fresh
     /// per attach.
     pub block_views: crate::block_views::ViewsSent,
+    /// C3c-1-fix (M-4) — this joiner's use-tagged edits refused since the
+    /// last broadcast (`HostedServer::refuse_use`), sent once each in its
+    /// next `StateUpdate` (`refused_uses`). Fresh per attach.
+    pub refused_uses: Vec<crate::protocol::RefusedUse>,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -510,6 +514,7 @@ impl ServerPlayer {
             container_sent: Default::default(),
             last_window_op_seq: 0,
             block_views: Default::default(),
+            refused_uses: Vec::new(),
         }
     }
 
@@ -1634,8 +1639,20 @@ impl GameServer {
         // `tick_counter` (monotonic), not `world_time` (cyclic 0-23999):
         // a subtract-based age check on a 24 000-tick cooldown never
         // fires with a clock that wraps at 24 000.
+        // C3c-1-fix (L-2) — the ONE rubber clock (a joined client runs none):
+        // each restore is queued as a block change, so every joiner — and a
+        // lending host's screen (`lent_sim_changes`) — sees the log regrow.
         if self.runs(SimSystem::Rubber) {
-            crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter);
+            for (x, y, z) in crate::rubber::restore_expired_taps(&mut self.world, self.tick_counter) {
+                let meta = self.world.meta_at(x, y, z);
+                self.pending_block_changes.push(crate::protocol::BlockChange::with_meta(
+                    x,
+                    y,
+                    z,
+                    crate::block::RUBBER_LOG,
+                    meta,
+                ));
+            }
         }
         // Salt feature — Salt Lick aura HP regen for livestock. Self-
         // throttled internally on SALT_LICK_REGEN_INTERVAL_TICKS; safe

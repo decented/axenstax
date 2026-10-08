@@ -1299,6 +1299,11 @@ pub(crate) struct GameState {
     /// await the server's `InteractOutcome` (`joiner_actions`). Empty unless
     /// joined.
     pub(crate) joiner_actions: crate::joiner_actions::JoinerActions,
+    /// C3c-1-fix (M-4) — a joiner's records of its recent block-edit uses
+    /// (what each spent and what of its product landed), so a use the server
+    /// refuses is undone from them (`use_edits::SentUses`). Empty unless
+    /// joined.
+    pub(crate) sent_uses: crate::use_edits::SentUses,
     /// Block changes made this tick, to be sent to the server. Cross-platform so
     /// `network_send_input` can drain it on both targets. NOTE: the ~30 push
     /// sites stay native-gated for now, so a browser joiner does not yet
@@ -1891,6 +1896,7 @@ impl GameState {
             remote_mobs_clock: None,
             own_health: crate::health_sync::OwnHealth::new(),
             joiner_actions: crate::joiner_actions::JoinerActions::default(),
+            sent_uses: Default::default(),
             pending_block_changes: Default::default(),
             window_inbox: Default::default(),
             pending_mined: Vec::new(),

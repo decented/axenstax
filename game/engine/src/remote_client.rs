@@ -435,6 +435,11 @@ pub struct RemoteClient {
     /// bounded like `pending_grants`.
     pub pending_outcomes: Vec<RequestOutcome>,
     pub pending_kills: Vec<protocol::KillEventPacket>,
+    /// C3c-1-fix (M-4) — the server's refusals of our use-tagged edits
+    /// (`StateUpdatePacket::refused_uses`), accumulated across every
+    /// StateUpdate since the game loop last drained them (a delta, never read
+    /// off `latest_state`). At most [`MAX_PENDING_REFUSED_USES`].
+    pub pending_refused_uses: Vec<protocol::RefusedUse>,
     /// MP-A3 — the tick (`self.tick`) our last `Respawn` request went out, while
     /// the server has not yet answered with `Respawned`. `send_input` re-sends
     /// every [`RESPAWN_RESEND_TICKS`] until it does: the server drops a
@@ -505,6 +510,11 @@ pub struct RemoteClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub pending_chat: Vec<protocol::ChatDeliverPacket>,
 }
+
+/// C3c-1-fix (M-4) — most refusal notices [`RemoteClient::pending_refused_uses`]
+/// holds before the game loop drains them (an honest server sends at most a
+/// few a tick: its per-tick edit budget).
+pub const MAX_PENDING_REFUSED_USES: usize = 256;
 
 /// Most chunk packets [`RemoteClient::chunk_queue`] holds before the game
 /// loop drains it. The server keeps at most `chunk_push::CHUNK_WINDOW_PACKETS`
@@ -768,6 +778,7 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
+            pending_refused_uses: Vec::new(),
             respawn_resend_from: None,
             window_op_seq: 0,
             events_applied: 0,
@@ -819,6 +830,7 @@ impl RemoteClient {
             pending_life_events: Vec::new(),
             pending_outcomes: Vec::new(),
             pending_kills: Vec::new(),
+            pending_refused_uses: Vec::new(),
             respawn_resend_from: None,
             window_op_seq: 0,
             events_applied: 0,
@@ -930,6 +942,12 @@ impl RemoteClient {
                                 self.pending_entity_batches.push(deltas);
                             }
                             self.pending_block_changes.append(&mut state.block_changes);
+                            // C3c-1-fix (M-4) — our refused uses, each once.
+                            // A hostile server can't grow this without limit
+                            // between frames.
+                            let room = MAX_PENDING_REFUSED_USES.saturating_sub(self.pending_refused_uses.len());
+                            let take = state.refused_uses.len().min(room);
+                            self.pending_refused_uses.extend(state.refused_uses.drain(..take));
                             // C3b-2 — this packet's block views go in the world
                             // stream after its block changes (and after every
                             // chunk push that arrived before it). Not numbered
@@ -2130,6 +2148,7 @@ mod tests {
                 storm_ticks_left: 0,
                 own_hunger: 0,
                 block_views: Vec::new(),
+                refused_uses: Vec::new(),
             };
             protocol::serialize_packet(PacketType::StateUpdate, &state)
         }
@@ -2229,6 +2248,7 @@ mod tests {
                     storm_ticks_left: 0,
                     own_hunger: 0,
                     block_views: Vec::new(),
+                    refused_uses: Vec::new(),
                 },
             )
         };
@@ -2513,7 +2533,7 @@ mod tests {
     }
 
     fn use_tag(x: i32) -> protocol::UseTag {
-        protocol::UseTag { x, y: 64, z: 0, kind: 1, slot: 0, used: None, tool: protocol::WireItem::None }
+        protocol::UseTag { x, y: 64, z: 0, kind: 1, slot: 0, used: None, tool: protocol::WireItem::None, unfit: 0 }
     }
 
     /// C3c-1 — send `edits` (each with its use tag, if any) in one input, as
@@ -3363,6 +3383,7 @@ mod tests {
             storm_ticks_left: 0,
             own_hunger: 0,
             block_views: Vec::new(),
+            refused_uses: Vec::new(),
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[1, 2])));
         // More than the old 256-packet cap, which dropped the rest silently.

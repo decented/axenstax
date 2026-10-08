@@ -447,6 +447,7 @@ mod tests {
                 storm_ticks_left: 0,
                 own_hunger: 0,
                 block_views: Vec::new(),
+                refused_uses: Vec::new(),
             };
             let bytes = protocol::serialize_packet(protocol::PacketType::StateUpdate, &pkt);
             assert!((bytes.len() as u64) < protocol::MAX_PACKET_SIZE, "{} bytes", bytes.len());

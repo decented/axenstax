@@ -238,7 +238,10 @@ fn protocol_version_is_the_pinned_value() {
     //   `ItemAction::Shoot`, `PlaceCart`, `Cast`, `Reel`,
     //   `ItemActionOutcomePacket.bite_after` — a joiner's bow, slingshot,
     //   carts and fishing run on the server.
-    assert_eq!(protocol::PROTOCOL_VERSION, 81);
+    // v82 (2026-10-08, C3c-1-fix):
+    //   `UseTag.unfit`, `StateUpdatePacket.refused_uses` — a use's overflow
+    //   is the client's, a refused use is undone.
+    assert_eq!(protocol::PROTOCOL_VERSION, 82);
 }
 
 #[test]

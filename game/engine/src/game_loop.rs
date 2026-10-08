@@ -4170,19 +4170,88 @@ impl super::GameState {
     /// ([`Self::use_tag`]). The server mirrors the use on its copy of a
     /// joiner's inventory (`use_edits`). Native only, in step with every
     /// other edit push (L-web-edit).
-    fn push_use_edit(&mut self, cell: [i32; 3], new_block: block::BlockId, tag: crate::protocol::UseTag) {
+    ///
+    /// C3c-1-fix — `product` is what the use gave back (`None` for a use
+    /// that makes nothing) and `unfit` how many of it the bag couldn't take
+    /// (its `add_item` leftover): the tag carries `unfit` (M-2: the server
+    /// spawns exactly that), and a joiner keeps its own record of the use —
+    /// what it spent, what of the product landed — so a refusal is undone
+    /// from it (M-4, `use_edits::SentUses`).
+    fn push_use_edit(
+        &mut self,
+        cell: [i32; 3],
+        new_block: block::BlockId,
+        mut tag: crate::protocol::UseTag,
+        product: Option<crate::item::ItemStack>,
+        unfit: u8,
+    ) {
+        tag.unfit = unfit;
         #[cfg(not(target_arch = "wasm32"))]
-        self.pending_block_changes.push_use(broadcast_change(&self.world, cell[0], cell[1], cell[2], new_block), tag);
+        {
+            if self.edits_reach_server() {
+                let landed = product.and_then(|p| {
+                    let n = p.count.saturating_sub(unfit);
+                    (n > 0).then_some(crate::item::ItemStack { item: p.item, count: n })
+                });
+                let cost = tag
+                    .used
+                    .as_ref()
+                    .and_then(|w| crate::inventory::stack_from_wire(w, &self.registry, false))
+                    .map(|s| s.item);
+                let made_at = self.remote_client.as_ref().map_or(0, |c| c.next_input_seq());
+                self.sent_uses.record(crate::use_edits::UseRecord {
+                    cell,
+                    kind: tag.kind,
+                    slot: usize::from(tag.slot),
+                    cost,
+                    landed,
+                    made_at,
+                });
+            }
+            self.pending_block_changes.push_use(broadcast_change(&self.world, cell[0], cell[1], cell[2], new_block), tag);
+        }
         #[cfg(target_arch = "wasm32")]
-        let _ = (cell, new_block, tag);
+        let _ = (cell, new_block, tag, product);
+    }
+
+    /// C3c-1-fix (M-4) — the server refused these use-tagged edits of ours
+    /// (`StateUpdatePacket::refused_uses`): undo each from our OWN record of
+    /// it (`use_edits::SentUses`), never from the notice — the cost it spent
+    /// back, the product that landed taken back (the shared owed-take search,
+    /// exact first) — and show the reason's toast. Tool wear is not undone
+    /// (the same bounded gap as a refused break's wear). A notice we hold no
+    /// record of (already undone, or past the hold) does nothing.
+    fn undo_refused_uses(&mut self, refused: &[crate::protocol::RefusedUse]) {
+        if self.players.is_empty() {
+            return;
+        }
+        for notice in refused {
+            let cell = [notice.x, notice.y, notice.z];
+            let Some(record) = self.sent_uses.take(cell, notice.kind) else {
+                log::debug!("The server refused a use at {cell:?} we hold no record of: nothing to undo");
+                continue;
+            };
+            let p = &mut self.players[0];
+            let undone = crate::use_edits::undo(&mut p.inventory, &mut p.crafting_ui, &record);
+            if undone.short > 0 || undone.lost > 0 {
+                log::info!(
+                    "Undoing a refused use at {cell:?}: {} of its product already gone, {} of its cost had no room",
+                    undone.short,
+                    undone.lost,
+                );
+            }
+            if let Some(text) = crate::item_actions::ItemNote::from_wire(notice.note).toast() {
+                self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(2)));
+            }
+        }
     }
 
     /// C3c-1 — what a use gave back that the bag couldn't hold (`leftover`):
     /// single-player (and a web joiner, whose edits never reach a server)
     /// drops it at `at` in its own world; a joined client spills nothing of
-    /// its own — the server spills its copy's overflow as a real ground item
-    /// at the joiner's feet, which reaches it like any other (in lockstep,
-    /// the same units).
+    /// its own — C3c-1-fix (M-2) its tag says how many didn't fit
+    /// (`UseTag::unfit`) and the server spawns exactly that as a real ground
+    /// item at the joiner's feet, which reaches it like any other.
     fn spill_use_leftover(&mut self, leftover: crate::item::ItemStack, at: glam::Vec3, seed: u32) {
         if self.edits_reach_server() {
             return;
@@ -4257,11 +4326,16 @@ impl super::GameState {
         };
         // C3c-1 — the hand before the fill spends the bucket.
         let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketFill, pos);
-        if !self.players[pidx]
-            .inventory
-            .consume_one_material(hotbar, crate::item::MaterialId::Bucket)
+        // C3c-1-fix (M-1) — a bucket a block use in flight claims (a hive's
+        // honey) isn't spent here too: the click does nothing (and is
+        // claimed, so nothing further down the chain spends it either).
+        let may_spend = self.hand_may_spend(pidx);
+        if !may_spend
+            || !self.players[pidx]
+                .inventory
+                .consume_one_material(hotbar, crate::item::MaterialId::Bucket)
         {
-            return false;
+            return !may_spend;
         }
         if is_water {
             self.water.remove_source(pos[0], pos[1], pos[2]);
@@ -4276,13 +4350,15 @@ impl super::GameState {
         }
         self.fire_challenge(crate::scenario::ChallengeEvent::UseBucket);
         let stack = crate::item::ItemStack::new_material(filled, 1);
-        if let Some(leftover) = self.players[pidx].inventory.add_item(stack) {
+        let leftover = self.players[pidx].inventory.add_item(stack.clone());
+        let unfit = leftover.as_ref().map_or(0, |l| l.count);
+        if let Some(leftover) = leftover {
             let seed_h = (pos[0] as u32).wrapping_mul(374761393)
                 ^ (self.tick_counter as u32).wrapping_mul(668265263);
             let at = glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 0.5, pos[2] as f32 + 0.5);
             self.spill_use_leftover(leftover, at, seed_h);
         }
-        self.push_use_edit(pos, block::AIR, tag);
+        self.push_use_edit(pos, block::AIR, tag, Some(stack), unfit);
         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
         self.audio.play_place();
         self.players[pidx].place_cooldown = 8;
@@ -5118,7 +5194,9 @@ impl super::GameState {
         // MUST use `tick_counter` (monotonic), not `world_time` (cyclic
         // 0-23999): a subtract-based age check on a 24 000-tick cooldown
         // never fires with a clock that wraps at 24 000.
-        if self.sim_runs(SimSystem::Rubber) {
+        // C3c-1-fix (L-2) — one rubber clock, the server's: a joined client
+        // runs none, and sees its logs regrow by the server's block changes.
+        if self.remote_client.is_none() && self.sim_runs(SimSystem::Rubber) {
             crate::rubber::tick_rubber_cooldowns(&mut self.world, self.tick_counter);
         }
         // Salt feature — Salt Lick aura HP regen for livestock. Self-
@@ -11563,6 +11641,12 @@ impl super::GameState {
                                     if self.world.get_block(pos[0], cy, pos[2]) == block::OAK_DOOR {
                                         self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                         self.world.set_meta((pos[0], cy, pos[2]), 0);
+                                        // C3c-1-fix (M-3) — and so does
+                                        // everyone else: the other half goes
+                                        // as its own untagged edit (no
+                                        // drop), as the broken half does.
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        self.pending_block_changes.push(broadcast_change(&self.world, pos[0], cy, pos[2], block::AIR));
                                         crate::lighting::update_for_block_change(
                                             &mut self.world,
                                             (pos[0], cy, pos[2]),
@@ -11950,6 +12034,13 @@ impl super::GameState {
                                         {
                                             self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                             self.world.set_meta((pos[0], cy, pos[2]), 0);
+                                            // C3c-1-fix (M-3) — and so does
+                                            // everyone else: the other half
+                                            // goes as its own untagged edit
+                                            // (no drop; the broken half's
+                                            // `mined` tag yields the door).
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            self.pending_block_changes.push(broadcast_change(&self.world, pos[0], cy, pos[2], block::AIR));
                                             crate::lighting::update_for_block_change(
                                                 &mut self.world,
                                                 (pos[0], cy, pos[2]),
@@ -14288,12 +14379,15 @@ impl super::GameState {
                         if crate::use_edits::grows_tall_grass(target_blk, above_blk) {
                             let hotbar = self.players[pidx].hotbar_slot;
                             let tag = self.use_tag(pidx, crate::use_edits::UseKind::GrowGrass, above);
-                            if self.players[pidx]
-                                .inventory
-                                .consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)
+                            // C3c-1-fix (M-1) — not bone meal a block use in
+                            // flight claims.
+                            if self.hand_may_spend(pidx)
+                                && self.players[pidx]
+                                    .inventory
+                                    .consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)
                             {
                                 self.world.set_block(above[0], above[1], above[2], block::TALL_GRASS);
-                                self.push_use_edit(above, block::TALL_GRASS, tag);
+                                self.push_use_edit(above, block::TALL_GRASS, tag, None, 0);
                                 self.rebuild_chunk_at(above[0], above[1], above[2]);
                                 self.players[pidx].place_cooldown = 8;
                             }
@@ -14802,15 +14896,15 @@ impl super::GameState {
                         // wallpaper overlays so none orphan onto the bare cell
                         // (resurface as phantom wallpaper + dupe-on-break later).
                         let _ = self.world.remove_face_attachments_at((pos[0], pos[1], pos[2]));
-                        self.push_use_edit(pos, block::AIR, tag);
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         let paper = crate::item::ItemStack::new_material(
                             crate::item::MaterialId::PapyrusSheet, 1,
                         );
                         // A full bag loses the sheet here (single-player as
-                        // ever); on a joined client the server's copy spills
-                        // its overflow as a real item.
-                        let _ = self.players[pidx].inventory.add_item(paper);
+                        // ever); on a joined client the server spawns what its
+                        // tag says didn't fit (`unfit`) as a real item.
+                        let unfit = self.players[pidx].inventory.add_item(paper.clone()).map_or(0, |l| l.count);
+                        self.push_use_edit(pos, block::AIR, tag, Some(paper), unfit);
                         self.audio.play_break();
                         self.players[pidx].place_cooldown = 8;
                     } else if self.players[pidx]
@@ -14910,7 +15004,7 @@ impl super::GameState {
                         // C3c-1 — the hoe as it was before this use wore it.
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::Till, pos);
                         self.world.set_block(pos[0], pos[1], pos[2], block::TILLED_SOIL);
-                        self.push_use_edit(pos, block::TILLED_SOIL, tag);
+                        self.push_use_edit(pos, block::TILLED_SOIL, tag, None, 0);
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                         self.handle_tool_use(info);
@@ -14951,7 +15045,7 @@ impl super::GameState {
                                 // changes don't touch it) so harvesting it earns
                                 // the produce but no proof-of-play work.
                                 self.world.place_player_block(above[0], above[1], above[2], stage_0);
-                                self.push_use_edit(above, stage_0, tag);
+                                self.push_use_edit(above, stage_0, tag, None, 0);
                                 self.rebuild_chunk_at(above[0], above[1], above[2]);
                                 self.audio.play_place();
                                 self.players[pidx].place_cooldown = 8;
@@ -15013,7 +15107,7 @@ impl super::GameState {
                                 .consume_one_material(hotbar, material)
                             {
                                 self.world.set_block(pos[0], pos[1], pos[2], next);
-                                self.push_use_edit(pos, next, tag);
+                                self.push_use_edit(pos, next, tag, None, 0);
                                 self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                                 self.audio.play_place();
                                 self.players[pidx].place_cooldown = 8;
@@ -15055,7 +15149,7 @@ impl super::GameState {
                         {
                             // Spec 06 §2.2 — planted papyrus is player-placed.
                             self.world.place_player_block(pos[0], pos[1] + 1, pos[2], block::PAPYRUS_STAGE_0);
-                            self.push_use_edit(reed_cell, block::PAPYRUS_STAGE_0, tag);
+                            self.push_use_edit(reed_cell, block::PAPYRUS_STAGE_0, tag, None, 0);
                             self.rebuild_chunk_at(pos[0], pos[1] + 1, pos[2]);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -15088,14 +15182,16 @@ impl super::GameState {
                             let rubber = crate::item::ItemStack::new_material(
                                 crate::item::MaterialId::Rubber, 1,
                             );
-                            if let Some(leftover) = self.players[pidx].inventory.add_item(rubber) {
+                            let leftover = self.players[pidx].inventory.add_item(rubber.clone());
+                            let unfit = leftover.as_ref().map_or(0, |l| l.count);
+                            if let Some(leftover) = leftover {
                                 let seed_h = (pos[0] as u32)
                                     .wrapping_mul(374761393)
                                     ^ (tap_tick as u32).wrapping_mul(668265263);
                                 let at = glam::Vec3::new(pos[0] as f32 + 0.5, pos[1] as f32 + 1.0, pos[2] as f32 + 0.5);
                                 self.spill_use_leftover(leftover, at, seed_h);
                             }
-                            self.push_use_edit(pos, block::RUBBER_LOG_TAPPED, tag);
+                            self.push_use_edit(pos, block::RUBBER_LOG_TAPPED, tag, Some(rubber), unfit);
                             self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -15130,8 +15226,11 @@ impl super::GameState {
                             .hotbar_slot(hotbar)
                             .map(|s| s.item.clone());
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::BucketEmpty, [dx, dy, dz]);
+                        // C3c-1-fix (M-1) — not a filled bucket a block use in
+                        // flight claims (an item frame's).
                         if let Some((liquid, filled)) = held
                             .and_then(|h| crate::bucket::empty_result(&h, self.world.get_block(dx, dy, dz)))
+                            && self.hand_may_spend(pidx)
                             && self.players[pidx]
                                 .inventory
                                 .consume_one_material(hotbar, filled)
@@ -15149,15 +15248,15 @@ impl super::GameState {
                                 let empty = crate::item::ItemStack::new_material(
                                     crate::item::MaterialId::Bucket, 1,
                                 );
-                                if let Some(leftover) =
-                                    self.players[pidx].inventory.add_item(empty)
-                                {
+                                let leftover = self.players[pidx].inventory.add_item(empty.clone());
+                                let unfit = leftover.as_ref().map_or(0, |l| l.count);
+                                if let Some(leftover) = leftover {
                                     let seed_h = (dx as u32).wrapping_mul(374761393)
                                         ^ (self.tick_counter as u32).wrapping_mul(668265263);
                                     let at = glam::Vec3::new(dx as f32 + 0.5, dy as f32 + 0.5, dz as f32 + 0.5);
                                     self.spill_use_leftover(leftover, at, seed_h);
                                 }
-                                self.push_use_edit([dx, dy, dz], liquid, tag);
+                                self.push_use_edit([dx, dy, dz], liquid, tag, Some(empty), unfit);
                                 self.rebuild_chunk_at(dx, dy, dz);
                                 self.audio.play_place();
                                 // Emptying a bucket is a fluids action too — fire
@@ -15186,12 +15285,15 @@ impl super::GameState {
                         // naturally skips SALT_PATH (it's not GRASS/DIRT).
                         let hotbar = self.players[pidx].hotbar_slot;
                         let tag = self.use_tag(pidx, crate::use_edits::UseKind::Salt, pos);
-                        if self.players[pidx]
-                            .inventory
-                            .consume_one_material(hotbar, crate::item::MaterialId::Salt)
+                        // C3c-1-fix (M-1) — not salt a block use in flight
+                        // claims.
+                        if self.hand_may_spend(pidx)
+                            && self.players[pidx]
+                                .inventory
+                                .consume_one_material(hotbar, crate::item::MaterialId::Salt)
                         {
                             self.world.set_block(pos[0], pos[1], pos[2], block::SALT_PATH);
-                            self.push_use_edit(pos, block::SALT_PATH, tag);
+                            self.push_use_edit(pos, block::SALT_PATH, tag, None, 0);
                             self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                             self.audio.play_place();
                             self.players[pidx].place_cooldown = 8;
@@ -15997,7 +16099,7 @@ impl super::GameState {
                                     // else see a whole door.
                                     if let Some(top) = door_top {
                                         let tag = crate::use_edits::tag(crate::use_edits::UseKind::DoorUpper, top, hotbar, None);
-                                        self.push_use_edit(top, block::OAK_DOOR, tag);
+                                        self.push_use_edit(top, block::OAK_DOOR, tag, None, 0);
                                     }
                                     self.rebuild_chunk_at(place_x, place_y, place_z);
                                     self.audio.play_place();
@@ -21470,6 +21572,7 @@ impl super::GameState {
         let mut pending_life_events = Vec::new();
         let mut pending_outcomes = Vec::new();
         let mut pending_kills = Vec::new();
+        let mut pending_refused_uses = Vec::new();
         let mut pending_entity_batches = Vec::new();
         let mut pending_block_changes = Vec::new();
         // World chat (Phase 2) — lines delivered to us this poll, from
@@ -21494,6 +21597,7 @@ impl super::GameState {
             pending_life_events = std::mem::take(&mut client.pending_life_events);
             pending_outcomes = std::mem::take(&mut client.pending_outcomes);
             pending_kills = std::mem::take(&mut client.pending_kills);
+            pending_refused_uses = std::mem::take(&mut client.pending_refused_uses);
             // Deltas accumulated across every StateUpdate since last frame —
             // sourced from the accumulators, NOT latest_state, so a frame
             // hitch that batches two server ticks loses nothing.
@@ -21639,6 +21743,11 @@ impl super::GameState {
             crate::chunk_stream::FORCED_CHECKS_PER_FRAME,
         );
 
+        // C3c-1-fix (M-4) — the server refused these uses of ours: each is
+        // undone from our own record of it. Before this update's
+        // acknowledgement lets records go.
+        self.undo_refused_uses(&pending_refused_uses);
+
         // Client: apply state update
         if let Some(state) = client_state {
             // Reserve state (Spec 16) — same source field as the host path,
@@ -21667,6 +21776,11 @@ impl super::GameState {
             // C3a-fix-1 — together with those answers, which may wait in the
             // window inbox (`apply_window_inbox`).
             self.window_inbox.acknowledged(acked);
+            // C3c-1-fix (M-4) — and our use records held long enough past it
+            // (`use_edits::USE_RECORD_HOLD_INPUTS`) go: a refusal of a use
+            // whose edit waited in the server's edit queue comes after the
+            // acknowledgement of the input that carried it.
+            self.sent_uses.acknowledged(acked);
             // C2a — our hunger is the server's (it runs our metabolism).
             let joined = self.joined();
             if let Some(slot) = self.players.first_mut() {

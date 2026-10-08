@@ -333,8 +333,26 @@ pub struct PossessionTally {
     pub use_mirrored: u32,
     /// C3c-1 — uses that didn't mirror cleanly: an outcome the use's rule
     /// can't produce, an item the copy didn't hold, a tool not in the slot.
-    /// Applied all the same (log-only).
+    /// Applied all the same (log-only). C3c-1-fix (L-1) — honest drift (an
+    /// outcome the server's world had moved on from, mirrored all the same)
+    /// and a tag that can't explain its edit (classified as an ordinary
+    /// edit) count here too.
     pub use_mismatch: u32,
+    /// C3c-1-fix (M-2) — units of a use's `product − unfit` the server's
+    /// copy had no room for: the client holds them; counted, never spawned.
+    pub use_copy_overflow: u32,
+    /// C3c-1-fix (M-2) — units of a use's `unfit` (the part the client's bag
+    /// couldn't take) the copy couldn't corroborate, spawned believed within
+    /// the joiner's believed bound (`window_ops::BelievedBucket`; BRIDGE
+    /// until C3d).
+    pub use_unfit_believed: u32,
+    /// C3c-1-fix (M-2) — uses whose unfit spawn went past that bound: nothing
+    /// was spawned.
+    pub use_unfit_refused: u32,
+    /// C3c-1-fix (M-4) — use-tagged edits refused (reach, a plot, the play
+    /// mode, a door's top half with no door below): the joiner was told, and
+    /// undoes them.
+    pub use_edit_refused: u32,
     /// C3c-1 — the use kinds already logged a mismatch for
     /// (`use_edits::UseKind::bit`): one line per kind per connection.
     uses_logged: u16,
@@ -406,7 +424,14 @@ impl PossessionTally {
             self.use_believed,
             self.use_refused,
         ];
-        let uses = [self.use_mirrored, self.use_mismatch];
+        let uses = [
+            self.use_mirrored,
+            self.use_mismatch,
+            self.use_copy_overflow,
+            self.use_unfit_believed,
+            self.use_unfit_refused,
+            self.use_edit_refused,
+        ];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
             .chain(&uses)
@@ -430,8 +455,15 @@ impl PossessionTally {
         }
         if uses.iter().any(|&n| n > 0) {
             line.push_str(&format!(
-                "; {} block-edit use(s) mirrored, {} use(s) that didn't match the server's copy",
-                self.use_mirrored, self.use_mismatch
+                "; {} block-edit use(s) mirrored, {} use(s) that didn't match the server's copy, \
+                 {} product unit(s) the copy had no room for, {} unfit unit(s) spawned believed, \
+                 {} unfit spawn(s) past the believed bound, {} use edit(s) refused",
+                self.use_mirrored,
+                self.use_mismatch,
+                self.use_copy_overflow,
+                self.use_unfit_believed,
+                self.use_unfit_refused,
+                self.use_edit_refused
             ));
         }
         if window.iter().any(|&n| n > 0) {

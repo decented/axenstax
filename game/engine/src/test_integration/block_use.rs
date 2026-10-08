@@ -761,6 +761,53 @@ fn believed_block_use_pays_are_bounded_like_believed_deposits() {
     assert_eq!(rig.ground(&diamond), 0, "nothing else made");
 }
 
+/// C3c-1-fix (L-3) — a block use that only WEARS its tool (shears on a hive,
+/// `pay` 0) with shears the server's copy doesn't hold is believed within the
+/// same bound (`window_ops::believe_wear`), and refused past it: a modified
+/// client claiming shears it doesn't hold harvests until the bound refuses.
+#[test]
+fn believed_wear_only_uses_are_bounded_like_believed_pays() {
+    let mut rig = Rig::dedicated("believed-shears", 1);
+    let c = [rig.at.x.floor() as i32, rig.at.y as i32, rig.at.z.floor() as i32];
+    let mut hives = Vec::new();
+    for y in 0..3 {
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                if (dx, dz) != (0, 0) && hives.len() < 80 {
+                    hives.push([c[0] + dx, c[1] + y, c[2] + dz]);
+                }
+            }
+        }
+    }
+    for &cell in &hives {
+        rig.set(cell, block::BEE_HIVE);
+        rig.world().insert_hive((cell[0], cell[1], cell[2]), crate::bee_hive::HiveData { bees_inside: 0, honey_level: 3 });
+    }
+    let start = rig.hs.server.tick_counter;
+    for (n, &cell) in hives.iter().enumerate() {
+        rig.cs[0].use_raw(2_000 + n as u32, cell, 0, &shears());
+    }
+    let mut answered_at = None;
+    for _ in 0..60 {
+        rig.tick();
+        if answered_at.is_none() && rig.cs[0].outcomes.len() == hives.len() {
+            answered_at = Some(rig.hs.server.tick_counter);
+        }
+    }
+    let secs = (answered_at.expect("every use answered") - start).div_ceil(20) as usize;
+    let sheared = rig.cs[0].outcomes.iter().filter(|o| o.accepted).count();
+    let refused: Vec<_> = rig.cs[0].outcomes.iter().filter(|o| !o.accepted).cloned().collect();
+    assert!(sheared >= 64, "the bound's depth is believed: {sheared}");
+    assert!(sheared <= 64 + 4 * secs + 1, "no more than 64 + 4/s ({secs} s): {sheared}");
+    assert!(!refused.is_empty(), "past the bound, refused");
+    assert!(refused.iter().all(|o| ItemNote::from_wire(o.note) == ItemNote::NothingToTake && o.window_event == 0));
+    let full = hives.iter().filter(|cell| rig.world().hive_at((cell[0], cell[1], cell[2])).is_some_and(|h| h.honey_level == 3)).count();
+    assert_eq!(full, refused.len(), "a refused use took no honey");
+    let sp = &rig.hs.server.players[rig.cs[0].slot];
+    assert_eq!(sp.possession.use_believed as usize, sheared, "each shearing was believed");
+    assert_eq!(sp.possession.use_refused as usize, refused.len());
+}
+
 /// M2 — a take the server's copy covers (the joiner really holds it) never
 /// touches the believed bound, even with the bound spent; with the bound
 /// spent, a claim the copy can't cover is refused and changes nothing.
@@ -925,7 +972,8 @@ fn each_joined_block_use_arm_asks_the_server_and_goes_no_further() {
 }
 
 /// M1 — source lint: when joined, every hand spend a block-use claim could
-/// race (a placement, a sown seed or reed, a crop accelerator) first asks
+/// race (a placement, a sown seed or reed, a crop accelerator; C3c-1-fix M-1:
+/// a bucket filled or emptied, bone meal on grass, salt) first asks
 /// `hand_may_spend` (`JoinerActions::can_spend`, as the Q-drop does), so one
 /// block can't be framed AND placed on a slow link. The real arms are driven
 /// by `game_harness_a_joiners_placement_waits_for_the_claim_of_a_frame_use_in_flight`.
@@ -939,6 +987,12 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
         ".consume_one_material(hotbar, seed_id)",
         ".consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)",
         ".consume_one_material(hotbar, material)",
+        // C3c-1-fix (M-1) — a bucket filled or emptied, bone meal on grass,
+        // salt: every spend of a claimable item.
+        ".consume_one_material(hotbar, crate::item::MaterialId::Bucket)",
+        ".consume_one_material(hotbar, filled)",
+        ".consume_one_material(hotbar, crate::item::MaterialId::Bonemeal)",
+        ".consume_one_material(hotbar, crate::item::MaterialId::Salt)",
     ] {
         let hits: Vec<usize> = lines
             .iter()

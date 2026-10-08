@@ -53,9 +53,17 @@ pub fn apply_tap(world: &mut World, pos: (i32, i32, i32), current_tick: u64) -> 
 ///
 /// Returns the count of restorations (useful for tests).
 pub fn tick_rubber_cooldowns(world: &mut World, current_tick: u64) -> u32 {
+    restore_expired_taps(world, current_tick).len() as u32
+}
+
+/// [`tick_rubber_cooldowns`]' work, returning the cells it restored (sorted,
+/// so the order is the same on every run): C3c-1-fix (L-2) — the server
+/// queues each as a block change, so every joiner (and a lending host's
+/// screen) sees the log regrow on the one clock that runs it.
+pub fn restore_expired_taps(world: &mut World, current_tick: u64) -> Vec<(i32, i32, i32)> {
     // Snapshot the entries first so we don't borrow tapped_rubber_logs
     // mutably while reading World.
-    let expired: Vec<(i32, i32, i32)> = world
+    let mut expired: Vec<(i32, i32, i32)> = world
         .tapped_rubber_logs
         .iter()
         .filter(|&(_, &tap_tick)| {
@@ -63,13 +71,14 @@ pub fn tick_rubber_cooldowns(world: &mut World, current_tick: u64) -> u32 {
         })
         .map(|(&pos, _)| pos)
         .collect();
-    let mut restored = 0u32;
+    expired.sort_unstable();
+    let mut restored = Vec::new();
     for pos in expired {
         // Only restore the block if it's still in the tapped state;
         // the player may have felled it during cooldown.
         if world.get_block(pos.0, pos.1, pos.2) == block::RUBBER_LOG_TAPPED {
             world.set_block(pos.0, pos.1, pos.2, block::RUBBER_LOG);
-            restored += 1;
+            restored.push(pos);
         }
         world.tapped_rubber_logs.remove(&pos);
     }

@@ -26,18 +26,29 @@
 //!   from the tag's slot first), wear its tool (`joiner_inventory::wear_tool`,
 //!   the client's `use_tool_at`), add what it made with the client's own
 //!   `Inventory::add_item` (first matching stack, else first empty slot), so
-//!   in lockstep both sides land it in the same slot. What doesn't fit the
-//!   copy is the caller's to spill as a real ground item (a joined client
-//!   spills nothing of its own).
+//!   in lockstep both sides land it in the same slot. C3c-1-fix (M-2) — a
+//!   use's overflow is what the CLIENT says didn't fit its bag
+//!   (`UseTag::unfit`): the server spawns exactly that as a real ground item
+//!   at the joiner (a joined client spills nothing of its own) and the copy
+//!   adds the rest; what of that doesn't fit the copy is only counted.
+//! - **The undo** (C3c-1-fix, M-4). A joined client keeps its own record of
+//!   each use ([`SentUses`]); when the server refuses the use's edit (reach,
+//!   a plot, the play mode…) it says so (`StateUpdatePacket::refused_uses`),
+//!   and the client takes back what landed and gives back what it spent
+//!   ([`undo`]), from its record, never from the notice.
 //!
-//! **Log-only, like all of C3a–C3c.** Nothing is refused for a use: the edit
-//! is applied whatever the verdict. An outcome the rule can't produce (bone
-//! meal three stages up, water from an empty bucket), an item the copy
-//! doesn't hold, a tool not in the slot: each is a `use_mismatch`
-//! (`PossessionTally`). The mirror never makes an item from nothing: an
-//! illegal outcome still takes what the client says it spent and wears its
-//! tool, but adds no product, and a use whose cost (or, for a no-cost use,
-//! its required item or tool) the copy can't pay adds no product either.
+//! **Log-only, like all of C3a–C3c.** Nothing the edit check accepts is
+//! refused for its use (the one exception, C3c-1-fix: a door's top half with
+//! no door below, which costs nothing): the edit is applied whatever the
+//! verdict ([`Verdict`]). C3c-1-fix (L-1) — the copy TRACKS the client: an
+//! outcome the server's world had moved on from but the rule makes (honest
+//! drift) mirrors the cost and the product; only a combination the rule
+//! never makes (water poured from an empty bucket) mirrors the cost alone;
+//! a tag that can't explain its edit at all is not a use (the edit is
+//! classified as an ordinary one). Each miss is a `use_mismatch`
+//! (`PossessionTally`). The mirror never makes an item from nothing: a use
+//! whose cost (or, for a no-cost use, its required item or tool) the copy
+//! can't pay adds no product.
 
 use crate::block::{self, BlockId};
 use crate::crafting::{Tool, ToolType};
@@ -263,6 +274,8 @@ pub fn tag(kind: UseKind, cell: [i32; 3], slot: usize, held: Option<&Item>) -> U
         slot: slot.min(usize::from(u8::MAX)) as u8,
         used,
         tool,
+        // Set by the arm once its `add_item` has said what didn't fit.
+        unfit: 0,
     }
 }
 
@@ -279,15 +292,134 @@ pub struct Before {
     pub source: bool,
 }
 
+/// C3c-1-fix (L-1) — the server's verdict on a use's claimed outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// An outcome the use's rule produces on the server's world, for what
+    /// the tag says it used.
+    Legal,
+    /// An outcome the rule produces for what was used, but not from the
+    /// server's world as it stands: honest drift (a source that flowed, a
+    /// crop that grew, a cell another player changed, a log on the server's
+    /// cooldown). Log-only tracks the client: the copy mirrors the cost AND
+    /// the product (tallied as a drift mismatch).
+    Drift,
+    /// An outcome the rule never makes for what was used, whatever the world
+    /// (water poured from an empty bucket, salt sown as a seed): the cost the
+    /// client says it spent is mirrored, no product.
+    Impossible,
+    /// The kind can't explain the edit at all: its new block is never that
+    /// kind's output (a `DoorUpper` or `Till` tag on an ordinary placement),
+    /// or the kind byte is unknown. Not a use: the edit falls back to its
+    /// ordinary classification (`check_placement` sees it).
+    Unexplained,
+}
+
 /// The server's verdict on a use's outcome, read before the edit lands.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Judged {
-    /// Is `old → new` an outcome this use's rule can produce, for what the
-    /// tag says it used, on the server's world?
-    pub legal: bool,
-    /// What the rule gives back for this outcome (added only for a legal
-    /// one whose cost the copy pays).
+    pub verdict: Verdict,
+    /// What the rule gives back for this outcome (added only for a legal or
+    /// drifted one whose cost the copy pays). `None` for a drifted fill whose
+    /// server cell holds no fluid any more: which bucket the client filled
+    /// (water or lava) isn't on the tag.
     pub product: Option<ItemStack>,
+    /// L-1 — a crop accelerator or bone meal on grass whose server cell is
+    /// already at or past the stage the client sent (the crop grew on the
+    /// server first): the server's cell is left as it is (setting it would set
+    /// the crop BACK); the cost still settles. Not a refusal.
+    pub keeps_server_cell: bool,
+}
+
+impl Judged {
+    /// A use of a kind this build doesn't know (a modified peer's).
+    pub fn unknown_kind() -> Self {
+        Judged { verdict: Verdict::Unexplained, product: None, keeps_server_cell: false }
+    }
+
+    #[cfg(test)]
+    pub fn legal(&self) -> bool {
+        self.verdict == Verdict::Legal
+    }
+}
+
+/// Every seed `sown_crop` sows (for [`explains`]).
+const SEEDS: [MaterialId; 9] = [
+    MaterialId::WheatSeeds,
+    MaterialId::Carrot,
+    MaterialId::Potato,
+    MaterialId::CornSeeds,
+    MaterialId::CottonSeeds,
+    MaterialId::HempSeeds,
+    MaterialId::CornflowerSeeds,
+    MaterialId::FieldPoppySeeds,
+    MaterialId::ButtercupSeeds,
+];
+
+/// A crop stage past its first: one a crop accelerator can make (from the
+/// stage before it).
+fn is_grown_stage(b: BlockId) -> bool {
+    crate::growth::is_crop(b) && b != block::PAPYRUS_STAGE_0 && !SEEDS.iter().any(|&m| sown_crop(m) == Some(b))
+}
+
+/// L-1 — can a use of `kind` explain an edit leaving `new` (with `meta`) at
+/// all, whatever was used and whatever the world held: is `new` one of the
+/// kind's outputs?
+pub fn explains(kind: UseKind, new: BlockId, meta: u8) -> bool {
+    match kind {
+        UseKind::BucketFill | UseKind::Erase => new == block::AIR,
+        UseKind::BucketEmpty => matches!(new, block::WATER | block::LAVA),
+        UseKind::Sow => SEEDS.iter().any(|&m| sown_crop(m) == Some(new)),
+        UseKind::PlantPapyrus => new == block::PAPYRUS_STAGE_0,
+        UseKind::GrowGrass => new == block::TALL_GRASS,
+        UseKind::GrowCrop => is_grown_stage(new),
+        UseKind::Salt => new == block::SALT_PATH,
+        UseKind::TapRubber => new == block::RUBBER_LOG_TAPPED,
+        UseKind::Till => new == block::TILLED_SOIL,
+        UseKind::DoorUpper => new == block::OAK_DOOR && crate::block_shape::door_is_top(meta),
+    }
+}
+
+/// L-1 — could the client's rule make `new` with `used`, from SOME world
+/// (the one the client saw)? False only for a combination the rule never
+/// makes. A no-cost kind (an Eraser, a tap, a hoe, a door's top half) is
+/// possible whenever it [`explains`] the edit.
+fn possible(kind: UseKind, used: Option<&Item>, new: BlockId, meta: u8) -> bool {
+    let material = |m: MaterialId| used == Some(&Item::Material(m));
+    match kind {
+        UseKind::BucketFill => material(MaterialId::Bucket) && new == block::AIR,
+        UseKind::BucketEmpty => {
+            used.and_then(|u| crate::bucket::empty_result(u, block::AIR)).is_some_and(|(fluid, _)| fluid == new)
+        }
+        UseKind::Sow => matches!(used, Some(Item::Material(m)) if sown_crop(*m) == Some(new)),
+        UseKind::PlantPapyrus => material(MaterialId::PapyrusReed) && new == block::PAPYRUS_STAGE_0,
+        UseKind::GrowGrass => material(MaterialId::Bonemeal) && new == block::TALL_GRASS,
+        UseKind::GrowCrop => {
+            (material(MaterialId::Bonemeal) || material(MaterialId::Fertiliser)) && is_grown_stage(new)
+        }
+        UseKind::Salt => material(MaterialId::Salt) && new == block::SALT_PATH,
+        UseKind::Erase | UseKind::TapRubber | UseKind::Till | UseKind::DoorUpper => explains(kind, new, meta),
+    }
+}
+
+/// Is the server's `old` already at or past `sent` on the same crop's ladder
+/// (`growth::next_stage`, from `sent` on)? For bone meal on grass: tall grass
+/// already there.
+fn at_or_past(kind: UseKind, old: BlockId, sent: BlockId) -> bool {
+    match kind {
+        UseKind::GrowGrass => old == block::TALL_GRASS && sent == block::TALL_GRASS,
+        UseKind::GrowCrop => {
+            let mut stage = Some(sent);
+            while let Some(s) = stage {
+                if s == old {
+                    return true;
+                }
+                stage = crate::growth::next_stage(s);
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Judge a joiner's use of `kind`, which claims the edit `bc` (`before` the
@@ -295,7 +427,8 @@ pub struct Judged {
 /// member of the rule's outcome set is accepted (the server does not re-roll
 /// the client's bone-meal stage). `world` is the server's, before the edit:
 /// the cells around it (the soil under a seed, the water by a reed, a door's
-/// bottom half, a tapped log's cooldown) are read there.
+/// bottom half, a tapped log's cooldown) are read there. C3c-1-fix (L-1) —
+/// what isn't legal is drift, impossible or unexplained ([`Verdict`]).
 pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Before, world: &World) -> Judged {
     let (old, new) = (before.old, bc.new_block);
     let below = || world.get_block(bc.x, bc.y - 1, bc.z);
@@ -337,7 +470,21 @@ pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Befor
                 && below() == block::OAK_DOOR
         }
     };
-    Judged { legal, product: product(kind, old) }
+    let verdict = if legal {
+        Verdict::Legal
+    } else if !explains(kind, new, bc.meta) {
+        Verdict::Unexplained
+    } else if possible(kind, used, new, bc.meta) {
+        Verdict::Drift
+    } else {
+        Verdict::Impossible
+    };
+    let product = match verdict {
+        Verdict::Legal | Verdict::Drift => product(kind, old),
+        Verdict::Impossible | Verdict::Unexplained => None,
+    };
+    let keeps_server_cell = matches!(verdict, Verdict::Drift | Verdict::Impossible) && at_or_past(kind, old, new);
+    Judged { verdict, product, keeps_server_cell }
 }
 
 /// Why a use didn't mirror cleanly (log-only).
@@ -345,6 +492,12 @@ pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Befor
 pub enum UseMiss {
     /// The outcome isn't one the rule produces for what was used.
     Outcome,
+    /// C3c-1-fix (L-1) — an outcome the rule makes, but not from the
+    /// server's world as it stands (honest drift): mirrored all the same.
+    Drift,
+    /// C3c-1-fix (L-1) — the kind can't explain the edit: classified as an
+    /// ordinary edit instead.
+    Unexplained,
     /// The copy held none of what the use consumed (or, for a tap, no
     /// bucket in the slot).
     NothingToTake,
@@ -356,10 +509,25 @@ impl UseMiss {
     pub const fn label(self) -> &'static str {
         match self {
             UseMiss::Outcome => "an outcome its rule can't produce",
+            UseMiss::Drift => "an outcome the server's world had moved on from (drift; mirrored)",
+            UseMiss::Unexplained => "an edit its kind can't explain (checked as an ordinary edit)",
             UseMiss::NothingToTake => "an item the server's copy didn't hold",
             UseMiss::NoTool => "a tool the server's copy didn't hold in that slot",
         }
     }
+}
+
+/// M-2 — the part of a use's product the client said didn't fit its bag
+/// (`UseTag::unfit`), for the caller to spawn as a real ground item at the
+/// joiner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unfit {
+    pub stack: ItemStack,
+    /// The copy agrees: it paid the use's cost and, having added the rest of
+    /// the product, had no room for this either. Spawned free. Otherwise the
+    /// spawn is believed: charged to the joiner's believed bound
+    /// (`window_ops::BelievedBucket`) and not spawned past it.
+    pub corroborated: bool,
 }
 
 /// What [`settle`] did to the copy.
@@ -367,20 +535,34 @@ impl UseMiss {
 pub struct Settled {
     /// The first thing that didn't match, if any (`None` = mirrored).
     pub miss: Option<UseMiss>,
-    /// The part of the product the copy had no room for: the caller spills
-    /// it as a real ground item.
-    pub overflow: Option<ItemStack>,
+    /// M-2 — units of `product − unfit` the copy had no room for: tallied
+    /// only (`use_copy_overflow`), never spawned — the client holds them.
+    pub copy_overflow: u8,
+    /// M-2 — what the client said didn't fit, if anything (and the use makes
+    /// a product).
+    pub unfit: Option<Unfit>,
 }
 
 /// Mirror a joiner's use of `kind` on `inv`, the server's copy of its
 /// inventory, by the client's steps in the client's order: take one of
 /// `used` (from the tag's `slot` first: `joiner_actions::take_owed`), wear
-/// `tool` in `slot`, then add the product (`judged.product`, for a legal
-/// outcome whose cost or requirement the copy met) with `add_item`. A tap
-/// requires a Bucket in `slot` (it keeps it).
-pub fn settle(inv: &mut Inventory, kind: UseKind, tag: &UseTag, used: Option<&Item>, judged: Judged) -> Settled {
+/// `tool` in `slot`, then add the product (`judged.product`, for a legal or
+/// drifted outcome whose cost or requirement the copy met) with `add_item`.
+/// A tap requires a Bucket in `slot` (it keeps it).
+///
+/// C3c-1-fix (M-2) — the use's overflow is what the CLIENT says didn't fit
+/// (`tag.unfit`): the copy adds `product − unfit` (what doesn't fit the copy
+/// is only counted, `copy_overflow`), and the `unfit` part is handed back
+/// ([`Settled::unfit`]) for the caller to spawn. Never called for an
+/// [`Verdict::Unexplained`] use.
+pub fn settle(inv: &mut Inventory, kind: UseKind, tag: &UseTag, used: Option<&Item>, judged: &Judged) -> Settled {
     let slot = usize::from(tag.slot);
-    let mut miss = (!judged.legal).then_some(UseMiss::Outcome);
+    let mut miss = match judged.verdict {
+        Verdict::Legal => None,
+        Verdict::Drift => Some(UseMiss::Drift),
+        Verdict::Impossible => Some(UseMiss::Outcome),
+        Verdict::Unexplained => Some(UseMiss::Unexplained),
+    };
     let mut paid = true;
     if kind.consumes() {
         paid = used.is_some_and(|item| crate::joiner_actions::take_owed(inv, slot, item, 1) == 1);
@@ -401,11 +583,24 @@ pub fn settle(inv: &mut Inventory, kind: UseKind, tag: &UseTag, used: Option<&It
             miss = miss.or(Some(UseMiss::NoTool));
         }
     }
-    let overflow = match judged.product {
-        Some(stack) if judged.legal && paid => inv.add_item(stack),
-        _ => None,
+    let product = judged.product.clone().filter(|_| matches!(judged.verdict, Verdict::Legal | Verdict::Drift));
+    let Some(product) = product else {
+        return Settled { miss, copy_overflow: 0, unfit: None };
     };
-    Settled { miss, overflow }
+    let unfit_n = tag.unfit.min(product.count);
+    let landed = product.count - unfit_n;
+    let mut copy_overflow = 0;
+    if paid && landed > 0 {
+        copy_overflow = inv.add_item(ItemStack { item: product.item.clone(), count: landed }).map_or(0, |s| s.count);
+    }
+    let unfit = (unfit_n > 0).then(|| {
+        let stack = ItemStack { item: product.item.clone(), count: unfit_n };
+        // Would the copy, having paid, have taken it? Then it can't say the
+        // client's bag was full.
+        let corroborated = paid && inv.clone().add_item(stack.clone()).is_some();
+        Unfit { stack, corroborated }
+    });
+    Settled { miss, copy_overflow, unfit }
 }
 
 /// The tool a wearing use takes: an Eraser for an erase, a hoe for tilling.
@@ -415,6 +610,131 @@ fn wears_with(kind: UseKind, tool: &Tool) -> bool {
         UseKind::Till => tool.tool_type == ToolType::Hoe,
         _ => false,
     }
+}
+
+// ─── The undo (client) ───────────────────────────────────────────────────
+
+/// C3c-1-fix (M-4) — how many inputs past the one a use's edit could first
+/// ride (`RemoteClient::next_input_seq` when it was made) a joined client
+/// keeps its record of the use. The server acknowledges an input when it has
+/// simulated its movement, but the input's edits can wait in its edit queue
+/// past the per-tick edit budget (and a refusal can wait behind chunk pushes
+/// in the client's outbox), so a refusal can arrive after the acknowledgement
+/// of the input that carried the use: the record is held this long past it
+/// (5 s) so the undo always has it.
+pub const USE_RECORD_HOLD_INPUTS: u64 = 100;
+
+/// Most use records a joined client keeps (the oldest goes first). An honest
+/// client makes a use at most every 8 ticks: about 13 within the hold.
+pub const MAX_USE_RECORDS: usize = 64;
+
+/// C3c-1-fix (M-4) — a joined client's own record of a use it made: what the
+/// use spent and what of its product landed in the bag, read where the use
+/// was made. A refusal is undone from this, never from the notice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseRecord {
+    pub cell: [i32; 3],
+    /// The use's kind, as its tag carried it.
+    pub kind: u8,
+    /// The hotbar slot it was made from.
+    pub slot: usize,
+    /// What it consumed (one), if anything.
+    pub cost: Option<Item>,
+    /// What of its product the bag took (`product − unfit`), if anything.
+    pub landed: Option<ItemStack>,
+    /// `RemoteClient::next_input_seq` when it was made.
+    pub made_at: u64,
+}
+
+/// C3c-1-fix (M-4) — a joined client's records of its recent uses
+/// ([`UseRecord`]), for undoing the ones the server refuses.
+#[derive(Clone, Debug, Default)]
+pub struct SentUses {
+    records: std::collections::VecDeque<UseRecord>,
+}
+
+impl SentUses {
+    /// Keep `record` (dropping the oldest past [`MAX_USE_RECORDS`]).
+    pub fn record(&mut self, record: UseRecord) {
+        self.records.push_back(record);
+        while self.records.len() > MAX_USE_RECORDS {
+            self.records.pop_front();
+        }
+    }
+
+    /// The server has applied our inputs up to `acked`: drop the records held
+    /// [`USE_RECORD_HOLD_INPUTS`] past that. Call AFTER applying the
+    /// refusals that came with it.
+    pub fn acknowledged(&mut self, acked: u64) {
+        self.records.retain(|r| acked < r.made_at.saturating_add(USE_RECORD_HOLD_INPUTS));
+    }
+
+    /// The record a refusal at `cell` of `kind` undoes: the NEWEST of that
+    /// cell and kind, taken out. An older one there was more likely accepted
+    /// (it is only held for a while); two refused in flight are both undone,
+    /// whichever order.
+    pub fn take(&mut self, cell: [i32; 3], kind: u8) -> Option<UseRecord> {
+        let at = self.records.iter().rposition(|r| r.cell == cell && r.kind == kind)?;
+        self.records.remove(at)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Forget everything (the session ended).
+    pub fn clear(&mut self) {
+        self.records.clear();
+    }
+}
+
+/// What undoing one refused use did ([`undo`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Undone {
+    /// Units of the landed product the window no longer held (spent, moved
+    /// away, dropped): a shortfall, logged.
+    pub short: u8,
+    /// Units of the cost that didn't fit back: lost on the client (the
+    /// server's copy, which never applied the use, still holds them).
+    pub lost: u8,
+}
+
+/// C3c-1-fix (M-4) — undo the refused use `record` on the client's window:
+/// take back the product that landed (the shared owed-take search, exact
+/// first, from the use's slot first: `joiner_actions::take_owed_held`, which
+/// also searches the grid and cursor), then give back the cost: into its own
+/// slot when that is empty or holds a stack it joins, else wherever
+/// `add_item` puts it. Tool wear is not undone.
+pub fn undo(inv: &mut Inventory, ui: &mut crate::craft_ui::CraftingUi, record: &UseRecord) -> Undone {
+    let mut undone = Undone::default();
+    if let Some(landed) = &record.landed {
+        let taken = crate::joiner_actions::take_owed_held(inv, ui, record.slot, &landed.item, landed.count);
+        undone.short = landed.count.saturating_sub(taken);
+    }
+    if let Some(cost) = &record.cost {
+        let one = ItemStack { item: cost.clone(), count: 1 };
+        undone.lost = give_back(inv, record.slot, one);
+    }
+    undone
+}
+
+/// Put `stack` back in `slot` if it is empty or holds a stack it joins with
+/// room, else `add_item`. Returns how many didn't fit.
+fn give_back(inv: &mut Inventory, slot: usize, stack: ItemStack) -> u8 {
+    match inv.slot(slot) {
+        None if slot < 36 => {
+            inv.set_slot(slot, Some(stack));
+            return 0;
+        }
+        Some(s) if s.item.can_stack_with(&stack.item) && s.count.saturating_add(stack.count) <= s.item.max_stack() => {
+            let joined = ItemStack { item: s.item.clone(), count: s.count + stack.count };
+            inv.set_slot(slot, Some(joined));
+            return 0;
+        }
+        _ => {}
+    }
+    inv.add_item(stack).map_or(0, |s| s.count)
 }
 
 #[cfg(test)]
@@ -479,7 +799,7 @@ mod tests {
     fn a_crop_accelerator_is_judged_by_its_outcome_set() {
         let w = World::new();
         let meal = mat(MaterialId::Bonemeal);
-        let judge_to = |used: &Item, new| judge(UseKind::GrowCrop, Some(used), &bc(0, 70, 0, new), before(block::WHEAT_STAGE_0), &w).legal;
+        let judge_to = |used: &Item, new| judge(UseKind::GrowCrop, Some(used), &bc(0, 70, 0, new), before(block::WHEAT_STAGE_0), &w).legal();
         assert!(judge_to(&meal, block::WHEAT_STAGE_1));
         assert!(judge_to(&meal, block::WHEAT_STAGE_2));
         assert!(!judge_to(&meal, block::WHEAT_STAGE_3), "three stages is no bone meal outcome");
@@ -496,15 +816,15 @@ mod tests {
         let bucket = mat(MaterialId::Bucket);
         let fill = bc(0, 70, 0, block::AIR);
         let j = judge(UseKind::BucketFill, Some(&bucket), &fill, before(block::LAVA), &w);
-        assert!(j.legal);
+        assert!(j.legal());
         assert_eq!(j.product, Some(ItemStack::new_material(MaterialId::LavaBucket, 1)));
         let flowing = Before { old: block::WATER, source: false };
-        assert!(!judge(UseKind::BucketFill, Some(&bucket), &fill, flowing, &w).legal);
-        assert!(!judge(UseKind::BucketFill, Some(&mat(MaterialId::WaterBucket)), &fill, before(block::WATER), &w).legal);
+        assert!(!judge(UseKind::BucketFill, Some(&bucket), &fill, flowing, &w).legal());
+        assert!(!judge(UseKind::BucketFill, Some(&mat(MaterialId::WaterBucket)), &fill, before(block::WATER), &w).legal());
         // Water placed with an empty bucket: no outcome of emptying.
         let pour = bc(0, 70, 0, block::WATER);
-        assert!(!judge(UseKind::BucketEmpty, Some(&bucket), &pour, before(block::AIR), &w).legal);
-        assert!(judge(UseKind::BucketEmpty, Some(&mat(MaterialId::WaterBucket)), &pour, before(block::AIR), &w).legal);
+        assert!(!judge(UseKind::BucketEmpty, Some(&bucket), &pour, before(block::AIR), &w).legal());
+        assert!(judge(UseKind::BucketEmpty, Some(&mat(MaterialId::WaterBucket)), &pour, before(block::AIR), &w).legal());
     }
 
     /// Lockstep: the copy takes what the client's `consume_one_material`
@@ -525,8 +845,8 @@ mod tests {
             .map(|s| s.item);
         let w = World::new();
         let j = judge(UseKind::BucketFill, used.as_ref(), &bc(0, 70, 0, block::AIR), before(block::WATER), &w);
-        let s = settle(&mut copy, UseKind::BucketFill, &t, used.as_ref(), j);
-        assert_eq!((s.miss, s.overflow), (None, None));
+        let s = settle(&mut copy, UseKind::BucketFill, &t, used.as_ref(), &j);
+        assert_eq!((s.miss, s.copy_overflow, s.unfit), (None, 0, None));
         for k in 0..36 {
             assert_eq!(copy.slot(k), client.slot(k), "slot {k}");
         }
@@ -542,11 +862,15 @@ mod tests {
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         let stone = judge(UseKind::BucketFill, Some(&bucket), &bc(0, 70, 0, block::AIR), before(block::STONE), &w);
-        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), stone);
-        assert_eq!(s.miss, Some(UseMiss::Outcome));
+        // C3c-1-fix (L-1) — a fill whose server cell holds no fluid is drift
+        // (the client saw water there), but which bucket it filled isn't on
+        // the tag: the cost is mirrored, no product.
+        assert_eq!(stone.verdict, Verdict::Drift);
+        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), &stone);
+        assert_eq!(s.miss, Some(UseMiss::Drift));
         assert!(inv.slots_iter().all(|s| s.is_none()), "the bucket is spent, nothing made");
         let water = judge(UseKind::BucketFill, Some(&bucket), &bc(0, 70, 0, block::AIR), before(block::WATER), &w);
-        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), water);
+        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), &water);
         assert_eq!(s.miss, Some(UseMiss::NothingToTake));
         assert!(inv.slots_iter().all(|s| s.is_none()), "no bucket to fill: no water bucket");
     }
@@ -561,8 +885,8 @@ mod tests {
         inv.set_slot(3, Some(ItemStack { item: eraser.clone(), count: 1 }));
         let t = tag(UseKind::Erase, [0, 70, 0], 3, Some(&eraser));
         let j = judge(UseKind::Erase, None, &bc(0, 70, 0, block::AIR), before(block::BLUEPRINT_PAPER), &w);
-        assert!(j.legal);
-        let s = settle(&mut inv, UseKind::Erase, &t, None, j.clone());
+        assert!(j.legal());
+        let s = settle(&mut inv, UseKind::Erase, &t, None, &j);
         assert_eq!(s.miss, None);
         let worn = match inv.slot(3).map(|s| &s.item) {
             Some(Item::Tool(t)) => t.durability,
@@ -571,7 +895,7 @@ mod tests {
         assert_eq!(worn + 1, Tool::new(ToolType::Eraser, ToolMaterial::Wood).durability);
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::PapyrusSheet, 1)));
         // From the wrong slot: no wear, no sheet.
-        let s = settle(&mut inv, UseKind::Erase, &tag(UseKind::Erase, [0, 70, 0], 5, Some(&eraser)), None, j);
+        let s = settle(&mut inv, UseKind::Erase, &tag(UseKind::Erase, [0, 70, 0], 5, Some(&eraser)), None, &j);
         assert_eq!(s.miss, Some(UseMiss::NoTool));
         assert_eq!(inv.slot(0).map(|s| s.count), Some(1));
     }
@@ -582,17 +906,17 @@ mod tests {
     fn a_tap_is_judged_on_the_servers_cooldown() {
         let mut w = World::new();
         let tap = bc(4, 70, 4, block::RUBBER_LOG_TAPPED);
-        assert!(judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG), &w).legal);
+        assert!(judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG), &w).legal());
         w.tapped_rubber_logs.insert((4, 70, 4), 10);
-        assert!(!judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG), &w).legal);
-        assert!(!judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG_TAPPED), &World::new()).legal);
+        assert!(!judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG), &w).legal());
+        assert!(!judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG_TAPPED), &World::new()).legal());
         let mut inv = Inventory::new();
         let j = judge(UseKind::TapRubber, None, &tap, before(block::RUBBER_LOG), &World::new());
         let t = tag(UseKind::TapRubber, [4, 70, 4], 0, Some(&mat(MaterialId::Bucket)));
-        assert_eq!(settle(&mut inv, UseKind::TapRubber, &t, None, j.clone()).miss, Some(UseMiss::NothingToTake));
+        assert_eq!(settle(&mut inv, UseKind::TapRubber, &t, None, &j).miss, Some(UseMiss::NothingToTake));
         assert!(inv.slots_iter().all(|s| s.is_none()));
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
-        assert_eq!(settle(&mut inv, UseKind::TapRubber, &t, None, j).miss, None);
+        assert_eq!(settle(&mut inv, UseKind::TapRubber, &t, None, &j).miss, None);
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "the bucket is kept");
         assert_eq!(inv.slot(1), Some(&ItemStack::new_material(MaterialId::Rubber, 1)));
     }
@@ -602,11 +926,226 @@ mod tests {
     fn a_door_top_half_needs_its_bottom_half() {
         let mut w = World::new();
         let top = BlockChange { x: 2, y: 71, z: 2, new_block: block::OAK_DOOR, meta: door_top_meta(0) };
-        assert!(!judge(UseKind::DoorUpper, None, &top, before(block::AIR), &w).legal);
+        assert!(!judge(UseKind::DoorUpper, None, &top, before(block::AIR), &w).legal());
         w.set_block(2, 70, 2, block::OAK_DOOR);
-        assert!(judge(UseKind::DoorUpper, None, &top, before(block::AIR), &w).legal);
+        assert!(judge(UseKind::DoorUpper, None, &top, before(block::AIR), &w).legal());
         let bottom_meta = BlockChange { meta: 0, ..top.clone() };
-        assert!(!judge(UseKind::DoorUpper, None, &bottom_meta, before(block::AIR), &w).legal);
+        assert!(!judge(UseKind::DoorUpper, None, &bottom_meta, before(block::AIR), &w).legal());
         assert!(crate::block_shape::door_is_top(door_top_meta(crate::meta::with_facing(0, crate::meta::Facing::East))));
+    }
+
+    // ─── C3c-1-fix ─────────────────────────────────────────────────────────
+
+    /// L-1 — what isn't legal on the server's world is drift (the rule makes
+    /// it for what was used), impossible (it never does) or unexplained (the
+    /// kind never makes that block at all).
+    #[test]
+    fn an_illegal_use_is_drift_impossible_or_unexplained() {
+        let w = World::new();
+        let bucket = mat(MaterialId::Bucket);
+        let fill = bc(0, 70, 0, block::AIR);
+        // A source that flowed on the server: drift, and the product is the
+        // bucket of the fluid still there.
+        let flowed = judge(UseKind::BucketFill, Some(&bucket), &fill, Before { old: block::WATER, source: false }, &w);
+        assert_eq!(flowed.verdict, Verdict::Drift);
+        assert_eq!(flowed.product, Some(ItemStack::new_material(MaterialId::WaterBucket, 1)));
+        // Water poured from an EMPTY bucket: the rule never makes it.
+        let pour = judge(UseKind::BucketEmpty, Some(&bucket), &bc(0, 70, 0, block::WATER), before(block::AIR), &w);
+        assert_eq!((pour.verdict, pour.product), (Verdict::Impossible, None));
+        // An emptied bucket into a cell another player filled: drift, the
+        // empty bucket comes back.
+        let into_stone = judge(UseKind::BucketEmpty, Some(&mat(MaterialId::WaterBucket)), &bc(0, 70, 0, block::WATER), before(block::STONE), &w);
+        assert_eq!(into_stone.verdict, Verdict::Drift);
+        assert_eq!(into_stone.product, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        // A hoe tag on a stone placement, a door-top tag on a plank: no
+        // output of the kind.
+        assert_eq!(judge(UseKind::Till, None, &bc(0, 70, 0, block::STONE), before(block::DIRT), &w).verdict, Verdict::Unexplained);
+        let plank = BlockChange { x: 0, y: 70, z: 0, new_block: block::OAK_PLANKS, meta: door_top_meta(0) };
+        assert_eq!(judge(UseKind::DoorUpper, None, &plank, before(block::AIR), &w).verdict, Verdict::Unexplained);
+        // Salt "sowing" a seed's crop: explained (a crop is sown) but never
+        // made with salt.
+        let salt = mat(MaterialId::Salt);
+        assert_eq!(judge(UseKind::Sow, Some(&salt), &bc(0, 70, 0, block::WHEAT_STAGE_0), before(block::AIR), &w).verdict, Verdict::Impossible);
+        // A tap on a log the server holds on cooldown: drift, rubber comes.
+        let mut cooling = World::new();
+        cooling.tapped_rubber_logs.insert((0, 70, 0), 5);
+        let tap = judge(UseKind::TapRubber, None, &bc(0, 70, 0, block::RUBBER_LOG_TAPPED), before(block::RUBBER_LOG), &cooling);
+        assert_eq!(tap.verdict, Verdict::Drift);
+        assert_eq!(tap.product, Some(ItemStack::new_material(MaterialId::Rubber, 1)));
+    }
+
+    /// L-1 — a crop accelerator whose server crop already stands at or past
+    /// the stage sent keeps the server's cell (it isn't set back); a crop
+    /// behind the stage sent is drift, applied.
+    #[test]
+    fn a_crop_the_server_grew_first_is_not_set_back() {
+        let w = World::new();
+        let meal = mat(MaterialId::Bonemeal);
+        let to_2 = bc(0, 70, 0, block::WHEAT_STAGE_2);
+        for (server, keeps) in [
+            (block::WHEAT_STAGE_2, true),
+            (block::WHEAT_STAGE_3, true),
+            (block::CARROT_STAGE_3, false),
+            (block::AIR, false),
+        ] {
+            let j = judge(UseKind::GrowCrop, Some(&meal), &to_2, before(server), &w);
+            assert_eq!(j.keeps_server_cell, keeps, "server {server}");
+        }
+        let behind = judge(UseKind::GrowCrop, Some(&meal), &bc(0, 70, 0, block::WHEAT_STAGE_3), before(block::WHEAT_STAGE_0), &w);
+        assert_eq!((behind.verdict, behind.keeps_server_cell), (Verdict::Drift, false));
+        // Bone meal on grass where the server already has tall grass.
+        let grass = judge(UseKind::GrowGrass, Some(&meal), &bc(0, 71, 0, block::TALL_GRASS), before(block::TALL_GRASS), &w);
+        assert!(grass.keeps_server_cell);
+        assert!(!judge(UseKind::GrowGrass, Some(&meal), &bc(0, 71, 0, block::TALL_GRASS), before(block::AIR), &w).keeps_server_cell);
+    }
+
+    /// L-1 — log-only tracks the client: a drifted use mirrors its cost AND
+    /// its product on the copy.
+    #[test]
+    fn a_drifted_use_mirrors_cost_and_product() {
+        let w = World::new();
+        let bucket = mat(MaterialId::Bucket);
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+        let t = tag(UseKind::BucketFill, [0, 70, 0], 0, Some(&bucket));
+        let j = judge(UseKind::BucketFill, Some(&bucket), &bc(0, 70, 0, block::AIR), Before { old: block::LAVA, source: false }, &w);
+        let s = settle(&mut inv, UseKind::BucketFill, &t, Some(&bucket), &j);
+        assert_eq!(s.miss, Some(UseMiss::Drift));
+        assert_eq!(inv.slot(0).map(|s| s.count), Some(1));
+        assert_eq!(inv.slot(1), Some(&ItemStack::new_material(MaterialId::LavaBucket, 1)));
+    }
+
+    fn full_of_stone(inv: &mut Inventory, from: usize) {
+        for k in from..36 {
+            inv.set_slot(k, Some(ItemStack::new_block(block::STONE, 64)));
+        }
+    }
+
+    /// M-2 — the copy adds `product − unfit`; the `unfit` part is handed
+    /// back, corroborated only when the copy paid and had no room either.
+    #[test]
+    fn a_uses_unfit_part_is_the_clients_and_corroborated_by_a_full_paying_copy() {
+        let w = World::new();
+        let bucket = mat(MaterialId::Bucket);
+        let fill = bc(0, 70, 0, block::AIR);
+        let j = judge(UseKind::BucketFill, Some(&bucket), &fill, before(block::WATER), &w);
+        let mut t = tag(UseKind::BucketFill, [0, 70, 0], 0, Some(&bucket));
+        t.unfit = 1;
+        let water = ItemStack::new_material(MaterialId::WaterBucket, 1);
+        // A full copy that holds the buckets: corroborated, nothing added.
+        let mut full = Inventory::new();
+        full.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+        full_of_stone(&mut full, 1);
+        let s = settle(&mut full, UseKind::BucketFill, &t, Some(&bucket), &j);
+        assert_eq!(s.unfit, Some(Unfit { stack: water.clone(), corroborated: true }));
+        assert_eq!((s.miss, s.copy_overflow), (None, 0));
+        assert_eq!(full.slot(0).map(|s| s.count), Some(1));
+        // An EMPTY copy (empty at attach): it can't pay, so it can't say the
+        // bag was full: believed.
+        let mut empty = Inventory::new();
+        let s = settle(&mut empty, UseKind::BucketFill, &t, Some(&bucket), &j);
+        assert_eq!(s.unfit, Some(Unfit { stack: water.clone(), corroborated: false }));
+        assert!(empty.slots_iter().all(|s| s.is_none()), "nothing added");
+        // A copy with room: believed.
+        let mut roomy = Inventory::new();
+        roomy.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+        let s = settle(&mut roomy, UseKind::BucketFill, &t, Some(&bucket), &j);
+        assert_eq!(s.unfit, Some(Unfit { stack: water, corroborated: false }));
+        assert!(roomy.slots_iter().flatten().all(|s| s.item == bucket), "the unfit part never lands on the copy");
+        // A copy FULLER than the client (unfit 0): its overflow is counted,
+        // never handed back to spawn.
+        t.unfit = 0;
+        let mut fuller = Inventory::new();
+        fuller.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 2)));
+        full_of_stone(&mut fuller, 1);
+        let s = settle(&mut fuller, UseKind::BucketFill, &t, Some(&bucket), &j);
+        assert_eq!((s.copy_overflow, s.unfit), (1, None));
+        // A use that makes nothing has no unfit part, whatever the tag says.
+        let meal = mat(MaterialId::Bonemeal);
+        let mut g = tag(UseKind::GrowCrop, [0, 70, 0], 0, Some(&meal));
+        g.unfit = 1;
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bonemeal, 2)));
+        let gj = judge(UseKind::GrowCrop, Some(&meal), &bc(0, 70, 0, block::WHEAT_STAGE_1), before(block::WHEAT_STAGE_0), &w);
+        assert_eq!(settle(&mut inv, UseKind::GrowCrop, &g, Some(&meal), &gj).unfit, None);
+    }
+
+    fn record(cell: [i32; 3], kind: UseKind, made_at: u64) -> UseRecord {
+        UseRecord {
+            cell,
+            kind: kind.to_wire(),
+            slot: 0,
+            cost: Some(mat(MaterialId::Bucket)),
+            landed: Some(ItemStack::new_material(MaterialId::WaterBucket, 1)),
+            made_at,
+        }
+    }
+
+    /// M-4 — records are matched by cell and kind (the newest), and held
+    /// past the acknowledgement of the input that could first carry them.
+    #[test]
+    fn a_use_record_outlives_its_inputs_ack_by_the_hold() {
+        let mut uses = SentUses::default();
+        uses.record(record([1, 2, 3], UseKind::BucketFill, 10));
+        uses.record(record([1, 2, 3], UseKind::TapRubber, 11));
+        uses.record(record([1, 2, 3], UseKind::BucketFill, 12));
+        assert_eq!(uses.take([9, 9, 9], UseKind::BucketFill.to_wire()), None, "another cell");
+        assert_eq!(uses.take([1, 2, 3], UseKind::BucketFill.to_wire()).map(|r| r.made_at), Some(12), "the newest of that kind");
+        uses.acknowledged(12);
+        assert_eq!(uses.len(), 2, "acknowledged, but held");
+        uses.acknowledged(10 + USE_RECORD_HOLD_INPUTS - 1);
+        assert_eq!(uses.len(), 2);
+        uses.acknowledged(10 + USE_RECORD_HOLD_INPUTS);
+        assert_eq!(uses.len(), 1, "the oldest is past its hold");
+        for k in 0..(MAX_USE_RECORDS as u64 + 5) {
+            uses.record(record([0, 0, k as i32], UseKind::Salt, 20));
+        }
+        assert_eq!(uses.len(), MAX_USE_RECORDS);
+    }
+
+    /// M-4 — the undo takes back what landed (exact first, wherever it went)
+    /// and gives the cost back to its own slot; a product already gone is a
+    /// shortfall.
+    #[test]
+    fn a_refused_fill_is_undone_from_the_clients_record() {
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        inv.set_slot(4, Some(ItemStack::new_block(block::STONE, 3)));
+        let before_use = inv.clone();
+        // The client's fill: its last bucket spent, the lava bucket landed
+        // in the first empty slot (0).
+        assert!(inv.consume_one_material(0, MaterialId::Bucket));
+        assert!(inv.add_item(ItemStack::new_material(MaterialId::LavaBucket, 1)).is_none());
+        let rec = UseRecord {
+            cell: [0, 70, 0],
+            kind: UseKind::BucketFill.to_wire(),
+            slot: 0,
+            cost: Some(mat(MaterialId::Bucket)),
+            landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 1)),
+            made_at: 1,
+        };
+        assert_eq!(undo(&mut inv, &mut ui, &rec), Undone::default());
+        for k in 0..36 {
+            assert_eq!(inv.slot(k), before_use.slot(k), "slot {k}");
+        }
+        // The lava bucket was emptied before the refusal came: a shortfall.
+        // The cost still comes back.
+        let mut gone = Inventory::new();
+        assert_eq!(undo(&mut gone, &mut ui, &rec), Undone { short: 1, lost: 0 });
+        assert_eq!(gone.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
+        // A tap's rubber is taken back, the kept bucket untouched.
+        let tap = UseRecord {
+            kind: UseKind::TapRubber.to_wire(),
+            cost: None,
+            landed: Some(ItemStack::new_material(MaterialId::Rubber, 1)),
+            ..rec
+        };
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Rubber, 1)));
+        assert_eq!(undo(&mut inv, &mut ui, &tap), Undone::default());
+        assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
+        assert!(inv.slot(1).is_none());
     }
 }

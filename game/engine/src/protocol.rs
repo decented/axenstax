@@ -694,6 +694,12 @@ pub const MAX_MINED_PER_INPUT: usize = 16;
 /// count 1; `None` when it consumed nothing: a rubber tap, a hoe, an
 /// Eraser, a door's top half) and the tool it wore (`tool`, a hoe's or an
 /// Eraser's state before the use; `WireItem::None` otherwise).
+///
+/// C3c-1-fix (v82) — appends `unfit`: how many of the use's product the
+/// client's bag could NOT take (its `add_item` leftover: 0 or 1; always 0 for
+/// a use that makes nothing). A joined client spills nothing of its own; the
+/// server spawns exactly `unfit` of the product as a real ground item at the
+/// joiner and its copy adds `product − unfit` (`use_edits::settle`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UseTag {
     pub x: i32,
@@ -703,6 +709,25 @@ pub struct UseTag {
     pub slot: u8,
     pub used: WireSlot,
     pub tool: WireItem,
+    pub unfit: u8,
+}
+
+/// C3c-1-fix (v82) — the server refused one of this client's use-tagged
+/// edits ([`StateUpdatePacket::refused_uses`]): the edit's cell, the use's
+/// kind (`use_edits::UseKind`, as [`UseTag::kind`]) and why, as an
+/// `item_actions::ItemNote` code (`OutOfReach` for reach; `NotHere` for the
+/// play mode, a plot, an economy block or bedrock; `None`, silent, for the
+/// rest). The edit itself comes back as a plain block change (the send-back);
+/// the honest client undoes its own use from its OWN record of it — the cost
+/// it spent back, the product that landed taken back — never from this
+/// notice's content (`use_edits::SentUses`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedUse {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub kind: u8,
+    pub note: u8,
 }
 
 /// C3c-1 — the tag one edit travels with, client side and in the server's
@@ -1752,6 +1777,13 @@ pub struct StateUpdatePacket {
     /// last.
     #[serde(default)]
     pub block_views: Vec<BlockEntityView>,
+    /// C3c-1-fix (v82) — this client's use-tagged edits the server refused
+    /// since the last packet ([`RefusedUse`]), each once, in line after the
+    /// send-back of its cell (`state_outbox`, never repeated across the
+    /// packets of a tick). Per client; a host's own seat gets none.
+    /// APPEND-ONLY: last.
+    #[serde(default)]
+    pub refused_uses: Vec<RefusedUse>,
 }
 
 // ─── Chunk data (Server → Client, reliable stream) ───
@@ -2487,7 +2519,18 @@ pub struct ServerAnnouncePacket {
 ///   cast's wait for the server's bite). Lighting an unlit campfire (a
 ///   stick's friction, flint and steel, the Magnesium Firestarter) is a
 ///   `UseBlock`. New `item_actions::ItemNote` codes 19..=25.
-pub const PROTOCOL_VERSION: u32 = 81;
+/// - v82 (2026-10-08, C3c-1-fix): a use's
+///   overflow is the client's, and a refused use is undone. [`UseTag`]
+///   appends `unfit: u8` (after `tool`): how many of the use's product the
+///   client's bag could not take (0 or 1). The server spawns exactly that as
+///   a real ground item at the joiner (a spawn its copy can't corroborate is
+///   believed within the joiner's bound) and its copy adds the rest.
+///   [`StateUpdatePacket`] appends `refused_uses: Vec<RefusedUse>` (after
+///   `block_views`; [`RefusedUse`] `{ x, y, z: i32, kind: u8, note: u8 }`,
+///   `note` an `item_actions::ItemNote` code): each use-tagged edit the
+///   server refused, once, per client, in line after its send-back; the
+///   client undoes the use from its own record.
+pub const PROTOCOL_VERSION: u32 = 82;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2659,8 +2702,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3c-2 — v81.
-        assert_eq!(super::PROTOCOL_VERSION, 81);
+        // C3c-1-fix — v82 (on C3c-2's v81).
+        assert_eq!(super::PROTOCOL_VERSION, 82);
     }
 
     #[test]
@@ -2874,6 +2917,7 @@ mod tests {
                 slot: 4,
                 used: Some(WireStack { item_kind: item_kind::MATERIAL, item_id: 9, count: 1, full_item: WireItem::None }),
                 tool: WireItem::Tool { tool_type: 9, material: 1, durability: 50 },
+                unfit: 1,
             }],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
@@ -2934,6 +2978,7 @@ mod tests {
                 slot: 4,
                 used: Some(WireStack { item_kind: 3, item_id: 0x0506, count: 1, full_item: WireItem::None }),
                 tool: WireItem::None,
+                unfit: 1,
             }],
             ..head.clone()
         };
@@ -2974,7 +3019,8 @@ mod tests {
         tail.extend_from_slice(&0x0304u16.to_le_bytes());
         // v80 (C3c-1): use_tags (u64 length + entries: x, y, z i32, kind u8,
         // slot u8, used (`Some` tag, then item_kind u8, item_id u16, count
-        // u8, full_item's u32 variant tag), tool's u32 variant tag).
+        // u8, full_item's u32 variant tag), tool's u32 variant tag, and
+        // (v82) unfit u8).
         tail.extend_from_slice(&1u64.to_le_bytes());
         for v in [6i32, -7, 8] {
             tail.extend_from_slice(&v.to_le_bytes());
@@ -2984,6 +3030,8 @@ mod tests {
         tail.push(1);
         tail.extend_from_slice(&0u32.to_le_bytes());
         tail.extend_from_slice(&0u32.to_le_bytes());
+        // v82 (C3c-1-fix): each use tag closes with `unfit` u8.
+        tail.push(1);
         // Everything before the appended fields is unchanged, and the
         // appended fields close the packet in append order (`None` is one
         // `0` byte).
@@ -3017,6 +3065,7 @@ mod tests {
             storm_ticks_left: 300,
             own_hunger: 0,
             block_views: Vec::new(),
+            refused_uses: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3065,6 +3114,7 @@ mod tests {
             storm_ticks_left: 0,
             own_hunger: 0,
             block_views: Vec::new(),
+            refused_uses: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3122,6 +3172,7 @@ mod tests {
             storm_ticks_left: 600,
             own_hunger: 0,
             block_views: Vec::new(),
+            refused_uses: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3360,7 +3411,11 @@ mod tests {
         //   `Reel` (= 9), `ItemActionOutcomePacket.bite_after` (after
         //   `wear_held`) — a joiner's bow, slingshot, carts and fishing run on
         //   the server.
-        assert_eq!(PROTOCOL_VERSION, 81);
+        // v82 (2026-10-08, C3c-1-fix):
+        //   `UseTag.unfit` (after `tool`), `StateUpdatePacket.refused_uses`
+        //   (after `block_views`) — a use's overflow is the client's, and a
+        //   refused use is undone on the joiner.
+        assert_eq!(PROTOCOL_VERSION, 82);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3773,6 +3828,7 @@ mod tests {
                 storm_ticks_left: 0,
                 own_hunger: 20,
                 block_views: vec![v.clone()],
+                refused_uses: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3829,8 +3885,9 @@ mod tests {
         }
         assert_eq!(bincode::serialize(&rack_view).unwrap(), want_rack, "the rack view's bytes changed: bump the protocol");
 
-        // And that is what a StateUpdate carries, last (`block_views`: its
-        // length, then each view).
+        // And that is what a StateUpdate carries, after its other fields
+        // (`block_views`: its length, then each view), with only v81's
+        // `refused_uses` (empty: a u64 length 0) behind it.
         for (v, want) in [(fire, want_fire), (rack_view, want_rack)] {
             let pkt = StateUpdatePacket {
                 tick: 1,
@@ -3848,9 +3905,10 @@ mod tests {
                 storm_ticks_left: 0,
                 own_hunger: 0,
                 block_views: vec![v],
+                refused_uses: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
-            assert!(bytes.ends_with(&[1u64.to_le_bytes().to_vec(), want].concat()));
+            assert!(bytes.ends_with(&[1u64.to_le_bytes().to_vec(), want, 0u64.to_le_bytes().to_vec()].concat()));
         }
     }
 
@@ -4241,8 +4299,8 @@ mod tests {
 
     /// bincode 1 is positional, so `StateUpdatePacket`'s trailing fields must
     /// sit in the order each bump appended them: P9's weather windows (v59),
-    /// then C2a's `own_hunger` (v73), then C3b-2's `block_views` (v79).
-    /// Pinned on the wire bytes.
+    /// then C2a's `own_hunger` (v73), then C3b-2's `block_views` (v79), then
+    /// C3c-1-fix's `refused_uses` (v82). Pinned on the wire bytes.
     #[test]
     fn state_update_trailing_fields_are_in_append_order() {
         let pkt = StateUpdatePacket {
@@ -4261,6 +4319,7 @@ mod tests {
             storm_ticks_left: 0x0506_0708,
             own_hunger: 0x11,
             block_views: Vec::new(),
+            refused_uses: vec![RefusedUse { x: 5, y: -6, z: 7, kind: 8, note: 10 }],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let mut tail = Vec::new();
@@ -4271,9 +4330,17 @@ mod tests {
         tail.push(0x11);
         // v79 (C3b-2): block_views, an empty Vec (u64 length 0).
         tail.extend_from_slice(&0u64.to_le_bytes());
+        // v82 (C3c-1-fix): refused_uses (u64 length + entries: x, y, z i32,
+        // kind u8, note u8).
+        tail.extend_from_slice(&1u64.to_le_bytes());
+        for v in [5i32, -6, 7] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.extend_from_slice(&[8, 10]);
         assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..]);
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.own_hunger, 0x11);
+        assert_eq!(back.refused_uses, pkt.refused_uses);
     }
 
     #[test]
