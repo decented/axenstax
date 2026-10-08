@@ -1,4 +1,4 @@
-//! C3b-1 (2026-10-08, protocol v77) — shared chests, dispensers and furnaces
+//! C3b-1 (2026-10-08, protocol v77; C3b-fix-a, v78) — shared chests, dispensers and furnaces
 //! for joiners.
 //!
 //! Every test drives a REAL `HostedServer` over the in-process transport (a
@@ -6,10 +6,14 @@
 //! real one: a `CraftingUi` with the player's `Inventory` and armour, and a
 //! `container_window::SharedContainer` mirror built from the server's
 //! `ContainerOpened` and kept by its `WindowSlotSet`s
-//! (`container_window::apply_slot_set`), exactly as `game_loop` keeps it.
-//! Clicks go through `CraftingUi::apply_container_click` (the prediction,
-//! logged as a window op with its digest and touched slots), and the log is
-//! sent numbered, as `GameState::flush_window_ops` sends it.
+//! (`container_window::apply_slot_set`, with the session's correction debt),
+//! exactly as `game_loop` keeps it, each a window event applied in arrival
+//! order (C3b-fix-a, v78: every container view is numbered). Clicks go
+//! through `CraftingUi::apply_container_click` (the prediction, logged as a
+//! window op with its digest, touched slots, claims and verdict), and the
+//! log is sent numbered, as `GameState::flush_window_ops` sends it. A
+//! client can be held (`Rig::tick_holding`) so it acts inside a correction's
+//! round trip.
 
 use glam::Vec3;
 
@@ -22,7 +26,7 @@ use crate::furnace::{ClickMode, SlotKind};
 use crate::hosted_server::{HostedServer, RemoteTransport};
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack, MaterialId};
-use crate::protocol::{self, slot_set_reason, OpenRefusal, WindowOpPacket, WindowSlotSetPacket, WireWindowSlot};
+use crate::protocol::{self, slot_set_reason, OpenRefusal, WindowSlotSetPacket, WireWindowSlot};
 use crate::sim_lend::OwnedSimParts;
 use crate::transport::{ChannelClientTransport, ClientTransport};
 use crate::window::{self, ClickCtx, ClickResult, Station};
@@ -46,9 +50,18 @@ struct Client {
     refusals: Vec<OpenRefusal>,
     /// Every `WindowSlotSet` received, in order.
     slot_sets: Vec<WindowSlotSetPacket>,
-    /// The highest window event applied (C3a-fix-1; here a correction of
-    /// player slots), reported with every op.
+    /// The highest window event applied (C3a-fix-1; here an opened
+    /// container, a push or a correction), reported with every op.
     events: u32,
+    /// C3b-fix-a — what its window owes from correction takes it couldn't
+    /// pay (`WindowInbox::debt` in the game).
+    debt: container_window::CorrectionDebt,
+    /// `GrantUnfit` units reported back.
+    unfit: u32,
+    /// Its `ItemAction` sequence (`JoinerActions::unanswered`).
+    actions: u32,
+    /// Its last input's sequence number ([`Rig::report`]).
+    inputs: u64,
 }
 
 impl Client {
@@ -64,12 +77,19 @@ impl Client {
             refusals: Vec::new(),
             slot_sets: Vec::new(),
             events: 0,
+            debt: Default::default(),
+            unfit: 0,
+            actions: 0,
+            inputs: 0,
         }
     }
 
     /// Read everything the server sent: an opened container becomes the
-    /// mirror, a slot set is applied to the window and the mirror.
+    /// mirror, a slot set is applied to the window and the mirror. As
+    /// `GameState::apply_window_inbox` does, the ops logged before go out
+    /// first, so each reports the events applied when it was made.
     fn receive(&mut self, registry: &block::BlockRegistry) {
+        self.flush();
         while let Some(pkt) = self.transport.try_recv_from_server() {
             match protocol::deserialize_header(&pkt) {
                 Some((protocol::PacketType::ContainerOpened, payload)) => {
@@ -78,6 +98,7 @@ impl Client {
                         Some(why) => self.refusals.push(why),
                         None => self.mirror = SharedContainer::from_opened(&opened, registry),
                     }
+                    self.events = self.events.max(opened.window_event);
                 }
                 Some((protocol::PacketType::WindowSlotSet, payload)) => {
                     let set: WindowSlotSetPacket = protocol::safe_deserialize(payload).unwrap();
@@ -88,8 +109,21 @@ impl Client {
                         grid: &mut self.ui.grid,
                         container: self.mirror.as_mut().map(|m| m.as_mut()),
                     };
-                    container_window::apply_slot_set(&mut view, &set, registry);
+                    let applied = container_window::apply_slot_set(&mut view, &set, registry, &mut self.debt);
                     self.events = self.events.max(set.window_event);
+                    // What didn't fit goes back to the server, one report per
+                    // give in order, as `GameState::apply_window_inbox` sends it.
+                    let reported = applied.unfit.iter().rposition(|&n| n > 0).map_or(0, |last| last + 1);
+                    for &count in &applied.unfit[..reported] {
+                        self.unfit += u32::from(count);
+                        self.actions += 1;
+                        let pkt = protocol::ItemActionPacket {
+                            seq: self.actions,
+                            action: protocol::ItemAction::GrantUnfit { event: set.window_event, count },
+                            events_applied: self.events,
+                        };
+                        self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+                    }
                     self.slot_sets.push(set);
                 }
                 _ => {}
@@ -119,14 +153,7 @@ impl Client {
     fn flush(&mut self) {
         for logged in self.ui.take_ops(&self.inv, &self.armour) {
             self.seq += 1;
-            let pkt = WindowOpPacket {
-                op_seq: self.seq,
-                op: logged.op,
-                digest: logged.digest,
-                events_applied: self.events,
-                touched: logged.touched,
-                claims: logged.claims,
-            };
+            let pkt = logged.packet(self.seq, self.events);
             self.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
         }
     }
@@ -203,13 +230,75 @@ impl Rig {
 
     /// One server tick, then every client reads what it was sent.
     fn tick(&mut self) {
+        self.tick_holding(None);
+    }
+
+    /// One server tick, then every client but `held` reads what it was
+    /// sent: what the server sent `held` stays on its way (in the channel),
+    /// so `held` can act inside that round trip.
+    fn tick_holding(&mut self, held: Option<usize>) {
         match self.host.as_mut() {
             Some(h) => h.lend_tick(&mut self.hs),
             None => self.hs.tick(),
         }
-        for c in &mut self.cs {
-            c.receive(&self.registry);
+        for (n, c) in self.cs.iter_mut().enumerate() {
+            if Some(n) != held {
+                c.receive(&self.registry);
+            }
         }
+    }
+
+    /// Joiner `n` reports the window events it applied, as every input
+    /// does (standing still), and the server ticks: the server's copy of
+    /// its window catches up with what its client applied.
+    fn report(&mut self, n: usize) {
+        let slot = self.cs[n].slot;
+        self.cs[n].inputs += 1;
+        let sp = &self.hs.server.players[slot];
+        let input = protocol::InputPacket {
+            tick: self.cs[n].inputs,
+            x: sp.player.pos.x,
+            y: sp.player.pos.y,
+            z: sp.player.pos.z,
+            yaw: sp.yaw,
+            pitch: sp.pitch,
+            health: 20.0,
+            events_applied: self.cs[n].events,
+            ..Default::default()
+        };
+        self.cs[n].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        self.tick();
+    }
+
+    /// Units of `item` in the world: every joiner's client window, the real
+    /// container joiner 0 has open, and the ground items; and the same with
+    /// the server's copies of the windows instead of the clients'.
+    fn world_total(&self, item: &Item, chest: [i32; 3]) -> (u32, u32) {
+        let in_chest: u32 = self
+            .world_ref()
+            .chest_at((chest[0], chest[1], chest[2]))
+            .map(|c| c.slots.iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum())
+            .unwrap_or(0);
+        let ground: u32 = self
+            .hs
+            .server
+            .ecs
+            .query::<&crate::entity::ItemEntity>()
+            .iter()
+            .filter(|(_, it)| &it.stack.item == item)
+            .map(|(_, it)| u32::from(it.stack.count))
+            .sum();
+        let clients: u32 = self.cs.iter().map(|c| c.count(item)).sum();
+        let servers: u32 = self
+            .cs
+            .iter()
+            .map(|c| {
+                let sp = &self.hs.server.players[c.slot];
+                let inv: u32 = sp.inventory.slots_iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum();
+                inv + sp.cursor.iter().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum::<u32>()
+            })
+            .sum();
+        (clients + in_chest + ground, servers + in_chest + ground)
     }
 
     fn world(&mut self) -> &mut crate::world::World {
@@ -275,7 +364,7 @@ impl Rig {
     fn server_container(&self, n: usize) -> Option<ContainerRef<'_>> {
         let sp = &self.hs.server.players[self.cs[n].slot];
         let cell = sp.open_container?;
-        let kind = sp.container_sent.as_ref()?.kind;
+        let kind = sp.container_sent.open_kind?;
         container_window::container_at(self.world_ref(), cell, kind)
     }
 
@@ -297,7 +386,7 @@ impl Rig {
         assert_eq!(server, mirror, "{what}: the container");
         assert_eq!(self.server_digest(n), c.digest(), "{what}: the digests");
         assert_eq!(sp.possession.window_mismatch, 0, "{what}: no op mismatched");
-        assert_eq!(sp.possession.container_corrections, 0, "{what}: nothing corrected");
+        assert_eq!(sp.possession.container_corrected, 0, "{what}: nothing corrected");
     }
 }
 
@@ -391,7 +480,7 @@ fn a_scripted_container_session_keeps_the_server_in_lockstep() {
     assert_eq!(rig.cs[0].count(&Item::Material(MaterialId::IronIngot)), 1);
 
     let t = rig.tally(0);
-    assert_eq!((t.window_mismatch, t.container_corrections, t.container_refused), (0, 0, 0));
+    assert_eq!((t.window_mismatch, t.container_corrected, t.container_refused), (0, 0, 0));
 }
 
 /// Race — two joiners take the last stack of one chest slot in the same
@@ -422,6 +511,11 @@ fn two_joiners_racing_for_one_stack_end_with_one_stack_between_them() {
     let stone_item = Item::Block(block::STONE);
     assert_eq!(rig.cs[winner].count(&stone_item), 16, "the winner holds it");
     assert_eq!(rig.cs[loser].count(&stone_item), 0, "the loser's phantom stack was corrected away");
+    // C3b-fix-a — the server's copy follows the loser's own order: it took
+    // the prediction with the op, and takes the correction when the loser's
+    // next packet reports it applied it.
+    rig.report(loser);
+    rig.report(winner);
     let server_stone: u32 = (0..2)
         .map(|n| rig.hs.server.players[rig.cs[n].slot].inventory.slots_iter().flatten().filter(|s| s.item == stone_item).map(|s| u32::from(s.count)).sum::<u32>())
         .sum();
@@ -429,8 +523,13 @@ fn two_joiners_racing_for_one_stack_end_with_one_stack_between_them() {
     assert!(rig.server_container(winner).is_some_and(|c| c.get(0).is_none()));
     let corrections: Vec<_> = rig.cs[loser].slot_sets.iter().filter(|s| s.reason == slot_set_reason::CORRECTION).collect();
     assert_eq!(corrections.len(), 1, "one correction");
-    assert!(corrections[0].sets.iter().any(|(at, v)| matches!(at, WireWindowSlot::Inv(_)) && v.is_none()), "it names the inventory slot only the client filled");
-    assert_eq!(rig.tally(loser).container_corrections, 1);
+    // C3b-fix-a (v78) — by item, never a slot value: take back the 16 it
+    // predicted, from the slot it filled first.
+    assert_eq!(corrections[0].take, vec![(0, crate::inventory::stack_to_wire(&stone(16)))], "take 16 stone, from slot 0 first");
+    assert!(corrections[0].give.is_empty());
+    assert!(player_sets(corrections[0]).is_empty(), "no set names a player slot");
+    assert_eq!(rig.tally(loser).container_corrected, 1);
+    assert_eq!(rig.tally(loser).window_mismatch, 0, "a lost race is container convergence, not a lockstep mismatch");
     for n in [winner, loser] {
         let what = format!("joiner {n} after the race");
         let c = &rig.cs[n];
@@ -439,8 +538,10 @@ fn two_joiners_racing_for_one_stack_end_with_one_stack_between_them() {
 }
 
 /// Race, staggered — the loser clicks before the push of the winner's take
-/// reaches it, and its op lands a tick later. Its own touched slots still
-/// name where its phantom stack landed, so the correction finds it.
+/// reaches it, and its op lands a tick later. C3b-fix-a (C-M1) — the op
+/// reports the views it applied (none since it opened), so the server
+/// re-runs its prediction on exactly the view it was made on and corrects
+/// the phantom stack.
 #[test]
 fn a_take_predicted_before_the_push_arrived_is_still_corrected() {
     let mut rig = Rig::dedicated("race-staggered", 2);
@@ -462,6 +563,7 @@ fn a_take_predicted_before_the_push_arrived_is_still_corrected() {
     rig.tick();
     assert_eq!(rig.cs[1].count(&Item::Block(block::STONE)), 0, "corrected: no duplicate");
     assert_eq!(rig.cs[0].count(&Item::Block(block::STONE)), 9);
+    rig.report(1);
     assert_eq!(rig.server_digest(1), rig.cs[1].digest());
 }
 
@@ -563,23 +665,32 @@ fn opens_out_of_reach_protected_or_not_a_container_are_refused() {
     assert!(rig.world().chest_at((far[0], far[1], far[2])).is_none(), "no entity created for a refusal");
 
     // A container op with nothing open on the server: refused, tallied,
-    // and the slots the client touched are corrected back.
+    // and the client's prediction undone. C3b-fix-a — undone by item, on
+    // the view the server sent: the chest it opened was broken under it
+    // (the server closed it) before the click reached the server.
+    rig.world().plots.clear();
     rig.give(0, 5, Item::Block(block::DIRT), 3);
-    let mut fake = ChestData::new();
-    fake.slots[0] = Some(stone(4));
-    rig.cs[0].mirror = Some(SharedContainer {
-        cell: protected,
-        kind: ContainerKind::Chest { tier: ChestTier::Wood },
-        contents: container_window::ContainerData::Chest(fake),
-    });
+    let gone = rig.place(-1, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(stone(4));
+    rig.world().insert_chest((gone[0], gone[1], gone[2]), contents);
+    rig.open(0, gone);
+    assert!(rig.cs[0].mirror.is_some(), "opened");
+    rig.world().set_block(gone[0], gone[1], gone[2], block::AIR);
+    rig.tick();
+    assert_eq!(rig.hs.server.players[rig.cs[0].slot].open_container, None, "the server closed it");
     let eye = rig.eye(0);
     rig.cs[0].click(ContainerClick::Withdraw { slot: 0, all: true }, eye);
     rig.cs[0].flush();
     rig.tick();
     let t = rig.tally(0);
-    assert_eq!((t.container_refused, t.container_corrections), (1, 1));
-    assert_eq!(rig.cs[0].count(&Item::Block(block::STONE)), 0, "the stone from a chest the server never opened is gone");
+    assert_eq!((t.container_refused, t.container_corrected), (1, 1));
+    assert_eq!(rig.cs[0].count(&Item::Block(block::STONE)), 0, "the stone from a chest the server no longer had open is gone");
     assert_eq!(rig.cs[0].count(&Item::Block(block::DIRT)), 3, "an untouched slot stays");
+    assert_eq!(t.window_mismatch, 0, "a refused container op is container convergence, not a lockstep mismatch");
+    rig.report(0);
+    let sp = &rig.hs.server.players[rig.cs[0].slot];
+    assert!(sp.inventory.slots_iter().flatten().all(|s| s.item != Item::Block(block::STONE)), "the server's copy never moved");
 }
 
 /// Plans — a joiner can't put a Plan in a shared container (refused on both
@@ -732,7 +843,10 @@ fn a_locally_caught_fish_deposited_reaches_the_chest_and_the_slot_is_not_reverte
 /// prediction merged into. Its correction takes back exactly the 16 it
 /// predicted it gained: the 10 survive (the server's drifted copy had none
 /// there). The correction is a numbered window event, which the server's
-/// copy applies when the loser's next op reports it.
+/// copy applies when the loser's next op reports it. C3b-fix-a (v78) — by
+/// item ("take 16 stone"), never a slot value, and the server's copy
+/// applies its own change (it made the same prediction, so it takes the
+/// same 16), never the client's claimed 10 (C-M2).
 #[test]
 fn the_loser_of_a_race_gives_back_only_what_it_predicted_it_gained() {
     let mut rig = Rig::dedicated("race-claims", 2);
@@ -759,16 +873,21 @@ fn the_loser_of_a_race_gives_back_only_what_it_predicted_it_gained() {
     assert_eq!(rig.cs[loser].inv.slot(0), Some(&stone(10)), "the 16 went back; its own 10 survive");
     let corrections: Vec<_> = rig.cs[loser].slot_sets.iter().filter(|s| s.reason == slot_set_reason::CORRECTION).collect();
     assert_eq!(corrections.len(), 1);
-    assert_eq!(player_sets(corrections[0]), vec![WireWindowSlot::Inv(0)], "exactly the slot it predicted into");
+    assert!(player_sets(corrections[0]).is_empty(), "no slot value");
+    assert_eq!(
+        corrections[0].take,
+        vec![(0, crate::inventory::stack_to_wire(&stone(16)))],
+        "take the 16 it predicted, from the slot it predicted into first"
+    );
     let event = corrections[0].window_event;
-    assert!(event > 0, "a correction of player slots is a numbered window event");
+    assert!(event > 0, "a correction is a numbered window event");
     assert!(rig.server_container(loser).is_some_and(|c| c.get(0).is_none()), "the stack is the winner's");
     // The loser's next op reports the event: the server's copy takes it.
-    assert_eq!(rig.sp(loser).inventory.slot(0), None, "the server's copy waits for the client's word");
+    assert_eq!(rig.sp(loser).inventory.slot(0), Some(&stone(16)), "the server's copy made the same prediction, and waits for the client's word");
     rig.cs[loser].close();
     rig.cs[loser].flush();
     rig.tick();
-    assert_eq!(rig.sp(loser).inventory.slot(0), Some(&stone(10)), "applied in the client's order");
+    assert_eq!(rig.sp(loser).inventory.slot(0), None, "applied in the client's order: never the client's claimed 10");
     assert_eq!(rig.sp(loser).window_events.tally.forced, 0);
 }
 
@@ -797,8 +916,9 @@ fn drift_in_an_untouched_slot_is_never_corrected() {
     rig.cs[1].flush();
     rig.tick();
     let sets: Vec<WireWindowSlot> = rig.cs[loser].slot_sets.iter().flat_map(player_sets).collect();
-    assert!(!sets.is_empty(), "the race was corrected");
-    assert!(!sets.contains(&WireWindowSlot::Inv(20)) && !sets.contains(&WireWindowSlot::Inv(21)), "never a drifted slot: {sets:?}");
+    let corrected = rig.cs[loser].slot_sets.iter().any(|s| s.reason == slot_set_reason::CORRECTION && !s.take.is_empty());
+    assert!(corrected, "the race was corrected");
+    assert!(sets.is_empty(), "C3b-fix-a — a correction names no player slot, so never a drifted one: {sets:?}");
     assert_eq!(rig.cs[loser].inv.slot(20), None);
     assert_eq!(rig.cs[loser].inv.slot(21), Some(&ItemStack::new_material(MaterialId::Bread, 3)), "the client's bread stays");
     assert_eq!(rig.cs[loser].count(&Item::Block(block::STONE)), 0, "the phantom stack went back");
@@ -845,4 +965,393 @@ fn a_joiner_breaking_a_full_loot_chest_leaves_exactly_one_set_of_real_items() {
     let mut sp_ecs = hecs::World::new();
     crate::container_client::clear_broken_containers(&mut sp_world, &mut sp_ecs, chest, true);
     assert_eq!(items(&sp_ecs), total(&loot));
+}
+
+// ── C3b-fix-a (v78) — corrections are relative, phantoms never believed ──
+
+/// The loser of a race (joiner index) and the winner: the server reads the
+/// lower slot's op first.
+fn loser_and_winner(rig: &Rig) -> (usize, usize) {
+    let loser = if rig.cs[0].slot < rig.cs[1].slot { 1 } else { 0 };
+    (loser, 1 - loser)
+}
+
+/// C-H1 scenario 1 — two joiners shift-withdraw the same 16 stone; the
+/// loser's correction is still on its way when it shift-deposits its
+/// phantom stack straight back. Nothing is duplicated: the world holds 16
+/// stone, on the clients' side and on the server's.
+#[test]
+fn a_loser_depositing_its_phantom_back_inside_the_round_trip_duplicates_nothing() {
+    let mut rig = Rig::dedicated("race-deposit-back", 2);
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(stone(16));
+    rig.world().insert_chest((chest[0], chest[1], chest[2]), contents);
+    rig.open(0, chest);
+    rig.open(1, chest);
+    let (loser, winner) = loser_and_winner(&rig);
+    let stone_item = Item::Block(block::STONE);
+    let take = ContainerClick::Withdraw { slot: 0, all: true };
+    let (ew, el) = (rig.eye(winner), rig.eye(loser));
+    rig.cs[winner].click(take.clone(), ew);
+    rig.cs[loser].click(take, el);
+    rig.cs[winner].flush();
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    // Inside the correction's round trip: the loser deposits its phantom.
+    let at = rig.cs[loser].inv.slots_iter().position(|s| s.is_some_and(|s| s.item == stone_item)).expect("the phantom");
+    assert_eq!(rig.cs[loser].click(ContainerClick::Deposit { slot: at, all: true }, el), ClickResult::Done);
+    rig.cs[loser].flush();
+    rig.tick();
+    rig.tick();
+    rig.report(loser);
+    rig.report(winner);
+    assert_eq!(rig.cs[winner].count(&stone_item), 16, "the winner keeps its stack");
+    assert_eq!(rig.cs[loser].count(&stone_item), 0, "the loser holds none");
+    assert_eq!(rig.world_total(&stone_item, chest), (16, 16), "16 stone in the world (clients' view, servers' view)");
+    assert_eq!(rig.tally(loser).container_believed, 0, "the phantom was never believed");
+}
+
+/// C-H1 scenario 2 — the loser's phantom stack sits in its slot when, inside
+/// the correction's round trip, it shift-withdraws a second chest slot that
+/// merges into it. The second stack is real and survives the correction:
+/// nothing is lost.
+#[test]
+fn a_loser_withdrawing_a_second_slot_inside_the_round_trip_loses_nothing() {
+    let mut rig = Rig::dedicated("race-two-slots", 2);
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[0] = Some(stone(16));
+    contents.slots[1] = Some(stone(20));
+    rig.world().insert_chest((chest[0], chest[1], chest[2]), contents);
+    rig.open(0, chest);
+    rig.open(1, chest);
+    let (loser, winner) = loser_and_winner(&rig);
+    let stone_item = Item::Block(block::STONE);
+    let take = ContainerClick::Withdraw { slot: 0, all: true };
+    let (ew, el) = (rig.eye(winner), rig.eye(loser));
+    rig.cs[winner].click(take.clone(), ew);
+    rig.cs[loser].click(take, el);
+    rig.cs[winner].flush();
+    rig.cs[loser].flush();
+    rig.tick_holding(Some(loser));
+    assert_eq!(rig.cs[loser].click(ContainerClick::Withdraw { slot: 1, all: true }, el), ClickResult::Done);
+    assert_eq!(rig.cs[loser].count(&stone_item), 36, "predicted: its phantom 16 and the real 20");
+    rig.cs[loser].flush();
+    rig.tick();
+    rig.tick();
+    rig.report(loser);
+    rig.report(winner);
+    assert_eq!(rig.cs[winner].count(&stone_item), 16);
+    assert_eq!(rig.cs[loser].count(&stone_item), 20, "the real 20 survive the correction");
+    assert_eq!(rig.world_total(&stone_item, chest), (36, 36), "36 stone in the world");
+}
+
+fn cobble(n: u8) -> ItemStack {
+    ItemStack::new_block(block::COBBLESTONE, n)
+}
+
+/// A chest at `chest` fed by a hopper above it from a source chest holding
+/// `feed` cobblestone; `contents` in the chest.
+fn hopper_fed(rig: &mut Rig, chest: [i32; 3], contents: ChestData, feed: u8) {
+    rig.world().insert_chest((chest[0], chest[1], chest[2]), contents);
+    let hopper = [chest[0], chest[1] + 1, chest[2]];
+    let source = [chest[0], chest[1] + 2, chest[2]];
+    rig.world().set_block(hopper[0], hopper[1], hopper[2], block::HOPPER);
+    rig.world().set_block(source[0], source[1], source[2], block::CHEST);
+    let mut above = ChestData::new();
+    above.slots[0] = Some(cobble(feed));
+    rig.world().insert_chest((source[0], source[1], source[2]), above);
+}
+
+/// The real chest's slot `i` at `chest`.
+fn real_slot(rig: &Rig, chest: [i32; 3], i: usize) -> Option<ItemStack> {
+    rig.world_ref().chest_at((chest[0], chest[1], chest[2])).and_then(|c| c.slots[i].clone())
+}
+
+/// C-M1 — one joiner whose window drifted from the server's copy (the
+/// server's holds dirt the client doesn't, so no digest matches) and a
+/// hopper topping up the chest it has open: slot 7 goes from 19 to 20
+/// cobblestone and the push lands. The joiner shift-withdraws slot 7, then —
+/// inside that op's round trip — slot 8, which merges into the same stack.
+/// The server judges each op on exactly the view it was made on, so neither
+/// earns a correction and nothing is lost (the two-view guess corrected the
+/// first to 20 after the merge and lost 15).
+#[test]
+fn a_drifted_joiner_withdrawing_from_a_hopper_fed_chest_loses_nothing() {
+    let mut rig = Rig::dedicated("hopper-view", 1);
+    rig.sp(0).inventory.set_slot(30, Some(ItemStack::new_block(block::DIRT, 5))); // the server's only
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[7] = Some(cobble(19));
+    contents.slots[8] = Some(cobble(15));
+    hopper_fed(&mut rig, chest, contents, 1);
+    rig.open(0, chest);
+    for _ in 0..crate::hopper::HOPPER_INTERVAL_TICKS * 3 {
+        if real_slot(&rig, chest, 7) == Some(cobble(20)) {
+            break;
+        }
+        rig.tick();
+    }
+    assert_eq!(real_slot(&rig, chest, 7), Some(cobble(20)), "the hopper topped slot 7 up");
+    rig.tick();
+    rig.report(0);
+    let mirror_7 = |rig: &Rig| match &rig.cs[0].mirror.as_ref().unwrap().contents {
+        container_window::ContainerData::Chest(c) => c.slots[7].clone(),
+        _ => None,
+    };
+    assert_eq!(mirror_7(&rig), Some(cobble(20)), "the push landed");
+    let eye = rig.eye(0);
+    assert_eq!(rig.cs[0].click(ContainerClick::Withdraw { slot: 7, all: true }, eye), ClickResult::Done);
+    rig.cs[0].flush();
+    rig.tick_holding(Some(0));
+    assert_eq!(rig.cs[0].click(ContainerClick::Withdraw { slot: 8, all: true }, eye), ClickResult::Done);
+    assert_eq!(rig.cs[0].count(&Item::Block(block::COBBLESTONE)), 35, "merged: 20 + 15");
+    rig.cs[0].flush();
+    rig.tick();
+    rig.tick();
+    rig.report(0);
+    assert_eq!(rig.cs[0].count(&Item::Block(block::COBBLESTONE)), 35, "nothing lost");
+    assert!(rig.cs[0].slot_sets.iter().all(|s| s.take.is_empty() && s.give.is_empty()), "no correction moved an item");
+    assert_eq!(rig.tally(0).container_corrected, 0, "each op was judged on its own view");
+    assert_eq!((real_slot(&rig, chest, 7), real_slot(&rig, chest, 8)), (None, None));
+    assert_eq!(rig.world_total(&Item::Block(block::COBBLESTONE), chest), (35, 35), "19 + 15 + the hopper's 1");
+    assert_eq!(rig.sp(0).inventory.slot(30), Some(&ItemStack::new_block(block::DIRT, 5)), "the drift is untouched");
+}
+
+/// C-M1 — the same hopper, but the joiner clicks before the push of its
+/// top-up reaches it: its op was made on the view with 19, the server's run
+/// on the real chest gave it 20, so it is given the one more — and a second
+/// withdraw made inside that round trip keeps its stack.
+#[test]
+fn a_withdraw_made_before_a_hopper_push_arrived_is_given_the_difference() {
+    let mut rig = Rig::dedicated("hopper-in-flight", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    let mut contents = ChestData::new();
+    contents.slots[7] = Some(cobble(19));
+    contents.slots[8] = Some(cobble(15));
+    hopper_fed(&mut rig, chest, contents, 1);
+    rig.open(0, chest);
+    // The hopper moves while the joiner hears nothing.
+    for _ in 0..crate::hopper::HOPPER_INTERVAL_TICKS * 3 {
+        if real_slot(&rig, chest, 7) == Some(cobble(20)) {
+            break;
+        }
+        rig.tick_holding(Some(0));
+    }
+    assert_eq!(real_slot(&rig, chest, 7), Some(cobble(20)));
+    let eye = rig.eye(0);
+    rig.cs[0].click(ContainerClick::Withdraw { slot: 7, all: true }, eye);
+    assert_eq!(rig.cs[0].count(&Item::Block(block::COBBLESTONE)), 19, "predicted on the view with 19");
+    rig.cs[0].flush();
+    rig.tick_holding(Some(0));
+    rig.cs[0].click(ContainerClick::Withdraw { slot: 8, all: true }, eye);
+    rig.cs[0].flush();
+    rig.tick();
+    rig.tick();
+    rig.report(0);
+    assert_eq!(rig.cs[0].count(&Item::Block(block::COBBLESTONE)), 35, "given the one the hopper added");
+    let gives: Vec<_> = rig.cs[0].slot_sets.iter().flat_map(|s| s.give.iter()).collect();
+    assert_eq!(gives, vec![&crate::inventory::stack_to_wire(&cobble(1))], "one correction: give 1");
+    assert_eq!(rig.world_total(&Item::Block(block::COBBLESTONE), chest), (35, 35));
+    let mirror = rig.cs[0].mirror.as_ref().unwrap().as_ref().prints();
+    assert_eq!(Some(mirror), rig.server_container(0).map(|c| c.prints()), "the mirror shows the real chest");
+}
+
+/// C-M1 — a furnace output click while a cook's push is on its way: the
+/// joiner takes the one ingot its view shows; the furnace has cooked a
+/// second by then. It is given the second, the output it shows is set to
+/// the real (empty) one after the push, and no ingot is made or lost.
+#[test]
+fn a_furnace_output_click_during_a_cook_push_takes_what_the_furnace_really_held() {
+    let mut rig = Rig::dedicated("furnace-push", 1);
+    let furnace = rig.place(-1, 2, block::FURNACE);
+    let pos = (furnace[0], furnace[1], furnace[2]);
+    let data = crate::furnace::FurnaceData {
+        input: Some(ItemStack::new_material(MaterialId::RawIron, 2)),
+        fuel: Some(ItemStack::new_material(MaterialId::Coal, 2)),
+        ..Default::default()
+    };
+    rig.world().insert_furnace(pos, data);
+    rig.open(0, furnace);
+    let ingot = Item::Material(MaterialId::IronIngot);
+    let output = |rig: &Rig| rig.world_ref().furnace_at(pos).and_then(|f| f.output.clone()).map_or(0, |s| s.count);
+    // Cook quickly: the test hurries each smelt to its last tick.
+    let hurry = |rig: &mut Rig| {
+        if let Some(f) = rig.world().furnace_at_mut(pos)
+            && f.smelt_total > 1
+            && f.smelt_progress + 1 < f.smelt_total
+        {
+            f.smelt_progress = f.smelt_total - 1;
+        }
+    };
+    for _ in 0..40 {
+        if output(&rig) == 1 {
+            break;
+        }
+        hurry(&mut rig);
+        rig.tick();
+    }
+    assert_eq!(output(&rig), 1, "one cooked");
+    rig.tick();
+    rig.report(0);
+    // The second cooks while the joiner hears nothing.
+    for _ in 0..40 {
+        if output(&rig) == 2 {
+            break;
+        }
+        hurry(&mut rig);
+        rig.tick_holding(Some(0));
+    }
+    assert_eq!(output(&rig), 2, "a second cooked: its push is on its way");
+    let take = ContainerClick::Furnace { kind: SlotKind::Output, mode: ClickMode::Stack, hotbar: 0 };
+    let eye = rig.eye(0);
+    assert_eq!(rig.cs[0].click(take, eye), ClickResult::Done);
+    assert_eq!(rig.cs[0].count(&ingot), 1, "predicted: the one its view shows");
+    rig.cs[0].flush();
+    rig.tick();
+    rig.report(0);
+    assert_eq!(rig.cs[0].count(&ingot), 2, "given the second");
+    assert_eq!(output(&rig), 0, "the real output is empty");
+    let crate::container_window::ContainerData::Furnace(f) = &rig.cs[0].mirror.as_ref().unwrap().contents else {
+        panic!("a furnace mirror")
+    };
+    assert_eq!(f.output, None, "the mirror shows it empty, after the push");
+    let server: u32 = rig.sp(0).inventory.slots_iter().flatten().filter(|s| s.item == ingot).map(|s| u32::from(s.count)).sum();
+    assert_eq!(server, 2, "the server's copy holds both, in the client's order");
+    assert_eq!(rig.tally(0).window_mismatch, 0);
+}
+
+/// C-M2 (decision 3) — a modified client sends `Container(Sort)` with no
+/// container open, claiming 64 diamonds it touched. Refused: the server's
+/// copy gains nothing (a refused op never moves it), and with no view sent
+/// there is nothing to undo on the client.
+#[test]
+fn a_container_op_with_nothing_open_claiming_diamonds_gives_the_server_copy_nothing() {
+    let mut rig = Rig::dedicated("no-container-claims", 1);
+    let diamonds = ItemStack::new_material(MaterialId::Diamond, 64);
+    for n in 0..8u32 {
+        let pkt = protocol::WindowOpPacket {
+            op_seq: n + 1,
+            op: protocol::WireWindowOp::Container(ContainerClick::Sort),
+            digest: 0,
+            events_applied: 0,
+            touched: vec![WireWindowSlot::Inv(0)],
+            claims: vec![(WireWindowSlot::Inv(0), Some(crate::inventory::stack_to_wire(&diamonds)))],
+            client_ok: true,
+        };
+        rig.cs[0].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
+    }
+    rig.tick();
+    rig.tick();
+    rig.report(0);
+    let sp = rig.sp(0);
+    assert!(sp.inventory.slots_iter().all(|s| s.is_none()), "the server's copy gained nothing");
+    assert_eq!(sp.cursor, None);
+    assert_eq!(rig.tally(0).container_refused, 8);
+    assert!(rig.cs[0].slot_sets.is_empty(), "nothing to undo: no view was ever sent");
+    assert_eq!(rig.tally(0).window_mismatch, 0, "container convergence, not lockstep");
+}
+
+/// C-L3 (decision 4) — believed deposits are bounded per joiner: 64 units,
+/// refilled at 4 a second. A deposit past the bound is refused and
+/// corrected: the client gets its stack back and the real chest gains
+/// nothing. A second later 4 more units are believed.
+#[test]
+fn believed_deposits_past_the_bound_are_refused_and_corrected() {
+    let mut rig = Rig::dedicated("believed-bound", 1);
+    for slot in [0, 1, 2] {
+        rig.cs[0].inv.set_slot(slot, Some(fish(64))); // the client's only: caught locally
+    }
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest((chest[0], chest[1], chest[2]), ChestData::new());
+    rig.open(0, chest);
+    let eye = rig.eye(0);
+    let fish_item = Item::Material(MaterialId::RawFish);
+    let in_chest = |rig: &Rig| -> u32 {
+        rig.world_ref().chest_at((chest[0], chest[1], chest[2])).map_or(0, |c| {
+            c.slots.iter().flatten().filter(|s| s.item == fish_item).map(|s| u32::from(s.count)).sum()
+        })
+    };
+    rig.cs[0].click(ContainerClick::Deposit { slot: 0, all: true }, eye);
+    rig.cs[0].flush();
+    rig.tick();
+    assert_eq!(in_chest(&rig), 64, "the first stack is believed");
+    assert_eq!(rig.tally(0).container_believed, 64);
+    // The bound is spent: the next stack is refused, and the client's
+    // prediction undone.
+    rig.cs[0].click(ContainerClick::Deposit { slot: 1, all: true }, eye);
+    assert_eq!(rig.cs[0].count(&fish_item), 64, "predicted: the second stack went in");
+    rig.cs[0].flush();
+    rig.tick();
+    assert_eq!(in_chest(&rig), 64, "refused: the real chest gains nothing");
+    assert_eq!(rig.cs[0].count(&fish_item), 128, "corrected: the stack came back");
+    let t = rig.tally(0);
+    assert_eq!((t.container_believed, t.container_refused, t.container_corrected), (64, 1, 1));
+    let mirror = rig.cs[0].mirror.as_ref().unwrap().as_ref().prints();
+    assert_eq!(Some(mirror), rig.server_container(0).map(|c| c.prints()), "its mirror is the real chest again");
+    // A second refills four units.
+    for _ in 0..20 {
+        rig.tick();
+    }
+    rig.cs[0].click(ContainerClick::Deposit { slot: 2, all: false }, eye);
+    rig.cs[0].flush();
+    rig.tick();
+    assert_eq!(in_chest(&rig), 65, "one unit within the refill is believed");
+    assert_eq!(rig.tally(0).container_believed, 65);
+    // A real deposit (the server's copy holds it) is never bounded.
+    rig.give(0, 5, Item::Block(block::DIRT), 64);
+    rig.cs[0].click(ContainerClick::Deposit { slot: 5, all: true }, eye);
+    rig.cs[0].flush();
+    rig.tick();
+    assert_eq!(rig.world_total(&Item::Block(block::DIRT), chest).0, 64);
+    assert_eq!(rig.tally(0).container_refused, 1, "not refused");
+    assert_eq!(real_slot(&rig, chest, 2), Some(ItemStack::new_block(block::DIRT, 64)), "the dirt went in");
+}
+
+/// C-L3 (decision 4) — a claim no honest client can make is refused: a
+/// stack above its item's `max_stack()`, or a tool counted above one. The
+/// real chest gains nothing.
+#[test]
+fn claims_above_a_stack_are_refused() {
+    let mut rig = Rig::dedicated("over-stack", 1);
+    let chest = rig.place(0, 2, block::CHEST);
+    rig.world().insert_chest((chest[0], chest[1], chest[2]), ChestData::new());
+    rig.open(0, chest);
+    let pick = ItemStack {
+        item: Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Diamond)),
+        count: 2,
+    };
+    for (n, claim) in [ItemStack::new_block(block::STONE, 65), pick].into_iter().enumerate() {
+        let pkt = protocol::WindowOpPacket {
+            op_seq: rig.cs[0].seq + 1 + n as u32,
+            op: protocol::WireWindowOp::Container(ContainerClick::Deposit { slot: 0, all: true }),
+            digest: 0,
+            events_applied: rig.cs[0].events,
+            touched: vec![WireWindowSlot::Inv(0), WireWindowSlot::Container(0)],
+            claims: vec![(WireWindowSlot::Inv(0), Some(crate::inventory::stack_to_wire(&claim)))],
+            client_ok: true,
+        };
+        rig.cs[0].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
+    }
+    rig.tick();
+    rig.tick();
+    assert!(real_slot(&rig, chest, 0).is_none(), "the real chest gained nothing");
+    let t = rig.tally(0);
+    assert_eq!((t.container_refused, t.container_believed), (2, 0));
+}
+
+/// C-L5 (decision 6) — a joined client's Bulk vendor pulls no stock from an
+/// adjacent chest: its chests are never the real ones (a worldgen loot
+/// chest's generated copy, or nothing). Pinned on the game loop's source,
+/// as the vendor dialog needs a GPU.
+#[test]
+fn a_joined_clients_bulk_vendor_pulls_nothing_from_an_adjacent_chest() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("game_loop.rs");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("C-L5 lint: cannot read {} ({e})", path.display()));
+    let call = "crate::rail::depot_chest_for(vpos,";
+    let at = raw.find(call).unwrap_or_else(|| panic!("{call} is gone from game_loop.rs: update this lint, don't delete it"));
+    assert_eq!(raw.matches(call).count(), 1, "{call}: one call site");
+    let before = &raw[at.saturating_sub(200)..at];
+    assert!(before.contains("(!self.joined())"), "the depot pull must be gated on not joined");
 }

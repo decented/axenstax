@@ -278,7 +278,7 @@ pub fn uses(kind: Asked) -> u8 {
 /// Is `a` the item `b` was, for an outcome's purposes? A tool is the same
 /// tool by type and material, and an armour piece by slot and material
 /// (durability is what wears; the shadow's copy never does — C2b verify L6).
-fn same_item(a: &Item, b: &Item) -> bool {
+pub(crate) fn same_item(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::Tool(a), Item::Tool(b)) => a.tool_type == b.tool_type && a.material == b.material,
         (Item::Armour(a), Item::Armour(b)) => a.slot == b.slot && a.material == b.material,

@@ -1277,14 +1277,7 @@ fn a_swing_wears_the_weapon_where_it_now_is_on_both_sides() {
         ui.apply_click(&mut inv, &mut armour, &click, false, Vec3::ZERO, |_| block::AIR);
     }
     for (n, logged) in ui.take_ops(&inv, &armour).into_iter().enumerate() {
-        let pkt = protocol::WindowOpPacket {
-            op_seq: n as u32 + 1,
-            op: logged.op,
-            digest: logged.digest,
-            events_applied: u32::MAX,
-            touched: logged.touched,
-            claims: logged.claims,
-        };
+        let pkt = logged.packet(n as u32 + 1, u32::MAX);
         rig.joiners[0].client.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }
     rig.tick(10); // the ops, and past the swing schedule

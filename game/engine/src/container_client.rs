@@ -1,4 +1,4 @@
-//! C3b-1 (2026-10-08, protocol v77) — a joined client's shared
+//! C3b-1 (2026-10-08, protocol v77; C3b-fix-a, v78) — a joined client's shared
 //! container screens: asking the server to open its real chest, dispenser,
 //! dropper or furnace, opening on its answer, drawing from the mirror and
 //! predicting clicks on it, applying the server's corrections and pushes,
@@ -63,12 +63,15 @@ impl crate::GameState {
         self.release_cursor();
     }
 
-    /// C3b-1 — the server's values for some slots of player 0's window (a
-    /// correction or a push): exactly those slots are overwritten, in the
-    /// window and in the open container's mirror, and nothing is replayed
-    /// (`container_window::apply_slot_set`).
-    pub(crate) fn apply_window_slot_set(&mut self, pkt: &crate::protocol::WindowSlotSetPacket) {
-        let Some(p) = self.players.first_mut() else { return };
+    /// C3b-1 / C3b-fix-a — a `WindowSlotSet` (a push or a correction, a
+    /// window event in its turn): the named container slots of the open
+    /// mirror are overwritten, and a correction's item delta is resolved on
+    /// player 0's window as it is now, with this session's correction debt
+    /// (`container_window::apply_slot_set`); nothing is replayed. Returns,
+    /// per give of the delta, the units that didn't fit (the caller reports
+    /// them, `ItemAction::GrantUnfit`).
+    pub(crate) fn apply_window_slot_set(&mut self, pkt: &crate::protocol::WindowSlotSetPacket) -> Vec<u8> {
+        let Some(p) = self.players.first_mut() else { return Vec::new() };
         let mut view = crate::window::WindowMut {
             inv: &mut p.inventory,
             armour: &mut p.armour_slots,
@@ -76,8 +79,9 @@ impl crate::GameState {
             grid: &mut p.crafting_ui.grid,
             container: p.shared_container.as_mut().map(|m| m.as_mut()),
         };
-        crate::container_window::apply_slot_set(&mut view, pkt, &self.registry);
+        let applied = crate::container_window::apply_slot_set(&mut view, pkt, &self.registry, &mut self.window_inbox.debt);
         p.crafting_ui.update_result();
+        applied.unfit
     }
 
     /// C3b-1 — draw player `pidx`'s shared container screen from its mirror

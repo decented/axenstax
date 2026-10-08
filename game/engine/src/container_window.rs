@@ -1,4 +1,4 @@
-//! C3b-1 (2026-10-08, protocol v77) — the container screens' click rules,
+//! C3b-1 (2026-10-08, protocol v77; C3b-fix-a, v78) — the container screens' click rules,
 //! one pure model shared by every side
 //! (`docs/foundations/2026-10-07-c3-server-owned-inventory.md` §2, C3b row).
 //!
@@ -16,8 +16,16 @@
 //!   ([`SharedContainer`], from `ContainerOpened`) plus its own window, and
 //!   sends it as a window op (`WireWindowOp::Container`).
 //! - **The server** applies the same rule to the real container and its copy
-//!   of the joiner's window, compares digests, and corrects the slots
-//!   involved when its result differs (`WindowSlotSet`).
+//!   of the joiner's window, compares digests, and corrects the client when
+//!   the real container changed the outcome (`WindowSlotSet`).
+//!
+//! **C3b-fix-a (v78) — corrections move items, never set a slot.** A
+//! correction's player part is an [`ItemDelta`] ("take N of X", "give N of
+//! X"), resolved on the window as it is when it lands, with a
+//! [`CorrectionDebt`] so a take that finds its item gone is paid by the next
+//! give of it; the server's re-run debits the claims of what corrections on
+//! their way will take back ([`ClaimedWindow::debit`], the phantom ledger),
+//! and a claim above its stack is refused ([`claims_fit_stacks`]).
 //!
 //! **Plans stay with their holder** (design §5). In a shared container
 //! ([`ClickCtx::shared`]) a Plan can't go in, and a Plan already there (a
@@ -139,6 +147,16 @@ impl ContainerMut<'_> {
         match self {
             ContainerMut::Chest(c) => ContainerRef::Chest(c),
             ContainerMut::Furnace(f) => ContainerRef::Furnace(f),
+        }
+    }
+
+    /// C3b-fix-a — become `data` (a copy of this container a click was
+    /// first run on); a copy of the other kind changes nothing.
+    pub fn replace_with(&mut self, data: &ContainerData) {
+        match (self, data) {
+            (ContainerMut::Chest(c), ContainerData::Chest(d)) => **c = d.clone(),
+            (ContainerMut::Furnace(f), ContainerData::Furnace(d)) => **f = (**d).clone(),
+            _ => {}
         }
     }
 
@@ -528,6 +546,7 @@ impl ClaimedWindow {
     }
 
     /// Claimed slot `at`'s stack now (`None` for an unclaimed one).
+    #[cfg(test)]
     pub fn stack(&self, at: WireWindowSlot) -> Option<Option<ItemStack>> {
         if !self.claimed.contains(&at) {
             return None;
@@ -535,50 +554,280 @@ impl ClaimedWindow {
         PlayerSlots::of(&self.inv, &self.armour, &self.cursor, &self.grid).stack(at)
     }
 
-    /// Every claimed player slot's stack now, in claim order, a Plan
-    /// included: what a window that held the claims before the op holds in
-    /// those slots after it ([`Self::overlay`]).
-    pub fn claimed_all(&self) -> Vec<(WireWindowSlot, Option<ItemStack>)> {
-        let now = PlayerSlots::of(&self.inv, &self.armour, &self.cursor, &self.grid);
-        self.claimed.iter().filter_map(|&at| now.stack(at).map(|s| (at, s))).collect()
+    /// C3b-fix-a — the first claimed inventory slot holding `item` (by
+    /// `joiner_actions::same_item`): where a correction's take of it looks
+    /// first (where the prediction put it).
+    pub fn slot_holding(&self, item: &Item) -> Option<u8> {
+        self.claimed.iter().find_map(|at| match *at {
+            WireWindowSlot::Inv(i)
+                if self.inv.slot(usize::from(i)).is_some_and(|s| crate::joiner_actions::same_item(&s.item, item)) =>
+            {
+                Some(i)
+            }
+            _ => None,
+        })
     }
 
-    /// Set the claimed slots of a window (`inv`, `armour`, `cursor`,
-    /// `grid`) to their values here: the window a client whose other slots
-    /// are those holds after the op.
-    pub fn overlay(
-        &self,
-        inv: &mut Inventory,
-        armour: &mut [Option<ArmourItem>; 4],
-        cursor: &mut Option<ItemStack>,
-        grid: &mut CraftGrid,
-    ) {
-        for (at, stack) in self.claimed_all() {
-            match at {
-                WireWindowSlot::Inv(i) if usize::from(i) < SLOTS => inv.set_slot(usize::from(i), stack),
-                WireWindowSlot::Armour(i) if i < 4 => {
-                    armour[usize::from(i)] = match stack {
-                        Some(ItemStack { item: Item::Armour(piece), .. }) => Some(piece),
-                        _ => None,
-                    }
-                }
-                WireWindowSlot::Cursor => *cursor = stack,
-                WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => grid[usize::from(r)][usize::from(c)] = stack,
-                _ => {}
+    /// C3b-fix-a (v78) — the phantom ledger: take `n` of `item` off the
+    /// CLAIMED slots, by the owed search's order (the 36 slots, then the
+    /// grid, then the cursor; never a blocker): units a later op claims that
+    /// a correction still on its way takes back. Returns how many it took.
+    pub fn debit(&mut self, item: &Item, n: u32) -> u32 {
+        let mut left = n;
+        let order = self
+            .claimed
+            .iter()
+            .copied()
+            .filter(|at| matches!(at, WireWindowSlot::Inv(_)))
+            .chain(self.claimed.iter().copied().filter(|at| matches!(at, WireWindowSlot::Grid(..))))
+            .chain(self.claimed.iter().copied().filter(|at| matches!(at, WireWindowSlot::Cursor)))
+            .collect::<Vec<_>>();
+        for at in order {
+            if left == 0 {
+                break;
             }
+            let cell: &mut Option<ItemStack> = match at {
+                WireWindowSlot::Inv(i) if usize::from(i) < SLOTS => {
+                    let mut stack = self.inv.take_slot(usize::from(i));
+                    let took = take_from(&mut stack, item, left);
+                    self.inv.set_slot(usize::from(i), stack);
+                    left -= took;
+                    continue;
+                }
+                WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => &mut self.grid[usize::from(r)][usize::from(c)],
+                WireWindowSlot::Cursor => &mut self.cursor,
+                _ => continue,
+            };
+            left -= take_from(cell, item, left);
+        }
+        n - left
+    }
+}
+
+/// Take up to `n` of `item` (by `joiner_actions::same_item`) from `cell`;
+/// how many it took.
+fn take_from(cell: &mut Option<ItemStack>, item: &Item, n: u32) -> u32 {
+    let Some(stack) = cell.as_mut().filter(|s| crate::joiner_actions::same_item(&s.item, item)) else { return 0 };
+    let took = u32::from(stack.count).min(n);
+    stack.count -= took as u8;
+    if stack.count == 0 {
+        *cell = None;
+    }
+    took
+}
+
+/// C3b-fix-a (C-L3) — could a well-behaved client hold every claimed stack?
+/// None counts above its item's `max_stack()` (so a tool or armour piece
+/// above one). A claim that doesn't decode stays a blocker, as before.
+pub fn claims_fit_stacks(claims: &[(WireWindowSlot, WireSlot)], registry: &crate::block::BlockRegistry) -> bool {
+    claims.iter().all(|(_, value)| {
+        value
+            .as_ref()
+            .and_then(|w| crate::inventory::stack_from_wire(w, registry, true))
+            .is_none_or(|s| s.count <= s.item.max_stack())
+    })
+}
+
+// ── C3b-fix-a (v78): a correction moves items, never sets a slot ────────
+
+/// Units of each item, by exact identity, in a canonical order (by the
+/// item's print), so the client and the server split a delta the same way.
+pub type ItemCounts = Vec<(Item, i64)>;
+
+fn item_key(item: &Item) -> u32 {
+    crate::window::slot_print(Some(&ItemStack { item: item.clone(), count: 1 }))
+}
+
+fn add_count(counts: &mut ItemCounts, item: &Item, n: i64) {
+    if n == 0 {
+        return;
+    }
+    match counts.iter_mut().find(|(i, _)| i == item) {
+        Some((_, c)) => *c += n,
+        None => counts.push((item.clone(), n)),
+    }
+}
+
+/// Every item container `c` holds, counted.
+pub fn counts_of(c: ContainerRef) -> ItemCounts {
+    let mut out = Vec::new();
+    for i in 0..c.len() {
+        if let Some(s) = c.get(i) {
+            add_count(&mut out, &s.item, i64::from(s.count));
         }
     }
+    out
+}
 
-    /// Every claimed player slot's stack now, in claim order. A Plan is
-    /// left out: no rule moves one in a shared container, and a correction
-    /// never names a slot holding one (its holder keeps it, design §5).
-    pub fn claimed_values(&self) -> Vec<(WireWindowSlot, Option<ItemStack>)> {
-        let now = PlayerSlots::of(&self.inv, &self.armour, &self.cursor, &self.grid);
-        self.claimed
-            .iter()
-            .filter_map(|&at| now.stack(at).map(|s| (at, s)))
-            .filter(|(_, s)| !is_plan(s.as_ref()))
-            .collect()
+/// `a − b`, item by item, zeros dropped, in canonical order.
+pub fn counts_minus(a: &ItemCounts, b: &ItemCounts) -> ItemCounts {
+    let mut out = a.clone();
+    for (item, n) in b {
+        add_count(&mut out, item, -n);
+    }
+    out.retain(|(_, n)| *n != 0);
+    out.sort_by_key(|(item, _)| item_key(item));
+    out
+}
+
+/// What a container click gave the player, item by item: what the
+/// container lost from `before` to `after` (the rules only move items
+/// between the two; a negative count is what the player put in).
+pub fn player_gain(before: ContainerRef, after: ContainerRef) -> ItemCounts {
+    counts_minus(&counts_of(before), &counts_of(after))
+}
+
+/// C3b-fix-a (v78) — a correction's change to a player's window, by item,
+/// never by slot (C-H1): take `n` of an item (from a hint slot first, then
+/// wherever it is, `joiner_actions::take_owed_window`), and give stacks
+/// (`Inventory::add_item`). Resolved when the correction is applied, on the
+/// window as it is then, so an op the client made meanwhile keeps its
+/// effect. A Plan is never in one (no rule moves a Plan in a shared
+/// container, and it has no wire form).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemDelta {
+    /// Each `(hint, stack)`: at most a stack, looked for in inventory slot
+    /// `hint` first.
+    pub take: Vec<(u8, ItemStack)>,
+    /// Each at most a stack.
+    pub give: Vec<ItemStack>,
+}
+
+impl ItemDelta {
+    /// From net counts (positive: give, negative: take), each split into
+    /// stacks of at most its item's `max_stack()`. `hint` names the slot a
+    /// take of an item looks in first.
+    pub fn from_counts(net: &ItemCounts, hint: impl Fn(&Item) -> u8) -> Self {
+        let mut d = ItemDelta::default();
+        for (item, n) in net {
+            if matches!(item, Item::Plan(_)) {
+                continue;
+            }
+            let max = i64::from(item.max_stack().max(1));
+            let mut left = n.abs();
+            while left > 0 {
+                let count = left.min(max);
+                left -= count;
+                let stack = ItemStack { item: item.clone(), count: count as u8 };
+                if *n > 0 {
+                    d.give.push(stack);
+                } else {
+                    d.take.push((hint(item), stack));
+                }
+            }
+        }
+        d
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.take.is_empty() && self.give.is_empty()
+    }
+
+    /// Net counts: what it gives minus what it takes, item by item.
+    pub fn counts(&self) -> ItemCounts {
+        let mut out = Vec::new();
+        for s in &self.give {
+            add_count(&mut out, &s.item, i64::from(s.count));
+        }
+        for (_, s) in &self.take {
+            add_count(&mut out, &s.item, -i64::from(s.count));
+        }
+        out.retain(|(_, n)| *n != 0);
+        out
+    }
+
+    /// On the wire (`WindowSlotSetPacket::take`, `::give`).
+    pub fn to_wire(&self) -> (Vec<(u8, WireStack)>, Vec<WireStack>) {
+        let take = self.take.iter().map(|(hint, s)| (*hint, crate::inventory::stack_to_wire(s))).collect();
+        let give = self.give.iter().map(crate::inventory::stack_to_wire).collect();
+        (take, give)
+    }
+
+    /// From the wire: what doesn't decode, a Plan, or a count above the
+    /// item's stack is left out.
+    pub fn from_wire(take: &[(u8, WireStack)], give: &[WireStack], registry: &crate::block::BlockRegistry) -> Self {
+        let decode = |w: &WireStack| {
+            crate::inventory::stack_from_wire(w, registry, false)
+                .filter(|s| !matches!(s.item, Item::Plan(_)) && s.count <= s.item.max_stack())
+        };
+        ItemDelta {
+            take: take.iter().filter_map(|(hint, w)| decode(w).map(|s| (*hint, s))).collect(),
+            give: give.iter().filter_map(decode).collect(),
+        }
+    }
+}
+
+use crate::protocol::WireStack;
+
+/// C3b-fix-a (v78) — units of each item a window still owes from a
+/// correction's take it couldn't pay: the item had already left the window
+/// when the correction arrived (deposited back into the container, say, by an
+/// op made inside the round trip, whose own correction gives it back). The
+/// next correction gives of that item pay it first, so the take and the give
+/// cancel whichever order the window met them in, and a take never falls on
+/// an unrelated stack of the same item twice. One per joined client
+/// (`window_events::WindowInbox::debt`) and one per joiner's server copy
+/// (`window_events::WindowEvents::debt`), kept by the same rule.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CorrectionDebt {
+    owed: Vec<(Item, u32)>,
+}
+
+impl CorrectionDebt {
+    /// Units of `item` owed.
+    #[cfg(test)]
+    pub fn owed(&self, item: &Item) -> u32 {
+        self.owed.iter().filter(|(i, _)| crate::joiner_actions::same_item(i, item)).map(|(_, n)| n).sum()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.owed.is_empty()
+    }
+
+    /// Apply `delta` to a window (`inv`, `grid`, `cursor`): every take
+    /// (`joiner_actions::take_owed_window` from its hint first; what it can't
+    /// pay is owed), then every give (what is owed of its item first, then
+    /// `Inventory::add_item`). Returns, per give in order, how many of its
+    /// units were settled — a debt paid or landed in the window; the rest
+    /// didn't fit (the client reports it, `ItemAction::GrantUnfit`).
+    pub fn apply(
+        &mut self,
+        inv: &mut Inventory,
+        grid: &mut CraftGrid,
+        cursor: &mut Option<ItemStack>,
+        delta: &ItemDelta,
+    ) -> Vec<u8> {
+        for (hint, stack) in &delta.take {
+            let taken = crate::joiner_actions::take_owed_window(inv, grid, cursor, usize::from(*hint), &stack.item, stack.count);
+            if taken < stack.count {
+                let short = u32::from(stack.count - taken);
+                match self.owed.iter_mut().find(|(i, _)| i == &stack.item) {
+                    Some((_, n)) => *n += short,
+                    None => self.owed.push((stack.item.clone(), short)),
+                }
+            }
+        }
+        let mut settled = Vec::with_capacity(delta.give.len());
+        for stack in &delta.give {
+            let mut paid = 0u8;
+            for (item, n) in self.owed.iter_mut() {
+                if paid < stack.count && crate::joiner_actions::same_item(item, &stack.item) {
+                    let pay = (*n).min(u32::from(stack.count - paid)) as u8;
+                    *n -= u32::from(pay);
+                    paid += pay;
+                }
+            }
+            self.owed.retain(|(_, n)| *n > 0);
+            let rest = stack.count - paid;
+            let unfit = if rest > 0 {
+                inv.add_item(ItemStack { item: stack.item.clone(), count: rest }).map_or(0, |r| r.count)
+            } else {
+                0
+            };
+            settled.push(stack.count - unfit);
+        }
+        settled
     }
 }
 
@@ -697,81 +946,60 @@ pub fn container_in_server_reach(eye: glam::Vec3, cell: [i32; 3]) -> bool {
     crate::item_actions::cell_in_reach_with(eye, cell, crate::window::SERVER_TABLE_REACH_SLACK)
 }
 
+/// What applying one `WindowSlotSet` did ([`apply_slot_set`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SlotSetApplied {
+    /// Container slots set.
+    pub sets: usize,
+    /// Per give of its delta, in order: the units that didn't fit (the
+    /// client reports them, `ItemAction::GrantUnfit`, and the server spawns
+    /// them as a ground item).
+    pub unfit: Vec<u8>,
+}
+
 /// Apply a `WindowSlotSet` to a joined client's window and its open
-/// container mirror (`view.container`): exactly the named slots are
-/// overwritten with the server's values, and a furnace's progress is shown.
-/// Nothing is replayed. Skipped:
-/// - a container slot with no mirror open (a push that crossed the close);
-/// - a Plan placeholder named for anything but a container slot, or a stack
-///   that doesn't decode;
-/// - a window slot (not a container slot) that holds a Plan here. The
-///   server can't hold a Plan (it has no wire form), so it would always set
-///   that slot to something else; a correction never destroys a Plan its
-///   holder has (design §5, and §3 rule 2's "never destroys a client-held
-///   Plan").
-///
-/// Returns how many slots it set.
-pub fn apply_slot_set(view: &mut WindowMut, pkt: &WindowSlotSetPacket, registry: &crate::block::BlockRegistry) -> usize {
-    let mut set = 0;
+/// container mirror (`view.container`), as one window event, in its turn:
+/// - its container slots are set to the server's values (shared state: the
+///   real container's contents), and a furnace's progress is shown; a
+///   container slot with no mirror open (a push that crossed the close) is
+///   skipped, and so is anything but a container slot (C3b-fix-a, v78: a
+///   set never names a player slot);
+/// - its player part, a correction's delta (`take`, `give`), is resolved by
+///   item on the window as it is now ([`CorrectionDebt::apply`]), never by
+///   slot: so an op this client made while the correction was on its way
+///   keeps its effect (C-H1), and a Plan its holder has is never touched.
+pub fn apply_slot_set(
+    view: &mut WindowMut,
+    pkt: &WindowSlotSetPacket,
+    registry: &crate::block::BlockRegistry,
+    debt: &mut CorrectionDebt,
+) -> SlotSetApplied {
+    let mut out = SlotSetApplied::default();
     for (at, value) in &pkt.sets {
-        let in_container = matches!(at, WireWindowSlot::Container(_));
-        let holds_plan = match *at {
-            WireWindowSlot::Inv(i) if usize::from(i) < SLOTS => is_plan(view.inv.slot(usize::from(i))),
-            WireWindowSlot::Cursor => is_plan(view.cursor.as_ref()),
-            WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => is_plan(view.grid[usize::from(r)][usize::from(c)].as_ref()),
-            _ => false,
-        };
-        if holds_plan {
-            continue;
-        }
+        let WireWindowSlot::Container(i) = *at else { continue };
         let stack = match value {
             None => None,
-            Some(w) => match crate::inventory::stack_from_wire(w, registry, in_container) {
+            Some(w) => match crate::inventory::stack_from_wire(w, registry, true) {
                 Some(s) => Some(s),
                 None => continue,
             },
         };
-        let applied = match *at {
-            WireWindowSlot::Inv(i) if usize::from(i) < SLOTS => {
-                view.inv.set_slot(usize::from(i), stack);
-                true
-            }
-            WireWindowSlot::Armour(i) if i < 4 => match stack {
-                None => {
-                    view.armour[usize::from(i)] = None;
-                    true
-                }
-                Some(ItemStack { item: Item::Armour(piece), .. }) => {
-                    view.armour[usize::from(i)] = Some(piece);
-                    true
-                }
-                Some(_) => false,
-            },
-            WireWindowSlot::Cursor => {
-                *view.cursor = stack;
-                true
-            }
-            WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => {
-                view.grid[usize::from(r)][usize::from(c)] = stack;
-                true
-            }
-            WireWindowSlot::Container(i) => match view.container.as_mut() {
-                Some(container) if usize::from(i) < container.as_ref().len() => {
-                    container.set(usize::from(i), stack);
-                    true
-                }
-                _ => false,
-            },
-            _ => false,
-        };
-        if applied {
-            set += 1;
+        if let Some(container) = view.container.as_mut()
+            && usize::from(i) < container.as_ref().len()
+        {
+            container.set(usize::from(i), stack);
+            out.sets += 1;
         }
     }
     if let (Some(progress), Some(ContainerMut::Furnace(f))) = (pkt.furnace, view.container.as_mut()) {
         progress.apply_to(f);
     }
-    set
+    let delta = ItemDelta::from_wire(&pkt.take, &pkt.give, registry);
+    if !delta.is_empty() {
+        let settled = debt.apply(view.inv, view.grid, view.cursor, &delta);
+        out.unfit = delta.give.iter().zip(settled).map(|(g, s)| g.count - s).collect();
+    }
+    out
 }
 
 // ── Server: the real container at a cell ────────────────────────────────
@@ -1017,30 +1245,38 @@ mod tests {
         w.chest.slots.iter().any(|s| is_plan(s.as_ref()))
     }
 
+    /// C3b-fix-a (v78) — a slot set overwrites exactly the named CONTAINER
+    /// slots (a player slot named in it is skipped: a set never names one),
+    /// and its correction delta moves items by item, resolved on the window
+    /// as it is: a take from its hint first, then wherever the item is; a
+    /// give by `add_item`. A Plan the client holds is never touched.
     #[test]
-    fn a_slot_set_overwrites_exactly_the_named_slots() {
+    fn a_slot_set_sets_container_slots_and_moves_items_by_item() {
         let registry = crate::block::BlockRegistry::new();
         let mut w = Win::new();
         w.inv.set_slot(1, Some(stone(9)));
         w.inv.set_slot(2, Some(stone(3)));
         w.chest.slots[5] = Some(stone(1));
         w.inv.set_slot(8, Some(plan()));
+        let wire = |s: &ItemStack| crate::inventory::stack_to_wire(s);
         let pkt = WindowSlotSetPacket {
             op_seq_applied: 4,
             reason: crate::protocol::slot_set_reason::CORRECTION,
             sets: vec![
                 (WireWindowSlot::Inv(1), None),
-                (WireWindowSlot::Container(5), Some(crate::inventory::stack_to_wire(&stone(7)))),
-                (WireWindowSlot::Cursor, Some(crate::inventory::stack_to_wire(&ItemStack::new_block(block::DIRT, 2)))),
-                // A Plan placeholder named for an inventory slot is skipped.
-                (WireWindowSlot::Inv(3), Some(crate::inventory::stack_to_wire(&plan()))),
-                (WireWindowSlot::Inv(200), None),
-                // A Plan the client holds is never overwritten.
+                (WireWindowSlot::Container(5), Some(wire(&stone(7)))),
+                (WireWindowSlot::Cursor, Some(wire(&ItemStack::new_block(block::DIRT, 2)))),
+                (WireWindowSlot::Container(200), None),
                 (WireWindowSlot::Inv(8), None),
             ],
             furnace: None,
-            window_event: 0,
+            window_event: 1,
+            // Take 4 stone from slot 2 first (it holds 3: the last one comes
+            // from slot 1), give 2 dirt.
+            take: vec![(2, wire(&stone(4)))],
+            give: vec![wire(&ItemStack::new_block(block::DIRT, 2))],
         };
+        let mut debt = CorrectionDebt::default();
         let mut view = WindowMut {
             inv: &mut w.inv,
             armour: &mut w.armour,
@@ -1048,13 +1284,106 @@ mod tests {
             grid: &mut w.grid,
             container: Some(ContainerMut::Chest(&mut w.chest)),
         };
-        assert_eq!(apply_slot_set(&mut view, &pkt, &registry), 3);
-        assert_eq!(w.inv.slot(1), None);
-        assert_eq!(w.inv.slot(2), Some(&stone(3)), "an unnamed slot is untouched");
-        assert_eq!(w.inv.slot(3), None);
+        let applied = apply_slot_set(&mut view, &pkt, &registry, &mut debt);
+        assert_eq!(applied, SlotSetApplied { sets: 1, unfit: vec![0] }, "one container slot; the dirt fit");
         assert_eq!(w.chest.slots[5], Some(stone(7)));
-        assert_eq!(w.cursor, Some(ItemStack::new_block(block::DIRT, 2)));
+        assert_eq!(w.inv.slot(2), None, "the take looked in its hint first");
+        assert_eq!(w.inv.slot(1), Some(&stone(8)), "then wherever stone is");
+        assert_eq!(w.cursor, None, "a player slot named in a set is skipped");
+        assert_eq!(w.inv.slot(0), Some(&ItemStack::new_block(block::DIRT, 2)), "the give landed by add_item");
         assert!(is_plan(w.inv.slot(8)), "the held Plan survives");
+        assert!(debt.is_empty());
+    }
+
+    /// C3b-fix-a (C-H1) — a correction's take that finds nothing (the item
+    /// left the window before it arrived: deposited back, say) is owed, and
+    /// the next give of that item pays it first, whichever order the window
+    /// met them in; a give past the debt lands, and what doesn't fit is
+    /// reported unfit.
+    #[test]
+    fn a_take_that_finds_nothing_is_owed_and_paid_by_the_next_give() {
+        let mut inv = Inventory::new();
+        let (mut grid, mut cursor): (CraftGrid, Option<ItemStack>) = (Default::default(), None);
+        let mut debt = CorrectionDebt::default();
+        inv.set_slot(9, Some(stone(10)));
+        // Take 16: 10 found, 6 owed.
+        let take = ItemDelta { take: vec![(0, stone(16))], give: vec![] };
+        assert!(debt.apply(&mut inv, &mut grid, &mut cursor, &take).is_empty());
+        assert_eq!((inv.slot(9), debt.owed(&Item::Block(block::STONE))), (None, 6));
+        // Give 16: 6 pay the debt, 10 land.
+        let give = ItemDelta { take: vec![], give: vec![stone(16)] };
+        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &give), vec![16], "all 16 settled");
+        assert_eq!((inv.slot(0), debt.is_empty()), (Some(&stone(10)), true));
+        // A full window: the give's rest doesn't fit.
+        for i in 0..SLOTS {
+            inv.set_slot(i, Some(ItemStack::new_block(block::DIRT, 64)));
+        }
+        let give = ItemDelta { take: vec![], give: vec![stone(5)] };
+        assert_eq!(debt.apply(&mut inv, &mut grid, &mut cursor, &give), vec![0], "nothing settled: 5 unfit");
+    }
+
+    /// C3b-fix-a — a delta comes from net counts by item, split into stacks
+    /// of at most the item's `max_stack()` (a tool one by one); a Plan never.
+    #[test]
+    fn a_delta_splits_counts_into_stacks() {
+        let pick = ItemStack::new_tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron));
+        let net: ItemCounts = vec![(Item::Block(block::STONE), 100), (pick.item.clone(), -2), (plan().item, 1)];
+        let d = ItemDelta::from_counts(&net, |_| 7);
+        assert_eq!(d.give, vec![stone(64), stone(36)]);
+        assert_eq!(d.take, vec![(7, pick.clone()), (7, pick.clone())]);
+        let back = d.counts();
+        assert_eq!(back, vec![(Item::Block(block::STONE), 100), (pick.item.clone(), -2)], "the Plan is left out");
+        let registry = crate::block::BlockRegistry::new();
+        let (take, give) = d.to_wire();
+        assert_eq!(ItemDelta::from_wire(&take, &give, &registry), d, "round trip");
+        // What the container lost is what the player gained.
+        let (mut before, mut after) = (ChestData::new(), ChestData::new());
+        before.slots[0] = Some(stone(20));
+        after.slots[3] = Some(stone(5));
+        after.slots[4] = Some(ItemStack::new_block(block::DIRT, 2));
+        assert_eq!(
+            player_gain(ContainerRef::Chest(&before), ContainerRef::Chest(&after)),
+            {
+                let mut v = vec![(Item::Block(block::STONE), 15), (Item::Block(block::DIRT), -2)];
+                v.sort_by_key(|(item, _)| item_key(item));
+                v
+            }
+        );
+    }
+
+    /// C3b-fix-a — the phantom ledger debits claimed slots only (never a
+    /// blocker, even one that would match), in the owed search's order.
+    #[test]
+    fn a_debit_comes_off_claimed_slots_only() {
+        let registry = crate::block::BlockRegistry::new();
+        let wire = |s: &ItemStack| Some(crate::inventory::stack_to_wire(s));
+        let claims = vec![
+            (WireWindowSlot::Cursor, wire(&stone(4))),
+            (WireWindowSlot::Inv(5), wire(&stone(10))),
+            (WireWindowSlot::Inv(2), wire(&stone(3))),
+        ];
+        let mut w = ClaimedWindow::from_claims(&claims, &registry);
+        assert_eq!(w.debit(&Item::Block(block::STONE), 15), 15);
+        assert_eq!(w.stack(WireWindowSlot::Inv(5)), Some(None), "the 36 slots first, in claim order");
+        assert_eq!(w.stack(WireWindowSlot::Inv(2)), Some(None));
+        assert_eq!(w.stack(WireWindowSlot::Cursor), Some(Some(stone(2))), "then the cursor");
+        assert_eq!(w.debit(&Item::Block(block::STONE), 10), 2, "no more claimed");
+        assert_eq!(w.debit(&blocker().item, 1), 0, "a blocker is never debited");
+        assert_eq!(w.slot_holding(&Item::Block(block::STONE)), None);
+    }
+
+    /// C3b-fix-a (C-L3) — a claim above its item's stack is not one an
+    /// honest client can make: 65 stone, or two of one tool.
+    #[test]
+    fn claims_above_a_stack_are_rejected() {
+        let registry = crate::block::BlockRegistry::new();
+        let wire = |item: Item, count: u8| Some(crate::inventory::stack_to_wire(&ItemStack { item, count }));
+        let pick = Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron));
+        assert!(claims_fit_stacks(&[(WireWindowSlot::Inv(0), wire(Item::Block(block::STONE), 64))], &registry));
+        assert!(!claims_fit_stacks(&[(WireWindowSlot::Inv(0), wire(Item::Block(block::STONE), 65))], &registry));
+        assert!(claims_fit_stacks(&[(WireWindowSlot::Inv(1), wire(pick.clone(), 1))], &registry));
+        assert!(!claims_fit_stacks(&[(WireWindowSlot::Inv(1), wire(pick, 2))], &registry), "a tool counted above one");
+        assert!(claims_fit_stacks(&[(WireWindowSlot::Inv(2), None)], &registry));
     }
 
     #[test]
@@ -1069,6 +1398,7 @@ mod tests {
             slots: ContainerRef::Chest(&real).wire_slots(),
             furnace: None,
             refused: None,
+            window_event: 1,
         };
         let mirror = SharedContainer::from_opened(&pkt, &registry).expect("opened");
         let ContainerData::Chest(m) = &mirror.contents else { panic!("a chest") };
@@ -1116,7 +1446,9 @@ mod tests {
         // A Plan claimed stays put and is never a correction's value.
         let w = ClaimedWindow::from_claims(&[(WireWindowSlot::Inv(1), Some(crate::inventory::stack_to_wire(&plan())))], &registry);
         assert!(matches!(w.stack(WireWindowSlot::Inv(1)), Some(Some(ItemStack { item: Item::Plan(_), .. }))));
-        assert!(w.claimed_values().is_empty(), "a Plan is never named");
+        // C3b-fix-a — and never a correction's to move: a delta leaves a Plan out.
+        let net: ItemCounts = vec![(plan().item, 1)];
+        assert!(ItemDelta::from_counts(&net, |_| 0).is_empty(), "a Plan is never moved by a correction");
     }
 
     /// C3a-fix-2's server slack for containers: just past the client's

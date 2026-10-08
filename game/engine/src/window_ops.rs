@@ -42,22 +42,33 @@
 //! it doesn't follow any one client's order: the server re-runs the op over
 //! the player slots the client CLAIMS it held before it
 //! (`WindowOpPacket::claims`, `container_window::ClaimedWindow`) and the
-//! real container — the container's new contents are that run's, and a
-//! player slot whose result differs from what the client predicted (run the
-//! same way over the container as last sent to it, [`SentContainer`]) is
-//! corrected to that run's result: relative to the client's own state, never
-//! to the server's copy, which drifts until C3d. The correction
-//! (`WindowSlotSet`) also carries the real values of the container slots the
-//! op involved where they differ from what the client's prediction left in
-//! its mirror; its player part is a numbered
-//! window event (`window_events::WindowEvent::SetSlots`). The server's own
-//! copy applies the op as usual, over a copy of the container, and tallies
-//! what the client deposited that it didn't hold. [`container_push`] sends
-//! what others changed in an open container, once a tick.
+//! real container (R); the container's new contents are that run's.
+//!
+//! **C3b-fix-a (v78) — corrections that can't duplicate or lose.**
+//! - Every container view the server sends (the opened container, every
+//!   push, every correction's container slots) is a numbered window event,
+//!   so the server knows EXACTLY which view each op was predicted on
+//!   ([`ContainerViews::seen`], C-M1) and runs the client's prediction (P)
+//!   on it.
+//! - A correction moves items, never sets a player slot (C-H1): the client
+//!   is told R − P by item ("take N of X", "give N of X",
+//!   `container_window::ItemDelta`), resolved on its window as it is when
+//!   the correction lands, and the server's copy applies only R − own, its
+//!   own run's difference, never a claimed value.
+//! - The phantom ledger: while a correction is on its way, what it will
+//!   take back is debited from every later op's claims before R runs
+//!   (`window_events::phantom`), so an item the server already refused is
+//!   never believed again; a take that finds nothing is owed against the
+//!   next give of that item (`container_window::CorrectionDebt`).
+//! - A refused op's revert has no server-side effect (C-M2); believed
+//!   deposits are bounded per joiner ([`BelievedBucket`], C-L3).
+//!
+//! [`container_push`] sends what others changed in an open container, once
+//! a tick.
 
 use std::cell::Cell;
 
-use crate::container_window::{self, ClaimedWindow, ContainerClick, ContainerData, ContainerKind};
+use crate::container_window::{self, ClaimedWindow, ContainerClick, ContainerData, ContainerKind, ItemDelta};
 use crate::item::ItemStack;
 use crate::protocol::{
     BlockChange, EditHand, FurnaceView, WindowOpPacket, WindowSlotSetPacket, WireSlot, WireWindowOp, WireWindowSlot,
@@ -86,15 +97,35 @@ pub fn order_stamp() -> u64 {
 }
 
 /// One logged window op: the op, the window's digest after it, its order
-/// stamp, and (C3b-1, a container op) the slots the client's apply changed
-/// and its claims (the player slots it acts on, as they were before it).
+/// stamp, (C3b-1, a container op) the slots the client's apply changed and
+/// its claims (the player slots it acts on, as they were before it), and
+/// (C3b-fix-a) the client's own verdict on it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoggedOp {
     pub op: WireWindowOp,
     pub digest: u32,
     pub touched: Vec<WireWindowSlot>,
     pub claims: Vec<(WireWindowSlot, WireSlot)>,
+    /// A-L2/A-L3 — the client's `ClickResult::ok()` (`true` for an op that
+    /// isn't a click): `WindowOpPacket::client_ok`.
+    pub client_ok: bool,
     stamp: u64,
+}
+
+impl LoggedOp {
+    /// The packet that sends it as op `op_seq`, the client having applied
+    /// window events up to `events_applied`.
+    pub fn packet(self, op_seq: u32, events_applied: u32) -> WindowOpPacket {
+        WindowOpPacket {
+            op_seq,
+            op: self.op,
+            digest: self.digest,
+            events_applied,
+            touched: self.touched,
+            claims: self.claims,
+            client_ok: self.client_ok,
+        }
+    }
 }
 
 /// A client's window ops waiting to be sent, oldest first, each with the
@@ -115,25 +146,29 @@ impl OpLog {
     pub fn sync_auto_refill(&mut self, on: bool, digest: impl FnOnce() -> u32) {
         if self.auto_refill != Some(on) {
             self.auto_refill = Some(on);
-            self.record(WireWindowOp::SetAutoRefill { on }, digest());
+            self.record(WireWindowOp::SetAutoRefill { on }, digest(), true);
         }
     }
 
-    /// Log an op just applied, with the window's digest after it.
-    pub fn record(&mut self, op: WireWindowOp, digest: u32) {
-        self.record_container(op, digest, Vec::new(), Vec::new());
+    /// Log an op just applied, with the window's digest after it and the
+    /// client's own verdict on it (`ClickResult::ok()`; `true` for an op
+    /// that isn't a click).
+    pub fn record(&mut self, op: WireWindowOp, digest: u32, client_ok: bool) {
+        self.record_container(op, digest, Vec::new(), Vec::new(), client_ok);
     }
 
     /// C3b-1 — log a container op just applied, with the window's digest
-    /// after it (container included), the slots it changed and its claims.
+    /// after it (container included), the slots it changed, its claims and
+    /// the client's verdict.
     pub fn record_container(
         &mut self,
         op: WireWindowOp,
         digest: u32,
         touched: Vec<WireWindowSlot>,
         claims: Vec<(WireWindowSlot, WireSlot)>,
+        client_ok: bool,
     ) {
-        self.pending.push(LoggedOp { op, digest, touched, claims, stamp: order_stamp() });
+        self.pending.push(LoggedOp { op, digest, touched, claims, client_ok, stamp: order_stamp() });
     }
 
     /// Everything logged, oldest first, for a joined client to send. A
@@ -308,113 +343,225 @@ impl OpKind {
 }
 
 /// What applying one op did to the server's window.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Served {
     /// The rule's result for a click; `None` for an open or a setting. For
     /// a container op, the server's own copy's result.
     pub result: Option<ClickResult>,
     /// The server's window digest after the op (C3b-1: a container op's
-    /// covers the real container).
+    /// covers the container — v78: as the client's mirror shows it after its
+    /// own prediction, so the comparison is per-joiner lockstep only, C-L4).
     pub digest: u32,
     /// C3b-1 — a container op refused before the rule ran: no container
-    /// open, its cell gone, or beyond the server body's reach.
+    /// open, its cell gone, beyond the server body's reach, not the
+    /// container the client's mirror shows, a claim above its stack, or a
+    /// believed deposit past the bound (`over_bound`).
     pub container_refused: bool,
-    /// C3b-1 — the correction a container op earns, if any.
+    /// C3b-1 — the correction a container op earns, if any (v78: a refused
+    /// op's revert too).
     pub correction: Option<Correction>,
-    /// C3b-1 — the open furnace's progress after a container op.
-    pub furnace: Option<FurnaceView>,
     /// C3b-1 — units a container op put into the real container, by the
-    /// client's claims, beyond what the server's own copy of its window gave
-    /// it: believed deposits (a locally fished item, unmirrored until C3c).
+    /// client's claims, beyond what the server's own copy of its window held:
+    /// believed deposits (a locally fished item, unmirrored until C3c).
     pub believed: u32,
+    /// C3b-fix-a (C-L3) — units a container op would have put in believed
+    /// beyond the joiner's bound ([`BelievedBucket`]): the op was refused.
+    pub over_bound: u32,
 }
-
 
 impl Served {
     /// The rule refused the click (`Refused`, `NeedsTable`, `PlanStays`).
     pub fn refused(&self) -> bool {
         self.result.as_ref().is_some_and(|r| !r.ok())
     }
+
+    fn plain(result: Option<ClickResult>, digest: u32) -> Self {
+        Served { result, digest, container_refused: false, correction: None, believed: 0, over_bound: 0 }
+    }
 }
 
-/// C3b-1 — the correction a container op earns (`WindowSlotSet {
-/// Correction }`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Correction {
-    /// The player slots whose result differs from the client's prediction,
-    /// with the result of the op re-run over the client's claims and the
-    /// real container: a numbered window event
-    /// (`window_events::WindowEvent::SetSlots`), applied on both sides in
-    /// the client's order.
-    pub player: Vec<(WireWindowSlot, Option<ItemStack>)>,
-    /// Everything to send: those player slots, then the container slots the
-    /// op involved at their real values (shared state, applied at once).
-    pub sets: Vec<(WireWindowSlot, WireSlot)>,
-}
-
-/// C3b-1 — how long a container slot the server pushed or corrected to a
-/// joiner may still be on its way (two seconds: past any round trip a game
-/// is playable over). Until then the joiner may have acted on the slot's
-/// value from before, and [`serve_op`] judges its prediction both ways.
-pub const IN_FLIGHT_TICKS: u64 = 40;
-
-/// C3b-1 — what the server last sent a joiner of the container it has open
-/// (`ContainerOpened`, then every correction and push): its contents, by
-/// value (the client's prediction of each op is run over them, [`serve_op`]),
-/// and a furnace's progress. Own ops update it for the slots they involved,
-/// so a joiner's own clicks don't come back as pushes.
+/// C3b-fix-a — a container as a joined client's mirror shows it: the
+/// opened container and every view sent since, and the client's own
+/// predictions.
 #[derive(Clone, Debug)]
-pub struct SentContainer {
+pub struct MirrorView {
+    pub cell: [i32; 3],
     pub kind: ContainerKind,
+    /// Its slots, and a furnace's progress (`FurnaceData`).
     pub contents: ContainerData,
-    pub furnace: Option<FurnaceView>,
-    /// Per slot, while a push or correction of it may still be on its way
-    /// ([`IN_FLIGHT_TICKS`]): the tick it was last sent, and its value
-    /// before the first of those sends.
-    in_flight: Vec<Option<(u64, Option<ItemStack>)>>,
 }
 
-impl SentContainer {
-    /// What `ContainerOpened` sent.
-    pub fn new(kind: ContainerKind, contents: ContainerData, furnace: Option<FurnaceView>) -> Self {
-        let in_flight = vec![None; contents.as_ref().len()];
-        SentContainer { kind, contents, furnace, in_flight }
-    }
+/// C3b-fix-a (v78, C-M1) — one container view the server sends a joiner, a
+/// numbered window event (`window_events::WindowEvent::ContainerView`, or a
+/// correction's container part). It changes the client's mirror, never its
+/// window; the server applies it to its model of that mirror
+/// ([`ContainerViews::seen`]) when the client reports it applied it.
+#[derive(Clone, Debug)]
+pub enum ViewEvent {
+    /// `ContainerOpened`: the mirror opens on these contents.
+    Opened(MirrorView),
+    /// A `WindowSlotSet`'s container part: these container slots at these
+    /// values, and a furnace's progress if it moved.
+    Sets { sets: Vec<(usize, Option<ItemStack>)>, furnace: Option<FurnaceView> },
+}
 
-    /// Slot `i` was sent as `value` on tick `now` (a push or a correction):
-    /// it may not reach the joiner for a while.
-    fn send(&mut self, i: usize, value: Option<ItemStack>, now: u64) {
-        let was = self.contents.as_ref().get(i).cloned();
-        if let Some(slot) = self.in_flight.get_mut(i) {
-            let before = match slot.take() {
-                Some((at, before)) if now.saturating_sub(at) <= IN_FLIGHT_TICKS => before,
-                _ => was,
-            };
-            *slot = Some((now, before));
-        }
-        self.contents.set(i, value);
-    }
-
-    /// Slot `i` is now `value` by the joiner's own op: its prediction holds
-    /// it already.
-    fn settle(&mut self, i: usize, value: Option<ItemStack>) {
-        self.contents.set(i, value);
-    }
-
-    /// The contents as the joiner may still be seeing them on tick `now`:
-    /// every slot sent within [`IN_FLIGHT_TICKS`] at its value before. `None`
-    /// when nothing is on its way.
-    fn as_seen_lately(&self, now: u64) -> Option<ContainerData> {
-        let mut lately: Option<ContainerData> = None;
-        for (i, slot) in self.in_flight.iter().enumerate() {
-            if let Some((at, before)) = slot
-                && now.saturating_sub(*at) <= IN_FLIGHT_TICKS
-            {
-                lately.get_or_insert_with(|| self.contents.clone()).set(i, before.clone());
+impl ViewEvent {
+    /// Apply this view to a mirror (`None`: none open, which a set skips).
+    pub fn apply(&self, mirror: &mut Option<MirrorView>) {
+        match self {
+            ViewEvent::Opened(view) => *mirror = Some(view.clone()),
+            ViewEvent::Sets { sets, furnace } => {
+                let Some(m) = mirror.as_mut() else { return };
+                for (i, stack) in sets {
+                    m.contents.set(*i, stack.clone());
+                }
+                if let (Some(f), ContainerData::Furnace(data)) = (furnace, &mut m.contents) {
+                    f.apply_to(data);
+                }
             }
         }
-        lately
     }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, ViewEvent::Sets { sets, furnace: None } if sets.is_empty())
+    }
+}
+
+/// C3b-fix-a (v78) — the correction a container op earns
+/// (`WindowSlotSet { Correction }`, a numbered window event,
+/// `window_events::WindowEvent::Correction`).
+#[derive(Clone, Debug)]
+pub struct Correction {
+    /// The client's change, by item (C-H1): what the op gave it when re-run
+    /// over its claims and the real container, minus what its own
+    /// prediction gave it over the view it predicted on (R − P). A refused
+    /// op's revert: its prediction undone (−P).
+    pub client: ItemDelta,
+    /// The server's copy's change, by item, applied when the client reports
+    /// the event: R minus what its own run of the op gave it (R − own) —
+    /// never the client's claimed values (C-M2). `None` for a refused op:
+    /// the server's copy never moved.
+    pub own: Option<ItemDelta>,
+    /// The container slots the op involved whose real value differs from
+    /// what the client's mirror will show (a refused op: the slots it
+    /// touched and named), and a furnace's progress if it differs.
+    pub view: ViewEvent,
+}
+
+impl Correction {
+    /// The packet that carries it as window event `window_event`.
+    pub fn packet(&self, op_seq_applied: u32, window_event: u32) -> WindowSlotSetPacket {
+        let (sets, furnace) = match &self.view {
+            ViewEvent::Sets { sets, furnace } => (wire_sets(sets), *furnace),
+            ViewEvent::Opened(_) => (Vec::new(), None),
+        };
+        let (take, give) = self.client.to_wire();
+        WindowSlotSetPacket {
+            op_seq_applied,
+            reason: crate::protocol::slot_set_reason::CORRECTION,
+            sets,
+            furnace,
+            window_event,
+            take,
+            give,
+        }
+    }
+
+    /// Does it correct the client at all (an item to move, or a container
+    /// slot or progress to set)? What `container_corrected` counts.
+    pub fn corrects_client(&self) -> bool {
+        !self.client.is_empty() || !self.view.is_empty()
+    }
+}
+
+/// Container slots on the wire.
+fn wire_sets(sets: &[(usize, Option<ItemStack>)]) -> Vec<(WireWindowSlot, WireSlot)> {
+    sets.iter()
+        .filter_map(|(i, s)| u8::try_from(*i).ok().map(|at| (WireWindowSlot::Container(at), s.as_ref().map(crate::inventory::stack_to_wire))))
+        .collect()
+}
+
+/// C3b-fix-a (C-L3) — the believed-units bound per joiner: units a joiner
+/// may put into shared containers that the server's copy of its window
+/// doesn't hold (a locally caught fish, honest until C3c mirrors fishing).
+pub const BELIEVED_BUCKET_UNITS: u32 = 64;
+/// ... refilled at this many units a second.
+pub const BELIEVED_REFILL_PER_SECOND: u32 = 4;
+/// Server ticks a second.
+const TICKS_PER_SECOND: u32 = 20;
+
+/// C3b-fix-a (C-L3) — a joiner's believed-units bucket: [`BELIEVED_BUCKET_UNITS`]
+/// deep, refilled at [`BELIEVED_REFILL_PER_SECOND`]. A container op whose
+/// believed deposit it can't pay is refused and corrected.
+#[derive(Clone, Copy, Debug)]
+pub struct BelievedBucket {
+    /// In twentieths of a unit (one tick's refill at one unit a second).
+    level: u32,
+    /// The server tick of the last refill.
+    at: Option<u64>,
+}
+
+impl Default for BelievedBucket {
+    fn default() -> Self {
+        BelievedBucket { level: BELIEVED_BUCKET_UNITS * TICKS_PER_SECOND, at: None }
+    }
+}
+
+impl BelievedBucket {
+    /// Pay `units` on server tick `now`, if the bucket holds them.
+    pub fn try_take(&mut self, units: u32, now: u64) -> bool {
+        let cap = BELIEVED_BUCKET_UNITS * TICKS_PER_SECOND;
+        let ticks = self.at.map_or(0, |at| now.saturating_sub(at));
+        let refill = ticks.saturating_mul(u64::from(BELIEVED_REFILL_PER_SECOND)).min(u64::from(cap)) as u32;
+        self.level = self.level.saturating_add(refill).min(cap);
+        self.at = Some(now);
+        let cost = units.saturating_mul(TICKS_PER_SECOND);
+        if cost > self.level {
+            return false;
+        }
+        self.level -= cost;
+        true
+    }
+
+    /// Whole units it holds now (before this tick's refill).
+    #[cfg(test)]
+    pub fn units(&self) -> u32 {
+        self.level / TICKS_PER_SECOND
+    }
+}
+
+/// C3b-fix-a (v78) — one joiner's containers on the server
+/// (`ServerPlayer::container_sent`).
+#[derive(Clone, Debug, Default)]
+pub struct ContainerViews {
+    /// The kind of the real container `ServerPlayer::open_container` names.
+    pub open_kind: Option<ContainerKind>,
+    /// C-M1 — the joiner's mirror as its client holds it after the last
+    /// container op the server served and the views it reported applied:
+    /// the opened container, every push and correction it applied, and its
+    /// own predictions. A container op's prediction (P) is run on exactly
+    /// this, after the views its `events_applied` reports are applied
+    /// (`window_events::apply_through`). Cleared by the client's own close
+    /// (in its order), never by the server's: its mirror stays until it
+    /// closes it.
+    pub seen: Option<MirrorView>,
+    /// C-L3 — the believed-units bound.
+    pub believed: BelievedBucket,
+    /// C-L4 — the window event of the last refused op's revert: an op made
+    /// before the client applied it ran on a window the server's copy never
+    /// had (the prediction it undoes), which is not a lockstep mismatch.
+    pub revert_event: u32,
+}
+
+/// What joiner `sp`'s mirror will show once every container view sent to
+/// it lands: the model ([`ContainerViews::seen`]), then the views still
+/// waiting, oldest first. Pushes and corrections are diffed against it.
+pub fn latest_view(sp: &ServerPlayer) -> Option<MirrorView> {
+    let mut view = sp.container_sent.seen.clone();
+    for ev in crate::window_events::waiting_views(sp) {
+        ev.apply(&mut view);
+    }
+    view
 }
 
 /// Apply joiner `sp`'s window op `pkt` to the server's copy of its window,
@@ -429,9 +576,16 @@ impl SentContainer {
 /// player's grid, as the client's screen closes. `OpenPlayer` and
 /// `OpenTable` set the station; `SetAutoRefill` sets the setting.
 ///
+/// C3b-fix-a (A-L2) — a `Result` or `Autofill` click (the ones that read
+/// the table verdict, where the server's slack is kinder than the client's
+/// rule) is applied only when the client's own rule accepted it
+/// (`WindowOpPacket::client_ok`): the server never crafts what the client
+/// refused, so a stuck forced close can't craft on one side only.
+///
 /// C3b-1 — `Close`, `OpenPlayer` and `OpenTable` also close the open
-/// container; `OpenContainer` changes no window (the caller opens the
-/// container); a container op is [`serve_container`].
+/// container (and the model of the client's mirror: the client's screen
+/// closes with them); `OpenContainer` changes no window (the caller opens
+/// the container); a container op is [`serve_container`].
 pub fn serve_op(
     sp: &mut ServerPlayer,
     world: &mut World,
@@ -451,7 +605,7 @@ pub fn serve_op(
     let lately = sp.table_gone_ticks.is_none_or(|n| n <= window::SERVER_TABLE_GRACE_TICKS);
     let ctx = ClickCtx::new(creative, station, eye, |c| world.get_block(c[0], c[1], c[2])).with_server_slack(lately);
     if let WireWindowOp::Container(click) = op {
-        let served = serve_container(sp, world, registry, &ctx.with_shared(true), click, pkt, now);
+        let served = serve_container(sp, world, registry, &ctx.with_shared(true), click, pkt, now, creative);
         sp.last_window_op_seq = pkt.op_seq;
         return Some(served);
     }
@@ -464,7 +618,11 @@ pub fn serve_op(
     };
     let result = match op {
         WireWindowOp::Click(click) => {
-            let result = window::apply(&mut view, click, &ctx);
+            let result = if !pkt.client_ok && matches!(click, WindowClick::Result | WindowClick::Autofill { .. }) {
+                ClickResult::Refused
+            } else {
+                window::apply(&mut view, click, &ctx)
+            };
             station = window::station_after(station, click, &result);
             Some(result)
         }
@@ -495,60 +653,67 @@ pub fn serve_op(
     );
     if closes {
         sp.open_container = None;
-        sp.container_sent = None;
+        sp.container_sent.open_kind = None;
+        sp.container_sent.seen = None;
     }
     sp.station = station;
     sp.last_window_op_seq = pkt.op_seq;
-    Some(Served { result, digest, container_refused: false, correction: None, furnace: None, believed: 0 })
+    Some(Served::plain(result, digest))
 }
 
-/// C3b-1 (v77) — joiner `sp`'s container op `click` on the REAL container
-/// it has open, as a shared container (`ctx.shared`).
+/// Why a container op is refused before its rule runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// No container open on the server, or its cell gone.
+    NotOpen,
+    /// Beyond the server body's reach, with the slack.
+    OutOfReach,
+    /// The client's mirror shows another container (or none).
+    OtherView,
+    /// A claimed stack above its item's `max_stack()` (C-L3).
+    OverStack,
+}
+
+/// C3b-1 (v77) / C3b-fix-a (v78) — joiner `sp`'s container op `click` on
+/// the REAL container it has open, as a shared container (`ctx.shared`).
 ///
-/// Refused before the rule (`container_refused`) when none is open, its cell
-/// no longer holds it (then it is closed), or it stands beyond the server
-/// body's reach, judged with the server's slack
-/// (`container_window::container_in_server_reach`). Nothing moved, so the
-/// player slots the client changed go back to the values it claims they had
-/// (a correction).
+/// **P, the client's prediction:** the op over the player slots it claims
+/// it held before it (`pkt.claims`, every other slot a blocker,
+/// `container_window::ClaimedWindow`) and EXACTLY the view of the container
+/// it predicted on ([`ContainerViews::seen`], C-M1: every container view is a
+/// numbered window event, applied to the model up to the op's
+/// `events_applied`).
 ///
-/// Otherwise the op runs three times, over the same rule
-/// (`container_window::apply_container`):
-/// - **R, the shared truth:** over the player slots the client claims it
-///   held before it (`pkt.claims`, every other slot a blocker,
-///   `container_window::ClaimedWindow`) and the REAL container. The real
-///   container keeps R's result. A deposit of an item the server's copy of
-///   the window doesn't hold is BELIEVED: the container receives the
-///   claimed item and `believed` counts it.
-///   BRIDGE: C3d refuses and corrects from the server's window — replace
-///   when the flip lands (C3d). The same fabrication class as a claimed
-///   Q-drop (Spec 04 §4.2e).
-/// - **P, the client's prediction as the server sees it:** the same claims
-///   over the container as last sent to the joiner ([`SentContainer`]), and
-///   — while a push or correction of some slot may still be on its way
-///   ([`IN_FLIGHT_TICKS`]) — over the container as the joiner may still be
-///   seeing it (a race it lost before the winner's push reached it).
+/// Refused before the rule ([`refused_container_op`]) when no container is
+/// open or its cell no longer holds it (then it is closed), it stands beyond
+/// the server body's reach (`container_window::container_in_server_reach`),
+/// the client's mirror shows another container, or a claim counts above its
+/// stack (C-L3).
+///
+/// Otherwise:
+/// - **R, the shared truth:** the op over the client's claims less the
+///   phantom ledger (`window_events::phantom`: what corrections still on
+///   their way take back — items the server already refused, never believed
+///   again, C-H1) and the REAL container. A deposit of an item the server's
+///   copy of the window doesn't hold is BELIEVED (`believed`), within the
+///   joiner's bound ([`BelievedBucket`]; creative is unbounded): past it the
+///   op is refused. BRIDGE: C3d refuses and corrects from the server's
+///   window — replace when the flip lands (C3d). The same fabrication class
+///   as a claimed Q-drop (Spec 04 §4.2e).
 /// - **The server's own copy** (`ServerPlayer`'s window) applies the op as
-///   usual, over a copy of the container as it was: log-only, compared by
-///   digest (the real container's), its shortfall tallied (`believed`).
+///   usual over a copy of the view the client predicted on (own): in
+///   lockstep exactly the client's prediction, so its digest — taken with
+///   the container as the client's mirror shows it — compares lockstep only.
 ///
-/// The view the client predicted on is the one whose window (the server's
-/// copy with the claimed slots at that view's results, and that view's
-/// container) digests as the client's did; a drift confined to the claimed
-/// slots doesn't hide it. When neither matches (a drift elsewhere), both
-/// views are judged.
-///
-/// The correction: every claimed player slot where R differs from P (on a
-/// judged view), at R's value — relative to the client's own pre-op state,
-/// never the server's drifted copy, and only where the real container
-/// changed the outcome (so a drift never earns one by itself, and no
-/// correction touches a slot the op didn't claim); then every container
-/// slot the op involved (either side's changes and the click's named slots)
-/// whose real value differs from what P left in the client's mirror. Not on
-/// a digest mismatch alone: a drifted joiner would be corrected on every op,
-/// and a correction landing after its next click on the same slot would
-/// overwrite that click. The container slots it involved are recorded as
-/// sent at their real values (in flight, [`IN_FLIGHT_TICKS`], if corrected).
+/// The correction, by item (C-H1): the client's change R − P, and the server
+/// copy's R − own, both from what the container lost (the rules only move
+/// items between the two); then every container slot the op involved
+/// (either side's changes and the click's named slots) whose real value
+/// differs from what the client's mirror will show
+/// ([`latest_view`]), and a furnace's progress. When nothing reaches the
+/// client, the server's copy applies its change at once. Never on a digest
+/// mismatch alone.
+#[allow(clippy::too_many_arguments)]
 fn serve_container(
     sp: &mut ServerPlayer,
     world: &mut World,
@@ -557,221 +722,244 @@ fn serve_container(
     click: &ContainerClick,
     pkt: &WindowOpPacket,
     now: u64,
+    creative: bool,
 ) -> Served {
-    use crate::window::slot_print;
-    let station = sp.station;
     let eye = sp.player.eye_pos();
-    let open = sp.open_container.zip(sp.container_sent.as_ref().map(|s| s.kind));
-    let real_pre = open.and_then(|(cell, kind)| container_window::container_at(world, cell, kind)).map(ContainerData::of);
-    let in_reach = open.is_some_and(|(cell, _)| container_window::container_in_server_reach(eye, cell));
-    let (Some((cell, kind)), Some(real_pre), true, Some(sent)) = (open, real_pre.clone(), in_reach, sp.container_sent.as_ref())
-    else {
-        if open.is_some() && real_pre.is_none() {
-            sp.open_container = None;
-            sp.container_sent = None;
-        }
-        return refused_container_op(sp, registry, pkt);
-    };
-    // P — the client's prediction, over the container as last sent to it;
-    // and, while a push or correction may still be on its way, over the
-    // container as it may still be seeing it.
-    let mut predicted = sent.contents.clone();
-    let mut p_win = ClaimedWindow::from_claims(&pkt.claims, registry);
-    let p = p_win.apply(predicted.as_mut(), click, ctx);
-    let lately = sent.as_seen_lately(now).map(|mut c| {
+    let seen = sp.container_sent.seen.clone();
+    let predicted = seen.as_ref().map(|v| {
         let mut w = ClaimedWindow::from_claims(&pkt.claims, registry);
-        let applied = w.apply(c.as_mut(), click, ctx);
-        (w, applied, c)
+        let mut after = v.contents.clone();
+        let applied = w.apply(after.as_mut(), click, ctx);
+        Predicted { window: w, after, applied }
     });
-    // Which view the client predicted on: the one whose window — the
-    // server's copy with the claimed slots at that prediction's results —
-    // digests as the client's did. A drift confined to the claimed slots
-    // (a locally caught fish being deposited) doesn't hide it; a drift
-    // elsewhere does, and then both views are judged.
-    let view_digest = |w: &ClaimedWindow, c: &ContainerData| {
-        let (mut inv, mut armour, mut cursor, mut grid) =
-            (sp.inventory.clone(), sp.armour, sp.cursor.clone(), sp.craft_grid.clone());
-        w.overlay(&mut inv, &mut armour, &mut cursor, &mut grid);
-        window::digest_with(&inv, &armour, &cursor, &grid, station, Some(c.as_ref()))
+    let open = sp.open_container.zip(sp.container_sent.open_kind);
+    let real_pre = open.and_then(|(cell, kind)| container_window::container_at(world, cell, kind)).map(ContainerData::of);
+    if open.is_some() && real_pre.is_none() {
+        sp.open_container = None;
+        sp.container_sent.open_kind = None;
+    }
+    let refusal = match (open, &real_pre, &seen) {
+        (None, ..) | (_, None, _) => Some(Refusal::NotOpen),
+        (Some((cell, _)), ..) if !container_window::container_in_server_reach(eye, cell) => Some(Refusal::OutOfReach),
+        (Some((cell, kind)), _, Some(v)) if v.cell != cell || v.kind != kind => Some(Refusal::OtherView),
+        (_, _, None) => Some(Refusal::OtherView),
+        _ if !container_window::claims_fit_stacks(&pkt.claims, registry) => Some(Refusal::OverStack),
+        _ => None,
     };
-    let mut views: Vec<(&ClaimedWindow, &ContainerData)> = vec![(&p_win, &predicted)];
-    if let Some((w, _, c)) = lately.as_ref() {
-        views.push((w, c));
+    if let Some(why) = refusal {
+        log::debug!("{}'s container op {} refused: {why:?}", sp.display_name, pkt.op_seq);
+        return refused_container_op(sp, world, pkt, click, seen, predicted, 0);
     }
-    if let Some(&seen) = views.iter().find(|(w, c)| view_digest(w, c) == pkt.digest) {
-        views = vec![seen];
-    }
-    // R — the shared truth, over the real container.
+    let (Some((cell, kind)), Some(real_pre), Some(seen), Some(p)) = (open, real_pre, seen, predicted) else {
+        // The checks above leave none of these empty.
+        return refused_container_op(sp, world, pkt, click, None, None, 0);
+    };
+    // R — the claims less the phantom ledger, over a copy of the real
+    // container first (a deposit past the believed bound is refused).
     let mut r_win = ClaimedWindow::from_claims(&pkt.claims, registry);
-    let Some(real) = container_window::container_at_mut(world, cell, kind) else {
-        return refused_container_op(sp, registry, pkt);
-    };
-    let r = r_win.apply(real, click, ctx);
-    // The server's own copy of the window, over a copy of the container.
-    let mut own_copy = real_pre.clone();
+    for (item, n) in crate::window_events::phantom(sp) {
+        r_win.debit(&item, n);
+    }
+    let mut r_after = real_pre.clone();
+    let r = r_win.apply(r_after.as_mut(), click, ctx);
+    let r_gain = container_window::player_gain(real_pre.as_ref(), r_after.as_ref());
+    let believed_by_item = believed_units(sp, &r_gain);
+    let believed: u32 = believed_by_item.iter().map(|(_, n)| *n).fold(0, u32::saturating_add);
+    if believed > 0 && !creative && !sp.container_sent.believed.try_take(believed, now) {
+        log::debug!("{}'s container op {} refused: {believed} believed unit(s) past the bound", sp.display_name, pkt.op_seq);
+        return refused_container_op(sp, world, pkt, click, Some(seen), Some(p), believed);
+    }
+    if let Some(mut real) = container_window::container_at_mut(world, cell, kind) {
+        real.replace_with(&r_after);
+    }
+    // The server's own copy, over the view the client predicted on.
+    let mut own_after = seen.contents.clone();
     let own = {
         let mut view = WindowMut {
             inv: &mut sp.inventory,
             armour: &mut sp.armour,
             cursor: &mut sp.cursor,
             grid: &mut sp.craft_grid,
-            container: Some(own_copy.as_mut()),
+            container: Some(own_after.as_mut()),
         };
         container_window::apply_container(&mut view, click, ctx)
     };
-    let Some(real) = container_window::container_at(world, cell, kind) else {
-        return refused_container_op(sp, registry, pkt);
+    let p_gain = container_window::player_gain(seen.contents.as_ref(), p.after.as_ref());
+    let own_gain = container_window::player_gain(seen.contents.as_ref(), own_after.as_ref());
+    let hint = |item: &crate::item::Item| p.window.slot_holding(item).unwrap_or(0);
+    let client = ItemDelta::from_counts(&container_window::counts_minus(&r_gain, &p_gain), hint);
+    // The server's copy gives up what R put in, less the believed units it
+    // never held (tallied, not owed).
+    let believed_back: container_window::ItemCounts =
+        believed_by_item.iter().map(|(item, n)| (item.clone(), -i64::from(*n))).collect();
+    let own_net = container_window::counts_minus(&container_window::counts_minus(&r_gain, &own_gain), &believed_back);
+    let own_delta = ItemDelta::from_counts(&own_net, hint);
+    // The model: the client's mirror after its own prediction.
+    sp.container_sent.seen = Some(MirrorView { cell, kind, contents: p.after.clone() });
+    let involved = involved_slots(pkt, click, [&r.touched, &p.applied.touched]);
+    let view = view_correction(sp, r_after.as_ref(), &involved);
+    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, Some(p.after.as_ref()));
+    let correction = Correction { client, own: Some(own_delta), view };
+    let correction = if correction.corrects_client() {
+        Some(correction)
+    } else {
+        // Nothing reaches the client: its window is its prediction, so the
+        // server's copy takes its own change now (none in lockstep).
+        if let Some(own) = correction.own.as_ref().filter(|d| !d.is_empty()) {
+            sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, own);
+        }
+        None
     };
-    let believed = gained_beyond(real_pre.as_ref(), real, own_copy.as_ref());
-    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, station, Some(real));
-    // A claimed player slot is corrected where R's result differs from the
-    // client's prediction (on every view it may have predicted on).
-    let player: Vec<(WireWindowSlot, Option<ItemStack>)> = r_win
-        .claimed_values()
-        .into_iter()
-        .filter(|(at, rv)| {
-            views.iter().any(|(w, _)| w.stack(*at).is_some_and(|pv| slot_print(pv.as_ref()) != slot_print(rv.as_ref())))
-        })
-        .collect();
-    let mut involved: Vec<WireWindowSlot> = Vec::new();
-    let lately_touched = lately.as_ref().map(|(_, a, _)| a.touched.as_slice()).unwrap_or_default();
-    for at in pkt
-        .touched
+    Served { result: Some(own.result), digest, container_refused: false, correction, believed, over_bound: 0 }
+}
+
+/// The client's prediction of a container op, run by the server.
+struct Predicted {
+    /// The claimed window after it.
+    window: ClaimedWindow,
+    /// The container after it.
+    after: ContainerData,
+    applied: container_window::ContainerApplied,
+}
+
+/// The container slots a container op involved: the ones the client says
+/// it touched (`pkt.touched`), the ones each run changed, and the ones the
+/// click names.
+fn involved_slots<const N: usize>(pkt: &WindowOpPacket, click: &ContainerClick, runs: [&Vec<WireWindowSlot>; N]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let named = container_window::named_slots(click);
+    for at in pkt.touched.iter().chain(runs.into_iter().flatten()).chain(&named) {
+        if let WireWindowSlot::Container(i) = *at
+            && !out.contains(&usize::from(i))
+        {
+            out.push(usize::from(i));
+        }
+    }
+    out
+}
+
+/// The container part of a correction: each of `involved` whose real value
+/// (`real`) differs from what joiner `sp`'s mirror will show
+/// ([`latest_view`]), at its real value, and with them a furnace's progress
+/// if it differs. Progress alone earns no correction: the cook's push
+/// carries it.
+fn view_correction(sp: &ServerPlayer, real: container_window::ContainerRef, involved: &[usize]) -> ViewEvent {
+    let latest = latest_view(sp);
+    let shown = latest.as_ref().map(|v| v.contents.as_ref());
+    let print = |c: Option<container_window::ContainerRef>, i: usize| c.map(|c| window::slot_print(c.get(i)));
+    let sets: Vec<(usize, Option<ItemStack>)> = involved
         .iter()
-        .chain(&r.touched)
-        .chain(&p.touched)
-        .chain(lately_touched)
         .copied()
-        .chain(container_window::named_slots(click))
-    {
-        if !container_window::is_player_slot(at) && !involved.contains(&at) {
-            involved.push(at);
-        }
-    }
-    let involved: Vec<(WireWindowSlot, Option<&ItemStack>)> =
-        involved.into_iter().filter_map(|at| slot_at(real, at).map(|v| (at, v))).collect();
-    // A container slot the op involved is corrected where the real one
-    // differs from what the client's prediction left in its mirror.
-    let mispredicted: Vec<(WireWindowSlot, Option<&ItemStack>)> = involved
+        .filter(|&i| i < real.len() && print(Some(real), i) != print(shown, i))
+        .map(|i| (i, real.get(i).cloned()))
+        .collect();
+    let furnace = real
+        .furnace_view()
+        .filter(|f| !sets.is_empty() && shown.and_then(|c| c.furnace_view()) != Some(*f));
+    ViewEvent::Sets { sets, furnace }
+}
+
+/// Units a container op's R put into the real container (`r_gain`'s
+/// negative counts) beyond what the server's copy of joiner `sp`'s window
+/// holds of each item (its 36 slots, grid and cursor, its armour for an
+/// armour piece; a tool or armour piece by kind, as an owed take finds it):
+/// believed deposits, item by item (none listed at 0).
+fn believed_units(sp: &ServerPlayer, r_gain: &container_window::ItemCounts) -> Vec<(crate::item::Item, u32)> {
+    use crate::joiner_actions::same_item;
+    let held = |item: &crate::item::Item| -> u64 {
+        let of = |s: Option<&ItemStack>| s.filter(|s| same_item(&s.item, item)).map_or(0, |s| u64::from(s.count));
+        let inv: u64 = sp.inventory.slots_iter().map(of).sum();
+        let grid: u64 = sp.craft_grid.iter().flatten().map(|c| of(c.as_ref())).sum();
+        let armour = sp.armour.iter().flatten().filter(|p| same_item(&crate::item::Item::Armour(**p), item)).count() as u64;
+        inv + grid + of(sp.cursor.as_ref()) + armour
+    };
+    r_gain
         .iter()
-        .copied()
-        .filter(|(at, v)| {
-            views.iter().any(|(_, c)| slot_at(c.as_ref(), *at).is_none_or(|pv| slot_print(pv) != slot_print(*v)))
-        })
-        .collect();
-    let furnace = real.furnace_view();
-    let corrected: Vec<WireWindowSlot> = mispredicted.iter().map(|(at, _)| *at).collect();
-    let mut sets: Vec<(WireWindowSlot, WireSlot)> =
-        player.iter().map(|(at, s)| (*at, s.as_ref().map(crate::inventory::stack_to_wire))).collect();
-    sets.extend(mispredicted.iter().map(|(at, v)| (*at, v.map(crate::inventory::stack_to_wire))));
-    let correction = (!sets.is_empty()).then_some(Correction { player, sets });
-    // The slots it involved are as the joiner will hold them: its own
-    // prediction, or (corrected) on their way.
-    let involved: Vec<(WireWindowSlot, Option<ItemStack>)> = involved.iter().map(|(at, v)| (*at, v.cloned())).collect();
-    if let Some(sent) = sp.container_sent.as_mut() {
-        for (at, v) in involved {
-            let WireWindowSlot::Container(i) = at else { continue };
-            if corrected.contains(&at) {
-                sent.send(usize::from(i), v, now);
-            } else {
-                sent.settle(usize::from(i), v);
-            }
-        }
-        if correction.is_some() {
-            sent.furnace = furnace;
-        }
-    }
-    Served { result: Some(own.result), digest, container_refused: false, correction, furnace, believed }
+        .filter(|(_, n)| *n < 0)
+        .map(|(item, n)| (item.clone(), n.unsigned_abs().saturating_sub(held(item)).min(u64::from(u32::MAX)) as u32))
+        .filter(|(_, n)| *n > 0)
+        .collect()
 }
 
-/// Container slot `at` of `c` (`None` for a player slot or one past the
-/// end).
-fn slot_at(c: container_window::ContainerRef<'_>, at: WireWindowSlot) -> Option<Option<&ItemStack>> {
-    match at {
-        WireWindowSlot::Container(i) if usize::from(i) < c.len() => Some(c.get(usize::from(i))),
-        _ => None,
+/// C3b-1 / C3b-fix-a (C-M2, C-L1) — a container op refused before its rule
+/// ran. The server's copy never moved, and neither did the real container.
+/// The client's prediction (P, over the view it predicted on) is undone by
+/// item — a numbered event with NO server-side effect (`own: None`) — and
+/// the container slots it touched and named go back to their real values
+/// where its mirror would show otherwise, if that container still exists.
+/// With no view to predict on (no container was ever opened for it), there
+/// is nothing to undo: a client can't hold a mirror the server never sent.
+/// `over_bound`: the believed units that refused it, if that was why.
+fn refused_container_op(
+    sp: &mut ServerPlayer,
+    world: &World,
+    pkt: &WindowOpPacket,
+    click: &ContainerClick,
+    seen: Option<MirrorView>,
+    predicted: Option<Predicted>,
+    over_bound: u32,
+) -> Served {
+    let mut correction = None;
+    if let (Some(v), Some(p)) = (seen, predicted) {
+        let undo: container_window::ItemCounts =
+            container_window::player_gain(v.contents.as_ref(), p.after.as_ref()).into_iter().map(|(item, n)| (item, -n)).collect();
+        let client = ItemDelta::from_counts(&undo, |item| p.window.slot_holding(item).unwrap_or(0));
+        sp.container_sent.seen = Some(MirrorView { contents: p.after.clone(), ..v.clone() });
+        let view = match container_window::container_at(world, v.cell, v.kind) {
+            Some(real) => view_correction(sp, real, &involved_slots(pkt, click, [&p.applied.touched])),
+            None => ViewEvent::Sets { sets: Vec::new(), furnace: None },
+        };
+        let c = Correction { client, own: None, view };
+        correction = c.corrects_client().then_some(c);
     }
+    let shown = sp.container_sent.seen.as_ref().map(|v| v.contents.as_ref());
+    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, shown);
+    Served { result: Some(ClickResult::Refused), digest, container_refused: true, correction, believed: 0, over_bound }
 }
 
-/// C3b-1 — a container op refused before the rule ran: nothing moved, so
-/// the player slots the client changed (`pkt.touched`) go back to the values
-/// it claims they had (a Plan the client holds is never named: it keeps it).
-fn refused_container_op(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, pkt: &WindowOpPacket) -> Served {
-    let player: Vec<(WireWindowSlot, Option<ItemStack>)> = ClaimedWindow::from_claims(&pkt.claims, registry)
-        .claimed_values()
-        .into_iter()
-        .filter(|(at, _)| pkt.touched.contains(at))
-        .collect();
-    let sets: Vec<(WireWindowSlot, WireSlot)> =
-        player.iter().map(|(at, s)| (*at, s.as_ref().map(crate::inventory::stack_to_wire))).collect();
-    let digest = window::digest_with(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station, None);
-    Served {
-        result: Some(ClickResult::Refused),
-        digest,
-        container_refused: true,
-        correction: (!sets.is_empty()).then_some(Correction { player, sets }),
-        furnace: None,
-        believed: 0,
-    }
-}
-
-/// C3b-1 — units of each item the real container gained from `before` to
-/// `real` beyond what the server's own copy (`own`, from the same `before`)
-/// gained: what a container op put in by the client's claims that the
-/// server's copy of the window didn't hold (believed deposits).
-fn gained_beyond(before: container_window::ContainerRef, real: container_window::ContainerRef, own: container_window::ContainerRef) -> u32 {
-    use std::collections::HashMap;
-    // One stack's item, digested without its count (`window::slot_print`).
-    let key = |s: &ItemStack| window::slot_print(Some(&ItemStack { item: s.item.clone(), count: 1 }));
-    let mut gain: HashMap<u32, i64> = HashMap::new();
-    for (c, sign) in [(real, 1i64), (own, -1), (before, 0)] {
-        for i in 0..c.len() {
-            if let Some(s) = c.get(i) {
-                *gain.entry(key(s)).or_default() += sign * i64::from(s.count);
-            }
-        }
-    }
-    gain.values().map(|&g| g.max(0)).sum::<i64>().min(i64::from(u32::MAX)) as u32
-}
-
-/// C3b-1 — what changed in joiner `sp`'s open container since it was last
-/// sent ([`SentContainer`]): the container slots whose contents differ, and
-/// a furnace's progress if it moved, as a `WindowSlotSet { Changed }` (no
-/// window event: container slots only). This is what everyone but the
-/// joiner's own ops did: another player, a hopper, the furnace cooking, a
-/// host's click on its lent world. `None` when nothing changed. A container
-/// whose cell no longer holds it is closed (the client closes its screen by
-/// the same rule, seeing the block go). `now`: the server tick.
+/// C3b-1 / C3b-fix-a — what changed in joiner `sp`'s open container beyond
+/// what its mirror will show once every view sent lands ([`latest_view`]):
+/// the container slots whose contents differ, and a furnace's progress if it
+/// moved, as a `WindowSlotSet { Changed }` — v78: a numbered window event
+/// (`window_events::WindowEvent::ContainerView`), queued here, so the
+/// client's next op names the view it predicted on (C-M1). This is what
+/// everyone but the joiner's own ops did: another player, a hopper, the
+/// furnace cooking, a host's click on its lent world. `None` when nothing
+/// changed. A container whose cell no longer holds it is closed on the
+/// server (the client closes its screen by the same rule, seeing the block
+/// go). `now`: the server tick.
 pub fn container_push(sp: &mut ServerPlayer, world: &World, now: u64) -> Option<WindowSlotSetPacket> {
     let cell = sp.open_container?;
-    let kind = sp.container_sent.as_ref()?.kind;
+    let kind = sp.container_sent.open_kind?;
     let Some(c) = container_window::container_at(world, cell, kind) else {
         sp.open_container = None;
-        sp.container_sent = None;
+        sp.container_sent.open_kind = None;
         return None;
     };
-    let sent = sp.container_sent.as_mut()?;
-    let was = sent.contents.as_ref().prints();
-    let mut sets: Vec<(WireWindowSlot, WireSlot)> = Vec::new();
-    for (i, print) in c.prints().into_iter().enumerate() {
-        if was.get(i) == Some(&print) {
-            continue;
-        }
-        let Ok(at) = u8::try_from(i) else { continue };
-        sets.push((WireWindowSlot::Container(at), c.get(i).map(crate::inventory::stack_to_wire)));
-        sent.send(i, c.get(i).cloned(), now);
-    }
-    let furnace = c.furnace_view();
-    if sets.is_empty() && furnace == sent.furnace {
+    let latest = latest_view(sp).filter(|v| v.cell == cell && v.kind == kind)?;
+    let shown = latest.contents.as_ref();
+    let sets: Vec<(usize, Option<ItemStack>)> = (0..c.len())
+        .filter(|&i| window::slot_print(c.get(i)) != window::slot_print(shown.get(i)))
+        .map(|i| (i, c.get(i).cloned()))
+        .collect();
+    let furnace = c.furnace_view().filter(|f| shown.furnace_view() != Some(*f));
+    if sets.is_empty() && furnace.is_none() {
         return None;
     }
-    sent.furnace = furnace;
+    let wire = wire_sets(&sets);
+    let event = crate::window_events::queue(
+        sp,
+        crate::window_events::WindowEvent::ContainerView(ViewEvent::Sets { sets, furnace }),
+        now,
+    );
     Some(WindowSlotSetPacket {
         op_seq_applied: sp.last_window_op_seq,
         reason: crate::protocol::slot_set_reason::CHANGED,
-        sets,
+        sets: wire,
         furnace,
-        window_event: 0,
+        window_event: event,
+        take: Vec::new(),
+        give: Vec::new(),
     })
 }
 
@@ -791,27 +979,37 @@ pub fn watch_table(sp: &mut ServerPlayer, world: &World) {
 
 /// Tally op `pkt` as served (`served`) on joiner `sp`'s possession counters:
 /// every op is counted; unless `creative`, a rule refusal is counted (a
-/// no-op when the client's digest agrees, a refusal when it doesn't) and a
-/// digest that differs from the client's is a mismatch (the first one's
-/// kind is kept, and it is logged at info; the rest at debug). Log-only.
+/// no-op when the client's own rule refused too, a refusal when it didn't)
+/// and a digest that differs from the client's is a mismatch (the first
+/// one's kind is kept, and it is logged at info; the rest at debug).
+/// Log-only.
 ///
 /// C3a-fix-1 (decision 2) — the first comparison after join is not tallied:
 /// it is recorded as the baseline (`WindowEvents::baseline`), the window the
 /// joiner arrived with, which no wire carries yet (the sidecar's join sync
 /// will).
+///
+/// C3b-fix-a — `window_mismatch` is per-joiner lockstep only, the C3d gate
+/// (C-L4): a container op refused before its rule (tallied
+/// `container_refused` by the caller), and an op made before the client
+/// applied a refused op's revert ([`ContainerViews::revert_event`]: it ran
+/// on a prediction the server's copy never made), are container
+/// convergence, not mismatches. A-L3: no-op versus refusal splits on the
+/// client's own verdict (`client_ok`), not on the digests, which drift
+/// elsewhere would split wrongly.
 pub fn note_served(sp: &mut ServerPlayer, pkt: &WindowOpPacket, served: &Served, creative: bool) {
     let tally = &mut sp.possession;
     tally.window_ops = tally.window_ops.saturating_add(1);
-    if creative {
+    if creative || served.container_refused {
         return;
     }
     if served.refused() {
-        // B-L4: refused on both sides (the client's digest is the server's:
-        // its rule refused too) is a benign no-op; refused here alone is not.
-        if served.digest == pkt.digest {
-            tally.window_noop = tally.window_noop.saturating_add(1);
-        } else {
+        // B-L4: refused on both sides is a benign no-op; refused here alone
+        // is not.
+        if pkt.client_ok {
             tally.window_refused = tally.window_refused.saturating_add(1);
+        } else {
+            tally.window_noop = tally.window_noop.saturating_add(1);
         }
     }
     let matched = served.digest == pkt.digest;
@@ -826,7 +1024,7 @@ pub fn note_served(sp: &mut ServerPlayer, pkt: &WindowOpPacket, served: &Served,
         }
         return;
     }
-    if matched {
+    if matched || sp.container_sent.revert_event > pkt.events_applied {
         return;
     }
     let kind = OpKind::of(&pkt.op);
@@ -850,9 +1048,9 @@ mod tests {
     fn a_session_starts_by_logging_auto_refill_then_only_its_changes() {
         let mut log = OpLog::default();
         log.sync_auto_refill(true, || 11);
-        log.record(WireWindowOp::OpenPlayer, 11);
+        log.record(WireWindowOp::OpenPlayer, 11, true);
         log.sync_auto_refill(true, || panic!("unchanged: no digest is read"));
-        log.record(WireWindowOp::Click(WindowClick::Sort), 12);
+        log.record(WireWindowOp::Click(WindowClick::Sort), 12, true);
         let taken = log.take(false, 13);
         assert!(taken.iter().all(|l| l.touched.is_empty()), "no op here touched a container");
         assert_eq!(
@@ -867,7 +1065,7 @@ mod tests {
         );
         assert!(log.take(false, 13).is_empty(), "nothing new");
         // Not joined: dropped, and the next session sends the setting again.
-        log.record(WireWindowOp::OpenPlayer, 1);
+        log.record(WireWindowOp::OpenPlayer, 1, true);
         log.discard();
         assert_eq!(log.len(), 0);
         let again: Vec<_> = log.take(false, 2).into_iter().map(|l| (l.op, l.digest)).collect();
@@ -880,11 +1078,11 @@ mod tests {
     fn ops_split_at_the_first_unsent_edit() {
         let mut log = OpLog::default();
         let mut edits = PendingEdits::default();
-        log.record(WireWindowOp::Click(WindowClick::Close), 1);
+        log.record(WireWindowOp::Click(WindowClick::Close), 1, true);
         edits.push(BlockChange { x: 1, y: 2, z: 3, new_block: 4, meta: 0 });
-        log.record(WireWindowOp::OpenPlayer, 2);
+        log.record(WireWindowOp::OpenPlayer, 2, true);
         edits.push(BlockChange { x: 5, y: 2, z: 3, new_block: 4, meta: 0 });
-        log.record(WireWindowOp::Click(WindowClick::Sort), 3);
+        log.record(WireWindowOp::Click(WindowClick::Sort), 3, true);
         let pairs = |ops: Vec<LoggedOp>| ops.into_iter().map(|l| (l.op, l.digest)).collect::<Vec<_>>();
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![(WireWindowOp::Click(WindowClick::Close), 1)]);
         assert_eq!(pairs(log.take_before(edits.first_stamp())), vec![], "the rest wait for the input");
@@ -918,6 +1116,22 @@ mod tests {
         edits.push(edit(9));
         edits.clear();
         assert_eq!((edits.len(), edits.first_stamp()), (0, None));
+    }
+
+    /// C3b-fix-a (C-L3) — the believed bucket: 64 units deep, 4 a second
+    /// back, all or nothing per op.
+    #[test]
+    fn the_believed_bucket_holds_sixty_four_and_refills_four_a_second() {
+        let mut b = BelievedBucket::default();
+        assert_eq!(b.units(), BELIEVED_BUCKET_UNITS);
+        assert!(b.try_take(60, 100));
+        assert!(!b.try_take(5, 100), "4 left: 5 is refused whole");
+        assert!(b.try_take(4, 100));
+        assert!(!b.try_take(1, 104), "4 ticks refill 0.8 of a unit");
+        assert!(b.try_take(1, 105), "5 ticks, one unit");
+        assert!(b.try_take(4, 125), "a second, four");
+        assert!(b.try_take(64, 10_000), "full again, never past full");
+        assert!(!b.try_take(1, 10_000));
     }
 
     #[test]

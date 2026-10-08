@@ -2173,13 +2173,18 @@ impl HostedServer {
     ///   container, or a refusal ([`Self::open_joiner_container`]).
     /// - A container op acts on the real container, re-run over the client's
     ///   claimed slots (`window_ops::serve_op`). One refused before the rule
-    ///   (none open, gone, out of reach) is tallied; one that earns a
-    ///   correction is answered with a `WindowSlotSet { Correction }` (a
-    ///   creative joiner too: the container is everyone's), sent now, ahead
-    ///   of this tick's grants. Its player slots are a numbered window event
-    ///   (`window_events::WindowEvent::SetSlots`), applied to the server's
-    ///   copy when the client reports it applied it; its container slots are
-    ///   already the real ones.
+    ///   (none open, gone, out of reach, another view, a claim above its
+    ///   stack, a believed deposit past the bound) is tallied
+    ///   `container_refused`; one that earns a correction (C3b-fix-a: a
+    ///   refused one's revert too) is answered with a `WindowSlotSet {
+    ///   Correction }` (a creative joiner too: the container is everyone's),
+    ///   sent now, ahead of this tick's grants. It is a numbered window event
+    ///   (`window_events::WindowEvent::Correction`): the client resolves its
+    ///   item delta in its order, and the server's copy applies its own
+    ///   delta (none for a refusal) when the client reports it applied it;
+    ///   its container slots are already the real ones. Container
+    ///   convergence is tallied apart from lockstep (C-L4):
+    ///   `container_corrected`, `container_believed`, `container_refused`.
     fn handle_window_op(&mut self, i: usize, pkt: &protocol::WindowOpPacket) {
         let creative = self.server.play_mode.is_creative();
         let now = self.server.tick_counter;
@@ -2209,20 +2214,27 @@ impl HostedServer {
                 held_back_note(due),
             );
         }
+        if served.over_bound > 0 {
+            let due = sp.possession.note_mismatch(now);
+            log::log!(
+                crate::joiner_inventory::mismatch_log_level(due),
+                "possession check: {} tried to put {} item(s) in a shared container that the server's copy of \
+                 their inventory didn't hold, past the believed bound — refused{}",
+                sp.display_name,
+                served.over_bound,
+                held_back_note(due),
+            );
+        }
         if let Some(correction) = served.correction {
-            sp.possession.container_corrections = sp.possession.container_corrections.saturating_add(1);
-            let window_event = if correction.player.is_empty() {
-                0
-            } else {
-                crate::window_events::queue(sp, crate::window_events::WindowEvent::SetSlots(correction.player), now)
-            };
-            let pkt = protocol::WindowSlotSetPacket {
-                op_seq_applied: pkt.op_seq,
-                reason: protocol::slot_set_reason::CORRECTION,
-                sets: correction.sets,
-                furnace: served.furnace,
-                window_event,
-            };
+            sp.possession.container_corrected = sp.possession.container_corrected.saturating_add(1);
+            let revert = correction.own.is_none();
+            let set = correction.packet(pkt.op_seq, 0);
+            let window_event =
+                crate::window_events::queue(sp, crate::window_events::WindowEvent::Correction(Box::new(correction)), now);
+            if revert {
+                sp.container_sent.revert_event = window_event;
+            }
+            let pkt = protocol::WindowSlotSetPacket { window_event, ..set };
             self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::WindowSlotSet, &pkt));
         }
         if let protocol::WireWindowOp::OpenContainer { cell } = pkt.op {
@@ -2264,10 +2276,17 @@ impl HostedServer {
                 cw::ensure_container(&mut self.server.world, cell, kind);
                 let Some(view) = cw::container_at(&self.server.world, cell, kind) else { return };
                 let (slots, furnace, contents) = (view.wire_slots(), view.furnace_view(), cw::ContainerData::of(view));
+                let now = self.server.tick_counter;
                 let sp = &mut self.server.players[i];
                 sp.open_container = Some(cell);
-                sp.container_sent = Some(crate::window_ops::SentContainer::new(kind, contents, furnace));
-                protocol::ContainerOpenedPacket { cell, kind, slots, furnace, refused: None }
+                sp.container_sent.open_kind = Some(kind);
+                // C3b-fix-a (C-M1) — the opened view is a numbered window
+                // event: the model of the client's mirror takes it when the
+                // client reports it applied it.
+                let opened = crate::window_ops::ViewEvent::Opened(crate::window_ops::MirrorView { cell, kind, contents });
+                let window_event =
+                    crate::window_events::queue(sp, crate::window_events::WindowEvent::ContainerView(opened), now);
+                protocol::ContainerOpenedPacket { cell, kind, slots, furnace, refused: None, window_event }
             }
             Err(why) => {
                 log::debug!("{}'s container at {cell:?} didn't open: {why:?}", sp.display_name);
@@ -2277,6 +2296,7 @@ impl HostedServer {
                     slots: Vec::new(),
                     furnace: None,
                     refused: Some(why),
+                    window_event: 0,
                 }
             }
         };

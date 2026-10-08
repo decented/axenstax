@@ -1129,7 +1129,9 @@ impl RemoteClient {
                         if let Ok(opened) = protocol::safe_deserialize::<
                             protocol::ContainerOpenedPacket,
                         >(payload)
-                            && self.pending_outcomes.len() < MAX_UNNUMBERED_PER_POLL
+                            // C3b-fix-a (v78) — an opened container is a
+                            // numbered view: never dropped by the cap.
+                            && has_room(self.pending_outcomes.len(), MAX_UNNUMBERED_PER_POLL, opened.window_event)
                         {
                             self.pending_outcomes.push(RequestOutcome::ContainerOpened(opened));
                             changed = true;
@@ -1440,28 +1442,15 @@ impl RemoteClient {
     /// move). Never answered. Not native-only: a web joiner's window is
     /// mirrored too.
     ///
-    /// C3b-1 — `touched`: the slots a container op changed on our side, and
-    /// `claims`: our values before it of the player slots it acts on (both
-    /// empty for any other op).
-    pub fn send_window_op(
-        &mut self,
-        op: protocol::WireWindowOp,
-        digest: u32,
-        touched: Vec<protocol::WireWindowSlot>,
-        claims: Vec<(protocol::WireWindowSlot, protocol::WireSlot)>,
-    ) {
+    /// C3b-1 — with a container op, the slots it changed on our side and
+    /// our values before it of the player slots it acts on (both empty for
+    /// any other op); C3b-fix-a — and our own verdict on it (`client_ok`).
+    pub fn send_window_op(&mut self, logged: crate::window_ops::LoggedOp) {
         if !matches!(self.state, ConnectionState::Connected { .. }) {
             return;
         }
         self.window_op_seq = self.window_op_seq.wrapping_add(1);
-        let pkt = protocol::WindowOpPacket {
-            op_seq: self.window_op_seq,
-            op,
-            digest,
-            events_applied: self.events_applied,
-            touched,
-            claims,
-        };
+        let pkt = logged.packet(self.window_op_seq, self.events_applied);
         self.transport.send_to_server(&protocol::serialize_packet(PacketType::WindowOp, &pkt));
     }
 
@@ -3316,6 +3305,8 @@ mod tests {
                 sets: Vec::new(),
                 furnace: None,
                 window_event: n,
+                take: Vec::new(),
+                give: Vec::new(),
             };
             srv.send_to_client(&protocol::serialize_packet(PacketType::WindowSlotSet, &set));
         }

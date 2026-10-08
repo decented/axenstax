@@ -365,14 +365,7 @@ impl Rig {
         let n = ops.len();
         for logged in ops {
             c.seq += 1;
-            let pkt = WindowOpPacket {
-                op_seq: c.seq,
-                op: logged.op,
-                digest: logged.digest,
-                events_applied: c.events,
-                touched: logged.touched,
-                claims: logged.claims,
-            };
+            let pkt = logged.packet(c.seq, c.events);
             c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
         }
         n
@@ -641,6 +634,61 @@ fn a_table_click_the_client_judged_in_reach_is_accepted_by_the_server_too() {
     assert_eq!(rig.tally().window_mismatch, 0);
 }
 
+/// A-L2 (C3b-fix-a) — the converse of the slack: a client whose forced
+/// close is stuck (a full bag, the grid laid) at a table just out of its
+/// reach clicks Result. Its rule refuses; the server's slack would accept
+/// (its body is as far, inside the half-block slack). The server crafts only
+/// what the client's own rule accepted (`client_ok`), so it crafts nothing:
+/// the windows stay in lockstep, and both refusals are no-ops.
+#[test]
+fn a_result_click_the_client_refused_after_a_stuck_forced_close_is_not_crafted() {
+    let mut rig = Rig::dedicated("stuck-close");
+    rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Iron Pickaxe") }).ok());
+    // A full bag: a close can't return the grid.
+    for i in 0..36 {
+        if rig.c.inv.slot(i).is_none() {
+            rig.give(i, Item::Block(block::DIRT), 64);
+        }
+    }
+    // The server body, and the client's eye, 6.6 blocks from the table: out
+    // of the client's reach (6.37), inside the server's slack.
+    let centre = Vec3::new(table[0] as f32 + 0.5, table[1] as f32 + 0.5, table[2] as f32 + 0.5);
+    let eye = rig.sp().player.eye_pos();
+    let (dx, dy) = (eye.x - centre.x, eye.y - centre.y);
+    let dz = (6.6f32 * 6.6 - dy * dy - dx * dx).sqrt();
+    rig.sp().player.pos += Vec3::new(eye.x, eye.y, centre.z + dz) - eye;
+    let eye = rig.sp().player.eye_pos();
+    assert!(!crate::window::table_in_reach(block::CRAFTING_TABLE, table, eye), "out of the client's reach");
+    let slack = window::ClickCtx::new(false, Station::Table { cell: table }, eye, |_| block::CRAFTING_TABLE).with_server_slack(false);
+    assert!(slack.table_present(), "inside the server's slack");
+    // The screen's forced close is stuck: the bag is full.
+    let closed = {
+        let c = &mut rig.c;
+        c.ui.force_close(&mut c.inv, &mut c.armour, true)
+    };
+    assert!(!closed, "stuck");
+    // The client clicks Result there; its rule refuses.
+    let result = {
+        let world = &rig.hs.server.world;
+        let c = &mut rig.c;
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |p| world.get_block(p[0], p[1], p[2]))
+    };
+    assert!(!result.ok(), "the client's rule refuses");
+    rig.flush();
+    rig.tick();
+    rig.assert_lockstep("a result click the client refused, after a stuck forced close");
+    let sp = &rig.hs.server.players[rig.c.slot];
+    assert!(sp.craft_grid.iter().flatten().any(|c| c.as_ref().is_some_and(|s| s.item == Item::Material(MaterialId::IronIngot))), "the grid is still laid");
+    assert!(sp.inventory.slots_iter().flatten().all(|s| !matches!(s.item, Item::Tool(_))), "no pickaxe crafted on the server");
+    let t = rig.tally();
+    assert_eq!(t.window_refused, 0, "the client's own verdict says it refused too");
+    assert_eq!(t.window_noop, 2, "the stuck close and the result click: refused on both sides");
+}
+
 /// B-L2 — a table another player just broke: the honest client has not heard,
 /// crafts at it, and the server (grace of ten ticks) crafts too. The grace
 /// ends, and only in reach.
@@ -720,6 +768,7 @@ fn a_closed_connection_holding_a_thousand_window_ops_is_reaped() {
             events_applied: 0,
             touched: Vec::new(),
             claims: Vec::new(),
+            client_ok: true,
         };
         c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
     }

@@ -208,7 +208,7 @@ fn protocol_version_is_the_pinned_value() {
     // v73 (2026-10-07, C2a): `ItemAction = 62` (Eat, Sleep),
     //   `ItemActionOutcome = 63`, `StateUpdatePacket.own_hunger` — the server
     //   runs a joiner's hunger, eating and sleep.
-    // v74 (2026-10-07, C2b, PROVISIONAL — renumbered at merge):
+    // v74 (2026-10-07, C2b):
     //   `ItemAction::Craft` and `ItemAction::Drop` — the server mirrors a
     //   joiner's crafting and spawns its Q-drops.
     // v75 (2026-10-08, C3a-2a):
@@ -224,7 +224,11 @@ fn protocol_version_is_the_pinned_value() {
     //   and `.claims` (after v76's `events_applied`), `ContainerOpened = 65`,
     //   `WindowSlotSet = 66` (its `window_event` numbers a player-slot
     //   correction) — shared chests, dispensers and furnaces for joiners.
-    assert_eq!(protocol::PROTOCOL_VERSION, 77);
+    // v78 (2026-10-08, C3b-fix-a):
+    //   `ContainerOpenedPacket.window_event`, `WindowSlotSetPacket.take`/
+    //   `.give`, `WindowOpPacket.client_ok` — numbered container views and
+    //   item-delta corrections.
+    assert_eq!(protocol::PROTOCOL_VERSION, 78);
 }
 
 #[test]

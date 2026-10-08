@@ -13747,9 +13747,14 @@ impl super::GameState {
                         // Rail Freight P2 — a Bulk vendor pulls its wholesale stock
                         // from an adjacent freight depot chest before the dialog
                         // shows, so freight just unloaded there is sellable.
-                        let depot = crate::rail::depot_chest_for(vpos, |c| {
-                            self.world.chest_at((c.0, c.1, c.2)).is_some()
-                        });
+                        // C3b-fix-a (C-L5) — not on a joined client: its chests
+                        // are never the real ones (a worldgen loot chest's
+                        // generated copy, or nothing), so a pull would move a
+                        // private copy of shared loot. Economy blocks are
+                        // refused for joiners at C3d.
+                        let depot = (!self.joined())
+                            .then(|| crate::rail::depot_chest_for(vpos, |c| self.world.chest_at((c.0, c.1, c.2)).is_some()))
+                            .flatten();
                         if let Some(depot) = depot
                             && let Some(mut chest) = self.world.chest_at(depot).cloned()
                                 && let Some(mut v) = self.world.vendor_at(vpos).cloned() {
@@ -22411,7 +22416,7 @@ impl super::GameState {
             {
                 for (stamp, request) in client.take_queued_requests() {
                     for logged in p.crafting_ui.ops.take_before(Some(stamp)) {
-                        client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
+                        client.send_window_op(logged);
                     }
                     client.send_request(request);
                 }
@@ -22420,7 +22425,7 @@ impl super::GameState {
                     None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
                 };
                 for logged in ops {
-                    client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
+                    client.send_window_op(logged);
                 }
             } else {
                 p.crafting_ui.ops.discard();
@@ -22452,7 +22457,7 @@ impl super::GameState {
             .min();
         let Some(p) = self.players.first_mut() else { return };
         for logged in p.crafting_ui.ops.take_before(first_edit) {
-            client.send_window_op(logged.op, logged.digest, logged.touched, logged.claims);
+            client.send_window_op(logged);
         }
     }
 
@@ -22539,7 +22544,9 @@ impl super::GameState {
         let mut satori = false;
         for item in items {
             let event = item.event();
-            let mut unfit = 0;
+            // Units that didn't fit, per grant (a grant is one; a container
+            // correction one per give, C3b-fix-a), reported in order.
+            let mut unfit: Vec<u8> = Vec::new();
             match item {
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Interact(out)) => {
                     self.apply_interact_outcome(&out);
@@ -22554,15 +22561,17 @@ impl super::GameState {
                     self.apply_container_opened(&pkt);
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::SlotSet(pkt)) => {
-                    self.apply_window_slot_set(&pkt);
+                    unfit = self.apply_window_slot_set(&pkt);
                 }
                 crate::window_events::InboxItem::Grant(grant) => {
-                    unfit = crate::remote_entities::apply_inventory_grant(
-                        &mut self.players[0].inventory,
-                        &grant,
-                        &self.registry,
-                    )
-                    .unwrap_or(0);
+                    unfit.push(
+                        crate::remote_entities::apply_inventory_grant(
+                            &mut self.players[0].inventory,
+                            &grant,
+                            &self.registry,
+                        )
+                        .unwrap_or(0),
+                    );
                     // C1 — a joiner's Satori is the server's roll, granted
                     // like any break drop: the routine pickup celebration
                     // plays here. (The Genesis Block is the host's world's
@@ -22577,11 +22586,16 @@ impl super::GameState {
             }
             if let Some(client) = self.remote_client.as_mut() {
                 client.note_window_event(event);
-                if unfit > 0 {
+                // One report per grant of the event, in order, up to the
+                // last that didn't fit (one that fit before it is reported
+                // as 0): the server names each by its order
+                // (`window_events::return_unfit`).
+                let reported = unfit.iter().rposition(|&n| n > 0).map_or(0, |last| last + 1);
+                for &count in &unfit[..reported] {
                     let seq = self.joiner_actions.unanswered();
                     client.send_item_action(&crate::protocol::ItemActionPacket {
                         seq,
-                        action: crate::protocol::ItemAction::GrantUnfit { event, count: unfit },
+                        action: crate::protocol::ItemAction::GrantUnfit { event, count },
                         events_applied: 0,
                     });
                 }

@@ -183,7 +183,7 @@ impl CraftingUi {
     fn log_op(&mut self, op: crate::protocol::WireWindowOp, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
         let now = window::digest_parts(inv, armour, &self.cursor_item, &self.grid, self.station());
         self.ops.sync_auto_refill(inv.auto_refill, || now);
-        self.ops.record(op, now);
+        self.ops.record(op, now, true);
     }
 
     /// C3a-2a — the window ops logged since the last call, for a joined
@@ -230,7 +230,13 @@ impl CraftingUi {
             .into_iter()
             .filter_map(|at| before.wire(at).map(|v| (at, v)))
             .collect();
-        self.ops.record_container(crate::protocol::WireWindowOp::Container(click.clone()), after, applied.touched.clone(), claims);
+        self.ops.record_container(
+            crate::protocol::WireWindowOp::Container(click.clone()),
+            after,
+            applied.touched.clone(),
+            claims,
+            applied.result.ok(),
+        );
         applied
     }
 
@@ -288,7 +294,8 @@ impl CraftingUi {
         // returned everything is back at the player's grid (`close` resets
         // `table` just after), as the server's copy is (`window_ops::serve_op`).
         let after = window::digest(&view, window::station_after(station, click, &out));
-        self.ops.record(crate::protocol::WireWindowOp::Click(click.clone()), after);
+        // C3b-fix-a (A-L2/A-L3) — with this client's own verdict on it.
+        self.ops.record(crate::protocol::WireWindowOp::Click(click.clone()), after, out.ok());
         // L2 — after every click, a refused close's half-emptied grid too.
         self.update_result();
         out

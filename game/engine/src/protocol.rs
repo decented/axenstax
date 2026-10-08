@@ -1163,16 +1163,24 @@ pub struct ContainerOpenedPacket {
     pub slots: Vec<WireSlot>,
     pub furnace: Option<FurnaceView>,
     pub refused: Option<OpenRefusal>,
+    /// v78 (C3b-fix-a, C-M1) — an opened container is a numbered window
+    /// event (`window_events`): the first container view the server sent,
+    /// applied in arrival order with the other carriers and reported back
+    /// in `events_applied`, so the server knows exactly which view each of
+    /// the client's container ops was predicted on. 0 for a refusal.
+    pub window_event: u32,
 }
 
 /// C3b-1 — `WindowSlotSetPacket::reason` values.
 pub mod slot_set_reason {
     /// A container op's result differed from the client's (someone else got
     /// there first, or the server refused it): the REAL values of the
-    /// container slots it involved, and the server's re-run of the op over
-    /// the client's claimed pre-op player slots
-    /// (`WindowOpPacket::claims`) for each player slot whose result differs
-    /// from the client's own prediction — never the server's drifted copy.
+    /// container slots it involved, and (v78) the player part as an item
+    /// delta — the server's re-run of the op over the client's claimed pre-op
+    /// player slots (`WindowOpPacket::claims`) and the real container, minus
+    /// the client's own prediction over the view it predicted on (R − P), or
+    /// for a refused op the prediction undone (−P). Never the server's
+    /// drifted copy, and never a slot value.
     pub const CORRECTION: u8 = 0;
     /// What changed in the open container since the last push, made by
     /// anyone but this joiner's own ops: another player, a hopper, the
@@ -1181,11 +1189,13 @@ pub mod slot_set_reason {
 }
 
 /// Server → Client (C3b-1, `PacketType::WindowSlotSet`): values for exactly
-/// the named slots of the joiner's window (§3 rule 7: never a whole-window
-/// overwrite, which would revert local uses not mirrored yet). The client
-/// overwrites those slots and nothing else; nothing is replayed, and a later
-/// mismatch is corrected again. It is applied in arrival order with the
-/// other window-event carriers (`window_events::WindowInbox`).
+/// the named CONTAINER slots of the joiner's open container (§3 rule 7:
+/// never a whole-window overwrite), and (v78) a correction's change to its
+/// own window by item. It is a numbered window event, applied in arrival
+/// order with the other window-event carriers (`window_events::WindowInbox`):
+/// the client overwrites those container slots in its mirror and resolves
+/// the item delta on its window as it is then; nothing is replayed, and a
+/// later mismatch is corrected again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowSlotSetPacket {
     /// The `op_seq` of the last window op from this client the server had
@@ -1193,19 +1203,50 @@ pub struct WindowSlotSetPacket {
     pub op_seq_applied: u32,
     /// [`slot_set_reason`]: `CORRECTION` or `CHANGED`.
     pub reason: u8,
-    /// At most [`MAX_WINDOW_SLOTS`] (more doesn't decode).
+    /// Container slots (`WireWindowSlot::Container`) and their real values.
+    /// v78 — a set never names a player slot (the client skips one). At
+    /// most [`MAX_WINDOW_SLOTS`] (more doesn't decode).
     #[serde(deserialize_with = "bounded_slot_sets")]
     pub sets: Vec<(WireWindowSlot, WireSlot)>,
     /// The open furnace's progress, when the open container is a furnace.
     pub furnace: Option<FurnaceView>,
-    /// v77 — a set that changes this joiner's PLAYER slots (inventory,
-    /// armour, cursor, grid) is a numbered window event (`window_events`,
-    /// as `InventoryGrantPacket::window_event`): the client applies it in
-    /// arrival order with the other carriers, and the server applies its
-    /// side when the client reports it (`events_applied`). 0 for a set of
-    /// container slots only (a push, or a container-only correction): shared
-    /// state, applied at once.
+    /// v77 — the window event this is (`window_events`, as
+    /// `InventoryGrantPacket::window_event`): the client applies it in
+    /// arrival order with the other carriers and reports it in
+    /// `events_applied`. v78 (C-M1) — every set is numbered, a push too: a
+    /// container view the client's next op may be predicted on.
     pub window_event: u32,
+    /// v78 (C3b-fix-a, C-H1) — a correction's player part, to take: each
+    /// `(hint, stack)` is "take `stack.count` of `stack`'s item", from
+    /// inventory slot `hint` first, then wherever it is
+    /// (`joiner_actions::take_owed_window`); what can't be paid is owed
+    /// against the next give of that item (`container_window::CorrectionDebt`).
+    /// At most [`MAX_WINDOW_SLOTS`].
+    #[serde(deserialize_with = "bounded_takes")]
+    pub take: Vec<(u8, WireStack)>,
+    /// v78 — a correction's player part, to give: each stack added
+    /// (`Inventory::add_item`) after the takes, paying what is owed of its
+    /// item first; what doesn't fit is reported back
+    /// (`ItemAction::GrantUnfit` naming this event, one per give in order).
+    /// At most [`MAX_WINDOW_SLOTS`].
+    #[serde(deserialize_with = "bounded_gives")]
+    pub give: Vec<WireStack>,
+}
+
+fn bounded_takes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<(u8, WireStack)>, D::Error> {
+    let take = Vec::<(u8, WireStack)>::deserialize(d)?;
+    if take.len() > MAX_WINDOW_SLOTS {
+        return Err(serde::de::Error::invalid_length(take.len(), &"at most 122 takes"));
+    }
+    Ok(take)
+}
+
+fn bounded_gives<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WireStack>, D::Error> {
+    let give = Vec::<WireStack>::deserialize(d)?;
+    if give.len() > MAX_WINDOW_SLOTS {
+        return Err(serde::de::Error::invalid_length(give.len(), &"at most 122 gives"));
+    }
+    Ok(give)
 }
 
 fn bounded_container_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WireSlot>, D::Error> {
@@ -1260,10 +1301,17 @@ pub struct WindowOpPacket {
     /// op. The server re-runs the op over these slots and the REAL container
     /// (`window_ops::serve_op`), so a correction of a player slot is
     /// relative to the client's own state, never to the server's drifted
-    /// copy. Believed while the mirror is log-only (C3d refuses). At most
-    /// [`MAX_WINDOW_SLOTS`].
+    /// copy. Believed while the mirror is log-only (C3d refuses), within a
+    /// per-joiner bound (v78, C-L3). At most [`MAX_WINDOW_SLOTS`].
     #[serde(deserialize_with = "bounded_slot_sets")]
     pub claims: Vec<(WireWindowSlot, WireSlot)>,
+    /// v78 (C3b-fix-a, A-L2/A-L3) — the client's own verdict on the op: its
+    /// `window::ClickResult::ok()` (`true` for an op that isn't a click). The
+    /// server crafts a `Result` (and fills by `Autofill`) only when its own
+    /// rule accepts AND this is set, so its table slack never crafts what the
+    /// client refused; and a refusal on both sides is told from a refusal on
+    /// the server's alone by it, not by the digests.
+    pub client_ok: bool,
 }
 
 /// Server → Client: the decision on one [`ItemActionPacket`] (C2a).
@@ -2195,7 +2243,19 @@ pub struct ServerAnnouncePacket {
 ///   `window_event` ≠ 0). `item_kind::PLAN = 4` is reserved for a Plan
 ///   placeholder in a [`WireStack`]. A container op's window digest covers
 ///   the container.
-pub const PROTOCOL_VERSION: u32 = 77;
+/// - v78 (2026-10-08, C3b-fix-a):
+///   container corrections that can't duplicate or lose an item. Every
+///   container view the server sends a joiner is a numbered window event:
+///   [`ContainerOpenedPacket`] appends `window_event: u32` (0 for a
+///   refusal), and every [`WindowSlotSetPacket`] (push or correction) is
+///   numbered. A set names container slots only; a correction's player part
+///   is an item delta, appended after `window_event`: `take: Vec<(u8,
+///   WireStack)>` (≤ 122; take N of X, from a hint slot first) and `give:
+///   Vec<WireStack>` (≤ 122; each give's unfit part comes back as
+///   `ItemAction::GrantUnfit` naming the event, one per give in order).
+///   [`WindowOpPacket`] appends `client_ok: bool` (the client's own
+///   `ClickResult::ok()`).
+pub const PROTOCOL_VERSION: u32 = 78;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2367,8 +2427,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3b-1 — v77.
-        assert_eq!(super::PROTOCOL_VERSION, 77);
+        // C3b-fix-a — v78.
+        assert_eq!(super::PROTOCOL_VERSION, 78);
     }
 
     #[test]
@@ -3015,7 +3075,12 @@ mod tests {
         //   `WindowOpPacket.touched` and `.claims` (after `events_applied`),
         //   `ContainerOpened = 65`, `WindowSlotSet = 66` (trailing
         //   `window_event`) — shared chests, dispensers and furnaces.
-        assert_eq!(PROTOCOL_VERSION, 77);
+        // v78 (2026-10-08, C3b-fix-a):
+        //   `ContainerOpenedPacket.window_event`, `WindowSlotSetPacket.take`
+        //   and `.give` (after `window_event`), `WindowOpPacket.client_ok`
+        //   (after `claims`) — numbered container views, item-delta
+        //   corrections.
+        assert_eq!(PROTOCOL_VERSION, 78);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3331,6 +3396,7 @@ mod tests {
                 events_applied: 0x0102_0304,
                 touched: Vec::new(),
                 claims: Vec::new(),
+                client_ok: true,
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             assert_eq!(bytes[0], 64, "wire-stable tag");
@@ -3341,13 +3407,15 @@ mod tests {
             assert_eq!(&payload[4..8], &0u32.to_le_bytes(), "Click = 0");
             assert_eq!(&payload[8..12], &(index as u32).to_le_bytes(), "WindowClick variant {index}");
             // v76 — digest, then events_applied; v77 — then `touched` and
-            // `claims` (each an empty list: a u64 length of 0) close the
-            // packet. Append order: main's fields first.
-            let tail = &payload[payload.len() - 24..];
+            // `claims` (each an empty list: a u64 length of 0); v78 — then
+            // `client_ok` (one byte) closes the packet. Append order: main's
+            // fields first.
+            let tail = &payload[payload.len() - 25..];
             assert_eq!(&tail[0..4], &0xDEAD_BEEFu32.to_le_bytes(), "digest");
             assert_eq!(&tail[4..8], &0x0102_0304u32.to_le_bytes(), "events_applied (v76)");
             assert_eq!(&tail[8..16], &0u64.to_le_bytes(), "touched (v77)");
             assert_eq!(&tail[16..24], &0u64.to_le_bytes(), "claims (v77)");
+            assert_eq!(tail[24], 1, "client_ok (v78)");
         }
         let others = [
             (WireWindowOp::OpenPlayer, 1u32),
@@ -3355,7 +3423,7 @@ mod tests {
             (WireWindowOp::SetAutoRefill { on: false }, 3),
         ];
         for (op, index) in others {
-            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1, events_applied: 0, touched: Vec::new(), claims: Vec::new() };
+            let pkt = WindowOpPacket { op_seq: u32::MAX, op, digest: 1, events_applied: 0, touched: Vec::new(), claims: Vec::new(), client_ok: true };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<WindowOpPacket>(payload).unwrap(), pkt);
@@ -3369,6 +3437,7 @@ mod tests {
             events_applied: 0,
             touched: Vec::new(),
             claims: Vec::new(),
+            client_ok: true,
         };
         let bytes = serialize_packet(PacketType::WindowOp, &grid);
         // tag, op_seq, Click, DragGather, the list's u64 length, then Grid = 1.
@@ -3382,6 +3451,7 @@ mod tests {
                 events_applied: 0,
                 touched: Vec::new(),
                 claims: Vec::new(),
+                client_ok: true,
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3424,6 +3494,7 @@ mod tests {
                 events_applied: 3,
                 touched: vec![WireWindowSlot::Inv(4), WireWindowSlot::Container(71)],
                 claims: vec![(WireWindowSlot::Inv(4), None)],
+                client_ok: true,
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3438,6 +3509,7 @@ mod tests {
             events_applied: 0,
             touched: Vec::new(),
             claims: Vec::new(),
+            client_ok: true,
         };
         let bytes = serialize_packet(PacketType::WindowOp, &open);
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3452,6 +3524,7 @@ mod tests {
             events_applied: 0,
             touched: Vec::new(),
             claims: Vec::new(),
+            client_ok: true,
         };
         let bytes = serialize_packet(PacketType::WindowOp, &furnace);
         assert_eq!(&bytes[1 + 12..1 + 16], &2u32.to_le_bytes(), "SlotKind::Output = 2");
@@ -3465,6 +3538,7 @@ mod tests {
                 events_applied: 0,
                 touched: vec![WireWindowSlot::Cursor; n],
                 claims: Vec::new(),
+                client_ok: true,
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3479,13 +3553,15 @@ mod tests {
                 events_applied: 0,
                 touched: Vec::new(),
                 claims: vec![(WireWindowSlot::Inv(0), stone_claim()); n],
+                client_ok: true,
             };
             let bytes = serialize_packet(PacketType::WindowOp, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<WindowOpPacket>(payload).is_ok(), decodes, "{n} claims");
         }
-        // The trailing order (v77): events_applied (v76), then touched, then
-        // claims, each list a u64 length then its items.
+        // The trailing order (v78): events_applied (v76), then touched, then
+        // claims (v77), each list a u64 length then its items, then
+        // client_ok (v78).
         let order = WindowOpPacket {
             op_seq: 1,
             op: WireWindowOp::Container(ContainerClick::Deposit { slot: 2, all: true }),
@@ -3493,6 +3569,7 @@ mod tests {
             events_applied: 0x0102_0304,
             touched: vec![WireWindowSlot::Inv(2)],
             claims: vec![(WireWindowSlot::Inv(2), None)],
+            client_ok: false,
         };
         let bytes = bincode::serialize(&order).unwrap();
         let mut tail = Vec::new();
@@ -3505,7 +3582,8 @@ mod tests {
         tail.extend_from_slice(&0u32.to_le_bytes()); // WireWindowSlot::Inv
         tail.push(2);
         tail.push(0); // None
-        assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..], "digest, events_applied, touched, claims");
+        tail.push(0); // client_ok: false
+        assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..], "digest, events_applied, touched, claims, client_ok");
         assert_eq!(MAX_WINDOW_SLOTS, 72 + 36 + 4 + 1 + 9);
 
         // ContainerOpened = 65: every kind, a refusal, the slot bound.
@@ -3530,6 +3608,7 @@ mod tests {
                 slots: vec![stone.clone(), None, pick.clone(), plan.clone()],
                 furnace: Some(FurnaceView { smelt_progress: 40, smelt_total: 200, fuel_ticks_remaining: 1500, lit: true }),
                 refused: None,
+                window_event: 0x0102_0304,
             };
             let bytes = serialize_packet(PacketType::ContainerOpened, &pkt);
             assert_eq!(bytes[0], 65, "wire-stable tag");
@@ -3537,6 +3616,8 @@ mod tests {
             assert_eq!(ptype, PacketType::ContainerOpened);
             assert_eq!(safe_deserialize::<ContainerOpenedPacket>(payload).unwrap(), pkt);
             assert_eq!(&payload[12..16], &index.to_le_bytes(), "ContainerKind variant {index}");
+            // v78 — the opened view's window event closes the packet.
+            assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes(), "window_event (v78)");
         }
         for (refusal, index) in [
             (OpenRefusal::OutOfReach, 0u8),
@@ -3550,6 +3631,7 @@ mod tests {
                 slots: Vec::new(),
                 furnace: None,
                 refused: Some(refusal),
+                window_event: 0,
             };
             let bytes = serialize_packet(PacketType::ContainerOpened, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3564,6 +3646,7 @@ mod tests {
                 slots: vec![None; n],
                 furnace: None,
                 refused: None,
+                window_event: 0,
             };
             let bytes = serialize_packet(PacketType::ContainerOpened, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3586,6 +3669,8 @@ mod tests {
                 sets: vec![(at, stone.clone())],
                 furnace: None,
                 window_event: 0,
+                take: Vec::new(),
+                give: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::WindowSlotSet, &pkt);
             assert_eq!(bytes[0], 66, "wire-stable tag");
@@ -3602,6 +3687,8 @@ mod tests {
             sets: vec![(WireWindowSlot::Container(0), None)],
             furnace: Some(FurnaceView::default()),
             window_event: 0,
+            take: Vec::new(),
+            give: Vec::new(),
         };
         let bytes = serialize_packet(PacketType::WindowSlotSet, &push);
         let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -3613,24 +3700,51 @@ mod tests {
                 sets: vec![(WireWindowSlot::Cursor, None); n],
                 furnace: None,
                 window_event: 0,
+                take: Vec::new(),
+                give: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::WindowSlotSet, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
             assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).is_ok(), decodes, "{n} sets");
         }
-        // v77 — a correction that changes player slots is a numbered window
-        // event: `window_event` closes the packet.
+        // v77 — a set is a numbered window event: `window_event`; v78 —
+        // then the correction's item delta, `take` (hint, stack) and `give`
+        // (stacks), each a u64 length then its items, close the packet.
         let numbered = WindowSlotSetPacket {
             op_seq_applied: 9,
             reason: slot_set_reason::CORRECTION,
-            sets: vec![(WireWindowSlot::Inv(3), None)],
+            sets: vec![(WireWindowSlot::Container(3), None)],
             furnace: None,
             window_event: 0x0102_0304,
+            take: Vec::new(),
+            give: Vec::new(),
         };
         let bytes = serialize_packet(PacketType::WindowSlotSet, &numbered);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).unwrap(), numbered);
-        assert_eq!(&payload[payload.len() - 4..], &0x0102_0304u32.to_le_bytes(), "window_event last");
+        let tail = &payload[payload.len() - 20..];
+        assert_eq!(&tail[0..4], &0x0102_0304u32.to_le_bytes(), "window_event (v77)");
+        assert_eq!(&tail[4..12], &0u64.to_le_bytes(), "take (v78)");
+        assert_eq!(&tail[12..20], &0u64.to_le_bytes(), "give (v78)");
+        let delta = WindowSlotSetPacket {
+            take: vec![(7, stone.clone().unwrap()), (0, pick.clone().unwrap())],
+            give: vec![stone.clone().unwrap()],
+            ..numbered.clone()
+        };
+        let bytes = serialize_packet(PacketType::WindowSlotSet, &delta);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).unwrap(), delta, "take N of X, give stacks");
+        // Each list is bounded at 122.
+        let one = stone.clone().unwrap();
+        for (n, decodes) in [(MAX_WINDOW_SLOTS, true), (MAX_WINDOW_SLOTS + 1, false)] {
+            let takes = WindowSlotSetPacket { take: vec![(0, one.clone()); n], ..numbered.clone() };
+            let gives = WindowSlotSetPacket { give: vec![one.clone(); n], ..numbered.clone() };
+            for pkt in [takes, gives] {
+                let bytes = serialize_packet(PacketType::WindowSlotSet, &pkt);
+                let (_, payload) = deserialize_header(&bytes).unwrap();
+                assert_eq!(safe_deserialize::<WindowSlotSetPacket>(payload).is_ok(), decodes, "{n} deltas");
+            }
+        }
         assert_eq!(item_kind::PLAN, 4, "the reserved Plan placeholder kind");
         assert_eq!((PacketType::ContainerOpened as u8, PacketType::WindowSlotSet as u8), (65, 66));
     }

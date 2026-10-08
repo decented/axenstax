@@ -6,10 +6,15 @@
 //! The server changes a joiner's window by itself four ways: a grant (a
 //! break's yield, an interaction's product, a pickup), the owed take of an
 //! accepted request (an eat, a D2b interaction), an armour-wear hit and an
-//! accepted swing's weapon wear. C3b-1 (v77) adds a fifth: a container op's
-//! correction of player slots (`WindowSlotSet` with `window_event` set,
-//! [`WindowEvent::SetSlots`]); its container slots are shared state and are
-//! not an event. The client applies each when its packet
+//! accepted swing's weapon wear. C3b-1 (v77) added a fifth, a container op's
+//! correction. C3b-fix-a (v78) makes it a change by item, never by slot
+//! ([`WindowEvent::Correction`]: take N of X, give N of X, resolved where
+//! the client applies it), and numbers every container VIEW the server sends
+//! too ([`WindowEvent::ContainerView`]: an opened container and every push;
+//! a correction's container slots ride with it): such an event changes no
+//! window on the server, it only advances the count, so the server knows
+//! exactly which view a container op was predicted on (C-M1;
+//! `window_ops::ContainerViews`). The client applies each when its packet
 //! arrives, so a window op it applied in between reached the server after the
 //! change: "change, then op" on the server, "op, then change" on the client,
 //! and the two windows diverged (C3a review B-H1).
@@ -41,7 +46,7 @@ use crate::armour::ArmourItem;
 use crate::crafting::Tool;
 use crate::inventory::Inventory;
 use crate::item::{Item, ItemStack};
-use crate::protocol::{InventoryGrantPacket, WireWindowSlot};
+use crate::protocol::InventoryGrantPacket;
 use crate::remote_client::RequestOutcome;
 use crate::server::ServerPlayer;
 use crate::window::CraftGrid;
@@ -68,7 +73,7 @@ pub const RECENT_GRANTS: usize = 64;
 pub const UNFIT_HOLD_TICKS: u64 = 100;
 
 /// One change the server makes to a joiner's window by itself.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum WindowEvent {
     /// `InventoryGrant`: the stack is added (`Inventory::add_item`).
     Grant(ItemStack),
@@ -81,12 +86,19 @@ pub enum WindowEvent {
     /// An accepted swing wears `tool` where it now is
     /// (`joiner_actions::where_now` from `slot`).
     WearWeapon { slot: usize, tool: Tool },
-    /// C3b-1 (v77) — a container op's correction of player slots
-    /// (`WindowSlotSet`, `window_ops::Correction::player`): each named slot
-    /// takes the value the op had when re-run over the client's own claimed
-    /// slots and the real container. Container slots are never in it (they
-    /// are shared, set at once).
-    SetSlots(Vec<(WireWindowSlot, Option<ItemStack>)>),
+    /// C3b-fix-a (v78, C-M1) — a container view sent to the joiner (an
+    /// opened container, or a push of what others changed): it changes the
+    /// server's model of the client's mirror (`window_ops::ContainerViews`)
+    /// when applied, and no window.
+    ContainerView(crate::window_ops::ViewEvent),
+    /// C3b-fix-a (v78, C-H1) — a container op's correction
+    /// (`WindowSlotSet { Correction }`): the server's copy applies its own
+    /// delta (R − own; nothing for a refused op), by item, with the same
+    /// debt rule the client resolves its delta (R − P) by
+    /// (`container_window::CorrectionDebt`); its container slots go to the
+    /// model of the client's mirror. While it waits, its client delta is the
+    /// phantom ledger ([`phantom`]).
+    Correction(Box<crate::window_ops::Correction>),
 }
 
 /// One event waiting for the client's word.
@@ -152,6 +164,10 @@ pub struct WindowEvents {
     /// D-M2 — until this server tick the joiner's pickups follow its window
     /// ([`UNFIT_HOLD_TICKS`]).
     pub unfit_hold_until: u64,
+    /// C3b-fix-a — what the server's copy owes from correction takes it
+    /// couldn't pay (the client keeps the same ledger,
+    /// [`WindowInbox::debt`]).
+    pub debt: crate::container_window::CorrectionDebt,
     pub tally: EventTally,
 }
 
@@ -221,6 +237,11 @@ struct Parts<'a> {
 
 /// What applying one event did, for the tallies.
 enum Effect {
+    /// A correction: per give of the server's own delta, the units it
+    /// settled (`None`: a refused op's, which changes nothing here).
+    Corrected(Option<Vec<u8>>),
+    /// A container view: no window changed.
+    Viewed,
     /// A grant: how many units the window held.
     Granted { landed: u8 },
     /// A take: how many it paid.
@@ -229,12 +250,11 @@ enum Effect {
     Wore,
     /// A weapon's wear.
     Weapon(crate::joiner_inventory::WearCheck),
-    /// Slots set.
-    Set,
 }
 
-/// Apply `event` to `parts` by the client's own rule.
-fn apply_to(parts: &mut Parts, event: &WindowEvent) -> Effect {
+/// Apply `event` to `parts` (with the copy's correction `debt`) by the
+/// client's own rule.
+fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
         WindowEvent::Grant(stack) => {
             let rest = parts.inv.add_item(stack.clone()).map_or(0, |r| r.count);
@@ -256,25 +276,9 @@ fn apply_to(parts: &mut Parts, event: &WindowEvent) -> Effect {
             };
             Effect::Weapon(check)
         }
-        WindowEvent::SetSlots(sets) => {
-            for (at, stack) in sets {
-                match *at {
-                    WireWindowSlot::Inv(i) if usize::from(i) < crate::window::SLOTS => {
-                        parts.inv.set_slot(usize::from(i), stack.clone());
-                    }
-                    WireWindowSlot::Armour(i) if i < 4 => match stack {
-                        None => parts.armour[usize::from(i)] = None,
-                        Some(ItemStack { item: Item::Armour(piece), .. }) => parts.armour[usize::from(i)] = Some(*piece),
-                        Some(_) => {}
-                    },
-                    WireWindowSlot::Cursor => *parts.cursor = stack.clone(),
-                    WireWindowSlot::Grid(r, c) if r < 3 && c < 3 => {
-                        parts.grid[usize::from(r)][usize::from(c)] = stack.clone();
-                    }
-                    _ => {}
-                }
-            }
-            Effect::Set
+        WindowEvent::ContainerView(_) => Effect::Viewed,
+        WindowEvent::Correction(c) => {
+            Effect::Corrected(c.own.as_ref().map(|own| debt.apply(parts.inv, parts.grid, parts.cursor, own)))
         }
     }
 }
@@ -323,7 +327,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     }
     let mut parts =
         Parts { inv: &mut sp.inventory, armour: &mut sp.armour, cursor: &mut sp.cursor, grid: &mut sp.craft_grid };
-    match (apply_to(&mut parts, &w.event), w.event) {
+    match (apply_to(&mut parts, &mut sp.window_events.debt, &w.event), w.event) {
         (Effect::Granted { landed }, WindowEvent::Grant(stack)) => {
             let overflow = stack.count.saturating_sub(landed);
             sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
@@ -344,8 +348,88 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             );
         }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
+        (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
+        (Effect::Corrected(settled), WindowEvent::Correction(c)) => {
+            c.view.apply(&mut sp.container_sent.seen);
+            note_correction_gives(sp, w.seq, &c, settled);
+        }
         _ => {}
     }
+}
+
+/// A correction applied to the server's copy: each give of the CLIENT's
+/// delta is remembered as a grant (one entry per give, in order), so the
+/// client's `GrantUnfit` for this event names it — one report per give, in
+/// order, a give that fit reported as 0 when a later one didn't (they match
+/// [`return_unfit`]'s first unreturned grant of the event). What the server's
+/// copy settled of the same item is what it "landed"; a refused op's revert
+/// gives back what the server's copy never gave up, so all of it. The
+/// server's own gives that didn't fit count as `grant_overflow`, as a
+/// grant's do.
+fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops::Correction, settled: Option<Vec<u8>>) {
+    let mut held: Vec<(Item, u32)> = Vec::new();
+    if let (Some(own), Some(settled)) = (c.own.as_ref(), settled.as_ref()) {
+        for (g, s) in own.give.iter().zip(settled) {
+            let overflow = g.count.saturating_sub(*s);
+            sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
+            match held.iter_mut().find(|(i, _)| i == &g.item) {
+                Some((_, n)) => *n += u32::from(*s),
+                None => held.push((g.item.clone(), u32::from(*s))),
+            }
+        }
+    }
+    let grants = &mut sp.window_events.grants;
+    for g in &c.client.give {
+        let landed = match c.own {
+            None => g.count,
+            Some(_) => match held.iter_mut().find(|(i, _)| i == &g.item) {
+                Some((_, n)) => {
+                    let l = (*n).min(u32::from(g.count)) as u8;
+                    *n -= u32::from(l);
+                    l
+                }
+                None => 0,
+            },
+        };
+        if grants.len() >= RECENT_GRANTS {
+            grants.pop_front();
+        }
+        grants.push_back(AppliedGrant { seq, stack: g.clone(), landed, returned: false });
+    }
+}
+
+/// C3b-fix-a (C-H1) — the phantom ledger: what joiner `sp`'s corrections
+/// still on their way will take back from its client, item by item (their
+/// client deltas' takes, net of their gives). A later container op's claims
+/// still hold those units — items the server already refused — so the
+/// server debits them before re-running the op (`window_ops::serve_op`):
+/// they are never believed again. Read after `apply_through`, so every
+/// correction still waiting is one the op was made before.
+pub fn phantom(sp: &ServerPlayer) -> Vec<(Item, u32)> {
+    let mut net: Vec<(Item, i64)> = Vec::new();
+    for w in &sp.window_events.waiting {
+        let WindowEvent::Correction(c) = &w.event else { continue };
+        for (item, n) in c.client.counts() {
+            match net.iter_mut().find(|(i, _)| i == &item) {
+                Some((_, m)) => *m += n,
+                None => net.push((item, n)),
+            }
+        }
+    }
+    net.into_iter().filter(|(_, n)| *n < 0).map(|(item, n)| (item, n.unsigned_abs() as u32)).collect()
+}
+
+/// C3b-fix-a (C-M1) — the container views waiting for joiner `sp`'s
+/// client's word, oldest first (an opened container, a push, a correction's
+/// container slots): with the model of its mirror
+/// (`window_ops::ContainerViews::seen`), what its mirror will show once they
+/// land.
+pub fn waiting_views(sp: &ServerPlayer) -> impl Iterator<Item = &crate::window_ops::ViewEvent> {
+    sp.window_events.waiting.iter().filter_map(|w| match &w.event {
+        WindowEvent::ContainerView(v) => Some(v),
+        WindowEvent::Correction(c) => Some(&c.view),
+        _ => None,
+    })
 }
 
 /// Joiner `sp`'s 36 slots as they will be once every waiting event is
@@ -358,9 +442,10 @@ pub fn effective_inventory(sp: &ServerPlayer) -> Inventory {
         return inv;
     }
     let (mut armour, mut cursor, mut grid) = (sp.armour, sp.cursor.clone(), sp.craft_grid.clone());
+    let mut debt = sp.window_events.debt.clone();
     let mut parts = Parts { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid };
     for w in &sp.window_events.waiting {
-        apply_to(&mut parts, &w.event);
+        apply_to(&mut parts, &mut debt, &w.event);
     }
     inv
 }
@@ -458,10 +543,10 @@ impl InboxItem {
         match self {
             InboxItem::Outcome(RequestOutcome::Interact(o)) => o.window_event,
             InboxItem::Outcome(RequestOutcome::Item(o)) => o.window_event,
-            // C3b-1 — a set of player slots is an event; opening a mirror
-            // and a set of container slots only are not.
+            // C3b-fix-a (v78) — every container view is an event: an opened
+            // mirror (0 for a refusal), a push, a correction.
             InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
-            InboxItem::Outcome(RequestOutcome::ContainerOpened(_)) => 0,
+            InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
         }
@@ -481,6 +566,10 @@ pub struct WindowInbox {
     grants: Vec<InventoryGrantPacket>,
     armour: Vec<(u8, u32)>,
     ack: Option<u64>,
+    /// C3b-fix-a — what this client's window owes from correction takes it
+    /// couldn't pay (`container_window::CorrectionDebt`; the server keeps
+    /// the same ledger for its copy, [`WindowEvents::debt`]). Per session.
+    pub debt: crate::container_window::CorrectionDebt,
 }
 
 impl WindowInbox {
@@ -496,6 +585,7 @@ impl WindowInbox {
         self.ack = Some(self.ack.map_or(acked, |a| a.max(acked)));
     }
 
+    /// Nothing waits to be applied (the debt is not a carrier).
     pub fn is_empty(&self) -> bool {
         self.outcomes.is_empty() && self.grants.is_empty() && self.armour.is_empty() && self.ack.is_none()
     }

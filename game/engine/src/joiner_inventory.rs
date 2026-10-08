@@ -261,11 +261,15 @@ pub struct PossessionTally {
     pub window_refused: u32,
     /// C3b-1 — container ops (`WireWindowOp::Container`) refused because no
     /// container was open on the server, or its cell was gone or out of
-    /// reach.
+    /// reach (C3b-fix-a: or the client's mirror showed another container, a
+    /// claim counted above its stack, or a believed deposit went past the
+    /// joiner's bound). Container convergence, not lockstep (C-L4).
     pub container_refused: u32,
     /// C3b-1 — `WindowSlotSet` corrections sent after a container op whose
-    /// result differed (someone else got there first, or a refusal).
-    pub container_corrections: u32,
+    /// result differed (someone else got there first, or a refusal's
+    /// revert). C3b-fix-a (C-L4) — container convergence, tallied apart from
+    /// `window_mismatch` (per-joiner lockstep, the C3d gate).
+    pub container_corrected: u32,
     /// C3b-1 (v77) — units a joiner put into a shared container, by its
     /// claims, that the server's copy of its inventory didn't hold: believed
     /// deposits (BRIDGE until C3d; a locally fished item, unmirrored until
@@ -335,7 +339,7 @@ impl PossessionTally {
     pub fn summary(&self, label: &str) -> Option<String> {
         let window = [self.window_ops, self.window_noop, self.window_refused, self.window_mismatch];
         let c2b = [self.drops, self.grant_overflow];
-        let c3b = [self.container_refused, self.container_corrections, self.container_believed];
+        let c3b = [self.container_refused, self.container_corrected, self.container_believed];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
             .chain(&window)
@@ -367,7 +371,7 @@ impl PossessionTally {
         if c3b.iter().any(|&n| n > 0) {
             line.push_str(&format!(
                 "; {} container op(s) refused, {} container correction(s) sent, {} unit(s) deposited believed",
-                self.container_refused, self.container_corrections, self.container_believed
+                self.container_refused, self.container_corrected, self.container_believed
             ));
         }
         if c2b.iter().any(|&n| n > 0) {

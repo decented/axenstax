@@ -247,9 +247,12 @@ pub struct ServerPlayer {
     /// the container going. Container ops act on it; it is pushed every tick
     /// it changes (`window_ops::container_push`).
     pub open_container: Option<[i32; 3]>,
-    /// C3b-1 — what the server last sent this joiner of that container
-    /// (`window_ops::SentContainer`): the baseline the pushes diff against.
-    pub container_sent: Option<crate::window_ops::SentContainer>,
+    /// C3b-1 / C3b-fix-a — this joiner's containers
+    /// (`window_ops::ContainerViews`): the kind of the one `open_container`
+    /// names, the model of its client's mirror (the view its next container
+    /// op is predicted on, C-M1; pushes diff against it with the views still
+    /// on their way), and its believed-units bound (C-L3).
+    pub container_sent: crate::window_ops::ContainerViews,
     /// C3b-1 — the `op_seq` of the last window op applied from this joiner
     /// (`WindowSlotSetPacket::op_seq_applied`).
     pub last_window_op_seq: u32,
@@ -489,7 +492,7 @@ impl ServerPlayer {
             table_gone_ticks: None,
             window_events: Default::default(),
             open_container: None,
-            container_sent: None,
+            container_sent: Default::default(),
             last_window_op_seq: 0,
         }
     }
