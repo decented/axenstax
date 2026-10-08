@@ -319,15 +319,6 @@ fn waits_for_kind_budget(
     }
 }
 
-/// C2b verify M4 — is `packet` an `ItemAction::Drop`?
-fn is_drop_action(packet: &[u8]) -> bool {
-    matches!(
-        protocol::deserialize_header(packet),
-        Some((protocol::PacketType::ItemAction, payload))
-            if protocol::peek_item_action_variant(payload) == Some(protocol::item_action_variant::DROP)
-    )
-}
-
 /// FU4a (FU3 verify L1) — a request about the world as the client's own
 /// edits left it, so it waits behind those still waiting: `EntityAttack`,
 /// `EntityInteract`, `DeviceInteract`, `ItemAction`, and (C3a-2a) a
@@ -2709,16 +2700,27 @@ impl HostedServer {
             // a drain is below that budget's threshold and would otherwise
             // fall back to server-time pacing.)
             let catching_up = self.inbound[i].len() > MAX_PACKETS_PER_TICK;
+            // D-M1 — a tick with anything waiting is not silence, whether or
+            // not this tick's budget (or its own Drop at the head of the
+            // queue) lets any of it be read.
+            if !self.inbound[i].is_empty()
+                && let Some(sp) = self.server.players.get_mut(i)
+            {
+                sp.drop_bucket.note_inbound(self.server.tick_counter);
+            }
             // C2b verify M4 — a transport that is closed now (read after the
             // fill, which has taken every frame it handed over before it closed).
             let closed_now = closed_before_fill.get(i).copied().unwrap_or(false) || self.transports[i].is_closed();
             loop {
                 // C2b verify M4 — a connection that has closed gets none of
-                // its queued Drops spawned: they are discarded (at no read
-                // budget) so the queue empties and `reap_slots` can free the
-                // slot, rather than the leaver's backlog dribbling out one
-                // item per bucket token for hours.
-                if closed_now && self.inbound[i].front().is_some_and(|p| is_drop_action(p))
+                // its queued requests answered: they are discarded (at no
+                // read budget) so the queue empties and `reap_slots` can free
+                // the slot, rather than the leaver's backlog dribbling out
+                // one drop per bucket token, or eight window ops a tick, for
+                // hours. C3a-fix-2 B-L5: every request kind, not only Drops
+                // (none is answered, and nothing of a leaving joiner's window
+                // persists before the per-npub sidecar).
+                if closed_now && self.inbound[i].front().is_some_and(|p| is_request(p))
                 {
                     let _ = self.inbound[i].pop();
                     continue;
@@ -3133,10 +3135,13 @@ impl HostedServer {
                         else {
                             continue;
                         };
-                        // C2b verify M4 — in a catch-up, one input is one
-                        // client tick of drop-bucket credit.
+                        // C2b verify M4 — in a catch-up, one new input is one
+                        // client tick of drop-bucket credit. D-M1 — only an
+                        // input whose tick advances past the last credited one
+                        // earns, and never more than the ticks the client was
+                        // silent (`note_inbound`, above).
                         if catching_up && let Some(sp) = self.server.players.get_mut(i) {
-                            sp.drop_bucket.credit_client_input(now);
+                            sp.drop_bucket.credit_client_input(now, input.tick);
                         }
                         // B2a — the chunk push's credit window, the columns the
                         // client let go of and its render distance. Cumulative /

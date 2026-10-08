@@ -1676,6 +1676,18 @@ weapon the same way at the latest input's slot (it carries no slot of its
 own). The claimed tool still sets the drop tier and the damage; enforcement is
 C3d.
 
+**Tool wear the server never settles (C3a verify C-L1; known gaps).** The
+client wears its tool at the break, but four paths reach no
+`settle_joiner_edit`, so the server's copy of that tool ends up MORE durable
+than the client's (log-only; the same direction as the gaps below):
+
+- a refused edit (`validate_block_edit`: reach, plot or mode) returns before
+  it settles;
+- a group from an earlier life is sent back unsettled (the sent-back path can
+  resync at C3d);
+- queue truncation: an edit past the queue's bound is dropped;
+- an unpaired `mined` tag: it becomes `Unchecked` and wears nothing.
+
 The other direction — the shadow holds MORE: container
 deposits and the
 bucket / seed / hoe / flint / bone-meal consumes and fills into replaceable
@@ -1922,6 +1934,21 @@ it — the same wait condition as an entity request past its budget
 honest client, spacing its drops by the same interval, waits only if more
 than two arrive bunched.
 
+**The client-time credit is honest (C3a-fix-2, D-M1).** While a client's
+backlog is being replayed (more than ten packets waiting when the read
+starts), each new `ClientInput` read credits the bucket a quarter token, so a
+catch-up after a stall isn't slowed to real time. An input earns it only when
+its tick advances past the last one credited (a replayed or stale input
+earns nothing), and the total is capped at the server ticks the client was
+silent: `DropBucket::note_inbound` counts, once a tick, that the client has
+packets waiting, and the ticks between such ticks are the allowance each
+credit spends. A tick on which the client's own Drop holds the head of its
+queue still counts as waiting, not as silence. So a client that never goes
+silent earns nothing, a standing backlog earns nothing, and a stall earns at
+most the honest rate (one quarter token per silent tick). Before, a backlog of
+cheap or replayed inputs earned up to 16 times the honest rate, and the
+bucket was all that capped the fabricated Drop (the known C3 debt).
+
 **Known limits (C2b).** A modified client can drop an item it doesn't hold,
 and that item is then real for everyone (`// BRIDGE: possession check`);
 likewise it could report a craft it never made, and the shadow mirrored it
@@ -1997,13 +2024,41 @@ resets the station to the player's grid (the client clears its screen's
 table on the same close); `OpenPlayer` / `OpenTable` set the station;
 `SetAutoRefill` sets the shadow's `auto_refill`. Then
 `window_ops::note_served` compares digests: `PossessionTally.window_ops`
-counts every op; unless the world is creative, `window_refused` counts rule
-refusals (`Refused`, `NeedsTable` — the window stays as the rule leaves it,
-as on the client) and `window_mismatch` counts digest mismatches, keeping the
+counts every op; unless the world is creative, a rule refusal (`Refused`,
+`NeedsTable` — the window stays as the rule leaves it, as on the client) is
+counted as `window_noop` when the client's digest equals the server's after
+it (the client's rule refused too: a Trash with an empty cursor, a paint over
+a slot that won't take it, a Result with no recipe — benign) and as
+`window_refused` when it doesn't (the server refused and the client did not:
+a table the client still sees, or a click a modified client invented;
+C3a-fix-2, B-L4). `window_mismatch` counts digest mismatches, keeping the
 first one's kind (`first_window_mismatch`, `window_ops::OpKind`; the first is
 logged at info, the rest at debug; the leave summary prints them). A creative
 joiner is mirrored but not tallied: its item browser's gives stay local until
 C3c. Nothing is refused, corrected or answered.
+
+**The table verdict and drags (C3a-fix-2).** The server's table check is
+kinder than the client's, so its verdict is a superset of an honest client's
+(B-L2): the client keeps the exact rule (`window::table_in_reach`), but the
+server's `ClickCtx` (`with_server_slack`) allows `SERVER_TABLE_REACH_SLACK` =
+0.5 block more reach and, for `SERVER_TABLE_GRACE_TICKS` = 10 ticks after the
+table's cell stops being a crafting table, a table that is gone. The server
+counts that grace once a tick (`window_ops::watch_table`,
+`ServerPlayer::table_gone_ticks`): the client acts on a world a few ticks
+behind the server's, and a body is a little further from the table than the
+client's eye after knockback. The grace never extends reach. A drag is bounded
+by the station's grid exactly as a click is (B-L3): at the player's 2×2 the
+hidden row and column take nothing and give nothing
+(`window::distribute_one`, `gather`).
+
+**A forced close is paced (C3a-fix-2, B-M1).** The client closes a table's
+screen when the table is gone or out of reach (`CraftingUi::force_close`).
+The first attempt always goes, logged and sent as a `Close` op (a refused
+close still moves what fits). A close that can't return everything is retried
+at most once per tick, and only when the window's digest has changed since the
+refusal; otherwise it would log a `Close` per frame (about 12 a tick at 240
+fps, against the server's budget of 8) and hold the joiner's own inputs
+behind them.
 
 **Ordering and budget.** A `WindowOp` is a request (`is_request`): it waits
 behind the same client's edits still waiting past the edit budget (FU4a,
@@ -2011,7 +2066,12 @@ behind the same client's edits still waiting past the edit budget (FU4a,
 auto-refill) the client made before the op is applied first. At most
 `MAX_WINDOW_OPS_PER_TICK` = 8 are read per client per tick; one past it waits
 in the inbound queue with everything behind it (never dropped). A burst of 20
-applies over three ticks (`test_integration::window_ops`).
+applies over three ticks (`test_integration::window_ops`). A closed
+connection gets none of its queued requests answered (C3a-fix-2, B-L5): every
+request kind — window ops, item actions, entity requests, device interactions
+— is discarded at no read budget, so a leaver's backlog (a thousand window
+ops is 125 ticks at 8 a tick) can't hold its slot; `reap_slots` frees it
+within a few ticks.
 
 **Shared rules beside the click.** The owed payment of an accepted
 interaction or eat is `joiner_actions::take_owed_window` on both sides (36

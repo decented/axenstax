@@ -555,7 +555,13 @@ fn a_joiner_with_a_full_shadow_still_picks_up_a_ground_item() {
 fn a_stalled_backlog_of_drops_and_inputs_drains_in_catch_up_time() {
     let mut rig = Rig::dedicated("drop-catch-up", 1);
     rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 64));
-    let mut tick = 0;
+    // D-M1: the credit is for ticks the client was really silent, so the
+    // stall is real: one input is read, then 100 server ticks pass with none
+    // before the backlog of 100 client ticks arrives.
+    rig.send_input(0, 1);
+    rig.tick();
+    rig.ticks(100);
+    let mut tick = 1;
     for _ in 0..25 {
         for _ in 0..4 {
             tick += 1;
@@ -572,7 +578,31 @@ fn a_stalled_backlog_of_drops_and_inputs_drains_in_catch_up_time() {
     }
     let t = spawned_by.expect("every one of the 25 drops spawned");
     assert!(t <= 12, "drained in {t} ticks; server time alone would take about 92");
-    assert_eq!(rig.sp(0).last_input_tick, 100, "and every input was read");
+    assert_eq!(rig.sp(0).last_input_tick, 101, "and every input was read");
+}
+
+/// D-M1 — a client that keeps a standing backlog of inputs (20 a tick, every
+/// tick, never silent) while pressing Drop earns no client-time credit: over
+/// 100 ticks it gets what server time gives, two at once and one per interval,
+/// not four a tick.
+#[test]
+fn a_standing_backlog_of_inputs_earns_no_more_drops_than_the_honest_rate() {
+    let mut rig = Rig::dedicated("drop-standing", 1);
+    rig.give(0, 0, ItemStack::new_material(MaterialId::Stick, 64));
+    let mut tick = 0;
+    for _ in 0..100 {
+        for _ in 0..20 {
+            tick += 1;
+            rig.send_input(0, tick);
+        }
+        for _ in 0..4 {
+            rig.drop(0, &stick());
+        }
+        rig.tick();
+    }
+    let drops = rig.tally(0).drops;
+    assert!(drops <= 2 + 100 / DROP_INTERVAL_TICKS as u32 + 1, "honest rate only: {drops}");
+    assert!(drops >= 20, "and server time still paces them through: {drops}");
 }
 
 /// A client that sends only Drops sends no inputs, so it earns no client-time

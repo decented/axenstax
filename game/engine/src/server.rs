@@ -231,6 +231,11 @@ pub struct ServerPlayer {
     /// `OpenTable` (a close that returned everything resets it): the grid's
     /// size, and the table whose reach the result click checks.
     pub station: crate::window::Station,
+    /// C3a-fix-2 B-L2 — how many ticks the server has watched the open
+    /// table's cell stop being a crafting table (`window_ops::watch_table`);
+    /// `None` while it stands, or until the first tick that sees it gone. The
+    /// table verdict's grace ([`crate::window::SERVER_TABLE_GRACE_TICKS`]).
+    pub table_gone_ticks: Option<u8>,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -464,6 +469,7 @@ impl ServerPlayer {
             cursor: None,
             craft_grid: Default::default(),
             station: crate::window::Station::Player,
+            table_gone_ticks: None,
         }
     }
 
@@ -1737,6 +1743,7 @@ impl GameServer {
             }
             sp.interact_cooldown = sp.interact_cooldown.saturating_sub(1);
             sp.eat_cooldown = sp.eat_cooldown.saturating_sub(1);
+            crate::window_ops::watch_table(sp, &self.world);
         }
 
         // MP-D2a — hostile melee and lava/fire contact on every joiner's

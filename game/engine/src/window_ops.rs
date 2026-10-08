@@ -176,7 +176,11 @@ pub fn serve_op(sp: &mut ServerPlayer, world: &World, creative: bool, op: &WireW
     };
     let result = match op {
         WireWindowOp::Click(click) => {
-            let ctx = ClickCtx::new(creative, station, eye, |c| world.get_block(c[0], c[1], c[2]));
+            // B-L2: the server's table verdict is kinder than the client's,
+            // so it is a superset of an honest client's.
+            let lately = sp.table_gone_ticks.is_none_or(|n| n <= window::SERVER_TABLE_GRACE_TICKS);
+            let ctx = ClickCtx::new(creative, station, eye, |c| world.get_block(c[0], c[1], c[2]))
+                .with_server_slack(lately);
             let result = window::apply(&mut view, click, &ctx);
             if *click == WindowClick::Close && result.ok() {
                 station = Station::Player;
@@ -185,10 +189,12 @@ pub fn serve_op(sp: &mut ServerPlayer, world: &World, creative: bool, op: &WireW
         }
         WireWindowOp::OpenPlayer => {
             station = Station::Player;
+            sp.table_gone_ticks = None;
             None
         }
         WireWindowOp::OpenTable { cell } => {
             station = Station::Table { cell: *cell };
+            sp.table_gone_ticks = None;
             None
         }
         WireWindowOp::SetAutoRefill { on } => {
@@ -201,8 +207,23 @@ pub fn serve_op(sp: &mut ServerPlayer, world: &World, creative: bool, op: &WireW
     Some(Served { result, digest })
 }
 
+/// B-L2 — once a tick, for a joiner whose open screen is a crafting table's:
+/// count the ticks its cell has not been a crafting table
+/// (`ServerPlayer::table_gone_ticks`), so [`serve_op`] can grant a table that
+/// just changed a few ticks' grace ([`window::SERVER_TABLE_GRACE_TICKS`]): the
+/// client acts on a world that is a few ticks behind the server's.
+pub fn watch_table(sp: &mut ServerPlayer, world: &World) {
+    sp.table_gone_ticks = match sp.station {
+        Station::Table { cell } if world.get_block(cell[0], cell[1], cell[2]) != crate::block::CRAFTING_TABLE => {
+            Some(sp.table_gone_ticks.map_or(1, |n| n.saturating_add(1)))
+        }
+        _ => None,
+    };
+}
+
 /// Tally op `pkt` as served (`served`) on joiner `sp`'s possession counters:
-/// every op is counted; unless `creative`, a rule refusal is counted and a
+/// every op is counted; unless `creative`, a rule refusal is counted (a
+/// no-op when the client's digest agrees, a refusal when it doesn't) and a
 /// digest that differs from the client's is a mismatch (the first one's
 /// kind is kept, and it is logged at info; the rest at debug). Log-only.
 pub fn note_served(sp: &mut ServerPlayer, pkt: &WindowOpPacket, served: &Served, creative: bool) {
@@ -212,7 +233,13 @@ pub fn note_served(sp: &mut ServerPlayer, pkt: &WindowOpPacket, served: &Served,
         return;
     }
     if served.refused() {
-        tally.window_refused = tally.window_refused.saturating_add(1);
+        // B-L4: refused on both sides (the client's digest is the server's:
+        // its rule refused too) is a benign no-op; refused here alone is not.
+        if served.digest == pkt.digest {
+            tally.window_noop = tally.window_noop.saturating_add(1);
+        } else {
+            tally.window_refused = tally.window_refused.saturating_add(1);
+        }
     }
     if served.digest == pkt.digest {
         return;

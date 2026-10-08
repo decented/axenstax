@@ -15003,6 +15003,7 @@ impl super::GameState {
                         self.players[pidx].place_cooldown = 8;
                     } else if target_blk == block::TILLED_SOIL
                         && self.players[pidx].target_face == [0, 1, 0]
+                        && !self.players[pidx].biting()
                     {
                         // Farming Tier 1 (Wave 26 Phase 6): right-click tilled
                         // soil with seeds in hand → plant stage-0 crop in the
@@ -15124,6 +15125,7 @@ impl super::GameState {
                         || target_blk == block::GRASS
                         || target_blk == block::SAND)
                         && self.players[pidx].target_face == [0, 1, 0]
+                        && !self.players[pidx].biting()
                         && self.players[pidx]
                             .inventory
                             .hotbar_slot(self.players[pidx].hotbar_slot)
@@ -15351,7 +15353,10 @@ impl super::GameState {
                                 ));
                             }
                         }
-                    } else {
+                    } else if !self.players[pidx].biting() {
+                        // C3a-fix-2 D-L1 — the generic place waits out a bite
+                        // (as do the seed and reed plant arms above); every
+                        // other arm answers right after one.
                         let face = self.players[pidx].target_face;
 
                         // Spec 38 art-capture trigger (R5 final, 2026-05-28)
@@ -21197,7 +21202,9 @@ impl super::GameState {
                     p.player.eye_pos(),
                 )
             {
-                p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+                // B-M1: a close that can't return everything waits for the
+                // next tick and a change of the window, not the next frame.
+                p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, ticks_run > 0);
             }
         }
         for (pidx, click_target) in craft_clicks {

@@ -247,9 +247,17 @@ pub struct PossessionTally {
     pub unchecked: u32,
     /// C3a-2a — window ops applied to the server's copy of the window.
     pub window_ops: u32,
-    /// C3a-2a — of them, ops the rule refused (`Refused`, `NeedsTable`): the
-    /// window stays as the rule leaves it, as on the client. Not counted for
-    /// a creative joiner.
+    /// C3a-fix-2 B-L4 — of them, ops the server's rule refused (`Refused`,
+    /// `NeedsTable`) after which its window digest equals the client's: the
+    /// client's rule refused too (a Trash with an empty cursor, a paint over
+    /// a slot that won't take it, a Result with no recipe). Benign; the
+    /// window stays as the rule leaves it, on both sides. Not counted for a
+    /// creative joiner.
+    pub window_noop: u32,
+    /// C3a-2a — of them, ops the server's rule refused but the client's
+    /// digest says it did NOT (the digests differ): a table the client still
+    /// sees, a click a modified client sent. Not counted for a creative
+    /// joiner.
     pub window_refused: u32,
     /// C3a-2a — ops after which the server's window digest differed from the
     /// one the client sent (log-only). Not counted for a creative joiner,
@@ -313,7 +321,7 @@ impl PossessionTally {
     /// The one-line summary logged when `label` leaves, or `None` if nothing
     /// was counted.
     pub fn summary(&self, label: &str) -> Option<String> {
-        let window = [self.window_ops, self.window_refused, self.window_mismatch];
+        let window = [self.window_ops, self.window_noop, self.window_refused, self.window_mismatch];
         let c2b = [self.drops, self.grant_overflow];
         if [self.breaks, self.matched, self.mismatched, self.unchecked, self.crafts_ignored, self.wear_mismatch]
             .iter()
@@ -337,8 +345,9 @@ impl PossessionTally {
         if window.iter().any(|&n| n > 0) {
             let first = self.first_window_mismatch.map_or(String::new(), |k| format!(" (first: {})", k.label()));
             line.push_str(&format!(
-                "; {} window op(s) mirrored, {} refused by the rule, {} digest mismatch(es){first}",
-                self.window_ops, self.window_refused, self.window_mismatch
+                "; {} window op(s) mirrored, {} no-op(s) both rules refused, {} refused by the server alone, \
+                 {} digest mismatch(es){first}",
+                self.window_ops, self.window_noop, self.window_refused, self.window_mismatch
             ));
         }
         if c2b.iter().any(|&n| n > 0) {
@@ -464,8 +473,8 @@ mod tests {
         assert!(!t.summary("Visitor").unwrap().contains("craft"), "no craft part until one is counted");
     }
 
-    /// C3a-2a (was C2b's craft tally) — window ops (mirrored, refused by
-    /// the rule, digest mismatches with the first one's kind), Q-drops,
+    /// C3a-2a (was C2b's craft tally) — window ops (mirrored, no-ops,
+    /// refused by the server alone, digest mismatches with the first one's kind), Q-drops,
     /// grants that didn't fit and ignored pre-v75 crafts are counted and
     /// summarised when the player leaves.
     #[test]
@@ -475,6 +484,7 @@ mod tests {
         t.crafts_ignored = 1;
         assert!(t.summary("Crafter").is_some(), "an ignored craft alone is worth a line");
         t.window_ops = 12;
+        t.window_noop = 3;
         t.window_refused = 2;
         assert!(t.note_window_mismatch(OpKind::Result), "the first mismatch");
         assert!(!t.note_window_mismatch(OpKind::Sort));
@@ -483,7 +493,10 @@ mod tests {
         t.grant_overflow = 7;
         let line = t.summary("Crafter").unwrap();
         assert!(
-            line.contains("12 window op(s) mirrored, 2 refused by the rule, 2 digest mismatch(es) (first: result)"),
+            line.contains(
+                "12 window op(s) mirrored, 3 no-op(s) both rules refused, 2 refused by the server alone, \
+                 2 digest mismatch(es) (first: result)"
+            ),
             "{line}"
         );
         assert!(line.contains("5 Q-drop(s) spawned"), "{line}");

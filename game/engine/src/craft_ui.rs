@@ -72,6 +72,10 @@ pub struct CraftingUi {
     /// each open), with the window's digest after it, waiting to be sent as
     /// window ops when joined (`window_ops::OpLog`). Drained every tick.
     pub ops: crate::window_ops::OpLog,
+    /// C3a-fix-2 B-M1 — the window's digest after the last REFUSED forced
+    /// close ([`Self::force_close`]); `None` while the last forced close
+    /// succeeded or none has been tried since the screen opened.
+    forced_close_refused: Option<u32>,
 }
 
 impl CraftingUi {
@@ -121,6 +125,7 @@ impl CraftingUi {
             pinned_recipe_stack: Vec::new(),
             book_uses_filter: None,
             ops: crate::window_ops::OpLog::default(),
+            forced_close_refused: None,
         }
     }
 
@@ -137,6 +142,7 @@ impl CraftingUi {
         self.book_search.clear();
         self.pinned_recipe_stack.clear();
         self.book_uses_filter = None;
+        self.forced_close_refused = None;
         self.log_op(crate::protocol::WireWindowOp::OpenPlayer, inv, armour);
     }
 
@@ -153,6 +159,7 @@ impl CraftingUi {
         self.book_search.clear();
         self.pinned_recipe_stack.clear();
         self.book_uses_filter = None;
+        self.forced_close_refused = None;
         self.log_op(crate::protocol::WireWindowOp::OpenTable { cell: table }, inv, armour);
     }
 
@@ -253,6 +260,30 @@ impl CraftingUi {
             self.pinned_recipe_stack.clear();
         }
         all_placed
+    }
+
+    /// C3a-fix-2 B-M1 — close the screen because its table is gone or out of
+    /// reach (the game loop's per-frame check), paced so a close that can't
+    /// return everything isn't retried every frame. `new_tick`: a fixed tick
+    /// has run since the last frame.
+    ///
+    /// The first attempt always goes (logged and sent as a `Close` window op:
+    /// a refused close still moves what fits, and the server mirrors it). After
+    /// a refusal it is retried at most once a tick, and only when the window's
+    /// digest has changed since (the player made room, or something moved);
+    /// otherwise it would log a `Close` op per frame, flooding the joiner's own
+    /// inputs behind the server's per-tick op budget. Returns whether the
+    /// screen closed.
+    pub fn force_close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], new_tick: bool) -> bool {
+        if let Some(refused_at) = self.forced_close_refused
+            && (!new_tick || window::digest_parts(inventory, armour, &self.cursor_item, &self.grid) == refused_at)
+        {
+            return false;
+        }
+        let closed = self.close(inventory, armour);
+        self.forced_close_refused =
+            (!closed).then(|| window::digest_parts(inventory, armour, &self.cursor_item, &self.grid));
+        closed
     }
 
     /// Tests: apply `click` by a body standing beside the screen's table (in
@@ -2010,6 +2041,66 @@ mod tests {
         assert!(ui.open, "UI stays open so the items aren't stranded");
         assert_eq!(ui.grid[0][0].as_ref().map(|s| s.count), Some(5), "grid item preserved");
         assert_eq!(ui.cursor_item.as_ref().map(|s| s.count), Some(3), "cursor item preserved");
+    }
+
+    /// How many `Close` ops the screen has logged, draining its log.
+    fn closes_logged(ui: &mut CraftingUi, inv: &Inventory) -> usize {
+        ui.take_ops(inv, &[None; 4])
+            .iter()
+            .filter(|(op, _)| matches!(op, crate::protocol::WireWindowOp::Click(WindowClick::Close)))
+            .count()
+    }
+
+    /// C3a-fix-2 B-M1 — a forced close that can't return everything (a full
+    /// bag, items in the grid, the table gone) logs and sends ONE `Close`, not
+    /// one per frame: at 240 fps, over 100 ticks, one; then one more per
+    /// change of the window, and none at all between ticks.
+    #[test]
+    fn a_stuck_forced_close_sends_at_most_one_close_per_digest_change() {
+        let mut ui = CraftingUi::new();
+        let mut inv = Inventory::new();
+        for i in 0..36 {
+            inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
+        }
+        let mut armour = [None; 4];
+        ui.open_table_crafting([0, 64, 0], &inv, &armour);
+        ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
+        let _ = closes_logged(&mut ui, &inv); // the open
+        // 240 fps against 20 ticks a second: 12 frames to a tick.
+        let mut closes = 0;
+        for _tick in 0..100 {
+            for frame in 0..12 {
+                assert!(!ui.force_close(&mut inv, &mut armour, frame == 0), "the bag is full: it stays open");
+            }
+            closes += closes_logged(&mut ui, &inv);
+        }
+        assert_eq!(closes, 1, "one Close, not one per frame");
+        assert!(ui.open && ui.grid[0][0].is_some(), "nothing was lost");
+        // The player makes room for part of it: the window changed, so the
+        // next tick's retry goes (and it closes).
+        inv.set_slot(0, None);
+        assert!(!ui.force_close(&mut inv, &mut armour, false), "not until a tick has run");
+        assert_eq!(closes_logged(&mut ui, &inv), 0);
+        assert!(ui.force_close(&mut inv, &mut armour, true));
+        assert_eq!(closes_logged(&mut ui, &inv), 1);
+        assert!(!ui.open);
+        // A refusal that moved something is retried on the next tick's change
+        // only: one slot for two cells.
+        let mut ui = CraftingUi::new();
+        let mut inv = Inventory::new();
+        for i in 1..36 {
+            inv.set_slot(i, Some(ItemStack::new_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Iron))));
+        }
+        ui.open_table_crafting([0, 64, 0], &inv, &armour);
+        ui.grid[0][0] = Some(ItemStack::new_block(block::STONE, 5));
+        ui.grid[0][1] = Some(ItemStack::new_block(block::DIRT, 5));
+        let _ = closes_logged(&mut ui, &inv);
+        assert!(!ui.force_close(&mut inv, &mut armour, true), "first try: one cell fits, the other stays");
+        assert_eq!(closes_logged(&mut ui, &inv), 1, "the first refused Close is still sent");
+        for _ in 0..20 {
+            assert!(!ui.force_close(&mut inv, &mut armour, true), "no change: no retry");
+        }
+        assert_eq!(closes_logged(&mut ui, &inv), 0);
     }
 
     #[test]

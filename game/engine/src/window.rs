@@ -96,7 +96,23 @@ pub struct ClickCtx {
     /// C3a-2a — the block the acting side's world holds at the station's
     /// table cell (`AIR` at the player's grid). Each side reads its own world.
     pub table_block: BlockId,
+    /// C3a-fix-2 B-L2 — extra reach, in blocks, the table check allows. 0 on
+    /// the client (the exact rule); [`SERVER_TABLE_REACH_SLACK`] on the server.
+    pub reach_slack: f32,
+    /// C3a-fix-2 B-L2 — the table is allowed to be gone: it changed within
+    /// [`SERVER_TABLE_GRACE_TICKS`], so the client may not have heard.
+    /// `false` on the client; the server sets it ([`Self::with_server_slack`]).
+    pub table_grace: bool,
 }
+
+/// B-L2 — the server judges a joiner's table reach this much more kindly than
+/// the client does, so its verdict is a superset of an honest client's (the
+/// client eye and the server body differ by lag and knockback).
+pub const SERVER_TABLE_REACH_SLACK: f32 = 0.5;
+
+/// B-L2 — how many ticks after its table's cell changed the server still lets
+/// a joiner craft at it: the client acts on a world that is a few ticks old.
+pub const SERVER_TABLE_GRACE_TICKS: u8 = 10;
 
 impl ClickCtx {
     /// A click at `station` by a body whose eye is at `eye`, in a world
@@ -106,18 +122,31 @@ impl ClickCtx {
             Station::Table { cell } => block_at(cell),
             Station::Player => crate::block::AIR,
         };
-        ClickCtx { creative, station, eye, table_block }
+        ClickCtx { creative, station, eye, table_block, reach_slack: 0.0, table_grace: false }
+    }
+
+    /// B-L2 — the SERVER's context: [`SERVER_TABLE_REACH_SLACK`] more reach,
+    /// and, when `table_changed_lately`, a table that is no longer there
+    /// still counts. The client keeps [`Self::new`]'s exact rule.
+    pub fn with_server_slack(mut self, table_changed_lately: bool) -> Self {
+        self.reach_slack = SERVER_TABLE_REACH_SLACK;
+        self.table_grace = table_changed_lately;
+        self
     }
 
     /// May this station craft now? The player's own grid always; a table
     /// only while it stands in reach of the acting body ([`table_in_reach`],
-    /// the rule its screen closes by). The result click and `Autofill` ask,
+    /// the rule its screen closes by; the server's verdict carries a slack,
+    /// [`Self::with_server_slack`]). The result click and `Autofill` ask,
     /// so a screen whose forced close couldn't return everything can no
     /// longer craft at, or lay a recipe into, a table that's gone.
     pub fn table_present(&self) -> bool {
         match self.station {
             Station::Player => true,
-            Station::Table { cell } => table_in_reach(self.table_block, cell, self.eye),
+            Station::Table { cell } => {
+                (self.table_block == crate::block::CRAFTING_TABLE || self.table_grace)
+                    && crate::item_actions::cell_in_reach_with(self.eye, cell, self.reach_slack)
+            }
         }
     }
 }
@@ -310,14 +339,14 @@ pub fn apply(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx) -> Click
         WindowClick::DragDistribute { slots } => {
             let mut moved = false;
             for &at in slots {
-                moved |= distribute_one(view, at);
+                moved |= distribute_one(view, at, ctx.station);
             }
             done_if(moved)
         }
         WindowClick::DragGather { slots } => {
             let mut moved = false;
             for &at in slots {
-                moved |= gather(view, at);
+                moved |= gather(view, at, ctx.station);
             }
             done_if(moved)
         }
@@ -646,12 +675,13 @@ fn click_result(view: &mut WindowMut, station: Station) -> ClickResult {
 }
 
 /// RMB drag paint: drop one carried item into `at` (empty or matching with
-/// room). Returns true if a unit moved.
-fn distribute_one(view: &mut WindowMut, at: WindowSlot) -> bool {
+/// room). A grid cell the `station` doesn't have is skipped (B-L3: bounded
+/// like [`click_grid`]). Returns true if a unit moved.
+fn distribute_one(view: &mut WindowMut, at: WindowSlot, station: Station) -> bool {
     let Some(cursor) = view.cursor.take() else { return false };
     let target = match at {
         WindowSlot::Inv(slot) if slot < SLOTS => view.inv.slot(slot).cloned(),
-        WindowSlot::Grid(r, c) if r < 3 && c < 3 => view.grid[r][c].clone(),
+        WindowSlot::Grid(r, c) if r < station.grid_size() && c < station.grid_size() => view.grid[r][c].clone(),
         _ => {
             *view.cursor = Some(cursor);
             return false;
@@ -681,10 +711,10 @@ fn distribute_one(view: &mut WindowMut, at: WindowSlot) -> bool {
 
 /// LMB drag paint: gather matching items from `at` into the cursor. An
 /// empty cursor adopts the slot's item type and starts collecting.
-fn gather(view: &mut WindowMut, at: WindowSlot) -> bool {
+fn gather(view: &mut WindowMut, at: WindowSlot, station: Station) -> bool {
     let stack = match at {
         WindowSlot::Inv(slot) => view.inv.slot(slot).cloned(),
-        WindowSlot::Grid(r, c) if r < 3 && c < 3 => view.grid[r][c].clone(),
+        WindowSlot::Grid(r, c) if r < station.grid_size() && c < station.grid_size() => view.grid[r][c].clone(),
         WindowSlot::Grid(..) => None,
     };
     let Some(stack) = stack else { return false };
@@ -1669,6 +1699,68 @@ mod tests {
         assert_eq!(w.cursor_count(), Some(64), "nothing moved");
         assert_eq!(w.click(WindowClick::DragDistribute { slots }), ClickResult::Done);
         assert_eq!(w.cursor_count(), Some(64 - MAX_DRAG_SLOTS as u8));
+    }
+
+    /// C3a-fix-2 B-L2 — the server's table verdict is a superset of an honest
+    /// client's: a click 6.6 blocks from the server body while the client's
+    /// eye is 6.3 off is judged in reach on both sides, but the server's slack
+    /// stops at half a block, and the client's rule stays exact.
+    #[test]
+    fn the_servers_table_verdict_is_a_superset_of_the_clients() {
+        let cell = [0, 64, 0];
+        let centre = glam::Vec3::new(0.5, 64.5, 0.5);
+        let ctx = |d: f32, block: block::BlockId| {
+            ClickCtx::new(false, Station::Table { cell }, centre + glam::Vec3::new(0.0, 0.0, d), move |_| block)
+        };
+        let table = block::CRAFTING_TABLE;
+        assert!(ctx(6.3, table).table_present(), "the client's eye is in reach");
+        assert!(ctx(6.3, table).with_server_slack(false).table_present());
+        assert!(!ctx(6.6, table).table_present(), "the client's own rule is exact");
+        assert!(ctx(6.6, table).with_server_slack(false).table_present(), "the server's body is a little further");
+        assert!(!ctx(6.9, table).with_server_slack(false).table_present(), "but the slack is half a block");
+        // A table that just went: the client has closed it; the server allows
+        // it for the grace, and only in reach.
+        assert!(!ctx(2.0, block::AIR).table_present());
+        assert!(!ctx(2.0, block::AIR).with_server_slack(false).table_present());
+        assert!(ctx(2.0, block::AIR).with_server_slack(true).table_present());
+        assert!(!ctx(9.0, block::AIR).with_server_slack(true).table_present(), "the grace never extends the reach");
+        // The player's own grid needs no table.
+        let own = ClickCtx::new(false, Station::Player, glam::Vec3::ZERO, |_| block::AIR);
+        assert!(own.table_present() && own.with_server_slack(false).table_present());
+    }
+
+    /// C3a-fix-2 B-L3 — a drag is bounded by the station's grid, as a click
+    /// is: at the player's 2×2 the hidden row and column take nothing and
+    /// give nothing, at a table the whole 3×3 works.
+    #[test]
+    fn a_drag_cannot_reach_a_grid_cell_the_station_does_not_have() {
+        let hidden = [WindowSlot::Grid(2, 2), WindowSlot::Grid(0, 2), WindowSlot::Grid(2, 0)];
+        // Distribute: nothing lands in a hidden cell; the visible one takes.
+        let mut w = Win::new();
+        w.cursor = Some(stone(8));
+        let mut slots = hidden.to_vec();
+        assert_eq!(w.at(Station::Player, WindowClick::DragDistribute { slots: slots.clone() }), ClickResult::Refused);
+        assert_eq!(w.cursor_count(), Some(8), "nothing moved");
+        assert!(w.grid.iter().flatten().all(Option::is_none));
+        slots.push(WindowSlot::Grid(1, 1));
+        assert_eq!(w.at(Station::Player, WindowClick::DragDistribute { slots }), ClickResult::Done);
+        assert_eq!(w.cell_count(1, 1), Some(1));
+        assert_eq!(w.cursor_count(), Some(7));
+        assert!(w.grid[2][2].is_none() && w.grid[0][2].is_none() && w.grid[2][0].is_none());
+        // Gather: a stack parked in a hidden cell is not pulled out.
+        let mut w = Win::new();
+        w.grid[2][2] = Some(stone(3));
+        assert_eq!(w.at(Station::Player, WindowClick::DragGather { slots: hidden.to_vec() }), ClickResult::Refused);
+        assert!(w.cursor.is_none());
+        assert_eq!(w.cell_count(2, 2), Some(3));
+        // At a table the same cells work.
+        assert_eq!(w.at(TABLE, WindowClick::DragGather { slots: hidden.to_vec() }), ClickResult::Done);
+        assert_eq!(w.cursor_count(), Some(3));
+        let mut w = Win::new();
+        w.cursor = Some(stone(8));
+        assert_eq!(w.at(TABLE, WindowClick::DragDistribute { slots: hidden.to_vec() }), ClickResult::Done);
+        assert_eq!(w.cursor_count(), Some(5));
+        assert_eq!(w.total(block::STONE), 8, "count conserved");
     }
 
     // ── C3a-2a: the digest ──────────────────────────────────────────────

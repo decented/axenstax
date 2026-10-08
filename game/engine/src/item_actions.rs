@@ -48,13 +48,14 @@ use crate::world::World;
 /// frames (`place_cooldown`) and the server's in ticks, so an honest joiner
 /// at 60 fps was refused two bites in three.
 ///
-/// The block on PLACING after a bite is counted in the same ticks (C2b verify
-/// M2): `PlayerSlot::tick_place_cooldown` keeps `place_cooldown` up while
-/// `eat_cooldown` runs, so it is 0.8 s at 20 ticks a second whatever the
-/// frame rate, below 20 fps included (it was 16 frames: 1.07 s at 15 fps,
-/// 0.27 s at 60). A held right-click with food in hand between bites is
-/// swallowed (`health_sync::eat_click`), never passed on to plant, open or
-/// sleep.
+/// The block on PLACING and PLANTING after a bite is counted in the same ticks
+/// (C2b verify M2): the right-click chain's place and plant arms wait on
+/// `PlayerSlot::biting` while `eat_cooldown` runs, so it is 0.8 s at 20 ticks
+/// a second whatever the frame rate, below 20 fps included (it was 16 frames:
+/// 1.07 s at 15 fps, 0.27 s at 60). C3a-fix-2 D-L1: nothing else waits on it,
+/// so a door, chest, table, bed or mob answers right after a bite. A held
+/// right-click with food in hand between bites is swallowed
+/// (`health_sync::eat_click`), never passed on to plant, open or sleep.
 pub const EAT_COOLDOWN_TICKS: u32 = 16;
 
 /// How many ticks early the server accepts an eat: it takes one once its
@@ -268,6 +269,17 @@ pub fn cell_in_reach(eye: Vec3, cell: [i32; 3]) -> bool {
     crate::hosted_server::block_change_within_reach((centre - eye).length_squared(), 0, 0, true)
 }
 
+/// [`cell_in_reach`] with `slack` more blocks of reach (C3a-fix-2 B-L2: the
+/// server's table verdict).
+pub fn cell_in_reach_with(eye: Vec3, cell: [i32; 3], slack: f32) -> bool {
+    if slack == 0.0 {
+        return cell_in_reach(eye, cell);
+    }
+    let centre = Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5);
+    let dist = ((centre - eye).length() - slack).max(0.0);
+    crate::hosted_server::block_change_within_reach(dist * dist, 0, 0, true)
+}
+
 // ─── Dropping (C2b) ─────────────────────────────────────────────────────────
 
 /// The fewest ticks between two Q-drops on a joined client, and the
@@ -286,22 +298,46 @@ pub const DROP_BUCKET_CAPACITY: u8 = 2;
 /// everything sent after it) until a token is back; it is never refused or
 /// dropped. Refilled lazily from the server's tick counter, and (C2b verify
 /// M4) in CLIENT time too: while a client's backlog is being replayed, each
-/// `ClientInput` read is one client tick and credits a quarter of a token
+/// new `ClientInput` read is one client tick and credits a quarter of a token
 /// ([`DropBucket::credit_client_input`]), so a catch-up after a stall isn't
 /// slowed to real time.
+///
+/// C3a-fix-2 (D-M1) — the client-time credit is HONEST: an input earns it only
+/// when its tick advances past the last one credited, and the total is capped
+/// at the server ticks the client was actually silent before the backlog
+/// arrived ([`DropBucket::note_inbound`]). A standing backlog of replayed
+/// or stale inputs earns nothing, and a client that never goes silent earns
+/// nothing: at most one quarter-token per silent tick, which is the honest
+/// rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropBucket {
     tokens: u8,
     /// The tick the bucket last refilled at (or was last full at).
     since: u64,
     /// Client-time credit toward the next token, in quarter-tokens (one per
-    /// `ClientInput` read in a catch-up; [`DROP_INTERVAL_TICKS`] make a token).
+    /// new `ClientInput` read in a catch-up; [`DROP_INTERVAL_TICKS`] make a
+    /// token).
     quarters: u8,
+    /// The server tick this client last had anything waiting to be read at;
+    /// `None` before the first.
+    last_read: Option<u64>,
+    /// Client ticks of credit still allowed: the server ticks this client was
+    /// silent (nothing waiting) before its packets arrived, summed.
+    allowance: u64,
+    /// The highest client input tick credited so far.
+    last_credited: u64,
 }
 
 impl Default for DropBucket {
     fn default() -> Self {
-        DropBucket { tokens: DROP_BUCKET_CAPACITY, since: 0, quarters: 0 }
+        DropBucket {
+            tokens: DROP_BUCKET_CAPACITY,
+            since: 0,
+            quarters: 0,
+            last_read: None,
+            allowance: 0,
+            last_credited: 0,
+        }
     }
 }
 
@@ -317,16 +353,39 @@ impl DropBucket {
         }
     }
 
+    /// D-M1 — note that this client has packets waiting at server tick `now`
+    /// (once per tick, before they are read, whatever they are and however
+    /// many the tick's budget reads): the ticks since the previous such tick
+    /// were silence, and are what a later backlog may be credited for
+    /// ([`Self::credit_client_input`]). A tick on which the client's own Drop
+    /// holds the head of its queue still counts as waiting: that is the
+    /// client's backlog, not silence.
+    pub fn note_inbound(&mut self, now: u64) {
+        if let Some(last) = self.last_read {
+            self.allowance = self.allowance.saturating_add(now.saturating_sub(last).saturating_sub(1));
+        }
+        self.last_read = Some(self.last_read.map_or(now, |last| last.max(now)));
+    }
+
     /// C2b verify M4 — credit one `ClientInput` read during a catch-up: one
     /// client tick, `1 / DROP_INTERVAL_TICKS` of a token, counted in whole
     /// quarters, capacity [`DROP_BUCKET_CAPACITY`] as ever (a full bucket keeps
     /// no spare quarters). The server-time refill is unchanged and still
     /// counts; a client that sends only Drops sends no inputs and gets none of
     /// this.
-    pub fn credit_client_input(&mut self, now: u64) {
+    ///
+    /// D-M1 — only an input whose tick (`input_tick`) advances past the last
+    /// credited one earns it, and only while the client's silent ticks
+    /// ([`Self::note_inbound`]) leave allowance: each credit spends one.
+    pub fn credit_client_input(&mut self, now: u64, input_tick: u64) {
         let (tokens, since) = self.level(now);
         self.since = since;
         self.tokens = tokens;
+        if input_tick <= self.last_credited || self.allowance == 0 {
+            return;
+        }
+        self.last_credited = input_tick;
+        self.allowance -= 1;
         if tokens >= DROP_BUCKET_CAPACITY {
             self.quarters = 0;
             return;
@@ -627,32 +686,87 @@ mod tests {
         assert!(b.take(8), "and the next at +8");
     }
 
+    /// A bucket whose client was silent for `silent` ticks before a backlog.
+    fn after_silence(silent: u64) -> DropBucket {
+        let mut b = DropBucket::default();
+        b.note_inbound(0);
+        b.note_inbound(silent + 1);
+        b
+    }
+
     /// C2b verify M4 — client-time credit: four inputs in a catch-up are one
     /// token, capacity holds, and nothing but inputs earns it.
     #[test]
     fn client_inputs_credit_the_bucket_a_quarter_token_each() {
-        let mut b = DropBucket::default();
+        let mut b = after_silence(100);
         assert!(b.take(0) && b.take(0));
         assert!(!b.ready(0), "empty");
-        for _ in 0..3 {
-            b.credit_client_input(0);
+        for t in 1..=3 {
+            b.credit_client_input(0, t);
         }
         assert!(!b.ready(0), "three quarters is not a token");
-        b.credit_client_input(0);
+        b.credit_client_input(0, 4);
         assert!(b.take(0), "four inputs, one token");
         assert!(!b.take(0));
         // Capacity holds, and a full bucket keeps no spare quarters.
-        let mut full = DropBucket::default();
-        for _ in 0..100 {
-            full.credit_client_input(0);
+        let mut full = after_silence(1000);
+        for t in 1..=100 {
+            full.credit_client_input(0, t);
         }
         assert!(full.take(0) && full.take(0) && !full.take(0), "still capacity 2");
-        for _ in 0..3 {
-            full.credit_client_input(0);
+        for t in 101..=103 {
+            full.credit_client_input(0, t);
         }
         assert!(!full.ready(0), "no hoarded quarters from the time it was full");
         // Server time still refills beside it.
         assert!(full.ready(DROP_INTERVAL_TICKS));
+    }
+
+    /// D-M1 — only an input whose tick advances past the last credited one
+    /// earns credit: a replayed or stale input earns nothing.
+    #[test]
+    fn a_replayed_input_earns_no_client_time_credit() {
+        let mut b = after_silence(1000);
+        b.take(0);
+        b.take(0);
+        for _ in 0..100 {
+            b.credit_client_input(0, 7);
+        }
+        assert!(!b.ready(0), "one quarter at most, however often tick 7 is replayed");
+        b.credit_client_input(0, 5);
+        assert!(!b.ready(0), "a tick behind the last credited earns nothing either");
+        assert_eq!((b.quarters, b.last_credited), (1, 7));
+    }
+
+    /// D-M1 — the credit is capped at the ticks the client was silent: eight
+    /// silent ticks are two tokens, however many fresh inputs follow; and a
+    /// client that never goes silent earns nothing.
+    #[test]
+    fn the_credit_is_capped_at_the_ticks_the_client_was_silent() {
+        let mut b = after_silence(8);
+        b.take(0);
+        b.take(0);
+        for t in 1..=500 {
+            b.credit_client_input(0, t);
+        }
+        assert!(b.take(0) && b.take(0) && !b.take(0), "eight quarters, two tokens");
+        // Never silent: an input read every server tick, a standing backlog
+        // of fresh ticks credited each time. Over 100 server ticks it earns
+        // exactly what server time earns: one token per interval.
+        let mut b = DropBucket::default();
+        let mut taken = 0u32;
+        let mut client_tick = 0;
+        for now in 1..=100u64 {
+            b.note_inbound(now);
+            for _ in 0..16 {
+                client_tick += 1;
+                b.credit_client_input(now, client_tick);
+            }
+            while b.take(now) {
+                taken += 1;
+            }
+        }
+        assert!(taken <= 2 + 100 / DROP_INTERVAL_TICKS as u32, "honest rate only: {taken}");
     }
 
     #[test]

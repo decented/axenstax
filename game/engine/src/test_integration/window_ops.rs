@@ -350,7 +350,7 @@ fn a_scripted_inventory_session_keeps_the_servers_window_in_lockstep() {
     let t = rig.tally();
     assert_eq!(t.window_ops, rig.c.seq, "every op sent was mirrored");
     assert_eq!(t.window_mismatch, 0);
-    assert_eq!(t.window_refused, 0, "no click of this session is refused");
+    assert_eq!((t.window_refused, t.window_noop), (0, 0), "no click of this session is refused");
 }
 
 /// Refusal parity — a table result click with the table out of reach (the
@@ -372,23 +372,161 @@ fn a_table_result_click_out_of_reach_is_refused_on_both_sides() {
     assert_eq!(rig.step("a result click out of reach", WindowClick::Result), ClickResult::Refused);
     assert_eq!(rig.client_digest(), laid, "the client's window is unchanged");
     assert_eq!(rig.server_digest(), laid, "and so is the server's");
-    assert_eq!(rig.tally().window_refused, 1, "the refusal is tallied");
+    assert_eq!(rig.tally().window_noop, 1, "both rules refused: a benign no-op");
+    assert_eq!(rig.tally().window_refused, 0, "the client did not disagree");
     // Autofill there moves nothing either.
     let fill = WindowClick::Autofill { example: example("Iron Pickaxe") };
     assert_eq!(rig.step("autofill out of reach", fill), ClickResult::NeedsTable);
     assert_eq!(rig.server_digest(), laid);
 
-    // Back in reach, but the table is broken.
+    // Back in reach, but the table is broken (and the server's grace for a
+    // table that just changed, B-L2, has run out).
     let at = rig.at;
     rig.sp().player.pos = at;
     rig.world().set_block(table[0], table[1], table[2], block::AIR);
+    for _ in 0..=window::SERVER_TABLE_GRACE_TICKS {
+        rig.tick();
+    }
     assert_eq!(rig.step("a result click at a broken table", WindowClick::Result), ClickResult::Refused);
     assert_eq!(rig.server_digest(), laid);
     // Rebuilt: the same click crafts on both sides.
     rig.world().set_block(table[0], table[1], table[2], block::CRAFTING_TABLE);
     assert!(matches!(rig.step("in reach again", WindowClick::Result), ClickResult::Crafted(_)));
-    assert_eq!(rig.tally().window_refused, 3);
+    assert_eq!(rig.tally().window_noop, 3);
+    assert_eq!(rig.tally().window_refused, 0);
     assert_eq!(rig.tally().window_mismatch, 0);
+}
+
+/// B-L2 — the server's verdict on a table click is a superset of an honest
+/// client's. The client's eye is 6.3 blocks from the table (in reach, 6.37);
+/// the server's body, a little further off (knockback while the screen was
+/// open), is 6.6 away. The result click crafts on both sides, with no refusal
+/// and no mismatch.
+#[test]
+fn a_table_click_the_client_judged_in_reach_is_accepted_by_the_server_too() {
+    let mut rig = Rig::dedicated("slack");
+    rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Iron Pickaxe") }).ok());
+
+    // The server body is 6.6 blocks (eye to table centre) from the table...
+    let centre = Vec3::new(table[0] as f32 + 0.5, table[1] as f32 + 0.5, table[2] as f32 + 0.5);
+    let offset = |rig: &mut Rig, d: f32| {
+        let eye = rig.sp().player.eye_pos();
+        let dy = eye.y - centre.y;
+        let dx = eye.x - centre.x;
+        let dz = (d * d - dy * dy - dx * dx).sqrt();
+        (eye, Vec3::new(eye.x, eye.y, centre.z + dz))
+    };
+    let (eye, server_eye) = offset(&mut rig, 6.6);
+    rig.sp().player.pos += server_eye - eye;
+    assert!(((centre - rig.sp().player.eye_pos()).length() - 6.6).abs() < 0.01);
+    // ... the client's eye 6.3.
+    let (_, client_eye) = offset(&mut rig, 6.3);
+    assert!(crate::window::table_in_reach(block::CRAFTING_TABLE, table, client_eye), "in the client's reach");
+    assert!(!crate::window::table_in_reach(block::CRAFTING_TABLE, table, rig.sp().player.eye_pos()));
+
+    let result = {
+        let world = &rig.hs.server.world;
+        let c = &mut rig.c;
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, client_eye, |p| {
+            world.get_block(p[0], p[1], p[2])
+        })
+    };
+    assert!(matches!(result, ClickResult::Crafted(_)), "the client crafts");
+    rig.flush();
+    rig.tick();
+    rig.assert_lockstep("a click at 6.6 from the server body");
+    assert_eq!(rig.tally().window_refused, 0, "the server did not refuse it");
+    assert_eq!(rig.tally().window_mismatch, 0);
+}
+
+/// B-L2 — a table another player just broke: the honest client has not heard,
+/// crafts at it, and the server (grace of ten ticks) crafts too. The grace
+/// ends, and only in reach.
+#[test]
+fn a_table_that_just_went_is_still_craftable_on_the_server_for_a_few_ticks() {
+    let mut rig = Rig::dedicated("grace");
+    rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Iron Pickaxe") }).ok());
+    // Another player breaks the table; the server's world sees it, the client's
+    // (still showing a table) does not. The server has seen it for 3 ticks.
+    rig.world().set_block(table[0], table[1], table[2], block::AIR);
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.sp().table_gone_ticks, Some(3), "watched, tick by tick");
+    let eye = rig.sp().player.eye_pos();
+    let client = {
+        let c = &mut rig.c;
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+    };
+    assert!(matches!(client, ClickResult::Crafted(_)));
+    rig.flush();
+    rig.tick();
+    rig.assert_lockstep("a click at a table the server saw go 3 ticks ago");
+    assert_eq!(rig.tally().window_refused, 0);
+    // It stands again: nothing is counted.
+    rig.world().set_block(table[0], table[1], table[2], block::CRAFTING_TABLE);
+    rig.tick();
+    assert_eq!(rig.sp().table_gone_ticks, None, "it stands again");
+}
+
+/// B-L2 — the grace ends: a table the server has seen gone for longer than
+/// `SERVER_TABLE_GRACE_TICKS` is refused, as the client (who by now has closed
+/// the screen) would not have clicked.
+#[test]
+fn the_grace_for_a_table_that_went_ends() {
+    let mut rig = Rig::dedicated("grace-ends");
+    rig.give(0, Item::Material(MaterialId::IronIngot), 3);
+    rig.give(1, Item::Material(MaterialId::Stick), 2);
+    let table = rig.place_table(-2);
+    rig.open_table(table);
+    assert!(rig.step("autofill", WindowClick::Autofill { example: example("Iron Pickaxe") }).ok());
+    rig.world().set_block(table[0], table[1], table[2], block::AIR);
+    for _ in 0..=window::SERVER_TABLE_GRACE_TICKS + 1 {
+        rig.tick();
+    }
+    let eye = rig.sp().player.eye_pos();
+    let stale = {
+        let c = &mut rig.c;
+        c.ui.apply_click(&mut c.inv, &mut c.armour, &WindowClick::Result, false, eye, |_| block::CRAFTING_TABLE)
+    };
+    assert!(matches!(stale, ClickResult::Crafted(_)), "a client that never heard crafts");
+    rig.flush();
+    rig.tick();
+    let t = rig.tally();
+    assert_eq!(t.window_refused, 1, "the server refuses it past the grace, and the client's digest says it crafted");
+    assert_eq!(t.window_noop, 0, "not a benign no-op");
+    assert_eq!(t.window_mismatch, 1);
+}
+
+/// B-L5 — a closed connection's queued requests are discarded, whatever their
+/// kind, so a leaver's backlog of window ops (eight a tick) doesn't hold its
+/// slot: a thousand are reaped within a few ticks, and none is applied.
+#[test]
+fn a_closed_connection_holding_a_thousand_window_ops_is_reaped() {
+    let rig = Rig::dedicated("closed");
+    let Rig { mut hs, c, .. } = rig;
+    let slot = c.slot;
+    for n in 1..=1000u32 {
+        let pkt = WindowOpPacket { op_seq: n, op: protocol::WireWindowOp::Click(WindowClick::Sort), digest: 0 };
+        c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::WindowOp, &pkt));
+    }
+    drop(c.transport); // the link just goes
+    let mut freed_at = None;
+    for t in 1..=6u32 {
+        hs.tick();
+        if hs.slot_is_free(slot) && freed_at.is_none() {
+            freed_at = Some(t);
+        }
+    }
+    assert!(freed_at.is_some(), "the slot is reaped within a few ticks");
 }
 
 /// A grid with no recipe is refused on both sides too.
@@ -400,7 +538,8 @@ fn a_result_click_on_a_grid_with_no_recipe_is_refused_on_both_sides() {
     rig.step("pick up", slot(0, false));
     rig.step("one dirt", WindowClick::Grid { row: 0, col: 0, right: true });
     assert_eq!(rig.step("craft nothing", WindowClick::Result), ClickResult::Refused);
-    assert_eq!(rig.tally().window_refused, 1);
+    assert_eq!(rig.tally().window_noop, 1, "a recipe-less result click refuses on both sides");
+    assert_eq!(rig.tally().window_refused, 0);
 }
 
 /// Waiting — a burst of 20 ops in one tick is applied over three ticks,
