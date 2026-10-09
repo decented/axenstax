@@ -834,6 +834,83 @@ mod tests {
         assert_eq!(server.server.world.grave_at(cell).unwrap().slots[0].as_ref().unwrap().count, 3);
     }
 
+    /// OC (v88) — the full client path: a saved joiner owing Stone 1 joins
+    /// by its real signed join; the client's own `apply_window_inbox` (the
+    /// `Sync` arm) installs the debt the `InventorySync` carries, the server's
+    /// copy holds the same; the next identical correction give, sent as a
+    /// served op's is, then pays it on both copies — no free Stone. And an
+    /// owed list the client can't decode whole ends the session (A6),
+    /// applying nothing.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_oc_saved_debt_reaches_the_client_and_pays_the_next_give() {
+        use crate::transport::ClientTransport as _;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-oc-debt");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-oc-debt-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).unwrap();
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&[67; 32]).unwrap());
+        let stone = crate::item::Item::Block(crate::block::STONE);
+        let one_stone = crate::item::ItemStack::new_block(crate::block::STONE, 1);
+        let mut saved = crate::server::ServerPlayer::new(server.server.world_spawn());
+        saved.server_simulated = true;
+        saved.verified_pubkey = Some(keys.public_key().to_bytes());
+        saved.enter_world();
+        saved.inventory.set_slot(5, Some(crate::item::ItemStack::new_block(crate::block::DIRT, 4)));
+        let take = crate::container_window::ItemDelta { take: vec![(0, one_stone.clone())], give: vec![] };
+        saved.window_events.debt.apply(&mut saved.inventory, &mut saved.craft_grid, &mut saved.cursor, &mut saved.armour, &take);
+        assert_eq!(saved.window_events.debt.owed(&stone), 1);
+        server.server.players.push(saved);
+        server.server.save_joiner(0).unwrap();
+        server.server.players.pop();
+        let binding = Some([18; 32]);
+        let transport = server.attach_test_remote_with_binding(binding);
+        let pkt = transport.try_recv_from_server().expect("issued challenge");
+        let (kind, bytes) = crate::protocol::deserialize_header(&pkt).unwrap();
+        assert_eq!(kind, crate::protocol::PacketType::Challenge);
+        let challenge: crate::protocol::ChallengePacket = crate::protocol::safe_deserialize(bytes).unwrap();
+        let mut request = crate::remote_client::build_join_request_guest("Owing", 0);
+        request.auth_event = Some(pollster::block_on(crate::signet::native_signer::build_join_auth_event(
+            &keys, &challenge.nonce_hex, &crate::signet::join_origin(binding))).unwrap());
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(Box::new(transport), request, None));
+        for _ in 0..8 { harness_step(&mut server, &mut hg); }
+        let has_stone = |inv: &crate::inventory::Inventory| inv.slots_iter().flatten().any(|s| s.item == stone);
+        assert_eq!(hg.state.players[0].inventory.slot(5).map(|s| s.count), Some(4), "the saved window arrived");
+        assert_eq!(hg.state.window_inbox.debt.owed(&stone), 1, "the client's Sync apply installed the carried debt");
+        assert_eq!(server.server.players[0].window_events.debt.owed(&stone), 1, "the server copy holds it too");
+        let give = crate::container_window::ItemDelta { take: vec![], give: vec![one_stone] };
+        let n = server.send_test_correction(0, crate::window_ops::Correction {
+            client: give.clone(), own: Some(give),
+            view: crate::window_ops::ViewEvent::Sets { sets: Vec::new(), furnace: None },
+        });
+        for _ in 0..8 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.players[0].window_events.waiting(), 0, "event {n} was applied on both copies");
+        assert!(!has_stone(&server.server.players[0].inventory), "the give paid the carried debt on the server copy");
+        assert!(!has_stone(&hg.state.players[0].inventory), "and on the client copy");
+        assert!(hg.state.players[0].crafting_ui.cursor_item.is_none());
+        assert!(server.server.players[0].window_events.debt.is_empty() && hg.state.window_inbox.debt.is_empty());
+        // A6 — an undecodable owed entry: a protocol error, nothing applied.
+        let bad = crate::protocol::InventorySyncPacket {
+            window_event: n + 1,
+            slots: vec![(crate::protocol::WireWindowSlot::Inv(5), None)],
+            owed: vec![(crate::protocol::WireStack {
+                item_kind: crate::protocol::item_kind::BLOCK, item_id: u16::MAX, count: 1,
+                full_item: crate::protocol::WireItem::None,
+            }, 1)],
+        };
+        hg.state.window_inbox.add(vec![crate::remote_client::RequestOutcome::Sync(bad)], Vec::new(), Vec::new());
+        hg.state.apply_window_inbox();
+        assert_eq!(hg.state.players[0].inventory.slot(5).map(|s| s.count), Some(4), "nothing of the refused Sync applied");
+        assert!(matches!(
+            &hg.state.remote_client.as_ref().unwrap().state,
+            crate::remote_client::ConnectionState::Failed(reason) if reason == crate::remote_client::HOST_BAD_WORLD_DATA
+        ), "the client leaves with a reason");
+    }
+
     /// C3a-fix-1 (B-L1) — a Close then a Q-drop in one tick, through the REAL
     /// send path: the close put the cursor's stack back in hotbar slot 0 and
     /// the drop takes one from there. The drop goes out mid-frame, but the

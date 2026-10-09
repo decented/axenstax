@@ -93,22 +93,50 @@ impl HostedServer {
                     ),
                 );
             }
-            let n = self.send_inventory_sync(i, window);
+            // OC — death clears the correction debt (accepted Mirror
+            // behaviour since v86): what the old life owed dies with it, on
+            // both copies. The replacement carries an empty debt, explicitly.
+            let n = self.send_inventory_sync(i, window, crate::container_window::CorrectionDebt::default());
             self.server.players[i].window_events.death_replace = Some(n);
         }
     }
 
+    /// Replace joiner `i`'s whole window with `window` and its correction
+    /// debt with `debt` (OC, v88), on both copies: one numbered
+    /// `WindowEvent::Replace` for the server's and one `InventorySync`
+    /// carrying the same window and debt for the client's. The debt is
+    /// carried as a carrier holds it (`CorrectionDebt::carried`: at most
+    /// `MAX_CARRIED_DEBT` entries; `CorrectionDebt::wire_safe`: only entries
+    /// the client decodes back exactly), the same on both copies; anything
+    /// left out marks the session's obligations incomplete. Returns the
+    /// event's number.
     pub(super) fn send_inventory_sync(
         &mut self,
         i: usize,
         window: crate::window_events::EffectiveWindow,
+        debt: crate::container_window::CorrectionDebt,
     ) -> u32 {
+        let (debt, over) = debt.carried();
+        let (debt, unsafe_on_wire) = debt.wire_safe(&self.server.registry);
+        let dropped = over + unsafe_on_wire;
+        if dropped > 0 {
+            // A validated save holds at most the bound, and a death or a
+            // fresh joiner none; only an item no window holds (a piece at
+            // durability 0) fails the wire. Either way the session can no
+            // longer prove its debt.
+            log::warn!(
+                "Inventory sync for {}: {dropped} correction-debt entries left out (past the carried bound, \
+                 or not decodable by the client)",
+                self.server.players[i].display_name
+            );
+            self.server.players[i].obligations.mark(crate::joiner_save::IncompleteCause::Overflow);
+        }
         let n = crate::window_events::queue(
             &mut self.server.players[i],
-            crate::window_events::WindowEvent::Replace(Box::new(window.clone())),
+            crate::window_events::WindowEvent::Replace { window: Box::new(window.clone()), debt: debt.clone() },
             self.server.tick_counter,
         );
-        let pkt = crate::inventory_sync::packet(&window, n);
+        let pkt = crate::inventory_sync::packet(&window, &debt, n);
         self.send_to_joined_slot(
             i,
             &protocol::serialize_packet(protocol::PacketType::InventorySync, &pkt),

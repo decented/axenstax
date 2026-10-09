@@ -1,10 +1,17 @@
 //! Whole-window wire conversion and client application without replacing preferences.
+//! OC (v88) — the window's correction debt travels with it: the packet
+//! carries the debt the server's `Replace` gives its copy, and the client's
+//! apply installs exactly that debt on its own copy.
 use crate::{
     item::Item,
     protocol::{InventorySyncPacket, WireWindowSlot},
     window_events::EffectiveWindow,
 };
-pub fn packet(w: &EffectiveWindow, window_event: u32) -> InventorySyncPacket {
+pub fn packet(
+    w: &EffectiveWindow,
+    debt: &crate::container_window::CorrectionDebt,
+    window_event: u32,
+) -> InventorySyncPacket {
     let slots = crate::container_window::PlayerSlots::of(&w.inv, &w.armour, &w.cursor, &w.grid);
     let ats = (0..36)
         .map(WireWindowSlot::Inv)
@@ -14,14 +21,23 @@ pub fn packet(w: &EffectiveWindow, window_event: u32) -> InventorySyncPacket {
     InventorySyncPacket {
         window_event,
         slots: ats.map(|at| (at, slots.wire(at).unwrap())).collect(),
+        owed: debt.to_wire(),
     }
 }
+/// Apply a whole-window replacement to the client's window `w`, and install
+/// the correction debt it carries as the client's `debt` (OC, v88: the same
+/// debt the server's copy now owes; empty after a death). An owed list the
+/// client can't decode whole (`CorrectionDebt::from_wire`) is a protocol
+/// error: nothing is applied, neither the window nor the debt, and the
+/// caller leaves the world.
 pub fn apply(
     w: &mut crate::window::WindowMut,
     pkt: &InventorySyncPacket,
     reg: &crate::block::BlockRegistry,
     uses: &mut crate::use_edits::SentUses,
-) {
+    debt: &mut crate::container_window::CorrectionDebt,
+) -> Result<(), String> {
+    let carried = crate::container_window::CorrectionDebt::from_wire(&pkt.owed, reg)?;
     let predicted_plans = uses.retire_for_replace();
     let old = crate::container_window::PlayerSlots::of(w.inv, w.armour, w.cursor, w.grid);
     let plans: Vec<_> = (0..36)
@@ -90,6 +106,8 @@ pub fn apply(
             _ => {}
         }
     }
+    *debt = carried;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -105,7 +123,7 @@ mod tests {
             grid: Default::default(),
         };
         crate::starter_kit::grant_fresh_kit(&mut w.inv, "testlab", false, false);
-        let packet = packet(&w, 1);
+        let packet = packet(&w, &Default::default(), 1);
         assert_eq!(packet.slots.len(), 50);
         let mut inv = Inventory::new();
         // A pre-existing body-less stub must not shadow the built-in body.
@@ -135,7 +153,8 @@ mod tests {
             &packet,
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
-        );
+            &mut Default::default(),
+        ).unwrap();
         assert!(!inv.auto_refill);
         assert!(inv.is_locked(3));
         let original = (0..36)
@@ -199,10 +218,11 @@ mod tests {
                 grid: &mut grid,
                 container: None,
             },
-            &packet(&w, 3),
+            &packet(&w, &Default::default(), 3),
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
-        );
+            &mut Default::default(),
+        ).unwrap();
         assert!(inv.slot(1).is_none());
         if let Item::Plan(p) = &inv.slot(2).unwrap().item {
             assert_eq!(p.cells, body.cells);
@@ -250,10 +270,11 @@ mod prediction_tests {
                 grid: &mut ui.grid,
                 container: None,
             },
-            &packet(&w, 3),
+            &packet(&w, &Default::default(), 3),
             &crate::block::BlockRegistry::new(),
             &mut uses,
-        );
+            &mut Default::default(),
+        ).unwrap();
         // A later poll delivers the refusal, after the replacement was applied.
         let out = crate::use_edits::undo_refused(
             &mut uses,
@@ -338,10 +359,11 @@ mod prediction_tests {
                     grid: &mut ui.grid,
                     container: None,
                 },
-                &packet(&w, 3),
+                &packet(&w, &Default::default(), 3),
                 &crate::block::BlockRegistry::new(),
                 &mut uses,
-            );
+                &mut Default::default(),
+            ).unwrap();
             let Item::Plan(recovered) = &inv.slot(2).unwrap().item else {
                 panic!("Plan missing");
             };
@@ -355,6 +377,80 @@ mod prediction_tests {
                 1,
                 "only the authoritative Plan is seated"
             );
+        }
+    }
+}
+
+/// OC (v88) — the client's half of the carried debt.
+#[cfg(test)]
+mod oc_tests {
+    use super::*;
+    use crate::{
+        container_window::CorrectionDebt,
+        inventory::Inventory,
+        item::ItemStack,
+        protocol::{WireItem, WireStack, item_kind},
+        window::WindowMut,
+    };
+
+    fn stone() -> Item {
+        Item::Block(crate::block::STONE)
+    }
+
+    fn sync_with(owed: Vec<(WireStack, u32)>) -> InventorySyncPacket {
+        let mut w = EffectiveWindow { inv: Inventory::new(), armour: [None; 4], cursor: None, grid: Default::default() };
+        w.inv.set_slot(4, Some(ItemStack::new_block(crate::block::DIRT, 9)));
+        InventorySyncPacket { owed, ..packet(&w, &Default::default(), 2) }
+    }
+
+    /// Apply `pkt` to a client window holding Stone 3 in slot 0, whose debt
+    /// owes Dirt 5: what the window and the debt are after.
+    fn apply_to_client(pkt: &InventorySyncPacket) -> (Result<(), String>, Inventory, CorrectionDebt) {
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 3)));
+        let mut debt = CorrectionDebt::from_entries(vec![(Item::Block(crate::block::DIRT), 5)]).unwrap();
+        let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
+        let out = apply(
+            &mut WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            pkt,
+            &crate::block::BlockRegistry::new(),
+            &mut crate::use_edits::SentUses::default(),
+            &mut debt,
+        );
+        (out, inv, debt)
+    }
+
+    #[test]
+    fn sync_installs_exactly_the_debt_it_carries() {
+        let carried = CorrectionDebt::from_entries(vec![(stone(), 70_000)]).unwrap();
+        let (out, inv, debt) = apply_to_client(&sync_with(carried.to_wire()));
+        assert!(out.is_ok());
+        assert_eq!(debt, carried, "the carried debt replaces the old one");
+        assert!(inv.slot(0).is_none() && inv.slot(4).is_some(), "and the window is replaced");
+        let (_, _, debt) = apply_to_client(&sync_with(Vec::new()));
+        assert!(debt.is_empty(), "an empty owed list (a death's) clears it");
+    }
+
+    /// A6 — an owed entry the client can't decode, or two that decode to
+    /// the same item, make the whole Sync a protocol error: neither the
+    /// window nor the debt is touched.
+    #[test]
+    fn an_owed_list_the_client_cant_decode_whole_applies_nothing() {
+        let unknown_block = WireStack { item_kind: item_kind::BLOCK, item_id: u16::MAX, count: 1, full_item: WireItem::None };
+        let pick = WireItem::Tool { tool_type: 0, material: 2, durability: 9 };
+        let pick_a = WireStack { item_kind: item_kind::TOOL, item_id: 2, count: 1, full_item: pick };
+        let pick_b = WireStack { item_kind: item_kind::BLOCK, item_id: 1, count: 1, full_item: pick };
+        let broken = WireStack { full_item: WireItem::Tool { tool_type: 0, material: 2, durability: 0 }, ..pick_a.clone() };
+        for (why, owed) in [
+            ("an unknown block", vec![(unknown_block, 1)]),
+            ("a tool at durability 0", vec![(broken, 1)]),
+            ("two entries that decode to one item", vec![(pick_a, 1), (pick_b, 1)]),
+        ] {
+            let (out, inv, debt) = apply_to_client(&sync_with(owed));
+            assert!(out.is_err(), "{why}: a protocol error");
+            assert_eq!(inv.slot(0).map(|s| s.count), Some(3), "{why}: the window is untouched");
+            assert!(inv.slot(4).is_none(), "{why}: the window is untouched");
+            assert_eq!(debt.owed(&Item::Block(crate::block::DIRT)), 5, "{why}: the debt is untouched");
         }
     }
 }

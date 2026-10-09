@@ -768,10 +768,20 @@ use crate::protocol::WireStack;
 /// an unrelated stack of the same item twice. One per joined client
 /// (`window_events::WindowInbox::debt`) and one per joiner's server copy
 /// (`window_events::WindowEvents::debt`), kept by the same rule.
+///
+/// OC (v88) — the debt is carried across a reconnect: a joiner save holds
+/// the effective debt (`joiner_save::JoinerSave`, v2) and the join's
+/// `WindowEvent::Replace` + `InventorySync` give it back to both copies
+/// ([`Self::carried`], [`Self::to_wire`], [`Self::from_wire`]). Entries keep
+/// their live order: a give pays the first entry of its item first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CorrectionDebt {
     owed: Vec<(Item, u32)>,
 }
+
+/// OC (v88) — the most entries a carried debt holds (a joiner save's
+/// `owed`, `InventorySyncPacket::owed`): `protocol::MAX_SYNC_OWED`.
+pub const MAX_CARRIED_DEBT: usize = crate::protocol::MAX_SYNC_OWED;
 
 impl CorrectionDebt {
     /// Units of `item` owed.
@@ -780,9 +790,106 @@ impl CorrectionDebt {
         self.owed.iter().filter(|(i, _)| crate::joiner_actions::same_item(i, item)).map(|(_, n)| n).sum()
     }
 
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.owed.is_empty()
+    }
+
+    /// OC — what is owed, in live order: `(item, units)`, each item at most
+    /// once (exact equality), never a Plan, never 0 units.
+    pub fn entries(&self) -> &[(Item, u32)] {
+        &self.owed
+    }
+
+    /// OC — a carried debt (a joiner save's): refused whole unless it has at
+    /// most [`MAX_CARRIED_DEBT`] entries, each at least one unit, none a
+    /// Plan, and no two with exactly equal items. Never truncated.
+    pub fn from_entries(owed: Vec<(Item, u32)>) -> Result<Self, String> {
+        if owed.len() > MAX_CARRIED_DEBT {
+            return Err(format!("{} owed entries, at most {MAX_CARRIED_DEBT}", owed.len()));
+        }
+        for (at, (item, units)) in owed.iter().enumerate() {
+            if *units == 0 {
+                return Err("an owed entry of 0 units".into());
+            }
+            if matches!(item, Item::Plan(_)) {
+                return Err("an owed Plan".into());
+            }
+            if owed[..at].iter().any(|(earlier, _)| earlier == item) {
+                return Err("two owed entries of the same item".into());
+            }
+        }
+        Ok(CorrectionDebt { owed })
+    }
+
+    /// OC — the debt as a carrier holds it (a joiner save, a join's
+    /// `Replace`): the first [`MAX_CARRIED_DEBT`] entries in live order, and
+    /// how many entries it leaves out (a Plan or a 0-unit entry, which the
+    /// rule never makes, is left out too). An entry of an item already
+    /// carried (the rule never makes one either) is added to it, saturating.
+    pub fn carried(&self) -> (CorrectionDebt, usize) {
+        let mut out: Vec<(Item, u32)> = Vec::new();
+        let mut dropped = 0;
+        for (item, units) in &self.owed {
+            if *units == 0 || matches!(item, Item::Plan(_)) {
+                dropped += 1;
+            } else if let Some((_, n)) = out.iter_mut().find(|(i, _)| i == item) {
+                *n = n.saturating_add(*units);
+            } else if out.len() < MAX_CARRIED_DEBT {
+                out.push((item.clone(), *units));
+            } else {
+                dropped += 1;
+            }
+        }
+        (CorrectionDebt { owed: out }, dropped)
+    }
+
+    /// OC (v88) — the debt on the wire (`InventorySyncPacket::owed`): each
+    /// item as a one-unit [`WireStack`] (`inventory::stack_to_wire`, the
+    /// encoding every correction take travels in), with its units, in order.
+    pub fn to_wire(&self) -> Vec<(WireStack, u32)> {
+        self.owed
+            .iter()
+            .map(|(item, n)| (crate::inventory::stack_to_wire(&ItemStack { item: item.clone(), count: 1 }), *n))
+            .collect()
+    }
+
+    /// OC (v88) — a joined client's debt from an `InventorySync`
+    /// (`protocol::bounded_owed` already refused a list past
+    /// [`MAX_CARRIED_DEBT`], a 0-unit entry, a count other than 1 or a Plan).
+    /// Every entry must decode faithfully (`inventory::stack_from_wire`) to a
+    /// non-Plan item, and no two to an exactly equal one; otherwise the whole
+    /// list is refused (the caller treats the Sync as a protocol error). An
+    /// honest server sends only entries that round-trip
+    /// ([`Self::wire_safe`]).
+    pub fn from_wire(owed: &[(WireStack, u32)], registry: &crate::block::BlockRegistry) -> Result<Self, String> {
+        let mut entries = Vec::with_capacity(owed.len());
+        for (wire, units) in owed {
+            let stack = crate::inventory::stack_from_wire(wire, registry, crate::inventory::PlanDecode::Refuse)
+                .filter(|s| s.count == 1)
+                .ok_or_else(|| "an owed item that doesn't decode".to_string())?;
+            entries.push((stack.item, *units));
+        }
+        Self::from_entries(entries)
+    }
+
+    /// OC — the entries an `InventorySync` can carry: each item that
+    /// round-trips exactly through [`Self::to_wire`] and the client's
+    /// [`Self::from_wire`] on `registry` (a tool or armour piece at durability
+    /// 0 or above its maximum, which no window holds, doesn't), and how many
+    /// it leaves out.
+    pub fn wire_safe(&self, registry: &crate::block::BlockRegistry) -> (CorrectionDebt, usize) {
+        let mut owed = Vec::with_capacity(self.owed.len());
+        let mut dropped = 0;
+        for (item, units) in &self.owed {
+            let wire = crate::inventory::stack_to_wire(&ItemStack { item: item.clone(), count: 1 });
+            let back = crate::inventory::stack_from_wire(&wire, registry, crate::inventory::PlanDecode::Refuse);
+            if back.is_some_and(|s| s.count == 1 && s.item == *item) {
+                owed.push((item.clone(), *units));
+            } else {
+                dropped += 1;
+            }
+        }
+        (CorrectionDebt { owed }, dropped)
     }
 
     /// Apply `delta` to a window (`inv`, `grid`, `cursor`, `armour`): every
@@ -811,7 +918,15 @@ impl CorrectionDebt {
             if taken < stack.count {
                 let short = u32::from(stack.count - taken);
                 match self.owed.iter_mut().find(|(i, _)| i == &stack.item) {
-                    Some((_, n)) => *n += short,
+                    // OC (A4) — checked: past `u32::MAX` it saturates, on
+                    // both copies alike, and says so (the server marks its
+                    // session's obligations incomplete).
+                    Some((_, n)) => {
+                        *n = n.checked_add(short).unwrap_or_else(|| {
+                            out.saturated = true;
+                            u32::MAX
+                        })
+                    }
                     None => self.owed.push((stack.item.clone(), short)),
                 }
                 out.short.push((stack.item.clone(), short));
@@ -854,6 +969,9 @@ pub struct DebtApplied {
     /// C3b-fix-e (L4) — per give that paid a debt, in order: its item and the
     /// units it paid (a shortfall settled after all).
     pub paid: Vec<(Item, u32)>,
+    /// OC (A4) — a short take's units saturated at `u32::MAX`: some of what
+    /// is owed is no longer counted.
+    pub saturated: bool,
 }
 
 impl ContainerData {
@@ -1335,7 +1453,7 @@ mod tests {
         // Take 16: 10 found, 6 owed — and reported short (C3b-fix-c).
         let take = ItemDelta { take: vec![(0, stone(16))], give: vec![] };
         let applied = debt.apply(&mut inv, &mut grid, &mut cursor, &mut armour, &take);
-        assert_eq!(applied, DebtApplied { settled: vec![], short: vec![(Item::Block(block::STONE), 6)], paid: vec![] });
+        assert_eq!(applied, DebtApplied { settled: vec![], short: vec![(Item::Block(block::STONE), 6)], paid: vec![], saturated: false });
         assert_eq!((inv.slot(9), debt.owed(&Item::Block(block::STONE))), (None, 6));
         // Give 16: 6 pay the debt, 10 land — and the 6 are reported paid
         // (C3b-fix-e L4: the server nets them off `correction_short`).

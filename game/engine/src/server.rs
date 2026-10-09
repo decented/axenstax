@@ -252,6 +252,11 @@ pub struct ServerPlayer {
     /// client reports it applied them (`window_events`), with the mirror's
     /// op-sequence check, join baseline and counters. Fresh per attach.
     pub window_events: crate::window_events::WindowEvents,
+    /// OC — whether this session's correction debt is fully known
+    /// (`joiner_save::ObligationHistory`): set at join from the joiner's
+    /// save (`Complete` with none, and for a guest), sticky once
+    /// `Incomplete` (a v1 save, an overflowing capture). Fresh per attach.
+    pub obligations: crate::joiner_save::SessionObligations,
     /// C3b-1 — the cell of the real container (chest, dispenser, dropper,
     /// furnace) this joiner has open, set when the server opens it on
     /// `OpenContainer` and cleared by `Close`, `OpenPlayer`, `OpenTable`, or
@@ -559,6 +564,7 @@ impl ServerPlayer {
             station: crate::window::Station::Player,
             table_gone_ticks: None,
             window_events: Default::default(),
+            obligations: Default::default(),
             open_container: None,
             container_sent: Default::default(),
             last_window_op_seq: 0,

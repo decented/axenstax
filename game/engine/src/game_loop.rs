@@ -23194,13 +23194,27 @@ impl super::GameState {
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::SlotSet(pkt)) => {
                     unfit = self.apply_window_slot_set(&pkt);
                 }
+                // OC (v88) — the replacement installs the correction debt it
+                // carries (the server's copy owes the same), never a reset.
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Sync(pkt)) => {
                     let p = &mut self.players[0];
-                    crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut p.inventory,
+                    let applied = crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut p.inventory,
                         armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item,
-                        grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses);
-                    self.window_inbox.debt = Default::default();
+                        grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses,
+                        &mut self.window_inbox.debt);
                     p.crafting_ui.update_result();
+                    // An owed list this client can't decode whole is a
+                    // protocol error (A6): nothing was applied; leave.
+                    if let Err(e) = applied {
+                        log::error!("Inventory sync {event} refused: {e}; leaving");
+                        if let Some(client) = self.remote_client.as_mut() {
+                            client.state = crate::remote_client::ConnectionState::Failed(
+                                crate::remote_client::HOST_BAD_WORLD_DATA.to_string(),
+                            );
+                        }
+                        self.window_inbox.clear();
+                        return;
+                    }
                 }
                 crate::window_events::InboxItem::Grant(grant) => {
                     unfit.push(

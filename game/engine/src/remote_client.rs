@@ -1218,10 +1218,22 @@ impl RemoteClient {
                         }
                     }
                     PacketType::InventorySync => {
-                        if let Ok(sync) = protocol::safe_deserialize::<protocol::InventorySyncPacket>(payload)
-                            && sync.window_event != 0 {
-                            self.pending_outcomes.push(RequestOutcome::Sync(sync));
-                            changed = true;
+                        match protocol::safe_deserialize::<protocol::InventorySyncPacket>(payload) {
+                            Ok(sync) if sync.window_event != 0 => {
+                                self.pending_outcomes.push(RequestOutcome::Sync(sync));
+                                changed = true;
+                            }
+                            Ok(_) => {}
+                            // OC (v88, A6) — a whole-window replacement this
+                            // client can't read (an owed list past the
+                            // carried bounds, say) can be neither applied
+                            // nor skipped: an honest server of this version
+                            // never sends one. End the session with a reason.
+                            Err(e) => {
+                                log::error!("Undecodable inventory sync: {e}; leaving");
+                                self.state = ConnectionState::Failed(HOST_BAD_WORLD_DATA.to_string());
+                                changed = true;
+                            }
                         }
                     }
                     PacketType::KillEvent => {
@@ -3480,6 +3492,44 @@ mod tests {
             matches!(&rc.state, ConnectionState::Failed(why) if why == HOST_BAD_WORLD_DATA),
             "the session ends with a reason"
         );
+    }
+
+    /// OC (v88, A6) — an `InventorySync` whose owed list the bounded
+    /// deserializer refuses ends the session (never applied, never silently
+    /// skipped); a valid one is queued.
+    #[test]
+    fn an_inventory_sync_that_does_not_decode_ends_the_session() {
+        let one = |d: u16| protocol::WireStack {
+            item_kind: protocol::item_kind::TOOL,
+            item_id: 2,
+            count: 1,
+            full_item: protocol::WireItem::Tool { tool_type: 0, material: 2, durability: d },
+        };
+        let sync = |owed: Vec<(protocol::WireStack, u32)>| {
+            protocol::serialize_packet(
+                PacketType::InventorySync,
+                &protocol::InventorySyncPacket { window_event: 1, slots: Vec::new(), owed },
+            )
+        };
+        let (srv, client) = channel_pair();
+        let mut rc =
+            RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
+        srv.send_to_client(&sync(vec![(one(9), 3)]));
+        assert!(rc.poll());
+        assert!(matches!(rc.pending_outcomes.as_slice(), [RequestOutcome::Sync(_)]), "a valid sync is queued");
+        assert!(!matches!(rc.state, ConnectionState::Failed(_)));
+        for bad in [(1..=257).map(|d| (one(d), 1)).collect::<Vec<_>>(), vec![(one(1), 0)]] {
+            let (srv, client) = channel_pair();
+            let mut rc =
+                RemoteClient::from_transport(Box::new(client), build_join_request_guest("Guest", 0), None);
+            srv.send_to_client(&sync(bad));
+            assert!(rc.poll());
+            assert!(rc.pending_outcomes.is_empty(), "nothing to apply");
+            assert!(
+                matches!(&rc.state, ConnectionState::Failed(why) if why == HOST_BAD_WORLD_DATA),
+                "the session ends with a reason"
+            );
+        }
     }
 
     #[test]

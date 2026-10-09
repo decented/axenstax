@@ -1859,6 +1859,22 @@ impl HostedServer {
         }
     }
 
+    /// OC test hook — queue `correction` for joiner `i` as its next
+    /// numbered window event and send its `WindowSlotSet`, as a served
+    /// container op does. Returns the event's number.
+    #[cfg(test)]
+    pub(crate) fn send_test_correction(&mut self, i: usize, correction: crate::window_ops::Correction) -> u32 {
+        let set = correction.packet(0, 0);
+        let window_event = crate::window_events::queue(
+            &mut self.server.players[i],
+            crate::window_events::WindowEvent::Correction(Box::new(correction)),
+            self.server.tick_counter,
+        );
+        let pkt = protocol::WindowSlotSetPacket { window_event, ..set };
+        self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::WindowSlotSet, &pkt));
+        window_event
+    }
+
     /// Is slot `i` a server-simulated joiner the server holds dead (MP-A3)?
     fn joiner_is_dead(&self, i: usize) -> bool {
         self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.combat.dead)
@@ -4366,7 +4382,16 @@ impl HostedServer {
                                 &protocol::PlayerEventPacket { player_index: i as u32,
                                     event: protocol::PlayerEventType::DiedOf { cause: protocol::WireDamageCause::Generic }, window_event: 0 }));
                         }
-                        let mut kit = saved_joiner.as_ref().map(|s| s.window().expect("validated joiner window")).unwrap_or_else(|| crate::window_events::effective_window(&self.server.players[i]));
+                        // OC — the join's replacement carries the restored
+                        // record's correction debt (a fresh joiner's own
+                        // effective debt, empty), to both copies.
+                        let (mut kit, debt) = match saved_joiner.as_ref() {
+                            Some(s) => (s.window().expect("validated joiner window"), s.debt().expect("validated joiner debt")),
+                            None => {
+                                let fold = crate::window_events::effective_window_and_debt(&self.server.players[i]);
+                                (fold.window, fold.debt)
+                            }
+                        };
                         if saved_joiner.is_none() { crate::starter_kit::grant_fresh_kit(&mut kit.inv, &self.server.world.world_type,
                             self.server.play_mode.is_creative(), self.server.world.is_workshop); }
                         for at in 0..36 {
@@ -4376,7 +4401,7 @@ impl HostedServer {
                                     crate::plan::PlanData::marker_placeholder(crate::plan::marker(&body), matches!(body.develop_state, crate::plan::DevelopState::Developed))), count: stack.count }));
                             }
                         }
-                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) { self.send_inventory_sync(i, kit); }
+                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) { self.send_inventory_sync(i, kit, debt); }
 
                         // The operator joining without a channel binding plays
                         // normally but gets no operator tools — say so, so the
@@ -8460,7 +8485,7 @@ mod tests {
         hs.server.players[i].craft_grid[1][2] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Diamond, 3));
         hs.server.players[i].combat.health = 8.0; hs.server.players[i].combat.hunger = 9;
         let spawn = glam::Vec3::new(10.5, 80.0, 20.5); hs.server.players[i].spawn_pos = spawn;
-        let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]), 1);
+        let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
         let second = hs.attach_test_remote_with_binding(Some([34;32]));
         send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
         let i = hs.server.players.len()-1;
@@ -8478,8 +8503,138 @@ mod tests {
         }
         let accept = accept.unwrap(); assert_eq!([accept.spawn_x, accept.spawn_y, accept.spawn_z], spawn.to_array());
         assert_eq!(sync.unwrap(), expected);
-        assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]), 1), expected);
+        assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1), expected);
         assert!((hs.server.players[i].combat.health - 8.0).abs() < 0.01);
+    }
+
+    /// The packets of `kind` waiting for `client`, decoded.
+    fn oc_received<T: serde::de::DeserializeOwned>(client: &ChannelClientTransport, kind: protocol::PacketType) -> Vec<T> {
+        use crate::transport::ClientTransport as _;
+        let mut out = Vec::new();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((k, bytes)) = protocol::deserialize_header(&pkt) && k == kind {
+                out.push(protocol::safe_deserialize::<T>(bytes).unwrap());
+            }
+        }
+        out
+    }
+
+    fn oc_stone_correction(take: bool) -> crate::window_ops::Correction {
+        let stone = crate::item::ItemStack::new_block(crate::block::STONE, 1);
+        let delta = if take {
+            crate::container_window::ItemDelta { take: vec![(0, stone)], give: vec![] }
+        } else {
+            crate::container_window::ItemDelta { take: vec![], give: vec![stone] }
+        };
+        crate::window_ops::Correction {
+            client: delta.clone(),
+            own: Some(delta),
+            view: crate::window_ops::ViewEvent::Sets { sets: Vec::new(), furnace: None },
+        }
+    }
+
+    /// OC — the C3d counterexample, inverted on the real paths: a numbered
+    /// correction take of an absent Stone leaves debt 1; the reconnect saves
+    /// it (capture → bincode → file), loads it and sends the real join sync,
+    /// which gives debt 1 to the server's copy AND carries it in the
+    /// `InventorySync`; the next identical correction give pays it on both
+    /// copies (the client's through its own Sync apply and slot-set apply), so
+    /// it never lands as a free Stone.
+    #[test]
+    fn oc_unpaid_correction_debt_survives_reconnect_on_both_copies() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("oc-reconnect");
+        let mut hs = start_room_test_server("oc-reconnect", 0);
+        let first = hs.attach_test_remote_with_binding(Some([17; 32]));
+        send_signed_join(&first, [66; 32], Some([17; 32]));
+        hs.tick();
+        let i = hs.server.players.len() - 1;
+        let stone = crate::item::Item::Block(crate::block::STONE);
+        let n = hs.send_test_correction(i, oc_stone_correction(true));
+        crate::window_events::apply_through(&mut hs.server.players[i], n, hs.server.tick_counter);
+        assert_eq!(hs.server.players[i].window_events.debt.owed(&stone), 1);
+        while first.try_recv_from_server().is_some() {}
+        // Reconnect: the old slot is released (saved), the new one loads it.
+        let second = hs.attach_test_remote_with_binding(Some([34; 32]));
+        send_signed_join(&second, [66; 32], Some([34; 32]));
+        hs.tick();
+        let j = hs.server.players.len() - 1;
+        let syncs: Vec<protocol::InventorySyncPacket> = oc_received(&second, protocol::PacketType::InventorySync);
+        assert_eq!(syncs.len(), 1, "the join sync");
+        let sync = &syncs[0];
+        let registry = crate::block::BlockRegistry::new();
+        assert_eq!(
+            crate::container_window::CorrectionDebt::from_wire(&sync.owed, &registry).unwrap().owed(&stone),
+            1,
+            "the InventorySync carries the debt"
+        );
+        crate::window_events::apply_through(&mut hs.server.players[j], sync.window_event, hs.server.tick_counter);
+        assert_eq!(hs.server.players[j].window_events.debt.owed(&stone), 1, "the join's Replace gives the server copy the debt");
+        // The client's copy, by its own apply of that Sync.
+        let mut inv = crate::inventory::Inventory::new_client();
+        let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
+        let mut client_debt = crate::container_window::CorrectionDebt::default();
+        crate::inventory_sync::apply(
+            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            sync,
+            &registry,
+            &mut crate::use_edits::SentUses::default(),
+            &mut client_debt,
+        )
+        .unwrap();
+        assert_eq!(client_debt.owed(&stone), 1, "the client's Sync apply installs it");
+        // The later identical correction give pays it on both copies.
+        let n = hs.send_test_correction(j, oc_stone_correction(false));
+        let sets: Vec<protocol::WindowSlotSetPacket> = oc_received(&second, protocol::PacketType::WindowSlotSet);
+        assert_eq!(sets.len(), 1);
+        crate::container_window::apply_slot_set(
+            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            &sets[0],
+            &registry,
+            &mut client_debt,
+        );
+        crate::window_events::apply_through(&mut hs.server.players[j], n, hs.server.tick_counter);
+        let has_stone = |inv: &crate::inventory::Inventory| inv.slots_iter().flatten().any(|s| s.item == stone);
+        assert!(!has_stone(&hs.server.players[j].inventory), "the give pays the carried debt on the server copy");
+        assert!(!has_stone(&inv), "and on the client copy");
+        assert!(hs.server.players[j].window_events.debt.is_empty() && client_debt.is_empty());
+    }
+
+    /// OC — death clears the correction debt on both copies (accepted Mirror
+    /// behaviour, kept and pinned): its `Replace` and its `InventorySync`
+    /// carry none.
+    #[test]
+    fn oc_death_replace_clears_both_copies_debt() {
+        let _g = crate::save::WorldsRootGuard::new("oc-death");
+        let mut hs = start_room_test_server("oc-death", 0);
+        let client = hs.attach_test_remote_with_binding(Some([17; 32]));
+        send_signed_join(&client, [66; 32], Some([17; 32]));
+        hs.tick();
+        let i = hs.server.players.len() - 1;
+        let stone = crate::item::Item::Block(crate::block::STONE);
+        let n = hs.send_test_correction(i, oc_stone_correction(true));
+        crate::window_events::apply_through(&mut hs.server.players[i], n, hs.server.tick_counter);
+        assert_eq!(hs.server.players[i].window_events.debt.owed(&stone), 1);
+        let _: Vec<protocol::WindowSlotSetPacket> = oc_received(&client, protocol::PacketType::WindowSlotSet);
+        hs.server.players[i].combat.die(crate::survival::DamageCause::Generic);
+        hs.handle_joiner_deaths();
+        let syncs: Vec<protocol::InventorySyncPacket> = oc_received(&client, protocol::PacketType::InventorySync);
+        assert_eq!(syncs.len(), 1, "the death sync");
+        assert!(syncs[0].owed.is_empty(), "the death InventorySync carries no debt");
+        crate::window_events::apply_through(&mut hs.server.players[i], syncs[0].window_event, hs.server.tick_counter);
+        assert!(hs.server.players[i].window_events.debt.is_empty(), "the death Replace clears the server copy's debt");
+        let mut inv = crate::inventory::Inventory::new_client();
+        let (mut armour, mut cursor, mut grid) = ([None; 4], None, Default::default());
+        let mut client_debt = crate::container_window::CorrectionDebt::from_entries(vec![(stone, 1)]).unwrap();
+        crate::inventory_sync::apply(
+            &mut crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None },
+            &syncs[0],
+            &crate::block::BlockRegistry::new(),
+            &mut crate::use_edits::SentUses::default(),
+            &mut client_debt,
+        )
+        .unwrap();
+        assert!(client_debt.is_empty(), "and the client's");
     }
 
     #[test]
@@ -8579,12 +8734,12 @@ mod tests {
             for at in 0..36 { hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64))); }
             hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
             hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
-            let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),1);
+            let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
             hs.release_slot(i,None); hs.release_slot(i,None);
             let count = hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_,drop)| drop.stack.count as u32).sum::<u32>();
             assert_eq!(count,u32::from(5-space));
             let saved = hs.server.load_joiner(i).unwrap();
-            assert_eq!(crate::inventory_sync::packet(&saved.window().unwrap(),1),expected);
+            assert_eq!(crate::inventory_sync::packet(&saved.window().unwrap(),&Default::default(),1),expected);
         }
     }
 
@@ -8652,7 +8807,7 @@ mod tests {
         let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
         let i=hs.server.players.len()-1;
         let mut wire=crate::inventory::stack_to_wire(&crate::item::ItemStack {item:crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),count:1}); wire.count=2;
-        let before=crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),1);
+        let before=crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1);
         client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction,&protocol::ItemActionPacket {seq:1,action:protocol::ItemAction::CreativeGive {item:wire},events_applied:0})); hs.tick();
         let mut outcome=None; let mut grants=0;
         while let Some(pkt)=client.try_recv_from_server() {match protocol::deserialize_header(&pkt) {
@@ -8661,8 +8816,8 @@ mod tests {
             _=>{}
         }}
         assert!(!outcome.unwrap().accepted,"a count-two Plan cannot become two server items and one client item");
-        assert_eq!(grants,0); assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),1),before);
-        hs.release_slot(i,None); assert_eq!(crate::inventory_sync::packet(&hs.server.load_joiner(i).unwrap().window().unwrap(),1),before);
+        assert_eq!(grants,0); assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),&Default::default(),1),before);
+        hs.release_slot(i,None); assert_eq!(crate::inventory_sync::packet(&hs.server.load_joiner(i).unwrap().window().unwrap(),&Default::default(),1),before);
     }
 
     #[test]

@@ -79,8 +79,11 @@ pub const UNFIT_HOLD_TICKS: u64 = 100;
 pub enum WindowEvent {
     /// `InventoryGrant`: the stack is added (`Inventory::add_item`).
     Grant(ItemStack),
-    /// Whole truth after join or death, resetting correction debt.
-    Replace(Box<EffectiveWindow>),
+    /// Whole truth after join or death (`InventorySync`): the window, and
+    /// the correction debt the copy owes from here (OC, v88): a join's is
+    /// the restored record's (or a fresh joiner's effective debt), a death's
+    /// is empty.
+    Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -276,12 +279,12 @@ enum Effect {
 /// client's own rule.
 fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
-        WindowEvent::Replace(w) => {
+        WindowEvent::Replace { window: w, debt: carried } => {
             for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
             *parts.armour = w.armour;
             *parts.cursor = w.cursor.clone();
             *parts.grid = w.grid.clone();
-            *debt = Default::default();
+            *debt = carried.clone();
             Effect::Viewed
         }
         WindowEvent::Grant(stack) => {
@@ -321,7 +324,7 @@ pub fn queue(sp: &mut ServerPlayer, event: WindowEvent, now: u64) -> u32 {
     let ev = &mut sp.window_events;
     ev.last_sent = ev.last_sent.wrapping_add(1);
     ev.tally.sent = ev.tally.sent.saturating_add(1);
-    if matches!(event, WindowEvent::Replace(_)) { ev.last_replace = ev.last_sent; }
+    if matches!(event, WindowEvent::Replace { .. }) { ev.last_replace = ev.last_sent; }
     ev.waiting.push_back(Waiting { seq: ev.last_sent, sent: now, event });
     ev.last_sent
 }
@@ -428,7 +431,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
                 crate::hosted_server::held_back_note(due),
             );
         }
-        (Effect::Viewed, WindowEvent::Replace(_)) => { sp.window_events.forced_corrections.clear(); }
+        (Effect::Viewed, WindowEvent::Replace { .. }) => { sp.window_events.forced_corrections.clear(); }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
         (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
         (Effect::Corrected(applied), WindowEvent::Correction(c)) => {
@@ -436,6 +439,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             if let Some(a) = applied.as_ref() {
                 note_correction_short(sp, &a.short, now);
                 note_correction_paid(sp, &a.paid);
+                note_debt_bounds(sp, a.saturated);
             }
             note_correction_gives(sp, w.seq, &c, applied.map(|a| a.settled));
             if forced {
@@ -479,6 +483,17 @@ pub fn apply_own_now(sp: &mut ServerPlayer, own: &crate::container_window::ItemD
     let applied = sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, own);
     note_correction_short(sp, &applied.short, now);
     note_correction_paid(sp, &applied.paid);
+    note_debt_bounds(sp, applied.saturated);
+}
+
+/// OC (A2, A4) — after a real apply to joiner `sp`'s server copy: a live
+/// debt past what a carrier holds (`container_window::MAX_CARRIED_DEBT`
+/// entries), or units that saturated, can no longer be carried whole, so the
+/// session's obligations are incomplete from here (`Overflow`, sticky).
+fn note_debt_bounds(sp: &mut ServerPlayer, saturated: bool) {
+    if saturated || sp.window_events.debt.entries().len() > crate::container_window::MAX_CARRIED_DEBT {
+        sp.obligations.mark(crate::joiner_save::IncompleteCause::Overflow);
+    }
 }
 
 /// C3b-fix-e (L4) — a correction give paid a debt a short take left on
@@ -551,7 +566,7 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
 /// still holds the phantom.
 pub fn phantom(sp: &ServerPlayer) -> Vec<(Item, u32)> {
     let mut net: Vec<(Item, i64)> = Vec::new();
-    let replace = sp.window_events.waiting.iter().rev().find(|w| matches!(w.event, WindowEvent::Replace(_))).map(|w| w.seq);
+    let replace = sp.window_events.waiting.iter().rev().find(|w| matches!(w.event, WindowEvent::Replace { .. })).map(|w| w.seq);
     let waiting = sp.window_events.waiting.iter().filter(|w| replace.is_none_or(|n| w.seq > n)).filter_map(|w| match &w.event {
         WindowEvent::Correction(c) => Some(&c.client),
         _ => None,
@@ -593,21 +608,47 @@ pub fn effective_inventory(sp: &ServerPlayer) -> Inventory {
 /// for all four parts): what the believed bound counts
 /// (`window_ops::believed_units`). Changes nothing and tallies nothing.
 pub fn effective_window(sp: &ServerPlayer) -> EffectiveWindow {
-    let mut w = EffectiveWindow {
+    effective_window_and_debt(sp).window
+}
+
+/// OC — what [`effective_window_and_debt`] folds.
+pub struct EffectiveFold {
+    /// [`effective_window`].
+    pub window: EffectiveWindow,
+    /// The correction debt the copy will owe once every waiting event is
+    /// applied, in live order.
+    pub debt: crate::container_window::CorrectionDebt,
+    /// A waiting correction's short take saturated its units at `u32::MAX`
+    /// in the fold (A4).
+    pub saturated: bool,
+}
+
+/// OC — [`effective_window`] and the correction debt the copy will owe,
+/// from ONE fold of the waiting events (the debt is folded through them by
+/// the same rule, `apply_to`): what a joiner save captures. Never pair the
+/// effective window with the raw `WindowEvents::debt` — a waiting
+/// correction's give that pays the debt would count in the slots AND leave
+/// the debt standing (a double charge at the next give). With nothing
+/// waiting, the debt is the raw one.
+pub fn effective_window_and_debt(sp: &ServerPlayer) -> EffectiveFold {
+    let mut window = EffectiveWindow {
         inv: sp.inventory.clone(),
         armour: sp.armour,
         cursor: sp.cursor.clone(),
         grid: sp.craft_grid.clone(),
     };
-    if sp.window_events.waiting.is_empty() {
-        return w;
-    }
     let mut debt = sp.window_events.debt.clone();
-    let mut parts = Parts { inv: &mut w.inv, armour: &mut w.armour, cursor: &mut w.cursor, grid: &mut w.grid };
-    for ev in &sp.window_events.waiting {
-        apply_to(&mut parts, &mut debt, &ev.event);
+    let mut saturated = false;
+    if !sp.window_events.waiting.is_empty() {
+        let mut parts =
+            Parts { inv: &mut window.inv, armour: &mut window.armour, cursor: &mut window.cursor, grid: &mut window.grid };
+        for ev in &sp.window_events.waiting {
+            if let Effect::Corrected(Some(a)) = apply_to(&mut parts, &mut debt, &ev.event) {
+                saturated |= a.saturated;
+            }
+        }
     }
-    w
+    EffectiveFold { window, debt, saturated }
 }
 
 /// A copy of a joiner's window with its waiting events applied
@@ -1151,7 +1192,8 @@ mod tests {
         assert_eq!(sp.window_events.debt.owed(&stone.item),5);
         let g = queue(&mut sp,WindowEvent::Grant(stone),0);
         let mut w = effective_window(&sp); w.inv.set_slot(0,None);
-        let n = queue(&mut sp,WindowEvent::Replace(Box::new(w)),0);
+        // A death's replacement carries no debt (OC: death clears it).
+        let n = queue(&mut sp,WindowEvent::Replace { window: Box::new(w), debt: Default::default() },0);
         sp.window_events.death_replace = Some(n);
         apply_overdue(&mut sp,EVENT_ACK_TIMEOUT_TICKS);
         assert_eq!(sp.window_events.death_replace,Some(n),"timeout does not acknowledge a client replacement");

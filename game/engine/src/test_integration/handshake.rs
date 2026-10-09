@@ -250,7 +250,9 @@ fn protocol_version_is_the_pinned_value() {
     //   server's world and stream to joiners.
     // v85 (D2c-1): Mount, RIDDEN/SEATED, StateUpdatePacket.own_riding.
     // v87 (sidecar): CreativeGive.
-    assert_eq!(protocol::PROTOCOL_VERSION, 87);
+    // v88 (OC): `InventorySyncPacket.owed` — the join's replacement carries
+    //   the joiner's correction debt to both copies.
+    assert_eq!(protocol::PROTOCOL_VERSION, 88);
 }
 
 #[test]

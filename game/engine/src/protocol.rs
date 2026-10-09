@@ -1325,7 +1325,19 @@ pub struct InventorySyncPacket {
     pub window_event: u32,
     #[serde(deserialize_with = "bounded_slot_sets")]
     pub slots: Vec<(WireWindowSlot, WireSlot)>,
+    /// v88 (OC) — the window's correction debt the replacement carries
+    /// (`container_window::CorrectionDebt`), in live order: each item as a
+    /// one-unit [`WireStack`] and the units owed of it. The client's debt
+    /// becomes exactly this (empty after a death). At most [`MAX_SYNC_OWED`]
+    /// entries, each at least one unit, a count of 1, no Plan, no two equal
+    /// (more, or any other, doesn't decode).
+    #[serde(deserialize_with = "bounded_owed")]
+    pub owed: Vec<(WireStack, u32)>,
 }
+
+/// v88 (OC) — the most owed entries an [`InventorySyncPacket`] carries (and
+/// a joiner save holds, `container_window::MAX_CARRIED_DEBT`).
+pub const MAX_SYNC_OWED: usize = 256;
 
 
 /// C3b-1 — a furnace's progress as its screen draws it (the bars), sent with
@@ -1482,6 +1494,30 @@ fn bounded_container_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec
         return Err(serde::de::Error::invalid_length(slots.len(), &"at most 72 container slots"));
     }
     Ok(slots)
+}
+
+/// v88 (OC) — [`InventorySyncPacket::owed`]: refused whole past
+/// [`MAX_SYNC_OWED`] entries, or with an entry of 0 units, a count other
+/// than 1, a Plan (by kind or by its full item), or two equal entries. (Two
+/// that decode to the same item are refused by the client's decode,
+/// `CorrectionDebt::from_wire`.)
+fn bounded_owed<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<(WireStack, u32)>, D::Error> {
+    let owed = Vec::<(WireStack, u32)>::deserialize(d)?;
+    if owed.len() > MAX_SYNC_OWED {
+        return Err(serde::de::Error::invalid_length(owed.len(), &"at most 256 owed entries"));
+    }
+    for (at, (stack, units)) in owed.iter().enumerate() {
+        if *units == 0 || stack.count != 1 {
+            return Err(serde::de::Error::custom("an owed entry must be one item and at least one unit"));
+        }
+        if stack.item_kind == item_kind::PLAN || matches!(stack.full_item, WireItem::Plan { .. }) {
+            return Err(serde::de::Error::custom("an owed Plan"));
+        }
+        if owed[..at].iter().any(|(earlier, _)| earlier == stack) {
+            return Err(serde::de::Error::custom("two equal owed entries"));
+        }
+    }
+    Ok(owed)
 }
 
 fn bounded_slot_sets<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<(WireWindowSlot, WireSlot)>, D::Error> {
@@ -2689,7 +2725,11 @@ pub struct ServerAnnouncePacket {
 /// - v86 (2026-10-09): server-owned joiner death, InventorySync (tag 67),
 ///   ItemAction::OpenGrave (= 13), PlayerEventType::GraveAt (= 7).
 /// - v87 (2026-10-09): CreativeGive (= 14), per-npub joiner sync.
-pub const PROTOCOL_VERSION: u32 = 87;
+/// - v88 (2026-10-09, OC): [`InventorySyncPacket`] appends `owed` (after
+///   `slots`): the correction debt the whole-window replacement carries, so a
+///   joiner's unpaid correction debt survives a reconnect on both copies
+///   (empty after a death). Provisional until merged.
+pub const PROTOCOL_VERSION: u32 = 88;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2862,8 +2902,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // Sidecar creative gives — v87, appended after server-owned death.
-        assert_eq!(super::PROTOCOL_VERSION, 87);
+        // OC — v88, InventorySync carries the correction debt.
+        assert_eq!(super::PROTOCOL_VERSION, 88);
     }
 
     #[test]
@@ -3613,7 +3653,8 @@ mod tests {
         // v86 (2026-10-09, death): numbered InventorySync (tag 67),
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
-        assert_eq!(PROTOCOL_VERSION, 87);
+        // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
+        assert_eq!(PROTOCOL_VERSION, 88);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4867,7 +4908,7 @@ mod tests {
 #[cfg(test)] mod death_wire_tests {
     use super::*;
     #[test] fn death_wire_tags_and_bounds_are_append_only() {
-        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)] };
+        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)], owed: vec![] };
         let bytes = serialize_packet(PacketType::InventorySync,&sync);
         assert_eq!(bytes[0],67);
         let (_,payload) = deserialize_header(&bytes).unwrap();
@@ -4883,5 +4924,72 @@ mod tests {
         let bytes = bincode::serialize(&grave).unwrap();
         assert_eq!(&bytes[..4],&7u32.to_le_bytes());
         assert_eq!(safe_deserialize::<PlayerEventType>(&bytes).unwrap(),grave);
+    }
+}
+
+/// OC (v88) — `InventorySyncPacket.owed`: the correction debt a whole-window
+/// replacement carries, after `slots`, bounded in the deserializer.
+#[cfg(test)]
+mod oc_wire_tests {
+    use super::*;
+
+    fn one(kind: u8, id: u16, full_item: WireItem) -> WireStack {
+        WireStack { item_kind: kind, item_id: id, count: 1, full_item }
+    }
+
+    fn tool(durability: u16) -> WireStack {
+        one(item_kind::TOOL, 2, WireItem::Tool { tool_type: 0, material: 2, durability })
+    }
+
+    fn round_trip(sync: &InventorySyncPacket) -> Result<InventorySyncPacket, bincode::Error> {
+        let bytes = serialize_packet(PacketType::InventorySync, sync);
+        assert_eq!(bytes[0], 67);
+        safe_deserialize(&bytes[1..])
+    }
+
+    #[test]
+    fn inventory_sync_v88_layout_appends_owed_after_slots() {
+        let stone = one(item_kind::BLOCK, crate::block::STONE, WireItem::None);
+        let sync = InventorySyncPacket {
+            window_event: 9,
+            slots: vec![(WireWindowSlot::Inv(0), None)],
+            owed: vec![(stone, 70_000)],
+        };
+        let mut expect = vec![67];
+        expect.extend(9u32.to_le_bytes());
+        // slots: length, then `Inv` (variant 0) slot 0, empty.
+        expect.extend(1u64.to_le_bytes());
+        expect.extend(0u32.to_le_bytes());
+        expect.extend([0, 0]);
+        // owed: length, then the one-unit stack (kind, id, count, full item
+        // `None` = variant 0) and its u32 units.
+        expect.extend(1u64.to_le_bytes());
+        expect.push(item_kind::BLOCK);
+        expect.extend(crate::block::STONE.to_le_bytes());
+        expect.push(1);
+        expect.extend(0u32.to_le_bytes());
+        expect.extend(70_000u32.to_le_bytes());
+        assert_eq!(serialize_packet(PacketType::InventorySync, &sync), expect);
+        assert_eq!(round_trip(&sync).unwrap(), sync);
+    }
+
+    #[test]
+    fn inventory_sync_owed_bounds_refuse_the_whole_packet() {
+        let base = InventorySyncPacket { window_event: 1, slots: vec![], owed: vec![] };
+        let at_cap: Vec<(WireStack, u32)> = (1..=MAX_SYNC_OWED as u16).map(|d| (tool(d), 1)).collect();
+        assert_eq!(MAX_SYNC_OWED, 256);
+        assert!(round_trip(&InventorySyncPacket { owed: at_cap.clone(), ..base.clone() }).is_ok(), "256 is allowed");
+        let mut over = at_cap;
+        over.push((tool(257), 1));
+        for (why, owed) in [
+            ("257 entries", over),
+            ("0 units", vec![(tool(1), 0)]),
+            ("a count of 2", vec![(WireStack { count: 2, ..tool(1) }, 1)]),
+            ("a Plan by kind", vec![(one(item_kind::PLAN, 0, WireItem::None), 1)]),
+            ("a Plan by full item", vec![(one(item_kind::BLOCK, 1, WireItem::Plan { marker: [7; 32], developed: true }), 1)]),
+            ("two equal entries", vec![(tool(5), 1), (tool(5), 2)]),
+        ] {
+            assert!(round_trip(&InventorySyncPacket { owed, ..base.clone() }).is_err(), "{why}");
+        }
     }
 }
