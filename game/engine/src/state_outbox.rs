@@ -901,7 +901,9 @@ mod tests {
     fn c3d_actual_outbox_bundle_spans_budgets_without_later_world_overtaking() {
         use crate::action_wire::RecoveryPacket;
         let mut ob = ClientOutbox::new(true);
-        ob.tick_budget = Some(110);
+        // A test budget must fit the real snapshot plus one ordinary block;
+        // otherwise it stalls before reaching the recovery carrier at all.
+        ob.tick_budget = Some(1 + wire_size(&template()) + wire_size(&bc(1, 1)));
         ob.push_block(&bc(1, 1));
         ob.push_recovery_bundle(recovery_manifest(), vec![Box::new([1; 4]), Box::new([2; 4])]).unwrap();
         ob.push_block(&bc(1, 2));
