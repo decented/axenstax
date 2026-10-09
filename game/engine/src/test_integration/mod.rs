@@ -49,6 +49,8 @@ pub mod state_budget; // T1-5 — bounded server→client StateUpdates.
 pub mod joiner_authority;
 // D1 — a host lends its world to its server: one world, one sim.
 pub mod lent_world;
+#[cfg(not(target_arch = "wasm32"))]
+mod handover_live;
 pub mod audit_cross_wave;
 pub mod trials_lint;
 pub mod packaging_copy_lint;

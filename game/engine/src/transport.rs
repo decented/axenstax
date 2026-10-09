@@ -104,6 +104,24 @@ impl InboundQueue {
         self.packets.iter().skip(self.packets.len().saturating_sub(n))
     }
 
+    /// Remove every waiting packet `pick` selects, oldest first, keeping the
+    /// rest in their original order (world handover: control frames are
+    /// read out of a frozen joiner's queue while its gameplay waits).
+    pub fn extract(&mut self, mut pick: impl FnMut(&Packet) -> bool) -> Vec<Packet> {
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.packets.len());
+        for packet in self.packets.drain(..) {
+            if pick(&packet) {
+                self.bytes -= charge(&packet);
+                taken.push(packet);
+            } else {
+                kept.push_back(packet);
+            }
+        }
+        self.packets = kept;
+        taken
+    }
+
     /// Take the oldest packet waiting.
     pub fn pop(&mut self) -> Option<Packet> {
         let packet = self.packets.pop_front()?;

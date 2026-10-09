@@ -5209,3 +5209,18 @@ current expiry/authority/Commit must still be checked by the live controller.
 Normal transfer retry requires a currently verified admission. Full live freeze,
 agreement/progression authority, recipient personal adapter, direct-control
 session, listener latch, Prepared/Commit and gameplay callers remain unwired.
+
+**Live source link and freeze (branch mp-handover, private provisional wire tag
+`PacketType::Handover = 68`, renumbered at rebase; not a delivered protocol).**
+A source host binds one control link to an exact authenticated seat: slot,
+attach generation and verified key, all re-checked at bind, freeze and every
+send/read; a departed, reconnected or differently keyed seat breaks the link.
+Control frames from any other seat are dropped. While frozen,
+`HostedServer::tick` returns at once, so there is no admission (queued accept
+hand-overs wait), inbound gameplay, simulation, grants, overdue window-event
+valve, broadcast or LAN heartbeat. The selected seat's control frames are read
+straight out of its queue; its other packets stay queued in order, and other
+seats' packets stay in their transports. A pre-retirement release unfreezes;
+packets still waiting are judged by the ordinary path once, only for the same
+seat generation (a departed seat's queue is discarded). The window-event ack
+timeout counts server ticks, so a freeze cannot apply waiting events.

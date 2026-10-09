@@ -23,6 +23,8 @@
 //! spawned (native-only).
 
 mod death;
+#[cfg(not(target_arch = "wasm32"))]
+mod handover;
 mod sidecar;
 
 use std::collections::VecDeque;
@@ -436,6 +438,10 @@ pub struct HostedServer {
     lent_ids_reset: bool,
     #[cfg(not(target_arch = "wasm32"))]
     deferred_kicks: Vec<[u8; 32]>,
+    /// World handover: the control link to ONE selected joiner, and while
+    /// frozen, the source freeze (`hosted_server/handover.rs`).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover: Option<handover::HandoverLink>,
     /// C3c-3b — has this server taken its world's attachment log in yet?
     /// The first take only drops what is there: a lending host's world keeps
     /// its log on after a server stops (nothing turns it off), so it can hold
@@ -922,6 +928,8 @@ impl HostedServer {
             lent_ids_reset: false,
             #[cfg(not(target_arch = "wasm32"))]
             deferred_kicks: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover: None,
             attachments_started: false,
             // Local slots ride an in-process channel: unbudgeted outboxes.
             outboxes: (0..num_local_players)
@@ -3682,6 +3690,13 @@ impl HostedServer {
     /// `sim_lend::LentSim::lend(hs, parts, clock).tick()` — so every step
     /// above reads and writes the host client's own world.
     pub fn tick(&mut self) {
+        // A frozen handover source runs no tick: no admission, no inbound
+        // gameplay, no simulation, no broadcast, no discovery heartbeat. Only
+        // `handover_take_frames` reads the selected joiner's control frames.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.handover_frozen() {
+            return;
+        }
         debug_assert_eq!(
             self.lends_host_world(),
             self.server.lent,
@@ -3874,6 +3889,16 @@ impl HostedServer {
         self.current_remote.fetch_add(1, Ordering::Relaxed);
         self.attach_remote_transport(Box::new(server_side));
         client_side
+    }
+
+    /// Test-only: replace the accept thread's hand-over channel, so a test
+    /// can deliver a connection exactly as the accept thread does (it then
+    /// waits for `accept_new_remote_connections` inside a tick).
+    #[cfg(test)]
+    pub(crate) fn test_accept_channel(&mut self) -> mpsc::Sender<Box<dyn ServerTransport>> {
+        let (tx, rx) = mpsc::channel();
+        self.remote_rx = Some(rx);
+        tx
     }
 
     /// Test-only: like [`Self::attach_test_remote`], but the server side of the
@@ -4080,6 +4105,8 @@ impl HostedServer {
                     continue;
                 };
                 match ptype {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    protocol::PacketType::Handover => self.route_handover_frame(i, payload),
                     protocol::PacketType::JoinRequest => {
                         if self.handshake_done[i] {
                             // Re-sends after handshake are dropped silently.
@@ -7176,7 +7203,7 @@ fn spawn_quic_accept_thread(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // ── C3c-3-fix (M2): a held claim never decodes to a Plan ──
@@ -7398,7 +7425,7 @@ mod tests {
     };
     use secp256k1::{Keypair, Secp256k1};
 
-    fn signed_auth_event(
+    pub(crate) fn signed_auth_event(
         seckey_bytes: [u8; 32],
         challenge_hex: &str,
         origin: &str,
@@ -7469,7 +7496,7 @@ mod tests {
     }
 
     /// Build a `JoinRequestPacket` carrying the given event + credential.
-    fn join_with_auth(
+    pub(crate) fn join_with_auth(
         event: SignetAuthEvent,
         cred: Option<SignetCredential>,
     ) -> protocol::JoinRequestPacket {

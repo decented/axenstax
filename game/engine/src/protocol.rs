@@ -144,6 +144,11 @@ pub enum PacketType {
     WindowSlotSet = 66,
     /// Whole player window, applied as a numbered replacement.
     InventorySync = 67,
+    /// Both ways, between a source host and ONE selected joiner only: an
+    /// opaque bounded world-handover control frame (`handover::live::wire`).
+    /// PRIVATE PROVISIONAL (branch mp-handover, v88): renumbered at rebase,
+    /// never advertised as delivered.
+    Handover = 68,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -2801,6 +2806,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         65 => PacketType::ContainerOpened,
         66 => PacketType::WindowSlotSet,
         67 => PacketType::InventorySync,
+        68 => PacketType::Handover,
         _ => return None,
     };
     Some((tag, &data[1..]))
