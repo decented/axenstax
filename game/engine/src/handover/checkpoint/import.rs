@@ -322,7 +322,6 @@ fn extract(
     if entries.next().is_some() {
         return Err(Error::Invalid("extra archive member"));
     }
-    drop(entries);
     // Drain all gzip bytes: CRC/truncation and hidden decompressed suffix fail.
     let mut rest = archive.into_inner();
     let mut buf = [0; files::BUFFER];

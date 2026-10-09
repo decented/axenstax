@@ -150,7 +150,7 @@ pub(super) fn rename_new(source: &Path, destination: &Path) -> Result<()> {
         if result == 0 {
             return Ok(());
         }
-        return Err(Error::Io);
+        Err(Error::Io)
     }
     #[cfg(target_os = "macos")]
     {
@@ -162,7 +162,7 @@ pub(super) fn rename_new(source: &Path, destination: &Path) -> Result<()> {
         if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
             return Ok(());
         }
-        return Err(Error::Io);
+        Err(Error::Io)
     }
     #[cfg(target_os = "windows")]
     {
