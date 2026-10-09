@@ -273,6 +273,7 @@ impl ServerTransport for ChannelServerTransport {
 /// A client transport that is already closed: sends go nowhere. World
 /// handover takes a joined client's live transport out of its RemoteClient
 /// and leaves this behind, so a later `disconnect()` cannot close the link.
+#[cfg_attr(not(test), allow(dead_code))] // BRIDGE: see RemoteClient::take_transport
 pub struct ClosedClientTransport;
 
 impl ClientTransport for ClosedClientTransport {

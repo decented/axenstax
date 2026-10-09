@@ -1639,7 +1639,10 @@ impl RemoteClient {
     /// World handover: take this client's live transport for the
     /// independent control session. What remains is closed, so tearing the
     /// joined world down (`disconnect`, drop) cannot touch the link.
+    // BRIDGE: its production caller is the GameState recipient wiring (the
+    // next handover assignment); until then only the loopback tests call it.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn take_transport(&mut self) -> Box<dyn ClientTransport> {
         self.state = ConnectionState::Disconnected;
         std::mem::replace(&mut self.transport, Box::new(crate::transport::ClosedClientTransport))
