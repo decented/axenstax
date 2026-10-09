@@ -73,8 +73,9 @@ pub fn affected_chunks(min: [i32; 3], max: [i32; 3]) -> Vec<(i32, i32, i32)> {
 /// network, a chest's contents stayed orphaned under whatever came next, and a
 /// pasted lamp-and-lever build had no devices behind it, so it was inert
 /// (audit 2026-09-27, P7). Here the old block's meta and block-entity go with
-/// it, a power block gets its device registered (as the place handler does),
-/// and any power cell wakes its network (Spec 48 §2.3).
+/// it (before the write, so a new block's own state from `World::set_block` —
+/// a hive's — is kept), a power block gets its device registered (as the
+/// place handler does), and any power cell wakes its network (Spec 48 §2.3).
 ///
 /// Only power cells notify their neighbours: a region is up to
 /// `MAX_REGION_VOLUME` cells, and queuing six neighbours for every one of them
@@ -86,10 +87,13 @@ pub fn write_cell(world: &mut World, pos: [i32; 3], new: BlockId, changed: &mut 
         return false;
     }
     let key = (x, y, z);
-    world.set_block(x, y, z, new);
-    // The old block's meta and block-entity belong to the old block.
+    // The old block's meta and block-entity belong to the old block: they go
+    // BEFORE the write, so the state `World::set_block` gives the new block
+    // stays (C3c-2-fix L6: a written hive's empty state, which the honey
+    // sweep fills — removed after the write, a `/we` hive never filled).
     world.set_meta(key, 0);
     world.block_entities.remove(&key);
+    world.set_block(x, y, z, new);
     if let Some(kind) = crate::power::device_kind_for_block(new) {
         world.insert_power_device(
             key,
@@ -484,5 +488,35 @@ mod tests {
         let rest = q.next_batch(&server, 10);
         assert_eq!((rest[0].x, rest[0].new_block), (2, crate::block::AIR));
         assert_eq!((rest[1].x, rest[1].new_block), (3, crate::block::STONE));
+    }
+
+    /// C3c-2-fix (L6) — a hive set or pasted by `/we` fills. `World::set_block`
+    /// gives a written hive an empty state (C3b-fix-e, decision 6), and
+    /// `write_cell` used to remove it straight after (the old block's entity
+    /// goes BEFORE the write now), so the honey sweep never found it.
+    #[test]
+    fn a_hive_set_or_pasted_by_worldedit_fills() {
+        use crate::bee_hive::{HONEY_ACCUM_INTERVAL_TICKS, HiveData, accumulate_honey};
+        let mut w = World::new();
+        // Over a chest: the old block's state still goes.
+        w.set_block(0, 4, 0, block::CHEST);
+        w.insert_chest((0, 4, 0), crate::chest::ChestData::default());
+        assert_eq!(region_set(&mut w, [0, 4, 0], [0, 4, 0], block::BEE_HIVE, &mut Vec::new()), 1);
+        assert!(w.chest_at((0, 4, 0)).is_none(), "the chest's state went with the chest");
+        assert_eq!(w.hive_at((0, 4, 0)), Some(&HiveData::default()), "a set hive has state");
+        let clip = region_copy(&w, [0, 4, 0], [0, 4, 0]);
+        assert_eq!(clipboard_paste(&mut w, &clip, [3, 4, 0], &mut Vec::new()), 1);
+        assert_eq!(w.hive_at((3, 4, 0)), Some(&HiveData::default()), "so has a pasted one");
+        let mut ecs = hecs::World::new();
+        ecs.spawn((
+            crate::entity::Position(glam::Vec3::new(1.5, 4.0, 0.5)),
+            crate::entity::MobKind(crate::mob::MobType::Bee),
+        ));
+        accumulate_honey(&mut w, &ecs, HONEY_ACCUM_INTERVAL_TICKS);
+        assert_eq!(w.hive_at((0, 4, 0)).map(|h| h.honey_level), Some(1), "a bee nearby fills the set hive");
+        assert_eq!(w.hive_at((3, 4, 0)).map(|h| h.honey_level), Some(1), "and the pasted one");
+        // `/we set air` over it drops the state.
+        region_set(&mut w, [0, 4, 0], [0, 4, 0], block::AIR, &mut Vec::new());
+        assert!(w.hive_at((0, 4, 0)).is_none());
     }
 }

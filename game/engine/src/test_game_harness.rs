@@ -925,7 +925,7 @@ mod tests {
     /// inputs) of its own.
     fn paced_step(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame) {
         hg.state.last_tick = std::time::Instant::now();
-        hg.state.tick_accumulator = std::time::Duration::ZERO;
+        hg.state.tick_accumulator = web_time::Duration::ZERO;
         harness_step(server, hg);
     }
 
@@ -2303,6 +2303,116 @@ mod tests {
             .map(|(_, it)| u32::from(it.stack.count))
             .sum();
         assert!(dropped >= 1, "the catch dropped at the player");
+    }
+
+    // ─── C3c-2-fix ─────────────────────────────────────────────────────────
+
+    /// C3c-2-fix (M1) — hold right-click through the REAL click arms for
+    /// `ticks` game ticks at `fps` frames a second (`fps / 20` frames a tick,
+    /// spread evenly), with no wall-clock tick inside a frame so the game
+    /// tick is the test's; a joined client's `server` steps once a tick, as
+    /// `harness_step`. Returns the game ticks elapsed.
+    fn hold_right_click(hg: &mut HeadlessGame, mut server: Option<&mut crate::hosted_server::HostedServer>, fps: u32, ticks: u32) -> u64 {
+        let start = hg.state.tick_counter;
+        hg.state.players[0].place_cooldown = 0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.right_held = true;
+        let mut owed = 0u32;
+        for _ in 0..ticks {
+            if let Some(s) = server.as_deref_mut() {
+                s.tick();
+            }
+            owed += fps;
+            while owed >= 20 {
+                owed -= 20;
+                hg.state.tick_accumulator = web_time::Duration::ZERO;
+                hg.state.last_tick = web_time::Instant::now();
+                hg.frames(1);
+            }
+            hg.ticks(1);
+            if server.is_some() {
+                hg.state.network_send_input();
+            }
+        }
+        hg.state.input.right_held = false;
+        hg.state.tick_counter - start
+    }
+
+    /// A bow in hotbar slot 0 and `arrows` arrows in slot 9 of player 0's
+    /// (and, joined, the server's) window, aimed high over the pad.
+    fn arm_bow(hg: &mut HeadlessGame, server: Option<(&mut crate::hosted_server::HostedServer, usize)>, arrows: u8) {
+        use crate::crafting::{Tool, ToolMaterial, ToolType};
+        use crate::item::{ItemStack, MaterialId};
+        let bow = ItemStack::new_tool(Tool::new(ToolType::Bow, ToolMaterial::Wood));
+        let ammo = ItemStack::new_material(MaterialId::Arrow, arrows);
+        let inv = &mut hg.state.players[0].inventory;
+        inv.set_slot(0, Some(bow.clone()));
+        inv.set_slot(9, Some(ammo.clone()));
+        if let Some((server, slot)) = server {
+            let inv = &mut server.server.players[slot].inventory;
+            inv.set_slot(0, Some(bow));
+            inv.set_slot(9, Some(ammo));
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        let eye = hg.state.players[0].player.eye_pos();
+        aim_at(hg, eye + glam::Vec3::new(0.0, 30.0, -4.0));
+    }
+
+    /// C3c-2-fix (M1) — single-player's held bow fires on the TICK cadence
+    /// (`shot::SHOT_COOLDOWN_TICKS`, 2.5 shots a second) whatever the frame
+    /// rate: it used to fire every 8 FRAMES (7.5 a second at 60 fps, 18 at
+    /// 144).
+    fn single_player_bow_cadence(fps: u32) {
+        use crate::item::{Item, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world(&format!("harness-bow-cadence-{fps}"));
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        hg.frames(5);
+        clear_pad(&mut hg, None);
+        hg.state.players[0].inventory = crate::inventory::Inventory::new();
+        arm_bow(&mut hg, None, 64);
+        let elapsed = hold_right_click(&mut hg, None, fps, 160);
+        let shots = 64 - held_units(&hg.state.players[0].inventory, &Item::Material(MaterialId::Arrow));
+        let want = elapsed.div_ceil(crate::shot::SHOT_COOLDOWN_TICKS);
+        assert!(u64::from(shots).abs_diff(want) <= 1, "{fps} fps: {shots} shots in {elapsed} ticks (want {want})");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_held_bow_fires_two_and_a_half_a_second_at_60_fps() {
+        single_player_bow_cadence(60);
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_held_bow_fires_two_and_a_half_a_second_at_144_fps() {
+        single_player_bow_cadence(144);
+    }
+
+    /// C3c-2-fix (M1) — a joiner holding right-click with its bow at 60 fps
+    /// paces its `Shoot`s on the same tick cadence the server holds it to:
+    /// every shot it sends is accepted (none `TooSoon`), 2.5 a second, each
+    /// paid from both copies. It used to send one every 8 frames and have
+    /// two in three silently refused.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_holding_its_bow_has_every_shot_accepted() {
+        use crate::item::{Item, MaterialId};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("bow-cadence");
+        clear_pad(&mut hg, Some(&mut server));
+        arm_bow(&mut hg, Some((&mut server, slot)), 64);
+        harness_step(&mut server, &mut hg);
+        let elapsed = hold_right_click(&mut hg, Some(&mut server), 60, 160);
+        settle(&mut server, &mut hg);
+        let arrow = Item::Material(MaterialId::Arrow);
+        let client_shots = 64 - held_units(&hg.state.players[0].inventory, &arrow);
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.possession.shot_too_soon, 0, "no honest shot refused as too soon");
+        assert_eq!(64 - held_units(&sp.inventory, &arrow), client_shots, "both copies paid each shot");
+        let want = elapsed.div_ceil(crate::shot::SHOT_COOLDOWN_TICKS);
+        assert!(u64::from(client_shots).abs_diff(want) <= 1, "{client_shots} shots in {elapsed} ticks (want {want})");
+        assert_eq!((sp.possession.ammo_believed, sp.possession.mismatched), (0, 0));
     }
 
     // ─── C3c-1-fix ─────────────────────────────────────────────────────────

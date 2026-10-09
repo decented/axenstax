@@ -532,7 +532,7 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak, events_applied: u32 }` (`events_applied` v76). **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76) `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81), `ItemAction::PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (v83) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9, PlanMinted=10); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop, GrantUnfit and PlanMinted are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, UseBlock from v79). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76), `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81), `ItemAction::PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (v83) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9, PlanMinted=10); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop, GrantUnfit and PlanMinted are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, GrantUnfit from v76, UseBlock from v79, Shoot, PlaceCart, Cast and Reel from v81, PlanMinted from v83). See §4.2f. |
 | 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, WireSlot)>, client_ok: bool }` (`events_applied` v76; `touched` and `claims` v77, ≤ 122 each, in that order; `client_ok` v78, the client's own verdict), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3; v77: OpenContainer { cell }=4, Container(ContainerClick)=5). Never answered, except an `OpenContainer` (by `ContainerOpened`) and a `Container` op that earns a correction (by a `WindowSlotSet`). **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
 | 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal>, window_event: u32 }` (`window_event` v78: an opened view is a numbered window event; 0 for a refusal). **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
 | 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named container slots of a joiner's open container, and a correction's item delta: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32, take: Vec<(u8, WireStack)> (≤ 122), give: Vec<WireStack> (≤ 122) }` (`take` and `give` v78) — a correction of a container op, or a push of what changed in the open container. Never a whole window, never a player slot's value (v78). Every set is a numbered window event (v78; v77 numbered only a set of player slots). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
@@ -1362,13 +1362,18 @@ claim, C3b-fix-e):
   included. C3b-fix-e (L7) — the send path's two decisions (sent from the
   queue → rebased; discarded or no connection → released) are one unit-tested
   fn, `JoinerActions::settle` (`RequestFate`). **The 64-entry bound never ends
-  a live claim (C3b-fix-e, L5):** at 64 outstanding, `JoinerActions::record`
-  forgets the oldest entry whose claim has ended, else a sent one that claims
-  no item (a swing, a sleep), else a sent one (its claim ends within a round
-  trip), else a queued one that claims no item, and only then the oldest; and
-  `can_afford` refuses a new request that would claim an item while every
-  entry still claims, so that use does nothing locally, as when it can't be
-  afforded. Before, the 64th record popped the oldest whatever its state: a
+  a live claim (C3b-fix-e, L5; C3c-2-fix, L4):** a request that claims no item
+  (a swing, a sleep, a shear, a cast, a reel, a Firestarter lighting) is
+  recorded as NON-claiming; at 64 outstanding, `JoinerActions::record` forgets
+  the oldest entry that claims nothing (its claim ended, or it never had
+  one), else a sent one (its claim ends within a round trip), and only then
+  the oldest; and `can_afford` refuses a new request — one that would claim an
+  item, and since C3c-2-fix one that claims nothing too (a cast, a reel, a
+  Firestarter lighting: recorded, it would end a queued claim just the same)
+  — while every entry still claims, so that use does nothing locally, as when
+  it can't be afforded. (A swing and a sleep still record without asking: at
+  64 queued item claims, one of them can end the oldest; that needs about
+  8.5 s of carry-over first.) Before, the 64th record popped the oldest whatever its state: a
   queued Eat waiting behind a long carry-over while the player kept swinging
   was forgotten, a Q-drop of its bread passed `can_spend`, and the server ate
   the bread AND dropped it. Pinned by `joiner_actions::tests` and, on the real
@@ -1908,8 +1913,9 @@ item (`use_edits.rs`).
   `old → new` an outcome of this use's rule for what it used? Any member of
   the rule's outcome set is legal — bone meal one or two stages, never
   re-rolled; a fill needs a server-side source; a seed needs tilled soil under
-  it, a reed water beside its base, a door top its bottom half; a tap a live
-  log the server has not got on cooldown), and once the edit is in,
+  it, a reed water beside its base, a door top a door's BOTTOM half — never
+  another top half (C3c-2-fix, F-L2); a tap a live log the server has not
+  got on cooldown), and once the edit is in,
   `settle_joiner_use` applies the client's own steps to the copy
   (`use_edits::settle`): take one of `used` (`joiner_actions::take_owed`, the
   tag's slot first), wear `tool` in the tag's slot
@@ -1934,9 +1940,16 @@ item (`use_edits.rs`).
   flowed, a crop that grew, a cell another player changed, a log on the
   server's cooldown: the cost AND the product are mirrored (the product by
   the server's cell: a drifted fill whose cell holds no fluid any more has
-  none, since the tag doesn't say which fluid). **Impossible**: a combination
-  the rule never makes (water poured from an empty bucket, salt "sown"):
-  the cost is mirrored, no product. **Unexplained**: the kind can't explain
+  none, since the tag doesn't say which fluid). A no-cost kind (an Eraser, a
+  tap, a hoe, a door's top half) checks nothing it used, so it is drift only
+  where the server's `old` is the rule's input or its output (another player
+  erased, tapped, tilled or hung a door there first; C3c-2-fix, F-L3,
+  `use_edits::no_cost_drift`). **Impossible**: a combination the rule never
+  makes (water poured from an empty bucket, salt "sown", an Eraser on stone,
+  a tap on AIR): the cost is mirrored, no product. (A tap or a hoe that
+  races another player's felling or digging finds AIR and is impossible
+  too: the server keeps no record of who broke a cell. The edit still
+  applies, log-only, and the copy gets no rubber.) **Unexplained**: the kind can't explain
   the edit at all (`use_edits::explains`: a `DoorUpper` or `Till` tag on an
   ordinary placement) — not a use: the edit falls back to its ordinary
   classification, so `check_placement` sees it. A kind byte this build
@@ -1971,7 +1984,12 @@ item (`use_edits.rs`).
   (`use_unfit_refused`). Only an unfit the copy also failed to fit after
   paying the cost spawns free. An honest full-bag joiner just after attach
   pays a few units of the bound (BRIDGE until `InventorySync` gives the copy
-  what the joiner arrived with). A refused use spawns nothing. The Eraser's
+  what the joiner arrived with), and past the bound an honest full-bag use
+  loses its product: per-unit believed deposits that have just drained the
+  bound (a 64-stack deposited into a chest just after attach) leave nothing
+  for the use's unfit, which is then neither on the client nor spawned
+  (C3c-1-fix verify F-L4; narrow — the refill outpaces uses as soon as the
+  deposits stop). A refused use spawns nothing. The Eraser's
   sheet: single-player still loses it on a full bag; a joiner's tag carries
   it as `unfit`, and the server spawns it.
 - *Refused: told, and undone on the client (C3c-1-fix, M-4, v82).* A use
@@ -1988,8 +2006,19 @@ item (`use_edits.rs`).
   never from the notice: it takes the landed product back with the shared
   owed-take search, exact first (`take_owed_held`: the slots, the grid, the
   cursor), gives the cost back (to its own slot when that is empty or joins
-  it), and shows the note's toast (`GameState::undo_refused_uses`). A product
-  already gone (emptied, dropped) is a shortfall, logged. Joiners are never
+  it), and shows the note's toast (`GameState::undo_refused_uses`). **The cost
+  comes back only when the landed product came back in full (C3c-2-fix,
+  F-M1).** A product already gone (emptied, dropped, deposited) is a
+  shortfall, logged, and NOTHING is given back: the act that spent it may
+  have been accepted (an empty of the filled bucket gives its bucket back on
+  its own), so returning the cost too minted one (a refused fill emptied
+  inside the notice's latency: a bucket a cycle, on an unmodified client).
+  The client may end below the server's copy (a believed deposit or a
+  Q-drop already made the product real), never above it. A frame's notices
+  are undone NEWEST first (`use_edits::undo_refused`), which is exact for
+  chained uses whose notices land together (a fill, then an empty of the
+  bucket it filled, both refused, put the client back to its one bucket;
+  oldest first it ended with a bucket and a water bucket). Joiners are never
   sent plots, so before this a tap, fill or erase in a foreign plot repeated
   with no limit; now each repeat is undone. *The record's hold.* The server
   acknowledges an input once it has simulated its movement, but its edits
@@ -2000,7 +2029,12 @@ item (`use_edits.rs`).
   input it could first ride (`RemoteClient::next_input_seq` when it was
   made; at most 64 records), refusals are applied before an update's
   acknowledgement lets records go, and a notice matches the NEWEST record of
-  its cell and kind. Not undone: tool wear (the same bounded gap as a
+  its cell and kind. With two DIFFERENT uses of one cell and kind in flight
+  (a lava fill refused, then a water fill accepted there, or the same use
+  from two slots) the wrong record can be undone: a swap (a lava bucket for
+  a water bucket, or the wrong slot), never a mint, since the counts stay
+  right (C3c-1-fix verify F-L5). Matching by the input the edit rode would
+  need that seq on the wire (`RefusedUse`). Not undone: tool wear (the same bounded gap as a
   refused break's wear), and the edits of a joiner's earlier life or of a
   dead joiner, which are sent back with no notice (its inventory was not
   the one they spent). A creative joiner's uses are mirrored too: its arms
@@ -2017,10 +2051,21 @@ item (`use_edits.rs`).
   every other joiner and a lending host's joiners lose both halves; the
   untagged half is classified unchecked and yields nothing, so one door comes
   back, never two. On the server a `DoorUpper` with no door below it (its
-  bottom half refused, or never sent) is refused and sent back (it costs
-  nothing, so it can be refused now; the joiner is told, silently). The
-  robust rule — a remote edit that takes a door half out clears its pair on
-  the server, whoever sent it — is C3d's (gate list).
+  bottom half refused, or never sent) — or (C3c-2-fix, F-L2) over another
+  door's TOP half — is refused and sent back (it costs nothing, so it can be
+  refused now; the joiner is told, silently). **A door breaks whole on the
+  server (C3c-2-fix, F-L1; C3d gate 6 pulled forward):** an accepted
+  joiner edit that takes a door half out takes its matching half too
+  (`HostedServer::clear_door_pair`: the bottom below a top, the top above a
+  bottom), queued after the edit's own change, so it also overtakes a
+  refused send-back of that half queued earlier in the tick. One exception:
+  the honest break arm sends the other half's untagged AIR FIRST, so that
+  edit spares the half the same input then breaks with its `mined` tag
+  (`EditGroup::mined_ahead`) — clearing it first would leave the tagged
+  break nothing to yield. So a door broken at the edge of the server's reach
+  (the far half's AIR refused), or one half sent alone by a modified client,
+  leaves no floating half and one door. Nothing yields for the cleared
+  half.
 - *The cyanotype hang (C3c-3a, v83).* A developed Plan aimed at
   a wall face is hung: the AIR (or water) cell before the face becomes a
   `CYANOTYPE_PRINT` and the Plan is spent (in both modes; the print keeps no
@@ -2541,20 +2586,40 @@ ammo search `find_ammo` — the first Arrow / Rubber Ball stack in any of the
 **The joined client changes nothing locally for these**: no projectile or
 cart in its own ECS, no ammo, cart, stick or wear spent, no catch rolled, no
 fire lit, until the outcome. The server's random rolls use its own seed
-(`GameServer::use_seed`: the world's Proof-of-Play secret, the server tick,
-the slot and a salt per roll), which no client can foresee.
+(`GameServer::use_seed`: keyed by the world's Proof-of-Play secret, over the
+server tick, the slot and a salt per roll), which no client can foresee.
+C3c-2-fix (L1) — the seed is `HMAC-SHA256(k, salt ‖ tick ‖ slot)` (each a
+little-endian u64; its first 8 bytes, little-endian) under a sub-key
+`k = HMAC-SHA256(pop_secret, "axenstax/use-seed/v1")` (`server::use_seed_key`,
+`use_seed_from`, pinned by a test vector), so the secret only ever keys an
+HMAC; it used to go through splitmix64, which is no PRF, whose outputs a
+client partly sees (a bite's wait, a catch).
 
 | Use | Request | Server | Pays (window event) | Gains | Refusals |
 |---|---|---|---|---|---|
-| Bow / slingshot | `Shoot { weapon, held claim, yaw, pitch, charge }` (= 6) | spawns the projectile in ITS world from ITS position for that player at eye height (never a client origin), along the request's yaw/pitch, `charge` clamped to the weapon's maximum (`shot::launch`), owned by the joiner | one ammo (owed take), then the weapon's wear: TWO events in a row, the outcome carries the second's number (the client applies both with it; the server applies both when the client reports it) | — | `TooSoon` inside `shot::SHOT_COOLDOWN_TICKS` (8) less `SHOT_JITTER_TICKS` (3); `NoAmmo` (silent) when the server's copy holds none and the believed bound can't pay; `NothingToTake` when the claim isn't the weapon |
+| Bow / slingshot | `Shoot { weapon, held claim, yaw, pitch, charge }` (= 6) | spawns the projectile in ITS world from ITS position for that player at eye height (never a client origin), along the request's yaw/pitch, `charge` clamped to the weapon's maximum (`shot::launch`), owned by the joiner | one ammo (owed take; none for a believed unit), then the weapon's wear: TWO events in a row, the outcome carries the second's number (the client applies both with it; the server applies both when the client reports it) | — | `TooSoon` inside `shot::SHOT_COOLDOWN_TICKS` (8 game ticks, 0.4 s) less `SHOT_JITTER_TICKS` (3) — C3c-2-fix (M1): the one tick cadence every seat's arm and a joined client's sends keep (`PlayerSlot::shot_ready`), so an honest held button is never refused (tallied `shot_too_soon`); `NoAmmo` (silent) when the server's copy holds none and the believed-AMMO bound (C3c-2-fix M2: 16, then one every 4 s) can't pay; `NothingToTake` when the claim isn't the weapon, or (M2) the copy holds no weapon of its kind and the believed bound can't pay |
 | Cart | `PlaceCart { cell, held claim }` (= 7) | the cell must be a `TRACK` in reach and allowed (`remote_may_touch`); the server's OWN entities are checked (`cart::cart_here`; a joined client's ECS holds no carts); spawns the cart of the item's hull | the cart (owed take) | — | `CartHere`, `NotThatBlock`, `OutOfReach`, `NotHere`, `NothingToTake` |
-| Cast | `Cast { held claim }` (= 8) | water along the 24-step ray from ITS eye along ITS look for that player; records the cast (`ServerPlayer::fishing`, the bite tick) and draws the wait on its seed | — | `bite_after` | `NoWater` |
-| Reel | `Reel { held claim }` (= 9) | hooked when the server's bite tick has passed, less `fishing::REEL_SLACK_TICKS` (20, clock skew only — the client shows the bite `bite_after` after the outcome ARRIVES); a hooked line has no closing window (single-player's never had one); rolls the catch on its seed | the rod's wear | the catch (`grant_to_joiner`; an unfit part comes back as `GrantUnfit` and is spilled, never lost) | `NothingBit` before the bite (nothing caught or spent; the line comes in); `NoLine` (silent) with no cast |
-| Light (a campfire `UseBlock` on `CAMPFIRE_UNLIT` with a lighter) | `UseBlock` (= 5) | stick: friction after the client's 5 s hold, rolled 70 % on the server's seed; flint and steel; Magnesium Firestarter. The rule runs before the campfire's (a stick on an unlit fire is friction, never fuel); a lit fire's block goes `CAMPFIRE_UNLIT → CAMPFIRE` by `relight_campfire` → `derive_campfire_edit` (the one smoke-pillar source) | stick: one, hit or miss (`NotDryEnough` rides an ACCEPTED miss); flint: wear, also with no fuel (`NeedsFuel` rides that accepted outcome); Firestarter: nothing | — | `FrictionNeedsFuel` (stick kept), `NeedsFuel` (Firestarter) |
+| Cast | `Cast { held claim }` (= 8) | water along the 24-step ray from ITS eye along ITS look for that player; records the cast (`ServerPlayer::fishing`, the bite tick) and draws the wait on its seed | — | `bite_after` | `NoWater`; `NothingToTake` when the claim isn't a rod, or (C3c-2-fix M2) the copy holds no rod of its kind and the believed bound can't pay |
+| Reel | `Reel { held claim }` (= 9) | hooked when the server's bite tick has passed, less `fishing::REEL_SLACK_TICKS` (20, clock skew only — the client shows the bite `bite_after` after the outcome ARRIVES); a hooked line has no closing window (single-player's never had one); rolls the catch on its seed | the rod's wear | the catch (`grant_to_joiner`; an unfit part comes back as `GrantUnfit` and is spilled, never lost) | `NothingBit` before the bite (nothing caught or spent; the line comes in); `NoLine` (silent) with no cast; `NothingToTake` as a cast's (the line stays out) |
+| Light (a campfire `UseBlock` on `CAMPFIRE_UNLIT` with a lighter) | `UseBlock` (= 5) | stick: friction after the client's 5 s hold, rolled 70 % on the server's seed; flint and steel; Magnesium Firestarter. The rule runs before the campfire's (a stick on an unlit fire is friction, never fuel); a lit fire's block goes `CAMPFIRE_UNLIT → CAMPFIRE` by `relight_campfire` → `derive_campfire_edit` (the one smoke-pillar source) | stick: one, hit or miss (`NotDryEnough` rides an ACCEPTED miss); flint: wear, also with no fuel (`NeedsFuel` rides that accepted outcome); Firestarter: nothing | — | `FrictionNeedsFuel` (stick kept), `NeedsFuel` (Firestarter); `NothingToTake` past the believed bound (a stick, flint, or — C3c-2-fix M2 — a Firestarter the copy doesn't hold) |
 
 Pays are judged as a block use's are (C3b-2-fix M2): what the server's copy
 of the window can't cover is believed within the joiner's bound
-(`window_ops::believe_pay`) and past it refused. The requests count against
+(`window_ops::believe_pay`) and past it refused. **C3c-2-fix (M2) — believed
+shots and tools are bounded.** A shot's believed ammo is charged to its own,
+smaller per-joiner bucket (`window_ops::BelievedAmmo`:
+`BELIEVED_AMMO_UNITS` = 16 deep, a unit back every
+`BELIEVED_AMMO_REFILL_TICKS` = 80 ticks), drained by shots alone, so the
+2.5-a-second cadence can't outpace it (on the main bound, refilled at 4 a
+second, a shooter never ran dry: unlimited real projectiles from no arrows);
+past it `NoAmmo`, tallied `ammo_believed`. A tool a request wears or needs
+that the copy holds no unit of — the `Shoot` weapon, the `Cast` / `Reel`
+rod, the Firestarter of a `Light` — is charged 1 to the main bound
+(`believe_wear` by type and material, `believe_pay` for the Firestarter;
+tallied `tool_believed`), refused past it with the request's own note
+(`NothingToTake`): the shears pattern of C3c-1-fix L-3. A shot looks at both
+buckets before it charges either. BRIDGE until C3d takes the tool from the
+server's held slot (C3 design doc, gate list). The requests count against
 the existing per-tick item-action limit (`MAX_ITEM_ACTIONS_PER_TICK`); a
 shot also against its weapon's cooldown on the server's schedule
 (`ServerPlayer::next_shot_tick`, the swing's shape). Notes (append-only
@@ -2564,7 +2629,12 @@ shot also against its weapon's cooldown on the server's schedule
 refuses a shot.
 
 *Client.* `GameState::send_shot` (claims one AMMO: `Asked::Shoot { weapon,
-material }` with `Pending.held` the ammo, the request's slot the weapon's),
+material }` with `Pending.held` the ammo, the request's slot the weapon's;
+C3c-2-fix (L3) and one unit of the weapon's WEAR — a shot goes only while the
+bows or slingshots of that kind in the 36 slots have more uses left than the
+shots in flight will wear, so a bow on its last use fires once and can't be
+dropped while that shot is in flight; asked only when the shot is due on the
+tick cadence, `PlayerSlot::shot_ready`, M1),
 `send_place_cart` (`Asked::PlaceCart`, claims the cart), `send_fishing`
 (`Asked::Cast` puts a line out waiting for the server's bite — `catch_at_tick`
 unknown until the outcome, then now + `bite_after`; `Asked::Reel` takes the
@@ -2591,6 +2661,23 @@ picked up. A departed joiner's shot in flight credits nobody
 it through `remote_entities::RemoteProjectiles`. Pinned by
 `test_integration::use_requests` and
 `test_game_harness::game_harness_a_joiners_bow_cart_rod_and_flint_ask_the_server`.
+
+*Known limits (C3c-2; C3c-2-fix).*
+- *A re-cast picks a short wait (L2).* A cast is free and its outcome
+  reveals `bite_after`, so a modified client can cast, read the wait, and
+  cast again until it is near the minimum (`fishing::MIN_WAIT_TICKS`): about
+  twice the catch rate (fish, bone or leather). A hooked line never closes
+  (single-player's never did), but a catch still needs a `Reel`: no AFK
+  auto-catch. For C3d's gate list.
+- *The friction hold isn't enforced on the server (L7).* The five-second
+  stick rub is the client's; a modified client can strike back to back, one
+  stick each at 70 %. No item gain, only time. For C3d's gate list.
+- *A cast is judged on the look of the input before it (L7).* `serve_cast`
+  aims from the server body along `ServerPlayer::yaw` / `pitch` from the last
+  input read, and requests are read ahead of the input sent with them (and
+  the server body lags the client's), so an honest cast at the water's edge
+  can be refused `NoWater` where the client saw water. `Shoot` carries its own
+  yaw and pitch; `Cast` doesn't (a wire change to fix).
 
 **Plans (C3c-3a, protocol v83; log-only, like all of
 C3a–C3c).** A Plan's body can reach about 160 KB (the packet cap is 64 KiB),

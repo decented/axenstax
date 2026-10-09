@@ -2253,9 +2253,13 @@ impl HostedServer {
     ///   server's schedule ([`crate::shot::SHOT_COOLDOWN_TICKS`] less
     ///   [`crate::shot::SHOT_JITTER_TICKS`]; sooner: `TooSoon`);
     /// - the ammo (`shot::ammo_for`) is judged as a block use's pay is: what
-    ///   the server's copy of the window can't hold is believed within the
-    ///   joiner's bound (`window_ops::believe_pay`), and past it the shot is
-    ///   refused (`NoAmmo`, silent). A creative joiner is unbounded;
+    ///   the server's copy of the window can't hold is believed — C3c-2-fix
+    ///   (M2) within the joiner's own small believed-AMMO bound
+    ///   (`window_ops::BelievedAmmo`: 16, then one every 4 s; tallied
+    ///   `ammo_believed`) — and past it the shot is refused (`NoAmmo`,
+    ///   silent). The weapon, when the copy holds none of its kind, is
+    ///   believed 1 against the believed bound (`tool_believed`; past it
+    ///   `NothingToTake`). A creative joiner is unbounded;
     /// - the projectile is spawned in the server's world, from the server's
     ///   own position for this player at eye height (never a client-sent
     ///   origin), along the request's yaw and pitch, at its charge clamped to
@@ -2291,19 +2295,30 @@ impl HostedServer {
         let ammo = crate::item::Item::Material(crate::shot::ammo_for(weapon));
         let Some(sp) = self.server.players.get_mut(i) else { return };
         if now + crate::shot::SHOT_JITTER_TICKS < sp.next_shot_tick {
+            sp.possession.shot_too_soon = sp.possession.shot_too_soon.saturating_add(1);
             return self.refuse_item_action(i, seq, ItemNote::TooSoon);
         }
-        let believed = if creative {
-            0
+        // C3c-2-fix (M2) — what the copy can't cover: the ammo from the
+        // believed-AMMO bound (`NoAmmo` past it), the weapon from the believed
+        // bound (`NothingToTake` past it). Both looked at before either is
+        // charged, so a refusal charges nothing.
+        let (ammo_short, weapon_short) = if creative {
+            (0, 0)
         } else {
-            match crate::window_ops::believe_pay(sp, &ammo, 1, now) {
-                Ok(n) => n,
-                Err(over) => {
-                    self.note_believed_use(i, 0, over, now);
-                    return self.refuse_item_action(i, seq, ItemNote::NoAmmo);
-                }
-            }
+            (crate::window_ops::pay_short(sp, &ammo, 1), crate::window_ops::wear_short(sp, &tool))
         };
+        if ammo_short > 0 && !sp.container_sent.believed_ammo.can_take(ammo_short, now) {
+            self.note_believed_request(i, 0, 0, true, now);
+            return self.refuse_item_action(i, seq, ItemNote::NoAmmo);
+        }
+        if weapon_short > 0 && !sp.container_sent.believed.can_take(weapon_short, now) {
+            self.note_believed_request(i, 0, 0, true, now);
+            return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+        }
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let views = &mut sp.container_sent;
+        let believed = if ammo_short > 0 && views.believed_ammo.try_take(ammo_short, now) { ammo_short } else { 0 };
+        let tool_believed = if weapon_short > 0 && views.believed.try_take(weapon_short, now) { weapon_short } else { 0 };
         sp.next_shot_tick = sp.next_shot_tick.max(now) + crate::shot::SHOT_COOLDOWN_TICKS;
         let shooter = crate::entity::Shooter {
             who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen },
@@ -2312,9 +2327,10 @@ impl HostedServer {
         let eye = sp.player.eye_pos();
         let dir = crate::camera::forward_from(aim.yaw, aim.pitch);
         crate::shot::spawn(&mut self.server.ecs, &crate::shot::launch(weapon, eye, dir, aim.charge), Some(shooter));
-        if believed > 0 {
-            self.note_believed_use(i, believed, 0, now);
-        } else {
+        if believed > 0 || tool_believed > 0 {
+            self.note_believed_request(i, believed, tool_believed, false, now);
+        }
+        if believed == 0 {
             self.shadow_take_owed(i, slot, &ammo, 1, "on a shot");
         }
         let window_event = match self.server.players.get_mut(i) {
@@ -2415,13 +2431,19 @@ impl HostedServer {
     /// `NoWater`), records the cast (`ServerPlayer::fishing`: the tick its
     /// fish bites, drawn by `fishing::wait_ticks` on the server's seed) and
     /// answers with the wait (`bite_after`). A cast replaces a line already
-    /// out. It costs nothing.
+    /// out. It costs nothing. C3c-2-fix (M2) — a rod the server's copy holds
+    /// none of is believed 1 against the joiner's believed bound
+    /// (`tool_believed`), and past it the cast is refused (`NothingToTake`);
+    /// a reel's rod likewise.
     fn serve_cast(&mut self, i: usize, seq: u32, held: Option<crate::item::Item>) {
         use crate::item_actions::ItemNote;
         if !self.joiner_may_act(i) {
             return self.refuse_item_action(i, seq, ItemNote::NotNow);
         }
-        if !is_rod(held.as_ref()) {
+        let Some(crate::item::Item::Tool(rod)) = held.filter(|h| is_rod(Some(h))) else {
+            return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+        };
+        if !self.believe_request_tool(i, &rod) {
             return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
         }
         let seed = self.server.use_seed(i, SEED_BITE);
@@ -2468,6 +2490,9 @@ impl HostedServer {
         let Some(crate::item::Item::Tool(rod)) = held.filter(|h| is_rod(Some(h))) else {
             return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
         };
+        if !self.believe_request_tool(i, &rod) {
+            return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+        }
         let now = self.server.tick_counter;
         let seed = self.server.use_seed(i, SEED_CATCH);
         let slot = self.action_slot(i, hotbar_slot);
@@ -2523,11 +2548,31 @@ impl HostedServer {
         let now = self.server.tick_counter;
         // C3c-2 — a stick's friction strikes on the server's roll.
         let struck = crate::campfire::friction_strikes(self.server.use_seed(i, SEED_FRICTION));
-        let (mut believed, mut over_bound) = (0u32, 0u32);
+        let (mut believed, mut over_bound, mut tool_believed) = (0u32, 0u32, 0u32);
         let used = self.judge_block_use(i, cell).and_then(|kind| {
             let server = &mut self.server;
             let Some(sp) = server.players.get_mut(i) else { return Err(ItemNote::NotNow) };
             let mut admit = |u: &crate::block_use::Used| -> Result<(), ItemNote> {
+                // C3c-2-fix (M2) — a Firestarter lighting (it neither pays nor
+                // wears) with no Firestarter in the copy: believed 1 within
+                // the same bound (`tool_believed`), refused past it.
+                if u.effect == crate::block_use::Effect::Lit
+                    && u.pay == 0
+                    && !u.wear
+                    && !creative
+                    && let Some(item @ crate::item::Item::Material(crate::item::MaterialId::MagnesiumFirestarter)) = held.as_ref()
+                {
+                    return match crate::window_ops::believe_pay(sp, item, 1, now) {
+                        Ok(n) => {
+                            tool_believed = n;
+                            Ok(())
+                        }
+                        Err(n) => {
+                            over_bound = n;
+                            Err(ItemNote::NothingToTake)
+                        }
+                    };
+                }
                 // C3c-1-fix (L-3) — a use that only wears its tool (shears on
                 // a hive) with a tool the copy doesn't hold is believed within
                 // the same bound, and refused past it.
@@ -2574,6 +2619,9 @@ impl HostedServer {
         });
         if believed > 0 || over_bound > 0 {
             self.note_believed_use(i, believed, over_bound, now);
+        }
+        if tool_believed > 0 {
+            self.note_believed_request(i, 0, tool_believed, false, now);
         }
         // C3c-2 — an accepted use can carry a note too: a missed friction or
         // an unfuelled flint strike still spent or wore.
@@ -2628,6 +2676,59 @@ impl HostedServer {
         if let Some(used) = used {
             self.grant_to_joiner(i, used.gain);
         }
+    }
+
+    /// C3c-2-fix (M2) — joiner `i`'s use request needs `tool` (a cast's or a
+    /// reel's rod): when the server's copy holds no tool of its kind, 1 is
+    /// believed against the joiner's believed bound (`window_ops::
+    /// believe_wear`; tallied `tool_believed`). `false` when the bound can't
+    /// pay: the caller refuses the request. A creative joiner is unbounded.
+    fn believe_request_tool(&mut self, i: usize, tool: &crate::crafting::Tool) -> bool {
+        let now = self.server.tick_counter;
+        if self.server.play_mode.is_creative() {
+            return true;
+        }
+        let Some(sp) = self.server.players.get_mut(i) else { return false };
+        match crate::window_ops::believe_wear(sp, tool, now) {
+            Ok(n) => {
+                if n > 0 {
+                    self.note_believed_request(i, 0, n, false, now);
+                }
+                true
+            }
+            Err(_) => {
+                self.note_believed_request(i, 0, 0, true, now);
+                false
+            }
+        }
+    }
+
+    /// C3c-2-fix (M2) — joiner `i`'s use request spent `ammo` units and
+    /// wore or needed `tool` units its server copy didn't hold (within their
+    /// bounds; tallied `ammo_believed`, `tool_believed`), or was `refused`
+    /// past a bound (`use_refused`); logged, rate-limited, as a believed
+    /// block-use pay is. BRIDGE: C3d refuses what the server's window can't
+    /// cover — replace when the flip lands.
+    fn note_believed_request(&mut self, i: usize, ammo: u32, tool: u32, refused: bool, now: u64) {
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        sp.possession.ammo_believed = sp.possession.ammo_believed.saturating_add(ammo);
+        sp.possession.tool_believed = sp.possession.tool_believed.saturating_add(tool);
+        if refused {
+            sp.possession.use_refused = sp.possession.use_refused.saturating_add(1);
+        }
+        let due = sp.possession.note_mismatch(now);
+        let verdict = if refused {
+            "past the believed bound — refused".to_string()
+        } else {
+            format!("{ammo} ammo and {tool} tool unit(s) believed")
+        };
+        log::log!(
+            crate::joiner_inventory::mismatch_log_level(due),
+            "possession check (log-only): {} made a request with item(s) the server's copy of their inventory \
+             didn't hold — {verdict}{}",
+            sp.display_name,
+            held_back_note(due),
+        );
     }
 
     /// C3b-2-fix (M2) — joiner `i`'s block use took `believed` units its
@@ -4321,7 +4422,7 @@ impl HostedServer {
             // C3a-fix-1 (C-M1) — and the slot and hand the edit itself was
             // made with, when its input said (`InputPacket.edit_hands`).
             let slot = hand.slot().map_or_else(|| self.server.players[i].hotbar_slot, usize::from);
-            self.process_one_edit(i, &bc, tag, hand.held(), slot, budget);
+            self.process_one_edit(i, &bc, tag, hand.held(), slot, budget, group);
         }
     }
 
@@ -4329,6 +4430,7 @@ impl HostedServer {
     /// (FU4a, L2) or (C3c-1) use tag, and the hand its input reported. A
     /// refused edit is sent back (within the per-tick cap), so the sender's
     /// optimistic local edit is undone; its tag yields nothing.
+    #[allow(clippy::too_many_arguments)]
     fn process_one_edit(
         &mut self,
         i: usize,
@@ -4337,6 +4439,7 @@ impl HostedServer {
         hand: (u8, u16),
         slot: usize,
         budget: &mut EditTickBudget,
+        ahead: &crate::edit_queue::EditGroup,
     ) {
         let remote = self.server.players[i].server_simulated;
         let use_tag = tag.as_ref().and_then(|t| t.use_tag()).filter(|_| remote);
@@ -4354,6 +4457,9 @@ impl HostedServer {
         }
         let old_block =
             self.server.world.get_block(bc.x, bc.y, bc.z);
+        // C3c-2-fix (F-L1) — which half a door's broken cell was, read before
+        // the edit's meta lands.
+        let old_meta = self.server.world.meta_at(bc.x, bc.y, bc.z);
         // A container broken out from under the host
         // spills its contents instead of stranding them
         // as an orphan block entity (audit 2026-09-27).
@@ -4368,9 +4474,11 @@ impl HostedServer {
             // C3c-1-fix (M-3) — a door's top half with no door below it (its
             // bottom half was refused, or never sent) costs nothing, so it is
             // refused now: sent back, and the joiner told.
+            // C3c-2-fix (F-L2) — nor over a door's TOP half: a top half stands
+            // on a bottom half only (no free door tops up a column).
             if u.kind == Some(crate::use_edits::UseKind::DoorUpper)
                 && u.explained()
-                && self.server.world.get_block(bc.x, bc.y - 1, bc.z) != crate::block::OAK_DOOR
+                && !crate::use_edits::below_holds_a_door_bottom(&self.server.world, bc)
             {
                 self.send_back_authoritative_block(bc, budget);
                 self.refuse_use(i, bc, u.tag.kind, crate::item_actions::ItemNote::None);
@@ -4557,6 +4665,19 @@ impl HostedServer {
         if self.lends_host_world() {
             self.lent_edit_cells.push(cell);
         }
+        // C3c-2-fix (F-L1) — a door breaks whole ON THE SERVER: a joiner's
+        // edit that takes a door half out takes its pair too (queued after
+        // it), unless this same input breaks that pair with its own `mined`
+        // tag next (the break arm sends the other half's AIR first).
+        if remote
+            && old_block == crate::block::OAK_DOOR
+            && bc.new_block != crate::block::OAK_DOOR
+        {
+            let pair_y = if crate::block_shape::door_is_top(old_meta) { bc.y - 1 } else { bc.y + 1 };
+            if !ahead.mined_ahead((bc.x, pair_y, bc.z)) {
+                self.clear_door_pair(cell, old_meta);
+            }
+        }
         // FU3 (FU1 verify N3) — a joiner's campfire edit: the server runs the
         // campfire rule itself, so the joiner sends the one edit, not the
         // pillar behind it. Gated on `remote` like the container spill: a
@@ -4564,6 +4685,45 @@ impl HostedServer {
         if remote {
             self.derive_campfire_edit(cell, old_block, bc.new_block);
             self.spill_used_block(cell, old_block, bc.new_block);
+        }
+    }
+
+    /// C3c-2-fix (F-L1, C3d gate 6 pulled forward) — a joiner's accepted
+    /// edit took the door half at `cell` (whose meta was `old_meta`) out: its
+    /// matching half (the bottom below a top, the top above a bottom) goes
+    /// too, and the change is queued after the edit's, so every seat loses
+    /// the whole door. A refused send-back of that half queued earlier is
+    /// overtaken (one ordered list). Nothing yields: the broken half's own
+    /// tag yields the one door. Already AIR (the client's own edit of it
+    /// landed first), or not the matching half: nothing to do. So a door at
+    /// the reach edge whose far half's AIR is refused, or a modified client
+    /// that sends one half alone, leaves no floating half.
+    fn clear_door_pair(&mut self, (x, y, z): (i32, i32, i32), old_meta: u8) {
+        let top = crate::block_shape::door_is_top(old_meta);
+        let pair = (x, if top { y - 1 } else { y + 1 }, z);
+        let world = &mut self.server.world;
+        if world.get_block(pair.0, pair.1, pair.2) != crate::block::OAK_DOOR
+            || crate::block_shape::door_is_top(world.meta_at(pair.0, pair.1, pair.2)) == top
+        {
+            return;
+        }
+        world.set_block(pair.0, pair.1, pair.2, crate::block::AIR);
+        world.set_meta(pair, 0);
+        world.set_placed(pair.0, pair.1, pair.2, false);
+        world.notify_neighbours(pair);
+        crate::fluids::notify_block_edit(
+            &mut self.server.water,
+            &mut self.server.lava,
+            &self.server.world,
+            pair.0,
+            pair.1,
+            pair.2,
+            crate::block::OAK_DOOR,
+            crate::block::AIR,
+        );
+        self.pending_block_changes.push(protocol::BlockChange { x: pair.0, y: pair.1, z: pair.2, new_block: crate::block::AIR, meta: 0 });
+        if self.lends_host_world() {
+            self.lent_edit_cells.push(pair);
         }
     }
 

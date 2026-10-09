@@ -296,8 +296,24 @@ pub struct PossessionTally {
     /// until C3d).
     pub use_believed: u32,
     /// C3b-2-fix (M2) — block uses refused because their believed take went
-    /// past the joiner's bound.
+    /// past the joiner's bound. C3c-2-fix (M2) — and use requests refused
+    /// past it or past the believed-ammo bound.
     pub use_refused: u32,
+    /// C3c-2-fix (M2) — arrows and rubber balls a joiner's accepted `Shoot`
+    /// spent that the server's copy of its window didn't hold: believed
+    /// within the believed-AMMO bound (`window_ops::BelievedAmmo`; BRIDGE
+    /// until C3d).
+    pub ammo_believed: u32,
+    /// C3c-2-fix (M2) — accepted requests whose tool the server's copy held
+    /// no unit of (the `Shoot` weapon, the `Cast`/`Reel` rod, a lighting's
+    /// Firestarter): 1 each, believed within the believed bound (BRIDGE until
+    /// C3d takes the tool from the server's held slot).
+    pub tool_believed: u32,
+    /// C3c-2-fix (M1) — `Shoot`s refused for arriving inside the server's
+    /// shot schedule (`ItemNote::TooSoon`, silent): an honest client paces
+    /// its sends to the same tick cadence, so this stays at 0 but for a
+    /// modified client (or a link that bunches shots past the jitter).
+    pub shot_too_soon: u32,
     /// C3b-fix-c (B-M1) — units a container op's correction took short from
     /// the server's copy of the window: the phantom had already gone some
     /// other way (placed, dropped, eaten, crafted) before the correction
@@ -444,6 +460,9 @@ impl PossessionTally {
             self.correction_short,
             self.use_believed,
             self.use_refused,
+            self.ammo_believed,
+            self.tool_believed,
+            self.shot_too_soon,
         ];
         let uses = [
             self.use_mirrored,
@@ -517,6 +536,12 @@ impl PossessionTally {
                 self.use_believed,
                 self.use_refused
             ));
+            if self.ammo_believed > 0 || self.tool_believed > 0 || self.shot_too_soon > 0 {
+                line.push_str(&format!(
+                    "; {} shot(s) on believed ammo, {} request(s) with a believed tool, {} shot(s) refused as too soon",
+                    self.ammo_believed, self.tool_believed, self.shot_too_soon
+                ));
+            }
         }
         if c2b.iter().any(|&n| n > 0) {
             line.push_str(&format!(

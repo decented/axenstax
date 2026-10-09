@@ -28,11 +28,15 @@ use crate::inventory::Inventory;
 use crate::item::{Item, MaterialId};
 use crate::protocol::ShotWeapon;
 
-/// The server's cooldown between a joiner's shots: single-player's
-/// right-click cooldown after a shot (`place_cooldown = 8`, about 0.4 s). A
-/// `Shoot` arriving sooner on the server's schedule (less
-/// [`SHOT_JITTER_TICKS`]) is refused (`ItemNote::TooSoon`); each accepted
-/// shot moves the schedule a full cooldown on.
+/// The cooldown between shots, in GAME ticks (0.4 s: 2.5 shots a second),
+/// ONE cadence on every seat (C3c-2-fix, M1): single-player's and a host's
+/// arm and a joined client's sends wait on `PlayerSlot::shot_ready`, and the
+/// server holds a joiner's `Shoot`s to it — one arriving sooner on the
+/// server's schedule (less [`SHOT_JITTER_TICKS`]) is refused
+/// (`ItemNote::TooSoon`, tallied `shot_too_soon`); each accepted shot moves
+/// the schedule a full cooldown on. (Before C3c-2-fix the arm counted 8
+/// FRAMES of `place_cooldown`: 7.5 shots a second at 60 fps, 18 at 144, and
+/// two in three of a joiner's held shots were refused.)
 pub const SHOT_COOLDOWN_TICKS: u64 = 8;
 
 /// How early a joiner's shot may arrive on the server's schedule: two shots

@@ -107,12 +107,13 @@ impl Rig {
     }
 
     /// Spend joiner `n`'s believed bound, so a pay its server copy can't
-    /// cover is refused.
+    /// cover is refused. C3c-2-fix (M2) — and its believed-ammo bound.
     fn spend_bound(&mut self, n: usize) {
         let now = self.hs.server.tick_counter + 1;
         let slot = self.cs[n].slot;
-        let b = &mut self.hs.server.players[slot].container_sent.believed;
-        while b.try_take(1, now) {}
+        let views = &mut self.hs.server.players[slot].container_sent;
+        while views.believed.try_take(1, now) {}
+        while views.believed_ammo.try_take(1, now) {}
     }
 
     /// The projectiles in the world the server simulates, with their
@@ -232,6 +233,90 @@ fn a_shot_with_no_ammo_is_refused_and_spends_nothing() {
     let asked = Asked::Shoot { weapon: ShotWeapon::Bow, material: ToolMaterial::Wood };
     refused(&rig.ask(0, |c| c.request(asked, Some(mat(MaterialId::Arrow)), 1, action)), ItemNote::NothingToTake);
     assert!(rig.projectiles().is_empty());
+}
+
+/// C3c-2-fix (M2) — believed ammo has its OWN small bound. A modified client
+/// with no ammo on the server's copy shooting at the full cadence: its shots
+/// are believed for a burst of `BELIEVED_AMMO_UNITS`, then one every
+/// `BELIEVED_AMMO_REFILL_TICKS`; the rest are refused (`NoAmmo`). (On the
+/// main bound, refilled at 4 a second, a 2.5-a-second shooter never ran
+/// dry.) The main bound is untouched, and no honest-cadence shot is
+/// refused as too soon.
+#[test]
+fn believed_ammo_stops_after_its_own_small_bound() {
+    use crate::window_ops::{BELIEVED_AMMO_REFILL_TICKS, BELIEVED_AMMO_UNITS, BELIEVED_BUCKET_UNITS};
+    let mut rig = Rig::dedicated("shoot-believed", 1);
+    let slot = rig.cs[0].slot;
+    // A diamond bow: wear enough for every shot (a wooden one breaks at 59).
+    rig.give(0, 0, Item::Tool(Tool::new(ToolType::Bow, ToolMaterial::Diamond)), 1);
+    // The client says it holds arrows; the server's copy holds none.
+    rig.cs[0].inv.set_slot(9, Some(ItemStack::new_material(MaterialId::Arrow, 64)));
+    let shots = 60u64;
+    let start = rig.hs.server.tick_counter;
+    for _ in 0..shots {
+        assert!(rig.cs[0].shoot(ShotWeapon::Bow, 0, 0.0, 1.5), "the client holds arrows and the bow's wear");
+        rig.ticks(crate::shot::SHOT_COOLDOWN_TICKS as usize);
+    }
+    rig.ticks(3);
+    let elapsed = rig.hs.server.tick_counter - start;
+    let outs = &rig.cs[0].outcomes;
+    let accepted = outs.iter().filter(|o| o.accepted).count() as u64;
+    let no_ammo = outs.iter().filter(|o| !o.accepted && ItemNote::from_wire(o.note) == ItemNote::NoAmmo).count() as u64;
+    assert_eq!(accepted + no_ammo, shots, "each shot believed or refused for ammo, none too soon");
+    let cap = u64::from(BELIEVED_AMMO_UNITS) + elapsed / u64::from(BELIEVED_AMMO_REFILL_TICKS) + 1;
+    assert!(accepted <= cap, "{accepted} believed shots in {elapsed} ticks (at most {cap})");
+    assert!(accepted >= u64::from(BELIEVED_AMMO_UNITS), "the burst: {accepted}");
+    let sp = &mut rig.hs.server.players[slot];
+    assert_eq!(u64::from(sp.possession.ammo_believed), accepted, "tallied");
+    assert_eq!(sp.possession.shot_too_soon, 0);
+    let now = rig.hs.server.tick_counter + 1;
+    assert!(rig.hs.server.players[slot].container_sent.believed.try_take(BELIEVED_BUCKET_UNITS, now), "the main bound is untouched");
+}
+
+/// C3c-2-fix (M2) — a tool the server's copy holds no unit of — the rod of a
+/// cast or a reel, the bow of a shot, the Firestarter of a lighting — is
+/// believed within the joiner's believed bound (1 each, `tool_believed`),
+/// and past the bound the request is refused (`NothingToTake`): no free
+/// catch on a rod the server never saw.
+#[test]
+fn a_tool_the_copy_doesnt_hold_is_believed_within_the_bound_and_refused_past_it() {
+    let mut rig = Rig::dedicated("tool-believed", 1);
+    let slot = rig.cs[0].slot;
+    // A rod on the client only.
+    rig.cs[0].inv.set_slot(0, Some(ItemStack { item: tool(ToolType::FishingRod), count: 1 }));
+    pond(&mut rig, 0);
+    let cast = rig.ask(0, |c| c.fish(false, 0));
+    accepted(&cast, 0);
+    assert_eq!(rig.hs.server.players[slot].possession.tool_believed, 1, "the cast's rod, believed");
+    rig.ticks(usize::from(cast.bite_after) + 1);
+    // The bound spent: the reel is refused, and nothing is caught.
+    rig.spend_bound(0);
+    refused(&rig.ask(0, |c| c.fish(true, 0)), ItemNote::NothingToTake);
+    let caught: u32 = [MaterialId::RawFish, MaterialId::Bone, MaterialId::Leather].into_iter().map(|m| rig.cs[0].count(&mat(m))).sum();
+    assert_eq!(caught, 0, "no catch on a rod the server can't believe");
+    let t = rig.hs.server.players[slot].possession;
+    assert_eq!((t.tool_believed, t.use_refused), (1, 1));
+    // A bow and a Firestarter on the client only, ammo on both.
+    let mut rig = Rig::dedicated("tool-believed-bow", 1);
+    let slot = rig.cs[0].slot;
+    rig.cs[0].inv.set_slot(0, Some(ItemStack { item: tool(ToolType::Bow), count: 1 }));
+    rig.give(0, 9, mat(MaterialId::Arrow), 2);
+    rig.cs[0].inv.set_slot(1, Some(ItemStack::new_material(MaterialId::MagnesiumFirestarter, 1)));
+    accepted(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), 1);
+    assert_eq!(rig.hs.server.players[slot].possession.tool_believed, 1, "the shot's bow, believed");
+    assert_eq!(rig.hs.server.players[slot].possession.ammo_believed, 0, "its arrow was the copy's");
+    let fire = unlit_fire(&mut rig, 2, 4_000);
+    accepted(&rig.ask(0, |c| c.light(fire, 1)), 0);
+    assert_eq!(rig.hs.server.players[slot].possession.tool_believed, 2, "the Firestarter, believed");
+    rig.set(fire, block::CAMPFIRE_UNLIT);
+    rig.spend_bound(0);
+    refused(&rig.ask(0, |c| c.light(fire, 1)), ItemNote::NothingToTake);
+    assert_eq!(rig.world().get_block(fire[0], fire[1], fire[2]), block::CAMPFIRE_UNLIT, "nothing lit");
+    rig.hs.server.players[slot].next_shot_tick = 0;
+    // (The bound refills a unit every 5 ticks: spent again right before.)
+    rig.spend_bound(0);
+    refused(&rig.ask(0, |c| c.shoot(ShotWeapon::Bow, 0, 0.0, 1.5)), ItemNote::NothingToTake);
+    assert_eq!(rig.cs[0].count(&mat(MaterialId::Arrow)), 1, "the refused shot spent nothing");
 }
 
 /// Two shots in flight with one arrow: the second is judged against the

@@ -197,13 +197,10 @@ impl Rig {
                 Some((protocol::PacketType::StateUpdate, payload)) => {
                     let state: protocol::StateUpdatePacket = protocol::safe_deserialize(payload).unwrap();
                     self.c.changes.extend(state.block_changes);
-                    for r in &state.refused_uses {
-                        if let Some(record) = self.c.uses.take([r.x, r.y, r.z], r.kind) {
-                            let c = &mut self.c;
-                            crate::use_edits::undo(&mut c.inv, &mut c.ui, &record);
-                            c.undone += 1;
-                        }
-                    }
+                    // C3c-2-fix (F-M1) — the game loop's own undo: newest first.
+                    let c = &mut self.c;
+                    let undone = crate::use_edits::undo_refused(&mut c.uses, &mut c.inv, &mut c.ui, &state.refused_uses);
+                    c.undone += undone.iter().filter(|(_, u)| u.is_some()).count() as u32;
                     self.c.refused.extend(state.refused_uses);
                     self.c.uses.acknowledged(state.last_acked_input);
                 }
@@ -1028,6 +1025,112 @@ fn a_door_top_half_over_air_is_refused() {
     assert!(rig.c.changes.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (top[0], top[1], top[2], block::AIR)), "sent back");
     assert_eq!(rig.c.refused.iter().map(|r| (r.kind, r.note)).collect::<Vec<_>>(), vec![(UseKind::DoorUpper.to_wire(), 0)]);
     assert_eq!(rig.tally().use_edit_refused, 1);
+}
+
+/// C3c-2-fix (F-L2) — a door's top half over another door's TOP half (a
+/// column of free door tops) is refused like one over AIR: a top half stands
+/// on a bottom half only.
+#[test]
+fn a_door_top_half_over_a_top_half_is_refused() {
+    let mut rig = Rig::dedicated("door-over-top");
+    let top = [ABOVE[0], ABOVE[1] + 1, ABOVE[2]];
+    let third = [ABOVE[0], ABOVE[1] + 2, ABOVE[2]];
+    rig.set(ABOVE, block::OAK_DOOR);
+    rig.set(top, block::OAK_DOOR);
+    rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+    rig.tick();
+    let tag = crate::use_edits::tag(UseKind::DoorUpper, third, 0, None);
+    let upper = protocol::BlockChange { x: third[0], y: third[1], z: third[2], new_block: block::OAK_DOOR, meta: crate::use_edits::door_top_meta(0) };
+    let (_, (k, id)) = rig.hand_now();
+    rig.send_input(vec![upper], vec![(0, k, id)], vec![tag]);
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.block(third), block::AIR, "no door top over a door top");
+    assert_eq!(rig.c.refused.iter().map(|r| r.kind).collect::<Vec<_>>(), vec![UseKind::DoorUpper.to_wire()]);
+    assert_eq!(rig.tally().use_edit_refused, 1);
+}
+
+/// C3c-2-fix (F-L1) — a door breaks whole ON THE SERVER. A joiner breaks a
+/// door's top half at the edge of the server's reach, where the bottom half
+/// (a block lower, so further from the eye) is out of it: the bottom half's
+/// untagged AIR is refused, but the server clears the pair of the half it
+/// accepted and sends it. No floating half on any seat, and one door.
+#[test]
+fn a_door_broken_at_the_reach_edge_breaks_whole_on_the_server() {
+    let mut rig = Rig::dedicated("door-reach-edge");
+    let (other, other_slot) = join_guest(&mut rig.hs, "Neighbour");
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    // The eye is at (40.5, 81.62, 40.5): the top half's centre (46.5, 81.5,
+    // 42.5) is 6.33 away (in reach, 6.37), the bottom's 6.42 (out of it).
+    let bottom: [i32; 3] = [46, 80, 42];
+    let top = [46, 81, 42];
+    rig.hs.hold_column_for_test(other_slot, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+    rig.set(bottom, block::OAK_DOOR);
+    rig.set(top, block::OAK_DOOR);
+    rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+    rig.tick();
+    let _ = super::joiner_authority::block_changes_seen(&other);
+    let air = |c: [i32; 3]| protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: block::AIR, meta: 0 };
+    let (_, (k, id)) = rig.hand_now();
+    let mined = protocol::MinedBlock { x: top[0], y: top[1], z: top[2], tool: protocol::WireItem::None };
+    let input = protocol::InputPacket {
+        tick: { rig.c.input_seq += 1; rig.c.input_seq },
+        x: rig.sp().player.pos.x,
+        y: rig.sp().player.pos.y,
+        z: rig.sp().player.pos.z,
+        health: 20.0,
+        held_kind: k,
+        held_id: id,
+        // The survival break arm's order: the other half first, untagged.
+        block_changes: vec![air(bottom), air(top)],
+        edit_hands: vec![(0, k, id), (0, k, id)],
+        mined: vec![mined],
+        events_applied: rig.c.events,
+        ..Default::default()
+    };
+    rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!((rig.block(bottom), rig.block(top)), (block::AIR, block::AIR), "the server cleared both halves");
+    let last = |seen: &[protocol::BlockChange], c: [i32; 3]| {
+        seen.iter().rev().find(|b| [b.x, b.y, b.z] == c).map(|b| b.new_block)
+    };
+    assert_eq!(last(&rig.c.changes, bottom), Some(block::AIR), "the breaker's last word on the bottom half is AIR");
+    let seen = super::joiner_authority::block_changes_seen(&other);
+    assert_eq!(last(&seen, bottom), Some(block::AIR), "and the other joiner's");
+    assert_eq!(last(&seen, top), Some(block::AIR));
+    let door = Item::Block(block::OAK_DOOR);
+    assert_eq!(units(&rig.c.inv, &door), 1, "one door");
+    assert!(rig.ground_items().iter().all(|s| s.item != door), "no second door anywhere");
+    assert_eq!(rig.tally().breaks, 1);
+}
+
+/// C3c-2-fix (F-M1) — a refused fill whose water bucket the client emptied
+/// before the notice came back: the undo is short (the water bucket is
+/// spent), so it gives the bucket back NO more — the empty already did. The
+/// client ends with exactly the buckets the server's copy holds (it used to
+/// end with one more: a bucket minted per cycle).
+#[test]
+fn a_refused_fill_emptied_before_its_notice_mints_no_bucket() {
+    let mut rig = Rig::dedicated("refused-fill-emptied");
+    // A pond out of the server's reach (the client's own view let it fill).
+    let far = [48, 80, 40];
+    rig.water_source(far);
+    rig.give(0, mat(MaterialId::Bucket), 1);
+    let (fill_tag, fill, fill_hand, _) = rig.make_use(UseKind::BucketFill, far, block::AIR, 0);
+    assert_eq!(rig.c.inv.slot(0), Some(&ItemStack::new_material(MaterialId::WaterBucket, 1)));
+    // Before the notice: the water bucket emptied in reach.
+    let (empty_tag, empty, empty_hand, _) = rig.make_use(UseKind::BucketEmpty, ABOVE, block::WATER, 0);
+    rig.send_input(vec![fill, empty], vec![fill_hand, empty_hand], vec![fill_tag, empty_tag]);
+    for _ in 0..3 {
+        rig.tick();
+    }
+    assert_eq!(rig.c.refused.iter().map(|r| r.kind).collect::<Vec<_>>(), vec![UseKind::BucketFill.to_wire()]);
+    let bucket = mat(MaterialId::Bucket);
+    assert_eq!(units(&rig.sp().inventory, &bucket), 1, "the copy: one bucket (the fill never happened)");
+    assert_eq!(units(&rig.c.inv, &bucket), 1, "the client: one bucket, not two");
+    assert_eq!(units(&rig.c.inv, &mat(MaterialId::WaterBucket)), 0);
 }
 
 /// M-3 — a joiner breaks one half of its door: its break arm sends the other

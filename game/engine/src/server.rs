@@ -1017,23 +1017,16 @@ impl GameServer {
 
     /// C3c-2 — a seed for a roll the server makes for player slot `slot` on
     /// this tick (a joiner's friction strike, its fish's bite and catch):
-    /// this world's Proof-of-Play secret, the server's tick, the slot and
-    /// `salt` (one per kind of roll), mixed (splitmix64). The secret never
-    /// leaves the server, so no client can foresee a roll.
+    /// keyed by this world's Proof-of-Play secret, over the server's tick, the
+    /// slot and `salt` (one per kind of roll). The secret never leaves the
+    /// server, so no client can foresee a roll. C3c-2-fix (L1) — HMAC-SHA256
+    /// under a key derived from the secret ([`use_seed_key`],
+    /// [`use_seed_from`]), never the secret in splitmix64 (not a PRF). The
+    /// key is derived on each call: `pop_secret` is a public field its owners
+    /// set directly (a loaded world's, a lending host's), and a roll is rare
+    /// (one per use request), so two HMACs cost nothing and never go stale.
     pub fn use_seed(&self, slot: usize, salt: u64) -> u64 {
-        fn mix(mut z: u64) -> u64 {
-            z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-        let mut h = mix(salt);
-        for chunk in self.pop_secret.chunks(8) {
-            let mut word = [0u8; 8];
-            word[..chunk.len()].copy_from_slice(chunk);
-            h = mix(h ^ u64::from_le_bytes(word));
-        }
-        mix(h ^ self.tick_counter.rotate_left(17) ^ (slot as u64).wrapping_mul(0xA24B_AED4_963E_E407))
+        use_seed_from(&use_seed_key(&self.pop_secret), salt, self.tick_counter, slot as u64)
     }
 
     /// C1 — the keys a joiner's break is rolled with (`break_drops`): this
@@ -2860,10 +2853,66 @@ impl GameServer {
     }
 }
 
+/// C3c-2-fix (L1) — the label the use-roll key is derived under. Bump the
+/// version to re-key every use roll (never reuse a label for another use).
+const USE_SEED_LABEL: &[u8] = b"axenstax/use-seed/v1";
+
+/// C3c-2-fix (L1) — the use-roll key: `HMAC-SHA256(pop_secret,
+/// "axenstax/use-seed/v1")`. A sub-key of the Proof-of-Play secret, so the
+/// secret itself only ever keys an HMAC (`proof_of_play`'s rolls and this
+/// derivation) and never meets a non-cryptographic mixer whose output a
+/// client sees part of (a bite's wait, a catch).
+pub fn use_seed_key(pop_secret: &[u8; 32]) -> [u8; 32] {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(pop_secret).expect("HMAC accepts any key length");
+    mac.update(USE_SEED_LABEL);
+    let out = mac.finalize().into_bytes();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out);
+    key
+}
+
+/// C3c-2-fix (L1) — a use roll's seed under `key` ([`use_seed_key`]): the
+/// first 8 bytes, as a little-endian u64, of `HMAC-SHA256(key, salt ‖ tick ‖
+/// slot)`, each a little-endian u64. Pinned by a test vector.
+pub fn use_seed_from(key: &[u8; 32], salt: u64, tick: u64, slot: u64) -> u64 {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(&salt.to_le_bytes());
+    mac.update(&tick.to_le_bytes());
+    mac.update(&slot.to_le_bytes());
+    let out = mac.finalize().into_bytes();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&out[..8]);
+    u64::from_le_bytes(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// C3c-2-fix (L1) — a use roll's seed is HMAC-SHA256 under a sub-key
+    /// derived from the Proof-of-Play secret, never the secret itself in a
+    /// non-cryptographic mixer: `k = HMAC-SHA256(pop_secret,
+    /// "axenstax/use-seed/v1")`, then `HMAC-SHA256(k, salt ‖ tick ‖ slot)`
+    /// (each a little-endian u64), its first 8 bytes as a little-endian u64.
+    /// The vector was computed with Python's `hmac` module.
+    #[test]
+    fn a_use_seed_is_an_hmac_under_a_key_derived_from_the_pop_secret() {
+        let secret = [7u8; 32];
+        let k = use_seed_key(&secret);
+        let hex: String = k.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "76a92b801ada80e383d9e70e7b0738b5548c6c69ac491071c6756f9b56de4e5b");
+        assert_eq!(use_seed_from(&k, 0xB17E, 1234, 2), 0x605e_30b5_6604_154b);
+        assert_eq!(use_seed_from(&k, 0xF1C7, 0, 0), 0xb856_5b62_9855_c052);
+        let mut server = GameServer::new(0, "w".to_string(), 42);
+        server.pop_secret = secret;
+        server.tick_counter = 1234;
+        assert_eq!(server.use_seed(2, 0xB17E), 0x605e_30b5_6604_154b, "the server's roll is the derivation");
+        server.pop_secret = [8u8; 32];
+        assert_ne!(server.use_seed(2, 0xB17E), 0x605e_30b5_6604_154b, "a new secret is a new key at once");
+    }
 
     /// T0-7 — the dedicated-server save round-trips through tmp + rename and
     /// leaves no `.tmp` behind.

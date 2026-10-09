@@ -541,32 +541,63 @@ pub const BELIEVED_REFILL_PER_SECOND: u32 = 4;
 /// Server ticks a second.
 const TICKS_PER_SECOND: u32 = 20;
 
-/// C3b-fix-a (C-L3) — a joiner's believed-units bucket: [`BELIEVED_BUCKET_UNITS`]
-/// deep, refilled at [`BELIEVED_REFILL_PER_SECOND`]. A container op whose
-/// believed deposit it can't pay is refused and corrected.
+/// C3c-2-fix (M2) — the believed-AMMO bound per joiner: arrows and rubber
+/// balls a `Shoot` spends that the server's copy of its window doesn't hold.
+/// Its own bucket, drained by shots alone: on the main bound (refilled at 4
+/// a second) a joiner shooting at the 2.5-a-second cadence never ran dry,
+/// so believed ammo was unbounded.
+pub const BELIEVED_AMMO_UNITS: u32 = 16;
+/// ... refilled one unit every this many server ticks (4 s): a believed
+/// burst of 16, then one shot in ten.
+pub const BELIEVED_AMMO_REFILL_TICKS: u32 = 80;
+
+/// A per-joiner bucket of believed units: `UNITS` deep, refilled one unit
+/// every `TICKS_PER_UNIT` server ticks, all or nothing per take. The
+/// believed bound ([`BelievedBucket`], C3b-fix-a C-L3) and the believed-ammo
+/// bound ([`BelievedAmmo`], C3c-2-fix M2).
 #[derive(Clone, Copy, Debug)]
-pub struct BelievedBucket {
-    /// In twentieths of a unit (one tick's refill at one unit a second).
+pub struct Bucket<const UNITS: u32, const TICKS_PER_UNIT: u32> {
+    /// In ticks of refill (`TICKS_PER_UNIT` a unit).
     level: u32,
     /// The server tick of the last refill.
     at: Option<u64>,
 }
 
-impl Default for BelievedBucket {
+/// C3b-fix-a (C-L3) — a joiner's believed-units bucket: [`BELIEVED_BUCKET_UNITS`]
+/// deep, refilled at [`BELIEVED_REFILL_PER_SECOND`]. A container op whose
+/// believed deposit it can't pay is refused and corrected; a block use's
+/// believed pay or tool, and (C3c-2-fix M2) a request's believed weapon, rod
+/// or Firestarter, likewise.
+pub type BelievedBucket = Bucket<BELIEVED_BUCKET_UNITS, { TICKS_PER_SECOND / BELIEVED_REFILL_PER_SECOND }>;
+
+/// C3c-2-fix (M2) — a joiner's believed-ammo bucket ([`BELIEVED_AMMO_UNITS`]
+/// deep, a unit every [`BELIEVED_AMMO_REFILL_TICKS`]).
+pub type BelievedAmmo = Bucket<BELIEVED_AMMO_UNITS, BELIEVED_AMMO_REFILL_TICKS>;
+
+impl<const UNITS: u32, const TICKS_PER_UNIT: u32> Default for Bucket<UNITS, TICKS_PER_UNIT> {
     fn default() -> Self {
-        BelievedBucket { level: BELIEVED_BUCKET_UNITS * TICKS_PER_SECOND, at: None }
+        Bucket { level: UNITS * TICKS_PER_UNIT, at: None }
     }
 }
 
-impl BelievedBucket {
+impl<const UNITS: u32, const TICKS_PER_UNIT: u32> Bucket<UNITS, TICKS_PER_UNIT> {
+    /// The level on server tick `now`, refilled since the last take.
+    fn level_at(&self, now: u64) -> u32 {
+        let cap = UNITS * TICKS_PER_UNIT;
+        let ticks = self.at.map_or(0, |at| now.saturating_sub(at)).min(u64::from(cap)) as u32;
+        self.level.saturating_add(ticks).min(cap)
+    }
+
+    /// Would the bucket pay `units` on server tick `now`? Takes nothing.
+    pub fn can_take(&self, units: u32, now: u64) -> bool {
+        units.saturating_mul(TICKS_PER_UNIT) <= self.level_at(now)
+    }
+
     /// Pay `units` on server tick `now`, if the bucket holds them.
     pub fn try_take(&mut self, units: u32, now: u64) -> bool {
-        let cap = BELIEVED_BUCKET_UNITS * TICKS_PER_SECOND;
-        let ticks = self.at.map_or(0, |at| now.saturating_sub(at));
-        let refill = ticks.saturating_mul(u64::from(BELIEVED_REFILL_PER_SECOND)).min(u64::from(cap)) as u32;
-        self.level = self.level.saturating_add(refill).min(cap);
+        self.level = self.level_at(now);
         self.at = Some(now);
-        let cost = units.saturating_mul(TICKS_PER_SECOND);
+        let cost = units.saturating_mul(TICKS_PER_UNIT);
         if cost > self.level {
             return false;
         }
@@ -577,7 +608,7 @@ impl BelievedBucket {
     /// Whole units it holds now (before this tick's refill).
     #[cfg(test)]
     pub fn units(&self) -> u32 {
-        self.level / TICKS_PER_SECOND
+        self.level / TICKS_PER_UNIT
     }
 }
 
@@ -598,6 +629,8 @@ pub struct ContainerViews {
     pub seen: Option<MirrorView>,
     /// C-L3 — the believed-units bound.
     pub believed: BelievedBucket,
+    /// C3c-2-fix (M2) — the believed-ammo bound (shots alone).
+    pub believed_ammo: BelievedAmmo,
     /// C-L4 — the window event of the last refused op's revert: an op made
     /// before the client applied it ran on a window the server's copy never
     /// had (the prediction it undoes), which is not a lockstep mismatch.
@@ -1035,8 +1068,7 @@ fn held_units(w: &crate::window_events::EffectiveWindow, item: &crate::item::Ite
 /// BRIDGE: C3d refuses a pay the server's window can't cover — replace when
 /// the flip lands (C3d gate list, design doc).
 pub fn believe_pay(sp: &mut ServerPlayer, item: &crate::item::Item, n: u32, now: u64) -> Result<u32, u32> {
-    let w = crate::window_events::effective_window(sp);
-    let short = u64::from(n).saturating_sub(held_units(&w, item)).min(u64::from(u32::MAX)) as u32;
+    let short = pay_short(sp, item, n);
     if short == 0 {
         return Ok(0);
     }
@@ -1045,6 +1077,26 @@ pub fn believe_pay(sp: &mut ServerPlayer, item: &crate::item::Item, n: u32, now:
     } else {
         Err(short)
     }
+}
+
+/// C3c-2-fix (M2) — of `n` of `item` joiner `sp`'s request pays, the units
+/// the server's copy of its window can't cover ([`believe_pay`]'s count;
+/// nothing is charged).
+pub fn pay_short(sp: &ServerPlayer, item: &crate::item::Item, n: u32) -> u32 {
+    let w = crate::window_events::effective_window(sp);
+    u64::from(n).saturating_sub(held_units(&w, item)).min(u64::from(u32::MAX)) as u32
+}
+
+/// C3c-2-fix (M2) — 1 when the server's copy of joiner `sp`'s window holds no
+/// tool of `tool`'s type and material ([`believe_wear`]'s test; nothing is
+/// charged), else 0.
+pub fn wear_short(sp: &ServerPlayer, tool: &crate::crafting::Tool) -> u32 {
+    let w = crate::window_events::effective_window(sp);
+    let like = |s: Option<&ItemStack>| {
+        matches!(s.map(|s| &s.item), Some(crate::item::Item::Tool(t)) if t.tool_type == tool.tool_type && t.material == tool.material)
+    };
+    let held = w.inv.slots_iter().any(like) || w.grid.iter().flatten().any(|c| like(c.as_ref())) || like(w.cursor.as_ref());
+    u32::from(!held)
 }
 
 /// C3c-1-fix (L-3) — joiner `sp`'s accepted block use wears `tool` and takes
@@ -1060,12 +1112,7 @@ pub fn believe_pay(sp: &mut ServerPlayer, item: &crate::item::Item, n: u32, now:
 /// the bound: the caller refuses the use. BRIDGE: C3d refuses a use with a
 /// tool the server's window doesn't hold — replace when the flip lands.
 pub fn believe_wear(sp: &mut ServerPlayer, tool: &crate::crafting::Tool, now: u64) -> Result<u32, u32> {
-    let w = crate::window_events::effective_window(sp);
-    let like = |s: Option<&ItemStack>| {
-        matches!(s.map(|s| &s.item), Some(crate::item::Item::Tool(t)) if t.tool_type == tool.tool_type && t.material == tool.material)
-    };
-    let held = w.inv.slots_iter().any(like) || w.grid.iter().flatten().any(|c| like(c.as_ref())) || like(w.cursor.as_ref());
-    if held {
+    if wear_short(sp, tool) == 0 {
         return Ok(0);
     }
     if sp.container_sent.believed.try_take(1, now) {
@@ -1432,6 +1479,21 @@ mod tests {
         assert!(b.try_take(4, 125), "a second, four");
         assert!(b.try_take(64, 10_000), "full again, never past full");
         assert!(!b.try_take(1, 10_000));
+    }
+
+    /// C3c-2-fix (M2) — the believed-ammo bucket: 16 deep, one unit back
+    /// every 80 ticks (4 s); `can_take` looks without taking.
+    #[test]
+    fn the_believed_ammo_bucket_holds_sixteen_and_refills_one_every_four_seconds() {
+        let mut b = BelievedAmmo::default();
+        assert_eq!(b.units(), BELIEVED_AMMO_UNITS);
+        assert!(b.try_take(16, 100));
+        assert!(!b.can_take(1, 179), "79 ticks: not yet");
+        assert!(b.can_take(1, 180) && b.can_take(1, 180), "looking takes nothing");
+        assert!(b.try_take(1, 180));
+        assert!(!b.try_take(1, 180));
+        assert!(b.try_take(16, 180 + 16 * 80));
+        assert!(!b.can_take(1, 180 + 16 * 80));
     }
 
     #[test]

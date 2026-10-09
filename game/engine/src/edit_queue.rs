@@ -214,6 +214,20 @@ impl EditGroup {
         Some((bc, tag, hand))
     }
 
+    /// C3c-2-fix (F-L1) — is an edit still waiting in this group at `cell`
+    /// with its own `mined` tag (a break the server yields)? The server
+    /// clears a door's other half when a joiner's edit takes one half out,
+    /// but not the half the same input is about to break with its tag: the
+    /// honest break arm sends the other half's untagged AIR FIRST, and
+    /// clearing the mined half ahead of its own edit would leave that edit
+    /// nothing to yield.
+    pub fn mined_ahead(&self, cell: (i32, i32, i32)) -> bool {
+        self.edits.iter().enumerate().any(|(k, (bc, _))| {
+            (bc.x, bc.y, bc.z) == cell
+                && self.tags.iter().any(|(at, tag)| *at == self.next + k as u32 && tag.mined().is_some())
+        })
+    }
+
     /// Take every edit left, their tags gone with them (a dead joiner's or
     /// an earlier life's: sent back, never applied).
     pub fn take_edits(&mut self) -> Vec<BlockChange> {

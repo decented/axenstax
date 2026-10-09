@@ -4293,28 +4293,32 @@ impl super::GameState {
     /// exact first) — and show the reason's toast. Tool wear is not undone
     /// (the same bounded gap as a refused break's wear). A notice we hold no
     /// record of (already undone, or past the hold) does nothing.
+    /// C3c-2-fix (F-M1) — undone newest first, and a use whose product is
+    /// already gone gets no cost back (`use_edits::undo_refused`, `undo`).
     fn undo_refused_uses(&mut self, refused: &[crate::protocol::RefusedUse]) {
         if self.players.is_empty() {
             return;
         }
-        for notice in refused {
+        let p = &mut self.players[0];
+        let undone_all = crate::use_edits::undo_refused(&mut self.sent_uses, &mut p.inventory, &mut p.crafting_ui, refused);
+        // The newest undone notice's reason (the use the player made last).
+        let toast = undone_all.iter().find(|(_, u)| u.is_some()).map(|(n, _)| n.note);
+        for (notice, undone) in undone_all {
             let cell = [notice.x, notice.y, notice.z];
-            let Some(record) = self.sent_uses.take(cell, notice.kind) else {
-                log::debug!("The server refused a use at {cell:?} we hold no record of: nothing to undo");
-                continue;
-            };
-            let p = &mut self.players[0];
-            let undone = crate::use_edits::undo(&mut p.inventory, &mut p.crafting_ui, &record);
-            if undone.short > 0 || undone.lost > 0 {
-                log::info!(
-                    "Undoing a refused use at {cell:?}: {} of its product already gone, {} of its cost had no room",
-                    undone.short,
-                    undone.lost,
-                );
+            match undone {
+                None => log::debug!("The server refused a use at {cell:?} we hold no record of: nothing to undo"),
+                Some(u) if u.short > 0 => log::info!(
+                    "Undoing a refused use at {cell:?}: {} of its product already gone, so its cost is not given back",
+                    u.short,
+                ),
+                Some(u) if u.lost > 0 => {
+                    log::info!("Undoing a refused use at {cell:?}: {} of its cost had no room", u.lost)
+                }
+                Some(_) => {}
             }
-            if let Some(text) = crate::item_actions::ItemNote::from_wire(notice.note).toast() {
-                self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(2)));
-            }
+        }
+        if let Some(text) = toast.and_then(|note| crate::item_actions::ItemNote::from_wire(note).toast()) {
+            self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(2)));
         }
     }
 
@@ -13670,12 +13674,21 @@ impl super::GameState {
                 // server, which spawns the real projectile from its body and
                 // takes the ammo and wears the weapon on the outcome; a
                 // joined client spawns and spends nothing here.
+                // C3c-2-fix (M1) — ONE tick-based cadence on every seat
+                // (`PlayerSlot::shot_ready`, `shot::SHOT_COOLDOWN_TICKS` game
+                // ticks, the server's for a joiner): 2.5 shots a second at any
+                // frame rate. Between shots the held click is still the bow's:
+                // it doesn't fall through to placing or opening.
                 if !ate {
                     let held = self.players[pidx].inventory.hotbar_slot(hotbar).map(|s| s.item.clone());
+                    let now = self.tick_counter;
                     if let Some(weapon) = crate::shot::weapon_of(held.as_ref()) {
-                        if self.joined() {
+                        if !self.players[pidx].shot_ready(now) {
+                            fired_arrow = true;
+                        } else if self.joined() {
                             if self.send_shot(pidx, weapon) {
-                                self.players[pidx].place_cooldown = 8; // ~0.4s between shots
+                                self.players[pidx].arm_shot(now);
+                                self.players[pidx].place_cooldown = 8;
                                 fired_arrow = true;
                             }
                         } else if let Some(slot_idx) = crate::shot::find_ammo(&self.players[pidx].inventory, weapon)
@@ -13689,10 +13702,11 @@ impl super::GameState {
                             let dir = self.players[pidx].camera.forward();
                             let shot = crate::shot::launch(weapon, eye, dir, crate::shot::max_charge(weapon));
                             crate::shot::spawn(&mut self.ecs, &shot, Some(crate::entity::Shooter::local(pidx)));
-                            // Weapon durability + draw cooldown.
+                            // Weapon durability + the shot's cadence.
                             let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                             self.handle_tool_use(info);
-                            self.players[pidx].place_cooldown = 8; // ~0.4s between shots
+                            self.players[pidx].arm_shot(now);
+                            self.players[pidx].place_cooldown = 8;
                             fired_arrow = true;
                         }
                     }

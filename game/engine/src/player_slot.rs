@@ -83,7 +83,17 @@ pub struct PlayerSlot {
     /// break). Cleared each frame the break button is up. Transient (not saved).
     pub peel_latch: bool,
     /// Placement cooldown (ticks remaining until next place allowed).
+    /// Known debt (C3c-2-fix): it counts FRAMES, not game ticks
+    /// ([`Self::tick_place_cooldown`] runs once a frame), so the right-click
+    /// arms it paces run faster at a higher frame rate. The bow and the
+    /// slingshot no longer use it for their cadence ([`Self::next_shot_tick`]).
     pub place_cooldown: u32,
+    /// C3c-2-fix (M1) — the game tick (`GameState::tick_counter`) from which
+    /// this player's bow or slingshot may shoot again: ONE tick-based cadence
+    /// on every seat ([`crate::shot::SHOT_COOLDOWN_TICKS`]), the cadence the
+    /// server holds a joiner's shots to, so an honest held button is never
+    /// refused. Transient (not saved).
+    pub next_shot_tick: u64,
     /// Eating cooldown, in fixed ticks (C2a verify M1): eating needs it at
     /// zero and arms it to `item_actions::EAT_COOLDOWN_TICKS`. Counted in the
     /// fixed-tick loop, never per frame, so a bite is 0.8 s at any frame rate.
@@ -353,6 +363,7 @@ impl PlayerSlot {
             break_progress: 0,
             peel_latch: false,
             place_cooldown: 0,
+            next_shot_tick: 0,
             eat_cooldown: 0,
             break_cooldown: 0,
             spawn_pos: spawn,
@@ -515,6 +526,19 @@ impl PlayerSlot {
     /// swallowed first, `health_sync::eat_click`); every other arm answers.
     pub fn biting(&self) -> bool {
         self.eat_cooldown > 0
+    }
+
+    /// C3c-2-fix (M1) — may the bow or slingshot shoot on game tick `now`?
+    /// A schedule more than one cooldown ahead is stale (the tick counter
+    /// restarted with a new world) and doesn't hold a shot back.
+    pub fn shot_ready(&self, now: u64) -> bool {
+        now >= self.next_shot_tick || self.next_shot_tick - now > crate::shot::SHOT_COOLDOWN_TICKS
+    }
+
+    /// C3c-2-fix (M1) — a shot left (or, joined, was asked for) on game tick
+    /// `now`: the next may go [`crate::shot::SHOT_COOLDOWN_TICKS`] later.
+    pub fn arm_shot(&mut self, now: u64) {
+        self.next_shot_tick = now + crate::shot::SHOT_COOLDOWN_TICKS;
     }
 
     /// Advance the placement cooldown one tick (frame), saturating at 0. Call
@@ -692,4 +716,38 @@ mod tests {
             helmet_dur_before,
         );
     }
+
+    /// C3c-2-fix (M1) — the shot cadence is counted in game ticks: a button
+    /// held at 60 or at 144 frames a second fires every
+    /// `SHOT_COOLDOWN_TICKS` ticks (2.5 a second), where the frame-counted
+    /// `place_cooldown` fired 7.5 or 18 a second. A stale schedule (a new
+    /// world's tick counter) holds nothing back.
+    #[test]
+    fn a_held_shot_fires_on_the_tick_cadence_at_any_frame_rate() {
+        for fps in [60u32, 144] {
+            let mut slot = fresh_slot();
+            let (mut tick, mut acc, mut shots) = (0u64, 0u32, 0u32);
+            // 20 seconds of frames; ticks run off a 20 TPS accumulator (in
+            // 1/(20·fps) s units) before each frame's click, as the game loop's.
+            for _ in 0..(20 * fps) {
+                acc += 20;
+                while acc >= fps {
+                    acc -= fps;
+                    tick += 1;
+                }
+                if slot.shot_ready(tick) {
+                    slot.arm_shot(tick);
+                    shots += 1;
+                }
+            }
+            // A shot on tick 0 and every cooldown after, to the last tick.
+            assert_eq!(u64::from(shots), tick / crate::shot::SHOT_COOLDOWN_TICKS + 1, "{fps} fps");
+            assert_eq!((tick, shots), (400, 51), "{fps} fps: 2.5 a second over 20 s");
+        }
+        let mut slot = fresh_slot();
+        slot.arm_shot(50_000);
+        assert!(!slot.shot_ready(50_004));
+        assert!(slot.shot_ready(3), "a restarted tick counter: the old schedule is stale");
+    }
+
 }

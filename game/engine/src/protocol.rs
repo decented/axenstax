@@ -2560,7 +2560,7 @@ pub struct ServerAnnouncePacket {
 ///   [`ItemActionOutcomePacket`] appends `bite_after: u16` (an accepted
 ///   cast's wait for the server's bite). Lighting an unlit campfire (a
 ///   stick's friction, flint and steel, the Magnesium Firestarter) is a
-///   `UseBlock`. New `item_actions::ItemNote` codes 19..=25.
+///   `UseBlock`. New `item_actions::ItemNote` codes 19..=26.
 /// - v82 (2026-10-08, C3c-1-fix): a use's
 ///   overflow is the client's, and a refused use is undone. [`UseTag`]
 ///   appends `unfit: u8` (after `tool`): how many of the use's product the
@@ -3996,7 +3996,7 @@ mod tests {
         assert_eq!(bincode::serialize(&rack_view).unwrap(), want_rack, "the rack view's bytes changed: bump the protocol");
 
         // And that is what a StateUpdate carries, after its other fields
-        // (`block_views`: its length, then each view), with only v81's
+        // (`block_views`: its length, then each view), with only v82's
         // `refused_uses` (empty: a u64 length 0) behind it.
         for (v, want) in [(fire, want_fire), (rack_view, want_rack)] {
             let pkt = StateUpdatePacket {

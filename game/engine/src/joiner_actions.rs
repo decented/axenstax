@@ -101,7 +101,9 @@ pub enum Asked {
     /// C3c-2 — shoot the `weapon` of `material` in the request's hotbar slot
     /// (`ItemAction::Shoot`). Unlike every other request, [`Pending::held`]
     /// is what it SPENDS — one of its ammo (`shot::ammo_for`) — so the claim
-    /// is on the ammo; the weapon wears ([`apply_use_wear`]).
+    /// is on the ammo; the weapon wears ([`apply_use_wear`]). C3c-2-fix (L3)
+    /// — it claims one unit of the weapon's wear too
+    /// ([`JoinerActions::can_afford`]).
     Shoot { weapon: crate::protocol::ShotWeapon, material: crate::crafting::ToolMaterial },
     /// C3c-2 — place the cart in hand on the rail at `cell`
     /// (`ItemAction::PlaceCart`), claiming the one cart.
@@ -111,10 +113,12 @@ pub enum Asked {
     /// lighting for the feedback). Claims the stick, or flint and steel's
     /// wear; the Firestarter nothing.
     Light { cell: [i32; 3], lighter: crate::block_use::Lighter },
-    /// C3c-2 — cast the rod in hand (`ItemAction::Cast`): claims nothing.
+    /// C3c-2 — cast the rod in hand (`ItemAction::Cast`): claims nothing
+    /// (C3c-2-fix L4: recorded as non-claiming, and only while the ledger has
+    /// room without ending a claim).
     Cast,
-    /// C3c-2 — reel the line in (`ItemAction::Reel`): claims nothing; the
-    /// rod wears on a catch.
+    /// C3c-2 — reel the line in (`ItemAction::Reel`): claims nothing (as a
+    /// cast); the rod wears on a catch.
     Reel,
 }
 
@@ -173,9 +177,21 @@ struct Entry {
     /// ends once the server acknowledges that input (N4). [`UNTIL_SENT`]
     /// while the request waits in the queue.
     ends_at_input: u64,
-    /// Still claiming its item ([`JoinerActions::can_afford`]).
+    /// Still claiming its item ([`JoinerActions::can_afford`]): not yet
+    /// read by the server (its input not acknowledged). For a request that
+    /// claims no item it only says "in flight" ([`JoinerActions::eat_in_flight`]).
     claims: bool,
     request: Pending,
+}
+
+impl Entry {
+    /// C3c-2-fix (L4) — does this entry hold an item claim right now: still
+    /// unread, and made to use an item ([`claims_an_item`])? A request that
+    /// claims nothing never does, so the eviction picks it first and it never
+    /// fills the ledger with claims.
+    fn claims_now(&self) -> bool {
+        self.claims && claims_an_item(&self.request)
+    }
 }
 
 /// The joiner's outstanding requests. Empty unless joined.
@@ -196,8 +212,13 @@ impl JoinerActions {
     ///
     /// C3b-fix-e (L5) — at [`MAX_PENDING`] one entry is forgotten to make
     /// room, never one whose claim still holds while another will do
-    /// ([`Self::evict_one`]); a caller that would CLAIM an item asks
-    /// [`Self::can_afford`] first, which says no while every entry claims.
+    /// ([`Self::evict_one`]); a caller asks [`Self::can_afford`] first, which
+    /// says no while every entry claims. C3c-2-fix (L4) — a request that
+    /// claims nothing ([`claims_an_item`]: a cast, a reel, a Firestarter
+    /// lighting, a swing) counts as NON-claiming ([`Entry::claims_now`]), so
+    /// the eviction picks it first and it never fills the ledger with claims;
+    /// and it too asks first (`can_afford` says no for it as well while every
+    /// entry claims), so it can't end a queued claim.
     pub fn record(&mut self, request: Pending, next_input_seq: u64) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
         if self.pending.len() >= MAX_PENDING {
@@ -214,16 +235,16 @@ impl JoinerActions {
 
     /// C3b-fix-e (L5) — forget one entry to make room (the ledger is at
     /// [`MAX_PENDING`]), the oldest of the first kind there is:
-    /// 1. one whose claim has ended (`claims == false`: the server has read
-    ///    it; its answer, if still to come, is lost);
-    /// 2. one already sent that claims no item (a swing, a sleep, a shear:
-    ///    only its answer is lost);
-    /// 3. one already sent (not [`UNTIL_SENT`]): its claim ends within a
+    /// 1. one that claims nothing: its claim has ended (the server has read
+    ///    it; its answer, if still to come, is lost), or (C3c-2-fix L4) it
+    ///    never claimed (a swing, a sleep, a shear, a cast: only its answer
+    ///    is lost);
+    /// 2. one already sent (not [`UNTIL_SENT`]): its claim ends within a
     ///    round trip anyway;
-    /// 4. one still queued that claims no item;
-    /// 5. the oldest of all — every entry is queued and claims an item, which
-    ///    only a caller that records without asking can meet (a request that
-    ///    claims is refused first, [`Self::can_afford`]).
+    /// 3. the oldest of all — every entry is queued and claims an item, which
+    ///    only a caller that records without asking can meet (every
+    ///    request that asks is refused first, [`Self::can_afford`]; a swing
+    ///    and a sleep still record without asking).
     ///
     /// So a queued request's claim — which lives until it is sent, however
     /// long a carry-over keeps it waiting — is never ended early by the
@@ -232,12 +253,10 @@ impl JoinerActions {
     /// dropped it).
     fn evict_one(&mut self) {
         let rank = |e: &Entry| -> u8 {
-            match (e.claims, e.ends_at_input == UNTIL_SENT, claims_an_item(&e.request)) {
-                (false, ..) => 1,
-                (true, false, false) => 2,
-                (true, false, true) => 3,
-                (true, true, false) => 4,
-                (true, true, true) => 5,
+            match (e.claims_now(), e.ends_at_input == UNTIL_SENT) {
+                (false, _) => 1,
+                (true, false) => 2,
+                (true, true) => 3,
             }
         };
         let at = (0..self.pending.len()).min_by_key(|&i| (rank(&self.pending[i]), i));
@@ -249,7 +268,7 @@ impl JoinerActions {
     /// Is the ledger full with every entry still claiming
     /// ([`Self::can_afford`]: no room for a new claim without ending one)?
     fn full_of_claims(&self) -> bool {
-        self.pending.len() >= MAX_PENDING && self.pending.iter().all(|e| e.claims)
+        self.pending.len() >= MAX_PENDING && self.pending.iter().all(Entry::claims_now)
     }
 
     /// C2b — the sequence number for a request the server never answers
@@ -335,21 +354,53 @@ impl JoinerActions {
     /// C3b-fix-e (L5) — and, for one that would claim, only while the ledger
     /// has room for it without ending a claim: at [`MAX_PENDING`] with every
     /// entry still claiming, the answer is no, so the use does nothing here,
-    /// exactly as when it can't be afforded.
+    /// exactly as when it can't be afforded. C3c-2-fix (L4) — one that claims
+    /// nothing (a cast, a reel, a Firestarter lighting) too: recorded, it
+    /// would end a queued claim just the same.
+    ///
+    /// C3c-2-fix (L3) — a shot also claims one unit of its weapon's WEAR: it
+    /// goes only while the client's bows (or slingshots) of that kind have
+    /// more uses left than the shots in flight will wear ([`wear_held`]), so
+    /// a bow on its last use fires once, not again for a round trip after it
+    /// breaks.
     pub fn can_afford(&self, inv: &Inventory, ui: &CraftingUi, kind: Asked, held: Option<&Item>) -> bool {
+        if self.full_of_claims() {
+            return false;
+        }
+        if let Some(weapon) = kind.shot_weapon()
+            && wear_held(inv, &weapon) <= self.wear_claimed(&weapon)
+        {
+            return false;
+        }
         let need = uses(kind);
         if need == 0 {
             return true;
         }
         let Some(item) = held else { return false };
-        !self.full_of_claims() && self.can_spend(inv, ui, item, u32::from(need))
+        self.can_spend(inv, ui, item, u32::from(need))
     }
 
     /// C2b — may the client spend `n` of `item` itself (a Q-drop, a craft)?
     /// Only if what it holds afterwards (`inv`, plus `ui`'s grid and cursor)
     /// still covers every claim of the requests in flight on that item.
+    /// C3c-2-fix (L3) — for a weapon, its wear too: the uses left after `n`
+    /// of it go must still cover the shots in flight.
     pub fn can_spend(&self, inv: &Inventory, ui: &CraftingUi, item: &Item, n: u32) -> bool {
-        count_held(inv, ui, item) >= self.claimed(item).saturating_add(n)
+        if count_held(inv, ui, item) < self.claimed(item).saturating_add(n) {
+            return false;
+        }
+        let worn = self.wear_claimed(item);
+        worn == 0 || wear_held(inv, item).saturating_sub(n.saturating_mul(uses_left(item))) >= worn
+    }
+
+    /// C3c-2-fix (L3) — the units of wear the shots still claiming will take
+    /// from weapons of `weapon`'s kind (one each).
+    fn wear_claimed(&self, weapon: &Item) -> u32 {
+        self.pending
+            .iter()
+            .filter(|e| e.claims)
+            .filter(|e| e.request.kind.shot_weapon().is_some_and(|w| same_item(&w, weapon)))
+            .count() as u32
     }
 
     /// C2b — may the result-slot click craft? It consumes one from every
@@ -430,6 +481,26 @@ pub fn uses(kind: Asked) -> u8 {
 /// one, and was made with one in hand)?
 fn claims_an_item(request: &Pending) -> bool {
     uses(request.kind) > 0 && request.held.is_some()
+}
+
+/// C3c-2-fix (L3) — the uses a tool has left before it breaks (a tool at 0
+/// still has the one that breaks it); 0 for anything else.
+fn uses_left(item: &Item) -> u32 {
+    match item {
+        Item::Tool(t) => u32::from(t.durability).max(1),
+        _ => 0,
+    }
+}
+
+/// C3c-2-fix (L3) — the uses left in every tool of `tool`'s kind in the
+/// client's 36 slots: where a shot's wear lands ([`where_now`], on both
+/// copies; a bow on the cursor or in the grid can't be worn).
+fn wear_held(inv: &Inventory, tool: &Item) -> u32 {
+    inv.slots_iter()
+        .flatten()
+        .filter(|s| same_item(&s.item, tool))
+        .map(|s| uses_left(&s.item).saturating_mul(u32::from(s.count)))
+        .sum()
 }
 
 /// Is `a` the item `b` was, for an outcome's purposes? A tool is the same
@@ -1430,11 +1501,15 @@ mod tests {
         assert!(a.eat_in_flight(), "the Eat still claims");
         assert!(a.can_spend(&inv, &ui, &bread, 1), "one loaf is unclaimed");
         assert!(!a.can_spend(&inv, &ui, &bread, 2), "a Q-drop of the claimed loaf is refused");
-        assert!(
-            !a.can_afford(&inv, &ui, Asked::Interact(InteractKind::Feed), Some(&bread)),
-            "full, and every entry still claims: a new claiming request is refused (it would evict a claim)"
-        );
+        // C3c-2-fix (L4) — a swing claims nothing, so it is recorded as
+        // non-claiming: the ledger isn't full of claims, and a new claim may
+        // go — it evicts a swing, never the queued Eat.
+        assert!(a.can_afford(&inv, &ui, Asked::Interact(InteractKind::Feed), Some(&bread)), "the swings claim nothing");
         assert!(a.can_afford(&inv, &ui, Asked::Swing, Some(&sword())), "one that claims nothing may still go");
+        a.record(Pending { kind: Asked::Interact(InteractKind::Feed), mob: Some(MobType::Pig), hotbar_slot: 0, held: Some(bread.clone()) }, 7);
+        assert_eq!(a.len(), MAX_PENDING);
+        assert!(a.eat_in_flight(), "the Eat still claims: a swing went instead");
+        assert!(!a.can_spend(&inv, &ui, &bread, 1), "both loaves are claimed now");
         // The queue drains: the Eat goes out ahead of input 8, and the
         // server reads every input up to it.
         a.rebase(eat, 8);
@@ -1505,5 +1580,84 @@ mod tests {
         assert!(inv.slot(0).is_none());
         assert_eq!(take_owed(&mut inv, 0, &Item::Plan(b), 1), 0, "none left");
         assert!(same_item(&placeholder(ma, true), &Item::Plan(a)));
+    }
+
+    /// C3c-2-fix (L4) — every recorder asks first. With the ledger full of
+    /// queued item claims, a cast, a reel or a Firestarter lighting (which
+    /// claim nothing) is refused locally like a claiming request: recorded,
+    /// it would evict a queued claim (and a Q-drop of that item could then
+    /// pass). A request that claims nothing is recorded as non-claiming, so
+    /// a claim made after it evicts IT first.
+    #[test]
+    fn a_cast_reel_or_firestarter_never_evicts_a_queued_claim() {
+        let bread = Item::Material(MaterialId::Bread);
+        let inv = inv_with(0, ItemStack::new_material(MaterialId::Bread, 64));
+        let ui = CraftingUi::new();
+        let rod = Item::Tool(Tool::new(ToolType::FishingRod, ToolMaterial::Wood));
+        let firestarter = Item::Material(MaterialId::MagnesiumFirestarter);
+        let eat = || Pending { kind: Asked::Eat, mob: None, hotbar_slot: 0, held: Some(bread.clone()) };
+        let mut a = JoinerActions::default();
+        for _ in 0..MAX_PENDING {
+            a.record(eat(), UNTIL_SENT);
+        }
+        assert!(!a.can_afford(&inv, &ui, Asked::Cast, Some(&rod)), "a cast would evict a queued Eat");
+        assert!(!a.can_afford(&inv, &ui, Asked::Reel, Some(&rod)));
+        let light = Asked::Light { cell: [1, 2, 3], lighter: crate::block_use::Lighter::Firestarter };
+        assert!(!a.can_afford(&inv, &ui, light, Some(&firestarter)));
+        // A cast recorded first, then 63 Eats: one more Eat may go, and the
+        // cast is what it evicts.
+        let mut b = JoinerActions::default();
+        let cast = b.record(Pending { kind: Asked::Cast, mob: None, hotbar_slot: 1, held: Some(rod.clone()) }, UNTIL_SENT);
+        let mut eats = Vec::new();
+        for _ in 0..MAX_PENDING - 1 {
+            eats.push(b.record(eat(), UNTIL_SENT));
+        }
+        assert!(b.can_afford(&inv, &ui, Asked::Eat, Some(&bread)), "the cast claims nothing");
+        eats.push(b.record(eat(), UNTIL_SENT));
+        assert_eq!(b.len(), MAX_PENDING);
+        assert!(!b.can_spend(&inv, &ui, &bread, 1), "all 64 Eats still claim");
+        b.release(cast);
+        assert_eq!(b.len(), MAX_PENDING, "the cast was the one evicted");
+    }
+
+    /// C3c-2-fix (L3) — a shot claims one unit of its weapon's WEAR as well as
+    /// its arrow: a bow on its last use can't fire a second shot inside the
+    /// round trip (the first breaks it), nor be dropped while its shot is in
+    /// flight; a bow with wear to spare fires on as before. The claim ends
+    /// with the acknowledgement, as every claim does.
+    #[test]
+    fn a_shot_claims_its_weapons_wear_so_a_bow_on_its_last_use_fires_once() {
+        use crate::protocol::ShotWeapon;
+        let ui = CraftingUi::new();
+        let arrow = Item::Material(MaterialId::Arrow);
+        let shoot = Asked::Shoot { weapon: ShotWeapon::Bow, material: ToolMaterial::Wood };
+        let shot = || Pending { kind: shoot, mob: None, hotbar_slot: 0, held: Some(arrow.clone()) };
+        let mut last = Tool::new(ToolType::Bow, ToolMaterial::Wood);
+        last.durability = 1;
+        let mut inv = inv_with(0, ItemStack::new_tool(last));
+        inv.set_slot(9, Some(ItemStack::new_material(MaterialId::Arrow, 10)));
+        let mut a = JoinerActions::default();
+        assert!(a.can_afford(&inv, &ui, shoot, Some(&arrow)));
+        a.record(shot(), 5);
+        assert!(!a.can_afford(&inv, &ui, shoot, Some(&arrow)), "its last use is claimed");
+        assert!(!a.can_spend(&inv, &ui, &Item::Tool(last), 1), "nor can it be dropped meanwhile");
+        assert!(a.can_spend(&inv, &ui, &arrow, 9), "the other nine arrows are free");
+        a.acknowledged(5);
+        assert!(a.can_afford(&inv, &ui, shoot, Some(&arrow)), "read: free again");
+        // A fresh bow: shots in flight up to its uses left.
+        let fresh = Tool::new(ToolType::Bow, ToolMaterial::Wood);
+        let mut inv = inv_with(0, ItemStack::new_tool(fresh));
+        inv.set_slot(9, Some(ItemStack::new_material(MaterialId::Arrow, 10)));
+        let mut b = JoinerActions::default();
+        for _ in 0..5 {
+            assert!(b.can_afford(&inv, &ui, shoot, Some(&arrow)), "wear to spare");
+            b.record(shot(), 5);
+        }
+        // A second bow of the kind carries the dropped one's claims.
+        let mut two = inv.clone();
+        two.set_slot(1, Some(ItemStack::new_tool(last)));
+        let mut c = JoinerActions::default();
+        c.record(shot(), 5);
+        assert!(c.can_spend(&two, &ui, &Item::Tool(last), 1), "the fresh bow still covers the shot");
     }
 }

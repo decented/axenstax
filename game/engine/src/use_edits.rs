@@ -404,9 +404,12 @@ pub fn explains(kind: UseKind, new: BlockId, meta: u8) -> bool {
 
 /// L-1 — could the client's rule make `new` with `used`, from SOME world
 /// (the one the client saw)? False only for a combination the rule never
-/// makes. A no-cost kind (an Eraser, a tap, a hoe, a door's top half) is
-/// possible whenever it [`explains`] the edit.
-fn possible(kind: UseKind, used: Option<&Item>, new: BlockId, meta: u8) -> bool {
+/// makes. C3c-2-fix (F-L3) — a no-cost kind (an Eraser, a tap, a hoe, a
+/// door's top half) checks nothing it used, so it is possible only where it
+/// [`explains`] the edit AND the server's `old` is the rule's input or its
+/// output (another player got there first: [`no_cost_drift`]); on any other
+/// block it is impossible, and mirrors no product.
+fn possible(kind: UseKind, used: Option<&Item>, old: BlockId, new: BlockId, meta: u8) -> bool {
     let material = |m: MaterialId| used == Some(&Item::Material(m));
     match kind {
         UseKind::BucketFill => material(MaterialId::Bucket) && new == block::AIR,
@@ -420,12 +423,32 @@ fn possible(kind: UseKind, used: Option<&Item>, new: BlockId, meta: u8) -> bool 
             (material(MaterialId::Bonemeal) || material(MaterialId::Fertiliser)) && is_grown_stage(new)
         }
         UseKind::Salt => material(MaterialId::Salt) && new == block::SALT_PATH,
-        UseKind::Erase | UseKind::TapRubber | UseKind::Till | UseKind::DoorUpper => explains(kind, new, meta),
+        UseKind::Erase | UseKind::TapRubber | UseKind::Till | UseKind::DoorUpper => {
+            explains(kind, new, meta) && no_cost_drift(kind, old)
+        }
         // C3c-3a — only a developed Plan hangs (a latent one lays flat).
         UseKind::HangPrint => {
             matches!(used, Some(Item::Plan(p)) if p.develop_state == crate::plan::DevelopState::Developed)
                 && new == block::CYANOTYPE_PRINT
         }
+    }
+}
+
+/// C3c-2-fix (F-L3) — is the server's `old` the input or the output of a
+/// no-cost use of `kind`: the block the client's rule works on (blueprint
+/// paper, a tappable log, dirt or grass, AIR for a door's top half), or the
+/// one it leaves (another player erased, tapped, tilled or hung a door there
+/// first)? Anything else can't be drift. (AIR where another player broke the
+/// block first is not counted for a tap or a hoe: the server keeps no record
+/// of who broke a cell. Such a race is impossible here — log-only, its edit
+/// still applies — and mirrors no rubber.)
+fn no_cost_drift(kind: UseKind, old: BlockId) -> bool {
+    match kind {
+        UseKind::Erase => erases(old) || old == block::AIR,
+        UseKind::TapRubber => crate::rubber::is_tappable(old) || old == block::RUBBER_LOG_TAPPED,
+        UseKind::Till => tills(old) || old == block::TILLED_SOIL,
+        UseKind::DoorUpper => old == block::AIR || old == block::OAK_DOOR,
+        _ => true,
     }
 }
 
@@ -494,7 +517,7 @@ pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Befor
             new == block::OAK_DOOR
                 && old == block::AIR
                 && crate::block_shape::door_is_top(bc.meta)
-                && below() == block::OAK_DOOR
+                && below_holds_a_door_bottom(world, bc)
         }
         UseKind::HangPrint => {
             matches!(used, Some(Item::Plan(p)) if p.develop_state == crate::plan::DevelopState::Developed)
@@ -507,7 +530,7 @@ pub fn judge(kind: UseKind, used: Option<&Item>, bc: &BlockChange, before: Befor
         Verdict::Legal
     } else if !explains(kind, new, bc.meta) {
         Verdict::Unexplained
-    } else if possible(kind, used, new, bc.meta) {
+    } else if possible(kind, used, old, new, bc.meta) {
         Verdict::Drift
     } else {
         Verdict::Impossible
@@ -657,6 +680,20 @@ fn wears_with(kind: UseKind, tool: &Tool) -> bool {
 /// (5 s) so the undo always has it.
 pub const USE_RECORD_HOLD_INPUTS: u64 = 100;
 
+// C3c-1-fix verify F-L6 — the hold must outlast the worst wait a notice can
+// have in the client's outbox: a full block-delta queue and a full chunk
+// window drained at the per-tick budget (about 53 ticks today), with half
+// again for the budget's overheads (about 39 KiB of block deltas a tick in
+// practice: about 66 ticks). A later bound change that would let a record
+// expire before its notice fails to build here.
+const _: () = assert!(
+    ((crate::state_outbox::CLIENT_QUEUE_MAX_BYTES + crate::chunk_push::CHUNK_WINDOW_BYTES)
+        / crate::state_outbox::CLIENT_TICK_BUDGET_BYTES) as u64
+        * 3
+        / 2
+        < USE_RECORD_HOLD_INPUTS
+);
+
 /// Most use records a joined client keeps (the oldest goes first). An honest
 /// client makes a use at most every 8 ticks: about 13 within the hold.
 pub const MAX_USE_RECORDS: usize = 64;
@@ -726,7 +763,8 @@ impl SentUses {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Undone {
     /// Units of the landed product the window no longer held (spent, moved
-    /// away, dropped): a shortfall, logged.
+    /// away, dropped): a shortfall, logged. C3c-2-fix (F-M1) — with any, the
+    /// cost is not given back.
     pub short: u8,
     /// Units of the cost that didn't fit back: lost on the client (the
     /// server's copy, which never applied the use, still holds them).
@@ -739,17 +777,56 @@ pub struct Undone {
 /// also searches the grid and cursor), then give back the cost: into its own
 /// slot when that is empty or holds a stack it joins, else wherever
 /// `add_item` puts it. Tool wear is not undone.
+///
+/// C3c-2-fix (F-M1) — the cost comes back only when the product came back
+/// in full (`short == 0`). A product already gone (emptied, dropped,
+/// deposited) was spent by a later act the server may have accepted — an
+/// empty of the filled bucket gives its bucket back on its own — so giving
+/// the cost back too would mint one (a bucket a cycle, on a slow link). The
+/// shortfall is logged and nothing is given: the client may end BELOW the
+/// server's copy (a believed deposit or a Q-drop already made the product
+/// real), never above it.
 pub fn undo(inv: &mut Inventory, ui: &mut crate::craft_ui::CraftingUi, record: &UseRecord) -> Undone {
     let mut undone = Undone::default();
     if let Some(landed) = &record.landed {
         let taken = crate::joiner_actions::take_owed_held(inv, ui, record.slot, &landed.item, landed.count);
         undone.short = landed.count.saturating_sub(taken);
     }
-    if let Some(cost) = &record.cost {
+    if let Some(cost) = &record.cost
+        && undone.short == 0
+    {
         let one = ItemStack { item: cost.clone(), count: 1 };
         undone.lost = give_back(inv, record.slot, one);
     }
     undone
+}
+
+/// C3c-2-fix (F-M1) — undo a frame's refusal notices `refused` (in the
+/// server's order: oldest first) from the client's own records `uses`,
+/// NEWEST first: chained uses whose notices land together (a fill, then an
+/// empty of the bucket it filled, both refused) are undone exactly in that
+/// order, the empty's product taken back and its cost returned before the
+/// fill's product is looked for. Each notice with what undoing it did, in
+/// the order undone (`None`: no record of it — nothing to undo).
+pub fn undo_refused(
+    uses: &mut SentUses,
+    inv: &mut Inventory,
+    ui: &mut crate::craft_ui::CraftingUi,
+    refused: &[crate::protocol::RefusedUse],
+) -> Vec<(crate::protocol::RefusedUse, Option<Undone>)> {
+    refused
+        .iter()
+        .rev()
+        .map(|r| (*r, uses.take([r.x, r.y, r.z], r.kind).map(|rec| undo(inv, ui, &rec))))
+        .collect()
+}
+
+/// C3c-2-fix (F-L2) — does the cell below `bc` hold a door's BOTTOM half?
+/// A door's top half stands on a bottom half only, never on another top half
+/// (a column of free door tops).
+pub fn below_holds_a_door_bottom(world: &World, bc: &BlockChange) -> bool {
+    world.get_block(bc.x, bc.y - 1, bc.z) == block::OAK_DOOR
+        && !crate::block_shape::door_is_top(world.meta_at(bc.x, bc.y - 1, bc.z))
 }
 
 /// Put `stack` back in `slot` if it is empty or holds a stack it joins with
@@ -966,6 +1043,13 @@ mod tests {
         let bottom_meta = BlockChange { meta: 0, ..top.clone() };
         assert!(!judge(UseKind::DoorUpper, None, &bottom_meta, before(block::AIR), &w).legal());
         assert!(crate::block_shape::door_is_top(door_top_meta(crate::meta::with_facing(0, crate::meta::Facing::East))));
+        // C3c-2-fix (F-L2) — over a door's TOP half it is not legal: a top
+        // half stands on a bottom half only (no free door tops up a column).
+        w.set_meta((2, 70, 2), door_top_meta(0));
+        assert!(!judge(UseKind::DoorUpper, None, &top, before(block::AIR), &w).legal());
+        assert!(!below_holds_a_door_bottom(&w, &top));
+        w.set_meta((2, 70, 2), 0);
+        assert!(below_holds_a_door_bottom(&w, &top));
     }
 
     // ─── C3c-1-fix ─────────────────────────────────────────────────────────
@@ -1006,6 +1090,36 @@ mod tests {
         let tap = judge(UseKind::TapRubber, None, &bc(0, 70, 0, block::RUBBER_LOG_TAPPED), before(block::RUBBER_LOG), &cooling);
         assert_eq!(tap.verdict, Verdict::Drift);
         assert_eq!(tap.product, Some(ItemStack::new_material(MaterialId::Rubber, 1)));
+    }
+
+    /// C3c-2-fix (F-L3) — a no-cost use (an Eraser, a tap, a hoe, a door's
+    /// top half) is drift only when the server's `old` is the rule's input or
+    /// its output (another player got there first); on anything else it is
+    /// impossible: no product, whatever the tag says.
+    #[test]
+    fn a_no_cost_use_on_an_unrelated_block_is_impossible() {
+        let w = World::new();
+        let verdict = |kind, new, meta, old| judge(kind, None, &BlockChange { x: 0, y: 70, z: 0, new_block: new, meta }, before(old), &w);
+        // The Eraser: input blueprint paper, output AIR.
+        let on_stone = verdict(UseKind::Erase, block::AIR, 0, block::STONE);
+        assert_eq!((on_stone.verdict, on_stone.product), (Verdict::Impossible, None), "an Eraser on stone yields no sheet");
+        let erased_first = verdict(UseKind::Erase, block::AIR, 0, block::AIR);
+        assert_eq!(erased_first.verdict, Verdict::Drift, "another player erased it first");
+        // The tap: input a tappable log, output a tapped one.
+        let on_air = verdict(UseKind::TapRubber, block::RUBBER_LOG_TAPPED, 0, block::AIR);
+        assert_eq!((on_air.verdict, on_air.product), (Verdict::Impossible, None), "a tap on AIR yields no rubber");
+        let on_oak = verdict(UseKind::TapRubber, block::RUBBER_LOG_TAPPED, 0, block::OAK_LOG);
+        assert_eq!(on_oak.verdict, Verdict::Impossible);
+        let tapped_first = verdict(UseKind::TapRubber, block::RUBBER_LOG_TAPPED, 0, block::RUBBER_LOG_TAPPED);
+        assert_eq!(tapped_first.verdict, Verdict::Drift, "another player tapped it first");
+        assert_eq!(tapped_first.product, Some(ItemStack::new_material(MaterialId::Rubber, 1)));
+        // The hoe: input dirt or grass, output tilled soil.
+        assert_eq!(verdict(UseKind::Till, block::TILLED_SOIL, 0, block::STONE).verdict, Verdict::Impossible);
+        assert_eq!(verdict(UseKind::Till, block::TILLED_SOIL, 0, block::TILLED_SOIL).verdict, Verdict::Drift);
+        // A door's top half: input AIR, output a door.
+        let top = door_top_meta(0);
+        assert_eq!(verdict(UseKind::DoorUpper, block::OAK_DOOR, top, block::STONE).verdict, Verdict::Impossible);
+        assert_eq!(verdict(UseKind::DoorUpper, block::OAK_DOOR, top, block::OAK_DOOR).verdict, Verdict::Drift);
     }
 
     /// L-1 — a crop accelerator whose server crop already stands at or past
@@ -1163,11 +1277,16 @@ mod tests {
         for k in 0..36 {
             assert_eq!(inv.slot(k), before_use.slot(k), "slot {k}");
         }
-        // The lava bucket was emptied before the refusal came: a shortfall.
-        // The cost still comes back.
+        // The lava bucket was emptied before the refusal came (the empty gave
+        // its bucket back): a shortfall. C3c-2-fix (F-M1) — the cost does NOT
+        // come back: the bucket it bought is already spent, so giving it
+        // back would mint one (the client may end below the server's copy,
+        // never above it).
         let mut gone = Inventory::new();
+        gone.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         assert_eq!(undo(&mut gone, &mut ui, &rec), Undone { short: 1, lost: 0 });
-        assert_eq!(gone.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
+        assert_eq!(gone.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "one bucket, not two");
+        assert!(gone.slots_iter().skip(1).all(|s| s.is_none()));
         // A tap's rubber is taken back, the kept bucket untouched.
         let tap = UseRecord {
             kind: UseKind::TapRubber.to_wire(),
@@ -1223,5 +1342,50 @@ mod tests {
         let s = settle(&mut copy, UseKind::HangPrint, &t, used.as_ref(), &j);
         assert_eq!(s.miss, Some(UseMiss::NothingToTake), "no second one to hang");
         assert_eq!(t.unfit, 0, "a hang makes nothing, so nothing is unfit");
+    }
+
+    /// C3c-2-fix (F-M1) — a frame's refusal notices are undone NEWEST first,
+    /// which is exact for chained uses: a fill then an empty of the bucket it
+    /// filled, both refused, put the client back to its one empty bucket.
+    /// (Oldest first, the fill's undo was short and still gave its bucket
+    /// back, and the empty's undo then turned that bucket into a filled one:
+    /// a bucket and a water bucket from one bucket.)
+    #[test]
+    fn a_frames_notices_are_undone_newest_first() {
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let mut inv = Inventory::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        let mut uses = SentUses::default();
+        let (pond, edge) = ([5, 70, 5], [6, 70, 5]);
+        // The fill: the bucket spent, the water bucket landed in slot 0.
+        assert!(inv.consume_one_material(0, MaterialId::Bucket));
+        assert!(inv.add_item(ItemStack::new_material(MaterialId::WaterBucket, 1)).is_none());
+        uses.record(UseRecord {
+            cell: pond,
+            kind: UseKind::BucketFill.to_wire(),
+            slot: 0,
+            cost: Some(mat(MaterialId::Bucket)),
+            landed: Some(ItemStack::new_material(MaterialId::WaterBucket, 1)),
+            made_at: 1,
+        });
+        // The empty: the water bucket spent, the bucket back.
+        assert!(inv.consume_one_material(0, MaterialId::WaterBucket));
+        assert!(inv.add_item(ItemStack::new_material(MaterialId::Bucket, 1)).is_none());
+        uses.record(UseRecord {
+            cell: edge,
+            kind: UseKind::BucketEmpty.to_wire(),
+            slot: 0,
+            cost: Some(mat(MaterialId::WaterBucket)),
+            landed: Some(ItemStack::new_material(MaterialId::Bucket, 1)),
+            made_at: 1,
+        });
+        let notice = |c: [i32; 3], k: UseKind| crate::protocol::RefusedUse { x: c[0], y: c[1], z: c[2], kind: k.to_wire(), note: 0 };
+        let undone = undo_refused(&mut uses, &mut inv, &mut ui, &[notice(pond, UseKind::BucketFill), notice(edge, UseKind::BucketEmpty)]);
+        assert_eq!(undone.len(), 2);
+        assert_eq!(undone[0].0.kind, UseKind::BucketEmpty.to_wire(), "the newest first");
+        assert!(undone.iter().all(|(_, u)| *u == Some(Undone::default())), "{undone:?}");
+        assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
+        assert!(inv.slots_iter().skip(1).all(|s| s.is_none()), "one bucket and nothing else");
+        assert_eq!(uses.len(), 0);
     }
 }
