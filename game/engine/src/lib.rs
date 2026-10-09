@@ -170,6 +170,10 @@ mod online_join;
 // Online play by contact — the phone tap, the socket and the router, off-loop.
 #[cfg(not(target_arch = "wasm32"))]
 mod online_prep;
+// Bounded handover protocol core. Native only; gameplay/UI integration is gated
+// separately and these utilities neither publish nor start a host on their own.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod handover;
 mod world_room;
 #[cfg(not(target_arch = "wasm32"))]
 mod kithmoot_keeper;

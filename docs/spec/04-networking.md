@@ -5043,3 +5043,78 @@ run. An aborted write receives two bounded retries (250 ms then 1 s), clearing
 its dirty record only on successful completion; permanent failure logs that
 only the in-memory body remains. It adds no network traffic or cookies and
 makes no unconditional durability claim.
+
+### World handover protocol core (native, dormant milestone)
+
+The native `handover` library core defines a bounded checkpoint-transfer protocol;
+it has no gameplay packet allocation, lobby control, automatic publication or
+host-activation hook. Protocol87 remains unchanged by this milestone. Complete
+live snapshot capture, consent, personal progression/ownership conversion and
+recipient role restoration are required before the handover feature can open.
+A joined render mirror is never a checkpoint source. Existing unsupported or
+unknown personal state cannot be inferred empty or donated to recipient slot0.
+
+The canonical root context is SHA256 of length-prefixed domain
+`AxeNStax/handover/root-context/v1`, invite version2, runtime32, persona32,
+expiry u64 and sorted/deduplicated decoded relay URLs (u32 counts/lengths,
+big-endian). Validate a curve point and canonical npub, at most8 input relays,
+each at most2048 UTF8 bytes and16384 aggregate, wss without credentials/fragment.
+Cosmetic world names do not affect authority. Standard HKDF-SHA256 derives a
+bearer-specific NIP44 recipient with distinct root/hop labels and bounded valid
+secp scalar retry; no private runtime key is copied. Retired capability identity
+also binds the root recipient public key, since context alone excludes bearer.
+
+Application stored kind1099 carries a runtime-signed NIP44v2 encrypted setup
+envelope. This is an application choice, not external registration/reservation.
+Only one opaque recipient p tag is public; no persona, world, manifest, endpoint
+or bearer tags. Runtime/time/cipher-size/route correlation remains observable.
+Exact author, tags, id/signature and bounds precede decryption. Fixed ordered
+binary certificate bytes are Base64 inside a strict versioned JSON envelope;
+Ready acceptance and both persona attestations are bounded signed proofs.
+Invitation runtime/prefix supplies delegation authority; existing attestation
+allowed-kinds fields are not claimed to grant1099. Proofs bind the exact manifest,
+transfer nonce, source/recipient, lineage, generation, epoch and expiry. At most
+four committed hops are allowed; hand-back is a new epoch, not reuse of old
+routing state. Conflicts fail closed. Restored unsigned prefix digests are only
+rollback context; fresh crypto-verified root-to-current reconstruction is needed
+for successor authority. Persisted prefix advancement cannot remove known entries
+or clear conflict state. Fresh relay withholding cannot prove latest authority
+or exclusive single-writer operation.
+
+Prepared is inert and never routable/activating. Its matching publication OK and
+independent stored readback precede terminal source retirement. Retirement stores
+exact final Committed signed bytes plus manifest/phase/epoch/capability bindings,
+with file fsync, rename and parent-directory fsync, before publication power is
+returned. A retirement failure quarantines the source until resolved; after
+durable retirement it never resumes the old authority. Receiver durable Ready
+receipt precedes Prepared receipt; durable Activated receipt follows valid
+Committed stored readback and precedes gameplay admission. Duplicate Commit is
+idempotent and late Abort cannot delete an activated import. Records live outside
+world/autosave restoration, key by transfer, and bind retired SOURCE epoch to
+certificate DESTINATION epoch minus one and exact predecessor/runtime. An actual
+verified later hand-back can create a new authority; its later retirement must
+still close it. Corrupt/unreadable markers fail closed. Retirement/activation are
+not a distributed lock or crash-backup guarantee.
+
+Bounds are plaintext16KiB, ciphertext21936 characters, event24KiB, relay frame
+32KiB before JSON parsing; each proof4KiB. A separate one-shot subscription has
+no recent-since filter and shares a25s absolute deadline,128 candidates,16 per
+relay,8 original relays,4 hops and4MiB received bytes across phases/hops. Invalid
+frames consume the budget. Publication requires matching OK and exact independent
+stored readback, not a queued send. These APIs are dormant unless explicitly
+called; ordinary rendezvous subscriptions are untouched.
+
+Manifest limits are2MiB encoded and8MiB resident member allocations,65536 members,
+240-byte paths,4096 participants,64KiB per participant member and1024 exhibit
+images of at most8MiB each. Only declared regular world metadata/data, numeric
+chunk paths, canonical npub sidecars/companions and flat exhibit paths are allowed;
+missing required world members, duplicates, traversal, unsupported schema or
+absent participant agreement refuse. Full archive decoding/extraction and agreement
+verification belong to the gated snapshot adapter. Transfer is at most128MiB
+compressed/512MiB decompressed,16KiB direct chunks with at most four unacknowledged
+chunks,300s absolute/15s progress deadlines, exact ordered offsets and final stream
+hash. Partial write failure poisons the receiver; conflicting/expired duplicates
+refuse. No archive data goes through relays. Markers cap64 records per kind and
+256 directory entries; capacity exhaustion preserves prior records and fails
+closed. Retired-capability checks precede contact shortcuts, including an expired
+old link, because legacy contact admission otherwise ignores bearer expiry.
