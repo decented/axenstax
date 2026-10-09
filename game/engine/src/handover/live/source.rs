@@ -4,7 +4,7 @@
 //! releases the freeze and the original world is exactly as it was.
 //! Prepared/Commit/retirement are later boundaries, not reachable here.
 use super::eligibility::{self, Refusal, Seat};
-use super::wire::{Frame, PART_LIMIT, acceptance_content};
+use super::wire::{Frame, PART_LIMIT, acceptance_content, source_agreement_content};
 use crate::handover::{
     Id,
     certificate::Core,
@@ -16,7 +16,7 @@ use crate::handover::{
     stream::{CHUNK_LIMIT, FLIGHT_LIMIT, Sender},
 };
 use crate::hosted_server::HostedServer;
-use nostr::{Event, JsonUtil, Keys, PublicKey, Timestamp, ToBech32};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Timestamp, ToBech32};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -37,7 +37,26 @@ pub struct SourceConfig {
     pub scratch: PathBuf,
     /// Certificate lifetime, clipped to the invitation's expiry.
     pub validity: u64,
+    /// The world's own folder, whose `joiners/` the session reads itself at
+    /// every boundary (`None`: a world never saved holds no records).
+    pub world_dir: Option<PathBuf>,
 }
+
+/// What the caller re-reads from the live game at EVERY boundary (host
+/// action, consent/freeze, frozen capture), never the values captured when
+/// the host chose: a sign-in change or a second local player since then
+/// refuses before anything irreversible.
+#[derive(Clone, Copy, Debug)]
+pub struct Live {
+    pub signed_in: Option<[u8; 32]>,
+    pub local_seats: usize,
+}
+
+/// How long the recipient may take to answer the proposal (the world is
+/// not frozen yet) and, once frozen, how long the transfer may go without
+/// any message from the recipient before the source gives up and resumes.
+pub const CONSENT_SECS: u64 = 300;
+pub const STALL_SECS: u64 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceStage {
@@ -50,11 +69,12 @@ pub enum SourceStage {
     Aborted(&'static str),
 }
 
-/// What the frozen caller supplies: the sanitised transfer copies and the
-/// source's own records (`capture::local0_*`).
+/// What the frozen caller supplies: the sanitised metadata copy, the RAW
+/// save built from the frozen real seats, carts and kept mobs (the session
+/// neutralises it itself), and the source's own records (`capture::local0_*`).
 pub struct Capture<'a> {
     pub meta: &'a crate::save::WorldMeta,
-    pub save: &'a crate::save::WorldSave,
+    pub save: crate::save::WorldSave,
     pub world: &'a crate::world::World,
     pub disk_chunks: Option<&'a std::path::Path>,
     pub exhibit_dir: Option<&'a std::path::Path>,
@@ -76,6 +96,9 @@ pub struct SourceSession {
     file: Option<std::fs::File>,
     sender: Option<Sender>,
     ready: Option<Event>,
+    /// Shared with the bound link: dropping the session releases it.
+    _lease: std::sync::Arc<()>,
+    last_heard: u64,
 }
 
 fn random_id() -> Id {
@@ -89,26 +112,14 @@ fn npub(key: [u8; 32]) -> String {
 
 impl SourceSession {
     /// The host action: refusals first, then bind the exact seat and propose.
-    pub fn begin(
-        hs: &mut HostedServer,
-        action: HostAction,
-        cfg: SourceConfig,
-        signed_in: Option<[u8; 32]>,
-        local_seats: usize,
-        saved: &[[u8; 32]],
-    ) -> Result<Self, Refusal> {
-        eligibility::local_seats(local_seats)?;
-        eligibility::source_identity(action.source_key, signed_in)?;
-        if cfg.authority.runtime() != cfg.runtime.public_key().to_bytes() {
-            return Err(Refusal("This machine doesn't hold this world's invitation."));
-        }
-        eligibility::seats(&hs.server, action.seat)?;
-        eligibility::saved_records(saved, action.source_key, action.seat.key)?;
+    pub fn begin(hs: &mut HostedServer, action: HostAction, cfg: SourceConfig, live: Live, now: u64) -> Result<Self, Refusal> {
+        check(hs, &action, &cfg, live)?;
+        let transfer = random_id();
         let s = action.seat;
-        hs.handover_bind(s.slot, s.generation, s.key).map_err(Refusal)?;
-        let session = Self {
+        let lease = hs.handover_bind(s.slot, s.generation, s.key, transfer).map_err(Refusal)?;
+        let mut session = Self {
             stage: SourceStage::Proposed,
-            transfer: random_id(),
+            transfer,
             challenge: random_id(),
             recipient_runtime: None,
             recipient_challenge: [0; 16],
@@ -118,6 +129,8 @@ impl SourceSession {
             file: None,
             sender: None,
             ready: None,
+            _lease: lease,
+            last_heard: now,
             action,
             cfg,
         };
@@ -132,12 +145,16 @@ impl SourceSession {
             root_relays: session.cfg.root.relays().to_vec(),
             lineage: session.cfg.lineage,
         };
-        let mut session = session;
         if let Err(r) = session.send(hs, &propose) {
             hs.handover_release();
             return Err(r);
         }
         Ok(session)
+    }
+
+    /// The recipient's npub, for the host's status line.
+    pub fn recipient_npub(&self) -> String {
+        npub(self.action.seat.key)
     }
 
     pub fn stage(&self) -> SourceStage {
@@ -179,8 +196,10 @@ impl SourceSession {
 
     /// Drive control: read the bound seat's frames, keep the transfer
     /// window full. Any refusal aborts (pre-retirement) and is returned.
-    pub fn pump(&mut self, hs: &mut HostedServer, now: u64) -> Result<(), Refusal> {
-        if matches!(self.stage, SourceStage::Aborted(_) | SourceStage::ReadyVerified) {
+    /// After Ready the source is still frozen and still listening: a
+    /// recipient Abort releases it.
+    pub fn pump(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
+        if matches!(self.stage, SourceStage::Aborted(_)) {
             return Ok(());
         }
         let frames = match hs.handover_take_frames() {
@@ -192,9 +211,19 @@ impl SourceSession {
                 Ok(f) if f.transfer() == self.transfer => f,
                 _ => return Err(self.fail(hs, Refusal("The recipient sent a malformed handover message."))),
             };
-            if let Err(r) = self.on_frame(hs, frame, now) {
+            self.last_heard = now;
+            if let Err(r) = self.on_frame(hs, live, frame, now) {
                 return Err(self.fail(hs, r));
             }
+        }
+        let quiet = now.saturating_sub(self.last_heard);
+        let stalled = match self.stage {
+            SourceStage::Proposed => quiet > CONSENT_SECS,
+            SourceStage::Streaming => quiet > STALL_SECS,
+            _ => false,
+        };
+        if stalled {
+            return Err(self.fail(hs, Refusal("The other player stopped responding. Play has resumed.")));
         }
         if self.stage == SourceStage::Streaming
             && let Err(r) = self.fill(hs)
@@ -204,15 +233,22 @@ impl SourceSession {
         Ok(())
     }
 
-    fn on_frame(&mut self, hs: &mut HostedServer, frame: Frame, now: u64) -> Result<(), Refusal> {
+    /// Every boundary re-reads identity, seats, live seat state and the
+    /// world's saved records.
+    fn check(&self, hs: &HostedServer, live: Live) -> Result<(), Refusal> {
+        check(hs, &self.action, &self.cfg, live)
+    }
+
+    fn on_frame(&mut self, hs: &mut HostedServer, live: Live, frame: Frame, now: u64) -> Result<(), Refusal> {
         match (self.stage, frame) {
             (_, Frame::Abort { .. }) | (SourceStage::Proposed, Frame::Decline { .. }) => {
                 Err(Refusal("The other player cancelled the handover."))
             }
             (SourceStage::Proposed, Frame::Accept { runtime, attestation, acceptance, challenge, .. }) => {
                 self.verify_accept(runtime, &attestation, &acceptance, challenge, now)?;
-                // Re-authenticated: the same seat, still eligible, then freeze.
-                eligibility::seats(&hs.server, self.action.seat)?;
+                // Re-authenticated: the same identity, seat and records,
+                // still eligible, then freeze.
+                self.check(hs, live)?;
                 hs.handover_freeze().map_err(Refusal)?;
                 self.recipient_runtime = Some(runtime);
                 self.recipient_challenge = challenge;
@@ -271,18 +307,25 @@ impl SourceSession {
 
     /// The frozen capture: re-check, pack the sanitised copies with both
     /// players' own records, certify and offer. Called once, while frozen.
-    pub fn offer(&mut self, hs: &mut HostedServer, capture: Capture<'_>, now: u64) -> Result<(), Refusal> {
+    pub fn offer(&mut self, hs: &mut HostedServer, live: Live, capture: Capture<'_>, now: u64) -> Result<(), Refusal> {
         if self.stage != SourceStage::Frozen || !hs.handover_frozen() {
             return Err(Refusal("The world isn't frozen for a handover."));
         }
-        let r = self.offer_inner(hs, capture, now);
+        let r = self.offer_inner(hs, live, capture, now);
         r.map_err(|r| self.fail(hs, r))
     }
 
-    fn offer_inner(&mut self, hs: &mut HostedServer, c: Capture<'_>, now: u64) -> Result<(), Refusal> {
+    /// Is the session waiting for the frozen capture?
+    pub fn wants_capture(&self) -> bool {
+        self.stage == SourceStage::Frozen
+    }
+
+    fn offer_inner(&mut self, hs: &mut HostedServer, live: Live, c: Capture<'_>, now: u64) -> Result<(), Refusal> {
         hs.handover_check().map_err(Refusal)?;
-        eligibility::seats(&hs.server, self.action.seat)?;
+        self.check(hs, live)?;
         let seat = self.action.seat;
+        let mut save = c.save;
+        eligibility::neutralise(&mut save, &npub(self.action.source_key))?;
         let recipient_sidecar = crate::joiner_save::JoinerSave::capture(&hs.server.players[seat.slot], hs.server.run_id)
             .encode()
             .map_err(|_| Refusal("The other player's inventory couldn't be recorded."))?;
@@ -300,16 +343,21 @@ impl SourceSession {
             ParticipantMember { npub: &dst_npub, kind: MemberKind::Sidecar, schema: 1, bytes: &recipient_sidecar },
             ParticipantMember { npub: &dst_npub, kind: MemberKind::Progression, schema: 1, bytes: &recipient_progress },
         ];
-        // Source consent is its host action (authenticated by the offer's
-        // runtime signature over this manifest); the recipient's is its
-        // runtime-signed acceptance, whose hash the manifest binds.
+        // Source consent: its runtime-signed agreement (the runtime the
+        // certificate names), sent with the offer; the recipient's is its
+        // runtime-signed acceptance. The manifest binds both hashes.
+        let source_agreement = pollster::block_on(
+            EventBuilder::new(
+                Kind::Custom(crate::handover::STORED_KIND),
+                source_agreement_content(self.transfer, self.challenge, &self.action.world_name, &dst_npub),
+            )
+            .custom_created_at(Timestamp::from(now))
+            .sign(&self.cfg.runtime),
+        )
+        .map_err(|_| Refusal("Your agreement couldn't be signed."))?
+        .as_json();
         let mut agreements = vec![
-            Agreement {
-                participant: self.action.source_key,
-                proof: crate::handover::hash(
-                    acceptance_content(self.transfer, self.challenge, &self.action.world_name, &dst_npub).as_bytes(),
-                ),
-            },
+            Agreement { participant: self.action.source_key, proof: crate::handover::hash(source_agreement.as_bytes()) },
             Agreement {
                 participant: seat.key,
                 proof: crate::handover::hash(self.acceptance.as_deref().unwrap_or_default().as_bytes()),
@@ -319,7 +367,7 @@ impl SourceSession {
         let packed = checkpoint::pack(
             CheckpointSource {
                 meta: c.meta,
-                save: c.save,
+                save: &save,
                 world: c.world,
                 disk_chunks: c.disk_chunks,
                 exhibit_dir: c.exhibit_dir,
@@ -369,7 +417,7 @@ impl SourceSession {
             let f = Frame::ManifestPart { transfer: self.transfer, total, offset: (i * PART_LIMIT) as u32, bytes: part.to_vec() };
             self.send(hs, &f)?;
         }
-        self.send(hs, &Frame::Offer { transfer: self.transfer, core: core.encode(), offer })?;
+        self.send(hs, &Frame::Offer { transfer: self.transfer, core: core.encode(), offer, agreement: source_agreement })?;
         let archive = packed.archive();
         let len = std::fs::metadata(archive).map_err(|_| Refusal("The packed world went missing."))?.len();
         self.file = Some(std::fs::File::open(archive).map_err(|_| Refusal("The packed world went missing."))?);
@@ -400,4 +448,24 @@ impl SourceSession {
         }
         Ok(())
     }
+}
+
+/// The refusals every boundary re-runs. The source persona must be the
+/// signed-in identity now AND the persona of the authority this machine
+/// holds (a sign-in or profile change can't remap the world's seat 0).
+fn check(hs: &HostedServer, action: &HostAction, cfg: &SourceConfig, live: Live) -> Result<(), Refusal> {
+    eligibility::local_seats(live.local_seats)?;
+    eligibility::source_identity(action.source_key, live.signed_in)?;
+    if cfg.authority.runtime() != cfg.runtime.public_key().to_bytes() {
+        return Err(Refusal("This machine doesn't hold this world's invitation."));
+    }
+    if cfg.authority.persona() != action.source_key {
+        return Err(Refusal("This world's invitation belongs to a different identity than the one signed in."));
+    }
+    eligibility::seats(&hs.server, action.seat)?;
+    let saved = match &cfg.world_dir {
+        Some(dir) => eligibility::saved_record_keys(dir)?,
+        None => Vec::new(),
+    };
+    eligibility::saved_records(&saved, action.source_key, action.seat.key)
 }

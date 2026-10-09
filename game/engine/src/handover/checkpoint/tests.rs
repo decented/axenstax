@@ -425,6 +425,35 @@ fn handover_checkpoint_personal_rows_and_operator_metadata_refused() {
     save.locked_slots.clear();
     save.inventory.push(crate::save::SavedSlot::Empty);
     assert!(validate_neutral(&save).is_err());
+    save.inventory.clear();
+    assert!(validate_neutral(&save).is_ok());
+    // Seat-numbered ownership the session never mapped refuses at the packer.
+    let seat_owned: [fn(&mut WorldSave); 4] = [
+        |s| s.plots.push(crate::plot::PlotData::from_marker(crate::plot::PlotOwner::LocalPlayer(0), 0, 64, 0)),
+        |s| s.raid_kills.push(((0, 0), 0, 1)),
+        |s| {
+            let mut d = crate::wolf::WolfData::untamed();
+            d.ownership.owner_pubkey = "local-player-0".into();
+            s.saved_mobs.push(crate::save::SavedTamedPet {
+                x: 0.0,
+                y: 64.0,
+                z: 0.0,
+                data: crate::save::SavedTamedPetData::Wolf(d),
+            });
+        },
+        |s| s.waypoints.push(crate::waypoint::Waypoint {
+            id: 0,
+            name: "pin".into(),
+            pos: [0; 3],
+            colour: crate::waypoint::MANUAL_COLOUR,
+            kind: crate::waypoint::WaypointKind::Manual,
+        }),
+    ];
+    for (i, case) in seat_owned.iter().enumerate() {
+        let mut s = neutral_save(42);
+        case(&mut s);
+        assert!(validate_neutral(&s).is_err(), "seat-owned case {i} must refuse");
+    }
     let dirty = WorldMeta::new("secret");
     assert!(validate_metadata(&dirty).is_err());
     let mut published = clean.clone();

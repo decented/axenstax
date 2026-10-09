@@ -58,6 +58,33 @@ fn validate_neutral(save: &WorldSave) -> Result<()> {
     {
         return Err(Error::Invalid("unattributed personal save"));
     }
+    if !save.waypoints.is_empty() || save.satoshi != Default::default() {
+        return Err(Error::Invalid("source-local player state"));
+    }
+    // Anything still owned or kept by seat number would land on whoever
+    // becomes seat 0 on the recipient: the session maps proven seat 0 to
+    // its npub first, so a remaining seat owner means it was never mapped.
+    use crate::save::SavedTamedPetData as Pet;
+    let seat = |o: &crate::tameable::OwnershipData| o.owner_pubkey.starts_with("local-player-");
+    let unmapped = save.vendors.iter().any(|v| matches!(v.data.owner, Some(crate::vendor::VendorOwner::LocalPlayer(_))))
+        || save.tip_jars.iter().any(|t| matches!(t.data.owner, Some(crate::tip_jar::TipJarOwner::LocalPlayer(_))))
+        || save.auctions.iter().any(|a| {
+            a.data.high_bidder.is_some() || matches!(a.data.owner, crate::auction::AuctionOwner::LocalPlayer(_))
+        })
+        || save.plots.iter().any(|p| matches!(p.owner, crate::plot::PlotOwner::LocalPlayer(_)))
+        || save.market_hubs.iter().any(|h| matches!(h.owner, crate::market_hub::HubOwner::LocalPlayer(_)))
+        || !save.raid_kills.is_empty()
+        || save.active_raids.iter().any(|r| !r.contribution_table.is_empty() || r.killing_blow.is_some())
+        || save.saved_mobs.iter().any(|m| match &m.data {
+            Pet::Wolf(d) => seat(&d.ownership),
+            Pet::Nostrich(d) => seat(&d.ownership),
+            Pet::Companion { data, .. } | Pet::Companion2 { data, .. } => seat(&data.ownership),
+            Pet::Steed { data, .. } | Pet::Steed2 { data, .. } => data.kept_by.is_some(),
+            Pet::Authored { .. } => false,
+        });
+    if unmapped {
+        return Err(Error::Invalid("seat-numbered ownership"));
+    }
     Ok(())
 }
 

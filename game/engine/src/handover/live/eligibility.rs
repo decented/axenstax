@@ -87,6 +87,39 @@ pub fn saved_records(saved: &[[u8; 32]], source: [u8; 32], recipient: [u8; 32]) 
     Ok(())
 }
 
+/// Most saved records a world may hold for a handover check (the manifest's
+/// participant bound).
+pub const SAVED_RECORDS_LIMIT: usize = 4096;
+
+/// The participant records actually on disk in the world's own folder
+/// (`joiners/<npub>.dat`). Read by the session itself at every boundary, so
+/// a record written after the host action (a player who joined and left
+/// during the consent window) refuses instead of being silently left out.
+/// A half-written or unrecognised file refuses too: it is never guessed at.
+pub fn saved_record_keys(world_dir: &std::path::Path) -> Result<Vec<[u8; 32]>, Refusal> {
+    use nostr::FromBech32;
+    let unreadable = Refusal("This world's saved player records couldn't be read. Nothing was changed.");
+    let entries = match std::fs::read_dir(world_dir.join("joiners")) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(unreadable),
+    };
+    let mut keys = Vec::new();
+    for entry in entries {
+        let name = entry.map_err(|_| unreadable.clone())?.file_name();
+        let key = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".dat"))
+            .and_then(|n| nostr::PublicKey::from_bech32(n).ok())
+            .ok_or(Refusal("A saved player record here is unfinished or unrecognised. Nothing was changed."))?;
+        if keys.len() >= SAVED_RECORDS_LIMIT {
+            return Err(Refusal("This world holds too many saved player records to hand over."));
+        }
+        keys.push(key.to_bytes());
+    }
+    Ok(keys)
+}
+
 fn local_owner_index(s: &str) -> Option<&str> {
     s.strip_prefix("local-player-")
 }
@@ -167,6 +200,10 @@ pub fn neutralise(save: &mut WorldSave, source_npub: &str) -> Result<(), Refusal
     if save.players.iter().any(|p| !p.tamed_pets.is_empty()) {
         return Err(Refusal("This world has old-style pet records this version can't move yet."));
     }
+    // The host's own map pins and guide progress are its local UI state:
+    // they stay in its own world, never on the copy the recipient hosts.
+    save.waypoints.clear();
+    save.satoshi = Default::default();
     save.players.clear();
     save.inventory.clear();
     save.locked_slots.clear();
@@ -190,7 +227,7 @@ mod tests {
 
     fn live_copy() -> WorldSave {
         let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(4.0, 70.0, 4.0), 1.0);
-        crate::save::build_world_save(&crate::world::World::new(), &[slot], 42, &[], &[])
+        crate::save::build_world_save(&crate::world::World::new(), &[slot], 42, &[], &[]).unwrap()
     }
     fn vendor(owner: VendorOwner) -> SavedVendor {
         SavedVendor { x: 1, y: 2, z: 3, data: VendorData { owner: Some(owner), ..Default::default() } }
@@ -209,12 +246,21 @@ mod tests {
             data: TipJarData { owner: Some(TipJarOwner::LocalPlayer(0)), ..Default::default() },
         });
         s.auctions.push(SavedAuction { x: 0, y: 0, z: 0, data: AuctionData::new(AuctionOwner::LocalPlayer(0)) });
+        s.waypoints.push(crate::waypoint::Waypoint {
+            id: 0,
+            name: "Died here".into(),
+            pos: [1, 2, 3],
+            colour: crate::waypoint::DEATH_COLOUR,
+            kind: crate::waypoint::WaypointKind::Death,
+        });
+        s.satoshi.has_gifted = true;
         neutralise(&mut s, SOURCE).unwrap();
         assert!(matches!(&s.vendors[0].data.owner, Some(VendorOwner::Npub(n)) if n == SOURCE));
         assert!(matches!(&s.vendors[1].data.owner, Some(VendorOwner::Npub(n)) if n == "npub1other"));
         assert!(matches!(&s.tip_jars[0].data.owner, Some(TipJarOwner::Npub(n)) if n == SOURCE));
         assert!(matches!(&s.auctions[0].data.owner, AuctionOwner::Npub(n) if n == SOURCE));
         assert!(s.players.is_empty() && s.inventory.is_empty() && s.locked_slots.is_empty());
+        assert!(s.waypoints.is_empty() && s.satoshi == Default::default(), "the host's pins and guide stay home");
         assert_eq!((s.player_x, s.player_health, s.hotbar_slot), (0.0, 20.0, 0));
     }
 
@@ -244,6 +290,11 @@ mod tests {
             assert!(neutralise(&mut s, SOURCE).is_err(), "case {i} must refuse");
             assert_eq!(s.players.len(), 1, "case {i}: a refusal leaves the rows to the original");
         }
+    }
+
+    #[test]
+    fn handover_save_builder_refuses_no_seats_without_panicking() {
+        assert!(crate::save::build_world_save(&crate::world::World::new(), &[], 42, &[], &[]).is_none());
     }
 
     #[test]

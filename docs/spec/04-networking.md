@@ -5212,40 +5212,61 @@ session, listener latch, Prepared/Commit and gameplay callers remain unwired.
 
 **Live source link and freeze (branch mp-handover, private provisional wire tag
 `PacketType::Handover = 68`, renumbered at rebase; not a delivered protocol).**
-A source host binds one control link to an exact authenticated seat: slot,
-attach generation and verified key, all re-checked at bind, freeze and every
-send/read; a departed, reconnected or differently keyed seat breaks the link.
-Control frames from any other seat are dropped. While frozen,
-`HostedServer::tick` returns at once, so there is no admission (queued accept
-hand-overs wait), inbound gameplay, simulation, grants, overdue window-event
-valve, broadcast or LAN heartbeat. The selected seat's control frames are read
-straight out of its queue; its other packets stay queued in order, and other
-seats' packets stay in their transports. A pre-retirement release unfreezes;
-packets still waiting are judged by the ordinary path once, only for the same
-seat generation (a departed seat's queue is discarded). The window-event ack
-timeout counts server ticks, so a freeze cannot apply waiting events.
+A source host binds one control link to an exact authenticated seat for one
+transfer: slot, attach generation and verified key, all re-checked at bind,
+freeze and every send/read; a departed, reconnected or differently keyed seat
+breaks the link. Control frames from any other seat are dropped. The link holds
+only a weak lease on its session: a session dropped without an explicit abort
+is released (the recipient sent Abort) at the top of the next
+`HostedServer::tick`. While frozen, `HostedServer::tick` returns at once, so
+there is no admission (queued accept hand-overs wait), inbound gameplay,
+simulation, grants, overdue window-event valve, broadcast or LAN heartbeat. The
+selected seat's control frames are read straight out of its queue; its other
+packets stay queued in order, and other seats' packets stay in their
+transports. Freezing tells every joined player `Notice { paused: true }` and a
+release after a freeze tells them `Notice { paused: false }`; a paused client
+sends no input. A pre-retirement release unfreezes; packets still waiting are
+judged by the ordinary path once, only while the seat is still that exact live
+seat (same generation, connection open, so its client sees the result); a
+departed, reused or closed seat's queue is discarded, never replayed. The
+window-event ack timeout counts server ticks, so a freeze cannot apply waiting
+events. The source notices a closed recipient connection on the pump after the
+one that drained its last frames.
 
-**Eligibility at this base (refusals, original untouched).** One local seat
-only (split-screen seats have no proven identity); the signed-in identity at
-freeze must equal the one the host action captured. Server-wide grants, kill
-and breeding events must be delivered. Every connected signed seat other than
-the recipient, and every saved `joiners/<npub>.dat` other than the source's and
-recipient's, needs that player's agreement, which this version cannot request:
-refuse. A connected seat whose saved record was unreadable
+**Eligibility at this base (refusals, original untouched).** Re-run in full at
+the host action, at consent/freeze and at the frozen capture, from values the
+caller re-reads each time (`source::Live`: the signed-in identity now and the
+local seat count), never from what the host action captured. One local seat only
+(split-screen seats have no proven identity). The source persona must be the
+signed-in identity now AND the persona of the authority this machine holds
+(`phase::Authority::persona`; root: the invitation's own `h=`), so a sign-in or
+profile change cannot remap seat 0. Server-wide grants, kill and breeding events
+must be delivered. Every connected signed seat other than the recipient needs
+that player's agreement, which this version cannot request: refuse. The
+session itself reads the world folder's `joiners/` at each boundary: any record
+other than the source's and recipient's refuses (agreement), so a player who
+joins and leaves during the consent window refuses rather than being left out;
+a file that is not `<npub>.dat` (half-written, unrecognised) refuses; more than
+4096 refuses. A connected seat whose saved record was unreadable
 (`failed_joiner_reads`) refuses. The recipient must be the exact seat (slot,
 generation, key), alive, with a window that is quiescent (no unacknowledged or
 valve-forced event, no correction debt, no death replacement, no retired
-overflow) and progression tracked since a verified signed admission on this
-attach (`ServerPlayer.progression_tracked`) with zero server-queued kill credits
-(`progression_credits`), i.e. default progression; any credit refuses until a
-numbered progression authority exists. On the transfer COPY of the WorldSave
-(built by the same `save::build_world_save` the ordinary save uses): proven
+overflow: "inventory still settling") and progression tracked since a verified
+signed admission on this attach (`ServerPlayer.progression_tracked`) with zero
+server-queued kill credits (`progression_credits`), i.e. default progression;
+any credit refuses until a numbered progression authority exists. The caller
+supplies the RAW WorldSave built from the frozen real seats, carts and kept mobs
+by the same `save::build_world_save` the ordinary save uses (which returns
+`None`, never panics, for no seats); the SESSION neutralises its copy: proven
 source seat0 `LocalPlayer(0)` owners of vendors, tip jars, auctions, plots and
 market hubs and `local-player-0` pet owners become the source npub; npub owners
 stay; any other seat number, any auction bidder, raid contribution, killing
 blow or raid kill row, a kept steed (`kept_by`) or a legacy row pet list
-refuses. Positional player rows and legacy seat0 fields are then stripped; that
-state travels in the source's own sidecar and participant records.
+refuses. Positional player rows, legacy seat0 fields, the host's waypoints and
+its Satoshi-guide state are stripped; player state travels in the source's own
+sidecar and participant records. The packer independently refuses any
+remaining seat-numbered owner, bidder, raid row, `local-player-` pet, kept
+steed, waypoint or guide state.
 
 **Live session to Ready (first live checkpoint; inert, recoverable).** The host
 action (`handover::live::source::HostAction`: exact seat, captured signed-in
@@ -5254,33 +5275,56 @@ exact transfer, world name and source npub it was shown) are typed values only
 a caller acting on the player's own choice constructs; nothing accepts by
 default or on a timer. Control frames (`live::wire::Frame`, bincode, at most the
 ordinary 64KiB payload, text fields 8KiB, parts 16KiB, no trailing bytes) ride
-the existing authenticated direct game connection, never a relay. Order:
-Propose (transfer id, world name, source npub, the source's fresh challenge,
-root invitation fields, lineage) → Accept (recipient runtime key, its persona's
-player attestation, a runtime-signed acceptance over domain, transfer, source
-challenge, world name and source npub, plus the recipient's own fresh
-challenge). The source verifies the attestation persona equals the seat's
-verified key, re-runs eligibility, then freezes. The frozen caller supplies the
-sanitised transfer metadata, neutralised WorldSave copy and the source's own
-seat0 sidecar (`live::capture::local0_sidecar`, the sidecar's own encoder; its
-private Plan bodies are remembered in this machine's Plan store, the record
-keeps markers) and participant record (`local0_progress`, with pose, view,
-hotbar and lock mask). The session adds the recipient's sidecar from its server
-copy and a DEFAULT participant record, binds both players' agreements (the
-recipient's proof is the hash of its signed acceptance; the source's consent is
-authenticated by the offer's runtime signature over the manifest), packs,
-certifies (epoch = authority epoch+1, predecessor = authority's committed hash,
-expiry clipped to the invitation) and sends the manifest in parts, the signed
-offer bound to the recipient's challenge, then 16KiB chunks with at most four
-unacknowledged. The recipient owns the joined client's transport (taken out of
-its RemoteClient, leaving a closed transport so a later teardown or
-`disconnect()` cannot reach the link). At this base it follows the first hop
-only (the invitation's own runtime/persona offer); a later hop refuses until the
-verified chain lookup is wired. It verifies the offer, imports into a fresh
-non-overwriting inactive directory, completes the durable checkpoint, binds a
-latched QUIC listener that refuses every connection and has no broadcaster,
-relay subscription or admission path, signs Ready over the SOURCE's challenge,
-persists the Ready receipt and only then sends Ready. The source verifies Ready
-and stays frozen (Prepared/Commit/retirement are later boundaries). Any refusal,
-Decline or Abort before retirement releases the freeze; the recipient removes
-its own inactive checkpoint if it aborts before Ready and keeps it after.
+the existing authenticated direct game connection, never a relay. The joined
+`RemoteClient` routes Handover packets into a bounded inbox (32 frames,
+256KiB) for its game loop, so the recipient keeps playing while it decides.
+Order: Propose (transfer id, world name, source npub, the source's fresh
+challenge, root invitation fields, lineage). Before any consent is shown the
+recipient (`RecipientSession::propose`) checks the proposal against the host it
+VERIFIED when it joined (`recipient::JoinedHost`: the persona from online
+play's verified answer and the runtime it connected to): the root runtime and
+persona must be that host's, the displayed source npub must be that persona's
+npub, and the lineage must be the one the root derives
+(`wire::root_lineage`, a domain-separated hash of the root context digest, so
+a new invitation is a new lineage and no lineage is taken on the source's
+word). A join that verified no host identity cannot receive a handover. A
+Decline goes back over the joined connection and play continues. On consent the
+session takes the joined connection out of the `RemoteClient`, which is parked
+(it reads and sends nothing and is not treated as a lost session; leaving the
+joined world cannot reach the link), and sends Accept (recipient runtime key,
+its persona's player attestation, a runtime-signed acceptance over domain,
+transfer, source challenge, world name and source npub, plus the recipient's
+own fresh challenge). The source verifies the attestation persona equals the
+seat's verified key, re-runs eligibility, then freezes. The frozen caller
+supplies the sanitised transfer metadata, the raw save (above) and the source's
+own seat0 sidecar (`live::capture::local0_sidecar`, the sidecar's own encoder,
+markers only for private Plans) and participant record (`local0_progress`,
+with pose, view, hotbar and lock mask). Capture writes nothing on the source
+machine: the Plan bodies the record's markers name (`local0_plan_items`) are
+remembered in the Plan store at retirement, a later boundary. The session adds
+the recipient's sidecar from its server copy and a DEFAULT participant record,
+signs the source's own agreement with its runtime key over a distinct domain
+(`source-agree/v1`: transfer, source challenge, world name, recipient npub),
+binds both agreements' hashes (the recipient's is the hash of its signed
+acceptance), packs, certifies (epoch = authority epoch+1, predecessor =
+authority's committed hash, expiry clipped to the invitation) and sends the
+manifest in parts, the signed offer bound to the recipient's challenge plus
+the source agreement, then 16KiB chunks with at most four unacknowledged. The
+recipient follows the first hop only (the invitation's own runtime/persona
+offer); a later hop refuses until the verified chain lookup is wired. It
+verifies the offer, the source agreement's signature by the certificate's
+source runtime and content, and that the manifest's agreements are exactly
+those two hashes, imports into a fresh non-overwriting inactive directory,
+completes the durable checkpoint, binds a latched QUIC listener that refuses
+every connection (a connecting client gets `CONNECTION_REFUSED`; no
+broadcaster, relay subscription or admission path), signs Ready over the
+SOURCE's challenge, persists the Ready receipt and only then sends Ready. The
+source verifies Ready and stays frozen (Prepared/Commit/retirement are later
+boundaries) and keeps reading: a recipient Abort after Ready releases it. The
+source gives up and resumes if the recipient doesn't answer the proposal within
+300s or goes 60s without a message while streaming. Gameplay packets that
+reach the recipient's session before the freeze are parked (at most 4MiB). Any
+refusal, Decline or Abort before retirement releases the freeze; the recipient
+removes its own inactive checkpoint if it aborts before Ready and keeps it
+after; a pre-Ready abort hands the connection and the parked gameplay back to
+the joined client, which resumes in order (past the bound, the player rejoins).

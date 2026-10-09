@@ -11,6 +11,18 @@ use crate::sim_lend::OwnedSimParts;
 use crate::transport::{ChannelClientTransport, ClientTransport};
 
 pub(super) const BINDING: [u8; 32] = [17; 32];
+const T: crate::handover::Id = [0x2a; 16];
+
+/// The handover frames waiting for a joined client, decoded.
+fn frames_for(client: &ChannelClientTransport) -> Vec<crate::handover::live::wire::Frame> {
+    let mut out = Vec::new();
+    while let Some(p) = client.try_recv_from_server() {
+        if let Some(b) = crate::handover::live::recipient::handover_payload(&p) {
+            out.push(crate::handover::live::wire::Frame::decode(b).expect("well-formed frame"));
+        }
+    }
+    out
+}
 
 fn now_secs() -> u32 {
     std::time::SystemTime::now()
@@ -55,11 +67,14 @@ fn handover_frame(bytes: &[u8]) -> Vec<u8> {
 fn handover_link_binds_only_the_exact_authenticated_seat() {
     let (mut hs, mut host) = start_lent("handover-bind");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x51; 32]);
-    assert_eq!(hs.handover_bind(slot, generation.wrapping_add(1), key), Err("that player is no longer signed in to this world"));
-    assert!(hs.handover_bind(slot, generation, [9; 32]).is_err(), "another key");
-    assert!(hs.handover_bind(0, generation, key).is_err(), "the host's own seat");
-    hs.handover_bind(slot, generation, key).unwrap();
-    assert!(hs.handover_bind(slot, generation, key).is_err(), "one link at a time");
+    assert_eq!(
+        hs.handover_bind(slot, generation.wrapping_add(1), key, T).err(),
+        Some("that player is no longer signed in to this world")
+    );
+    assert!(hs.handover_bind(slot, generation, [9; 32], T).is_err(), "another key");
+    assert!(hs.handover_bind(0, generation, key, T).is_err(), "the host's own seat");
+    let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    assert!(hs.handover_bind(slot, generation, key, T).is_err(), "one link at a time");
     // A frame from the bound seat reaches the link through ordinary processing.
     client.send_to_server(&handover_frame(b"hello"));
     host.lend_tick(&mut hs);
@@ -78,8 +93,12 @@ fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release()
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x52; 32]);
     let (other, other_slot, _, _) = signed_join_lent(&mut hs, &mut host, [0x53; 32]);
     let accept = hs.test_accept_channel();
-    hs.handover_bind(slot, generation, key).unwrap();
+    let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    let _ = frames_for(&other);
     hs.handover_freeze().unwrap();
+    // Every joined player is told play is paused, so its client stops sending.
+    use crate::handover::live::wire::Frame;
+    assert_eq!(frames_for(&other), vec![Frame::Notice { transfer: T, paused: true }]);
     let cell = cell_beside(&hs, slot, 1, 0, 0);
     let other_cell = cell_beside(&hs, other_slot, 0, 0, 1);
     let before = host.world.get_block(cell.0, cell.1, cell.2);
@@ -100,10 +119,15 @@ fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release()
     assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), before, "frozen edit applied");
     assert_eq!(host.world.get_block(other_cell.0, other_cell.1, other_cell.2), other_before);
     assert!(newcomer.try_recv_from_server().is_none(), "admission ran while frozen");
+    assert!(frames_for(&other).is_empty(), "nothing else reaches a joiner while frozen");
     // Pre-retirement release: same generations, so the waiting edits are
     // judged by the ordinary path, once, and the newcomer is met.
     hs.handover_release();
     assert!(!hs.handover_frozen());
+    assert!(
+        frames_for(&other).contains(&Frame::Notice { transfer: T, paused: false }),
+        "joiners are told play resumes"
+    );
     host.lend_tick(&mut hs);
     assert!(host.world.sim_tally != tally, "a released source must simulate again");
     assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), block::GLASS);
@@ -144,6 +168,64 @@ fn handover_eligibility_refuses_live_seat_state_it_cannot_carry() {
     assert!(seats(&hs.server, Seat { slot, generation, key }).is_err());
 }
 
+#[test]
+fn handover_dropped_session_lease_releases_the_source_and_tells_the_recipient() {
+    let (mut hs, mut host) = start_lent("handover-lease");
+    let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x54; 32]);
+    let lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    hs.handover_freeze().unwrap();
+    let tally = host.world.sim_tally;
+    host.lend_tick(&mut hs);
+    assert!(hs.handover_frozen() && host.world.sim_tally == tally, "held lease: still frozen");
+    let _ = frames_for(&client);
+    drop(lease); // the session went away without an explicit abort
+    host.lend_tick(&mut hs);
+    assert!(!hs.handover_frozen() && hs.handover_link().is_none(), "a dropped session's link is released");
+    let got = frames_for(&client);
+    use crate::handover::live::wire::Frame;
+    assert!(got.contains(&Frame::Abort { transfer: T }), "the recipient is told: {got:?}");
+    assert!(got.contains(&Frame::Notice { transfer: T, paused: false }));
+}
+
+#[test]
+fn handover_release_discards_a_departed_recipients_waiting_edits() {
+    let (mut hs, mut host) = start_lent("handover-departed");
+    let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x55; 32]);
+    let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    hs.handover_freeze().unwrap();
+    let cell = cell_beside(&hs, slot, 1, 0, 0);
+    let before = host.world.get_block(cell.0, cell.1, cell.2);
+    send_edits(&hs, &client, slot, 1, &[(cell, block::GLASS)]);
+    // Pull the waiting edit into the seat's queue the way the frozen pump
+    // does, then the recipient's connection goes.
+    assert!(hs.handover_take_frames().unwrap().is_empty());
+    drop(client);
+    // The source's pumps notice the closed connection (frames sent before
+    // the close are read first), then it releases.
+    assert!((0..3).any(|_| hs.handover_take_frames().is_err()), "the link breaks when the recipient goes");
+    hs.handover_release();
+    for _ in 0..3 {
+        host.lend_tick(&mut hs);
+    }
+    assert_eq!(host.world.get_block(cell.0, cell.1, cell.2), before, "a departed seat's stale edit was replayed");
+}
+
+#[test]
+fn handover_refuses_while_the_recipients_inventory_is_still_settling() {
+    use crate::handover::live::eligibility::{Refusal, Seat, seats};
+    let (mut hs, mut host) = start_lent("handover-settling");
+    let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x65; 32]);
+    let seat = Seat { slot, generation, key };
+    assert_eq!(seats(&hs.server, seat), Ok(()));
+    // A grant sent to the joiner and not yet acknowledged by its client.
+    let stack = crate::item::ItemStack::new_block(block::GLASS, 1);
+    crate::window_events::queue(&mut hs.server.players[slot], crate::window_events::WindowEvent::Grant(stack), 1);
+    assert_eq!(
+        seats(&hs.server, seat),
+        Err(Refusal("That player's inventory is still settling with yours. Try again in a moment."))
+    );
+}
+
 mod session {
     use super::*;
     use crate::handover::{
@@ -152,13 +234,16 @@ mod session {
         live::{
             capture,
             eligibility::Seat,
-            recipient::{RecipientConsent, RecipientIdentity, RecipientSession, RecipientStage},
-            source::{Capture, HostAction, SourceConfig, SourceSession, SourceStage},
+            recipient::{JoinedHost, RecipientConsent, RecipientIdentity, RecipientSession, RecipientStage},
+            source::{Capture, HostAction, Live, SourceConfig, SourceSession, SourceStage},
+            wire::{Frame, root_lineage},
         },
         personal::{PersonalRecord, RecordContext},
         phase::Authority,
     };
-    use nostr::{Keys, SecretKey, Timestamp, ToBech32};
+    use crate::remote_client::RemoteClient;
+    use nostr::{JsonUtil, Keys, SecretKey, Timestamp, ToBech32};
+    use std::sync::{Arc, Mutex};
 
     struct Dir(std::path::PathBuf);
     impl Dir {
@@ -180,145 +265,248 @@ mod session {
     fn now() -> u64 {
         now_secs() as u64
     }
+    fn npub(k: &Keys) -> String {
+        k.public_key().to_bech32().unwrap()
+    }
+
+    /// A joined client's connection, with an optional replacement for the
+    /// Ready it sends (a man in the middle, for the source's own check).
+    struct Tap {
+        inner: Box<dyn ClientTransport>,
+        forged_ready: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+    impl ClientTransport for Tap {
+        fn send_to_server(&self, data: &[u8]) {
+            let ready = crate::handover::live::recipient::handover_payload(data)
+                .and_then(|b| Frame::decode(b).ok())
+                .is_some_and(|f| matches!(f, Frame::Ready { .. }));
+            match (ready, self.forged_ready.lock().unwrap().clone()) {
+                (true, Some(forged)) => self.inner.send_to_server(&forged),
+                _ => self.inner.send_to_server(data),
+            }
+        }
+        fn try_recv_from_server(&self) -> Option<crate::transport::Packet> {
+            self.inner.try_recv_from_server()
+        }
+        fn is_closed(&self) -> bool {
+            self.inner.is_closed()
+        }
+        fn channel_binding(&self) -> Option<[u8; 32]> {
+            self.inner.channel_binding()
+        }
+    }
+
+    const SOURCE_RUNTIME: u8 = 0x81;
+    const SOURCE_PERSONA: u8 = 0x82;
+    const RECIPIENT_PERSONA: u8 = 0x71;
+    const RECIPIENT_RUNTIME: u8 = 0x72;
 
     struct Pair {
         hs: HostedServer,
         host: OwnedSimParts,
         src: SourceSession,
-        dst: RecipientSession,
+        rc: RemoteClient,
+        dst: Option<RecipientSession>,
         seat: Seat,
-        source_persona: Keys,
+        live: Live,
+        root: RootContext,
+        forged_ready: Arc<Mutex<Option<Vec<u8>>>>,
         dir: Dir,
     }
 
-    /// A lent source with one signed joiner whose RemoteClient is torn down
-    /// after its transport moves into the recipient session.
-    fn pair(tag: &str) -> Pair {
-        let dir = Dir::new(tag);
-        let (mut hs, mut host) = start_lent(&format!("handover-{tag}"));
-        let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x71; 32]);
-        let mut rc = crate::remote_client::RemoteClient::from_transport(
-            Box::new(client),
-            crate::remote_client::build_join_request_guest("dup", 0),
-            None,
-        );
-        let link = rc.take_transport();
-        rc.disconnect(); // the joined world's teardown: must not reach the link
-        drop(rc);
-        let runtime = keys(0x72);
+    fn root() -> RootContext {
+        RootContext::new(
+            keys(SOURCE_RUNTIME).public_key().to_bytes(),
+            &npub(&keys(SOURCE_PERSONA)),
+            now() + 3600,
+            &["wss://relay.example".into()],
+            now(),
+        )
+        .unwrap()
+    }
+    fn joined_host() -> JoinedHost {
+        JoinedHost {
+            persona: keys(SOURCE_PERSONA).public_key().to_bytes(),
+            runtime: keys(SOURCE_RUNTIME).public_key().to_bytes(),
+        }
+    }
+    fn identity() -> RecipientIdentity {
+        let runtime = keys(RECIPIENT_RUNTIME);
         let attestation = pollster::block_on(crate::runtime_identity::mint_player_attestation(
-            &keys(0x71),
+            &keys(RECIPIENT_PERSONA),
             &runtime.public_key(),
             Timestamp::from(now()),
             1,
         ))
         .unwrap();
-        std::fs::create_dir_all(dir.0.join("imports")).unwrap();
-        std::fs::create_dir_all(dir.0.join("markers")).unwrap();
-        let dst = RecipientSession::new(
-            link,
-            RecipientIdentity { runtime, attestation },
-            dir.0.join("imports"),
-            MarkerStore::new(dir.0.join("markers")).unwrap(),
-        );
-        let source_runtime = keys(0x81);
-        let source_persona = keys(0x82);
-        let root = RootContext::new(
-            source_runtime.public_key().to_bytes(),
-            &source_persona.public_key().to_bech32().unwrap(),
-            now() + 3600,
-            &["wss://relay.example".into()],
-            now(),
-        )
-        .unwrap();
-        let authority = Authority::root(&root, [5; 16]).unwrap();
-        std::fs::create_dir_all(dir.0.join("scratch")).unwrap();
+        RecipientIdentity { runtime, attestation }
+    }
+    fn markers(dir: &Dir) -> MarkerStore {
+        MarkerStore::new(dir.0.join("markers")).unwrap()
+    }
+
+    /// A lent source with one signed joiner that keeps PLAYING through its
+    /// RemoteClient: the Propose reaches it the ordinary way.
+    fn pair(tag: &str) -> Pair {
+        let dir = Dir::new(tag);
+        for d in ["imports", "markers", "scratch", "world"] {
+            std::fs::create_dir_all(dir.0.join(d)).unwrap();
+        }
+        let (mut hs, mut host) = start_lent(&format!("handover-{tag}"));
+        let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [RECIPIENT_PERSONA; 32]);
+        let forged_ready = Arc::new(Mutex::new(None));
+        let tap = Tap { inner: Box::new(client), forged_ready: forged_ready.clone() };
+        let rc = RemoteClient::from_transport(Box::new(tap), crate::remote_client::build_join_request_guest("dup", 0), None);
+        let root = root();
+        let lineage = root_lineage(&root);
         let cfg = SourceConfig {
-            runtime: source_runtime,
-            root,
-            authority,
-            lineage: [5; 16],
+            runtime: keys(SOURCE_RUNTIME),
+            root: root.clone(),
+            authority: Authority::root(&root, lineage).unwrap(),
+            lineage,
             world: [6; 16],
             generation: 1,
             scratch: dir.0.join("scratch"),
             validity: 600,
+            world_dir: Some(dir.0.join("world")),
         };
         let seat = Seat { slot, generation, key };
-        let action = HostAction {
-            seat,
-            source_key: source_persona.public_key().to_bytes(),
-            world_name: "Loop".into(),
-        };
-        let src = SourceSession::begin(&mut hs, action, cfg, Some(source_persona.public_key().to_bytes()), 1, &[])
-            .expect("eligible");
-        Pair { hs, host, src, dst, seat, source_persona, dir }
+        let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
+        let action = HostAction { seat, source_key, world_name: "Loop".into() };
+        let live = Live { signed_in: Some(source_key), local_seats: 1 };
+        let src = SourceSession::begin(&mut hs, action, cfg, live, now()).expect("eligible");
+        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, dir }
     }
 
+    /// The joined client reads the proposal through its ordinary poll, the
+    /// recipient session checks it against the verified host.
+    fn propose(p: &mut Pair) {
+        p.host.lend_tick(&mut p.hs);
+        p.rc.poll();
+        let frames = p.rc.take_handover_frames();
+        let propose = frames.iter().find(|b| matches!(Frame::decode(b), Ok(Frame::Propose { .. })));
+        let dst = RecipientSession::propose(
+            propose.expect("the Propose reached the joined client"),
+            joined_host(),
+            identity(),
+            p.dir.0.join("imports"),
+            markers(&p.dir),
+            now(),
+        )
+        .expect("a proposal from the verified host");
+        assert_eq!(dst.stage(), RecipientStage::AwaitingConsent);
+        assert_eq!(dst.proposal().world_name, "Loop");
+        assert_eq!(dst.proposal().source_npub, npub(&keys(SOURCE_PERSONA)));
+        p.dst = Some(dst);
+    }
+
+    /// Explicit consent: the session takes the joined connection (parked).
     fn consent(p: &mut Pair) {
-        p.dst.pump(now()).unwrap();
-        assert_eq!(p.dst.stage(), RecipientStage::AwaitingConsent);
-        let prop = p.dst.proposal().unwrap().clone();
-        assert_eq!(prop.world_name, "Loop");
-        assert_eq!(prop.source_npub, p.source_persona.public_key().to_bech32().unwrap());
+        propose(p);
+        let dst = p.dst.as_mut().unwrap();
+        let prop = dst.proposal().clone();
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let c = RecipientConsent { transfer: prop.transfer, world_name: prop.world_name, source_npub: prop.source_npub };
-        p.dst.consent(c, socket, now()).unwrap();
+        let link = p.rc.park_transport();
+        dst.consent(c, socket, link, now()).unwrap();
+        assert!(p.rc.is_parked());
         p.host.lend_tick(&mut p.hs); // ordinary processing routes the Accept
-        p.src.pump(&mut p.hs, now()).unwrap();
+        p.src.pump(&mut p.hs, p.live, now()).unwrap();
         assert_eq!(p.src.stage(), SourceStage::Frozen);
         assert!(p.hs.handover_frozen());
     }
 
-    #[test]
-    fn handover_loopback_reaches_durable_ready_with_distinct_records_and_latched_listener() {
-        let mut p = pair("ready");
-        consent(&mut p);
-        // The frozen capture: the source's own seat 0 with its own state.
-        let mut seat0 = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(3.0, 70.0, 3.0), 1.0);
-        seat0.reputation.per_village.insert((2, -2), -40);
-        seat0.kill_counter.insert(crate::mob::MobType::Pig, 7);
-        seat0.bounties_claimed.insert(11, 2);
-        seat0.inventory.set_slot(4, Some(crate::item::ItemStack::new_block(block::GLASS, 9)));
+    /// The frozen capture: a raw save of the source's own seat 0 with a
+    /// seat-0 pet and a cart; the session neutralises it itself.
+    fn offer(p: &mut Pair, seat0: &crate::player_slot::PlayerSlot) -> Vec<u8> {
+        let (r, sidecar) = try_offer(p, seat0);
+        r.unwrap();
+        sidecar
+    }
+    fn try_offer(
+        p: &mut Pair,
+        seat0: &crate::player_slot::PlayerSlot,
+    ) -> (Result<(), crate::handover::live::eligibility::Refusal>, Vec<u8>) {
         let transfer = p.src.transfer();
-        let context = |participant| RecordContext { participant, lineage: [5; 16], generation: 1, transfer };
-        let source_key = p.source_persona.public_key().to_bytes();
-        let sidecar = capture::local0_sidecar(&seat0, [9; 16]).unwrap();
-        let progress = capture::local0_progress(&seat0, context(source_key)).unwrap();
+        let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
+        let context = RecordContext { participant: source_key, lineage: root_lineage(&p.root), generation: 1, transfer };
+        let sidecar = capture::local0_sidecar(seat0, [9; 16]).unwrap();
+        let progress = capture::local0_progress(seat0, context).unwrap();
         let meta = crate::handover::checkpoint::transfer_metadata(&crate::save::WorldMeta::new("Loop")).unwrap();
-        let mut save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(&seat0), 42, &[], &[]);
-        let source_npub = p.source_persona.public_key().to_bech32().unwrap();
-        crate::handover::live::eligibility::neutralise(&mut save, &source_npub).unwrap();
+        let mut ecs = hecs::World::new();
+        crate::cart::spawn_cart(&mut ecs, (1, 70, 1));
+        let carts = crate::save::carts_to_saved(&ecs);
+        let mut wolf = crate::wolf::WolfData::untamed();
+        wolf.ownership.owner_pubkey = "local-player-0".into();
+        let pet = crate::save::SavedTamedPet { x: 2.0, y: 70.0, z: 2.0, data: crate::save::SavedTamedPetData::Wolf(wolf) };
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &carts, &[pet]).unwrap();
         let cap = Capture {
             meta: &meta,
-            save: &save,
+            save,
             world: &p.host.world,
             disk_chunks: None,
             exhibit_dir: None,
             source_sidecar: &sidecar,
             source_progress: &progress,
         };
-        p.src.offer(&mut p.hs, cap, now()).unwrap();
+        (p.src.offer(&mut p.hs, p.live, cap, now()), sidecar)
+    }
+
+    /// Pump both sides, ticking the frozen source the way an ungated caller
+    /// would every round: it must simulate nothing.
+    fn stream(p: &mut Pair, rounds: usize) {
         let tally = p.host.world.sim_tally;
-        for _ in 0..10_000 {
-            p.dst.pump(now()).unwrap();
-            p.src.pump(&mut p.hs, now()).unwrap();
-            if p.src.stage() == SourceStage::ReadyVerified {
+        for _ in 0..rounds {
+            p.host.lend_tick(&mut p.hs);
+            p.dst.as_mut().unwrap().pump(now()).unwrap();
+            if p.src.pump(&mut p.hs, p.live, now()).is_err() || p.src.stage() == SourceStage::ReadyVerified {
                 break;
             }
         }
+        assert_eq!(p.host.world.sim_tally, tally, "a frozen source simulated while streaming");
+    }
+
+    fn seat0() -> crate::player_slot::PlayerSlot {
+        let mut seat0 = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(3.0, 70.0, 3.0), 1.0);
+        seat0.reputation.per_village.insert((2, -2), -40);
+        seat0.kill_counter.insert(crate::mob::MobType::Pig, 7);
+        seat0.bounties_claimed.insert(11, 2);
+        seat0.inventory.set_slot(4, Some(crate::item::ItemStack::new_block(block::GLASS, 9)));
+        seat0
+    }
+
+    #[test]
+    fn handover_loopback_reaches_durable_ready_with_distinct_records_and_latched_listener() {
+        let mut p = pair("ready");
+        consent(&mut p);
+        // The joined world is torn down: its RemoteClient goes, the session's
+        // connection stays.
+        let mut rc = std::mem::replace(
+            &mut p.rc,
+            RemoteClient::from_transport(Box::new(crate::transport::ClosedClientTransport), crate::remote_client::build_join_request_guest("x", 0), None),
+        );
+        rc.disconnect();
+        drop(rc);
+        let seat0 = seat0();
+        let sidecar = offer(&mut p, &seat0);
+        stream(&mut p, 10_000);
+        let dst = p.dst.as_ref().unwrap();
         assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
-        assert_eq!(p.dst.stage(), RecipientStage::Ready);
-        assert!(p.hs.handover_frozen() && p.host.world.sim_tally == tally, "still frozen, nothing simulated");
-        assert!(!p.dst.gameplay_admitted(), "Ready is not activation");
-        // Ready was persisted before it was sent.
-        let markers = MarkerStore::new(p.dir.0.join("markers")).unwrap();
-        assert!(markers.read(MarkerKind::Ready, p.src.transfer()).unwrap().is_some());
+        assert_eq!(dst.stage(), RecipientStage::Ready);
+        assert!(p.hs.handover_frozen(), "still frozen at Ready");
+        assert!(!dst.gameplay_admitted(), "Ready is not activation");
+        let markers = markers(&p.dir);
+        assert!(markers.read(MarkerKind::Ready, p.src.transfer()).unwrap().is_some(), "Ready persisted");
         // Distinct own records, each bound to its own identity.
-        let cp = p.dst.checkpoint().unwrap();
+        let transfer = p.src.transfer();
+        let lineage = root_lineage(&p.root);
+        let context = |participant| RecordContext { participant, lineage, generation: 1, transfer };
+        let cp = dst.checkpoint().unwrap();
         let got = |who: [u8; 32], kind: &str| {
             let n = nostr::PublicKey::from_slice(&who).unwrap().to_bech32().unwrap();
             std::fs::read(cp.received_world().join(format!("{kind}/{n}.dat"))).unwrap()
         };
+        let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
         let src_rec = PersonalRecord::decode(&got(source_key, "participants"), &context(source_key)).unwrap();
         assert_eq!(src_rec.reputation, vec![((2, -2), -40)]);
         assert_eq!(src_rec.kills, vec![(crate::mob::MobType::Pig, 7)]);
@@ -328,32 +516,216 @@ mod session {
         assert!(dst_rec.is_default() && dst_rec.local.is_none(), "the recipient inherits nothing");
         assert_eq!(got(source_key, "joiners"), sidecar);
         assert_ne!(got(p.seat.key, "joiners"), sidecar);
-        // The latched listener refuses and never admits.
-        let l = p.dst.listener().unwrap();
-        assert!(!l.admits());
-        let _try = crate::network::connect_to_server(l.local_addr());
-        let mut refused = false;
-        for _ in 0..100 {
-            if l.refused() > 0 {
-                refused = true;
-                break;
+        // The session neutralised the raw copy: the seat-0 pet is the
+        // source's by npub, the cart came across, no seat rows remain.
+        let bytes = std::fs::read(cp.received_world().join("world.dat")).unwrap();
+        let (body, _) = crate::save_format::split_save_footer(&bytes);
+        let world: crate::save::WorldSave = bincode::deserialize(body).unwrap();
+        assert!(world.players.is_empty() && world.inventory.is_empty());
+        assert_eq!(world.carts.len(), 1);
+        match &world.saved_mobs[..] {
+            [crate::save::SavedTamedPet { data: crate::save::SavedTamedPetData::Wolf(w), .. }] => {
+                assert_eq!(w.ownership.owner_pubkey, npub(&keys(SOURCE_PERSONA)))
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            other => panic!("the pet didn't come across: {other:?}"),
         }
-        assert!(refused, "the latched listener did not refuse a connection");
+    }
+
+    /// What a connecting client actually gets from the latched listener: a
+    /// refused connection, never an established one.
+    #[test]
+    fn handover_latched_listener_refuses_a_connecting_client() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let l = crate::handover::live::listener::LatchedListener::bind(socket).unwrap();
+        let addr = l.local_addr();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let outcome = rt.block_on(async move {
+            let ep = crate::network::create_client_endpoint().unwrap();
+            let connecting = ep.connect(addr, "axenstax-server").unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), connecting).await
+        });
+        match outcome {
+            Ok(Err(quinn::ConnectionError::ConnectionClosed(c))) => {
+                assert_eq!(c.error_code, quinn::TransportErrorCode::CONNECTION_REFUSED)
+            }
+            Ok(Err(e)) => panic!("unexpected refusal shape: {e}"),
+            Ok(Ok(_)) => panic!("the latched listener let a client connect"),
+            Err(_) => panic!("the latched listener never answered"),
+        }
+        assert!(l.refused() > 0);
     }
 
     #[test]
-    fn handover_recipient_cancel_before_ready_restores_working_source() {
+    fn handover_recipient_cancel_before_ready_restores_play_on_both_sides() {
         let mut p = pair("cancel");
         consent(&mut p);
         let tally = p.host.world.sim_tally;
-        p.dst.abort("changed my mind");
-        assert!(p.src.pump(&mut p.hs, now()).is_err());
+        let dst = p.dst.as_mut().unwrap();
+        dst.abort("changed my mind");
+        assert!(p.src.pump(&mut p.hs, p.live, now()).is_err());
         assert!(matches!(p.src.stage(), SourceStage::Aborted(_)));
-        assert!(!p.hs.handover_frozen());
+        assert!(!p.hs.handover_frozen() && p.hs.handover_link().is_none());
         p.host.lend_tick(&mut p.hs);
         assert!(p.host.world.sim_tally != tally, "the source simulates again");
-        assert!(p.hs.handover_link().is_none());
+        // The recipient's joined client gets its connection back and keeps
+        // playing: it hears that play resumed.
+        let (link, parked) = p.dst.as_mut().unwrap().return_link().expect("connection handed back");
+        p.rc.restore_transport(link, parked);
+        assert!(!p.rc.is_parked());
+        p.host.lend_tick(&mut p.hs);
+        p.rc.poll();
+        let frames: Vec<_> = p.rc.take_handover_frames().iter().map(|b| Frame::decode(b).unwrap()).collect();
+        assert!(frames.iter().any(|f| matches!(f, Frame::Notice { paused: false, .. })), "{frames:?}");
+        assert!(crate::world_exit::remote_session_end_reason(&p.rc).is_none(), "still in the world");
+    }
+
+    #[test]
+    fn handover_source_refuses_a_ready_signed_over_the_wrong_challenge() {
+        let mut p = pair("forged");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        // A man in the middle swaps the recipient's Ready for one signed by
+        // the same runtime over a different challenge.
+        let core = p.src.core().unwrap().clone();
+        let forged = pollster::block_on(crate::handover::crypto::sign_ready(&keys(RECIPIENT_RUNTIME), &core, [0x33; 16])).unwrap();
+        let frame = Frame::Ready { transfer: p.src.transfer(), event: forged.as_json() }.encode().unwrap();
+        let mut pkt = vec![protocol::PacketType::Handover as u8];
+        pkt.extend_from_slice(&frame);
+        *p.forged_ready.lock().unwrap() = Some(pkt);
+        let mut refusal = None;
+        for _ in 0..10_000 {
+            let _ = p.dst.as_mut().unwrap().pump(now());
+            if let Err(r) = p.src.pump(&mut p.hs, p.live, now()) {
+                refusal = Some(r);
+                break;
+            }
+            assert_ne!(p.src.stage(), SourceStage::ReadyVerified, "the source accepted a forged Ready");
+        }
+        assert_eq!(refusal.map(|r| r.0), Some("The recipient's Ready didn't verify."));
+        assert!(!p.hs.handover_frozen(), "a refused Ready releases the source");
+    }
+
+    /// Consent over the parked connection, without pumping the source.
+    fn consent_only(p: &mut Pair) {
+        propose(p);
+        let dst = p.dst.as_mut().unwrap();
+        let prop = dst.proposal().clone();
+        let c = RecipientConsent { transfer: prop.transfer, world_name: prop.world_name, source_npub: prop.source_npub };
+        dst.consent(c, std::net::UdpSocket::bind("127.0.0.1:0").unwrap(), p.rc.park_transport(), now()).unwrap();
+        p.host.lend_tick(&mut p.hs);
+    }
+
+    #[test]
+    fn handover_identity_change_since_the_host_action_refuses_at_freeze() {
+        let mut p = pair("ident");
+        consent_only(&mut p);
+        let other = Live { signed_in: Some([7; 32]), ..p.live };
+        let r = p.src.pump(&mut p.hs, other, now()).unwrap_err();
+        assert_eq!(r.0, "You signed in as someone else since you started. Start the handover again.");
+        assert!(!p.hs.handover_frozen() && p.hs.handover_link().is_none(), "never frozen");
+    }
+
+    #[test]
+    fn handover_saved_record_written_after_the_host_action_refuses_at_freeze() {
+        // A player who joined and left during the consent window: their
+        // record refuses rather than being silently left out of the copy.
+        let mut p = pair("late-record");
+        let late = keys(0x44).public_key();
+        std::fs::create_dir_all(p.dir.0.join("world/joiners")).unwrap();
+        std::fs::write(p.dir.0.join(format!("world/joiners/{}.dat", late.to_bech32().unwrap())), b"opaque").unwrap();
+        consent_only(&mut p);
+        let r = p.src.pump(&mut p.hs, p.live, now()).unwrap_err();
+        assert!(r.0.starts_with("Other players have saved records"), "{}", r.0);
+        assert!(!p.hs.handover_frozen());
+    }
+
+    #[test]
+    fn handover_sign_out_before_the_frozen_capture_refuses_the_offer() {
+        let mut p = pair("ident-offer");
+        consent(&mut p);
+        let seat0 = seat0();
+        p.live = Live { signed_in: None, ..p.live };
+        let (r, _) = try_offer(&mut p, &seat0);
+        assert_eq!(r.err().map(|e| e.0), Some("Sign in before handing this world over."));
+        assert!(!p.hs.handover_frozen() && matches!(p.src.stage(), SourceStage::Aborted(_)));
+    }
+
+    #[test]
+    fn handover_host_action_persona_must_be_the_authority_persona() {
+        let (mut hs, mut host) = start_lent("handover-persona");
+        let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x66; 32]);
+        let root = root();
+        let lineage = root_lineage(&root);
+        let cfg = SourceConfig {
+            runtime: keys(SOURCE_RUNTIME),
+            root: root.clone(),
+            authority: Authority::root(&root, lineage).unwrap(),
+            lineage,
+            world: [6; 16],
+            generation: 1,
+            scratch: std::env::temp_dir(),
+            validity: 600,
+            world_dir: None,
+        };
+        let stranger = keys(0x99).public_key().to_bytes();
+        let action = HostAction { seat: Seat { slot, generation, key }, source_key: stranger, world_name: "Loop".into() };
+        let live = Live { signed_in: Some(stranger), local_seats: 1 };
+        let r = SourceSession::begin(&mut hs, action, cfg, live, now()).err().unwrap();
+        assert_eq!(r.0, "This world's invitation belongs to a different identity than the one signed in.");
+        assert!(hs.handover_link().is_none());
+    }
+
+    #[test]
+    fn handover_recipient_abort_after_ready_releases_the_source() {
+        let mut p = pair("after-ready");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 10_000);
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+        p.dst.as_mut().unwrap().abort("changed my mind");
+        assert!(p.src.pump(&mut p.hs, p.live, now()).is_err(), "the source hears the Abort after Ready");
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)));
+        assert!(!p.hs.handover_frozen(), "and resumes play");
+        // The recipient keeps its quarantined checkpoint after Ready.
+        assert!(p.dst.as_ref().unwrap().checkpoint().is_some());
+    }
+
+    #[test]
+    fn handover_recipient_refuses_a_proposal_that_isnt_from_the_host_it_verified() {
+        let dir = Dir::new("spoof");
+        let r = root();
+        let propose = |source_npub: String, root: &RootContext| {
+            Frame::Propose {
+                transfer: [1; 16],
+                world_name: "Loop".into(),
+                source_npub,
+                challenge: [2; 16],
+                root_runtime: root.runtime(),
+                root_persona: nostr::PublicKey::from_slice(&root.persona()).unwrap().to_bech32().unwrap(),
+                root_expiry: root.expiry(),
+                root_relays: root.relays().to_vec(),
+                lineage: root_lineage(root),
+            }
+            .encode()
+            .unwrap()
+        };
+        let session = |payload: &[u8], host: JoinedHost| {
+            RecipientSession::propose(payload, host, identity(), dir.0.join("imports"), markers(&dir), now())
+        };
+        assert!(session(&propose(npub(&keys(SOURCE_PERSONA)), &r), joined_host()).is_ok(), "the honest proposal");
+        // Displays one npub while the invitation names another.
+        let shown = session(&propose(npub(&keys(0x55)), &r), joined_host());
+        assert_eq!(shown.err().map(|e| e.0), Some("This handover doesn't come from the host you joined."));
+        // A self-consistent proposal for a host this client never verified.
+        let other_root = RootContext::new(
+            keys(0x56).public_key().to_bytes(),
+            &npub(&keys(0x57)),
+            now() + 3600,
+            &["wss://relay.example".into()],
+            now(),
+        )
+        .unwrap();
+        let foreign = session(&propose(npub(&keys(0x57)), &other_root), joined_host());
+        assert_eq!(foreign.err().map(|e| e.0), Some("This handover doesn't come from the host you joined."));
     }
 }

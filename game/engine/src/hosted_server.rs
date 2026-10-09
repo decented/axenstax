@@ -3693,6 +3693,9 @@ impl HostedServer {
         // A frozen handover source runs no tick: no admission, no inbound
         // gameplay, no simulation, no broadcast, no discovery heartbeat. Only
         // `handover_take_frames` reads the selected joiner's control frames.
+        // A link whose session is gone is released first.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handover_reap();
         #[cfg(not(target_arch = "wasm32"))]
         if self.handover_frozen() {
             return;

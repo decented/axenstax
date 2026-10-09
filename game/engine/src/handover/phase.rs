@@ -202,6 +202,11 @@ impl Authority {
     pub fn runtime(&self) -> Hash {
         self.runtime
     }
+    /// The persona this authority's runtime acts for (root: the invitation's
+    /// own persona; a successor: the certificate's successor persona).
+    pub fn persona(&self) -> Hash {
+        self.persona
+    }
     pub fn root(root: &super::context::RootContext, lineage: Id) -> Result<Self> {
         if lineage == [0; 16] {
             return Err(Error::Invalid("root lineage"));

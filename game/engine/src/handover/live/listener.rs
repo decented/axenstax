@@ -67,10 +67,6 @@ impl LatchedListener {
     pub fn refused(&self) -> usize {
         self.refused.load(Ordering::Relaxed)
     }
-    /// A latched listener admits nobody, ever.
-    pub fn admits(&self) -> bool {
-        false
-    }
 }
 
 impl Drop for LatchedListener {

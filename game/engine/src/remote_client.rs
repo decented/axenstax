@@ -511,7 +511,29 @@ pub struct RemoteClient {
     /// at all (`docs/foundations/2026-09-05-world-chat.md` §6).
     #[cfg(not(target_arch = "wasm32"))]
     pub pending_chat: Vec<protocol::ChatDeliverPacket>,
+    /// World handover control frames from the host (payloads, oldest
+    /// first), drained by the game loop each frame. Bounded like
+    /// `pending_chat`; past the bound a frame is dropped and the handover it
+    /// belonged to fails its own checks.
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_inbox: std::collections::VecDeque<Vec<u8>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_inbox_bytes: usize,
+    /// The connection is lent to a world-handover session: nothing is read
+    /// or sent here, and the session isn't over (`state` is untouched).
+    parked: bool,
+    /// Gameplay that arrived while parked, handed back with the connection
+    /// on a cancelled handover: read before the transport, in order.
+    replay: std::collections::VecDeque<Vec<u8>>,
 }
+
+/// Most handover control frames / bytes the joined client holds between
+/// frames (a proposal and the pause notices are all that arrive while it
+/// still owns the connection).
+#[cfg(not(target_arch = "wasm32"))]
+pub const HANDOVER_INBOX_FRAMES: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+pub const HANDOVER_INBOX_BYTES: usize = 256 * 1024;
 
 /// C3c-1-fix (M-4) — most refusal notices [`RemoteClient::pending_refused_uses`]
 /// holds before the game loop drains them (an honest server sends at most a
@@ -794,6 +816,12 @@ impl RemoteClient {
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox_bytes: 0,
+            parked: false,
+            replay: Default::default(),
         }
     }
 
@@ -846,19 +874,29 @@ impl RemoteClient {
             queued_requests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_chat: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_inbox_bytes: 0,
+            parked: false,
+            replay: Default::default(),
         }
     }
 
     /// Poll for server messages. Call each frame.
     /// Returns true if state changed (e.g., join accepted, state update received).
     pub fn poll(&mut self) -> bool {
+        // A connection lent to a handover session is read by that session.
+        if self.parked {
+            return false;
+        }
         let mut changed = false;
         // Read BEFORE draining: every packet the peer sent before the link
         // went (a kick's JoinReject included) is then already queued, and is
         // handled first — so its reason wins over the generic one below.
         let transport_closed = self.transport.is_closed();
 
-        while let Some(packet) = self.transport.try_recv_from_server() {
+        while let Some(packet) = self.replay.pop_front().or_else(|| self.transport.try_recv_from_server()) {
             if let Some((ptype, payload)) = protocol::deserialize_header(&packet) {
                 match ptype {
                     PacketType::JoinAccept => {
@@ -1280,6 +1318,18 @@ impl RemoteClient {
                             changed = true;
                         }
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    PacketType::Handover => {
+                        if self.handover_inbox.len() < HANDOVER_INBOX_FRAMES
+                            && self.handover_inbox_bytes + payload.len() <= HANDOVER_INBOX_BYTES
+                        {
+                            self.handover_inbox_bytes += payload.len();
+                            self.handover_inbox.push_back(payload.to_vec());
+                            changed = true;
+                        } else {
+                            log::warn!("Dropped a handover message: too many waiting");
+                        }
+                    }
                     PacketType::ResourcePackSuggest => {
                         // Server suggests a resource pack (Spec 03 §11.6). Store it
                         // for the game loop to prompt the player + (on accept) load.
@@ -1636,16 +1686,47 @@ impl RemoteClient {
         self.respawn_resend_from = None;
     }
 
-    /// World handover: take this client's live transport for the
-    /// independent control session. What remains is closed, so tearing the
-    /// joined world down (`disconnect`, drop) cannot touch the link.
-    // BRIDGE: its production caller is the GameState recipient wiring (the
-    // next handover assignment); until then only the loopback tests call it.
+    /// World handover control frames the host sent since the last call.
     #[cfg(not(target_arch = "wasm32"))]
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn take_transport(&mut self) -> Box<dyn ClientTransport> {
-        self.state = ConnectionState::Disconnected;
+    pub fn take_handover_frames(&mut self) -> Vec<Vec<u8>> {
+        self.handover_inbox_bytes = 0;
+        self.handover_inbox.drain(..).collect()
+    }
+
+    /// Send one packet as-is (a handover Decline while still joined).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn send_raw(&self, packet: &[u8]) {
+        if !self.parked {
+            self.transport.send_to_server(packet);
+        }
+    }
+
+    /// World handover: lend this client's live connection to the independent
+    /// control session. What remains is closed, so leaving the joined world
+    /// (`disconnect`, drop) cannot touch the link, and the session isn't
+    /// treated as over while parked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn park_transport(&mut self) -> Box<dyn ClientTransport> {
+        self.parked = true;
         std::mem::replace(&mut self.transport, Box::new(crate::transport::ClosedClientTransport))
+    }
+
+    /// A cancelled handover gives the connection back, with the gameplay
+    /// that arrived meanwhile; play continues from it in order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn restore_transport(
+        &mut self,
+        transport: Box<dyn ClientTransport>,
+        replay: std::collections::VecDeque<Vec<u8>>,
+    ) {
+        self.transport = transport;
+        self.replay = replay;
+        self.parked = false;
+    }
+
+    /// Is the connection lent to a handover session?
+    pub fn is_parked(&self) -> bool {
+        self.parked
     }
 
     /// Send a graceful disconnect to the server.

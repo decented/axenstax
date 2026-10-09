@@ -1905,7 +1905,11 @@ pub fn build_world_save(
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
-) -> WorldSave {
+) -> Option<WorldSave> {
+    // No seat, no legacy single-player fields to fill: refused, not a panic.
+    if players.is_empty() {
+        return None;
+    }
     // Build per-player save data
     let player_saves: Vec<PlayerSaveData> = players.iter().map(|slot| {
         PlayerSaveData {
@@ -2009,7 +2013,7 @@ pub fn build_world_save(
         .map(|(&(x, y, z), chain)| SavedArchitectPlaque { x, y, z, chain: chain.clone() })
         .collect();
 
-    WorldSave {
+    Some(WorldSave {
         seed,
         player_x: p0.x,
         player_y: p0.y,
@@ -2080,7 +2084,7 @@ pub fn build_world_save(
             .iter_power_devices()
             .map(|((x, y, z), data)| SavedPowerDevice { x, y, z, data: data.clone() })
             .collect(),
-    }
+    })
 }
 
 /// [`save_world`], doing `at_commit` to the autosave the moment `world.dat`
@@ -2106,7 +2110,8 @@ fn save_world_at(
     finish_staged_first_save(&dir)?;
     let chunks_dir = dir.join("chunks");
 
-    let save = build_world_save(world, players, seed, carts, saved_mobs);
+    let save = build_world_save(world, players, seed, carts, saved_mobs)
+        .ok_or_else(|| "save_world: no players to save".to_string())?;
 
     // Increment version counter + flush proof-of-play stats into meta BEFORE
     // the folder write so world_meta.json on disk matches the live state.

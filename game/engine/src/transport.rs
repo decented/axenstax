@@ -267,15 +267,13 @@ impl ServerTransport for ChannelServerTransport {
     }
 }
 
-/// What a freed slot holds once its real transport has been dropped (which is
-/// what closes the socket). Sends go nowhere, nothing ever arrives, and it
-/// reports closed — so a stale index can never reach a new connection.
 /// A client transport that is already closed: sends go nowhere. World
-/// handover takes a joined client's live transport out of its RemoteClient
-/// and leaves this behind, so a later `disconnect()` cannot close the link.
-#[cfg_attr(not(test), allow(dead_code))] // BRIDGE: see RemoteClient::take_transport
+/// handover lends a joined client's live transport to its session and leaves
+/// this behind, so a later `disconnect()` cannot close the link.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ClosedClientTransport;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ClientTransport for ClosedClientTransport {
     fn send_to_server(&self, _data: &[u8]) {}
     fn try_recv_from_server(&self) -> Option<Packet> {
@@ -286,6 +284,9 @@ impl ClientTransport for ClosedClientTransport {
     }
 }
 
+/// What a freed slot holds once its real transport has been dropped (which is
+/// what closes the socket). Sends go nowhere, nothing ever arrives, and it
+/// reports closed — so a stale index can never reach a new connection.
 pub struct ClosedTransport;
 
 impl ServerTransport for ClosedTransport {

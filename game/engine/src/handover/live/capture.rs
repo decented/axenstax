@@ -2,28 +2,15 @@
 //! function builds the sidecar so the obligation-carrier rebase can swap it
 //! for `JoinerSave::from_parts` of that version (a local trusted seat has no
 //! correction-debt machinery: its record is complete with nothing owed).
+//! Capture writes nothing: an aborted handover leaves this machine as it was.
 use super::eligibility::Refusal;
 use crate::handover::personal::{LocalRestore, PersonalRecord, RecordContext};
 use crate::player_slot::PlayerSlot;
 
 /// The seat's window + vitals in exactly the sidecar encoding a joiner's
-/// record uses. Private Plan bodies stay in this machine's own Plan store
-/// (remembered here, before the record keeps only their markers).
+/// record uses. Pure: nothing on this machine changes at capture.
 pub fn local0_sidecar(slot: &PlayerSlot, run_id: [u8; 16]) -> Result<Vec<u8>, Refusal> {
-    let window = crate::window_events::EffectiveWindow {
-        inv: slot.inventory.clone(),
-        armour: slot.armour_slots,
-        cursor: slot.crafting_ui.cursor_item.clone(),
-        grid: slot.crafting_ui.grid.clone(),
-    };
-    for i in 0..36 {
-        if let Some(s) = window.inv.slot(i) {
-            crate::plan_store::remember_item(&s.item);
-        }
-    }
-    for s in window.cursor.iter().chain(window.grid.iter().flatten().flatten()) {
-        crate::plan_store::remember_item(&s.item);
-    }
+    let window = local0_window(slot);
     let save = crate::joiner_save::JoinerSave::from_parts(
         &window,
         slot.combat.health,
@@ -65,4 +52,25 @@ pub fn default_progress(context: RecordContext) -> Vec<u8> {
     PersonalRecord::from_maps(context, [], [], [], None)
         .and_then(|r| r.encode())
         .expect("an empty record always encodes")
+}
+
+fn local0_window(slot: &PlayerSlot) -> crate::window_events::EffectiveWindow {
+    crate::window_events::EffectiveWindow {
+        inv: slot.inventory.clone(),
+        armour: slot.armour_slots,
+        cursor: slot.crafting_ui.cursor_item.clone(),
+        grid: slot.crafting_ui.grid.clone(),
+    }
+}
+
+/// The seat's items whose private Plan bodies this machine must keep
+/// resolvable once its record holds only their markers. Remembered in the
+/// Plan store at retirement (a later boundary), never at capture.
+pub fn local0_plan_items(slot: &PlayerSlot) -> Vec<crate::item::Item> {
+    let w = local0_window(slot);
+    let inv = (0..36).filter_map(|i| w.inv.slot(i).map(|s| s.item.clone()));
+    let rest = w.cursor.iter().chain(w.grid.iter().flatten().flatten()).map(|s| s.item.clone());
+    inv.chain(rest)
+        .filter(|i| matches!(i, crate::item::Item::Plan(body) if body.marker.is_none()))
+        .collect()
 }

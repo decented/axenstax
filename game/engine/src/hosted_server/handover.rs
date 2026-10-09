@@ -10,7 +10,13 @@
 //! by `handover_take_frames`; everything else that seat sent stays queued in
 //! its original order, and every other seat's packets stay in its transport.
 //! A pre-retirement release resumes them through the ordinary path only while
-//! the seat is the same generation (a reused seat starts with a fresh queue).
+//! the seat is still that exact live seat (a reused, departed or closed seat's
+//! queue is discarded, never replayed into a world its client can't see).
+//!
+//! Every joined player is told when play pauses (freeze) and resumes
+//! (release), so their clients stop sending input instead of queueing it.
+//! The link holds only a weak lease on its session: a session dropped without
+//! an explicit abort is released (and the recipient told) at the next tick.
 use super::HostedServer;
 use crate::protocol::{self, PacketType};
 use std::collections::VecDeque;
@@ -28,6 +34,8 @@ pub struct HandoverLink {
     inbox: VecDeque<Vec<u8>>,
     inbox_bytes: usize,
     broken: Option<&'static str>,
+    transfer: crate::handover::Id,
+    lease: std::sync::Weak<()>,
 }
 
 /// Why a link refused or broke. Short reasons, no keys or frame text.
@@ -55,14 +63,23 @@ impl HostedServer {
             .then_some((sp.attach_gen, key))
     }
 
-    /// Bind the control link to one authenticated seat. One link at a time.
-    pub fn handover_bind(&mut self, slot: usize, generation: u32, key: [u8; 32]) -> Result<(), LinkError> {
+    /// Bind the control link to one authenticated seat for one transfer.
+    /// One link at a time. The returned lease keeps it bound: drop it and the
+    /// next tick releases the link.
+    pub fn handover_bind(
+        &mut self,
+        slot: usize,
+        generation: u32,
+        key: [u8; 32],
+        transfer: crate::handover::Id,
+    ) -> Result<std::sync::Arc<()>, LinkError> {
         if self.handover.is_some() {
             return Err("a handover is already in progress");
         }
         if !self.handover_seat_live(slot, generation, key) {
             return Err("that player is no longer signed in to this world");
         }
+        let lease = std::sync::Arc::new(());
         self.handover = Some(HandoverLink {
             slot,
             generation,
@@ -71,8 +88,10 @@ impl HostedServer {
             inbox: VecDeque::new(),
             inbox_bytes: 0,
             broken: None,
+            transfer,
+            lease: std::sync::Arc::downgrade(&lease),
         });
-        Ok(())
+        Ok(lease)
     }
 
     /// Re-check the bound seat; a changed or departed seat breaks the link.
@@ -92,13 +111,47 @@ impl HostedServer {
         Ok(())
     }
 
-    /// Freeze the source. Only after the seat re-check passes.
+    /// Freeze the source. Only after the seat re-check passes. Every joined
+    /// player is told play is paused.
     pub fn handover_freeze(&mut self) -> Result<(), LinkError> {
         self.handover_check()?;
+        let mut transfer = None;
         if let Some(l) = &mut self.handover {
+            if !l.frozen {
+                transfer = Some(l.transfer);
+            }
             l.frozen = true;
         }
+        if let Some(t) = transfer {
+            self.handover_notice_all(t, true);
+        }
         Ok(())
+    }
+
+    /// Tell every joined, live player that play paused or resumed.
+    fn handover_notice_all(&self, transfer: crate::handover::Id, paused: bool) {
+        let Ok(frame) = crate::handover::live::wire::Frame::Notice { transfer, paused }.encode() else { return };
+        let mut pkt = vec![PacketType::Handover as u8];
+        pkt.extend_from_slice(&frame);
+        for j in 0..self.transports.len() {
+            self.send_to_joined_slot(j, &pkt);
+        }
+    }
+
+    /// A link whose session was dropped without an explicit abort: tell the
+    /// recipient and release. Called at the top of every tick (frozen or not).
+    pub(super) fn handover_reap(&mut self) {
+        let Some(l) = &self.handover else { return };
+        if l.lease.strong_count() > 0 {
+            return;
+        }
+        let (slot, transfer) = (l.slot, l.transfer);
+        if let Ok(frame) = (crate::handover::live::wire::Frame::Abort { transfer }).encode() {
+            let mut pkt = vec![PacketType::Handover as u8];
+            pkt.extend_from_slice(&frame);
+            self.send_to_joined_slot(slot, &pkt);
+        }
+        self.handover_release();
     }
 
     pub fn handover_frozen(&self) -> bool {
@@ -170,17 +223,17 @@ impl HostedServer {
     }
 
     /// Pre-retirement abort: unfreeze and drop the link. The bound seat's
-    /// waiting gameplay resumes through the ordinary path only if it is still
-    /// the same generation; a departed seat's queue is discarded with it.
+    /// waiting gameplay resumes through the ordinary path only while it is
+    /// still that exact live seat (its client restored the connection and
+    /// sees the world); a departed, reused or closed seat's queue is
+    /// discarded. Joined players are told play resumes.
     pub fn handover_release(&mut self) {
         let Some(l) = self.handover.take() else { return };
-        let same = self
-            .server
-            .players
-            .get(l.slot)
-            .is_some_and(|sp| sp.attach_gen == l.generation);
-        if !same {
+        if !self.handover_seat_live(l.slot, l.generation, l.key) {
             self.inbound[l.slot] = Default::default();
+        }
+        if l.frozen {
+            self.handover_notice_all(l.transfer, false);
         }
     }
 }
