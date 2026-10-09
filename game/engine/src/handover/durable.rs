@@ -1,5 +1,8 @@
 //! Narrow durable marker storage: no archive extraction or arbitrary filenames.
-use super::{Error, Id, Result};
+use super::{
+    Error, Id, Result,
+    codec::{Reader, frame},
+};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -15,6 +18,15 @@ pub enum MarkerKind {
     Prefix,
 }
 impl MarkerKind {
+    fn number(self) -> u8 {
+        match self {
+            Self::Retired => 0,
+            Self::Ready => 1,
+            Self::Activated => 2,
+            Self::Prepared => 3,
+            Self::Prefix => 4,
+        }
+    }
     fn label(self) -> &'static str {
         match self {
             Self::Retired => "retired",
@@ -66,7 +78,9 @@ impl MarkerStore {
             .join(format!("{}-{}.dat", kind.label(), hex::encode(id)))
     }
     pub fn read(&self, kind: MarkerKind, id: Id) -> Result<Option<Vec<u8>>> {
-        read_bounded(&self.path(kind, id))
+        read_bounded(&self.path(kind, id))?
+            .map(|bytes| decode_marker(&bytes, kind, id))
+            .transpose()
     }
     pub fn persist(&self, kind: MarkerKind, id: Id, bytes: &[u8]) -> Result<()> {
         self.persist_observed(kind, id, bytes, &mut NoFault)
@@ -81,6 +95,9 @@ impl MarkerStore {
         if id == [0; 16] || bytes.is_empty() || bytes.len() > MARKER_LIMIT {
             return Err(Error::Limit("marker record"));
         }
+        let payload = bytes;
+        let encoded = encode_marker(kind, id, payload)?;
+        let bytes = encoded.as_slice();
         let path = self.path(kind, id);
         if let Some(old) = read_bounded(&path)? {
             if old == bytes {
@@ -96,8 +113,9 @@ impl MarkerStore {
             if kind != MarkerKind::Prefix {
                 return Err(Error::State("immutable marker conflict"));
             }
-            let old = super::certificate::Prefix::restore(&old)?;
-            let next = super::certificate::Prefix::restore(bytes)?;
+            let old_payload = decode_marker(&old, kind, id)?;
+            let old = super::certificate::Prefix::restore(&old_payload)?;
+            let next = super::certificate::Prefix::restore(payload)?;
             if !old.can_advance_to(&next) {
                 return Err(Error::State("prefix rollback/conflict"));
             }
@@ -193,12 +211,51 @@ impl MarkerStore {
             if value != hex::encode(id) {
                 return Err(Error::Invalid("noncanonical retirement filename"));
             }
-            let bytes = read_bounded(&entry.path())?.ok_or(Error::Io)?;
+            let bytes = self.read(MarkerKind::Retired, id)?.ok_or(Error::Io)?;
             out.push((id, bytes));
         }
         Ok(out)
     }
 }
+const MARKER_DOMAIN: &str = "AxeNStax/handover/marker/v1";
+const MARKER_OVERHEAD: usize = 4 + MARKER_DOMAIN.len() + 4 + 1 + 16 + 4 + 32;
+/// Unkeyed accidental-corruption checksum, not a machineowner authentication
+/// boundary. Full encoded record, including all framing and checksum, is64KiB.
+fn encode_marker(kind: MarkerKind, id: Id, payload: &[u8]) -> Result<Vec<u8>> {
+    if payload.is_empty() || payload.len() > MARKER_LIMIT - MARKER_OVERHEAD {
+        return Err(Error::Limit("full marker record"));
+    }
+    let mut out = Vec::with_capacity(MARKER_OVERHEAD + payload.len());
+    frame(&mut out, MARKER_DOMAIN.as_bytes());
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.push(kind.number());
+    out.extend_from_slice(&id);
+    frame(&mut out, payload);
+    let checksum = super::hash(&out);
+    out.extend_from_slice(&checksum);
+    Ok(out)
+}
+fn decode_marker(bytes: &[u8], kind: MarkerKind, id: Id) -> Result<Vec<u8>> {
+    if bytes.len() > MARKER_LIMIT || bytes.len() < MARKER_OVERHEAD {
+        return Err(Error::Invalid("marker envelope size"));
+    }
+    let (body, checksum) = bytes.split_at(bytes.len() - 32);
+    if super::hash(body).as_slice() != checksum {
+        return Err(Error::Invalid("marker checksum"));
+    }
+    let mut r = Reader::new(body, MARKER_LIMIT)?;
+    r.label(MARKER_DOMAIN)?;
+    if r.u32()? != 1 || r.u8()? != kind.number() || r.array::<16>()? != id {
+        return Err(Error::Invalid("marker envelope binding"));
+    }
+    let payload = r.framed(MARKER_LIMIT - MARKER_OVERHEAD)?;
+    r.end()?;
+    if payload.is_empty() {
+        return Err(Error::Invalid("marker payload"));
+    }
+    Ok(payload.to_vec())
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     fs::File::open(path)
         .and_then(|f| f.sync_all())
@@ -300,6 +357,50 @@ pub(crate) mod tests {
             s.read(MarkerKind::Retired, [1; 16]).unwrap().unwrap(),
             b"unchanged old record"
         );
+        fs::remove_dir_all(p).unwrap();
+    }
+    #[test]
+    fn handover_marker_full_size_kind_id_version_trailing_and_corruption() {
+        let payload = vec![1; MARKER_LIMIT - MARKER_OVERHEAD];
+        let encoded = encode_marker(MarkerKind::Activated, [1; 16], &payload).unwrap();
+        assert_eq!(encoded.len(), MARKER_LIMIT);
+        assert_eq!(encoded.capacity(), MARKER_LIMIT);
+        assert_eq!(
+            decode_marker(&encoded, MarkerKind::Activated, [1; 16]).unwrap(),
+            payload
+        );
+        assert!(
+            encode_marker(MarkerKind::Activated, [1; 16], &vec![1; payload.len() + 1]).is_err()
+        );
+        assert!(decode_marker(&encoded, MarkerKind::Retired, [1; 16]).is_err());
+        assert!(decode_marker(&encoded, MarkerKind::Activated, [2; 16]).is_err());
+        let mut trailing = encode_marker(MarkerKind::Activated, [1; 16], b"payload").unwrap();
+        trailing.push(0);
+        assert!(decode_marker(&trailing, MarkerKind::Activated, [1; 16]).is_err());
+        let mut future = encode_marker(MarkerKind::Activated, [1; 16], b"payload").unwrap();
+        let version_at = 4 + MARKER_DOMAIN.len();
+        future[version_at + 3] = 2;
+        let end = future.len() - 32;
+        let checksum = super::super::hash(&future[..end]);
+        future[end..].copy_from_slice(&checksum);
+        assert!(decode_marker(&future, MarkerKind::Activated, [1; 16]).is_err());
+        let (s, p) = store("all-kind-corruption");
+        for kind in [
+            MarkerKind::Retired,
+            MarkerKind::Ready,
+            MarkerKind::Activated,
+            MarkerKind::Prepared,
+            MarkerKind::Prefix,
+        ] {
+            let id = [kind.number() + 1; 16];
+            s.persist(kind, id, b"exact phase binding").unwrap();
+            let path = s.path(kind, id);
+            let mut bytes = fs::read(&path).unwrap();
+            let offset = bytes.len() - 33;
+            bytes[offset] ^= 1;
+            fs::write(&path, bytes).unwrap();
+            assert!(s.read(kind, id).is_err());
+        }
         fs::remove_dir_all(p).unwrap();
     }
     #[test]

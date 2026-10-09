@@ -5118,3 +5118,15 @@ refuse. No archive data goes through relays. Markers cap64 records per kind and
 256 directory entries; capacity exhaustion preserves prior records and fails
 closed. Retired-capability checks precede contact shortcuts, including an expired
 old link, because legacy contact admission otherwise ignores bearer expiry.
+
+Handover marker files use a domain-separated, versioned envelope binding marker
+kind, transfer/cache id and length-prefixed payload, followed by SHA256 of that
+complete prefix. The64KiB limit includes framing/checksum and is checked before
+allocation; payload limit is reduced by the fixed envelope overhead. Corruption,
+wrong kind/id, unknown version and trailing bytes refuse with no raw legacy
+fallback. This detects accidental damage, including lineage and Activated hash
+changes; it does not authenticate records against the machine owner. Fresh
+retirement requires private crypto-bound construction; decoded markers cannot
+mint new retirement permits. Live startup integration must additionally reverify
+actual encrypted certificate context using the local runtime/#p, not infer its
+inner fields from an outer event signature.

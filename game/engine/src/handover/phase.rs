@@ -527,6 +527,78 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handover::crypto::{self, Seal, Verified};
+    use nostr::Keys;
+    async fn pair(
+        a: &Keys,
+        b: &Keys,
+        aa: &Event,
+        ab: &Event,
+        core: &Core,
+        root: &crate::handover::context::RootContext,
+    ) -> (VerifiedPrepared, VerifiedCommit, Event) {
+        let keys = crypto::recipient(
+            root,
+            &[1; 16],
+            if core.epoch == 1 {
+                None
+            } else {
+                Some(core.predecessor)
+            },
+        )
+        .unwrap();
+        let ready = crypto::sign_ready(b, core, [8; 16]).await.unwrap();
+        let event = crypto::seal(
+            Seal {
+                source: a,
+                recipient: &keys,
+                core,
+                ready: &ready,
+                challenge: [8; 16],
+                source_attestation: aa,
+                successor_attestation: ab,
+                prepared: None,
+            },
+            root,
+            100,
+        )
+        .await
+        .unwrap();
+        let Verified::Prepared(p) =
+            crypto::open(&event, &keys, a.public_key().to_bytes(), root, 100, None).unwrap()
+        else {
+            panic!("Prepared")
+        };
+        let event = crypto::seal(
+            Seal {
+                source: a,
+                recipient: &keys,
+                core,
+                ready: &ready,
+                challenge: [8; 16],
+                source_attestation: aa,
+                successor_attestation: ab,
+                prepared: Some(&p),
+            },
+            root,
+            100,
+        )
+        .await
+        .unwrap();
+        let Verified::Committed(c) = crypto::open(
+            &event,
+            &keys,
+            a.public_key().to_bytes(),
+            root,
+            100,
+            Some(&p),
+        )
+        .unwrap() else {
+            panic!("Commit")
+        };
+        (p, c, event)
+    }
+
     #[test]
     fn handover_phase_durable_cut_restart_activation_and_late_abort() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -732,78 +804,8 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            use crate::handover::crypto::{self, Seal, Verified};
+            use crate::handover::crypto;
             use nostr::{Keys, Timestamp, ToBech32};
-            async fn pair(
-                a: &Keys,
-                b: &Keys,
-                aa: &Event,
-                ab: &Event,
-                core: &Core,
-                root: &crate::handover::context::RootContext,
-            ) -> (VerifiedPrepared, VerifiedCommit, Event) {
-                let keys = crypto::recipient(
-                    root,
-                    &[1; 16],
-                    if core.epoch == 1 {
-                        None
-                    } else {
-                        Some(core.predecessor)
-                    },
-                )
-                .unwrap();
-                let ready = crypto::sign_ready(b, core, [8; 16]).await.unwrap();
-                let event = crypto::seal(
-                    Seal {
-                        source: a,
-                        recipient: &keys,
-                        core,
-                        ready: &ready,
-                        challenge: [8; 16],
-                        source_attestation: aa,
-                        successor_attestation: ab,
-                        prepared: None,
-                    },
-                    root,
-                    100,
-                )
-                .await
-                .unwrap();
-                let Verified::Prepared(p) =
-                    crypto::open(&event, &keys, a.public_key().to_bytes(), root, 100, None)
-                        .unwrap()
-                else {
-                    panic!("Prepared")
-                };
-                let event = crypto::seal(
-                    Seal {
-                        source: a,
-                        recipient: &keys,
-                        core,
-                        ready: &ready,
-                        challenge: [8; 16],
-                        source_attestation: aa,
-                        successor_attestation: ab,
-                        prepared: Some(&p),
-                    },
-                    root,
-                    100,
-                )
-                .await
-                .unwrap();
-                let Verified::Committed(c) = crypto::open(
-                    &event,
-                    &keys,
-                    a.public_key().to_bytes(),
-                    root,
-                    100,
-                    Some(&p),
-                )
-                .unwrap() else {
-                    panic!("Commit")
-                };
-                (p, c, event)
-            }
             let a = Keys::generate();
             let b = Keys::generate();
             let root = crate::handover::context::RootContext::new(
@@ -931,6 +933,93 @@ mod tests {
             let mut wrong = handback;
             wrong.committed = [99; 32];
             assert!(Source::restart(&store, &wrong).is_err());
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
+    #[test]
+    fn handover_persisted_lineage_mutation_cannot_reopen_source() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use nostr::{Timestamp, ToBech32};
+            let a = Keys::generate();
+            let b = Keys::generate();
+            let root = crate::handover::context::RootContext::new(
+                a.public_key().to_bytes(),
+                &a.public_key().to_bech32().unwrap(),
+                900,
+                &["wss://relay.example".into()],
+                100,
+            )
+            .unwrap();
+            let (_, mut c) = crate::handover::certificate::tests::fixture();
+            c.context = root.digest();
+            c.root_runtime = root.runtime();
+            c.root_persona = root.persona();
+            c.source_runtime = root.runtime();
+            c.source_persona = root.persona();
+            c.successor_runtime = b.public_key().to_bytes();
+            c.successor_persona = b.public_key().to_bytes();
+            let aa = crate::runtime_identity::mint_player_attestation(
+                &a,
+                &a.public_key(),
+                Timestamp::from(100),
+                1,
+            )
+            .await
+            .unwrap();
+            let ab = crate::runtime_identity::mint_player_attestation(
+                &b,
+                &b.public_key(),
+                Timestamp::from(100),
+                1,
+            )
+            .await
+            .unwrap();
+            let (p, proof, event) = pair(&a, &b, &aa, &ab, &c, &root).await;
+            let (store, dir) = crate::handover::durable::tests::store("mutated-lineage");
+            let authority = Authority::root(&root, c.lineage).unwrap();
+            let mut source = Source::frozen(c.clone(), &authority).unwrap();
+            source
+                .prepared(
+                    &p,
+                    &StoredProof {
+                        hash: p.event_hash(),
+                    },
+                )
+                .unwrap();
+            let capability = crypto::root_capability(&root, &[1; 16]).unwrap();
+            source
+                .retire(
+                    &store,
+                    Retirement::new(
+                        &proof,
+                        &p,
+                        event.as_json().into_bytes(),
+                        [19; 16],
+                        capability,
+                        vec![RetiredRoot {
+                            capability,
+                            expiry: 900,
+                        }],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let path = dir.join(format!("retired-{}.dat", hex::encode(c.transfer)));
+            let mut bytes = std::fs::read(&path).unwrap();
+            let offset = bytes
+                .windows(c.lineage.len())
+                .position(|w| w == c.lineage)
+                .unwrap();
+            bytes[offset] ^= 1;
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(
+                Source::restart(&store, &authority).is_err(),
+                "corrupted retirement must fail closed, never look absent"
+            );
             std::fs::remove_dir_all(dir).unwrap();
         });
     }
