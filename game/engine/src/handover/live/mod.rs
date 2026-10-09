@@ -1,3 +1,9 @@
-//! Live world-handover integration: eligibility, the source capture and the
-//! direct control session between the source host and ONE selected joiner.
+//! Live world-handover integration: eligibility, the source capture, the
+//! direct control session between the source host and ONE selected joiner,
+//! and the recipient's inactive import, latched listener and Ready.
+pub mod capture;
 pub mod eligibility;
+pub mod listener;
+pub mod recipient;
+pub mod source;
+pub mod wire;

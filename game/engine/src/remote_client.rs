@@ -1636,6 +1636,15 @@ impl RemoteClient {
         self.respawn_resend_from = None;
     }
 
+    /// World handover: take this client's live transport for the
+    /// independent control session. What remains is closed, so tearing the
+    /// joined world down (`disconnect`, drop) cannot touch the link.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_transport(&mut self) -> Box<dyn ClientTransport> {
+        self.state = ConnectionState::Disconnected;
+        std::mem::replace(&mut self.transport, Box::new(crate::transport::ClosedClientTransport))
+    }
+
     /// Send a graceful disconnect to the server.
     pub fn disconnect(&mut self) {
         let packet = protocol::serialize_packet(PacketType::Disconnect, &());

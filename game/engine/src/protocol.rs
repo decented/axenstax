@@ -2734,6 +2734,9 @@ pub struct ServerAnnouncePacket {
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
+/// - v88 PRIVATE PROVISIONAL (branch mp-handover, never delivered as such;
+///   renumbered at rebase): `PacketType::Handover` (tag 68), the bounded
+///   world-handover control frame between a host and one selected joiner.
 pub const PROTOCOL_VERSION: u32 = 88;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this

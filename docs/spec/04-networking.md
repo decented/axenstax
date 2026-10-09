@@ -5048,7 +5048,7 @@ makes no unconditional durability claim.
 
 The native `handover` library core defines a bounded checkpoint-transfer protocol;
 it has no gameplay packet allocation, lobby control, automatic publication or
-host-activation hook. Protocol87 remains unchanged by this milestone. Complete
+host-activation hook. The core milestone left Protocol87 unchanged; the live session below adds private provisional v88. Complete
 live snapshot capture, consent, personal progression/ownership conversion and
 recipient role restoration are required before the handover feature can open.
 A joined render mirror is never a checkpoint source. Existing unsupported or
@@ -5246,3 +5246,41 @@ stay; any other seat number, any auction bidder, raid contribution, killing
 blow or raid kill row, a kept steed (`kept_by`) or a legacy row pet list
 refuses. Positional player rows and legacy seat0 fields are then stripped; that
 state travels in the source's own sidecar and participant records.
+
+**Live session to Ready (first live checkpoint; inert, recoverable).** The host
+action (`handover::live::source::HostAction`: exact seat, captured signed-in
+key, world name) and the recipient's consent (`RecipientConsent`, echoing the
+exact transfer, world name and source npub it was shown) are typed values only
+a caller acting on the player's own choice constructs; nothing accepts by
+default or on a timer. Control frames (`live::wire::Frame`, bincode, at most the
+ordinary 64KiB payload, text fields 8KiB, parts 16KiB, no trailing bytes) ride
+the existing authenticated direct game connection, never a relay. Order:
+Propose (transfer id, world name, source npub, the source's fresh challenge,
+root invitation fields, lineage) → Accept (recipient runtime key, its persona's
+player attestation, a runtime-signed acceptance over domain, transfer, source
+challenge, world name and source npub, plus the recipient's own fresh
+challenge). The source verifies the attestation persona equals the seat's
+verified key, re-runs eligibility, then freezes. The frozen caller supplies the
+sanitised transfer metadata, neutralised WorldSave copy and the source's own
+seat0 sidecar (`live::capture::local0_sidecar`, the sidecar's own encoder; its
+private Plan bodies are remembered in this machine's Plan store, the record
+keeps markers) and participant record (`local0_progress`, with pose, view,
+hotbar and lock mask). The session adds the recipient's sidecar from its server
+copy and a DEFAULT participant record, binds both players' agreements (the
+recipient's proof is the hash of its signed acceptance; the source's consent is
+authenticated by the offer's runtime signature over the manifest), packs,
+certifies (epoch = authority epoch+1, predecessor = authority's committed hash,
+expiry clipped to the invitation) and sends the manifest in parts, the signed
+offer bound to the recipient's challenge, then 16KiB chunks with at most four
+unacknowledged. The recipient owns the joined client's transport (taken out of
+its RemoteClient, leaving a closed transport so a later teardown or
+`disconnect()` cannot reach the link). At this base it follows the first hop
+only (the invitation's own runtime/persona offer); a later hop refuses until the
+verified chain lookup is wired. It verifies the offer, imports into a fresh
+non-overwriting inactive directory, completes the durable checkpoint, binds a
+latched QUIC listener that refuses every connection and has no broadcaster,
+relay subscription or admission path, signs Ready over the SOURCE's challenge,
+persists the Ready receipt and only then sends Ready. The source verifies Ready
+and stays frozen (Prepared/Commit/retirement are later boundaries). Any refusal,
+Decline or Abort before retirement releases the freeze; the recipient removes
+its own inactive checkpoint if it aborts before Ready and keeps it after.

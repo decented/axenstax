@@ -190,6 +190,18 @@ pub struct Authority {
     persona: Hash,
 }
 impl Authority {
+    /// The authority epoch this source holds (root is 0); its certificate
+    /// names epoch + 1.
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+    /// The committed certificate hash this authority came from (zero at root).
+    pub fn committed(&self) -> Hash {
+        self.committed
+    }
+    pub fn runtime(&self) -> Hash {
+        self.runtime
+    }
     pub fn root(root: &super::context::RootContext, lineage: Id) -> Result<Self> {
         if lineage == [0; 16] {
             return Err(Error::Invalid("root lineage"));

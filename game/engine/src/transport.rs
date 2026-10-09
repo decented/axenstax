@@ -270,6 +270,21 @@ impl ServerTransport for ChannelServerTransport {
 /// What a freed slot holds once its real transport has been dropped (which is
 /// what closes the socket). Sends go nowhere, nothing ever arrives, and it
 /// reports closed — so a stale index can never reach a new connection.
+/// A client transport that is already closed: sends go nowhere. World
+/// handover takes a joined client's live transport out of its RemoteClient
+/// and leaves this behind, so a later `disconnect()` cannot close the link.
+pub struct ClosedClientTransport;
+
+impl ClientTransport for ClosedClientTransport {
+    fn send_to_server(&self, _data: &[u8]) {}
+    fn try_recv_from_server(&self) -> Option<Packet> {
+        None
+    }
+    fn is_closed(&self) -> bool {
+        true
+    }
+}
+
 pub struct ClosedTransport;
 
 impl ServerTransport for ClosedTransport {
