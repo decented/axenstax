@@ -32,6 +32,7 @@ impl Default for ActionQueue {
 
 impl ActionQueue {
     pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn retained_bytes(&self) -> usize { self.bytes }
     pub fn front(&self) -> Option<&QueuedAction> { self.entries.front() }
 

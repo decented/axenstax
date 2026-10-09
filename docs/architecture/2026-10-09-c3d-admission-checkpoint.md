@@ -2,8 +2,11 @@
 
 Source base: accepted smallfix `1dc5725e`, protocol 87. This is the first source
 and model checkpoint for an implementation in progress. The new modules are
-not connected to gameplay dispatch yet. Their test sources have not been
-compiled or executed. Strict is not shipped or enabled by this checkpoint.
+not connected to gameplay dispatch yet. The initial compile and 21 model tests
+pass. Six deliberately broken invariants produced eight assertion failures;
+two later journal regressions also failed before their fixes. These are model
+results, not actual Strict dispatch or applied world-intake acceptance. Strict
+is not shipped or enabled by this checkpoint.
 The approved delivery proposes protocol 88 and operator-local
 `--strict-inventory`, default false, fixed and advertised at join. Trusted local
 host slots keep their existing policy. No discovery, service, identity collection,
@@ -22,8 +25,20 @@ Movement acknowledgement never advances this frontier.
 semantic recipes and touched/dependency cells, including unsent overlays. No
 private Plan body is owned by an entry. Retirement requires included events and
 an applied world boundary. Cuts cannot regress after earlier history is freed.
+The included event base also cannot regress after a receipt or recovery; later
+applied post-fence events are a distinct prefix and do not redefine that base.
+The eventual receipt carrier must name authoritative included E explicitly,
+not reuse the original action's client-reported events_applied as authority.
 Recovery cuts include the connection namespace: coincident id/epoch/life/sequence
 numbers from another session cannot acknowledge or activate them.
+
+Append reserves the aggregate retained suffix context before sequence allocation
+and prediction. The conservative sum counts duplicates too and stops at8192
+cells, so several separately valid actions cannot make complete Describe
+impossible. Receipt, recovery and death release the corresponding reservation.
+Server-derived dependency headroom and the combined client/server footprint
+still require an actual union/count/512 KiB check before bundle capture; the
+model reservation does not authorise truncation or arbitrary context generation.
 
 `staged_window` runs the actual `window::apply` on raw marker-only scratch
 holdings. Full private bodies are converted to exact marker/developed stubs

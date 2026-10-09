@@ -45,6 +45,10 @@ pub struct ActionJournal {
     life: u32,
     next: u64,
     retired_through: u64,
+    /// Included base events, distinct from later applied world-stream events.
+    included_events: u32,
+    /// Conservative sum: duplicate cells also reserve complete Describe room.
+    context_cells: usize,
     bytes: usize,
     actions: VecDeque<RetainedAction>,
 }
@@ -53,10 +57,11 @@ impl ActionJournal {
     pub fn new(session: [u8; 16], life: u32) -> Self {
         let actions = VecDeque::with_capacity(MAX_ACTIONS);
         let bytes = std::mem::size_of::<Self>() + actions.capacity() * std::mem::size_of::<RetainedAction>();
-        Self { session, epoch: 0, life, next: 1, retired_through: 0, bytes, actions }
+        Self { session, epoch: 0, life, next: 1, retired_through: 0, included_events: 0, context_cells: 0, bytes, actions }
     }
 
     pub fn len(&self) -> usize { self.actions.len() }
+    pub fn is_empty(&self) -> bool { self.actions.is_empty() }
     pub fn retained_bytes(&self) -> usize { self.bytes }
     pub fn actions(&self) -> impl Iterator<Item = &RetainedAction> { self.actions.iter() }
 
@@ -64,7 +69,9 @@ impl ActionJournal {
     pub fn append(&mut self, intent: Box<[u8]>, recipe: Box<[u8]>, cells: Box<[[i32; 3]]>, events_applied: u32) -> Result<ActionHeader, JournalError> {
         if intent.len() > MAX_INTENT_BYTES { return Err(JournalError::IntentTooLarge); }
         if self.actions.len() == MAX_ACTIONS { return Err(JournalError::CountLimit); }
-        if cells.len() > MAX_CONTEXT_CELLS { return Err(JournalError::ByteLimit); }
+        if events_applied < self.included_events { return Err(JournalError::InvalidFrontier); }
+        let context_cells = self.context_cells.checked_add(cells.len()).ok_or(JournalError::ByteLimit)?;
+        if context_cells > MAX_CONTEXT_CELLS { return Err(JournalError::ByteLimit); }
         let next = self.next.checked_add(1).ok_or(JournalError::SequenceExhausted)?;
         let header = ActionHeader { session: self.session, epoch: self.epoch, seq: self.next, life: self.life, events_applied };
         let action = RetainedAction { header, intent, recipe, cells, sent: false };
@@ -73,6 +80,7 @@ impl ActionJournal {
         if total > MAX_RETAINED_BYTES { return Err(JournalError::ByteLimit); }
         self.actions.push_back(action);
         self.bytes = total;
+        self.context_cells = context_cells;
         self.next = next;
         Ok(header)
     }
@@ -87,15 +95,17 @@ impl ActionJournal {
     /// included window events apply. Older receipts cannot regress the prefix.
     pub fn retire_receipt(&mut self, receipt: ActionHeader, applied_events: u32, applied_through: u64) -> Result<(), JournalError> {
         if receipt.session != self.session || receipt.epoch != self.epoch || receipt.life != self.life
-            || receipt.seq < self.retired_through || receipt.seq >= self.next
+            || receipt.seq < self.retired_through || receipt.seq >= self.next || receipt.events_applied < self.included_events
             || applied_events < receipt.events_applied || applied_through < receipt.seq {
             return Err(JournalError::InvalidFrontier);
         }
         while self.actions.front().is_some_and(|a| a.header.seq <= receipt.seq) {
             let action = self.actions.pop_front().expect("front was present");
             self.bytes -= action.bytes()?;
+            self.context_cells -= action.cells.len();
         }
         self.retired_through = receipt.seq;
+        self.included_events = receipt.events_applied;
         Ok(())
     }
 
@@ -105,6 +115,7 @@ impl ActionJournal {
         if life <= self.life || epoch <= self.epoch { return Err(JournalError::InvalidFrontier); }
         let through = self.next - 1;
         self.actions.clear();
+        self.context_cells = 0;
         self.bytes = std::mem::size_of::<Self>() + self.actions.capacity() * std::mem::size_of::<RetainedAction>();
         self.life = life;
         self.epoch = epoch;
@@ -116,15 +127,17 @@ impl ActionJournal {
     /// never socket reception. Events included in the base have also applied.
     pub fn activate(&mut self, cut: RecoveryCut, included_events: u32, applied_events: u32, applied_fence: Option<u64>) -> Result<(), JournalError> {
         if cut.session != self.session || cut.life != self.life || cut.epoch <= self.epoch || cut.through >= self.next || cut.through < self.retired_through
-            || applied_events < included_events || applied_fence != Some(cut.id) {
+            || included_events < self.included_events || applied_events < included_events || applied_fence != Some(cut.id) {
             return Err(JournalError::InvalidFrontier);
         }
         while self.actions.front().is_some_and(|a| a.header.seq <= cut.through) {
             let action = self.actions.pop_front().expect("front was present");
             self.bytes -= action.bytes()?;
+            self.context_cells -= action.cells.len();
         }
         self.epoch = cut.epoch;
         self.retired_through = cut.through;
+        self.included_events = included_events;
         for action in &mut self.actions {
             action.header.epoch = cut.epoch;
             action.header.events_applied = included_events;
@@ -199,6 +212,42 @@ mod tests {
         assert_eq!(journal.activate(regression, 9, 9, Some(1)), Err(JournalError::InvalidFrontier));
         assert_eq!(journal.len(), 6);
         assert_eq!(journal.retire_receipt(ActionHeader { seq: 3, ..receipt }, 9, 4), Err(JournalError::InvalidFrontier));
+    }
+
+    #[test]
+    fn c3d_included_event_base_never_regresses_after_receipt_or_recovery() {
+        let mut journal = ActionJournal::new([8; 16], 1);
+        for _ in 0..10 { append(&mut journal, 0).unwrap(); }
+        let receipt = ActionHeader { session: [8; 16], epoch: 0, life: 1, seq: 4, events_applied: 10 };
+        journal.retire_receipt(receipt, 10, 4).unwrap();
+        let cut = RecoveryCut { session: [8; 16], id: 1, epoch: 1, life: 1, through: 4 };
+        assert_eq!(journal.activate(cut, 5, 10, Some(1)), Err(JournalError::InvalidFrontier));
+        assert_eq!(journal.retire_receipt(ActionHeader { seq: 5, events_applied: 9, ..receipt }, 10, 5), Err(JournalError::InvalidFrontier));
+        journal.activate(cut, 10, 15, Some(1)).unwrap();
+        let later = RecoveryCut { id: 2, epoch: 2, ..cut };
+        assert_eq!(journal.activate(later, 9, 15, Some(2)), Err(JournalError::InvalidFrontier));
+        // Applied post-fence events do not force the captured base up to 15.
+        journal.activate(later, 10, 15, Some(2)).unwrap();
+        assert!(journal.actions().all(|a| a.header.events_applied == 10));
+    }
+
+    #[test]
+    fn c3d_retained_context_fits_one_complete_describe_and_releases_at_cuts() {
+        let mut journal = ActionJournal::new([8; 16], 1);
+        let cells = |offset| (0..MAX_CONTEXT_CELLS).map(|n| [n as i32, offset, 0]).collect::<Vec<_>>().into_boxed_slice();
+        let first = journal.append(Box::new([]), Box::new([]), cells(0), 0).unwrap();
+        let before = journal.retained_bytes();
+        assert_eq!(journal.append(Box::new([]), Box::new([]), cells(1), 0), Err(JournalError::ByteLimit));
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal.retained_bytes(), before);
+        journal.retire_receipt(first, 0, 1).unwrap();
+        let second = journal.append(Box::new([]), Box::new([]), cells(1), 0).unwrap();
+        assert_eq!(second.seq, 2, "failed reservation never allocates a sequence");
+        let cut = RecoveryCut { session: [8; 16], id: 1, epoch: 1, life: 1, through: 2 };
+        journal.activate(cut, 0, 0, Some(1)).unwrap();
+        journal.append(Box::new([]), Box::new([]), cells(2), 0).unwrap();
+        journal.change_life(2, 2).unwrap();
+        journal.append(Box::new([]), Box::new([]), cells(3), 0).unwrap();
     }
 
     #[test]
