@@ -100,3 +100,14 @@ A Plan body can reach about 160 KB (the packet cap is 64 KiB), so it never cross
 
 ## 6. Open (owner)
 - None blocks C3a. A joiner's death drops and graves follow Minecraft-like ownerless rules. Say if graves should belong to their owner; that would be a side table.
+
+### C3d implementation checkpoint (2026-10-09)
+
+The source and model checkpoint in
+[the C3d admission design](../architecture/2026-10-09-c3d-admission-checkpoint.md)
+records exact action frontiers, source-local staged rules, byte/count bounds,
+mutation ingress and all eleven standalone use costs. It is preparation for
+operator-opted-in Strict admission, default false; dispatch/recovery integration
+and execution acceptance are pending. The owner's honest-play gate still controls
+any default flip. CaptureArt markers are latent; CaptureCommit development follows
+authoritative Creative mode, without server verification of private Plan content.

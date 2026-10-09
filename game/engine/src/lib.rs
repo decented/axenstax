@@ -30,6 +30,12 @@
 #![cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
 
 // Cross-platform modules
+mod action_identity;
+mod action_queue;
+mod action_journal;
+mod action_capacity;
+mod rebase_assembly;
+mod staged_window;
 mod audio;
 mod controls;
 mod biome;
