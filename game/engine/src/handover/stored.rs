@@ -253,8 +253,18 @@ async fn lookup_inner(
     budget.check()?;
     cancelled(cancel)?;
     budget.register_relay(url)?;
-    PublicKey::from_slice(&route.author).map_err(|_| Error::Invalid("lookup author"))?;
-    PublicKey::from_slice(&route.recipient).map_err(|_| Error::Invalid("lookup recipient"))?;
+    PublicKey::from_slice(&route.author)
+        .and_then(|key| {
+            key.xonly()?;
+            Ok(key)
+        })
+        .map_err(|_| Error::Invalid("lookup author"))?;
+    PublicKey::from_slice(&route.recipient)
+        .and_then(|key| {
+            key.xonly()?;
+            Ok(key)
+        })
+        .map_err(|_| Error::Invalid("lookup recipient"))?;
     let deadline = budget.deadline();
     let id = subscription()?;
     let (mut ws, _) = bounded(

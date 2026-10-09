@@ -90,6 +90,10 @@ impl Manifest {
         let mut previous = None;
         for a in &self.agreements {
             nostr::PublicKey::from_slice(&a.participant)
+                .and_then(|key| {
+                    key.xonly()?;
+                    Ok(key)
+                })
                 .map_err(|_| Error::Invalid("agreement identity"))?;
             if a.proof == [0; 32]
                 || previous.is_some_and(|p| p >= a.participant)

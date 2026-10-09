@@ -121,7 +121,7 @@ impl Retirement {
         let mut roots = Vec::with_capacity(n as usize);
         for _ in 0..n {
             roots.push(RetiredRoot {
-                context: r.array()?,
+                capability: r.array()?,
                 expiry: r.u64()?,
             });
         }

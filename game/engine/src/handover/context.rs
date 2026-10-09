@@ -22,7 +22,12 @@ impl RootContext {
         relays: &[String],
         now: u64,
     ) -> Result<Self> {
-        PublicKey::from_slice(&runtime).map_err(|_| Error::Invalid("runtime curve point"))?;
+        PublicKey::from_slice(&runtime)
+            .and_then(|key| {
+                key.xonly()?;
+                Ok(key)
+            })
+            .map_err(|_| Error::Invalid("runtime curve point"))?;
         let persona = canonical_npub(persona_npub)?;
         if expiry < now {
             return Err(Error::Invalid("expired invite"));
@@ -86,7 +91,12 @@ pub fn canonical_npub(value: &str) -> Result<Hash> {
     if key.to_bech32().map_err(|_| Error::Invalid("npub"))? != value {
         return Err(Error::Invalid("noncanonical npub"));
     }
-    PublicKey::from_slice(&key.to_bytes()).map_err(|_| Error::Invalid("persona curve point"))?;
+    PublicKey::from_slice(&key.to_bytes())
+        .and_then(|key| {
+            key.xonly()?;
+            Ok(key)
+        })
+        .map_err(|_| Error::Invalid("persona curve point"))?;
     Ok(key.to_bytes())
 }
 
