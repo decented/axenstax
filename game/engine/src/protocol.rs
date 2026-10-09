@@ -142,6 +142,8 @@ pub enum PacketType {
     /// op whose result differed, or a push of what changed in the open
     /// container. Never a whole-window overwrite.
     WindowSlotSet = 66,
+    /// Whole player window, applied as a numbered replacement.
+    InventorySync = 67,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -1191,6 +1193,8 @@ pub enum ItemAction {
     /// an `InventoryGrant`). A laid Blueprint is refused (C3c-3r). Claims
     /// nothing; answered with an `ItemActionOutcome`.
     Detach { x: i32, y: i32, z: i32, face: u8 },
+    /// Retrieve a shared grave within server-body reach.
+    OpenGrave { x: i32, y: i32, z: i32 },
 }
 
 /// C3c-2 (v81) — the weapon an [`ItemAction::Shoot`] fires. Wire-stable,
@@ -1310,6 +1314,16 @@ pub struct WireStack {
 
 /// C3b-1 — one window or container slot on the wire: empty, or a stack.
 pub type WireSlot = Option<WireStack>;
+
+/// A whole player window: all 36 inventory, 4 armour, cursor and 9 grid slots.
+/// Client-owned locks, auto-refill and hotbar selection are not replaced.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InventorySyncPacket {
+    pub window_event: u32,
+    #[serde(deserialize_with = "bounded_slot_sets")]
+    pub slots: Vec<(WireWindowSlot, WireSlot)>,
+}
+
 
 /// C3b-1 — a furnace's progress as its screen draws it (the bars), sent with
 /// [`ContainerOpenedPacket`] and with each push while the furnace cooks.
@@ -2073,7 +2087,8 @@ pub enum PlayerEventType {
     Respawned { x: f32, y: f32, z: f32 },
     /// MP-D2b (v70) — `Died`, naming what killed the body (the mob's species,
     /// lava, a fall …) for the death screen and the client's own records.
-    /// The server sends this instead of `Died`, under the same rules.
+    /// The server sends this instead of `Died`. Since v86 every death,
+    /// including a client report, is announced once by the inventory hook.
     DiedOf { cause: WireDamageCause },
     /// MP-D2b (v70) — `hits` hits the server landed on this player's body
     /// since the last report wear its armour, one durability per worn piece
@@ -2085,6 +2100,8 @@ pub enum PlayerEventType {
     /// `BreedAnimals` challenge single-player fires for a breed. Sent to
     /// that player alone; a host's own players are credited by its client.
     Bred { offspring: EntityKind },
+    /// Location of the real shared grave made for this death.
+    GraveAt { x: i32, y: i32, z: i32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2666,7 +2683,9 @@ pub struct ServerAnnouncePacket {
 ///   appends `own_riding: Option<u32>` (after `attachment_changes`): the
 ///   addressed client's mount, server-driven. New
 ///   `mob_interact::InteractNote` code 18 (`MountTaken`).
-pub const PROTOCOL_VERSION: u32 = 85;
+/// - v86 (2026-10-09): server-owned joiner death, InventorySync (tag 67),
+///   ItemAction::OpenGrave (= 13), PlayerEventType::GraveAt (= 7).
+pub const PROTOCOL_VERSION: u32 = 86;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2737,6 +2756,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         64 => PacketType::WindowOp,
         65 => PacketType::ContainerOpened,
         66 => PacketType::WindowSlotSet,
+        67 => PacketType::InventorySync,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2838,8 +2858,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // MP-D2c-1 — v85 (on C3c-3b's v84).
-        assert_eq!(super::PROTOCOL_VERSION, 85);
+        // Server-owned death — v86 (on MP-D2c-1's v85).
+        assert_eq!(super::PROTOCOL_VERSION, 86);
     }
 
     #[test]
@@ -3586,7 +3606,9 @@ mod tests {
         //   `InteractKind::Mount` (= 8), `entity_flags::RIDDEN` (64),
         //   `player_flags::SEATED` (8), `StateUpdatePacket.own_riding` (after
         //   `attachment_changes`) — riding runs on the server; joiners ride.
-        assert_eq!(PROTOCOL_VERSION, 85);
+        // v86 (2026-10-09, death): numbered InventorySync (tag 67),
+        //   OpenGrave (= 13) and GraveAt (= 7).
+        assert_eq!(PROTOCOL_VERSION, 86);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4266,8 +4288,8 @@ mod tests {
         }
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
-        // C3b-1 (v77) — 65 and 66 are taken (`container_packets_round_trip`).
-        assert_eq!(deserialize_header(&[67, 0]), None, "nothing past 66 yet");
+        // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync).
+        assert_eq!(deserialize_header(&[68, 0]), None, "nothing past 67 yet");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)
@@ -4813,5 +4835,27 @@ mod tests {
         let compressed = compress_chunk(&payload);
         let back = decompress_chunk(&compressed).expect("valid roundtrip");
         assert_eq!(back, payload);
+    }
+}
+
+#[cfg(test)] mod death_wire_tests {
+    use super::*;
+    #[test] fn death_wire_tags_and_bounds_are_append_only() {
+        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)] };
+        let bytes = serialize_packet(PacketType::InventorySync,&sync);
+        assert_eq!(bytes[0],67);
+        let (_,payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<InventorySyncPacket>(payload).unwrap(),sync);
+        let oversized = InventorySyncPacket { slots:vec![(WireWindowSlot::Cursor,None); MAX_WINDOW_SLOTS+1],..sync };
+        assert!(safe_deserialize::<InventorySyncPacket>(&serialize_packet(PacketType::InventorySync,&oversized)[1..]).is_err());
+        let open = ItemActionPacket { seq:3,action:ItemAction::OpenGrave { x:1,y:80,z:2 },events_applied:9 };
+        let bytes = serialize_packet(PacketType::ItemAction,&open);
+        assert_eq!(peek_item_action_variant(&bytes[1..]),Some(13));
+        let decoded:ItemActionPacket = safe_deserialize(&bytes[1..]).unwrap();
+        assert_eq!(decoded.action,open.action);
+        let grave = PlayerEventType::GraveAt { x:1,y:80,z:2 };
+        let bytes = bincode::serialize(&grave).unwrap();
+        assert_eq!(&bytes[..4],&7u32.to_le_bytes());
+        assert_eq!(safe_deserialize::<PlayerEventType>(&bytes).unwrap(),grave);
     }
 }

@@ -7152,7 +7152,7 @@ impl super::GameState {
                 }
                 // W2 — the death screen's grave line; set below if a grave
                 // is actually placed this death.
-                self.players[i].last_grave = None;
+                if !self.joined() { self.players[i].last_grave = None; }
                 // #6 — drop a death marker where the player fell, regardless of
                 // keep-inventory, so the map shows the way back (rolling, capped).
                 let dp = self.players[i].player.pos;
@@ -7160,21 +7160,17 @@ impl super::GameState {
                     &mut self.world.waypoints,
                     [dp.x.floor() as i32, dp.y.floor() as i32, dp.z.floor() as i32],
                 );
-                if self.world.keep_inventory {
+                if self.joined() || self.world.keep_inventory {
                     // Keep-inventory worlds (e.g. blank-canvas / parkour): the
                     // inventory survives death untouched — no grave, no scatter.
                 } else {
                     let death_pos = self.players[i].player.pos;
                     // Snapshot all 36 slots index-aligned (slot i → grave slot i)
                     // and clear the inventory.
-                    let mut snapshot: Vec<Option<crate::item::ItemStack>> = Vec::with_capacity(36);
-                    let mut any = false;
-                    for s in 0..36 {
-                        let st = self.players[i].inventory.slot(s).cloned();
-                        any |= st.is_some();
-                        snapshot.push(st);
-                        self.players[i].inventory.set_slot(s, None);
-                    }
+                    let (snapshot, kept) = crate::death::split_window(&self.players[i].inventory, false);
+                    let snapshot: Vec<_> = snapshot.into();
+                    let any = snapshot.iter().any(Option::is_some);
+                    for (at, stack) in kept.into_iter().enumerate() { self.players[i].inventory.set_slot(at, stack); }
                     if any {
                         let bx = death_pos.x.floor() as i32;
                         let by = death_pos.y.floor() as i32;
@@ -7190,6 +7186,7 @@ impl super::GameState {
                         );
                         if let Some([gx, gy, gz]) = safe {
                             self.world.set_block(gx, gy, gz, crate::block::GRAVE);
+                            self.pending_block_changes.push(broadcast_change(&self.world, gx, gy, gz, crate::block::GRAVE));
                             let grave = crate::grave::GraveData::from_snapshot(snapshot, self.world_time);
                             self.world.insert_grave((gx, gy, gz), grave);
                             self.players[i].last_grave = Some([gx, gy, gz]);
@@ -14339,6 +14336,10 @@ impl super::GameState {
                         self.players[pidx].place_cooldown = 8;
                         continue;
                     } else if target_blk == block::GRAVE {
+                        if self.joined() {
+                            self.send_open_grave(pidx, pos);
+                            continue;
+                        }
                         // #47 — right-clicking a Grave reclaims its contents to
                         // the player's ORIGINAL inventory slots (best-effort into
                         // free slots otherwise). When emptied, the grave block +
@@ -14355,6 +14356,7 @@ impl super::GameState {
                         if emptied {
                             self.world.remove_block_entity(pos_key);
                             self.world.set_block(pos[0], pos[1], pos[2], block::AIR);
+                            self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], block::AIR));
                             self.toast = Some((
                                 "Recovered your things".to_string(),
                                 Instant::now() + Duration::from_secs(3),
@@ -21993,7 +21995,12 @@ impl super::GameState {
                 match *ev {
                     // MP-D2b — with the cause the server recorded, for the
                     // death-screen line.
+                    crate::remote_client::OwnLifeEvent::GraveAt(cell) => {
+                        self.players[0].last_grave = Some(cell);
+                        self.toast = Some((format!("Your grave is at {}, {}, {} — go and reclaim it", cell[0], cell[1], cell[2]), Instant::now() + Duration::from_secs(6)));
+                    }
                     crate::remote_client::OwnLifeEvent::Died(cause) => {
+                        self.players[0].last_grave = None;
                         if !self.is_creative {
                             // Review D2b LOW-7 — names the cause even when our
                             // own sim reached the death screen first.
@@ -22016,6 +22023,7 @@ impl super::GameState {
                         armour_worn.push((hits, event));
                     }
                     crate::remote_client::OwnLifeEvent::Respawned(at) => {
+                        self.players[0].last_grave = None;
                         // Back at full health: nothing reported before the
                         // death still applies.
                         self.own_health.reset();
@@ -22681,6 +22689,15 @@ impl super::GameState {
         self.send_use_request(pidx, asked, held, hot, action);
     }
 
+    /// Ask the server to grant what fits from this shared grave. One request
+    /// waits per grave; the joined client changes no inventory locally.
+    fn send_open_grave(&mut self, pidx: usize, cell: [i32; 3]) {
+        let asked = crate::joiner_actions::Asked::OpenGrave { cell };
+        if self.joiner_actions.is_asking(asked) { return; }
+        let hot = self.players[pidx].hotbar_slot;
+        self.send_use_request(pidx, asked, None, hot, crate::protocol::ItemAction::OpenGrave { x: cell[0], y: cell[1], z: cell[2] });
+    }
+
     /// C3c-3b — player `pidx` (a joiner) peels the wallpaper or blank paper
     /// off face `face` of the block at `cell` (`ItemAction::Detach`): the
     /// server removes it from its world and grants the item back; we see it
@@ -22813,6 +22830,10 @@ impl super::GameState {
         let note = crate::item_actions::ItemNote::from_wire(out.note);
         if out.accepted {
             match request.kind {
+                crate::joiner_actions::Asked::OpenGrave { .. } => {
+                    let text = if note == crate::item_actions::ItemNote::InventoryFull { "Inventory full — make room and grab the rest" } else { "Recovered your things" };
+                    self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(3)));
+                }
                 crate::joiner_actions::Asked::Eat => {
                     self.fire_challenge(crate::scenario::ChallengeEvent::EatFood);
                 }
@@ -23132,6 +23153,14 @@ impl super::GameState {
                 }
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::SlotSet(pkt)) => {
                     unfit = self.apply_window_slot_set(&pkt);
+                }
+                crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Sync(pkt)) => {
+                    let p = &mut self.players[0];
+                    crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut p.inventory,
+                        armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item,
+                        grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses);
+                    self.window_inbox.debt = Default::default();
+                    p.crafting_ui.update_result();
                 }
                 crate::window_events::InboxItem::Grant(grant) => {
                     unfit.push(

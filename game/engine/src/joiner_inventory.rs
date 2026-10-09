@@ -240,6 +240,8 @@ pub fn mismatch_log_level(due: Option<u32>) -> log::Level {
 /// ([`Self::summary`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PossessionTally {
+    pub drop_believed: u32,
+    pub drop_refused: u32,
     /// Breaks the server yielded.
     pub breaks: u32,
     /// Plain placements the shadow's held slot backed.
@@ -451,7 +453,7 @@ impl PossessionTally {
     /// was counted.
     pub fn summary(&self, label: &str) -> Option<String> {
         let window = [self.window_ops, self.window_noop, self.window_refused, self.window_mismatch];
-        let c2b = [self.drops, self.grant_overflow];
+        let c2b = [self.drops, self.grant_overflow, self.drop_believed, self.drop_refused];
         let c3b = [
             self.container_refused,
             self.container_corrected,
@@ -542,6 +544,9 @@ impl PossessionTally {
                     self.ammo_believed, self.tool_believed, self.shot_too_soon
                 ));
             }
+        }
+        if self.drop_believed > 0 || self.drop_refused > 0 {
+            line.push_str(&format!("; {} Q-drop unit(s) believed, {} Q-drop(s) refused past the believed bound", self.drop_believed, self.drop_refused));
         }
         if c2b.iter().any(|&n| n > 0) {
             line.push_str(&format!(

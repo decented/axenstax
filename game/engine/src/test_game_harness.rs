@@ -2013,6 +2013,7 @@ mod tests {
         assert_eq!(framed, Some(crate::item::Item::Block(crate::block::DIAMOND_BLOCK)), "the frame has it");
         assert_eq!(server.server.world.get_block(place[0], place[1], place[2]), crate::block::AIR, "and the world doesn't");
         assert_eq!(diamonds(&hg.state.players[0].inventory), 0);
+        copy_holds(&mut server, &mut hg, slot, &crate::item::Item::Block(crate::block::DIAMOND_BLOCK), 0);
         assert_eq!(diamonds(&server.server.players[slot].inventory), 0);
     }
 
@@ -3451,6 +3452,8 @@ mod tests {
         let pos = (frame[0], frame[1], frame[2]);
         let framed = server.server.world.item_frame_at(pos).and_then(|f| f.item.as_ref().map(|s| s.item.clone()));
         assert_eq!(framed, Some(Item::Block(crate::block::BLUEPRINT_PAPER)), "the frame has it");
+        assert!(hg.state.players[0].inventory.slot(0).is_none(), "the client paid for the framed paper");
+        copy_holds(&mut server, &mut hg, slot, &Item::Block(crate::block::BLUEPRINT_PAPER), 0);
         let sp = &server.server.players[slot];
         assert_eq!(sp.possession.plan_minted, 0, "nothing reported");
         assert!(!has_plan(&sp.inventory) && !has_plan(&hg.state.players[0].inventory));

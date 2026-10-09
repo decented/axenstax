@@ -4234,3 +4234,17 @@ Per the Platform Overview, early alpha priorities are **movement feel, block pla
 16. **Chat and commands** (section 10) — Full command system, permissions.
 
 This ordering ensures the **Genesis test** passes at every phase: at any point, the game should feel good for what it has, even if incomplete.
+
+
+### Shared graves for joined players (delivered, protocol v86)
+
+The server handles a joiner's death once, moving its effective 36-slot inventory
+into a real shared grave (or real item entities if no loaded safe cell exists).
+A joiner's Plans stay with the joiner; armour, cursor and craft grid survive as
+before. Keep-inventory uses the server's live rule. InventorySync replaces the
+client's slots in order; the joined client creates no private grave or scatter.
+Anyone can retrieve any grave through OpenGrave within the server body's reach;
+what does not fit stays in the grave. The host's own grave placement and removal
+are broadcast. Single-player keeps its original death and recovery rules.
+Fresh Test Lab and Workshop join kits come from the server, including the
+deterministic starter-hut Plan, rather than being created twice by each seat.

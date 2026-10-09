@@ -31,6 +31,8 @@ const REACH_DISTANCE: f32 = 5.0;
 
 /// Per-player server-side state.
 pub struct ServerPlayer {
+    /// Once-per-death inventory hook, reset on entering or respawning.
+    pub death_handled: bool,
     pub player: Player,
     /// A local slot: the host's own player's inventory as saved/restored.
     /// A server-simulated player (joiner or guest): the SHADOW the server
@@ -546,6 +548,7 @@ impl ServerPlayer {
             next_swing_tick: 0,
             next_shot_tick: 0,
             fishing: None,
+            death_handled: false,
             drop_bucket: crate::item_actions::DropBucket::default(),
             possession: crate::joiner_inventory::PossessionTally::default(),
             eat_cooldown: 0,
@@ -615,6 +618,7 @@ impl ServerPlayer {
     /// hunger and breath, whatever was done to the copy while it waited, with
     /// no fall in progress and no death pending.
     pub fn enter_world(&mut self) {
+        self.death_handled = false;
         self.awaiting_join = false;
         self.combat.respawn();
         self.combat.just_died = false;
@@ -2512,9 +2516,10 @@ impl GameServer {
     /// carries zero health — starvation on Hard, anything its own sim ran. The
     /// server takes the death (only ever downward: a report of health coming
     /// BACK is never believed — only `respawn_player` revives). The
-    /// `just_died` one-shot is consumed here: the reporting client already
-    /// knows, so no `PlayerEventType::Died` is echoed to it — an echo landing
-    /// after a quick Respawn click would kill it a second time.
+    /// `just_died` one-shot is consumed for a plain report. The hosted
+    /// server's once-per-death inventory hook uses `death_handled` instead
+    /// and sends one DiedOf and InventorySync for every death. The client
+    /// ignores an old-life echo while Respawn is unanswered.
     ///
     /// One exception (review D2a HIGH-2): when the health changes this
     /// client reported earlier, still queued behind this report, would
@@ -2570,6 +2575,7 @@ impl GameServer {
             crate::riding::unmount(&mut self.ecs, mount, &mut sp.ride);
         }
         sp.combat.respawn();
+        sp.death_handled = false;
         sp.combat.just_died = false;
         sp.dead_ticks = 0;
         sp.player.pos = spawn;

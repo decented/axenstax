@@ -20,7 +20,7 @@ use crate::transport::{ChannelClientTransport, ClientTransport};
 
 use super::joiner_authority::{join_guest, join_guest_accept, send_guest_join, start_open_server};
 
-fn start_dedicated_server(tag: &str) -> HostedServer {
+pub(super) fn start_dedicated_server(tag: &str) -> HostedServer {
     HostedServer::start(
         0,
         format!("joiner-death-{tag}-{}", std::process::id()),
@@ -33,15 +33,16 @@ fn start_dedicated_server(tag: &str) -> HostedServer {
 
 /// What the joiner has been sent that these tests care about.
 #[derive(Default)]
-struct Inbox {
+pub(super) struct Inbox {
     /// `(player_index, event)` for every PlayerEvent.
-    events: Vec<(u32, PlayerEventType)>,
+    pub(super) events: Vec<(u32, PlayerEventType)>,
     grants: usize,
+    pub(super) syncs: Vec<protocol::InventorySyncPacket>,
     block_changes: Vec<protocol::BlockChange>,
 }
 
 impl Inbox {
-    fn drain(&mut self, client: &ChannelClientTransport) {
+    pub(super) fn drain(&mut self, client: &ChannelClientTransport) {
         while let Some(pkt) = client.try_recv_from_server() {
             let Some((ptype, payload)) = protocol::deserialize_header(&pkt) else { continue };
             match ptype {
@@ -51,6 +52,7 @@ impl Inbox {
                     }
                 }
                 protocol::PacketType::InventoryGrant => self.grants += 1,
+                protocol::PacketType::InventorySync => self.syncs.push(protocol::safe_deserialize(payload).unwrap()),
                 protocol::PacketType::StateUpdate => {
                     if let Ok(s) = protocol::safe_deserialize::<protocol::StateUpdatePacket>(payload) {
                         self.block_changes.extend(s.block_changes);
@@ -61,7 +63,7 @@ impl Inbox {
         }
     }
 
-    fn died(&self, slot: usize) -> usize {
+    pub(super) fn died(&self, slot: usize) -> usize {
         self.events
             .iter()
             .filter(|(i, e)| {
@@ -83,7 +85,7 @@ impl Inbox {
     }
 }
 
-fn tick_n(hs: &mut HostedServer, client: &ChannelClientTransport, inbox: &mut Inbox, n: u32) {
+pub(super) fn tick_n(hs: &mut HostedServer, client: &ChannelClientTransport, inbox: &mut Inbox, n: u32) {
     for _ in 0..n {
         hs.tick();
         inbox.drain(client);
@@ -91,7 +93,7 @@ fn tick_n(hs: &mut HostedServer, client: &ChannelClientTransport, inbox: &mut In
 }
 
 /// Send one ClientInput from the joiner.
-fn send_input(
+pub(super) fn send_input(
     client: &ChannelClientTransport,
     tick: u64,
     at: Vec3,
@@ -114,15 +116,16 @@ fn send_input(
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
 }
 
-fn send_respawn(client: &ChannelClientTransport) {
+pub(super) fn send_respawn(client: &ChannelClientTransport) {
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Respawn, &()));
 }
 
 /// Stand the joiner's server copy on a fresh stone floor far from anything,
 /// so items dropped at its feet settle within pickup reach. Returns where it
 /// stands.
-fn stand_on_floor(hs: &mut HostedServer, slot: usize) -> Vec3 {
-    let (fx, fy, fz) = (40, 80, 40);
+pub(super) fn stand_on_floor(hs: &mut HostedServer, slot: usize) -> Vec3 {
+    let (fx, fy, fz): (i32, i32, i32) = (40, 80, 40);
+    hs.server.ensure_column_loaded(fx.div_euclid(16), fz.div_euclid(16));
     let world = &mut hs.server.world;
     for x in fx - 4..=fx + 4 {
         for z in fz - 4..=fz + 4 {
@@ -235,8 +238,8 @@ fn a_joiner_reporting_zero_health_is_dead_on_the_server_and_its_input_is_ignored
     assert!(hs.server.players[slot].combat.dead);
     assert_eq!(
         inbox.died(slot),
-        0,
-        "a reported death is not echoed: an echo after a quick Respawn would kill the joiner again"
+        1,
+        "every death is handled once, including a reported death"
     );
 }
 

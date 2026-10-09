@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `85`** (D2c-1) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `86`** (server-owned death) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -44,10 +44,11 @@
 - **v83** (2026-10-08, C3c-3a): **A joiner's Plans are tracked by marker.** `WireItem` appends `Plan { marker: [u8; 32], developed: bool }` (= 3): a Plan by reference, never its body — `marker` is `plan::marker`, SHA-256 of the bincode of the WHOLE `PlanData` (develop state, kind, derivation chain and authored-in included, unlike `plan::content_hash`). It is a Plan's `full_item` wherever a Plan is encoded (`inventory::item_to_wire_full`: a `WireStack` of `item_kind::PLAN` id 0, a use tag's `used`; since C3c-3-fix a request's held claim is never read as a Plan); `inventory::item_from_wire_full` decodes it to nothing (no body), so a host's Plan in a shared container, on the ground or in a frame shows exactly as before. `ItemAction` appends `PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (= 10; `plan_mint::MintSource` append-only: CaptureCommit 0, CaptureArt 1): a Plan the joined client minted in its own window, never answered. `use_edits::UseKind` appends `HangPrint` (= 11): a developed Plan hung as a cyanotype print, its tag's `used` the Plan. The server holds a joiner's Plan as a marker placeholder (`plan::PlanData::marker_placeholder`, its `marker` a `#[serde(skip)]` field, so no saved or wire encoding of a `PlanData` changes) and takes it by marker; log-only (`PossessionTally::plan_minted` / `plan_mismatch`). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `wire_item_roundtrips_every_variant`), `use_edits::tests::use_kind_wire_bytes_are_pinned` and `plan_mint::tests::mint_source_wire_bytes_are_pinned`. See §4.2e "Block-edit uses" and §4.2f "Plans".
 - **v84** (2026-10-09, C3c-3b): **Face attachments live in the server's world.** `ItemAction` appends `Attach { x, y, z: i32, face: u8, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 11: paint the wallpaper, or lay the blank Blueprint Paper, in hand on a face; the held claim is `UseBlock`'s, verbatim) and `Detach { x, y, z: i32, face: u8 }` (= 12: peel it), both answered with an `ItemActionOutcome`. `StateUpdatePacket` appends `attachment_changes: Vec<AttachmentChange>` after `refused_uses` (`AttachmentChange { x, y, z: i32, face: u8, att: Option<PushedAttachment> }`: a face as it now stands, `None` = bare): every attachment change in a chunk the client holds, whoever made it, reliable and in line with the block changes. New `item_actions::ItemNote` codes `FaceCovered` (27) and `NotAFloor` (28). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Face attachments".
 - **v85** (2026-10-09, D2c-1): **Riding runs on the server.** `InteractKind::Mount` (= 8), `entity_flags::RIDDEN` (= 64), `player_flags::SEATED` (= 8), and appended `StateUpdatePacket.own_riding: Option<u32>` (the mount's ProtocolId). See §4.2h.
+- **v86** (2026-10-09, death): server-owned joiner graves, `InventorySync` (tag 67, numbered whole player window), `ItemAction::OpenGrave` (= 13) and `PlayerEventType::GraveAt` (= 7). Joined clients create no private graves or fresh kits; the server supplies the deterministic fresh kit and death window. Requests and window ops remain refused through death replacement acknowledgement, including after respawn.
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
-> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 84), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
+> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 86), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
 
 > **Server-side column streaming is built (Phase B1, 2026-10-06); the chunk push is built too (Phase B2a, 2026-10-07; only touched columns since Phase B2b, §4.1 "As built").** A dedicated server loads and unloads world columns around every connected player itself, within `--sim-distance` (default 8) — its own *simulation region*, so a server-simulated joiner stands on server terrain and edits are accepted anywhere a player goes (Spec 01 §4.1.2). The chunk push sends joiners what that region holds (§4.1 "As built"). LAN / online hosts do not stream server-side; their server keeps the `initial_load` region and generates the 3×3 round each joiner as it moves (§5.3.1) — never both in one mode.
 >
@@ -534,10 +535,11 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak, events_applied: u32 }` (`events_applied` v76). **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76), `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81), `ItemAction::PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (v83), `ItemAction::Attach { x, y, z: i32, face: u8, hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Detach { x, y, z: i32, face: u8 }` (v84) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9, PlanMinted=10, Attach=11, Detach=12); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop, GrantUnfit and PlanMinted are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, GrantUnfit from v76, UseBlock from v79, Shoot, PlaceCart, Cast and Reel from v81, PlanMinted from v83, Attach and Detach from v84). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76), `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81), `ItemAction::PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (v83), `ItemAction::Attach { x, y, z: i32, face: u8, hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Detach { x, y, z: i32, face: u8 }` (v84), `ItemAction::OpenGrave { x, y, z: i32 }` (v86) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9, PlanMinted=10, Attach=11, Detach=12, OpenGrave=13); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop, GrantUnfit and PlanMinted are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, GrantUnfit from v76, UseBlock from v79, Shoot, PlaceCart, Cast and Reel from v81, PlanMinted from v83, Attach and Detach from v84). See §4.2f. |
 | 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, WireSlot)>, client_ok: bool }` (`events_applied` v76; `touched` and `claims` v77, ≤ 122 each, in that order; `client_ok` v78, the client's own verdict), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3; v77: OpenContainer { cell }=4, Container(ContainerClick)=5). Never answered, except an `OpenContainer` (by `ContainerOpened`) and a `Container` op that earns a correction (by a `WindowSlotSet`). **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
 | 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal>, window_event: u32 }` (`window_event` v78: an opened view is a numbered window event; 0 for a refusal). **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
 | 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named container slots of a joiner's open container, and a correction's item delta: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32, take: Vec<(u8, WireStack)> (≤ 122), give: Vec<WireStack> (≤ 122) }` (`take` and `give` v78) — a correction of a container op, or a push of what changed in the open container. Never a whole window, never a player slot's value (v78). Every set is a numbered window event (v78; v77 numbered only a set of player slots). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
+| 0x43 | `InventorySync` | S->C | Reliable | `{ window_event: u32, slots: Vec<(WireWindowSlot, WireSlot)> }`, bounded by `MAX_WINDOW_SLOTS`. A numbered whole player-window replacement: 36 inventory, 4 armour, cursor, 9 grid slots, including explicit empty slots. Protocol v86. |
 | 0x3F | `ItemActionOutcome` | S->C | Reliable | The server's decision on one item action, to the asker alone: `{ seq, accepted, consume_held: u8, note: u8, window_event: u32, wear_held: bool, bite_after: u16 }` (`item_actions::ItemNote`; `window_event` v76: an accepted eat's or block use's take, 0 for none; `wear_held` v79: an accepted block use wore the held tool — shears on a hive; v81 a shot's weapon, a catch's rod, flint and steel — as that window event; `bite_after` v81: an accepted cast's ticks until the server's bite). **Implemented tag** (`PacketType::ItemActionOutcome = 63`, protocol v73). |
 
 > The tags above are the v1 design numbering; the implemented `PacketType`
@@ -3212,7 +3214,8 @@ corrected per slot (§4 of the C3 design).
 fishing and campfire lighting are server requests since C3c-2; a Plan minted
 by a capture or hung as a print is mirrored by marker since C3c-3a; face
 attachments are the server's since C3c-3b), chests and other containers (C3b), its
-death (the death phase), the inventory it joined with (the sidecar), and
+death (server-owned since v86), the fresh kit (server-owned since v86; saved
+join windows remain the sidecar), and
 creative gives are not mirrored, so the next op after one mismatches. A
 Plan the server's copy holds (minted or spent through C3c-3a's paths) is its
 marker placeholder, which moves under the ops exactly as the client's Plan
@@ -3223,8 +3226,7 @@ there, and the digest counts that. The server's own changes (grants, owed takes,
 race the ops: they apply in the client's order (above). A carrier the client
 drops (its bounded queues: 256 grants or outcomes, 16 life events a poll) is
 applied on the server when a later count passes it: a divergence, never
-expected of an honest server. No sync exists yet: `InventorySync` lands with
-the death phase; mismatch-driven resync with replay with C3d. (C3b-1's per-slot `WindowSlotSet`, below, is a
+expected of an honest server. `InventorySync` is delivered at join and death (v86); mismatch-driven resync with replay remains C3d. (C3b-1's per-slot `WindowSlotSet`, below, is a
 narrower carrier.)
 
 #### Shared containers (as built, protocol v77, C3b-1; v78, C3b-fix-a)
@@ -3873,10 +3875,9 @@ taken, it would kill the quickly-respawned client a second time. A death after
 alive, no Respawn sent) takes it as before. **Server-side guard:** `report_player_death` runs when the packet is
 received, ahead of the inputs still queued; when the health changes queued
 behind it would themselves take the body to zero, the death is theirs — a
-body reported at zero by `health_delta` — and it keeps `just_died`, so it goes
-through the one death path that sends `Died`. Only a death the client's own
-sim computed is taken silently (before C2a, Hard starvation from a body the
-server held above zero; since C2a starvation is the server's).
+body reported at zero by `health_delta`. Since v86, the once-per-death hook
+handles either report regardless of `just_died` and sends one `DiedOf` plus
+InventorySync; the client's pending-respawn guard still drops old-life echoes.
 
 Closed in v70 (MP-D2b): a server-side death names its cause (`DiedOf`), and
 server-landed hits wear the joiner's armour (`ArmourWorn`, §4.2c). A death the
@@ -4960,3 +4961,64 @@ Monthly cost per player-hour (at $0.09/GB egress):
 ---
 
 *This specification will be implemented in phases. Phase 1 covers Sections 1-3 (transport, packets, reliability) and Section 9 (connection lifecycle). Phase 2 adds Sections 4-5 (state sync, prediction). Phase 3 adds Sections 7-8 (tick sync, spectator protocol). Security hardening (Section 11) is continuous from Phase 1 onward.*
+
+
+### Server-owned joiner death (delivered, protocol v86)
+
+After inbound reports and the simulation tick, earned pickup grants are queued
+before one hook handles each in-world
+server-simulated player's `combat.dead && !death_handled`. Entering the world
+or respawning resets the marker. All death paths, including reported zero
+health, send exactly one `DiedOf`. The hook closes the open container and reads
+`effective_window`: waiting grants and takes are included.
+
+Only the 36 inventory slots move into the real, ownerless shared grave; a
+joiner's Plans stay in their slots because their bodies live on the client.
+Armour, cursor and crafting grid stay. Keep-inventory keeps everything. Safe
+grave cells must lie in a loaded column and contain AIR; no safe cell spills
+real server item entities. `GraveAt { x, y, z: i32 }` (PlayerEvent variant 7,
+event 0) reports the grave location. The shared-world GRAVE and AIR edits reach
+joiners, including the lending host's own death and retrieval edits.
+
+`InventorySync` (tag 67) follows as a numbered `WindowEvent::Replace`, behind
+waiting events. It contains every player slot and clears correction debt,
+forced corrections and the phantom ledger. `GrantUnfit` for an event at or
+before the latest Replace is ignored. The client applies each slot individually,
+preserving locks, auto-refill and hotbar selection. Plan markers resolve to a
+local body (same slot first, then the rest of the window), then the deterministic
+built-in starter-hut Plan; an unknown marker stays a logged body-less stub.
+A replacement retires earlier SentUses prediction records and parked costs, so
+a refusal in a later poll cannot restore a pre-death cost into the new window.
+Real Plan bodies from pending or parked hangs remain resolution candidates for
+markers actually named by the authoritative sync; other old costs are never
+re-seated. The joined client's death sweep creates only the local map marker and death
+screen, with no inventory emptying, grave or scatter.
+
+While dead, ItemAction, EntityAttack and EntityInteract have no side effects.
+After the hook, requests and window ops remain refused through the death
+Replace acknowledgement, including after respawn. Edit groups apply the reported acknowledgement before
+checking the same barrier: stale post-respawn placements and use-tagged edits
+are sent back, with RefusedUse undo notices for predicted uses. Window ops received before
+the hook can still act on the earlier window; later deposits cannot duplicate
+items from the grave. A stale `events_applied` never lifts this guard, even if
+the event timeout has already applied the replacement on the server.
+
+`ItemAction::OpenGrave { x, y, z: i32 }` (variant 13) retrieves any grave in
+server-body reach. Only stacks that fit the effective inventory are removed
+and granted; an unfit grant returns to a surviving grave, or spills if the grave
+has gone. Plans in a host grave remain there. An emptied grave becomes AIR;
+a partial retrieval answers with `ItemNote::InventoryFull`.
+
+A fresh join's kit is built on the server by the same deterministic helper as
+single-player: Test Lab kit and starter-hut Plan, Workshop Bellows, otherwise
+empty. Non-empty kits arrive as the first InventorySync; a joined client builds
+no kit itself. Sidecar loading remains future work. `/keepinventory` changed
+mid-session is not pushed to joiner clients; the server's flag governs death.
+
+Q-drop previews both the effective window and its raw inventory owed take,
+charging the larger shortfall once to the existing believed-units bound (64 +
+4/s) before mutation or spawn. This fire-and-forget mirror consumes the raw
+inventory only; a cursor, grid or unacknowledged grant cannot pay that raw take
+and therefore costs belief even if the effective window holds it. A claim past
+the bound spawns nothing, tallied `drop_refused`;
+believed units are tallied `drop_believed`. C3d still removes this bounded belief.

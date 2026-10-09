@@ -79,6 +79,8 @@ pub const UNFIT_HOLD_TICKS: u64 = 100;
 pub enum WindowEvent {
     /// `InventoryGrant`: the stack is added (`Inventory::add_item`).
     Grant(ItemStack),
+    /// Whole truth after join or death, resetting correction debt.
+    Replace(Box<EffectiveWindow>),
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -154,6 +156,11 @@ pub struct EventTally {
 pub struct WindowEvents {
     /// The number of the last event sent.
     last_sent: u32,
+    last_replace: u32,
+    /// Refuse requests until the client acknowledges its death replacement.
+    pub death_replace: Option<u32>,
+    /// Grave grants remembered for unfit returns, bounded like recent grants.
+    pub grave_grants: VecDeque<(u32, (i32, i32, i32))>,
     /// Events sent but not applied yet, oldest first.
     waiting: VecDeque<Waiting>,
     /// Grants applied lately, oldest first ([`RECENT_GRANTS`]).
@@ -185,6 +192,8 @@ impl WindowEvents {
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
+
+    pub fn last_number(&self) -> u32 { self.last_sent }
 
     /// The number of the last event sent (0 before the first).
     #[cfg(test)]
@@ -264,6 +273,14 @@ enum Effect {
 /// client's own rule.
 fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
+        WindowEvent::Replace(w) => {
+            for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
+            *parts.armour = w.armour;
+            *parts.cursor = w.cursor.clone();
+            *parts.grid = w.grid.clone();
+            *debt = Default::default();
+            Effect::Viewed
+        }
         WindowEvent::Grant(stack) => {
             let rest = parts.inv.add_item(stack.clone()).map_or(0, |r| r.count);
             Effect::Granted { landed: stack.count.saturating_sub(rest) }
@@ -301,6 +318,7 @@ pub fn queue(sp: &mut ServerPlayer, event: WindowEvent, now: u64) -> u32 {
     let ev = &mut sp.window_events;
     ev.last_sent = ev.last_sent.wrapping_add(1);
     ev.tally.sent = ev.tally.sent.saturating_add(1);
+    if matches!(event, WindowEvent::Replace(_)) { ev.last_replace = ev.last_sent; }
     ev.waiting.push_back(Waiting { seq: ev.last_sent, sent: now, event });
     ev.last_sent
 }
@@ -312,6 +330,7 @@ pub fn apply_through(sp: &mut ServerPlayer, acked: u32, now: u64) {
     while sp.window_events.waiting.front().is_some_and(|w| w.seq <= acked) {
         apply_front(sp, now, false);
     }
+    if sp.window_events.death_replace.is_some_and(|n| acked >= n) { sp.window_events.death_replace = None; }
     // C3b-fix-c (B-L6) — a forced correction the client has now applied
     // leaves the phantom ledger.
     sp.window_events.forced_corrections.retain(|(seq, _)| *seq > acked);
@@ -358,6 +377,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
                 crate::hosted_server::held_back_note(due),
             );
         }
+        (Effect::Viewed, WindowEvent::Replace(_)) => { sp.window_events.forced_corrections.clear(); }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
         (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
         (Effect::Corrected(applied), WindowEvent::Correction(c)) => {
@@ -484,11 +504,12 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
 /// still holds the phantom.
 pub fn phantom(sp: &ServerPlayer) -> Vec<(Item, u32)> {
     let mut net: Vec<(Item, i64)> = Vec::new();
-    let waiting = sp.window_events.waiting.iter().filter_map(|w| match &w.event {
+    let replace = sp.window_events.waiting.iter().rev().find(|w| matches!(w.event, WindowEvent::Replace(_))).map(|w| w.seq);
+    let waiting = sp.window_events.waiting.iter().filter(|w| replace.is_none_or(|n| w.seq > n)).filter_map(|w| match &w.event {
         WindowEvent::Correction(c) => Some(&c.client),
         _ => None,
     });
-    for client in sp.window_events.forced_corrections.iter().map(|(_, d)| d).chain(waiting) {
+    for client in sp.window_events.forced_corrections.iter().filter(|_| replace.is_none()).map(|(_, d)| d).chain(waiting) {
         for (item, n) in client.counts() {
             match net.iter_mut().find(|(i, _)| i == &item) {
                 Some((_, m)) => *m += n,
@@ -552,6 +573,17 @@ pub struct EffectiveWindow {
     pub grid: CraftGrid,
 }
 
+impl std::fmt::Debug for EffectiveWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EffectiveWindow")
+            .field("inventory", &self.inv.slots_iter().collect::<Vec<_>>())
+            .field("armour", &self.armour)
+            .field("cursor", &self.cursor)
+            .field("grid", &self.grid)
+            .finish()
+    }
+}
+
 /// D-M2 — joiner `sp`'s client says `count` of the stack granted by window
 /// event `event` didn't fit. Clamped to what that grant gave (one report per
 /// grant; an event it can't name gives nothing, all tallied
@@ -575,6 +607,10 @@ pub struct EffectiveWindow {
 /// except the overflow, which never landed and is the grant's.
 pub fn return_unfit(sp: &mut ServerPlayer, event: u32, count: u8, now: u64) -> Option<ItemStack> {
     let ev = &mut sp.window_events;
+    if event <= ev.last_replace {
+        ev.tally.unfit_clamped = ev.tally.unfit_clamped.saturating_add(u32::from(count));
+        return None;
+    }
     let Some(g) = ev.grants.iter_mut().find(|g| g.seq == event && !g.returned) else {
         ev.tally.unfit_clamped = ev.tally.unfit_clamped.saturating_add(u32::from(count));
         return None;
@@ -663,6 +699,7 @@ impl InboxItem {
             // C3b-fix-a (v78) — every container view is an event: an opened
             // mirror (0 for a refusal), a push, a correction.
             InboxItem::Outcome(RequestOutcome::SlotSet(set)) => set.window_event,
+            InboxItem::Outcome(RequestOutcome::Sync(set)) => set.window_event,
             InboxItem::Outcome(RequestOutcome::ContainerOpened(o)) => o.window_event,
             InboxItem::Grant(g) => g.window_event,
             InboxItem::ArmourWorn { event, .. } => *event,
@@ -1053,5 +1090,27 @@ mod tests {
         inbox.clear();
         assert!(inbox.is_empty());
         assert_eq!(inbox.take_ordered(), (Vec::new(), None));
+    }
+}
+
+#[cfg(test)] mod death_replace_tests {
+    use super::*;
+    #[test] fn replace_clears_debt_and_blocks_unfit_for_earlier_grants() {
+        let mut sp = ServerPlayer::new(glam::Vec3::ZERO);
+        sp.inventory.auto_refill = false; sp.inventory.toggle_lock(4);
+        let stone = ItemStack::new_block(crate::block::STONE,5);
+        let delta = crate::container_window::ItemDelta { take:vec![(0,stone.clone())],give:vec![] };
+        sp.window_events.debt.apply(&mut sp.inventory,&mut sp.craft_grid,&mut sp.cursor,&mut sp.armour,&delta);
+        assert_eq!(sp.window_events.debt.owed(&stone.item),5);
+        let g = queue(&mut sp,WindowEvent::Grant(stone),0);
+        let mut w = effective_window(&sp); w.inv.set_slot(0,None);
+        let n = queue(&mut sp,WindowEvent::Replace(Box::new(w)),0);
+        sp.window_events.death_replace = Some(n);
+        apply_overdue(&mut sp,EVENT_ACK_TIMEOUT_TICKS);
+        assert_eq!(sp.window_events.death_replace,Some(n),"timeout does not acknowledge a client replacement");
+        assert!(sp.window_events.debt.is_empty()); assert!(phantom(&sp).is_empty());
+        assert!(return_unfit(&mut sp,g,5,201).is_none());
+        assert!(!sp.inventory.auto_refill); assert!(sp.inventory.is_locked(4));
+        apply_through(&mut sp,n,202); assert!(sp.window_events.death_replace.is_none());
     }
 }

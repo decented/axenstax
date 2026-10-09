@@ -250,6 +250,7 @@ pub const RESPAWN_RESEND_TICKS: u64 = 20;
 /// MP-A3 — a server decision about the local player's own body.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OwnLifeEvent {
+    GraveAt([i32; 3]),
     /// The server holds us dead: enter the death screen if not already on it.
     /// MP-D2b — with the cause the server recorded (the death-screen line).
     Died(crate::survival::DamageCause),
@@ -285,6 +286,7 @@ pub enum RequestOutcome {
     ContainerOpened(protocol::ContainerOpenedPacket),
     /// C3b-1 — the server's values for some slots of our window.
     SlotSet(protocol::WindowSlotSetPacket),
+    Sync(protocol::InventorySyncPacket),
 }
 
 /// C3b-fix-b (B-M1) — a request this client sends mid-frame, in the one
@@ -1071,6 +1073,13 @@ impl RemoteClient {
                                         changed = true;
                                     }
                                 }
+                                protocol::PlayerEventType::GraveAt { x, y, z } => {
+                                    if self.player_index() == Some(event.player_index)
+                                        && self.pending_life_events.len() < MAX_LIFE_EVENTS_PER_POLL {
+                                        self.pending_life_events.push(OwnLifeEvent::GraveAt([*x, *y, *z]));
+                                        changed = true;
+                                    }
+                                }
                                 protocol::PlayerEventType::ArmourWorn { hits } => {
                                     if self.player_index() == Some(event.player_index)
                                         && has_room(self.pending_life_events.len(), MAX_LIFE_EVENTS_PER_POLL, event.window_event)
@@ -1205,6 +1214,13 @@ impl RemoteClient {
                             && has_room(self.pending_outcomes.len(), MAX_UNNUMBERED_PER_POLL, set.window_event)
                         {
                             self.pending_outcomes.push(RequestOutcome::SlotSet(set));
+                            changed = true;
+                        }
+                    }
+                    PacketType::InventorySync => {
+                        if let Ok(sync) = protocol::safe_deserialize::<protocol::InventorySyncPacket>(payload)
+                            && sync.window_event != 0 {
+                            self.pending_outcomes.push(RequestOutcome::Sync(sync));
                             changed = true;
                         }
                     }

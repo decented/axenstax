@@ -22,6 +22,8 @@
 //! Dropping the HostedServer shuts down the QUIC accept thread if it was
 //! spawned (native-only).
 
+mod death;
+
 use std::collections::VecDeque;
 
 use crate::protocol;
@@ -1851,39 +1853,6 @@ impl HostedServer {
         self.server.players.get(i).is_some_and(|sp| sp.server_simulated && sp.combat.dead)
     }
 
-    /// MP-A3 — turn this tick's server-originated joiner deaths (the
-    /// `just_died` one-shot: a fall, drowning, a mob, lava or fire, a blast,
-    /// or — MP-D2a — a reported `health_delta` that took a body the server
-    /// held lower than its client knew to zero) into
-    /// `PlayerEventType::Died`, sent to the dead player alone (nobody else has
-    /// a use for it, and it names where someone is not safe). That is how a
-    /// joiner whose server copy died — when its own sim didn't see it — reaches
-    /// its death screen, and with it the Respawn button the server is waiting
-    /// on. A death the joiner's input REPORTED (`health <= 0`) sets no
-    /// one-shot (`GameServer::report_player_death`): its client already knows,
-    /// and an echo arriving after a quick Respawn would kill it a second time.
-    fn announce_joiner_deaths(&mut self) {
-        for i in 0..self.server.players.len() {
-            let sp = &mut self.server.players[i];
-            if !sp.server_simulated || !sp.combat.just_died {
-                continue;
-            }
-            sp.combat.just_died = false;
-            // MP-D2b — naming the cause the body recorded, for the joiner's
-            // death screen.
-            let cause = damage_cause_to_wire(sp.combat.last_damage);
-            let pkt = protocol::serialize_packet(
-                protocol::PacketType::PlayerEvent,
-                &protocol::PlayerEventPacket {
-                    player_index: i as u32,
-                    event: protocol::PlayerEventType::DiedOf { cause },
-                    window_event: 0,
-                },
-            );
-            self.send_to_joined_slot(i, &pkt);
-        }
-    }
-
     /// MP-D2b — this tick's server-landed hits wear each joiner's armour
     /// (`PlayerEventType::ArmourWorn`, to that joiner alone), and the kills
     /// credited to joiners go out as `KillEvent`s, each to its killer alone.
@@ -2108,6 +2077,12 @@ impl HostedServer {
     /// it, `joiner_actions`).
     fn handle_item_action(&mut self, i: usize, req: &protocol::ItemActionPacket) {
         use crate::item_actions::{self, ItemNote};
+        if self.joiner_requests_blocked(i) {
+            if !matches!(req.action, protocol::ItemAction::Drop { .. } | protocol::ItemAction::GrantUnfit { .. } | protocol::ItemAction::PlanMinted { .. } | protocol::ItemAction::Craft { .. }) {
+                self.refuse_item_action(i, req.seq, ItemNote::NotNow);
+            }
+            return;
+        }
         let mut window_event = 0;
         let served: Result<u8, ItemNote> = match &req.action {
             protocol::ItemAction::Eat { hotbar_slot, held_kind, held_id, held_full } => {
@@ -2198,6 +2173,9 @@ impl HostedServer {
             protocol::ItemAction::Attach { x, y, z, face, hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 return self.serve_attach(i, req.seq, [*x, *y, *z], *face, *hotbar_slot, held);
+            }
+            protocol::ItemAction::OpenGrave { x, y, z } => {
+                return self.serve_open_grave(i, req.seq, (*x, *y, *z));
             }
             protocol::ItemAction::Detach { x, y, z, face } => {
                 return self.serve_detach(i, req.seq, [*x, *y, *z], *face);
@@ -3033,10 +3011,27 @@ impl HostedServer {
         if !sp.server_simulated || !sp.is_in_world() {
             return;
         }
-        let Some(stack) = crate::window_events::return_unfit(sp, event, count, now) else { return };
+        let Some(mut stack) = crate::window_events::return_unfit(sp, event, count, now) else { return };
         // C3b-fix-b (B-M2) — thrown from the joiner (it can't take it back
         // for the Q-drop delay), and only what came back.
         let feet = sp.player.pos;
+        let cell = sp.window_events.grave_grants.iter().find(|(n, _)| *n == event).map(|(_,cell)| *cell);
+        if let Some(cell) = cell
+            && let Some(mut grave) = self.server.world.grave_at(cell).cloned() {
+            for stored in grave.slots.iter_mut().flatten() {
+                if stored.item.can_stack_with(&stack.item) {
+                    let n = stored.item.max_stack().saturating_sub(stored.count).min(stack.count);
+                    stored.count += n;
+                    stack.count -= n;
+                }
+            }
+            if stack.count > 0 && let Some(slot) = grave.slots.iter_mut().find(|s| s.is_none()) {
+                *slot = Some(stack.clone());
+                stack.count = 0;
+            }
+            self.server.world.insert_grave(cell, grave);
+            if stack.count == 0 { return; }
+        }
         crate::window_events::spawn_unfit(&mut self.server.ecs, feet, stack, i);
     }
 
@@ -3097,6 +3092,10 @@ impl HostedServer {
         }
         crate::window_events::apply_through(sp, pkt.events_applied, now);
         sp.window_events.note_op_seq(pkt.op_seq);
+        if sp.window_events.death_replace.is_some() {
+            sp.possession.window_refused = sp.possession.window_refused.saturating_add(1);
+            return;
+        }
         let Some(served) =
             crate::window_ops::serve_op(sp, &mut server.world, &server.registry, creative, pkt, now, &mut server.tables_gone)
         else {
@@ -3274,17 +3273,31 @@ impl HostedServer {
     /// item everyone sees and can pick up (`entity::q_drop_launch` +
     /// `spawn_thrown_item`, the client's own drop; the dropper waits out
     /// `ITEM_DROP_PICKUP_DELAY_TICKS`), and taken from the shadow by the
-    /// owed rule. A shortfall is a log-only mismatch and the item still
-    /// spawns. Never answered. The drop already spent a token of the
+    /// owed rule. A shortfall spawns only within the believed-units bound
+    /// and is tallied. Never answered. The drop already spent a token of the
     /// joiner's drop bucket (it waited in the inbound queue for one).
     ///
-    /// BRIDGE: possession check — a modified client can drop an item it
-    /// doesn't hold, and that item is then real for everyone. Closes with
-    /// enforcement (C3).
+    /// A shortfall uses the effective-window believed bound; past the bound
+    /// nothing spawns. C3d removes this bounded belief.
     fn spawn_joiner_drop(&mut self, i: usize, slot: usize, held: Option<crate::item::Item>) {
         let tick = self.server.tick_counter;
         let Some(sp) = self.server.players.get_mut(i) else { return };
         sp.drop_bucket.take(tick);
+        let Some(item) = held.as_ref() else { return };
+        if matches!(item, crate::item::Item::Plan(_)) { return; }
+        // BRIDGE: raw inventory mirroring plus bounded belief — replace when
+        // C3d makes every Q-drop pay from the effective window.
+        // Drop mirrors an already-predicted inventory take without a numbered
+        // carrier. A cursor, grid or unacknowledged grant cannot pay that raw
+        // take: charge its shortfall too, once, before mutating or spawning.
+        let mut preview = sp.inventory.clone();
+        let raw_short = 1u32.saturating_sub(u32::from(crate::joiner_actions::take_owed(&mut preview, slot, item, 1)));
+        let short = crate::window_ops::pay_short(sp, item, 1).max(raw_short);
+        if short > 0 && !sp.container_sent.believed.try_take(short, tick) {
+            sp.possession.drop_refused = sp.possession.drop_refused.saturating_add(1);
+            return;
+        }
+        sp.possession.drop_believed = sp.possession.drop_believed.saturating_add(short);
         let Some(drop) = crate::item_actions::serve_drop(sp, slot, held) else { return };
         sp.possession.drops = sp.possession.drops.saturating_add(1);
         let (pos, velocity) = crate::entity::q_drop_launch(drop.eye, drop.forward);
@@ -3618,12 +3631,6 @@ impl HostedServer {
         let closed_before_fill = self.process_inbound_packets();
         self.reap_slots(&closed_before_fill);
         self.server.tick();
-        self.announce_joiner_deaths();
-        self.announce_joiner_hits_and_kills();
-        // World chat §4.2 — inbound room lines, delivered under the same
-        // hearing rule as an in-world speaker. No-op unless a room is attached.
-        #[cfg(not(target_arch = "wasm32"))]
-        self.poll_room();
         // Death-drops phase 2b — deliver this tick's server-side pickup
         // grants to the players who earned them. Per-connection (never
         // broadcast: the stack belongs to one inventory); the item's
@@ -3633,6 +3640,12 @@ impl HostedServer {
         for (idx, stack) in grants {
             self.grant_to_joiner(idx, [stack]);
         }
+        self.handle_joiner_deaths();
+        self.announce_joiner_hits_and_kills();
+        // World chat §4.2 — inbound room lines, delivered under the same
+        // hearing rule as an in-world speaker. No-op unless a room is attached.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_room();
         // C3a-fix-1 — the safety valve: a window event the client has not
         // reported within `EVENT_ACK_TIMEOUT_TICKS` is applied anyway.
         let now = self.server.tick_counter;
@@ -4285,6 +4298,17 @@ impl HostedServer {
                         if let Some(sp) = self.server.players.get_mut(i) {
                             sp.enter_world();
                         }
+                        let mut kit = crate::window_events::effective_window(&self.server.players[i]);
+                        crate::starter_kit::grant_fresh_kit(&mut kit.inv, &self.server.world.world_type,
+                            self.server.play_mode.is_creative(), self.server.world.is_workshop);
+                        for at in 0..36 {
+                            if let Some(stack) = kit.inv.slot(at).cloned()
+                                && let crate::item::Item::Plan(body) = stack.item {
+                                kit.inv.set_slot(at, Some(crate::item::ItemStack { item: crate::item::Item::Plan(
+                                    crate::plan::PlanData::marker_placeholder(crate::plan::marker(&body), matches!(body.develop_state, crate::plan::DevelopState::Developed))), count: stack.count }));
+                            }
+                        }
+                        if (0..36).any(|at| kit.inv.slot(at).is_some()) { self.send_inventory_sync(i, kit); }
 
                         // The operator joining without a channel binding plays
                         // normally but gets no operator tools — say so, so the
@@ -4529,13 +4553,13 @@ impl HostedServer {
                                 protocol::safe_deserialize::<protocol::EntityAttackPacket>(payload)
                             {
                                 self.apply_window_events(i, req.events_applied);
-                                self.handle_entity_attack(i, &req);
+                                if !self.joiner_requests_blocked(i) { self.handle_entity_attack(i, &req); }
                             }
                         } else if let Ok(req) =
                             protocol::safe_deserialize::<protocol::EntityInteractPacket>(payload)
                         {
                             self.apply_window_events(i, req.events_applied);
-                            self.handle_entity_interact(i, &req);
+                            if !self.joiner_requests_blocked(i) { self.handle_entity_interact(i, &req); }
                         }
                     }
                     protocol::PacketType::ItemAction => {
@@ -4696,7 +4720,8 @@ impl HostedServer {
     /// back, all at once — they were made while it was alive, but the body
     /// and inventory they would act on are gone. FU4a (FU3 verify L1) — so
     /// is a group made in an earlier life (`EditGroup::life`): a respawn was
-    /// answered since. Within the per-tick send-back cap
+    /// answered since. A current-life group also waits for the death Replace
+    /// acknowledgement; its use tags receive the prediction undo. Within the per-tick send-back cap
     /// ([`MAX_SEND_BACKS_PER_CLIENT_PER_TICK`], M2); past it they are dropped.
     fn process_edit_group(
         &mut self,
@@ -4708,9 +4733,12 @@ impl HostedServer {
         // these edits go first (idempotent for a group already started).
         self.apply_window_events(i, group.events_applied);
         let earlier_life = self.server.players.get(i).is_some_and(|sp| sp.respawns != group.life);
-        if self.joiner_is_dead(i) || earlier_life {
-            for bc in group.take_edits() {
+        if self.joiner_requests_blocked(i) || earlier_life {
+            while let Some((bc, tag, _)) = group.pop_front() {
                 self.send_back_authoritative_block(&bc, budget);
+                if let Some(use_tag) = tag.as_ref().and_then(|t| t.use_tag()) {
+                    self.refuse_use(i, &bc, use_tag.kind, crate::item_actions::ItemNote::NotNow);
+                }
             }
             return;
         }

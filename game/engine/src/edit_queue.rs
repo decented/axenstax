@@ -228,13 +228,6 @@ impl EditGroup {
         })
     }
 
-    /// Take every edit left, their tags gone with them (a dead joiner's or
-    /// an earlier life's: sent back, never applied).
-    pub fn take_edits(&mut self) -> Vec<BlockChange> {
-        self.tags = Vec::new();
-        std::mem::take(&mut self.edits).into_iter().map(|(bc, _)| bc).collect()
-    }
-
     /// FU4a (M1) — keep the first `keep` edits waiting, with their tags, and
     /// free the room the rest held. Returns how many were dropped.
     fn truncate(&mut self, keep: usize) -> usize {

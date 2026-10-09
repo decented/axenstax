@@ -571,41 +571,9 @@ impl super::GameState {
             // The Workshop is the one exception: it needs its Bellows tool to
             // function, so it still receives that (brand-new world only — this
             // branch is never reached on re-entry, so it's never re-dumped).
-            if self.is_creative && self.world.is_workshop {
-                self.players[0].inventory.set_slot(
-                    8,
-                    Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Bellows, 1)),
-                );
-            }
-
-            // Test Lab starter kit — a tester should never be blocked grinding
-            // before a mission. Generous building kit + the core tools + food +
-            // the starter-hut Plan (so build-along / schematic missions are
-            // immediately doable). Applies in Survival or Creative Test Labs.
-            if self.world.world_type == "testlab" {
-                use crate::block;
-                use crate::crafting::{Tool, ToolMaterial, ToolType};
-                use crate::item::{Item, ItemStack, MaterialId};
-                let kit = [
-                    block::OAK_PLANKS, block::OAK_LOG, block::STONE, block::COBBLESTONE,
-                    block::DIRT, block::GLASS, block::SAND, block::CRAFTING_TABLE,
-                    crate::rail::TRACK, block::CHEST,
-                ];
-                for (i, &id) in kit.iter().enumerate() {
-                    self.players[0].inventory.set_slot(i, Some(ItemStack::new_block(id, 64)));
-                }
-                for tt in [ToolType::Pickaxe, ToolType::Axe, ToolType::Shovel, ToolType::Sword] {
-                    let _ = self.players[0]
-                        .inventory
-                        .add_item(ItemStack::new_tool(Tool::new(tt, ToolMaterial::Iron)));
-                }
-                let _ = self.players[0]
-                    .inventory
-                    .add_item(ItemStack::new_material(MaterialId::Bread, 8));
-                let _ = self.players[0].inventory.add_item(ItemStack {
-                    item: Item::Plan(crate::satoshi::starter_hut_plan()),
-                    count: 1,
-                });
+            if !self.joined() {
+                crate::starter_kit::grant_fresh_kit(&mut self.players[0].inventory,
+                    &self.world.world_type, self.is_creative, self.world.is_workshop);
             }
 
             // Phase 6 — start every player in the remembered camera perspective.

@@ -757,6 +757,21 @@ impl SentUses {
         self.records.len()
     }
 
+    /// A whole-window replacement supersedes every earlier prediction.
+    /// Keep only real Plan bodies as resolution candidates: the sync decides
+    /// which markers still belong in the window. Late refusals cannot give
+    /// old costs back, and parked costs must never be re-seated afterwards.
+    pub fn retire_for_replace(&mut self) -> Vec<crate::plan::PlanData> {
+        let plans = self.records.iter().filter_map(|r| r.cost.as_ref())
+            .chain(self.parked.iter().map(|s| &s.item))
+            .filter_map(|item| match item {
+                Item::Plan(body) if body.marker.is_none() => Some(body.clone()),
+                _ => None,
+            }).collect();
+        self.clear();
+        plans
+    }
+
     /// Forget everything (the session ended).
     pub fn clear(&mut self) {
         self.records.clear();

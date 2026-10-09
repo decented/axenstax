@@ -127,6 +127,7 @@ pub enum Asked {
     /// C3c-3b — peel the attachment off face `face` of the block at `cell`
     /// (`ItemAction::Detach`): claims nothing; the item comes as a grant.
     Detach { cell: [i32; 3], face: u8 },
+    OpenGrave { cell: [i32; 3] },
 }
 
 impl Asked {
@@ -489,6 +490,7 @@ pub fn uses(kind: Asked) -> u8 {
         | Asked::Sleep { .. }
         | Asked::Cast
         | Asked::Reel
+        | Asked::OpenGrave { .. }
         | Asked::Detach { .. } => 0,
         Asked::UseBlock { claim, .. } => claim,
         Asked::Light { lighter, .. } => u8::from(lighter != crate::block_use::Lighter::Firestarter),
@@ -795,6 +797,7 @@ pub fn apply_outcome(
         | Asked::Cast
         | Asked::Reel
         | Asked::Attach { .. }
+        | Asked::OpenGrave { .. }
         | Asked::Detach { .. } => {}
     }
     applied

@@ -64,6 +64,8 @@ pub mod join_world;
 // MP-A3 — server-side projectiles reach joiners; a dead joiner stays dead.
 pub mod server_projectiles;
 pub mod joiner_death;
+mod death_window;
+mod death_boundaries;
 // MP step 1 — a joiner's one position: server-simulated, predicted + reconciled.
 pub mod position_truth;
 // Phase B1 — the dedicated server streams columns around every player.
