@@ -218,7 +218,7 @@ impl Authority {
             persona: proof.core().successor_persona,
         })
     }
-    fn validates_source(&self, core: &Core) -> bool {
+    pub(crate) fn validates_source(&self, core: &Core) -> bool {
         self.epoch.checked_add(1) == Some(core.epoch)
             && self.lineage == core.lineage
             && self.committed == core.predecessor

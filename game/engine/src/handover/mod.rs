@@ -5,6 +5,7 @@
 //! Prepared records are inert; source retirement precedes committed publication.
 
 pub mod certificate;
+pub mod checkpoint;
 mod codec;
 pub mod context;
 pub mod crypto;

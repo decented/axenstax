@@ -5130,3 +5130,68 @@ retirement requires private crypto-bound construction; decoded markers cannot
 mint new retirement permits. Live startup integration must additionally reverify
 actual encrypted certificate context using the local runtime/#p, not infer its
 inner fields from an outer event signature.
+
+The dormant native checkpoint I/O adapter streams a compatible known-member
+USTAR+gzip archive to an owned file; it never constructs an archive-sized buffer
+or reloads a second live simulation. It accepts only an explicitly frozen,
+personally attributed transfer copy: no positional player rows, inventory or
+locks; legacy position is positive zero on each axis, health20 and hotbar0.
+Personal records must already preserve that removed state. Transfer metadata
+contains no source Proof-of-Play secret, owner stamp, publication endpoint or
+Stash opt-in, while retaining genesis, rules, authored data and gameplay history.
+Current persisted/evicted chunks override old disk files; the existing evicted
+snapshot wins over neighbour-generation spill, and current all-air removes the
+old disk member. Required referenced exhibits cannot be skipped. Actual current
+JoinerSavev1 is strictly decoded; admitted progression members remain bounded
+opaque bytes until the personal-carrier codec/authority is implemented.
+
+Admission precedes archive transfer/Ready: a bounded source-signed direct offer
+binds the complete certificate, manifest and recipient's fresh expected challenge,
+verified source Authority, root context, recipient runtime/persona and validity.
+A digest or caller boolean cannot construct AdmittedManifest. The import uses
+the core ordered receiver/deadlines, then verifies every actual member path,
+regular type, length and digest, required exhibit cross-references, exact current
+world.dat schema/footer and complete positional payload. It refuses unknown,
+missing, duplicate, extra, traversal/link/device/GNU/PAX extension members and
+trailing compressed content. USTAR paths obey the core240-byte cap; a single
+filename exceeding USTAR's100-byte component field fails instead of emitting
+unbounded extension headers. Existing permissive local legacy readers are
+unchanged; legacy worlds must first be locally migrated to the current format.
+
+Hard limits remain128MiB compressed/512MiB logical member bytes,65536 members,
+2MiB manifest/8MiB retained manifest allocation,1024 images/eightMiB each and
+64KiB per participant. I/O additionally bounds its member/path index at8MiB
+before insertion, world.dat at64MiB input/128MiB conservative decoding budget,
+metadata at2MiB input/16MiB decoding budget, sidecar at2MiB decoding budget and
+nesting128. The focused serde adapter suppresses sequence/map allocation hints,
+charges typed elements before decode at four times inline size plus128bytes,
+and charges owned body/string copies; archive/file transfer uses16KiB buffers.
+Tar header/padding inflation has a separate finite cap of logical limit plus
+1024bytes per declared member plus1024bytes. Smaller caller limits use the same
+actual I/O paths and cannot increase these maxima.
+
+Imports are inactive wrappers outside ordinary world layout, with immutable
+`received` evidence and separate `working` members. Hashes verify BEFORE the
+receiver metadata transform; its new secret and verified recipient owner stamp
+have an explicit transformv1 digest in a private durable receipt bound to the
+original manifest/core/world/transfer and original admission evidence. Required
+writes, file syncs, nested-directory syncs, atomic no-replace rename and parent
+sync must succeed. Pre-rename cleanup removes only its own scratch folder;
+post-rename uncertainty preserves the import for exact restart/retry and late
+cleanup never deletes it. Native no-replace uses Linux/Android renameat2,
+macOS exclusive rename and Windows directory rename; unsupported targets fail
+closed. These platform paths still require their own platform validation and
+this milestone does not claim portable completed handover.
+
+Bounded admission evidence retains only the signed offer, public root context,
+challenge and recorded admission time, never a bearer/private/derived key.
+Historical integrity recovery returns a distinct RecoveredCheckpoint with no
+AdmittedManifest, Ready, Authority or activation permission. It rechecks genuine
+signatures, manifest/member/receipt bindings and root-first-hop source authority;
+subsequent-hop recovery requires a source Authority genuinely reconstructed by
+the controller through the existing verified chain, otherwise fails closed.
+Recorded admission time permits integrity inspection/local durability retry;
+current expiry/authority/Commit must still be checked by the live controller.
+Normal transfer retry requires a currently verified admission. Full live freeze,
+agreement/progression authority, recipient personal adapter, direct-control
+session, listener latch, Prepared/Commit and gameplay callers remain unwired.
