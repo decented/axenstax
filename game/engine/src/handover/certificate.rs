@@ -129,7 +129,12 @@ impl Core {
             self.successor_runtime,
             self.successor_persona,
         ] {
-            nostr::PublicKey::from_slice(&key).map_err(|_| Error::Invalid("certificate key"))?;
+            nostr::PublicKey::from_slice(&key)
+                .and_then(|key| {
+                    key.xonly()?;
+                    Ok(key)
+                })
+                .map_err(|_| Error::Invalid("certificate key"))?;
         }
         Ok(())
     }

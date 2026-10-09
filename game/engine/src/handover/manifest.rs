@@ -84,7 +84,12 @@ impl Manifest {
             return Err(Error::Invalid("manifest binding"));
         }
         for key in [self.source, self.receiver] {
-            nostr::PublicKey::from_slice(&key).map_err(|_| Error::Invalid("manifest identity"))?;
+            nostr::PublicKey::from_slice(&key)
+                .and_then(|key| {
+                    key.xonly()?;
+                    Ok(key)
+                })
+                .map_err(|_| Error::Invalid("manifest identity"))?;
         }
         let mut agreed = BTreeSet::new();
         let mut previous = None;

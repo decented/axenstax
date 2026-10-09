@@ -16,15 +16,25 @@ pub struct RetiredRoot {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Retirement {
-    pub core: Core,
-    pub prepared: Hash,
-    pub committed: Hash,
-    pub exact_event: Vec<u8>,
-    pub retained_copy: Id,
-    pub active_capability: Hash,
-    pub roots: Vec<RetiredRoot>,
+    core: Core,
+    prepared: Hash,
+    committed: Hash,
+    exact_event: Vec<u8>,
+    retained_copy: Id,
+    active_capability: Hash,
+    roots: Vec<RetiredRoot>,
+    verified: bool,
 }
 impl Retirement {
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+    pub fn committed_hash(&self) -> Hash {
+        self.committed
+    }
+    pub fn retained_copy(&self) -> Id {
+        self.retained_copy
+    }
     pub fn new(
         commit: &VerifiedCommit,
         prepared: &VerifiedPrepared,
@@ -44,6 +54,7 @@ impl Retirement {
             retained_copy,
             active_capability,
             roots,
+            verified: true,
         };
         r.validate()?;
         Ok(r)
@@ -134,6 +145,7 @@ impl Retirement {
             retained_copy,
             active_capability,
             roots,
+            verified: false,
         };
         value.validate()?;
         Ok(value)
@@ -271,6 +283,11 @@ impl Source {
         Ok(())
     }
     pub fn retire(&mut self, store: &MarkerStore, record: Retirement) -> Result<PublicationPermit> {
+        if !record.verified {
+            return Err(Error::Invalid(
+                "restored record is not a new retirement proof",
+            ));
+        }
         if !matches!(
             self.stage,
             SourceStage::Prepared | SourceStage::RetirementUncertain
@@ -658,9 +675,14 @@ mod tests {
             assert!(retirement.retained_admission([9; 16], None, true, false));
             assert!(!retirement.refuses_root([99; 32], 100));
             assert_eq!(
-                Retirement::decode(&retirement.encode().unwrap()).unwrap(),
-                retirement
+                Retirement::decode(&retirement.encode().unwrap())
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+                retirement.encode().unwrap()
             );
+            let decoded = Retirement::decode(&retirement.encode().unwrap()).unwrap();
+            assert!(source.retire(&store, decoded).is_err());
             let permit = source.retire(&store, retirement).unwrap();
             assert_eq!(permit.bytes(), event.as_json().as_bytes());
             assert!(source.abort().is_err());
