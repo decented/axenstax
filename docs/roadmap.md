@@ -118,6 +118,7 @@ Only items that block building further on top.
 - **Anti-X-ray chunk obfuscation.** Built and unit-tested but not yet in the live chunk-stream send path; it lands with real remote chunk streaming. The architectural reward-layer defence is live; this part is not.
 - **Take-your-worlds-to-native conflict policy.** Import currently keeps both when a name clashes; the final merge policy is an owner decision.
 - **Sub-block detail for authored builds** (high-resolution statues and faces): needs a choice between a micro-model reference, sub-voxels or a detail-block palette.
+- **World handover.** A host who needs to leave can hand the running world to another player in the session ("Hand this world to …"): the world and everyone's saved things move to that player's machine, and everyone reconnects there. Queued in the multiplayer work after per-player joiner saves; the original host keeps their own copy.
 
 ---
 
@@ -131,6 +132,7 @@ Horizons, each one line. None is scheduled.
 - **Electricity phases 3–4** — quantitative energy economy, electric furnace and motor.
 - **Aether (wireless signalling) element** — design written, not built.
 - **Multi-world places, hub and portals** — one self-hosted address hosting several linked worlds, with a back-stack and per-world access rules.
+- **Backup host** — a player the host names keeps a live copy of the world, so the session survives the host crashing or dropping off, not only a planned handover. Follows world handover; still a player's own machine, never one AxeNStax runs.
 - **Creator gallery phases 3–4** — studio sidecar, and gated or consigned exhibits.
 - **Voice and proximity audio** — game-transport-native, audio only; not built.
 - **Guardian-facing controls** — permissions a parent or operator can set per child account; the operator-side allowlist exists, a guardian surface does not.
