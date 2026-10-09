@@ -7527,7 +7527,7 @@ impl super::GameState {
         }
         let Some(p) = self.players.first_mut() else { return false };
         if p.crafting_ui.open {
-            p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+            self.close_crafting(0);
             return true;
         }
         if p.dialogue_villager.is_some() {
@@ -8171,10 +8171,8 @@ impl super::GameState {
                 match &self.mode {
                     GameMode::Playing => {
                         // Close crafting UI for all players that have it open
-                        for p in &mut self.players {
-                            if p.crafting_ui.open {
-                                p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
-                            }
+                        for pidx in 0..self.players.len() {
+                            if self.players[pidx].crafting_ui.open { self.close_crafting(pidx); }
                         }
                         self.release_cursor();
                         self.skin_panel.open = false;
@@ -10708,10 +10706,7 @@ impl super::GameState {
                     // No-op; the workstation UI's own 'E' handler
                     // already closed it this frame.
                 } else if self.players[pidx].crafting_ui.open {
-                    let closed = {
-                        let p = &mut self.players[pidx];
-                        p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots)
-                    };
+                    let closed = self.close_crafting(pidx);
                     if !closed {
                         self.toast = Some((
                             "Inventory full — make room to close crafting".to_string(),
@@ -21320,23 +21315,22 @@ impl super::GameState {
         // C3a-1 — every item move is one pure window transition
         // (`window::apply`, via `CraftingUi::apply_click`) over the player's
         // inventory + armour and the screen's grid + cursor.
-        let creative = self.is_creative;
         // L3 (C2b verify) — a crafting table's screen closes when its table
         // stops being a crafting table or leaves the player's reach, as in
         // Minecraft (`window::table_in_reach`: the server's reach rule, from
         // the body's eye). The grid goes back as on any close.
-        for p in self.players.iter_mut() {
-            if p.crafting_ui.open
-                && let Some(cell) = p.crafting_ui.table
+        for pidx in 0..self.players.len() {
+            if self.players[pidx].crafting_ui.open
+                && let Some(cell) = self.players[pidx].crafting_ui.table
                 && !crate::window::table_in_reach(
                     self.world.get_block(cell[0], cell[1], cell[2]),
                     cell,
-                    p.player.eye_pos(),
+                    self.players[pidx].player.eye_pos(),
                 )
             {
                 // B-M1: a close that can't return everything waits for the
                 // next tick and a change of the window, not the next frame.
-                p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, ticks_run > 0);
+                self.force_close_crafting(pidx, ticks_run > 0);
             }
         }
         // C3b-1 — a joiner's shared container screen closes by the same rule
@@ -21353,19 +21347,9 @@ impl super::GameState {
                     if self.joined() && !self.joiner_actions.may_craft(&p.inventory, &p.crafting_ui) {
                         continue;
                     }
-                    let world = &self.world;
-                    let p = &mut self.players[pidx];
-                    let eye = p.player.eye_pos();
                     // UX polish sweep Task 2 — what was crafted, so a
                     // first-ever craft of a non-obvious item can teach a hint.
-                    let craft_item = match p.crafting_ui.apply_click(
-                        &mut p.inventory,
-                        &mut p.armour_slots,
-                        &crate::window::WindowClick::Result,
-                        creative,
-                        eye,
-                        |c| world.get_block(c[0], c[1], c[2]),
-                    ) {
+                    let craft_item = match self.apply_window_click(pidx, &crate::window::WindowClick::Result) {
                         crate::window::ClickResult::Crafted(stack) => Some(stack.item),
                         _ => None,
                     };
@@ -21416,12 +21400,7 @@ impl super::GameState {
                 | crate::craft_ui::ClickTarget::SortInventory
                 | crate::craft_ui::ClickTarget::ToggleLock(_) => {
                     if let Some(click) = click_target.window_click() {
-                        let world = &self.world;
-                        let p = &mut self.players[pidx];
-                        let eye = p.player.eye_pos();
-                        p.crafting_ui.apply_click(&mut p.inventory, &mut p.armour_slots, &click, creative, eye, |c| {
-                            world.get_block(c[0], c[1], c[2])
-                        });
+                        self.apply_window_click(pidx, &click);
                     }
                 }
                 crate::craft_ui::ClickTarget::OpenBook => {
@@ -21435,18 +21414,8 @@ impl super::GameState {
                         let card = &crate::crafting_catalogue::all_cards()[gidx];
                         let example = card.example_grid;
                         let name = card.name.clone();
-                        let world = &self.world;
-                        let p = &mut self.players[pidx];
-                        let eye = p.player.eye_pos();
                         let fill = crate::window::WindowClick::Autofill { example };
-                        let toast = match p.crafting_ui.apply_click(
-                            &mut p.inventory,
-                            &mut p.armour_slots,
-                            &fill,
-                            creative,
-                            eye,
-                            |c| world.get_block(c[0], c[1], c[2]),
-                        ) {
+                        let toast = match self.apply_window_click(pidx, &fill) {
                             // M3 — a 3×3 recipe can't be laid in the 2×2.
                             crate::window::ClickResult::NeedsTable => Some("Needs a crafting table".to_string()),
                             crate::window::ClickResult::Refused => Some(format!("Not enough materials for {name}")),
@@ -21474,18 +21443,8 @@ impl super::GameState {
                     }
                 }
                 crate::craft_ui::ClickTarget::TrashCursor => {
-                    let world = &self.world;
-                    let p = &mut self.players[pidx];
-                    let eye = p.player.eye_pos();
                     let trash = crate::window::WindowClick::Trash;
-                    let binned = p.crafting_ui.apply_click(
-                        &mut p.inventory,
-                        &mut p.armour_slots,
-                        &trash,
-                        creative,
-                        eye,
-                        |c| world.get_block(c[0], c[1], c[2]),
-                    );
+                    let binned = self.apply_window_click(pidx, &trash);
                     if matches!(binned, crate::window::ClickResult::Binned(_)) {
                         self.toast = Some((
                             "Binned the held item".to_string(),

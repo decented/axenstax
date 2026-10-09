@@ -4,6 +4,7 @@ use super::{ConnectionState, RemoteClient};
 use crate::protocol::{self, PacketType};
 
 impl RemoteClient {
+    pub fn applied_window_boundary(&self) -> u32 { self.events_applied }
     /// Must succeed BEFORE the caller changes holdings, world or local ECS.
     /// Retains the complete packet; sender/resubmission never allocates an id.
     pub fn reserve_action(&mut self, intent: crate::action_wire::ActionIntent, recipe: Box<[u8]>, cells: Box<[[i32; 3]]>) -> Result<crate::action_identity::ActionHeader, String> {
@@ -101,6 +102,12 @@ impl RemoteClient {
         self.retire_applied_receipts();
     }
 
+    fn flush_applied_action_ack(&mut self) {
+        if let Some(ack) = self.pending_action_ack.take() {
+            self.transport.send_to_server(&protocol::serialize_packet(PacketType::AppliedActionAck, &ack));
+        }
+    }
+
     pub(super) fn retire_applied_receipts(&mut self) {
         while let Some(receipt) = self.action_receipts.front().copied() {
             if receipt.included_events > self.events_applied { break; }
@@ -117,9 +124,14 @@ impl RemoteClient {
                 self.state = ConnectionState::Failed(format!("Invalid applied action receipt: {error:?}"));
                 break;
             }
+            let ack = crate::action_wire::AppliedActionAck { session: receipt.action.session, epoch: receipt.action.epoch, life: receipt.action.life, through: receipt.action.seq, included_events: receipt.included_events };
+            self.pending_action_ack = Some(ack);
             self.action_receipts.pop_front();
             self.queued_action_receipts -= 1;
         }
+        // Event arrival also calls this path: no subsequent gameplay input is
+        // needed to send the one coalesced, actually-applied metadata frontier.
+        self.flush_applied_action_ack();
     }
 
 }

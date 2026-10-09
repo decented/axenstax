@@ -32,7 +32,11 @@
 // Cross-platform modules
 mod action_identity;
 mod action_queue;
+mod action_results;
 mod action_journal;
+mod body_residency;
+mod window_prediction;
+mod window_actions;
 mod action_capacity;
 mod action_wire;
 mod recovery_bundle;

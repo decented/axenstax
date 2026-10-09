@@ -150,6 +150,8 @@ pub enum PacketType {
     ActionReceipt = 69,
     /// Session-scoped prepare/describe/bundle/fence/ACK carriers.
     Recovery = 70,
+    /// Client → Server: applied receipt metadata, independent of movement.
+    AppliedActionAck = 71,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -2820,6 +2822,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         68 => PacketType::Action,
         69 => PacketType::ActionReceipt,
         70 => PacketType::Recovery,
+        71 => PacketType::AppliedActionAck,
         _ => return None,
     };
     Some((tag, &data[1..]))

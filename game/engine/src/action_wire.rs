@@ -60,6 +60,17 @@ pub struct ActionReceipt {
     pub included_events: u32,
 }
 
+/// The client sends this only after ordered world/receipt and included events
+/// apply. It frees server result metadata, never settles a window or action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AppliedActionAck {
+    pub session: [u8; 16],
+    pub epoch: u32,
+    pub life: u32,
+    pub through: u64,
+    pub included_events: u32,
+}
+
 /// Count-bounded owned data; rejects a hostile length before allocating it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]

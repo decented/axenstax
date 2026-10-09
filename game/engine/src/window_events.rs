@@ -42,6 +42,9 @@
 //! it holds edits it has not sent yet, so every edit of an input was made at
 //! the count the input reports (`GameState::apply_window_inbox`).
 
+mod strict;
+pub use strict::{stage_strict_click, stage_strict_effects, strict_effective_marker, prepare_strict_events, PreparedEvents, StrictStageError, StrictWindowStage};
+
 use std::collections::VecDeque;
 
 use crate::armour::ArmourItem;
@@ -159,6 +162,7 @@ pub struct EventTally {
 pub struct WindowEvents {
     /// The number of the last event sent.
     last_sent: u32,
+    last_applied: u32,
     last_replace: u32,
     /// Refuse requests until the client acknowledges its death replacement.
     pub death_replace: Option<u32>,
@@ -200,6 +204,7 @@ impl WindowEvents {
     }
 
     pub fn last_number(&self) -> u32 { self.last_sent }
+    pub fn accepts_boundary(&self, reported: u32) -> bool { reported >= self.last_applied && reported <= self.last_sent }
 
     /// The number of the last event sent (0 before the first).
     #[cfg(test)]
@@ -410,6 +415,7 @@ pub fn apply_overdue(sp: &mut ServerPlayer, now: u64) {
 /// Apply the oldest waiting event to `sp`'s window and tally it.
 fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     let Some(w) = sp.window_events.waiting.pop_front() else { return };
+    sp.window_events.last_applied = w.seq;
     if forced {
         sp.window_events.tally.forced = sp.window_events.tally.forced.saturating_add(1);
     }

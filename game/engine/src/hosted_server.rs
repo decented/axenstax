@@ -24,6 +24,7 @@
 
 mod death;
 mod sidecar;
+mod actions;
 
 use std::collections::VecDeque;
 
@@ -681,6 +682,10 @@ pub(crate) fn block_change_within_reach(
     };
     let limit = super::REACH_DISTANCE + REACH_MARGIN + bonus;
     dist_sq <= limit * limit
+}
+
+fn sp_inventory_is_strict(players: &[crate::server::ServerPlayer], i: usize) -> bool {
+    players.get(i).is_some_and(|sp| sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict)
 }
 
 impl HostedServer {
@@ -3987,6 +3992,8 @@ impl HostedServer {
             let mut budget = EditTickBudget::default();
             // FU3 — the edits that waited past last tick's budget go first.
             self.process_waiting_edits(i, &mut budget);
+            self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick);
+            if self.disconnected[i] { continue; }
             // C2b verify M4 — whether this client is replaying a backlog
             // (more than one ordinary tick's reading waiting after the fill):
             // each `ClientInput` it reads then credits the joiner's drop
@@ -4083,6 +4090,14 @@ impl HostedServer {
                     continue;
                 };
                 match ptype {
+                    protocol::PacketType::Action => {
+                        if !self.handshake_done[i] || self.disconnected[i] { continue; }
+                        self.receive_typed_action(i, payload);
+                        self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick);
+                    }
+                    protocol::PacketType::AppliedActionAck => {
+                        if self.handshake_done[i] && !self.disconnected[i] { self.receive_applied_action_ack(i, payload); }
+                    }
                     protocol::PacketType::JoinRequest => {
                         if self.handshake_done[i] {
                             // Re-sends after handshake are dropped silently.
@@ -4349,6 +4364,7 @@ impl HostedServer {
                         self.server.players[i].inventory_mode = self.inventory_mode;
                         self.server.players[i].action_frontier = Some(crate::action_identity::ActionFrontier::new(action_session, action_life));
                         self.server.players[i].action_queue = Some(Default::default());
+                        self.server.players[i].action_results = Some(crate::action_results::ActionResults::new(self.server.players[i].action_frontier.as_ref().expect("issued frontier").header(0, 0)));
                         let accept = protocol::JoinAcceptPacket {
                             inventory_mode: self.inventory_mode,
                             action_session,
@@ -4527,7 +4543,8 @@ impl HostedServer {
                         // edits are processed, `process_edit_group`: they may
                         // wait behind earlier ones). Not while edits wait: the
                         // client made them before these events.
-                        if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty() {
+                        if sp.server_simulated && input.block_changes.is_empty() && self.edit_queues[i].is_empty()
+                            && (sp.inventory_mode != crate::action_identity::InventoryMode::Strict || (sp.action_queue.as_ref().is_none_or(|q| q.is_empty()) && sp.window_events.accepts_boundary(input.events_applied))) {
                             crate::window_events::apply_through(sp, input.events_applied, now);
                         }
                         // MP-A3 — death is server-held for a joiner. While
@@ -4612,6 +4629,11 @@ impl HostedServer {
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick,
                         // and what is past it waits (FU3).
+                        // A Strict movement packet never carries mutation authority.
+                        // New edits use Action; the old bridge is isolated to Mirror.
+                        if sp_inventory_is_strict(&self.server.players, i) {
+                            input.block_changes.clear(); input.mined.clear(); input.use_tags.clear(); input.edit_hands.clear();
+                        }
                         let edits = std::mem::take(&mut input.block_changes);
                         // C3c-1 — and its use tags, each paired with the last
                         // edit of its cell, within the same per-input limit.
@@ -4631,6 +4653,10 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::DeviceInteract => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4653,6 +4679,10 @@ impl HostedServer {
                         self.handle_respawn(i);
                     }
                     protocol::PacketType::EntityAttack | protocol::PacketType::EntityInteract => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4673,6 +4703,10 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::ItemAction => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -4685,6 +4719,10 @@ impl HostedServer {
                         }
                     }
                     protocol::PacketType::WindowOp => {
+                        if self.strict_slot(i) {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !self.handshake_done[i] || self.disconnected[i] {
                             continue;
                         }
@@ -6016,6 +6054,11 @@ impl HostedServer {
                 // C3c-1-fix (M-4) — its refused uses, after this tick's block
                 // changes (each one's send-back among them), once each.
                 outbox.push_refused(&std::mem::take(&mut sp.refused_uses));
+                // Exact terminal receipts follow the complete preceding world
+                // prefix. Each is a coalescing barrier on this same outbox.
+                if let Some(results) = &mut sp.action_results {
+                    for receipt in results.take_unsent() { outbox.push_receipt(receipt); }
+                }
             }
             // The last input of THIS client's that its server state includes
             // — its prediction drops those and replays the rest (§5.3).
@@ -6040,6 +6083,16 @@ impl HostedServer {
                 .get(i)
                 .and_then(|sp| sp.riding)
                 .and_then(|m| self.server.ecs.get::<&crate::entity::ProtocolId>(m).ok().map(|p| p.0));
+            // A lost authoritative prefix cannot be repaired behind a terminal
+            // receipt. Settle paid events/death before the sidecar save and close
+            // the real transport; the client's old session keeps its journal.
+            let lost_boundary = outbox.take_failed_receipt().is_some() | outbox.take_failed_recovery().is_some();
+            if lost_boundary {
+                if let Some(left) = self.release_slot(i, Some("Authoritative action history could not be delivered; rejoin required")) {
+                    self.send_to_joined_except(i, &left);
+                }
+                continue;
+            }
             for pkt in outbox.drain_packets(&template) {
                 self.transports[i].send_to_client(&pkt);
             }

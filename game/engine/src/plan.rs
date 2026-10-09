@@ -250,8 +250,14 @@ pub fn marker(data: &PlanData) -> [u8; 32] {
     }
     #[cfg(test)]
     MARKER_HASHES.with(|c| c.set(c.get() + 1));
-    let bytes = bincode::serialize(data).expect("PlanData bincode");
-    Sha256::digest(&bytes).into()
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.update(bytes); Ok(bytes.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut writer = HashWriter(Sha256::new());
+    bincode::serialize_into(&mut writer, data).expect("PlanData bincode");
+    writer.0.finalize().into()
 }
 
 #[cfg(test)]

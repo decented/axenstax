@@ -35,6 +35,7 @@ pub struct ServerPlayer {
     pub inventory_mode: crate::action_identity::InventoryMode,
     pub action_frontier: Option<crate::action_identity::ActionFrontier>,
     pub action_queue: Option<crate::action_queue::ActionQueue>,
+    pub action_results: Option<crate::action_results::ActionResults>,
     /// Once-per-death inventory hook, reset on entering or respawning.
     pub death_handled: bool,
     pub player: Player,
@@ -521,6 +522,7 @@ impl ServerPlayer {
             inventory_mode: crate::action_identity::InventoryMode::Mirror,
             action_frontier: None,
             action_queue: None,
+            action_results: None,
             player: Player::new(spawn),
             inventory: Inventory::new(),
             combat: PlayerCombat::new(),

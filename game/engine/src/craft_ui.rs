@@ -276,6 +276,18 @@ impl CraftingUi {
         self.apply_ctx(inv, armour, click, &ctx)
     }
 
+    /// The real joined transition reserves its complete marker recipe before
+    /// window::apply. At a failed reservation every holding remains unchanged.
+    pub fn apply_joined_click(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], click: &WindowClick, ctx: &ClickCtx, registry: &crate::block::BlockRegistry) -> Result<ClickResult, String> {
+        let action = crate::window_prediction::reserve_click(remote, inv, armour, &self.cursor_item, &self.grid, click, ctx, registry)?;
+        let mut view = WindowMut { inv, armour, cursor: &mut self.cursor_item, grid: &mut self.grid, container: None };
+        let result = window::apply(&mut view, click, ctx);
+        self.update_result();
+        // A send failure never releases the reserved identity or body keys.
+        remote.send_reserved_action(action)?;
+        Ok(result)
+    }
+
     /// [`Self::apply_click`] with its context built.
     fn apply_ctx(
         &mut self,
@@ -316,7 +328,11 @@ impl CraftingUi {
     pub fn close(&mut self, inventory: &mut Inventory, armour: &mut [Option<ArmourItem>; 4]) -> bool {
         let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
         let all_placed = self.apply_ctx(inventory, armour, &WindowClick::Close, &ctx).ok();
-        if all_placed {
+        if all_placed { self.finish_close(); }
+        all_placed
+    }
+
+    fn finish_close(&mut self) {
             self.open = false;
             // The station goes with the screen, as the server's does
             // (`window_ops::serve_op`).
@@ -326,8 +342,20 @@ impl CraftingUi {
             self.book_open = false;
             self.book_search.clear();
             self.pinned_recipe_stack.clear();
-        }
-        all_placed
+    }
+
+    pub fn close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry) -> Result<bool, String> {
+        let ctx = ClickCtx::new(false, self.station(), glam::Vec3::ZERO, |_| crate::block::AIR);
+        let closed = self.apply_joined_click(remote, inv, armour, &WindowClick::Close, &ctx, registry)?.ok();
+        if closed { self.finish_close(); }
+        Ok(closed)
+    }
+
+    pub fn force_close_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &mut Inventory, armour: &mut [Option<ArmourItem>; 4], registry: &crate::block::BlockRegistry, new_tick: bool) -> Result<bool, String> {
+        if let Some(refused_at) = self.forced_close_refused && (!new_tick || self.digest(inv, armour) == refused_at) { return Ok(false); }
+        let closed = self.close_joined(remote, inv, armour, registry)?;
+        self.forced_close_refused = (!closed).then(|| self.digest(inv, armour));
+        Ok(closed)
     }
 
     /// C3a-fix-2 B-M1 — close the screen because its table is gone or out of

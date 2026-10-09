@@ -40,29 +40,30 @@ pub(crate) fn remember_item(item: &crate::item::Item) {
     }
 }
 pub(crate) fn remember(body: &PlanData) {
-    if body.marker.is_some() {
-        return;
+    if let Err(error) = crate::body_residency::allocated_body_bytes(body).map_err(|e| format!("Plan allocation cannot be bounded: {e:?}")).and_then(|resident| remember_checked(body, resident)) { log::warn!("Could not remember local Plan: {error}"); }
+}
+
+/// Native joined history may release ownership only after this returns success.
+/// A failed atomic write is never cached, so the same body can be retried.
+pub(crate) fn remember_checked(body: &PlanData, resident_bytes: usize) -> Result<(), String> {
+    if resident_bytes > crate::action_capacity::MAX_RESIDENT_BODY_BYTES { return Err("Local Plan residency exceeds its limit".into()); }
+    if body.marker.is_some() { return Ok(()); }
+    if crate::body_residency::allocated_body_bytes(body).map_err(|e| format!("Plan allocation cannot be bounded: {e:?}"))? > crate::action_capacity::MAX_PRIVATE_BODY_BYTES {
+        return Err("Local Plan body exceeds the store limit".into());
     }
     let marker = crate::plan::marker(body);
     let key = cache_key(marker);
-    if REMEMBERED.with(|set| set.borrow().contains(&key)) {
-        return;
-    }
-    let Ok(bytes) = bincode::serialize(body) else {
-        return;
-    };
-    if bytes.len() > 16 * 1024 * 1024 {
-        log::warn!("Local Plan body exceeds the store limit");
-        return;
-    }
-    match persist(marker, bytes) {
-        Ok(()) => {
-            REMEMBERED.with(|set| {
-                set.borrow_mut().insert(key);
-            });
-        }
-        Err(e) => log::warn!("Could not remember local Plan: {e}"),
-    }
+    if REMEMBERED.with(|set| set.borrow().contains(&key)) { return Ok(()); }
+    let encoded = usize::try_from(bincode::serialized_size(body).map_err(|e| e.to_string())?).map_err(|_| "Local Plan encoding cannot be bounded")?;
+    let scratch = encoded.checked_add(std::mem::size_of::<Box<[u8]>>()).ok_or("Local Plan encoding cannot be bounded")?;
+    crate::action_capacity::reserve_body(resident_bytes, scratch).map_err(|e| format!("Local Plan encoding reservation failed: {e:?}"))?;
+    // Fixed output cannot grow during serialisation. No owned Plan clone and no
+    // second body-sized hashing buffer enters the reservation.
+    let mut bytes = vec![0; encoded].into_boxed_slice();
+    bincode::serialize_into(std::io::Cursor::new(bytes.as_mut()), body).map_err(|e| e.to_string())?;
+    persist(marker, &bytes)?;
+    REMEMBERED.with(|set| { set.borrow_mut().insert(key); });
+    Ok(())
 }
 pub(crate) fn resolve(marker: [u8; 32]) -> Option<PlanData> {
     builtin(marker).or_else(|| load(marker).and_then(|bytes| decode(&bytes, marker)))
@@ -86,11 +87,45 @@ fn root() -> std::path::PathBuf {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn persist(marker: [u8; 32], bytes: Vec<u8>) -> Result<(), String> {
+fn persist(marker: [u8; 32], bytes: &[u8]) -> Result<(), String> {
     let dir = root();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    crate::save::write_atomic(&dir.join(hex::encode(marker)), &bytes)
+    ensure_checked_dir(&dir)?;
+    crate::save::write_atomic(&dir.join(hex::encode(marker)), bytes)?;
+    sync_checked_dir(&dir)
 }
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_checked_dir(dir: &std::path::Path) -> Result<(), String> {
+    if dir.is_dir() { return Ok(()); }
+    let parent = dir.parent().filter(|p| !p.as_os_str().is_empty()).ok_or("Plan-store directory has no parent")?;
+    ensure_checked_dir(parent)?;
+    match std::fs::create_dir(dir) {
+        Ok(()) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {},
+        Err(error) => return Err(error.to_string()),
+    }
+    sync_checked_dir(parent)
+}
+
+/// Checked directory durability is deliberately narrower than shared save's
+/// best-effort sync. Unsupported native filesystems/platforms return failure;
+/// joined history keeps its owned body and pauses instead of claiming success.
+#[cfg(not(target_arch = "wasm32"))]
+fn sync_checked_dir(dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_DIRECTORY_SYNC.with(|failure| failure.get()) { return Err("Injected Plan-store directory sync failure".into()); }
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).custom_flags(0x02000000).open(dir)
+    };
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(dir);
+    file.and_then(|file| file.sync_all()).map_err(|e| format!("Plan-store directory was not durably synced: {e}"))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! { static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 #[cfg(not(target_arch = "wasm32"))]
 fn load(marker: [u8; 32]) -> Option<Vec<u8>> {
     std::fs::File::open(root().join(hex::encode(marker)))
@@ -107,10 +142,10 @@ extern "C" {
     fn js_resolve(marker: String) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>;
 }
 #[cfg(target_arch = "wasm32")]
-fn persist(marker: [u8; 32], bytes: Vec<u8>) -> Result<(), String> {
+fn persist(marker: [u8; 32], bytes: &[u8]) -> Result<(), String> {
     js_remember(
         hex::encode(marker),
-        js_sys::Uint8Array::from(bytes.as_slice()),
+        js_sys::Uint8Array::from(bytes),
     )
     .map_err(|e| format!("{e:?}"))
 }
@@ -123,6 +158,44 @@ fn load(marker: [u8; 32]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn c3d_post_rename_sync_failure_keeps_actual_held_body_and_remains_retryable() {
+        let _g = crate::save::WorldsRootGuard::new("c3d-plans-sync-failure");
+        let mut body = PlanData::debug_3x3_stone();
+        body.name = "Held body survives checked directory sync failure".into();
+        let marker = crate::plan::marker(&body);
+        let mut inv = crate::inventory::Inventory::new_client();
+        inv.set_slot(0, Some(crate::item::ItemStack { item: crate::item::Item::Plan(body), count: 1 }));
+        std::fs::create_dir_all(root()).unwrap();
+        FAIL_DIRECTORY_SYNC.with(|failure| failure.set(true));
+        let failed = crate::window_prediction::retain_private_window(&inv, &None, &Default::default());
+        FAIL_DIRECTORY_SYNC.with(|failure| failure.set(false));
+        assert!(failed.is_err());
+        assert!(root().join(hex::encode(marker)).is_file(), "failure is after rename, not an absent-file shortcut");
+        assert!(!REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
+        let crate::item::Item::Plan(held) = &inv.slot(0).unwrap().item else { panic!("body ownership lost") };
+        assert!(!held.cells.is_empty());
+        assert_eq!(crate::plan::marker(held), marker);
+        crate::window_prediction::retain_private_window(&inv, &None, &Default::default()).unwrap();
+        assert!(REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
+        assert_eq!(resolve(marker).unwrap().cells, held.cells);
+    }
+
+    #[test]
+    fn c3d_encoding_scratch_is_reserved_before_store_allocation_or_write() {
+        let _g = crate::save::WorldsRootGuard::new("c3d-plans-scratch");
+        let mut body = PlanData::debug_3x3_stone();
+        body.name = "Scratch reservation refuses before write".into();
+        let marker = crate::plan::marker(&body);
+        let encoded = usize::try_from(bincode::serialized_size(&body).unwrap()).unwrap();
+        let resident = crate::action_capacity::MAX_RESIDENT_BODY_BYTES - encoded + 1;
+        assert!(remember_checked(&body, resident).is_err());
+        assert!(!REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
+        assert!(!root().join(hex::encode(marker)).exists());
+        assert!(!body.cells.is_empty());
+    }
+
     #[test]
     fn sidecar_plan_store_retries_after_failed_atomic_write() {
         let _g = crate::save::WorldsRootGuard::new("sidecar-plans-retry");

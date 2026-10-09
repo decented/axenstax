@@ -19,15 +19,24 @@ pub struct MarkerWindow {
 
 impl MarkerWindow {
     pub fn capture(view: &WindowMut, registry: &crate::block::BlockRegistry) -> Self {
+        Self::capture_parts(view.inv, view.armour, view.cursor, view.grid, registry)
+    }
+
+    pub fn capture_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid, registry: &crate::block::BlockRegistry) -> Self {
         let marker = |s: &ItemStack| crate::inventory::stack_from_wire(&crate::inventory::stack_to_wire(s), registry, crate::inventory::PlanDecode::Marker);
-        let mut inv = Inventory::new();
-        inv.auto_refill = view.inv.auto_refill;
+        let mut copied = Inventory::new();
+        copied.auto_refill = inv.auto_refill;
         for slot in 0..36 {
-            inv.set_slot(slot, view.inv.slot(slot).and_then(marker));
-            if view.inv.is_locked(slot) { inv.toggle_lock(slot); }
+            copied.set_slot(slot, inv.slot(slot).and_then(marker));
+            if inv.is_locked(slot) { copied.toggle_lock(slot); }
         }
-        Self { inv, armour: *view.armour, cursor: view.cursor.as_ref().and_then(marker),
-            grid: std::array::from_fn(|r| std::array::from_fn(|c| view.grid[r][c].as_ref().and_then(marker))) }
+        Self { inv: copied, armour: *armour, cursor: cursor.as_ref().and_then(marker),
+            grid: std::array::from_fn(|r| std::array::from_fn(|c| grid[r][c].as_ref().and_then(marker))) }
+    }
+
+    /// Moves marker-only holdings into the server's raw window after admission.
+    pub(crate) fn into_parts(self) -> (Inventory, [Option<ArmourItem>; 4], Option<ItemStack>, CraftGrid) {
+        (self.inv, self.armour, self.cursor, self.grid)
     }
 
     pub fn view(&mut self) -> WindowMut<'_> {
@@ -93,22 +102,42 @@ pub fn stage(raw: &MarkerWindow, click: &WindowClick, ctx: &ClickCtx) -> StagedC
 /// only falls: a later same-slot Grant cannot back an earlier removed source.
 pub struct SourceBacking {
     initial: MarkerSlots,
+    surviving_identity: MarkerSlots,
     eligible: [u8; PLAYER_PLACES],
 }
 
 impl SourceBacking {
     pub fn new(raw: MarkerSlots) -> Self {
         let eligible = std::array::from_fn(|i| raw[i].as_ref().map_or(0, |s| s.count));
-        Self { initial: raw, eligible }
+        Self { surviving_identity: raw.clone(), initial: raw, eligible }
     }
 
     pub fn observe_prefix(&mut self, prefix: &MarkerSlots) {
         for (i, current) in prefix.iter().enumerate() {
-            let same = match (&self.initial[i], current) {
+            let same = match (&self.surviving_identity[i], current) {
                 (Some(initial), Some(current)) => same_identity(initial, current),
                 _ => false,
             };
             self.eligible[i] = self.eligible[i].min(if same { current.as_ref().map_or(0, |s| s.count) } else { 0 });
+        }
+    }
+
+    /// Only an admitted existing pending wear may change a piece's expected
+    /// durability. Eligibility remains non-increasing and stays at its place.
+    pub(crate) fn observe_authorised_wear(&mut self, before: &MarkerSlots, after: &MarkerSlots) {
+        use crate::protocol::WireItem;
+        for i in 0..PLAYER_PLACES {
+            let (Some(expected), Some(previous)) = (&self.surviving_identity[i], &before[i]) else { continue };
+            if !same_identity(expected, previous) { continue; }
+            let Some(next) = &after[i] else { continue };
+            let worn = match (previous.full_item, next.full_item) {
+                (WireItem::Tool { tool_type: a, material: am, durability: ad }, WireItem::Tool { tool_type: b, material: bm, durability: bd }) => a == b && am == bm && bd < ad,
+                (WireItem::Armour { slot: a, material: am, durability: ad }, WireItem::Armour { slot: b, material: bm, durability: bd }) => a == b && am == bm && bd < ad,
+                _ => false,
+            };
+            if worn && previous.count == 1 && next.count == 1 && previous.item_kind == next.item_kind && previous.item_id == next.item_id {
+                self.surviving_identity[i] = Some(next.clone());
+            }
         }
     }
 
