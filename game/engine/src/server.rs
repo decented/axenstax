@@ -1725,8 +1725,9 @@ impl GameServer {
             // Death-drops phase 3 (v61) — everything the wire can express is
             // eligible. Blocks/materials ride the lossless `(kind, id)` pair;
             // tools and armour ride `WireItem` on the grant packet. Only
-            // `Item::Plan` stays floor-bound: `plan::PlanData` has no wire
-            // form, so granting one would mint an empty plan client-side.
+            // `Item::Plan` stays floor-bound: a grant carries no Plan body,
+            // so granting one would mint an empty plan client-side (C3c-3-fix:
+            // a ground Plan rides no marker either).
             // M1 (C2b verify): a joiner's shadow fills by drift, so a stack
             // it can't hold is still granted whole (the overflow is tallied
             // when the grant is applied). D-M2 (C3a-fix-1): not while a

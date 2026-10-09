@@ -901,7 +901,8 @@ pub enum WireItem {
     /// C3c-3a (v83) — a Plan, by reference: its `plan::marker`
     /// (SHA-256 of the whole `PlanData`) and whether it is developed. Sent
     /// where a joiner's own window names a Plan (a use tag's `used`,
-    /// [`ItemAction::PlanMinted`], a held claim); the server decodes it to a
+    /// [`ItemAction::PlanMinted`]; a request's held claim is never read as
+    /// one, C3c-3-fix); the server decodes it to a
     /// marker placeholder (`plan::PlanData::marker_placeholder`,
     /// `inventory::plan_from_wire`). `inventory::item_from_wire_full` decodes
     /// it to nothing: a Plan's body never crosses the wire, so a host's Plan

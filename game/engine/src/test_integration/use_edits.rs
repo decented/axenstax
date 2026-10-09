@@ -1407,6 +1407,38 @@ fn a_refused_hang_gives_the_plan_back_and_the_copy_keeps_its_placeholder() {
     assert_eq!((t.use_edit_refused, t.use_mirrored, t.use_mismatch), (1, 0, 0));
 }
 
+/// C3c-3-fix (L3a) — an art capture that names no paper, or something that
+/// isn't paper, is tallied as a mismatch (it used to read clean); so is a
+/// capture commit that names a spend. A proper art capture stays clean.
+#[test]
+fn a_mints_unexpected_spend_is_tallied() {
+    let mut rig = Rig::dedicated("mint-spend");
+    rig.give(0, Item::Block(block::BLUEPRINT_PAPER), 3);
+    rig.give(1, Item::Block(block::DIAMOND_BLOCK), 3);
+    let art = crate::plan::PlanData { kind: crate::plan::PlanKind::Art, ..developed_plan("Spend") };
+    let mint = |rig: &mut Rig, source: crate::plan_mint::MintSource, spent: Option<ItemStack>| {
+        rig.send_action(protocol::ItemAction::PlanMinted {
+            source: source.to_wire(),
+            x: ABOVE[0],
+            y: ABOVE[1],
+            z: ABOVE[2],
+            face: crate::mesh::Face::North.index() as u8,
+            hotbar_slot: 0,
+            spent: spent.as_ref().map(crate::inventory::stack_to_wire),
+            plan: crate::inventory::plan_to_wire(&art),
+        });
+    };
+    use crate::plan_mint::MintSource::{CaptureArt, CaptureCommit};
+    mint(&mut rig, CaptureArt, Some(ItemStack::new_block(block::BLUEPRINT_PAPER, 1)));
+    assert_eq!((rig.tally().plan_minted, rig.tally().plan_mismatch), (1, 0), "a proper art capture is clean");
+    mint(&mut rig, CaptureArt, None);
+    assert_eq!((rig.tally().plan_minted, rig.tally().plan_mismatch), (2, 1), "no paper named");
+    mint(&mut rig, CaptureArt, Some(ItemStack::new_block(block::DIAMOND_BLOCK, 1)));
+    assert_eq!((rig.tally().plan_minted, rig.tally().plan_mismatch), (3, 2), "a diamond is not paper");
+    mint(&mut rig, CaptureCommit, Some(ItemStack::new_block(block::BLUEPRINT_PAPER, 1)));
+    assert_eq!((rig.tally().plan_minted, rig.tally().plan_mismatch), (4, 3), "a commit spends nothing");
+}
+
 /// A latent Plan doesn't hang: the outcome is tallied (log-only), applied,
 /// and the Plan still spent on the copy as the client says.
 #[test]

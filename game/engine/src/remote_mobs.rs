@@ -489,6 +489,10 @@ pub const JOINED_AUTO_BUILD_TOAST: &str = "Auto build works in your own worlds. 
 /// Opening or using a vendor, tip jar, auction, market hub, bazaar, bounty
 /// board, commission or repair bench while joined.
 pub const JOINED_ECONOMY_TOAST: &str = "Shops and markets work in your own worlds for now.";
+/// C3c-3-fix (M1) — fuelling a Steam Generator while joined: its fuel slot is
+/// a private device in the client's copy, so the fuel would vanish into
+/// nothing. A sweep of game_loop.rs found no other joined path that does.
+pub const JOINED_MACHINE_TOAST: &str = "Machines work in your own worlds for now.";
 
 #[cfg(test)]
 mod tests {

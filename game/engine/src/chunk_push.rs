@@ -799,7 +799,7 @@ fn pushed_entity(e: &BlockEntityData) -> Option<PushedEntity> {
             let full_item = f
                 .item
                 .as_ref()
-                .map(|st| crate::inventory::item_to_wire_full(&st.item))
+                .map(|st| crate::inventory::item_to_wire_shared(&st.item))
                 .unwrap_or_default();
             Some(PushedEntity::ItemFrame { item_kind, item_id, full_item, rotation: f.rotation })
         }

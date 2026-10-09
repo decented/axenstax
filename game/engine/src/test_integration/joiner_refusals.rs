@@ -35,6 +35,8 @@ fn each_refused_plan_arm_checks_joined_before_its_first_change() {
         ("lay a Plan flat", "remote_mobs::JOINED_PLAN_LAY_TOAST", "lay_blueprint_on_floor("),
         ("Blueprint peel", "remote_mobs::JOINED_BLUEPRINT_LIFT_TOAST", ".remove_face_attachment((pos[0], pos[1], pos[2]), fi)"),
         ("Auto build", "remote_mobs::JOINED_AUTO_BUILD_TOAST", "crate::plan::start_build("),
+        // C3c-3-fix (M1) — a Steam Generator's fuel goes into a private device.
+        ("Steam Generator fuel", "remote_mobs::JOINED_MACHINE_TOAST", ".insert_power_device("),
     ];
     for (name, toast, change) in arms {
         let t = code_hits(&lines, toast);

@@ -4300,6 +4300,11 @@ impl super::GameState {
             return;
         }
         let p = &mut self.players[0];
+        // C3c-3-fix (L3b) — a Plan an earlier undo had no room for goes back
+        // in the bag at the first free slot.
+        if self.sent_uses.parked_len() > 0 {
+            self.sent_uses.reseat_parked(&mut p.inventory);
+        }
         let undone_all = crate::use_edits::undo_refused(&mut self.sent_uses, &mut p.inventory, &mut p.crafting_ui, refused);
         // The newest undone notice's reason (the use the player made last).
         let toast = undone_all.iter().find(|(_, u)| u.is_some()).map(|(n, _)| n.note);
@@ -4310,6 +4315,9 @@ impl super::GameState {
                 Some(u) if u.short > 0 => log::info!(
                     "Undoing a refused use at {cell:?}: {} of its product already gone, so its cost is not given back",
                     u.short,
+                ),
+                Some(u) if u.parked > 0 => log::info!(
+                    "Undoing a refused use at {cell:?}: its Plan had no room in the bag, so it is on the cursor or waits for a free slot",
                 ),
                 Some(u) if u.lost > 0 => {
                     log::info!("Undoing a refused use at {cell:?}: {} of its cost had no room", u.lost)
@@ -14231,6 +14239,14 @@ impl super::GameState {
                         // valid fuel in hand drops ONE unit into its fuel slot (the
                         // furnace v1-bridge pattern). The burner consumes it over
                         // time to drive power. No/!fuel in hand → harmless no-op.
+                        // C3c-3-fix (M1) — refused while joined: the fuel would
+                        // go into a private device in this client's copy and
+                        // the real generator would get nothing.
+                        if self.joined() {
+                            self.refuse_joined(crate::remote_mobs::JOINED_MACHINE_TOAST);
+                            self.players[pidx].place_cooldown = 8;
+                            continue;
+                        }
                         let pos_key = (pos[0], pos[1], pos[2]);
                         let hot = self.players[pidx].hotbar_slot;
                         if let Some(held) =

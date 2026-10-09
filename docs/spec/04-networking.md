@@ -41,12 +41,12 @@
 - **v80** (2026-10-08, C3c-1): **A joiner's block-edit uses are mirrored.** `InputPacket` appends, after v76's `edit_hands`, `use_tags: Vec<UseTag>` (`UseTag { x, y, z: i32, kind: u8, slot: u8, used: WireSlot, tool: WireItem }`; `kind` is `use_edits::UseKind`, append-only: BucketFill 0, BucketEmpty 1, Sow 2, PlantPapyrus 3, GrowGrass 4, GrowCrop 5, Salt 6, Erase 7, TapRubber 8, Till 9, DoorUpper 10): the uses among the input's edits, each with the hand BEFORE the use (its hotbar slot, one of what it consumed, the tool it wore). A use tag pairs with the LAST edit of its cell in its input, and counts with `mined` against one per-input limit (`MAX_MINED_PER_INPUT` = 16 in all; the server reads `mined` first, then use tags up to it). The server runs the use's rule on its copy of the joiner's inventory (log-only; `PossessionTally::use_mirrored` / `use_mismatch`). A door's top half now travels as its own edit (`DoorUpper`). Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `input_packet_roundtrip`) and `use_edits::tests::use_kind_wire_bytes_are_pinned`. See §4.2e "Block-edit uses".
 - **v81** (2026-10-08, C3c-2): **A joiner's bow, slingshot, cart placement, fishing and campfire lighting run on the server.** `ItemAction` appends `Shoot { weapon: ShotWeapon, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem, yaw: f32, pitch: f32, charge: u16 }` (= 6; `ShotWeapon` append-only: Bow 0, Slingshot 1), `PlaceCart { cell: [i32; 3], hotbar_slot, held_kind, held_id, held_full }` (= 7), `Cast { hotbar_slot, held_kind, held_id, held_full }` (= 8) and `Reel { hotbar_slot, held_kind, held_id, held_full }` (= 9). `ItemActionOutcome` appends `bite_after: u16` after `wear_held` (an accepted cast's wait for the server's bite; 0 otherwise). Lighting an unlit campfire (a stick's friction, flint and steel, the Magnesium Firestarter) is a campfire `UseBlock`, run by the lighting rule (`block_use::light_block`). `ItemNote` appends codes 19–26 (`NoAmmo`, `CartHere`, `NoWater`, `NothingBit`, `NoLine`, `NeedsFuel`, `FrictionNeedsFuel`, `NotDryEnough`). No new `PacketType`. Pinned by `protocol::tests::item_action_packets_round_trip` and `item_actions::tests::notes_round_trip_and_unknown_codes_read_as_nothing`. See §4.2f "Use requests".
 - **v82** (2026-10-08, C3c-1-fix): **A use's overflow is the client's, and a refused use is undone.** `UseTag` appends `unfit: u8` after `tool`: how many of the use's product the client's bag could NOT take (its `add_item` leftover, 0 or 1; 0 for a use that makes nothing). The server spawns exactly that as a real ground item at the joiner (one its copy can't corroborate is believed, charged to the joiner's believed bound) and its copy adds the rest; what of that doesn't fit the copy is only counted. `StateUpdatePacket` appends `refused_uses: Vec<RefusedUse>` after `block_views` (`RefusedUse { x, y, z: i32, kind: u8, note: u8 }`; `kind` the `UseKind`, `note` an existing `ItemNote` code: `OutOfReach` for reach, `NotHere` for the play mode, a plot, an economy block or bedrock, `None` otherwise; no new code): each use-tagged edit the server refused, once, per client, in line after the tick's block changes (its send-back among them), never in the repeated template. The joined client undoes the use from its OWN record of it. No new `PacketType`. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `state_update_trailing_fields_are_in_append_order`). See §4.2e "Block-edit uses".
-- **v83** (2026-10-08, C3c-3a): **A joiner's Plans are tracked by marker.** `WireItem` appends `Plan { marker: [u8; 32], developed: bool }` (= 3): a Plan by reference, never its body — `marker` is `plan::marker`, SHA-256 of the bincode of the WHOLE `PlanData` (develop state, kind, derivation chain and authored-in included, unlike `plan::content_hash`). It is a Plan's `full_item` wherever a Plan is encoded (`inventory::item_to_wire_full`: a `WireStack` of `item_kind::PLAN` id 0, a use tag's `used`, a held claim); `inventory::item_from_wire_full` decodes it to nothing (no body), so a host's Plan in a shared container, on the ground or in a frame shows exactly as before. `ItemAction` appends `PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (= 10; `plan_mint::MintSource` append-only: CaptureCommit 0, CaptureArt 1): a Plan the joined client minted in its own window, never answered. `use_edits::UseKind` appends `HangPrint` (= 11): a developed Plan hung as a cyanotype print, its tag's `used` the Plan. The server holds a joiner's Plan as a marker placeholder (`plan::PlanData::marker_placeholder`, its `marker` a `#[serde(skip)]` field, so no saved or wire encoding of a `PlanData` changes) and takes it by marker; log-only (`PossessionTally::plan_minted` / `plan_mismatch`). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `wire_item_roundtrips_every_variant`), `use_edits::tests::use_kind_wire_bytes_are_pinned` and `plan_mint::tests::mint_source_wire_bytes_are_pinned`. See §4.2e "Block-edit uses" and §4.2f "Plans".
+- **v83** (2026-10-08, C3c-3a): **A joiner's Plans are tracked by marker.** `WireItem` appends `Plan { marker: [u8; 32], developed: bool }` (= 3): a Plan by reference, never its body — `marker` is `plan::marker`, SHA-256 of the bincode of the WHOLE `PlanData` (develop state, kind, derivation chain and authored-in included, unlike `plan::content_hash`). It is a Plan's `full_item` wherever a Plan is encoded (`inventory::item_to_wire_full`: a `WireStack` of `item_kind::PLAN` id 0, a use tag's `used`; since C3c-3-fix a request's held claim is never read as a Plan); `inventory::item_from_wire_full` decodes it to nothing (no body), so a host's Plan in a shared container, on the ground or in a frame shows exactly as before. `ItemAction` appends `PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (= 10; `plan_mint::MintSource` append-only: CaptureCommit 0, CaptureArt 1): a Plan the joined client minted in its own window, never answered. `use_edits::UseKind` appends `HangPrint` (= 11): a developed Plan hung as a cyanotype print, its tag's `used` the Plan. The server holds a joiner's Plan as a marker placeholder (`plan::PlanData::marker_placeholder`, its `marker` a `#[serde(skip)]` field, so no saved or wire encoding of a `PlanData` changes) and takes it by marker; log-only (`PossessionTally::plan_minted` / `plan_mismatch`). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `wire_item_roundtrips_every_variant`), `use_edits::tests::use_kind_wire_bytes_are_pinned` and `plan_mint::tests::mint_source_wire_bytes_are_pinned`. See §4.2e "Block-edit uses" and §4.2f "Plans".
 - **v84** (2026-10-09, C3c-3b): **Face attachments live in the server's world.** `ItemAction` appends `Attach { x, y, z: i32, face: u8, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 11: paint the wallpaper, or lay the blank Blueprint Paper, in hand on a face; the held claim is `UseBlock`'s, verbatim) and `Detach { x, y, z: i32, face: u8 }` (= 12: peel it), both answered with an `ItemActionOutcome`. `StateUpdatePacket` appends `attachment_changes: Vec<AttachmentChange>` after `refused_uses` (`AttachmentChange { x, y, z: i32, face: u8, att: Option<PushedAttachment> }`: a face as it now stands, `None` = bare): every attachment change in a chunk the client holds, whoever made it, reliable and in line with the block changes. New `item_actions::ItemNote` codes `FaceCovered` (27) and `NotAFloor` (28). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Face attachments".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
-> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 74), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
+> **AS-BUILT (audit 2026-10-04).** Sections 0-3, 4.1 and 10 below are the original design and read as if built; they are not. As shipped: the native transport is **QUIC (quinn)**, plus a **WebSocket** transport for the dedicated server; there is **no raw-UDP / Noise IK transport and no WebRTC** (the web build is an offline taster with no multiplayer). The wire version is a **`u32`** (`PROTOCOL_VERSION`, currently 84), not a `u16`. **The §4.1 chunk push is built (v69, Phase B2a; touched columns v71, Phase B2b) but not as designed below** — see §4.1 "As built": a joiner receives the world **seed, rule flags and spawn** in `JoinAccept` (v65) and builds its world from them; round its server body the server either pushes a column (`ChunkData`, when it differs from generation — or always, under `--chunk-sync all` or for a joiner with another generator), which replaces anything the joiner holds there, or tells it the column is local (`ColumnLocal`), and the joiner generates it itself; block deltas then arrive in `StateUpdate` for the chunks it has been sent or told are local. **NAT traversal (§1.7) is built** for online play by contact (`nat/`, `rendezvous/`, §1.9), but as player-run hole-punching over player-chosen Nostr relays, not the platform STUN/TURN relay described in §1.7. The matchmaker / platform-JWT auth path is retired (§9.2).
 
 > **Server-side column streaming is built (Phase B1, 2026-10-06); the chunk push is built too (Phase B2a, 2026-10-07; only touched columns since Phase B2b, §4.1 "As built").** A dedicated server loads and unloads world columns around every connected player itself, within `--sim-distance` (default 8) — its own *simulation region*, so a server-simulated joiner stands on server terrain and edits are accepted anywhere a player goes (Spec 01 §4.1.2). The chunk push sends joiners what that region holds (§4.1 "As built"). LAN / online hosts do not stream server-side; their server keeps the `initial_load` region and generates the 3×3 round each joiner as it moves (§5.3.1) — never both in one mode.
 >
@@ -1900,7 +1900,12 @@ item (`use_edits.rs`).
   was about 2.25 MB per client (`MAX_DEFERRED_EDITS`). C3c-3a (v83): a Plan's
   32-byte marker makes `WireItem` 36 B and a tag 92 B (a use tag holds two),
   so the worst-case bound is now about 3.1 MB (under 3.5 MB; the measured
-  peak at the cap about 2.2 MB).
+  peak at the cap about 2.2 MB). The same inline marker (`PlanData.marker:
+  Option<[u8; 32]>`, 33 B) also makes every in-memory `Item` and `ItemStack`
+  bigger, in every inventory, container and ECS item: about 32 B each
+  (estimated from the layout, not measured). No stated bound depends on it;
+  `Option<Box<[u8; 32]>>` would cost 8 B (and `WireItem` would stop being
+  `Copy`): the owner's "Box the marker?" call (C3c-3-fix, L4).
 - *Order.* A use's product lands on the server's copy when its edit is
   processed (it rides the edit stream, not a window event), so a window op
   the client made BETWEEN two uses must reach the server between them: the
@@ -2086,7 +2091,11 @@ item (`use_edits.rs`).
   refused hang is undone from the client's record, which keeps the REAL Plan
   it spent (`GameState::push_use_edit_costing`: a Plan's body is not on its
   tag), so the Plan comes back whole; the copy, which never applied it,
-  keeps its placeholder.
+  keeps its placeholder. (C3c-3-fix, L3b: if the Plan's slot was refilled
+  meanwhile and the bag is full, the undo never destroys the body: it goes
+  on the cursor when that is empty, else into `SentUses`' small parked list,
+  re-seated at the first free slot every frame and logged, and forgotten
+  only when the session ends. The window digests drift until then, log-only.)
 - *Not uses (C3c-2, C3c-3).* Lighting a campfire by friction, flint and steel
   or a Firestarter, the bow, the slingshot, carts and fishing are requests
   since C3c-2 (§4.2f "Use requests"); a Plan minted by a capture is a
@@ -2128,8 +2137,11 @@ The server cannot yet mirror a Plan (until C3c-3a, v83, it had no wire form; a P
 | First-strike peel of a laid Blueprint attachment (the strike is spent; the block is not broken behind it) | "Only the one who laid it can lift it here." |
 | Plan Build, Auto (the panel stays open; Guided build-along is unchanged) | "Auto build works in your own worlds. Use Guided here." |
 | Opening a vendor, tip jar, auction, market hub, bazaar, bounty board, repair bench or drafting table (commission), or clicking a Builder villager | "Shops and markets work in your own worlds for now." |
+| (C3c-3-fix, M1) Fuelling a Steam Generator (the fuel went into a private power device in the client's copy and the real generator got nothing) | "Machines work in your own worlds for now." (`JOINED_MACHINE_TOAST`) |
 
 Also for a joined client: its break arms recover no attachment at all (C3c-3b, replacing C3c-3r's keep-the-Blueprint rule: the server spills each one once and its stream takes them out of the client's copy, §4.2f "Face attachments"); the Latent-to-Developed sun tick (`tick_develop`, `tick_develop_attachments`) and the auction settlement sweep do not run on it (a render stub pushed as Latent would otherwise develop on its own clock, independent of the host's). Pinned by `test_integration::joiner_refusals` (source lint: each refused arm tests `joined()` before its first inventory or world change) and the `game_harness_a_joiner_cannot_*` / `game_harness_a_joiners_plan_is_not_dropped` GPU tests. Not changed here: the capture, hang and capture-commit arms (C3c-3a) and wallpaper and blank paper (C3c-3b, requests).
+
+A sweep of `game_loop.rs` for other joined paths that take an item into a private block entity found only the Steam Generator (C3c-3-fix); the other fuel and item takes are already requests (campfire, composter, hive, drying rack, item frame: C3b-2, C3c-2), refused (economy blocks, above), or unreachable (the hand-lit keg fuse sits under the campfire arm, wears a tool and takes no item; local-mob Lead, feed, tame and pack arms need a mob in the joiner's own ECS, which it purges every tick).
 
 ### 4.2f Item actions (as built, protocol v73, C2a; v74, C2b; v79, C3b-2; v81, C3c-2; v83, C3c-3a; v84, C3c-3b)
 
@@ -2695,7 +2707,8 @@ so it never crosses the wire: a joiner's Plans are tracked BY MARKER
   one. (`plan::content_hash`, which leaves those four out, stays the
   Save-As / provenance hash.) On the wire a Plan is `WireItem::Plan {
   marker, developed }` (v83): a `WireStack` of `item_kind::PLAN` (id 0)
-  carries it as `full_item`, as does a use tag's `used` and a held claim.
+  carries it as `full_item`, as does a use tag's `used`. A request's
+  held claim (`held_full`) is never read as one (C3c-3-fix, M2): see below.
 - *The server's copy holds a marker placeholder*
   (`plan::PlanData::marker_placeholder`: a body-less "Plan" with the
   marker in a `#[serde(skip)]` field and the develop state), which moves
@@ -2703,15 +2716,24 @@ so it never crosses the wire: a joiner's Plans are tracked BY MARKER
   stacks; it sorts in one bucket, stably) and digests like it. The server
   decodes a `WireItem::Plan` to it only where a joiner's OWN window names
   the Plan (`inventory::PlanDecode::Marker`: a use tag's `used`, a
-  `PlanMinted`, a request's held claim, `inventory::plan_from_wire`);
+  `PlanMinted`, `inventory::plan_from_wire`; NOT a request's held claim);
   shared-container views keep the body-less `PlanData::placeholder`
   (`PlanDecode::Placeholder`) and `PlanStays`; a correction's item delta, a
   block view and a grant refuse a Plan (`PlanDecode::Refuse`), and
   `item_from_wire_full` decodes it to nothing, so a client never holds a
   marker placeholder in its own window, and a ground or framed Plan shows
-  as before. An owed take matches a Plan by marker
+  as before. (C3c-3-fix, L2: a Plan in a SHARED view, a frame's item in a
+  block view or a chunk push, a ground item in an entity spawn, rides
+  `WireItem::None` through `inventory::item_to_wire_shared`, so no marker is
+  hashed or sent for one: no joiner can use a Plan it sees in the world, and
+  `views_in` runs every tick.) An owed take matches a Plan by marker
   (`joiner_actions::same_item`, both passes of `take_owed_search`). A
-  placeholder is never spilled into the world.
+  placeholder is never spilled into the world, and never enters a shared
+  container either: a request's held claim (`held_item_from_wire`) decodes a
+  `WireItem::Plan` to an EMPTY hand, and `UseBlock` with a Plan claimed is
+  refused whole (`NothingToTake`, nothing judged or taken), so a modified
+  client cannot frame a marker placeholder (C3c-3-fix, M2; pinned by
+  `test_integration::block_use::a_plan_claimed_on_an_item_frame_frames_nothing`).
 - *Mints are reported* (`ItemAction::PlanMinted { source, x, y, z, face,
   hotbar_slot, spent, plan }` = 10, never answered): the joined client mints
   in its own window as single-player does, then sends it, routed exactly as
@@ -2741,7 +2763,10 @@ so it never crosses the wire: a joiner's Plans are tracked BY MARKER
   on both sides. Log-only: every report counts
   `PossessionTally::plan_minted`; a shortfall (the paper the copy doesn't
   hold, a placeholder with no room — dropped, never spilled — a report naming
-  no Plan or an unknown source) counts `plan_mismatch`, the first logged;
+  no Plan or an unknown source, and, since C3c-3-fix, a `spent` that is not
+  its source's: an art capture naming no Blueprint Paper or another item, or
+  a commit naming any spend, `plan_mint::spent_is_expected`) counts
+  `plan_mismatch`, the first logged;
   the leave summary carries both. A reported mint is believed until C3d.
   Since C3c-3b a commit also spends its capture's paper in the server's
   world (§4.2f "Face attachments").
@@ -4682,7 +4707,7 @@ edits and could never refuse and un-ghost them on the sender (it sends back the 
 every edit past `MAX_BLOCK_CHANGES_PER_TICK`, but only for one it has received). `send_input` now
 keeps the trimmed remainder in a carry-over queue and puts it ahead of the next packet's own edits,
 so a burst spreads over several packets in the order it was made. The queue is bounded at
-`INPUT_CARRY_OVER_MAX_CHANGES = 16,384` (~240 KB); past that the oldest are dropped and logged.
+`INPUT_CARRY_OVER_MAX_CHANGES = 16,384` (about 2 MB: each entry is a `PairedEdit`, a 16 B block change, its optional tag at about 88-92 B since C3c-3a, a 4 B hand and an 8 B order stamp, about 120 B; the early "~240 KB" counted the block changes alone); past that the oldest are dropped and logged.
 
 **Tests:** `state_outbox` unit tests (budget, order, coalescing, update gating and fairness,
 overflow) and `test_integration/state_budget.rs`, which drives a real join through

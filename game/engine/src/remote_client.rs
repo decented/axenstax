@@ -1684,7 +1684,14 @@ impl Drop for RemoteClient {
 /// Most trimmed input edits [`RemoteClient`] holds back for later packets.
 /// Past it the oldest are dropped (and logged): a client this far behind has
 /// more edits queued than the host's per-tick budget will clear in seconds, and
-/// holding them without bound would grow memory for nothing. About 240 KB.
+/// holding them without bound would grow memory for nothing. Each entry is a
+/// [`PairedEdit`]: the block change (16 B), its optional tag (`Option<EditTag>`,
+/// about 88-92 B since C3c-3a, when a `WireItem::Plan` marker made the two
+/// `WireItem`s of a use tag 36 B each), the hand it was made with (4 B) and
+/// its order stamp (8 B), about 120 B, so the full queue is about 2 MB
+/// (estimated from the field layouts, C3c-3-fix; `tests::the_carry_over_bound_stays_near_two_megabytes`
+/// pins it). It was about 1 MB after C3c-1 and an early "about 240 KB" counted
+/// the block changes alone.
 const INPUT_CARRY_OVER_MAX_CHANGES: usize = 16_384;
 
 /// C1/FU1 — an edit waiting to be sent, with its tag: the `mined` tag of the
@@ -1838,6 +1845,16 @@ fn order_cut_at(edits: &[PairedEdit], cut: Option<u64>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// C3c-3-fix (L4) — the carry-over queue's doc says about 2 MB: pin that
+    /// the real entry size keeps the full queue between 1 and 3 MiB, so the
+    /// figure can't drift again unnoticed.
+    #[test]
+    fn the_carry_over_bound_stays_near_two_megabytes() {
+        let entry = std::mem::size_of::<PairedEdit>();
+        let total = entry * INPUT_CARRY_OVER_MAX_CHANGES;
+        assert!((1 << 20..3 << 20).contains(&total), "PairedEdit is {entry} B: the queue is {total} B");
+    }
+
     use super::*;
     use crate::signet::native_signer::JoinAuth;
     use crate::signet::SignetAuthEventWire;

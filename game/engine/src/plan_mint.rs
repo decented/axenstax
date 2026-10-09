@@ -85,6 +85,20 @@ pub fn plan_fits(inv: &Inventory) -> bool {
     inv.slots_iter().any(|s| s.is_none())
 }
 
+/// C3c-3-fix (L3a) — is what a report says a mint `spent` what its source
+/// spends? An art capture spends one Blueprint Paper (never nothing, never
+/// another item); a capture's commit spends nothing (its paper was spent when
+/// laid). An unknown source answers `false`. Log-only, like the rest of the
+/// mirror: a `false` is tallied as a mismatch (`PossessionTally::note_plan_mint`)
+/// until C3d refuses it.
+pub fn spent_is_expected(source: Option<MintSource>, spent: Option<&Item>) -> bool {
+    match source {
+        Some(MintSource::CaptureCommit) => spent.is_none(),
+        Some(MintSource::CaptureArt) => matches!(spent, Some(Item::Block(b)) if *b == crate::block::BLUEPRINT_PAPER),
+        None => false,
+    }
+}
+
 /// What [`mirror_mint`] did to the copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mirrored {
@@ -177,6 +191,21 @@ mod tests {
             crate::window::digest_parts(&client, &[None; 4], &None, &Default::default(), crate::window::Station::Player),
             "and it digests like the real one"
         );
+    }
+
+    /// C3c-3-fix (L3a) — an art capture that spent nothing, or something that
+    /// isn't paper, is not what the source spends; neither is a commit that
+    /// names a spend.
+    #[test]
+    fn a_mints_spend_must_be_what_its_source_spends() {
+        let paper = Item::Block(crate::block::BLUEPRINT_PAPER);
+        let diamond = Item::Block(crate::block::DIAMOND_BLOCK);
+        assert!(spent_is_expected(Some(MintSource::CaptureArt), Some(&paper)));
+        assert!(!spent_is_expected(Some(MintSource::CaptureArt), None), "paper never spent");
+        assert!(!spent_is_expected(Some(MintSource::CaptureArt), Some(&diamond)), "not paper");
+        assert!(spent_is_expected(Some(MintSource::CaptureCommit), None));
+        assert!(!spent_is_expected(Some(MintSource::CaptureCommit), Some(&paper)), "a commit spends nothing");
+        assert!(!spent_is_expected(None, None));
     }
 
     /// A commit spends nothing; a shortfall (no paper, no room, no Plan) is

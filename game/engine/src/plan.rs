@@ -248,8 +248,18 @@ pub fn marker(data: &PlanData) -> [u8; 32] {
     if let Some(m) = data.marker {
         return m;
     }
+    #[cfg(test)]
+    MARKER_HASHES.with(|c| c.set(c.get() + 1));
     let bytes = bincode::serialize(data).expect("PlanData bincode");
     Sha256::digest(&bytes).into()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// C3c-3-fix (L2) — how many times [`marker`] hashed a body on this
+    /// thread: a test pins that a per-tick path (`block_views::views_in`)
+    /// hashes none.
+    pub(crate) static MARKER_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Bincode of a [`PlanData`] — `marker` is `#[serde(skip)]`, so this is the

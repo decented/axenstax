@@ -2134,7 +2134,10 @@ impl HostedServer {
             // campfire, item frame or hive, on the server's real one.
             protocol::ItemAction::UseBlock { cell, hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
-                return self.serve_block_use(i, req.seq, *cell, *hotbar_slot, held);
+                // C3c-3-fix (M2) — a use that claims a Plan is refused whole:
+                // read as an empty hand it would take a frame's item out.
+                let plan_claimed = matches!(held_full, protocol::WireItem::Plan { .. });
+                return self.serve_block_use(i, req.seq, *cell, *hotbar_slot, held, plan_claimed);
             }
             // C3c-2 (v81) — a joiner's bow or slingshot shot, cart placement,
             // cast and reel, run on the server.
@@ -2233,13 +2236,16 @@ impl HostedServer {
         if source == Some(crate::plan_mint::MintSource::CaptureCommit) {
             self.take_capture_paper(i, cell);
         }
+        // C3c-3-fix (L3a) — a report whose spend isn't its source's (an art
+        // capture with no paper, or another item) is tallied, not clean.
+        let spent_ok = crate::plan_mint::spent_is_expected(source, spent.as_ref());
         let Some(sp) = self.server.players.get_mut(i) else { return };
         if !crate::item_actions::can_mirror(sp) {
             return;
         }
         let placeholder = crate::inventory::plan_from_wire(plan);
         let mirrored = crate::plan_mint::mirror_mint(&mut sp.inventory, slot, placeholder, spent.as_ref());
-        let clean = mirrored.clean() && source.is_some() && !spent_unread;
+        let clean = mirrored.clean() && source.is_some() && !spent_unread && spent_ok;
         if sp.possession.note_plan_mint(clean) {
             log::info!(
                 "plan mirror (log-only): {}'s {} at ({}, {}, {}) from hotbar slot {slot} didn't match the server's copy \
@@ -2698,8 +2704,34 @@ impl HostedServer {
     /// joiner is unbounded, as its container deposits are. (M3) An accepted
     /// use on a lent world is remeshed by the host's client
     /// (`lent_edit_cells`: a frame's item is drawn).
-    fn serve_block_use(&mut self, i: usize, seq: u32, cell: [i32; 3], hotbar_slot: u8, held: Option<crate::item::Item>) {
+    fn serve_block_use(
+        &mut self,
+        i: usize,
+        seq: u32,
+        cell: [i32; 3],
+        hotbar_slot: u8,
+        held: Option<crate::item::Item>,
+        plan_claimed: bool,
+    ) {
         use crate::item_actions::ItemNote;
+        if plan_claimed {
+            // C3c-3-fix (M2) — no block takes a Plan: refused before anything
+            // is judged, nothing taken, nothing placed.
+            let pkt = protocol::serialize_packet(
+                protocol::PacketType::ItemActionOutcome,
+                &protocol::ItemActionOutcomePacket {
+                    seq,
+                    accepted: false,
+                    consume_held: 0,
+                    note: ItemNote::NothingToTake.to_wire(),
+                    window_event: 0,
+                    wear_held: false,
+                    bite_after: 0,
+                },
+            );
+            self.send_to_joined_slot(i, &pkt);
+            return;
+        }
         let pos = (cell[0], cell[1], cell[2]);
         let stack = held.clone().map(|item| crate::item::ItemStack { item, count: 1 });
         let creative = self.server.play_mode.is_creative();
@@ -6266,18 +6298,22 @@ fn is_rod(held: Option<&crate::item::Item>) -> bool {
 }
 
 /// A request's held claim (`held_kind`/`held_id` pair plus `held_full`): the
-/// full-fidelity payload, else (C3c-3a) a Plan as its marker placeholder
-/// (`inventory::plan_from_wire`: the joiner's own window names it), else the
-/// pair.
+/// full-fidelity payload, else the pair. C3c-3-fix (M2) — a Plan claim
+/// (`WireItem::Plan`) decodes to NOTHING, an empty hand: no request
+/// legitimately claims a Plan, and a marker placeholder (which has no body)
+/// must never be usable from a request, or a modified client could mount one
+/// in a shared container (an item frame). Spec 04 §4.2f: a placeholder never
+/// leaves the joiner's own window.
 fn held_item_from_wire(
     kind: u8,
     id: u16,
     full: &protocol::WireItem,
     registry: &crate::block::BlockRegistry,
 ) -> Option<crate::item::Item> {
-    crate::inventory::item_from_wire_full(full)
-        .or_else(|| crate::inventory::plan_from_wire(full))
-        .or_else(|| crate::inventory::item_from_ref(kind, id, registry))
+    if matches!(full, protocol::WireItem::Plan { .. }) {
+        return None;
+    }
+    crate::inventory::item_from_wire_full(full).or_else(|| crate::inventory::item_from_ref(kind, id, registry))
 }
 
 /// MP-D2b — a body's recorded death cause on the wire (`DiedOf`).
@@ -6892,6 +6928,23 @@ fn spawn_quic_accept_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── C3c-3-fix (M2): a held claim never decodes to a Plan ──
+
+    #[test]
+    fn a_held_claim_never_decodes_to_a_plan() {
+        let registry = crate::block::BlockRegistry::new();
+        let plan = protocol::WireItem::Plan { marker: [7; 32], developed: true };
+        // Even with a valid pair beside it, a Plan claim is an empty hand.
+        let (k, id) = crate::inventory::item_to_ref(&crate::item::Item::Block(crate::block::STONE)).to_wire();
+        assert!(held_item_from_wire(k, id, &plan, &registry).is_none());
+        assert!(held_item_from_wire(0, 0, &plan, &registry).is_none());
+        // The ordinary claim still decodes.
+        assert_eq!(
+            held_item_from_wire(k, id, &protocol::WireItem::None, &registry),
+            Some(crate::item::Item::Block(crate::block::STONE))
+        );
+    }
 
     // ── Death-drops phase 2b: pickup grants ride the wire per connection ──
 

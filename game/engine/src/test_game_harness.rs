@@ -2941,6 +2941,41 @@ mod tests {
         assert!(hg.state.players[0].pending_build_choice.is_none());
     }
 
+    /// C3c-3-fix (M1) — fuelling a Steam Generator while joined: the fuel
+    /// stays in hand, no private device is made in the client's copy, nothing
+    /// is asked of the server, and the toast says so. Alone, the same click
+    /// fuels it.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_cannot_fuel_a_steam_generator() {
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("gen-fuel");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let cell = (feet[0], feet[1], feet[2] - 2);
+        let aim = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.3, cell.2 as f32 + 0.5);
+        hg.state.world.set_block(cell.0, cell.1, cell.2, crate::block::STEAM_GENERATOR);
+        server.server.world.set_block(cell.0, cell.1, cell.2, crate::block::STEAM_GENERATOR);
+        let coal = crate::item::ItemStack::new_material(crate::item::MaterialId::Coal, 5);
+        hg.state.players[0].inventory.set_slot(0, Some(coal.clone()));
+        hg.state.players[0].hotbar_slot = 0;
+        harness_step(&mut server, &mut hg);
+        hg.state.toast = None;
+        aim_at(&mut hg, aim);
+        right_click(&mut hg);
+        assert_eq!(hg.state.players[0].inventory.slot(0), Some(&coal), "the coal is still in hand");
+        assert!(hg.state.world.power_device_at(cell).is_none(), "no private device made");
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_MACHINE_TOAST));
+        assert_eq!(hg.state.joiner_actions.len(), 0, "nothing asked of the server");
+        harness_step(&mut server, &mut hg);
+        assert!(server.server.world.power_device_at(cell).is_none_or(|d| d.fuel.is_none()), "the real generator got nothing");
+        // Alone, the same click fuels it.
+        hg.state.remote_client = None;
+        hg.state.toast = None;
+        right_click(&mut hg);
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(4), "alone, one coal goes in");
+        assert!(hg.state.world.power_device_at(cell).is_some_and(|d| d.fuel.is_some()), "and the device holds it");
+    }
+
     /// C3c-3r (decision 5) — right-clicking each economy block while joined
     /// opens nothing and says so; alone, the same click opens it.
     #[test]

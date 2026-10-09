@@ -1021,3 +1021,24 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
         );
     }
 }
+
+/// C3c-3-fix (M2) — a modified client's `UseBlock` on an item frame that
+/// claims a Plan frames nothing: a held claim never decodes to a Plan (the
+/// marker placeholder never leaves the joiner's own window), so the server
+/// refuses the use and no body-less Plan enters the shared world.
+#[test]
+fn a_plan_claimed_on_an_item_frame_frames_nothing() {
+    let mut rig = Rig::dedicated("frame-plan-claim", 1);
+    let cell = rig.place(2, block::ITEM_FRAME);
+    let pos = (cell[0], cell[1], cell[2]);
+    let plan = Item::Plan(crate::plan::PlanData::debug_3x3_stone());
+    let before = rig.cs[0].outcomes.len();
+    rig.cs[0].use_raw(7_000, cell, 0, &plan);
+    rig.ticks(3);
+    assert_eq!(rig.cs[0].outcomes.len(), before + 1, "answered once");
+    refused(&rig.cs[0].last().clone(), ItemNote::NothingToTake);
+    assert!(rig.world().item_frame_at(pos).is_none_or(|f| f.is_empty()), "the frame holds nothing");
+    // A claimed Plan decodes to an empty hand, not a placeholder.
+    let w = crate::inventory::item_to_wire_full(&plan);
+    assert!(matches!(w, protocol::WireItem::Plan { .. }), "the claim is a Plan on the wire");
+}

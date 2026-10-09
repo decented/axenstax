@@ -62,7 +62,7 @@ pub fn view_of(e: &BlockEntityData) -> Option<BlockView> {
             let (item_kind, item_id) = f.item.as_ref().map_or((crate::protocol::item_kind::EMPTY, 0), |st| {
                 crate::inventory::item_to_ref(&st.item).to_wire()
             });
-            let full_item = f.item.as_ref().map(|st| crate::inventory::item_to_wire_full(&st.item)).unwrap_or_default();
+            let full_item = f.item.as_ref().map(|st| crate::inventory::item_to_wire_shared(&st.item)).unwrap_or_default();
             Some(BlockView::ItemFrame { item_kind, item_id, full_item, rotation: f.rotation })
         }
         BlockEntityData::Campfire(c) => {
@@ -438,5 +438,31 @@ mod tests {
         let bad = BlockEntityView { kind: BlockViewKind::Composter, ..bad };
         assert!(!apply_view(&mut w, &reg, &bad));
         assert!(w.hive_at((9, 70, 9)).is_none());
+    }
+
+    /// C3c-3-fix (L2) — a framed Plan is shown with no marker, and the
+    /// per-tick `views_in` hashes no body: a host with Plans in frames paid
+    /// one SHA-256 of each body, every tick, for a marker no joiner can use.
+    #[test]
+    fn a_framed_plan_is_shown_without_a_marker_and_never_hashed() {
+        let mut w = World::new();
+        let cell = (1, 70, 1);
+        w.set_block(cell.0, cell.1, cell.2, block::ITEM_FRAME);
+        let mut framed = crate::item_frame::ItemFrameData::new();
+        framed.try_insert(ItemStack {
+            item: crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),
+            count: 1,
+        });
+        w.insert_item_frame(cell, framed);
+        let before = crate::plan::MARKER_HASHES.with(std::cell::Cell::get);
+        for _ in 0..40 {
+            let views = views_in(&w);
+            let BlockView::ItemFrame { item_kind, full_item, .. } = cell_view(&views, [1, 70, 1]) else {
+                panic!("the frame's view")
+            };
+            assert_eq!(*item_kind, crate::protocol::item_kind::EMPTY);
+            assert_eq!(*full_item, crate::protocol::WireItem::None);
+        }
+        assert_eq!(crate::plan::MARKER_HASHES.with(std::cell::Cell::get), before, "40 ticks of views hashed no body");
     }
 }

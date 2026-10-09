@@ -721,6 +721,10 @@ pub struct UseRecord {
 #[derive(Clone, Debug, Default)]
 pub struct SentUses {
     records: std::collections::VecDeque<UseRecord>,
+    /// C3c-3-fix (L3b) — Plans a refused use's undo had no room to give back
+    /// (the bag full, the cursor busy): irreplaceable bodies, kept here and
+    /// re-seated at the first free slot ([`SentUses::reseat_parked`]).
+    parked: Vec<ItemStack>,
 }
 
 impl SentUses {
@@ -756,6 +760,30 @@ impl SentUses {
     /// Forget everything (the session ended).
     pub fn clear(&mut self) {
         self.records.clear();
+        self.parked.clear();
+    }
+
+    /// C3c-3-fix (L3b) — seat each parked Plan at the first free slot of
+    /// `inv` (`Inventory::add_item`), logging each; any still without room
+    /// stay parked for the next call. Returns how many were seated.
+    pub fn reseat_parked(&mut self, inv: &mut Inventory) -> usize {
+        let before = self.parked.len();
+        self.parked = std::mem::take(&mut self.parked)
+            .into_iter()
+            .filter_map(|stack| {
+                let leftover = inv.add_item(stack);
+                if leftover.is_none() {
+                    log::info!("A Plan an undone hang had no room for is back in the bag");
+                }
+                leftover
+            })
+            .collect();
+        before - self.parked.len()
+    }
+
+    /// How many Plans are waiting for a free slot.
+    pub fn parked_len(&self) -> usize {
+        self.parked.len()
     }
 }
 
@@ -769,6 +797,10 @@ pub struct Undone {
     /// Units of the cost that didn't fit back: lost on the client (the
     /// server's copy, which never applied the use, still holds them).
     pub lost: u8,
+    /// C3c-3-fix (L3b) — a Plan cost that didn't fit back (the bag full):
+    /// put on the empty cursor, else parked ([`SentUses::reseat_parked`]).
+    /// Never counted in `lost`: a Plan body is irreplaceable.
+    pub parked: u8,
 }
 
 /// C3c-1-fix (M-4) — undo the refused use `record` on the client's window:
@@ -786,7 +818,16 @@ pub struct Undone {
 /// shortfall is logged and nothing is given: the client may end BELOW the
 /// server's copy (a believed deposit or a Q-drop already made the product
 /// real), never above it.
-pub fn undo(inv: &mut Inventory, ui: &mut crate::craft_ui::CraftingUi, record: &UseRecord) -> Undone {
+///
+/// C3c-3-fix (L3b) — a Plan cost is never lost: when the bag has no room (its
+/// slot was refilled by a pickup and the bag is full) it goes on the cursor if
+/// that is empty, else into `parked` for [`SentUses::reseat_parked`].
+pub fn undo(
+    inv: &mut Inventory,
+    ui: &mut crate::craft_ui::CraftingUi,
+    parked: &mut Vec<ItemStack>,
+    record: &UseRecord,
+) -> Undone {
     let mut undone = Undone::default();
     if let Some(landed) = &record.landed {
         let taken = crate::joiner_actions::take_owed_held(inv, ui, record.slot, &landed.item, landed.count);
@@ -796,7 +837,17 @@ pub fn undo(inv: &mut Inventory, ui: &mut crate::craft_ui::CraftingUi, record: &
         && undone.short == 0
     {
         let one = ItemStack { item: cost.clone(), count: 1 };
-        undone.lost = give_back(inv, record.slot, one);
+        let lost = give_back(inv, record.slot, one.clone());
+        if lost > 0 && matches!(one.item, Item::Plan(_)) {
+            if ui.cursor_item.is_none() {
+                ui.cursor_item = Some(one);
+            } else {
+                parked.push(one);
+            }
+            undone.parked = lost;
+        } else {
+            undone.lost = lost;
+        }
     }
     undone
 }
@@ -817,7 +868,7 @@ pub fn undo_refused(
     refused
         .iter()
         .rev()
-        .map(|r| (*r, uses.take([r.x, r.y, r.z], r.kind).map(|rec| undo(inv, ui, &rec))))
+        .map(|r| (*r, uses.take([r.x, r.y, r.z], r.kind).map(|rec| undo(inv, ui, &mut uses.parked, &rec))))
         .collect()
 }
 
@@ -1273,7 +1324,7 @@ mod tests {
             landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 1)),
             made_at: 1,
         };
-        assert_eq!(undo(&mut inv, &mut ui, &rec), Undone::default());
+        assert_eq!(undo(&mut inv, &mut ui, &mut Vec::new(), &rec), Undone::default());
         for k in 0..36 {
             assert_eq!(inv.slot(k), before_use.slot(k), "slot {k}");
         }
@@ -1284,7 +1335,7 @@ mod tests {
         // never above it).
         let mut gone = Inventory::new();
         gone.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
-        assert_eq!(undo(&mut gone, &mut ui, &rec), Undone { short: 1, lost: 0 });
+        assert_eq!(undo(&mut gone, &mut ui, &mut Vec::new(), &rec), Undone { short: 1, ..Default::default() });
         assert_eq!(gone.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)), "one bucket, not two");
         assert!(gone.slots_iter().skip(1).all(|s| s.is_none()));
         // A tap's rubber is taken back, the kept bucket untouched.
@@ -1297,9 +1348,58 @@ mod tests {
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
         inv.set_slot(1, Some(ItemStack::new_material(MaterialId::Rubber, 1)));
-        assert_eq!(undo(&mut inv, &mut ui, &tap), Undone::default());
+        assert_eq!(undo(&mut inv, &mut ui, &mut Vec::new(), &tap), Undone::default());
         assert_eq!(inv.slot(0), Some(&ItemStack::new_material(MaterialId::Bucket, 1)));
         assert!(inv.slot(1).is_none());
+    }
+
+    /// C3c-3-fix (L3b) — a refused hang whose slot was refilled while the
+    /// bag is full never destroys the client's real Plan: it goes on the
+    /// cursor when that is empty; otherwise it is parked and re-seated at the
+    /// first free slot (once there is one), not before.
+    #[test]
+    fn a_refused_hang_with_the_bag_full_keeps_the_real_plan() {
+        let plan = crate::plan::PlanData::debug_3x3_stone();
+        let rec = UseRecord {
+            cell: [0, 70, 0],
+            kind: UseKind::HangPrint.to_wire(),
+            slot: 0,
+            cost: Some(Item::Plan(plan.clone())),
+            landed: None,
+            made_at: 1,
+        };
+        let full = || {
+            let mut inv = Inventory::new();
+            for k in 0..36 {
+                inv.set_slot(k, Some(ItemStack::new_block(block::STONE, 64)));
+            }
+            inv
+        };
+        let notice = crate::protocol::RefusedUse { x: 0, y: 70, z: 0, kind: UseKind::HangPrint.to_wire(), note: 0 };
+        // The cursor is empty: the Plan rides it.
+        let (mut inv, mut ui, mut uses) = (full(), crate::craft_ui::CraftingUi::new(), SentUses::default());
+        uses.record(rec.clone());
+        let out = undo_refused(&mut uses, &mut inv, &mut ui, &[notice]);
+        assert_eq!(out[0].1, Some(Undone { parked: 1, ..Default::default() }), "not lost");
+        assert_eq!(ui.cursor_item, Some(ItemStack { item: Item::Plan(plan.clone()), count: 1 }));
+        assert_eq!(uses.parked_len(), 0);
+        // The cursor is busy: it is parked, and waits while the bag stays full.
+        let (mut inv, mut ui, mut uses) = (full(), crate::craft_ui::CraftingUi::new(), SentUses::default());
+        ui.cursor_item = Some(ItemStack::new_block(block::DIRT, 3));
+        uses.record(rec);
+        let out = undo_refused(&mut uses, &mut inv, &mut ui, &[notice]);
+        assert_eq!(out[0].1, Some(Undone { parked: 1, ..Default::default() }));
+        assert_eq!(uses.parked_len(), 1);
+        assert_eq!(uses.reseat_parked(&mut inv), 0, "no room yet");
+        assert_eq!(uses.parked_len(), 1);
+        inv.set_slot(13, None);
+        assert_eq!(uses.reseat_parked(&mut inv), 1);
+        assert_eq!(uses.parked_len(), 0);
+        assert!(matches!(inv.slot(13).map(|s| &s.item), Some(Item::Plan(p)) if p.same_plan(&plan)), "back at the first free slot");
+        // A session end forgets what is parked.
+        uses.parked.push(ItemStack::new_block(block::STONE, 1));
+        uses.clear();
+        assert_eq!(uses.parked_len(), 0);
     }
 
     /// C3c-3a — a hang's tag carries the Plan by marker; the server judges a

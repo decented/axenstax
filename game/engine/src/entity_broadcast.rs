@@ -111,7 +111,7 @@ impl LiveEntity {
                     spawn.item_kind = item_kind;
                     spawn.item_id = item_id;
                     spawn.item_count = item.stack.count;
-                    spawn.full_item = crate::inventory::item_to_wire_full(&item.stack.item);
+                    spawn.full_item = crate::inventory::item_to_wire_shared(&item.stack.item);
                 }
             }
         }
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn dropped_plan_broadcasts_a_marker_never_a_body() {
+    fn dropped_plan_broadcasts_neither_a_marker_nor_a_body() {
         let (mut ecs, mut b) = fresh();
         let mut all = ClientInterest::default();
         let data = crate::plan::PlanData::debug_3x3_stone();
@@ -813,13 +813,14 @@ mod tests {
             crate::item::ItemStack { item: crate::item::Item::Plan(data.clone()), count: 1 },
             0,
         );
+        let hashes = crate::plan::MARKER_HASHES.with(std::cell::Cell::get);
         let (spawns, _, _) = global(&mut ecs, &mut b, &mut all);
         let plan = spawns.iter().find(|s| s.kind == EntityKind::Item).unwrap();
         assert_eq!(plan.item_kind, crate::protocol::item_kind::EMPTY);
-        // C3c-3a (v83): the full-fidelity channel names the Plan by marker
-        // (never its body) — the same reference a joiner's own Plan rides as.
-        assert_eq!(plan.full_item, crate::inventory::plan_to_wire(&data));
-        assert!(matches!(plan.full_item, WireItem::Plan { .. }));
+        // C3c-3-fix (L2): no joiner can use a ground Plan, so it rides no
+        // marker (and hashes no body) — as before v83.
+        assert_eq!(plan.full_item, WireItem::None);
+        assert_eq!(crate::plan::MARKER_HASHES.with(std::cell::Cell::get), hashes, "no body hashed");
     }
 
     #[test]

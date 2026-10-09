@@ -221,6 +221,18 @@ pub fn item_to_wire_full(item: &crate::item::Item) -> crate::protocol::WireItem 
     }
 }
 
+/// C3c-3-fix (L2) — [`item_to_wire_full`] for an item SHARED with every joiner
+/// (a frame's item, a ground item): a Plan is `WireItem::None` here, as before
+/// v83. No joiner can use a Plan it sees in the world, so no marker is
+/// computed or sent, and the per-tick views never hash a Plan's body. A
+/// joiner's OWN window names its Plans by marker ([`plan_to_wire`]).
+pub fn item_to_wire_shared(item: &crate::item::Item) -> crate::protocol::WireItem {
+    match item {
+        crate::item::Item::Plan(_) => crate::protocol::WireItem::None,
+        other => item_to_wire_full(other),
+    }
+}
+
 /// C3c-3a — a Plan on the wire, by reference
 /// ([`WireItem::Plan`](crate::protocol::WireItem::Plan)): its `plan::marker`
 /// (a marker placeholder's own stored marker) and whether it is developed.
@@ -282,7 +294,8 @@ pub fn item_from_wire_full(w: &crate::protocol::WireItem) -> Option<crate::item:
 
 /// C3c-3a — the server's decode of a Plan a joiner's own window names
 /// ([`WireItem::Plan`](crate::protocol::WireItem::Plan): a use tag's `used`,
-/// an `ItemAction::PlanMinted`, a held claim): the marker placeholder
+/// an `ItemAction::PlanMinted`; NOT a held claim, C3c-3-fix: a request's
+/// claimed hand never decodes to a Plan): the marker placeholder
 /// (`plan::PlanData::marker_placeholder`) its copy of the window holds for
 /// it. `None` for anything else.
 pub fn plan_from_wire(w: &crate::protocol::WireItem) -> Option<crate::item::Item> {
