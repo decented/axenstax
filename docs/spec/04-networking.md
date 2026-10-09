@@ -5178,8 +5178,9 @@ original manifest/core/world/transfer and original admission evidence. Required
 writes, file syncs, nested-directory syncs, atomic no-replace rename and parent
 sync must succeed. Pre-rename cleanup removes only its own scratch folder;
 post-rename uncertainty preserves the import for exact restart/retry and late
-cleanup never deletes it. Native no-replace uses Linux/Android renameat2,
-macOS exclusive rename and Windows directory rename; unsupported targets fail
+cleanup never deletes it. Native no-replace uses Linux renameat2 and Android SYS_renameat2 via the
+existing syscall symbol (no API30 Bionic dependency on the API24 app),
+macOS exclusive rename and Windows directory rename; unsupported kernels/targets fail
 closed. These platform paths still require their own platform validation and
 this milestone does not claim portable completed handover.
 

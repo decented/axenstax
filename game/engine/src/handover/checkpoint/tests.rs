@@ -1082,6 +1082,19 @@ fn handover_checkpoint_symlink_source_and_atomic_directory_collision_refused() {
     assert!(files::rename_new(&source, &destination).is_err());
     assert!(source.exists());
     assert_eq!(fs::read(destination.join("retained")).unwrap(), b"original");
+    // Ordinary rename replaces an EMPTY existing directory; no-replace must
+    // preserve the target inode and all source state in this exact race seam.
+    use std::os::unix::fs::MetadataExt;
+    let empty = t.0.join("empty-existing");
+    fs::create_dir(&empty).unwrap();
+    let target_inode = fs::metadata(&empty).unwrap().ino();
+    let source_inode = fs::metadata(&source).unwrap().ino();
+    fs::write(source.join("source-state"), b"untouched").unwrap();
+    assert!(files::rename_new(&source, &empty).is_err());
+    assert_eq!(fs::metadata(&empty).unwrap().ino(), target_inode);
+    assert_eq!(fs::metadata(&source).unwrap().ino(), source_inode);
+    assert_eq!(fs::read(source.join("source-state")).unwrap(), b"untouched");
+    assert_eq!(fs::read(destination.join("retained")).unwrap(), b"original");
 }
 #[test]
 fn handover_checkpoint_signed_archive_missing_required_image_refused_by_importer() {

@@ -122,8 +122,24 @@ pub(super) fn rename_new(source: &Path, destination: &Path) -> Result<()> {
         let to =
             std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(|_| Error::Io)?;
         // SAFETY: both NUL-terminated paths remain alive; flags forbid replacement.
+        #[cfg(target_os = "linux")]
         let result = unsafe {
             libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        // Bionic's renameat2 symbol requires API30, but the app supports API24.
+        // The existing syscall symbol avoids a new dynamic API dependency;
+        // older kernels return an error and no overwriting fallback is used.
+        #[cfg(target_os = "android")]
+        let result = unsafe {
+            // SAFETY: kernel receives live terminated paths and no-replace flag.
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 from.as_ptr(),
                 libc::AT_FDCWD,
