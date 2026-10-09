@@ -2912,6 +2912,7 @@ mod tests {
     #[test]
     fn protocol_version_bumped() {
         // OC — v88, InventorySync carries the correction debt.
+        // v88 PRIVATE PROVISIONAL (mp-handover): the Handover control tag.
         assert_eq!(super::PROTOCOL_VERSION, 88);
     }
 
@@ -3663,6 +3664,7 @@ mod tests {
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
+        // v88 PRIVATE PROVISIONAL (mp-handover): Handover (tag 68).
         assert_eq!(PROTOCOL_VERSION, 88);
     }
 
@@ -4364,8 +4366,10 @@ mod tests {
         }
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
-        // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync).
-        assert_eq!(deserialize_header(&[68, 0]), None, "nothing past 67 yet");
+        // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync);
+        // the provisional handover control frame takes 68.
+        assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Handover));
+        assert_eq!(deserialize_header(&[69, 0]), None, "nothing past 68 yet");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)
