@@ -154,7 +154,7 @@ mod tests {
     fn c3d_removed_source_cannot_use_an_unrelated_or_later_same_slot_grant() {
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 1)));
-        inv.set_slot(1, Some(ItemStack::new_block(crate::block::STONE, 1)));
+        inv.set_slot(1, Some(ItemStack::new_block(crate::block::STONE, 64)));
         let raw = raw(&mut inv, &mut std::array::from_fn(|_| std::array::from_fn(|_| None)), &mut None);
         let staged = stage(&raw, &WindowClick::Slot { slot: 0, right: false }, &ctx());
         let mut pending = raw.clone();
