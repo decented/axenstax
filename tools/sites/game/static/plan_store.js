@@ -19,13 +19,33 @@
     transaction.onerror = () => reject(transaction.error);
   })).catch(error => console.warn('Local Plan preload failed', error));
   window.axenstax_plan_resolve = marker => cache.get(marker) || null;
+  // A synchronous cache hit is not a durability receipt. Keep each body
+  // dirty until its transaction completes; transient aborts get two retries.
+  const dirty = new Map();
+  const retryDelays = [250, 1000];
+  const persist = (marker, entry) => {
+    ready.then(db => new Promise((resolve, reject) => {
+      const transaction = db.transaction('bodies', 'readwrite');
+      transaction.objectStore('bodies').put(entry.bytes, marker);
+      transaction.oncomplete = resolve;
+      transaction.onerror = transaction.onabort = () => reject(transaction.error || new Error('Local Plan transaction aborted'));
+    })).then(() => {
+      if (dirty.get(marker) === entry) dirty.delete(marker);
+    }).catch(error => {
+      if (dirty.get(marker) !== entry) return;
+      if (entry.attempt < retryDelays.length) {
+        const delay = retryDelays[entry.attempt++];
+        setTimeout(() => { if (dirty.get(marker) === entry) persist(marker, entry); }, delay);
+      } else {
+        console.warn('Local Plan remains in memory; save failed after retries', error);
+      }
+    });
+  };
   window.axenstax_plan_remember = (marker, bytes) => {
     const copy = new Uint8Array(bytes);
     cache.set(marker, copy);
-    ready.then(db => {
-      const transaction = db.transaction('bodies', 'readwrite');
-      transaction.objectStore('bodies').put(copy, marker);
-      transaction.onerror = () => console.warn('Local Plan save failed', transaction.error);
-    }).catch(error => console.warn('Local Plan save failed', error));
+    const entry = { bytes: copy, attempt: 0 };
+    dirty.set(marker, entry);
+    persist(marker, entry);
   };
 })();

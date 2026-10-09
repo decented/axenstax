@@ -404,3 +404,99 @@ fn single_player_paints_lays_and_recovers_as_before() {
     let has = |item: &Item| inv.slots_iter().flatten().any(|s| &s.item == item);
     assert!(has(&paper()) && has(&wallpaper()), "both back in the hand");
 }
+
+#[test]
+fn smallfix_orphan_detach_refuses_without_grant_or_spill() {
+    for underlying in [block::AIR, block::WATER] {
+        let mut rig = Rig::dedicated("smallfix-orphan", 1);
+        let wall = rig.place(-2, underlying);
+        rig.lay(wall, SOUTH, FaceAttachment::Wallpaper(block::WALLPAPER_RED));
+        for k in 0..36 { rig.give(0, k, Item::Block(block::STONE), 64); }
+        let before = rig.hs.server.ecs.len();
+        refused(&rig.request_once(0, |c| c.detach(wall, SOUTH)), ItemNote::NotHere);
+        assert_eq!(rig.holds(wall, SOUTH), Some(FaceAttachment::Wallpaper(block::WALLPAPER_RED)));
+        assert_eq!(rig.cs[0].count(&wallpaper()), 0);
+        assert_eq!(rig.hs.server.ecs.len(), before, "no real overflow gain");
+        rig.assert_lockstep(0, "orphan refusal");
+    }
+}
+
+#[test]
+fn smallfix_local_economy_owner_prevents_attach_and_detach_before_payment() {
+    let mut rig = Rig::dedicated("smallfix-owner", 1);
+    let cell = rig.place(-2, block::TIP_JAR);
+    rig.world().insert_tip_jar((cell[0], cell[1], cell[2]), crate::tip_jar::TipJarData {
+        owner: Some(crate::tip_jar::TipJarOwner::LocalPlayer(0)), escrow_sats: 0,
+        last_tip_tick: 0, lifetime_tips_received: 0,
+    });
+    rig.give(0, 0, wallpaper(), 2);
+    refused(&rig.request_once(0, |c| c.attach(cell, SOUTH, 0)), ItemNote::NotHere);
+    assert_eq!(rig.cs[0].count(&wallpaper()), 2);
+    assert_eq!(rig.holds(cell, SOUTH), None);
+    rig.lay(cell, SOUTH, FaceAttachment::Wallpaper(block::WALLPAPER_RED));
+    refused(&rig.request_once(0, |c| c.detach(cell, SOUTH)), ItemNote::NotHere);
+    assert_eq!(rig.cs[0].count(&wallpaper()), 2);
+    assert_eq!(rig.holds(cell, SOUTH), Some(FaceAttachment::Wallpaper(block::WALLPAPER_RED)));
+    rig.assert_lockstep(0, "owner refusal");
+}
+
+#[test]
+fn smallfix_every_economy_owner_guard_applies_to_attach_and_detach() {
+    for kind in [block::VENDOR_BLOCK, block::TIP_JAR, block::AUCTION_BLOCK, block::PLOT_MARKER, block::MARKET_BELL] {
+        for same_owner in [false, true] {
+            let mut rig = Rig::dedicated("smallfix-owner-matrix", 1);
+            let cell = rig.place(-2, kind);
+            let npub = crate::hosted_server::verified_npub(Some([7; 32])).unwrap();
+            let owner = if same_owner { npub.clone() } else { crate::hosted_server::verified_npub(Some([8; 32])).unwrap() };
+            let slot = rig.cs[0].slot;
+            rig.hs.server.players[slot].verified_pubkey = Some([7; 32]);
+            let pos = (cell[0], cell[1], cell[2]);
+            match kind {
+                block::VENDOR_BLOCK => rig.world().insert_vendor(pos, crate::vendor::VendorData { owner: Some(crate::vendor::VendorOwner::Npub(owner)), ..Default::default() }),
+                block::TIP_JAR => rig.world().insert_tip_jar(pos, crate::tip_jar::TipJarData { owner: Some(crate::tip_jar::TipJarOwner::Npub(owner)), escrow_sats: 0, last_tip_tick: 0, lifetime_tips_received: 0 }),
+                block::AUCTION_BLOCK => rig.world().insert_auction(pos, crate::auction::AuctionData::new(crate::auction::AuctionOwner::Npub(owner))),
+                block::PLOT_MARKER => rig.world().plots.push(crate::plot::PlotData::from_marker(crate::plot::PlotOwner::Npub(owner), cell[0], cell[1], cell[2])),
+                _ => rig.world().market_hubs.push(crate::market_hub::MarketHubData::from_bell(crate::market_hub::HubOwner::Npub(owner), cell[0], cell[1], cell[2])),
+            }
+            rig.give(0, 0, wallpaper(), 2);
+            let attached = rig.request_once(0, |c| c.attach(cell, SOUTH, 0));
+            if same_owner {
+                accepted(&attached, 1);
+                accepted(&rig.request_once(0, |c| c.detach(cell, SOUTH)), 0);
+                assert_eq!(rig.cs[0].count(&wallpaper()), 2);
+            } else {
+                refused(&attached, ItemNote::NotHere);
+                rig.lay(cell, SOUTH, FaceAttachment::Wallpaper(block::WALLPAPER_RED));
+                refused(&rig.request_once(0, |c| c.detach(cell, SOUTH)), ItemNote::NotHere);
+                assert_eq!(rig.cs[0].count(&wallpaper()), 2);
+            }
+            rig.assert_lockstep(0, "economy owner matrix");
+        }
+    }
+}
+
+#[test]
+fn smallfix_capture_commit_preflights_reach_extent_and_every_plot_before_removing_any_paper() {
+    for case in 0..3 {
+        let mut rig = Rig::dedicated("smallfix-capture-preflight", 1);
+        let start = if case == 0 { let f = rig.floor_ahead(); [f[0] + 20, f[1], f[2]] } else { rig.floor_ahead() };
+        let width = if case == 1 { 33 } else { 3 };
+        let tiles: Vec<_> = (0..width).map(|x| [start[0] + x, start[1], start[2]]).collect();
+        for &t in &tiles { rig.set(t, block::STONE); rig.lay(t, TOP, FaceAttachment::BlueprintBlank); }
+        if case == 2 {
+            let last = tiles[2];
+            let mut plot = crate::plot::PlotData::from_marker(crate::plot::PlotOwner::LocalPlayer(0), last[0], last[1], last[2]);
+            plot.min_x = last[0]; plot.max_x = last[0]; plot.min_z = last[2]; plot.max_z = last[2];
+            rig.world().plots.push(plot);
+        }
+        let pkt = protocol::ItemActionPacket { seq: 1, events_applied: rig.cs[0].events,
+            action: ItemAction::PlanMinted { source: crate::plan_mint::MintSource::CaptureCommit.to_wire(),
+                x: start[0], y: start[1], z: start[2], face: TOP as u8, hotbar_slot: 0, spent: None,
+                plan: protocol::WireItem::Plan { marker: [19; 32], developed: false } } };
+        rig.cs[0].transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &pkt));
+        rig.ticks(3);
+        for t in tiles { assert_eq!(rig.holds(t, TOP), Some(FaceAttachment::BlueprintBlank), "case {case} leaves all paper intact"); }
+        assert_eq!(rig.hs.server.players[rig.cs[0].slot].possession.plan_minted, 1,
+            "mint remains log-only until C3d, independent of refused paper spending");
+    }
+}

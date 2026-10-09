@@ -8,6 +8,9 @@ use winit::window::Window;
 /// Wraps egui state for the game.
 pub struct EguiIntegration {
     pub ctx: egui::Context,
+    /// Harness observation of the real completed headless paint pass.
+    #[cfg(test)]
+    pub(crate) last_shapes: Vec<egui::epaint::ClippedShape>,
     /// None in headless mode (no window for event handling).
     state: Option<egui_winit::State>,
     renderer: egui_wgpu::Renderer,
@@ -93,6 +96,8 @@ impl EguiIntegration {
 
         Self {
             ctx,
+            #[cfg(test)]
+            last_shapes: Vec::new(),
             state: Some(state),
             renderer,
             block_texture_ids: Vec::new(),
@@ -121,6 +126,8 @@ impl EguiIntegration {
 
         Self {
             ctx,
+            #[cfg(test)]
+            last_shapes: Vec::new(),
             state: None,
             renderer,
             block_texture_ids: Vec::new(),
@@ -211,7 +218,11 @@ impl EguiIntegration {
     /// paint to: end the egui pass and discard the output. (The painted paths
     /// end the pass inside `Renderer::render` / `render_menu_only`.)
     pub fn end_frame_discard(&mut self) {
-        let _ = self.ctx.end_pass();
+        let output = self.ctx.end_pass();
+        #[cfg(test)]
+        { self.last_shapes = output.shapes; }
+        #[cfg(not(test))]
+        let _ = output;
     }
 
     /// End the egui pass: tessellate, upload textures, render.

@@ -444,7 +444,7 @@ fn possible(kind: UseKind, used: Option<&Item>, old: BlockId, new: BlockId, meta
 /// still applies — and mirrors no rubber.)
 fn no_cost_drift(kind: UseKind, old: BlockId) -> bool {
     match kind {
-        UseKind::Erase => erases(old) || old == block::AIR,
+        UseKind::Erase => erases(old),
         UseKind::TapRubber => crate::rubber::is_tappable(old) || old == block::RUBBER_LOG_TAPPED,
         UseKind::Till => tills(old) || old == block::TILLED_SOIL,
         UseKind::DoorUpper => old == block::AIR || old == block::OAK_DOOR,
@@ -677,7 +677,8 @@ fn wears_with(kind: UseKind, tool: &Tool) -> bool {
 /// past the per-tick edit budget (and a refusal can wait behind chunk pushes
 /// in the client's outbox), so a refusal can arrive after the acknowledgement
 /// of the input that carried the use: the record is held this long past it
-/// (5 s) so the undo always has it.
+/// (5 s). Expiry is absence of a refusal, not an acceptance receipt;
+/// delayed or repeated-key notices still need C3d action identity.
 pub const USE_RECORD_HOLD_INPUTS: u64 = 100;
 
 // C3c-1-fix verify F-L6 — the hold must outlast the worst wait a notice can
@@ -830,9 +831,10 @@ pub struct Undone {
 /// deposited) was spent by a later act the server may have accepted — an
 /// empty of the filled bucket gives its bucket back on its own — so giving
 /// the cost back too would mint one (a bucket a cycle, on a slow link). The
-/// shortfall is logged and nothing is given: the client may end BELOW the
-/// server's copy (a believed deposit or a Q-drop already made the product
-/// real), never above it.
+/// shortfall is logged and no cost is given. The product search is atomic:
+/// a short take leaves the existing holdings unchanged. This prevents
+/// destructive partial rollback, but cannot resolve lineage or remaining
+/// client phantoms without C3d authoritative resynchronisation.
 ///
 /// C3c-3-fix (L3b) — a Plan cost is never lost: when the bag has no room (its
 /// slot was refilled by a pickup and the bag is full) it goes on the cursor if
@@ -845,7 +847,21 @@ pub fn undo(
 ) -> Undone {
     let mut undone = Undone::default();
     if let Some(landed) = &record.landed {
-        let taken = crate::joiner_actions::take_owed_held(inv, ui, record.slot, &landed.item, landed.count);
+        // Preview the complete existing search: a short take must leave every
+        // real slot untouched and cannot authorise a cost refund.
+        let mut preview_inv = inv.clone();
+        let mut preview_grid = ui.grid.clone();
+        let mut preview_cursor = ui.cursor_item.clone();
+        let taken = crate::joiner_actions::take_owed_window(
+            &mut preview_inv, &mut preview_grid, &mut preview_cursor,
+            record.slot, &landed.item, landed.count,
+        );
+        if taken == landed.count {
+            *inv = preview_inv;
+            ui.grid = preview_grid;
+            ui.cursor_item = preview_cursor;
+            ui.update_result();
+        }
         undone.short = landed.count.saturating_sub(taken);
     }
     if let Some(cost) = &record.cost
@@ -1170,7 +1186,7 @@ mod tests {
         let on_stone = verdict(UseKind::Erase, block::AIR, 0, block::STONE);
         assert_eq!((on_stone.verdict, on_stone.product), (Verdict::Impossible, None), "an Eraser on stone yields no sheet");
         let erased_first = verdict(UseKind::Erase, block::AIR, 0, block::AIR);
-        assert_eq!(erased_first.verdict, Verdict::Drift, "another player erased it first");
+        assert_eq!(erased_first.verdict, Verdict::Impossible, "AIR proves no remaining paper");
         // The tap: input a tappable log, output a tapped one.
         let on_air = verdict(UseKind::TapRubber, block::RUBBER_LOG_TAPPED, 0, block::AIR);
         assert_eq!((on_air.verdict, on_air.product), (Verdict::Impossible, None), "a tap on AIR yields no rubber");
@@ -1503,4 +1519,44 @@ mod tests {
         assert!(inv.slots_iter().skip(1).all(|s| s.is_none()), "one bucket and nothing else");
         assert_eq!(uses.len(), 0);
     }
+    #[test]
+    fn smallfix_short_undo_is_atomic_across_bag_grid_and_cursor() {
+        for location in 0..3 {
+            let mut inv = Inventory::new();
+            let mut ui = crate::craft_ui::CraftingUi::new();
+            let product = ItemStack::new_material(MaterialId::LavaBucket, 1);
+            match location {
+                0 => inv.set_slot(0, Some(product)),
+                1 => ui.grid[0][0] = Some(product),
+                _ => ui.cursor_item = Some(product),
+            }
+            let before = (inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), ui.grid.clone(), ui.cursor_item.clone());
+            let record = UseRecord { cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
+                cost: Some(mat(MaterialId::Bucket)), landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 2)), made_at: 1 };
+            let out = undo(&mut inv, &mut ui, &mut Vec::new(), &record);
+            assert_eq!(out.short, 1);
+            assert_eq!((inv.slots_iter().map(|s| s.cloned()).collect::<Vec<_>>(), ui.grid.clone(), ui.cursor_item.clone()), before,
+                "a partial product take cannot consume a real holding or return the cost");
+        }
+    }
+
+    #[test]
+    fn smallfix_short_ancestor_never_retries_against_independent_refund() {
+        let mut inv = Inventory::new();
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        inv.set_slot(0, Some(ItemStack::new_material(MaterialId::Bucket, 1)));
+        let mut uses = SentUses::default();
+        uses.record(UseRecord { cell: [0, 70, 0], kind: UseKind::BucketFill.to_wire(), slot: 0,
+            cost: Some(mat(MaterialId::Bucket)), landed: Some(ItemStack::new_material(MaterialId::LavaBucket, 1)), made_at: 1 });
+        uses.record(UseRecord { cell: [1, 70, 0], kind: UseKind::BucketEmpty.to_wire(), slot: 0,
+            cost: Some(mat(MaterialId::LavaBucket)), landed: Some(ItemStack::new_material(MaterialId::Bucket, 1)), made_at: 2 });
+        let notice = |x, kind: UseKind| crate::protocol::RefusedUse { x, y: 70, z: 0, kind: kind.to_wire(), note: 0 };
+        undo_refused(&mut uses, &mut inv, &mut ui, &[notice(0, UseKind::BucketFill)]);
+        undo_refused(&mut uses, &mut inv, &mut ui, &[notice(1, UseKind::BucketEmpty)]);
+        assert_eq!(inv.slot(0).unwrap().item, mat(MaterialId::LavaBucket), "the real descendant cost survives");
+        assert_eq!(inv.slot(0).unwrap().count, 1);
+        undo_refused(&mut uses, &mut inv, &mut ui, &[notice(0, UseKind::BucketFill)]);
+        assert_eq!(inv.slot(0).unwrap().item, mat(MaterialId::LavaBucket), "a terminal short record cannot revive");
+    }
+
 }

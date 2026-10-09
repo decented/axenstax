@@ -2037,27 +2037,18 @@ item (`use_edits.rs`).
   C3c-1 only the bottom half was sent). A door with no headroom, or a Plot
   Marker whose claim would overlap a foreign plot, is refused BEFORE the item
   is taken (Spec 05): nothing is taken, refunded or sent. **Doors break
-  whole on every seat (C3c-1-fix, M-3):** both break arms (creative and
-  survival) push the other half's AIR as its own UNTAGGED edit, beside the
-  broken half's (which carries the `mined` tag in survival), so the server,
-  every other joiner and a lending host's joiners lose both halves; the
-  untagged half is classified unchecked and yields nothing, so one door comes
-  back, never two. On the server a `DoorUpper` with no door below it (its
-  bottom half refused, or never sent) — or (C3c-2-fix, F-L2) over another
-  door's TOP half — is refused and sent back (it costs nothing, so it can be
-  refused now; the joiner is told, silently). **A door breaks whole on the
-  server (C3c-2-fix, F-L1; C3d gate 6 pulled forward):** an accepted
-  joiner edit that takes a door half out takes its matching half too
-  (`HostedServer::clear_door_pair`: the bottom below a top, the top above a
-  bottom), queued after the edit's own change, so it also overtakes a
-  refused send-back of that half queued earlier in the tick. One exception:
-  the honest break arm sends the other half's untagged AIR FIRST, so that
-  edit spares the half the same input then breaks with its `mined` tag
-  (`EditGroup::mined_ahead`) — clearing it first would leave the tagged
-  break nothing to yield. So a door broken at the edge of the server's reach
-  (the far half's AIR refused), or one half sent alone by a modified client,
-  leaves no floating half and one door. Nothing yields for the cleared
-  half.
+  whole on every seat:** a joined client's two break arms predict both halves
+  disappearing but send only the selected primary half (with its `mined` tag
+  in survival; creative sends an untagged primary). Host/local broadcasts
+  retain both halves. The server always removes an accepted primary's live
+  matching pair and settles its attachments once. Two modified mined tags
+  yield one door: the second sees AIR. A refused primary restores its live
+  authoritative pair too through the existing 64-credit send-back budget,
+  including dead, earlier-life and awaiting-Replace drains. Derivation uses
+  server metadata only. Exhausted credits or a concurrently replaced non-door
+  target cannot guarantee paired correction; C3d resynchronisation remains
+  pending. `DoorUpper` still requires a bottom half; C3d also requires that
+  bottom to have been placed by the same edit group.
 - *The cyanotype hang (C3c-3a, v83).* A developed Plan aimed at
   a wall face is hung: the AIR (or water) cell before the face becomes a
   `CYANOTYPE_PRINT` and the Plan is spent (in both modes; the print keeps no
@@ -2612,7 +2603,8 @@ rod, the Firestarter of a `Light` — is charged 1 to the main bound
 (`believe_wear` by type and material, `believe_pay` for the Firestarter;
 tallied `tool_believed`), refused past it with the request's own note
 (`NothingToTake`): the shears pattern of C3c-1-fix L-3. A shot looks at both
-buckets before it charges either. BRIDGE until C3d takes the tool from the
+buckets before it charges either. The 4-units/s refill bounds spam, not ordinary shooting or fishing cadence.
+BRIDGE until C3d takes the tool from the
 server's held slot (C3 design doc, gate list). The requests count against
 the existing per-tick item-action limit (`MAX_ITEM_ACTIONS_PER_TICK`); a
 shot also against its weapon's cooldown on the server's schedule
@@ -2635,7 +2627,8 @@ unknown until the outcome, then now + `bite_after`; `Asked::Reel` takes the
 line in at once; neither claims), and `send_light` (a campfire `UseBlock`
 remembered as `Asked::Light { lighter }`, client-only, for the feedback;
 claims the stick or flint and steel's wear, the Firestarter nothing). The
-outcome's take and wear are applied by `joiner_actions::apply_item_outcome`
+held-shot cooldown swallows right-click for 0.4 seconds rather than passing
+through to another block use. The outcome's take and wear are applied by `joiner_actions::apply_item_outcome`
 / `apply_use_wear`; the catch arrives as a grant.
 
 *A joiner's shot is a host's shot.* The server's projectile carries its
@@ -2807,7 +2800,7 @@ With this, no joiner inventory change is unmirrored (C3 design §3 rule 7).
   one is in flight sends nothing. Nothing changes on the client. The server
   (`HostedServer::serve_attach`) judges it as a block use (in the world and
   alive, `container_in_server_reach`, the play mode and plots:
-  `remote_may_touch`) and by the SAME rule on its world, sets the attachment
+  `remote_may_touch`, plus the existing economy-owner predicate) and by the SAME rule on its world, sets the attachment
   there (logged, so the painter sees it through the stream like everyone
   else) and takes the block as a cart is taken: an owed take (a window event
   the outcome carries), or believed within the joiner's bound
@@ -2823,7 +2816,9 @@ With this, no joiner inventory change is unmirrored (C3 design §3 rule 7).
   (`GameState::send_detach`, once per press and per face in flight; claims
   nothing) and spends the strike (no break behind it); a laid Blueprint stays
   refused with C3c-3r's toast. The server (`serve_detach`) judges reach, play
-  mode and plots, and wants wallpaper or blank paper on that face of ITS world
+  mode, plots and the existing economy-owner predicate, requires a solid
+  underlying cell (AIR/water orphans refuse without gain), and wants wallpaper
+  or blank paper on that face of ITS world
   (bare — someone peeled it first — or a Blueprint: `NothingToTake`, silent),
   removes it (logged) and grants what it recovers to
   (`blueprint_attach::recovered_item_for`, `grant_to_joiner`: an
@@ -2841,13 +2836,20 @@ With this, no joiner inventory change is unmirrored (C3 design §3 rule 7).
   a joiner can't pick up and a host can; a use that clears the cell (the
   Eraser on a paper tile) and a block put where none stood (AIR, water) only
   remove them, as the client's own arms do; any other change leaves them.
-- *The capture commit's paper.* On `PlanMinted { source: CaptureCommit }`
-  (its cell the stamped tile, `tile_positions[0]`), the server re-runs the
-  capture's read-only flood from that cell over its world
-  (`plan::take_capture_paper` = `plan::flood_fill_tiles` + the commit's
-  removal) and spends what it finds (logged), so every copy loses it and
-  nobody captures the same paper twice. A joiner not in the world, or one the
-  play mode or a plot keeps off that cell, spends nothing of the server's.
+- *The capture commit's paper.* A joined shared `plan::commit_capture_with_paper`
+  builds the same Plan body/marker and inserts it without consuming local
+  attachment copies; solo/host commits still consume paper immediately.
+  Eraser and place-over clears likewise wait for authority when joined.
+  On `PlanMinted { source: CaptureCommit }`, the server requires a live body
+  and reachable stamped start, then discovers the complete same-Y connected
+  blank-paper component with bounded bookkeeping (`checked_capture_tiles`).
+  Its bounding box may span at most 32 cells per axis (up to 1,024 tiles).
+  Every tile passes play-mode, plot and economy-owner permission before any
+  removal: a wider or forbidden component spends nothing, never a clipped
+  prefix. Accepted removals stream to every copy. The reported mint remains
+  log-only: an empty/repeated or refused removal can still mirror a Plan until
+  C3d gate 7 refuses it. Without a client footprint/version, adjacent changes
+  between dialog and commit may alter the server's consumed component.
 - *Develop on the server.* `GameServer::tick` runs `tick_develop` and
   `tick_develop_attachments` on its world (`SimSystem::Develop`, lent owner
   the server: on a lent world the host client skips it, one owner), on the
@@ -2856,6 +2858,8 @@ With this, no joiner inventory change is unmirrored (C3 design §3 rule 7).
 - *Known limits.* A `--no-lend` host (BRIDGE) keeps its client's attachments
   in the client's own world: the server's copy and the joiners never see the
   host's own paint, and a joiner's request lands only in the server's copy.
+  This can leave attachment divergence/orphans; the new solid peel guard
+  refuses gains from non-solid orphans, but does not unify these two worlds.
   A Plan laid flat, a laid Blueprint lifted and Plan bodies on the server stay
   out (C3c-3r refusals; Plan transfer later).
 - Pinned by `test_integration::attachments` (paint, lay, peel, a break's
@@ -4994,3 +4998,30 @@ inventory only; a cursor, grid or unacknowledged grant cannot pay that raw take
 and therefore costs belief even if the effective window holds it. A claim past
 the bound spawns nothing, tallied `drop_refused`;
 believed units are tallied `drop_believed`. C3d still removes this bounded belief.
+
+### Multiplayer small-fix boundaries (2026-10-09, protocol unchanged v87)
+
+Refused predicted-use undo previews its complete owed-product search on
+cloned bag/grid/cursor holdings. A short search changes no real slot and gives
+no cost back; full removal commits before the ordinary refund. Same-batch
+reverse order remains, but exact cross-frame lineage, repeated cell/kind
+notice attribution and retirement without an acceptance receipt remain OPEN
+for C3d action identity/resynchronisation. No equality-based ancestor retry
+consumes an independent real item returned by a later refusal. AIR Erase is
+Impossible and mirrors no PapyrusSheet or real unfit spill; a race over a real
+paper tile can still leave the losing client phantom until C3d replay.
+
+Joined placement of Vendor Block, Tip Jar, Market Bell and Auction Block
+keeps ordinary placement/payment but shows the existing own-world economy
+notice instead of inviting unavailable setup. Returned full-bodied cursor
+Plans use the normal no-hit-test icon/name painter once in playing UI,
+including bag-closed and book-open views. Pointer/controller anchors stay in
+the player's viewport, with a local fallback and clip; death, trial/scenario and blocking Controls screens
+retain priority. Actually parked Plans remain distinct: freeing a slot alone
+still does not invoke parked reseating, an OPEN C3d replay boundary.
+
+Web local Plan storage keeps bodies synchronously usable while transactions
+run. An aborted write receives two bounded retries (250 ms then 1 s), clearing
+its dirty record only on successful completion; permanent failure logs that
+only the in-memory body remains. It adds no network traffic or cookies and
+makes no unconditional durability claim.

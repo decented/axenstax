@@ -535,7 +535,8 @@ pub struct CommitResult {
     /// applied if Save-As was selected, plus the new self-entry).
     pub committed_plan: PlanData,
     /// World-space tile positions whose BlueprintBlank attachment was
-    /// consumed by the commit. The floor block at each is UNCHANGED — only
+    /// selected by the commit (consumed locally only for solo/host;
+    /// joined clients wait for authority). The floor block is UNCHANGED — only
     /// the attachment was removed. Caller rebuilds the chunks they live in
     /// to re-mesh away the decal. NOT broadcast as a BlockChange (the block
     /// didn't change, and attachments don't sync as block changes — same
@@ -558,11 +559,24 @@ pub struct CommitResult {
 /// derivative" checkbox ticked AND a parent was detected at capture
 /// time — caller looks the plan up from inventory at the
 /// `pending.parent_match` hotbar slot.
-pub fn commit_capture(
+#[cfg(test)]
+fn commit_capture(
     world: &mut World,
     inventory: &mut crate::inventory::Inventory,
     pending: &PendingCapture,
     parent_plan: Option<&PlanData>,
+) -> CommitResult {
+    commit_capture_with_paper(world, inventory, pending, parent_plan, true)
+}
+
+/// Prepare the same Plan for every client; joined clients leave paper to
+/// the authoritative attachment stream rather than consuming their copy.
+pub fn commit_capture_with_paper(
+    world: &mut World,
+    inventory: &mut crate::inventory::Inventory,
+    pending: &PendingCapture,
+    parent_plan: Option<&PlanData>,
+    consume_paper: bool,
 ) -> CommitResult {
     let mut data = pending.candidate.data.clone();
 
@@ -589,7 +603,7 @@ pub fn commit_capture(
     // Consume the BlueprintBlank top-attachment from each tile, leaving
     // the player's floor block intact. No refund (paper locked in per
     // the 2026-05-20 amendment + Spec 24 §"Paper economy").
-    remove_capture_paper(world, &pending.candidate.tile_positions);
+    if consume_paper { remove_capture_paper(world, &pending.candidate.tile_positions); }
 
     // Insert plan into inventory.
     let stack = crate::item::ItemStack {
@@ -608,25 +622,13 @@ pub fn commit_capture(
 /// Remove the blank paper (`BlueprintBlank` on the Top face) from each of
 /// `tiles`, leaving the floor blocks as they are: a capture's commit spends
 /// it. Each removal is logged for a server's stream like every setter.
-fn remove_capture_paper(world: &mut World, tiles: &[(i32, i32, i32)]) {
+pub(crate) fn remove_capture_paper(world: &mut World, tiles: &[(i32, i32, i32)]) {
     let top = crate::mesh::Face::Top.index();
     for &pos in tiles {
         if matches!(world.face_attachment_at(pos, top), Some(crate::world::FaceAttachment::BlueprintBlank)) {
             world.remove_face_attachment(pos, top);
         }
     }
-}
-
-/// C3c-3b — the server's half of a joiner's capture commit
-/// (`PlanMinted { source: CaptureCommit }`, whose cell is the stamped tile):
-/// find that capture's paper by re-running its read-only flood from `start`
-/// over THIS world ([`flood_fill_tiles`], the one the capture ran on the
-/// joiner's copy) and spend it as the commit does. Returns the tiles taken
-/// (none when `start` carries no blank paper here: already spent).
-pub fn take_capture_paper(world: &mut World, start: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
-    let tiles = flood_fill_tiles(world, start);
-    remove_capture_paper(world, &tiles);
-    tiles
 }
 
 // ─── Capture flood-fill (Phase 4) ─────────────────────────────────────
@@ -720,6 +722,42 @@ pub fn flood_fill_tiles(world: &World, start: (i32, i32, i32)) -> Vec<(i32, i32,
         }
     }
     result
+}
+
+/// Whole-component preflight for server capture spending. The footprint is
+/// bounded by axis extent, never clipped into a permitted prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapturePaperRefusal { Empty, TooLarge, Forbidden }
+
+pub fn checked_capture_tiles(
+    world: &World,
+    start: (i32, i32, i32),
+    permitted: impl Fn((i32, i32, i32)) -> bool,
+) -> Result<Vec<(i32, i32, i32)>, CapturePaperRefusal> {
+    use std::collections::{HashSet, VecDeque};
+    if !has_blank_paper(world, start) { return Err(CapturePaperRefusal::Empty); }
+    let mut queue = VecDeque::from([start]);
+    let mut visited = HashSet::from([start]);
+    let mut tiles = Vec::new();
+    let (mut min_x, mut max_x, mut min_z, mut max_z) = (start.0, start.0, start.2, start.2);
+    while let Some(pos) = queue.pop_front() {
+        if !permitted(pos) { return Err(CapturePaperRefusal::Forbidden); }
+        tiles.push(pos);
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let (Some(x), Some(z)) = (pos.0.checked_add(dx), pos.2.checked_add(dz)) else { continue };
+            let next = (x, pos.1, z);
+            if visited.contains(&next) || !has_blank_paper(world, next) { continue; }
+            min_x = min_x.min(x); max_x = max_x.max(x);
+            min_z = min_z.min(z); max_z = max_z.max(z);
+            if i64::from(max_x) - i64::from(min_x) + 1 > i64::from(MAX_FOOTPRINT)
+                || i64::from(max_z) - i64::from(min_z) + 1 > i64::from(MAX_FOOTPRINT) {
+                return Err(CapturePaperRefusal::TooLarge);
+            }
+            visited.insert(next);
+            queue.push_back(next);
+        }
+    }
+    Ok(tiles)
 }
 
 /// Connectivity flood: from every block sitting directly on a paper tile,
@@ -2001,7 +2039,8 @@ mod tests {
         let mut world = build_test_world_with_tiles(&positions);
         world.set_face_attachment((9, 70, 9), crate::mesh::Face::Top.index(), crate::world::FaceAttachment::BlueprintBlank);
         world.track_attachment_changes();
-        let taken = take_capture_paper(&mut world, (2, 70, 1));
+        let taken = checked_capture_tiles(&world, (2, 70, 1), |_| true).unwrap();
+        remove_capture_paper(&mut world, &taken);
         assert_eq!(taken.len(), 6);
         for p in &positions {
             assert!(world.face_attachment_at(*p, crate::mesh::Face::Top.index()).is_none(), "{p:?} spent");
@@ -2009,7 +2048,7 @@ mod tests {
         }
         assert!(world.face_attachment_at((9, 70, 9), crate::mesh::Face::Top.index()).is_some(), "unconnected paper stays");
         assert_eq!(world.take_attachment_changes().len(), 6, "each removal logged");
-        assert!(take_capture_paper(&mut world, (2, 70, 1)).is_empty(), "nothing to capture twice");
+        assert_eq!(checked_capture_tiles(&world, (2, 70, 1), |_| true), Err(CapturePaperRefusal::Empty), "nothing to capture twice");
     }
 
     #[test]
@@ -3531,4 +3570,45 @@ mod tests {
             "Spec 38: develop_state must be zeroed in the content hash"
         );
     }
+    #[test]
+    fn smallfix_capture_preflight_accepts_32_axes_not_32_tiles() {
+        let positions: Vec<_> = (0..32).flat_map(|x| (0..32).map(move |z| (x, 70, z))).collect();
+        let world = build_test_world_with_tiles(&positions);
+        let tiles = checked_capture_tiles(&world, (0, 70, 0), |_| true).unwrap();
+        assert_eq!(tiles.len(), 1024);
+        assert_eq!(tiles, flood_fill_tiles(&world, (0, 70, 0)), "deterministic BFS is preserved");
+    }
+
+    #[test]
+    fn smallfix_capture_preflight_refuses_whole_oversized_or_forbidden_component() {
+        for positions in [
+            (0..33).map(|x| (x, 70, 0)).collect::<Vec<_>>(),
+            (0..33).map(|z| (0, 70, z)).collect(),
+        ] {
+            let world = build_test_world_with_tiles(&positions);
+            assert_eq!(checked_capture_tiles(&world, positions[0], |_| true), Err(CapturePaperRefusal::TooLarge));
+            assert!(positions.iter().all(|&p| has_blank_paper(&world, p)));
+        }
+        let positions = [(0, 70, 0), (1, 70, 0), (2, 70, 0)];
+        let world = build_test_world_with_tiles(&positions);
+        assert_eq!(checked_capture_tiles(&world, positions[0], |p| p.0 != 2), Err(CapturePaperRefusal::Forbidden));
+        assert!(positions.iter().all(|&p| has_blank_paper(&world, p)));
+        assert_eq!(checked_capture_tiles(&world, (8, 70, 8), |_| true), Err(CapturePaperRefusal::Empty));
+        let edge = build_test_world_with_tiles(&[(i32::MAX, 70, i32::MIN)]);
+        assert_eq!(checked_capture_tiles(&edge, (i32::MAX, 70, i32::MIN), |_| true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn smallfix_joined_commit_keeps_paper_and_identical_plan_body() {
+        let mut solo_world = World::new();
+        let pending = make_pending(&mut solo_world);
+        let mut joined_world = build_test_world_with_tiles(&pending.candidate.tile_positions);
+        let solo = commit_capture(&mut solo_world, &mut crate::inventory::Inventory::new(), &pending, None);
+        let joined = commit_capture_with_paper(&mut joined_world, &mut crate::inventory::Inventory::new(), &pending, None, false);
+        assert_eq!(joined.committed_plan, solo.committed_plan);
+        assert_eq!(marker(&joined.committed_plan), marker(&solo.committed_plan));
+        assert!(pending.candidate.tile_positions.iter().all(|&p| has_blank_paper(&joined_world, p)));
+        assert!(pending.candidate.tile_positions.iter().all(|&p| !has_blank_paper(&solo_world, p)));
+    }
+
 }

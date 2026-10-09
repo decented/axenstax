@@ -1051,47 +1051,64 @@ pub fn draw_crafting_ui(
     // Controller slot-cursor: there is no meaningful pointer on a pad, so
     // while the pad cursor is active the carried item anchors beside the
     // focused slot instead of following the mouse.
-    if let Some(cursor) = &ui_state.cursor_item {
-        let anchor = if pad_focus.is_some() {
-            focused_rect.map(|r| r.right_top() + egui::vec2(10.0, 6.0))
-        } else {
-            ctx.input(|i| i.pointer.latest_pos())
-        };
-        if let Some(pos) = anchor {
-            let cursor_size = slot_size * 0.8;
-            let icon_rect = egui::Rect::from_center_size(pos, egui::vec2(cursor_size, cursor_size));
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Tooltip,
-                egui::Id::new(("cursor_item", player_index)),
-            ));
-            paint_item_icon(&painter, icon_rect, cursor, registry, egui_integration);
-
-            // Floating name label next to the cursor — so the player can read
-            // what they're carrying without having to drop it onto a slot.
-            let label_text = if cursor.count > 1 {
-                format!("{} ({})", cursor.item.name(registry), cursor.count)
-            } else {
-                cursor.item.name(registry)
-            };
-            let label_anchor = icon_rect.right_top() + egui::vec2(8.0, 0.0);
-            let font = egui::FontId::proportional(13.0);
-            let text_galley =
-                painter.layout_no_wrap(label_text.clone(), font.clone(), egui::Color32::WHITE);
-            let bg_rect = egui::Rect::from_min_size(
-                label_anchor + egui::vec2(-4.0, -2.0),
-                text_galley.size() + egui::vec2(8.0, 4.0),
-            );
-            painter.rect_filled(
-                bg_rect,
-                3.0,
-                egui::Color32::from_rgba_premultiplied(0, 0, 0, 200),
-            );
-            painter.galley(label_anchor, text_galley, egui::Color32::WHITE);
-        }
-    }
+    paint_carried_item(ctx, viewport, player_index, ui_state.cursor_item.as_ref(),
+        if pad_focus.is_some() { focused_rect.map(|r| r.right_top() + egui::vec2(10.0, 6.0)) } else { None },
+        pad_focus.is_some(), registry, egui_integration);
 
     click_target
 }
+
+/// A carried stack has no hit-test region, including outside the bag panel.
+/// Missing or another viewport's pointer uses a deterministic local anchor.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_carried_item(
+    ctx: &egui::Context,
+    viewport: &crate::screen::ViewportRect,
+    player_index: usize,
+    cursor: Option<&ItemStack>,
+    controller_anchor: Option<egui::Pos2>,
+    controller_active: bool,
+    registry: &BlockRegistry,
+    egui_integration: &EguiIntegration,
+) {
+    let Some(cursor) = cursor else { return };
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(viewport.x as f32, viewport.y as f32),
+        egui::vec2(viewport.width as f32, viewport.height as f32),
+    );
+    let pointer = if controller_active { None } else { ctx.input(|i| i.pointer.latest_pos()).filter(|p| rect.contains(*p)) };
+    let pos = controller_anchor.filter(|p| rect.contains(*p)).or(pointer).unwrap_or(rect.center() + egui::vec2(28.0, 28.0));
+    let cursor_size = 48.0 * 0.8;
+    let icon_rect = egui::Rect::from_center_size(pos, egui::vec2(cursor_size, cursor_size));
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new(("cursor_item", player_index)),
+    )).with_clip_rect(rect);
+    paint_item_icon(&painter, icon_rect, cursor, registry, egui_integration);
+
+    // Floating name label next to the cursor — so the player can read
+    // what they're carrying without having to drop it onto a slot.
+    let label_text = if cursor.count > 1 {
+        format!("{} ({})", cursor.item.name(registry), cursor.count)
+    } else {
+        cursor.item.name(registry)
+    };
+    let label_anchor = icon_rect.right_top() + egui::vec2(8.0, 0.0);
+    let font = egui::FontId::proportional(13.0);
+    let text_galley =
+        painter.layout_no_wrap(label_text.clone(), font.clone(), egui::Color32::WHITE);
+    let bg_rect = egui::Rect::from_min_size(
+        label_anchor + egui::vec2(-4.0, -2.0),
+        text_galley.size() + egui::vec2(8.0, 4.0),
+    );
+    painter.rect_filled(
+        bg_rect,
+        3.0,
+        egui::Color32::from_rgba_premultiplied(0, 0, 0, 200),
+    );
+    painter.galley(label_anchor, text_galley, egui::Color32::WHITE);
+}
+
 
 /// Spec 28e — material → swatch colour. Matches the values in
 /// `Item::color` for armour so the slot column and the inventory grid

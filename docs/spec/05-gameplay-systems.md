@@ -4247,3 +4247,11 @@ what does not fit stays in the grave. The host's own grave placement and removal
 are broadcast. Single-player keeps its original death and recovery rules.
 Fresh Test Lab and Workshop join kits come from the server, including the
 deterministic starter-hut Plan, rather than being created twice by each seat.
+
+**Multiplayer carried Plan visibility (2026-10-09).** A refused hang returning
+a full Plan to the cursor paints its ordinary icon/name without opening the
+bag, including the recipe-book view. The painter creates no hit-test widget,
+clips to the player's viewport and uses a local fallback when there is no
+pointer/controller anchor. Death and critical screens retain priority. A
+Plan parked behind an occupied cursor is not drawn as another carried stack;
+freeing a bag slot alone still does not trigger parked reseating (C3d OPEN).

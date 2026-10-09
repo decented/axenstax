@@ -2313,6 +2313,11 @@ impl HostedServer {
             if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
                 return Err(ItemNote::NotHere);
             }
+            let current = self.server.world.get_block(cell[0], cell[1], cell[2]);
+            let npub = verified_npub(sp.verified_pubkey);
+            if !economy_owner_allows(&self.server.world, pos, current, npub.as_deref()) {
+                return Err(ItemNote::NotHere);
+            }
             crate::blueprint_attach::attach_rule(&self.server.world, &self.server.registry, pos, usize::from(face), *block)
                 .map_err(crate::blueprint_attach::AttachRefusal::note)
         })();
@@ -2381,6 +2386,14 @@ impl HostedServer {
             if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
                 return Err(ItemNote::NotHere);
             }
+            let current = self.server.world.get_block(cell[0], cell[1], cell[2]);
+            let npub = verified_npub(sp.verified_pubkey);
+            if !economy_owner_allows(&self.server.world, pos, current, npub.as_deref()) {
+                return Err(ItemNote::NotHere);
+            }
+            if !self.server.registry.is_solid(current) {
+                return Err(ItemNote::NotHere);
+            }
             match self.server.world.face_attachment_at(pos, usize::from(face)) {
                 Some(FaceAttachment::Wallpaper(_) | FaceAttachment::BlueprintBlank) => Ok(()),
                 Some(FaceAttachment::Blueprint(_)) | None => Err(ItemNote::NothingToTake),
@@ -2406,18 +2419,22 @@ impl HostedServer {
 
     /// C3c-3b — joiner `i` committed a capture whose stamped tile is `cell`
     /// (`PlanMinted { source: CaptureCommit }`): the blank paper of that
-    /// capture leaves the SERVER's world (`plan::take_capture_paper`: the
-    /// capture's own read-only flood from `cell`, re-run here, then each
-    /// tile's paper removed — logged, so every joiner's copy loses it and
-    /// nobody captures the same paper twice). A joiner whose body is gone,
-    /// or who may not touch that cell (the play mode, a plot), spends
-    /// nothing of the server's.
+    /// capture leaves the SERVER's world (`plan::checked_capture_tiles`: the
+    /// bounded whole-component preflight from `cell`, then each tile's
+    /// paper removed — logged for every copy). Reach and every tile's
+    /// permissions pass before mutation. Mint itself remains log-only.
     fn take_capture_paper(&mut self, i: usize, cell: [i32; 3]) {
         let Some(sp) = self.server.players.get(i) else { return };
-        if !sp.server_simulated || !sp.is_in_world() || self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+        if !sp.server_simulated || !sp.is_present_and_alive()
+            || !crate::container_window::container_in_server_reach(sp.player.eye_pos(), cell) {
             return;
         }
-        let _ = crate::plan::take_capture_paper(&mut self.server.world, (cell[0], cell[1], cell[2]));
+        let npub = verified_npub(sp.verified_pubkey);
+        let Ok(tiles) = crate::plan::checked_capture_tiles(&self.server.world, (cell[0], cell[1], cell[2]), |pos| {
+            self.remote_may_touch(sp, pos.0, pos.2).is_ok()
+                && economy_owner_allows(&self.server.world, pos, self.server.world.get_block(pos.0, pos.1, pos.2), npub.as_deref())
+        }) else { return };
+        crate::plan::remove_capture_paper(&mut self.server.world, &tiles);
     }
 
     /// C3c-2 — the hotbar slot an item action of joiner `i` names, or its
@@ -4482,7 +4499,7 @@ impl HostedServer {
                         let simulated = sp.server_simulated;
                         if simulated && sp.combat.dead {
                             for bc in &input.block_changes {
-                                self.send_back_authoritative_block(bc, &mut budget);
+                                self.send_back_refused_edit(bc, &mut budget);
                             }
                             continue;
                         }
@@ -4786,7 +4803,7 @@ impl HostedServer {
         let earlier_life = self.server.players.get(i).is_some_and(|sp| sp.respawns != group.life);
         if self.joiner_requests_blocked(i) || earlier_life {
             while let Some((bc, tag, _)) = group.pop_front() {
-                self.send_back_authoritative_block(&bc, budget);
+                self.send_back_refused_edit(&bc, budget);
                 if let Some(use_tag) = tag.as_ref().and_then(|t| t.use_tag()) {
                     self.refuse_use(i, &bc, use_tag.kind, crate::item_actions::ItemNote::NotNow);
                 }
@@ -4803,7 +4820,7 @@ impl HostedServer {
             // C3a-fix-1 (C-M1) — and the slot and hand the edit itself was
             // made with, when its input said (`InputPacket.edit_hands`).
             let slot = hand.slot().map_or_else(|| self.server.players[i].hotbar_slot, usize::from);
-            self.process_one_edit(i, &bc, tag, hand.held(), slot, budget, group);
+            self.process_one_edit(i, &bc, tag, hand.held(), slot, budget);
         }
     }
 
@@ -4820,7 +4837,6 @@ impl HostedServer {
         hand: (u8, u16),
         slot: usize,
         budget: &mut EditTickBudget,
-        ahead: &crate::edit_queue::EditGroup,
     ) {
         let remote = self.server.players[i].server_simulated;
         let use_tag = tag.as_ref().and_then(|t| t.use_tag()).filter(|_| remote);
@@ -4828,7 +4844,8 @@ impl HostedServer {
             log::debug!("Refused slot {i}'s edit at ({}, {}, {}): {why:?}", bc.x, bc.y, bc.z);
             // Un-ghost the refused edit on the sender: re-send what is
             // really there.
-            self.send_back_authoritative_block(bc, budget);
+            if remote { self.send_back_refused_edit(bc, budget); }
+            else { self.send_back_authoritative_block(bc, budget); }
             // C3c-1-fix (M-4) — and a use's: tell the joiner, which undoes it
             // (its cost back, its product taken back) from its own record.
             if let Some(use_tag) = use_tag {
@@ -4861,7 +4878,7 @@ impl HostedServer {
                 && u.explained()
                 && !crate::use_edits::below_holds_a_door_bottom(&self.server.world, bc)
             {
-                self.send_back_authoritative_block(bc, budget);
+                self.send_back_refused_edit(bc, budget);
                 self.refuse_use(i, bc, u.tag.kind, crate::item_actions::ItemNote::None);
                 return;
             }
@@ -5046,18 +5063,13 @@ impl HostedServer {
         if self.lends_host_world() {
             self.lent_edit_cells.push(cell);
         }
-        // C3c-2-fix (F-L1) — a door breaks whole ON THE SERVER: a joiner's
-        // edit that takes a door half out takes its pair too (queued after
-        // it), unless this same input breaks that pair with its own `mined`
-        // tag next (the break arm sends the other half's AIR first).
+        // Joined break packets name the selected half only. Derive the
+        // matching half once; another mined tag then finds AIR and yields nothing.
         if remote
             && old_block == crate::block::OAK_DOOR
             && bc.new_block != crate::block::OAK_DOOR
         {
-            let pair_y = if crate::block_shape::door_is_top(old_meta) { bc.y - 1 } else { bc.y + 1 };
-            if !ahead.mined_ahead((bc.x, pair_y, bc.z)) {
-                self.clear_door_pair(cell, old_meta);
-            }
+            self.clear_door_pair(cell, old_meta);
         }
         // FU3 (FU1 verify N3) — a joiner's campfire edit: the server runs the
         // campfire rule itself, so the joiner sends the one edit, not the
@@ -5101,16 +5113,24 @@ impl HostedServer {
         }
     }
 
-    /// C3c-2-fix (F-L1, C3d gate 6 pulled forward) — a joiner's accepted
-    /// edit took the door half at `cell` (whose meta was `old_meta`) out: its
-    /// matching half (the bottom below a top, the top above a bottom) goes
-    /// too, and the change is queued after the edit's, so every seat loses
-    /// the whole door. A refused send-back of that half queued earlier is
-    /// overtaken (one ordered list). Nothing yields: the broken half's own
-    /// tag yields the one door. Already AIR (the client's own edit of it
-    /// landed first), or not the matching half: nothing to do. So a door at
-    /// the reach edge whose far half's AIR is refused, or a modified client
-    /// that sends one half alone, leaves no floating half.
+    /// Restore a refused primary and its live authoritative door pair,
+    /// spending the existing send-back credits for each cell separately.
+    fn send_back_refused_edit(&mut self, bc: &protocol::BlockChange, budget: &mut EditTickBudget) {
+        self.send_back_authoritative_block(bc, budget);
+        if bc.new_block == crate::block::OAK_DOOR
+            || self.server.world.get_block(bc.x, bc.y, bc.z) != crate::block::OAK_DOOR {
+            return;
+        }
+        let top = crate::block_shape::door_is_top(self.server.world.meta_at(bc.x, bc.y, bc.z));
+        let Some(y) = bc.y.checked_add(if top { -1 } else { 1 }) else { return };
+        if self.server.world.get_block(bc.x, y, bc.z) == crate::block::OAK_DOOR
+            && crate::block_shape::door_is_top(self.server.world.meta_at(bc.x, y, bc.z)) != top {
+            let pair = protocol::BlockChange { x: bc.x, y, z: bc.z, new_block: crate::block::AIR, meta: 0 };
+            self.send_back_authoritative_block(&pair, budget);
+        }
+    }
+
+    /// Remove the live matching half and recover its attachments once.
     fn clear_door_pair(&mut self, (x, y, z): (i32, i32, i32), old_meta: u8) {
         let top = crate::block_shape::door_is_top(old_meta);
         let pair = (x, if top { y - 1 } else { y + 1 }, z);
@@ -5120,6 +5140,9 @@ impl HostedServer {
         {
             return;
         }
+        // The paired half has the same attachment recovery as the primary.
+        self.settle_edit_attachments(pair, crate::block::OAK_DOOR, crate::block::AIR, false);
+        let world = &mut self.server.world;
         world.set_block(pair.0, pair.1, pair.2, crate::block::AIR);
         world.set_meta(pair, 0);
         world.set_placed(pair.0, pair.1, pair.2, false);

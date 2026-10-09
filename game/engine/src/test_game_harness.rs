@@ -3421,7 +3421,7 @@ mod tests {
         hg.state.players[0].pending_capture = Some(pending());
         hg.state.confirm_capture(0);
         let plan = plan_in(&hg.state.players[0].inventory, 5).expect("the client's Plan");
-        assert!(hg.state.world.face_attachment_at(tile, top).is_none(), "the tile's paper was consumed");
+        assert_eq!(hg.state.world.face_attachment_at(tile, top), Some(&FaceAttachment::BlueprintBlank), "joined paper waits for authority");
         for _ in 0..3 {
             harness_step(&mut server, &mut hg);
         }
@@ -3603,4 +3603,226 @@ mod tests {
         let sp = &server.server.players[slot];
         assert_eq!(sp.possession.mismatched, 0, "every take paid from the server's copy");
     }
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_smallfix_refused_plan_is_visible_on_first_closed_and_book_frame() {
+        use crate::item::{Item, ItemStack};
+        use crate::plan::PlanData;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("smallfix-cursor");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let plan = PlanData { name: "Smallfix cursor identity 92741".to_string(), ..PlanData::debug_3x3_stone() };
+        let stone = ItemStack::new_block(crate::block::STONE, 64);
+        for k in 1..36 {
+            hg.state.players[0].inventory.set_slot(k, Some(stone.clone()));
+            server.server.players[slot].inventory.set_slot(k, Some(stone.clone()));
+        }
+        hg.state.players[0].inventory.set_slot(0, Some(ItemStack { item: Item::Plan(plan.clone()), count: 1 }));
+        server.server.players[slot].inventory.set_slot(0, Some(ItemStack {
+            item: Item::Plan(PlanData::marker_placeholder(crate::plan::marker(&plan), true)), count: 1 }));
+        hg.state.players[0].hotbar_slot = 0;
+        let wall = wall_ahead(&mut hg, &mut server, feet);
+        foreign_plot_on_server(&mut server, wall);
+        harness_step(&mut server, &mut hg);
+        aim_at_wall(&mut hg, wall);
+        right_click(&mut hg);
+        assert!(hg.state.players[0].inventory.slot(0).is_none(), "the real hang spent its Plan");
+        hg.state.players[0].inventory.set_slot(0, Some(stone));
+        assert!(!hg.state.players[0].crafting_ui.open);
+        let captured = hg.state.input.cursor_captured;
+        let mut found = false;
+        for _ in 0..60 {
+            harness_step(&mut server, &mut hg);
+            if hg.state.players[0].crafting_ui.cursor_item.is_some() { found = true; break; }
+        }
+        assert!(found, "the actual refusal returned the full Plan onto the cursor");
+        let cursor = hg.state.players[0].crafting_ui.cursor_item.as_ref().unwrap();
+        assert_eq!(cursor, &ItemStack { item: Item::Plan(plan.clone()), count: 1 });
+        assert_eq!(hg.state.input.cursor_captured, captured, "painting does not release capture");
+        let texts = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().filter_map(|s| {
+            if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text()) } else { None }
+        }).filter(|text| *text == plan.name).count();
+        assert_eq!(texts(&hg.state.renderer.egui.last_shapes), 1, "first refusal frame paints its unique carried name once");
+        let centre = egui::pos2(668.0, 388.0);
+        assert!(hg.state.renderer.egui.last_shapes.iter().any(|s| match &s.shape {
+            egui::Shape::Rect(r) => (r.rect.center() - centre).length() < 0.1 && (r.rect.width() - 38.4).abs() < 0.1,
+            _ => false,
+        }), "the actual carried icon uses the pointer-free viewport anchor");
+        hg.state.players[0].crafting_ui.open = true;
+        hg.state.players[0].crafting_ui.book_open = true;
+        hg.frames(1);
+        assert_eq!(texts(&hg.state.renderer.egui.last_shapes), 1, "book paints the cursor exactly once");
+        hg.state.players[0].crafting_ui.book_open = false;
+        hg.state.players[0].crafting_ui.pad_focus = Some(crate::craft_ui::PadSlot::Inv(5));
+        hg.state.players[0].inventory.set_slot(5, None);
+        hg.frames(1);
+        assert_eq!(texts(&hg.state.renderer.egui.last_shapes), 1, "grid paints the cursor exactly once");
+        // A newly opened egui Area has sizing/fade frames before its slot
+        // border is opaque. The first carried paint assertion above remains
+        // immediate; seating waits for the actual visible panel geometry.
+        for _ in 0..20 {
+            if hg.state.renderer.egui.last_shapes.iter().any(|s| matches!(&s.shape,
+                egui::Shape::Rect(r) if r.stroke.color == egui::Color32::from_rgb(255, 210, 80))) { break; }
+            hg.frames(1);
+        }
+        let target_rect = hg.state.renderer.egui.last_shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Rect(r) if r.stroke.color == egui::Color32::from_rgb(255, 210, 80) => Some(r.rect),
+            _ => None,
+        }).expect("the actual focused slot has its visible controller border");
+        let viewport = crate::screen::ViewportRect::full(1280, 720);
+        let ctx = hg.state.renderer.egui.ctx.clone();
+        let mut actual_click = crate::craft_ui::ClickTarget::None;
+        for pressed in [true, false] {
+            ctx.begin_pass(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+                events: vec![egui::Event::PointerMoved(target_rect.center()), egui::Event::PointerButton {
+                    pos: target_rect.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }],
+                ..Default::default() });
+            let p = &mut hg.state.players[0];
+            p.crafting_ui.pad_focus = None;
+            actual_click = crate::craft_ui::draw_crafting_ui(&ctx, &viewport, 0, &mut p.crafting_ui,
+                &p.inventory, &p.armour_slots, &hg.state.registry, &hg.state.renderer.egui);
+            let _ = ctx.end_pass();
+        }
+        assert!(matches!(actual_click, crate::craft_ui::ClickTarget::InventorySlot(5, false)),
+            "the carried painter over the slot lets its real pointer click through");
+        let p = &mut hg.state.players[0];
+        assert!(p.crafting_ui.click_inventory_slot(5, &mut p.inventory, false), "ordinary slot seating succeeds");
+        assert_eq!(plan_in(&p.inventory, 5), Some(plan));
+        assert!(p.crafting_ui.cursor_item.is_none());
+        hg.frames(1);
+        assert_eq!(hg.state.players[0].inventory.slots_iter().flatten().filter(|s| matches!(s.item, Item::Plan(_))).count(), 1);
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_smallfix_four_economy_placements_cost_once_and_explain_unavailable_setup() {
+        use crate::block;
+        use crate::item::{Item, ItemStack};
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("smallfix-economy-place");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let floor = [feet[0], feet[1] - 1, feet[2] - 3];
+        let cell = [floor[0], floor[1] + 1, floor[2]];
+        for kind in [block::VENDOR_BLOCK, block::TIP_JAR, block::MARKET_BELL, block::AUCTION_BLOCK] {
+            for w in [&mut hg.state.world, &mut server.server.world] {
+                w.set_block(cell[0], cell[1], cell[2], block::AIR);
+            }
+            let item = Item::Block(kind);
+            for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+                inv.set_slot(0, Some(ItemStack { item: item.clone(), count: 2 }));
+            }
+            hg.state.players[0].hotbar_slot = 0;
+            harness_step(&mut server, &mut hg);
+            aim_at(&mut hg, glam::Vec3::new(floor[0] as f32 + 0.5, floor[1] as f32 + 0.98, floor[2] as f32 + 0.5));
+            right_click(&mut hg);
+            assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), kind, "placed {kind}");
+            assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_ECONOMY_TOAST));
+            settle(&mut server, &mut hg);
+            copy_holds(&mut server, &mut hg, slot, &item, 1);
+            assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), kind, "authority placed {kind}");
+            assert_eq!(held_units(&hg.state.players[0].inventory, &item), 1, "one cost {kind}");
+            hg.state.toast = None;
+            aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.3, cell[2] as f32 + 0.5));
+            right_click(&mut hg);
+            let p = &hg.state.players[0];
+            assert!(p.open_vendor.is_none() && p.open_tip_jar.is_none() && p.open_market_hub.is_none() && p.open_auction.is_none());
+            assert_eq!(toast_text(&hg).as_deref(), Some(crate::remote_mobs::JOINED_ECONOMY_TOAST));
+            assert_eq!(held_units(&p.inventory, &item), 1, "refused setup costs nothing");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_smallfix_eraser_and_place_over_leave_attachment_copies_until_authority() {
+        use crate::block;
+        use crate::item::{Item, ItemStack};
+        use crate::world::FaceAttachment;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("smallfix-attachment-copies");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let floor = [feet[0], feet[1] - 1, feet[2] - 2];
+        let cell = [floor[0], floor[1] + 1, floor[2]];
+        let pos = (cell[0], cell[1], cell[2]);
+        let face = crate::mesh::Face::South.index();
+        for erase in [true, false] {
+            for refuse in [true, false] {
+                server.server.world.plots.clear();
+                let old = if erase { block::BLUEPRINT_PAPER } else { block::AIR };
+                for w in [&mut hg.state.world, &mut server.server.world] {
+                    w.set_block(cell[0], cell[1], cell[2], old);
+                    w.set_face_attachment(pos, face, FaceAttachment::Wallpaper(block::WALLPAPER_RED));
+                }
+                if refuse { foreign_plot_on_server(&mut server, cell); }
+                let item = if erase { Item::Tool(crate::crafting::Tool::new(crate::crafting::ToolType::Eraser, crate::crafting::ToolMaterial::Wood)) } else { Item::Block(block::OAK_PLANKS) };
+                for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+                    inv.set_slot(0, Some(ItemStack { item: item.clone(), count: if erase { 1 } else { 2 } }));
+                }
+                hg.state.players[0].hotbar_slot = 0;
+                harness_step(&mut server, &mut hg);
+                let aim = if erase { glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5) }
+                    else { glam::Vec3::new(floor[0] as f32 + 0.5, floor[1] as f32 + 0.98, floor[2] as f32 + 0.5) };
+                aim_at(&mut hg, aim); right_click(&mut hg);
+                assert_eq!(hg.state.world.face_attachment_at(pos, face), Some(&FaceAttachment::Wallpaper(block::WALLPAPER_RED)),
+                    "the real joined arm leaves paper copies immediately (erase {erase}, refused {refuse})");
+                let predicted = if erase { block::AIR } else { block::OAK_PLANKS };
+                assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), predicted, "the actual arm made its optimistic edit");
+                let authoritative = if refuse { old } else { predicted };
+                let expected = refuse.then_some(FaceAttachment::Wallpaper(block::WALLPAPER_RED));
+                // These are block edits, not ItemActions. Wait for their actual
+                // correction/attachment stream rather than an empty request list.
+                for _ in 0..40 {
+                    harness_step(&mut server, &mut hg);
+                    if server.server.world.get_block(cell[0], cell[1], cell[2]) == authoritative
+                        && hg.state.world.get_block(cell[0], cell[1], cell[2]) == authoritative
+                        && hg.state.world.face_attachment_at(pos, face) == expected.as_ref()
+                        && (!refuse || !erase || hg.state.sent_uses.len() == 0) { break; }
+                }
+                assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), authoritative, "the client received authority correction (erase {erase}, refused {refuse})");
+                if refuse && erase {
+                    assert_eq!(hg.state.sent_uses.len(), 0, "the Eraser refusal reached its actual undo callback");
+                }
+                assert_eq!(server.server.world.face_attachment_at(pos, face), expected.as_ref(), "erase {erase}, refused {refuse}: actual authority");
+                assert_eq!(hg.state.world.face_attachment_at(pos, face), expected.as_ref(), "only the actual stream clears accepted edits");
+                assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), if refuse { old } else if erase { block::AIR } else { block::OAK_PLANKS });
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_smallfix_carried_paint_stays_in_viewport_and_below_death_priority() {
+        use crate::item::{Item, ItemStack};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("smallfix-carried-viewports");
+        let plan = crate::plan::PlanData { name: "Smallfix viewport cursor 19037".to_string(), ..crate::plan::PlanData::debug_3x3_stone() };
+        let stack = ItemStack { item: Item::Plan(plan.clone()), count: 1 };
+        let viewport = crate::screen::ViewportRect { x: 640, y: 0, width: 640, height: 720 };
+        let clip = egui::Rect::from_min_size(egui::pos2(640.0, 0.0), egui::vec2(640.0, 720.0));
+        let ctx = hg.state.renderer.egui.ctx.clone();
+        for controller in [false, true] {
+            ctx.begin_pass(egui::RawInput { events: vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))], ..Default::default() });
+            crate::craft_ui::paint_carried_item(&ctx, &viewport, 1, Some(&stack), None, controller, &hg.state.registry, &hg.state.renderer.egui);
+            let output = ctx.end_pass();
+            assert!(output.shapes.iter().all(|s| s.clip_rect == clip));
+            assert!(output.shapes.iter().any(|s| match &s.shape {
+                egui::Shape::Rect(r) => (r.rect.center() - egui::pos2(988.0, 388.0)).length() < 0.1 && (r.rect.width() - 38.4).abs() < 0.1,
+                _ => false,
+            }), "foreign pointer or missing controller uses its own viewport fallback");
+        }
+        hg.state.players[0].crafting_ui.cursor_item = Some(stack);
+        hg.state.players[0].combat.dead = true;
+        hg.frames(1);
+        assert!(hg.state.renderer.egui.last_shapes.iter().all(|s| match &s.shape {
+            egui::Shape::Text(t) => t.galley.text() != plan.name,
+            _ => true,
+        }), "death screen keeps priority over carried paint");
+        hg.state.players[0].combat.dead = false;
+        hg.state.controls_card_open = true;
+        hg.frames(1);
+        assert!(hg.state.renderer.egui.last_shapes.iter().all(|s| match &s.shape {
+            egui::Shape::Text(t) => t.galley.text() != plan.name,
+            _ => true,
+        }), "the blocking Controls card also keeps priority");
+    }
+
 }

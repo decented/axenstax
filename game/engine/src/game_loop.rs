@@ -11668,12 +11668,13 @@ impl super::GameState {
                                     if self.world.get_block(pos[0], cy, pos[2]) == block::OAK_DOOR {
                                         self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                         self.world.set_meta((pos[0], cy, pos[2]), 0);
-                                        // C3c-1-fix (M-3) — and so does
-                                        // everyone else: the other half goes
-                                        // as its own untagged edit (no
-                                        // drop), as the broken half does.
+                                        // Joined authority derives the matching half from
+                                        // the selected primary. Host/local broadcasts
+                                        // still carry their already-applied pair.
                                         #[cfg(not(target_arch = "wasm32"))]
-                                        self.pending_block_changes.push(broadcast_change(&self.world, pos[0], cy, pos[2], block::AIR));
+                                        if !self.joined() {
+                                            self.pending_block_changes.push(broadcast_change(&self.world, pos[0], cy, pos[2], block::AIR));
+                                        }
                                         crate::lighting::update_for_block_change(
                                             &mut self.world,
                                             (pos[0], cy, pos[2]),
@@ -12064,13 +12065,13 @@ impl super::GameState {
                                         {
                                             self.world.set_block(pos[0], cy, pos[2], block::AIR);
                                             self.world.set_meta((pos[0], cy, pos[2]), 0);
-                                            // C3c-1-fix (M-3) — and so does
-                                            // everyone else: the other half
-                                            // goes as its own untagged edit
-                                            // (no drop; the broken half's
-                                            // `mined` tag yields the door).
+                                            // Joined authority derives the matching half;
+                                            // only the primary carries the mined tag.
+                                            // Host/local broadcasts still carry the pair.
                                             #[cfg(not(target_arch = "wasm32"))]
+                                            if !self.joined() {
                                             self.pending_block_changes.push(broadcast_change(&self.world, pos[0], cy, pos[2], block::AIR));
+                                        }
                                             crate::lighting::update_for_block_change(
                                                 &mut self.world,
                                                 (pos[0], cy, pos[2]),
@@ -15028,7 +15029,9 @@ impl super::GameState {
                         // Owner-inbox #1/2/3 — erasing the tile clears its
                         // wallpaper overlays so none orphan onto the bare cell
                         // (resurface as phantom wallpaper + dupe-on-break later).
-                        let _ = self.world.remove_face_attachments_at((pos[0], pos[1], pos[2]));
+                        if !self.joined() {
+                            let _ = self.world.remove_face_attachments_at((pos[0], pos[1], pos[2]));
+                        }
                         self.rebuild_chunk_at(pos[0], pos[1], pos[2]);
                         let paper = crate::item::ItemStack::new_material(
                             crate::item::MaterialId::PapyrusSheet, 1,
@@ -16084,9 +16087,9 @@ impl super::GameState {
                                     // a non-break mutator) — else it resurfaces
                                     // as phantom wallpaper + a free-item dupe on
                                     // break, and blocks legitimate painting here.
-                                    let _ = self
-                                        .world
-                                        .remove_face_attachments_at((place_x, place_y, place_z));
+                                    if !self.joined() {
+                                        let _ = self.world.remove_face_attachments_at((place_x, place_y, place_z));
+                                    }
                                     // Spec 19 phase 10 — Village Bell side-
                                     // table registration. The wanderer-
                                     // migration scan reads this each tick.
@@ -16113,7 +16116,9 @@ impl super::GameState {
                                             data,
                                         );
                                         self.toast = Some((
-                                            "Vendor Block placed — right-click to set up your shop.".to_string(),
+                                            if self.joined() {
+                                                crate::remote_mobs::JOINED_ECONOMY_TOAST.to_string()
+                                            } else { "Vendor Block placed — right-click to set up your shop.".to_string() },
                                             Instant::now() + Duration::from_secs(3),
                                         ));
                                     }
@@ -16135,7 +16140,9 @@ impl super::GameState {
                                             data,
                                         );
                                         self.toast = Some((
-                                            "Tip Jar placed — right-click to view tips.".to_string(),
+                                            if self.joined() {
+                                                crate::remote_mobs::JOINED_ECONOMY_TOAST.to_string()
+                                            } else { "Tip Jar placed — right-click to view tips.".to_string() },
                                             Instant::now() + Duration::from_secs(3),
                                         ));
                                     }
@@ -16236,8 +16243,10 @@ impl super::GameState {
                                             ),
                                         );
                                         self.toast = Some((
-                                            "Market Hub created — /market finds it; \
-                                             right-click for the directory.".to_string(),
+                                            if self.joined() {
+                                                crate::remote_mobs::JOINED_ECONOMY_TOAST.to_string()
+                                            } else { "Market Hub created — /market finds it; \
+                                             right-click for the directory.".to_string() },
                                             Instant::now() + Duration::from_secs(4),
                                         ));
                                     }
@@ -16252,8 +16261,10 @@ impl super::GameState {
                                             ),
                                         );
                                         self.toast = Some((
-                                            "Auction Block placed — right-click to set a lot."
-                                                .to_string(),
+                                            if self.joined() {
+                                                crate::remote_mobs::JOINED_ECONOMY_TOAST.to_string()
+                                            } else { "Auction Block placed — right-click to set a lot."
+                                                .to_string() },
                                             Instant::now() + Duration::from_secs(3),
                                         ));
                                     }
@@ -17233,6 +17244,15 @@ impl super::GameState {
             let dialogue_satoshi_target = self.players[pidx].dialogue_satoshi;
             let pending_build = self.players[pidx].pending_build_choice.clone();
             let painter_open = pidx == 0 && self.workshop_painter.open;
+
+            let critical = is_dead || self.controls_card_open || (pidx == 0 && self.trial_outcome.is_some())
+                || self.scenario.as_ref().is_some_and(|s| s.shows_blocking_end_card());
+            if !critical && !painter_open && (!crafting_open || self.players[pidx].crafting_ui.book_open) {
+                let ui = &self.players[pidx].crafting_ui;
+                crate::craft_ui::paint_carried_item(&self.renderer.egui.ctx, &screen.viewport,
+                    pidx, ui.cursor_item.as_ref(), None, ui.pad_focus.is_some(),
+                    &self.registry, &self.renderer.egui);
+            }
 
             if pidx == 0 && self.trial_outcome.is_some() {
                 // Trials (⚡ Race) — the "Well done!" completion panel. Celebrate,
@@ -22383,8 +22403,8 @@ impl super::GameState {
     }
 
     /// Spec 24 Phase 5 — player `pidx` confirmed the Capture dialog: commit
-    /// its pending capture (`plan::commit_capture`: the Plan to the bag, the
-    /// paper tiles consumed), as the dialog's Confirm button does.
+    /// its pending capture (the Plan to the bag, paper consumed locally only
+    /// for solo/host), as the dialog's Confirm button does.
     ///
     /// C3c-3a — a joined client mints only what its bag can hold: a Plan
     /// that wouldn't fit is refused BEFORE anything happens ("Make room for
@@ -22428,11 +22448,13 @@ impl super::GameState {
         // Take the pending so commit can consume it.
         let pending = self.players[pidx].pending_capture.take().unwrap();
         let last_lic = pending.candidate.data.license;
-        let result = crate::plan::commit_capture(
+        let consume_paper = !self.joined();
+        let result = crate::plan::commit_capture_with_paper(
             &mut self.world,
             &mut self.players[pidx].inventory,
             &pending,
             parent_plan.as_ref(),
+            consume_paper,
         );
         if result.plan_inserted { crate::plan_store::remember(&result.committed_plan); }
         // Sticky licence pref for next capture.

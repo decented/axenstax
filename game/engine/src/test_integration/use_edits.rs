@@ -1081,7 +1081,8 @@ fn a_door_broken_at_the_reach_edge_breaks_whole_on_the_server() {
         health: 20.0,
         held_kind: k,
         held_id: id,
-        // The survival break arm's order: the other half first, untagged.
+        // A legacy/modified packet sends the far untagged half first;
+        // accepting the near primary must still remove the matching pair.
         block_changes: vec![air(bottom), air(top)],
         edit_hands: vec![(0, k, id), (0, k, id)],
         mined: vec![mined],
@@ -1133,9 +1134,9 @@ fn a_refused_fill_emptied_before_its_notice_mints_no_bucket() {
     assert_eq!(units(&rig.c.inv, &mat(MaterialId::WaterBucket)), 0);
 }
 
-/// M-3 — a joiner breaks one half of its door: its break arm sends the other
-/// half's AIR as its own untagged edit beside the broken half's (with its
-/// `mined` tag). The server and another joiner lose both halves, the breaker
+/// A joiner breaks one half of its door: its break arm sends only the
+/// selected primary with its mined tag. Authority derives the matching
+/// pair. The server and another joiner lose both halves, the breaker
 /// gets one door (the tagged half's yield), and there is no second door
 /// anywhere. Both halves, each way round.
 #[test]
@@ -1151,10 +1152,9 @@ fn a_joiner_breaking_either_half_of_a_door_takes_the_whole_door_everywhere() {
         rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
         rig.tick();
         let _ = super::joiner_authority::block_changes_seen(&other);
-        let (broken, rest) = if broken_top { (top, ABOVE) } else { (ABOVE, top) };
+        let (broken, _rest) = if broken_top { (top, ABOVE) } else { (ABOVE, top) };
         let air = |c: [i32; 3]| protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: block::AIR, meta: 0 };
-        // The survival break arm: the other half first (untagged), then the
-        // broken half with its `mined` tag.
+        // The joined survival arm sends only the selected half with its mined tag.
         let (_, (k, id)) = rig.hand_now();
         let mined = protocol::MinedBlock { x: broken[0], y: broken[1], z: broken[2], tool: protocol::WireItem::None };
         let input = protocol::InputPacket {
@@ -1165,8 +1165,8 @@ fn a_joiner_breaking_either_half_of_a_door_takes_the_whole_door_everywhere() {
             health: 20.0,
             held_kind: k,
             held_id: id,
-            block_changes: vec![air(rest), air(broken)],
-            edit_hands: vec![(0, k, id), (0, k, id)],
+            block_changes: vec![air(broken)],
+            edit_hands: vec![(0, k, id)],
             mined: vec![mined],
             events_applied: rig.c.events,
             ..Default::default()
@@ -1554,4 +1554,90 @@ fn a_joiners_capture_commit_lands_its_marker_and_a_short_mint_is_counted() {
     assert!(holds_plan(&rig.hs.server.players[rig.c.slot].inventory, 2, &art), "mirrored as reported");
     let summary = t.summary("Drafter").unwrap();
     assert!(summary.contains("2 Plan mint(s) mirrored by marker, 1 with a shortfall"), "{summary}");
+}
+
+#[test]
+fn smallfix_two_mined_door_halves_yield_one_door_and_recover_both_wallpapers_once() {
+    let mut rig = Rig::dedicated("smallfix-double-door");
+    let top = [ABOVE[0], ABOVE[1] + 1, ABOVE[2]];
+    rig.set(ABOVE, block::OAK_DOOR); rig.set(top, block::OAK_DOOR);
+    rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+    for c in [ABOVE, top] {
+        rig.world().set_face_attachment((c[0], c[1], c[2]), crate::mesh::Face::South.index(),
+            crate::world::FaceAttachment::Wallpaper(block::WALLPAPER_RED));
+    }
+    let (k, id) = rig.hand_now().1;
+    let input = protocol::InputPacket { tick: { rig.c.input_seq += 1; rig.c.input_seq },
+        x: rig.sp().player.pos.x, y: rig.sp().player.pos.y, z: rig.sp().player.pos.z, health: 20.0,
+        held_kind: k, held_id: id,
+        block_changes: [ABOVE, top].map(|c| protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: block::AIR, meta: 0 }).to_vec(),
+        edit_hands: vec![(0, k, id); 2],
+        mined: [ABOVE, top].map(|c| protocol::MinedBlock { x: c[0], y: c[1], z: c[2], tool: protocol::WireItem::None }).to_vec(),
+        events_applied: rig.c.events, ..Default::default() };
+    rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+    for _ in 0..3 { rig.tick(); }
+    assert_eq!((rig.block(ABOVE), rig.block(top)), (block::AIR, block::AIR));
+    assert_eq!(units(&rig.c.inv, &Item::Block(block::OAK_DOOR)), 1);
+    assert_eq!(rig.ground_items().iter().filter(|s| s.item == Item::Block(block::WALLPAPER_RED)).map(|s| u32::from(s.count)).sum::<u32>(), 2);
+    for c in [ABOVE, top] { assert!(rig.world().face_attachment_at((c[0], c[1], c[2]), crate::mesh::Face::South.index()).is_none()); }
+}
+
+#[test]
+fn smallfix_air_erase_never_mints_copy_or_real_unfit_sheet() {
+    for full in [false, true] {
+        let mut rig = Rig::dedicated("smallfix-air-erase");
+        rig.set(ABOVE, block::AIR);
+        rig.give(0, Item::Tool(Tool::new(ToolType::Eraser, ToolMaterial::Wood)), 1);
+        if full { for k in 1..36 { rig.give(k, Item::Block(block::STONE), 64); } }
+        // A modified tag claiming an AIR erase, with an unfit sheet if full.
+        let held = rig.c.inv.hotbar_slot(0).unwrap().item.clone();
+        let mut tag = crate::use_edits::tag(UseKind::Erase, ABOVE, 0, Some(&held));
+        tag.unfit = u8::from(full);
+        let (hot, (k, id)) = rig.hand_now();
+        let edit = protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 };
+        for _ in 0..2 { rig.send_input(vec![edit.clone()], vec![(hot as u8, k, id)], vec![tag.clone()]); rig.tick(); }
+        assert_eq!(units(&rig.sp().inventory, &mat(MaterialId::PapyrusSheet)), 0);
+        assert!(rig.ground_items().iter().all(|s| s.item != mat(MaterialId::PapyrusSheet)));
+    }
+}
+
+#[test]
+fn smallfix_refused_primary_restores_both_standing_door_halves() {
+    for dead in [false, true] {
+        let mut rig = Rig::dedicated("smallfix-door-refusal");
+        let bottom = [46, 80, 42]; let top = [46, 81, 42];
+        rig.set(bottom, block::OAK_DOOR); rig.set(top, block::OAK_DOOR);
+        rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        rig.tick(); rig.c.changes.clear();
+        if dead { rig.sp().combat.dead = true; }
+        let primary = if dead { top } else { bottom };
+        let (_, (k, id)) = rig.hand_now();
+        let input = protocol::InputPacket { tick: { rig.c.input_seq += 1; rig.c.input_seq },
+            x: rig.sp().player.pos.x, y: rig.sp().player.pos.y, z: rig.sp().player.pos.z, health: 20.0,
+            held_kind: k, held_id: id,
+            block_changes: vec![protocol::BlockChange { x: primary[0], y: primary[1], z: primary[2], new_block: block::AIR, meta: 0 }],
+            edit_hands: vec![(0, k, id)],
+            mined: vec![protocol::MinedBlock { x: primary[0], y: primary[1], z: primary[2], tool: protocol::WireItem::None }],
+            events_applied: rig.c.events, ..Default::default() };
+        rig.c.transport.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput, &input));
+        for _ in 0..3 { rig.tick(); }
+        assert_eq!((rig.block(bottom), rig.block(top)), (block::OAK_DOOR, block::OAK_DOOR));
+        for c in [bottom, top] { assert!(rig.c.changes.iter().any(|b| [b.x, b.y, b.z] == c && b.new_block == block::OAK_DOOR), "both optimistic halves restored (dead {dead})"); }
+        assert_eq!(units(&rig.c.inv, &Item::Block(block::OAK_DOOR)), 0);
+    }
+}
+
+#[test]
+fn smallfix_creative_untagged_primary_removes_whole_door_without_yield() {
+    let mut rig = Rig::dedicated("smallfix-creative-door");
+    rig.hs.server.play_mode = crate::play_mode::PlayMode::Creative;
+    let top = [ABOVE[0], ABOVE[1] + 1, ABOVE[2]];
+    rig.set(ABOVE, block::OAK_DOOR); rig.set(top, block::OAK_DOOR);
+    rig.world().set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+    let (_, (k, id)) = rig.hand_now();
+    rig.send_input(vec![protocol::BlockChange { x: ABOVE[0], y: ABOVE[1], z: ABOVE[2], new_block: block::AIR, meta: 0 }], vec![(0, k, id)], vec![]);
+    for _ in 0..3 { rig.tick(); }
+    assert_eq!((rig.block(ABOVE), rig.block(top)), (block::AIR, block::AIR));
+    assert_eq!(units(&rig.c.inv, &Item::Block(block::OAK_DOOR)), 0);
+    assert!(rig.ground_items().iter().all(|s| s.item != Item::Block(block::OAK_DOOR)));
 }
