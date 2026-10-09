@@ -3040,6 +3040,44 @@ mod tests {
         assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
     }
 
+    #[test]
+    fn c3d_actual_dispatch_ignores_only_known_retired_duplicate_receipts() {
+        use crate::action_identity::ActionFate;
+        use crate::action_wire::{ActionIntent, ActionReceipt};
+        for conflict in [false, true] {
+            let (srv, client) = channel_pair();
+            let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+            srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &proofless_accept()));
+            rc.poll();
+            let mut allocated = Vec::new();
+            for _ in 0..4 { allocated.push(rc.reserve_action(ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap()); }
+            let current = ActionReceipt { action: allocated[2], fate: ActionFate::Accepted, included_events: 3 };
+            srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &current));
+            rc.poll();
+            rc.note_window_event(3);
+            let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = std::mem::take(&mut rc.chunk_queue).pop().unwrap().1 else { panic!("receipt stream marker") };
+            rc.apply_action_receipt(receipt);
+            assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+            let duplicate = ActionReceipt { action: allocated[1], fate: ActionFate::Accepted, included_events: if conflict { 4 } else { 2 } };
+            srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &duplicate));
+            rc.poll();
+            let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = std::mem::take(&mut rc.chunk_queue).pop().unwrap().1 else { panic!("receipt stream marker") };
+            rc.apply_action_receipt(receipt);
+            assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "duplicate or conflict cannot free the surviving suffix");
+            if conflict { assert!(matches!(rc.state, ConnectionState::Failed(_))); }
+            else {
+                assert!(rc.is_connected(), "a harmless retired receipt cannot end the session");
+                let foreign = ActionReceipt { action: crate::action_identity::ActionHeader { session: [99; 16], ..duplicate.action }, ..duplicate };
+                srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &foreign));
+                rc.poll();
+                let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = std::mem::take(&mut rc.chunk_queue).pop().unwrap().1 else { panic!("receipt stream marker") };
+                rc.apply_action_receipt(receipt);
+                assert!(matches!(rc.state, ConnectionState::Failed(_)));
+                assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+            }
+        }
+    }
+
     fn flat_sand_rules() -> protocol::WorldRules {
         protocol::WorldRules {
             world_type: "flat".into(),

@@ -73,6 +73,20 @@ impl ActionJournal {
         cut.session == self.session && cut.life == self.life && cut.epoch > self.epoch
             && cut.through >= self.retired_through && cut.through < self.next
     }
+    /// A late terminal duplicate is metadata only. It proves no new event or
+    /// world boundary and cannot retire/rewrite any surviving suffix.
+    pub fn retired_receipt_is_duplicate(&self, receipt: ActionReceipt) -> bool {
+        let action = receipt.action;
+        action.session == self.session && action.epoch == self.epoch && action.life == self.life
+            && action.seq > 0 && action.seq <= self.retired_through && receipt.included_events <= self.included_events
+    }
+    pub fn receipt_frontier_is_valid(&self, receipt: ActionReceipt) -> bool {
+        let action = receipt.action;
+        action.session == self.session && action.epoch == self.epoch && action.life == self.life
+            && action.seq > 0 && action.seq < self.next
+            && if action.seq <= self.retired_through { receipt.included_events <= self.included_events }
+                else { receipt.included_events >= self.included_events }
+    }
 
     /// Allocation succeeds before the caller is permitted to predict anything.
     pub fn append(&mut self, intent: Box<[u8]>, recipe: Box<[u8]>, cells: Box<[[i32; 3]]>, events_applied: u32) -> Result<ActionHeader, JournalError> {

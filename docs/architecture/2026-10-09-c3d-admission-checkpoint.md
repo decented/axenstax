@@ -95,6 +95,13 @@ wait. Recovery and ordinary action receipts clear both live and rebuilt
 coalescing indexes. Overflow during a partial bundle removes its whole remaining
 entry and reports the failed cut; the authority's restart/settlement integration
 is still pending. A truncated capture cannot emit its later End/fence.
+Overflow also removes ordinary receipts and reports the lost boundary before
+dropping authoritative blocks: a receipt can never retire history ahead of a
+resync snapshot queued later. The authority must consume both failure reports.
+Normal late terminal duplicates are ignored only for the current namespace,
+epoch/life, already retired sequence and an included E within the retired base.
+They cannot change that base or release the surviving suffix; foreign or
+conflicting receipt frontiers fail closed.
 
 Describe uses Begin, pages of at most2048 cells and End, because8192 cells do
 not fit one ordinary64 KiB wire packet. The whole client suffix remains bounded

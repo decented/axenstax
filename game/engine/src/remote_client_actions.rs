@@ -93,6 +93,10 @@ impl RemoteClient {
     }
 
     pub fn apply_action_receipt(&mut self, receipt: crate::action_wire::ActionReceipt) {
+        if self.queued_action_receipts == 0 || self.action_journal.as_ref().is_none_or(|journal| !journal.receipt_frontier_is_valid(receipt)) {
+            self.state = ConnectionState::Failed("Invalid action receipt frontier".into());
+            return;
+        }
         self.action_receipts.push_back(receipt);
         self.retire_applied_receipts();
     }
@@ -104,6 +108,11 @@ impl RemoteClient {
                 self.state = ConnectionState::Failed("Receipt has no joined action session".into());
                 break;
             };
+            if journal.retired_receipt_is_duplicate(receipt) {
+                self.action_receipts.pop_front();
+                self.queued_action_receipts -= 1;
+                continue;
+            }
             if let Err(error) = journal.retire_receipt(receipt, self.events_applied, receipt.action.seq) {
                 self.state = ConnectionState::Failed(format!("Invalid applied action receipt: {error:?}"));
                 break;

@@ -193,6 +193,7 @@ pub struct ClientOutbox {
     queued_recovery_bytes: usize,
     /// Overflow during a partial recovery invalidates the WHOLE cut.
     failed_recovery: Option<crate::action_identity::RecoveryCut>,
+    failed_receipt: Option<crate::action_identity::ActionHeader>,
     /// Backlog mode: cell → seq of its (single) queued change. `Some` only
     /// while backlogged; every queued block change is indexed while it is.
     coalesce_index: Option<HashMap<(i32, i32, i32), u64>>,
@@ -230,6 +231,7 @@ impl ClientOutbox {
             queued_chunk_bytes: 0,
             queued_recovery_bytes: 0,
             failed_recovery: None,
+            failed_receipt: None,
             coalesce_index: None,
             updates: BTreeMap::new(),
             update_cursor: 0,
@@ -379,6 +381,9 @@ impl ClientOutbox {
     /// acknowledge a bundle whose preceding world prefix was dropped.
     pub fn take_failed_recovery(&mut self) -> Option<crate::action_identity::RecoveryCut> {
         self.failed_recovery.take()
+    }
+    pub fn take_failed_receipt(&mut self) -> Option<crate::action_identity::ActionHeader> {
+        self.failed_receipt.take()
     }
 
     /// All touched authoritative deltas and immediate event carriers precede
@@ -548,6 +553,19 @@ impl ClientOutbox {
     /// order, and they are bounded by the entity population and the push's
     /// credit window, not by block churn.
     fn overflow(&mut self, now: u64) {
+        // Resync snapshots are queued in a later tick. No surviving receipt
+        // may overtake that repair and free history whose world prefix drops.
+        let mut receipt_bytes = 0;
+        let mut failed_receipt = self.failed_receipt;
+        self.queue.retain(|entry| {
+            if let Delta::Receipt(receipt) = &entry.delta {
+                failed_receipt = Some(receipt.action);
+                receipt_bytes += entry.size;
+                false
+            } else { true }
+        });
+        self.failed_receipt = failed_receipt;
+        self.queued_bytes -= receipt_bytes;
         if let Some(cut) = self.queue.iter().find_map(|entry| match &entry.delta {
             Delta::Recovery(bundle) => Some(bundle.cut()),
             _ => None,
@@ -932,6 +950,19 @@ mod tests {
         assert!(!ob.queue.iter().any(|e| matches!(e.delta, Delta::Recovery(_))));
         assert_eq!(ob.queued_recovery_bytes, 0);
         assert!(!ob.drain_packets(&template()).iter().any(|p| matches!(protocol::deserialize_header(p), Some((protocol::PacketType::Recovery, _)))), "a truncated capture emits no later End/fence");
+    }
+
+    #[test]
+    fn c3d_actual_outbox_overflow_never_emits_a_receipt_ahead_of_world_resync() {
+        let mut ob = ClientOutbox::new(true);
+        let receipt = action_receipt();
+        ob.push_block(&bc(1, 1));
+        ob.push_action_receipt(receipt);
+        ob.overflow(10);
+        assert_eq!(ob.take_failed_receipt(), Some(receipt.action));
+        assert!(!ob.queue.iter().any(|e| matches!(e.delta, Delta::Receipt(_))));
+        assert!(!ob.take_chunk_resync_requests().is_empty(), "the dropped authoritative cell still requires repair");
+        assert!(!ob.drain_packets(&template()).iter().any(|p| matches!(protocol::deserialize_header(p), Some((protocol::PacketType::ActionReceipt, _)))), "no receipt can retire history before the later repair");
     }
 
     fn spawn(id: u32) -> EntitySpawn {
