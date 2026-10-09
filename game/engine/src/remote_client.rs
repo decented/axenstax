@@ -12,6 +12,9 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use crate::protocol::{self, PacketType};
 use crate::transport::ClientTransport;
 
+#[path = "remote_client_actions.rs"]
+mod actions;
+
 /// A present remote player's verified identity, for the inspect view. Built from
 /// the server's `Joined` events. `npub` is the full NIP-19 npub (copyable, lets a
 /// specific person be verified beyond the grindable collision suffix) or `""` for
@@ -350,6 +353,15 @@ pub fn damage_cause_from_wire(cause: protocol::WireDamageCause) -> crate::surviv
 
 /// A remote game client connected to a server.
 pub struct RemoteClient {
+    pub inventory_mode: crate::action_identity::InventoryMode,
+    pub action_journal: Option<crate::action_journal::ActionJournal>,
+    pub recovery_prepare: Option<crate::action_identity::RecoveryCut>,
+    pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
+    /// Exact receipts wait for the actual ordered world boundary.
+    pub action_receipts: std::collections::VecDeque<crate::action_wire::ActionReceipt>,
+    last_recovery_id: u64,
+    queued_action_receipts: usize,
+    queued_recovery_fence: Option<crate::action_identity::RecoveryCut>,
     transport: Box<dyn ClientTransport>,
     pub state: ConnectionState,
     /// The sequence number (`InputPacket.tick`) the NEXT input goes out with:
@@ -759,6 +771,14 @@ impl RemoteClient {
         transport.send_to_server(&packet);
         Self {
             transport,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_journal: None,
+            recovery_prepare: None,
+            recovery_assembly: None,
+            action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
+            last_recovery_id: 0,
+            queued_action_receipts: 0,
+            queued_recovery_fence: None,
             state: ConnectionState::Connecting,
             tick: 1,
             latest_state: None,
@@ -811,6 +831,14 @@ impl RemoteClient {
         let client_nonce = hex::decode(&base.client_nonce_hex).unwrap_or_default();
         Self {
             transport,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_journal: None,
+            recovery_prepare: None,
+            recovery_assembly: None,
+            action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
+            last_recovery_id: 0,
+            queued_action_receipts: 0,
+            queued_recovery_fence: None,
             state: ConnectionState::Connecting,
             tick: 1,
             latest_state: None,
@@ -862,6 +890,11 @@ impl RemoteClient {
             if let Some((ptype, payload)) = protocol::deserialize_header(&packet) {
                 match ptype {
                     PacketType::JoinAccept => {
+                        if !matches!(&self.state, ConnectionState::Connecting) {
+                            self.state = ConnectionState::Failed("Unexpected JoinAccept outside initial admission".into());
+                            changed = true;
+                            continue;
+                        }
                         if let Ok(accept) = protocol::safe_deserialize::<protocol::JoinAcceptPacket>(payload) {
                             // C1 — enforce the server's identity proof against the
                             // pinned operator before trusting the connection. Native
@@ -908,6 +941,8 @@ impl RemoteClient {
                                     "Joined server as player {} (seed: {}, mode: {:?})",
                                     accept.player_index, accept.seed, accept.play_mode
                                 );
+                                self.inventory_mode = accept.inventory_mode;
+                                self.action_journal = Some(crate::action_journal::ActionJournal::new(accept.action_session, accept.action_life));
                                 self.spawn_pos =
                                     Some((accept.spawn_x, accept.spawn_y, accept.spawn_z));
                                 // Queue play_mode for game loop to apply via set_play_mode.
@@ -1235,6 +1270,26 @@ impl RemoteClient {
                                 changed = true;
                             }
                         }
+                    }
+                    PacketType::ActionReceipt => {
+                        if self.queued_action_receipts == crate::action_journal::MAX_ACTIONS {
+                            self.state = ConnectionState::Failed("Action receipts exceed their pending limit".into());
+                        } else if let Ok(receipt) = protocol::safe_deserialize::<crate::action_wire::ActionReceipt>(payload) {
+                            self.queued_action_receipts += 1;
+                            self.chunk_queue.push((self.pending_block_changes.len(), crate::chunk_intake::StreamItem::ActionReceipt(receipt)));
+                        } else {
+                            self.state = ConnectionState::Failed("Invalid action receipt".into());
+                        }
+                        changed = true;
+                    }
+                    PacketType::Recovery => {
+                        match protocol::safe_deserialize::<crate::action_wire::RecoveryPacket>(payload) {
+                            Ok(packet) => {
+                                if let Err(reason) = self.receive_recovery(packet) { self.state = ConnectionState::Failed(reason); }
+                            }
+                            Err(_) => self.state = ConnectionState::Failed("Invalid recovery carrier".into()),
+                        }
+                        changed = true;
                     }
                     PacketType::KillEvent => {
                         if let Ok(kill) =
@@ -1587,6 +1642,7 @@ impl RemoteClient {
     /// (0 = none): the count every later packet reports goes up to it.
     pub fn note_window_event(&mut self, event: u32) {
         self.events_applied = self.events_applied.max(event);
+        self.retire_applied_receipts();
     }
 
     /// C3a-fix-1 — are edits waiting for a later input (trimmed off a full
@@ -2879,7 +2935,109 @@ mod tests {
             world_rules: protocol::WorldRules::default(),
             worldgen_version: crate::world::worldgen_fingerprint(),
             chunk_note_radius: 0,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_session: [7; 16],
+            action_life: 0,
         }
+    }
+
+    #[test]
+    fn c3d_actual_receipt_poll_and_movement_ack_cannot_retire_before_world_and_events() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &proofless_accept()));
+        rc.poll();
+        let action = rc.reserve_action(crate::action_wire::ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap();
+        rc.send_reserved_action(action).unwrap();
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+        let state = protocol::StateUpdatePacket {
+            tick: 7, players: Vec::new(),
+            block_changes: vec![protocol::BlockChange::with_meta(1, 1, 1, crate::block::STONE, 0)],
+            world_time: 1000, last_acked_input: 999,
+            entity_spawns: Vec::new(), entity_updates: Vec::new(), entity_despawns: Vec::new(),
+            reserve_richness: 1.0, reserve_target_sats: 0, reserve_current_sats: 0,
+            rain_ticks_left: 0, storm_ticks_left: 0, own_hunger: 0,
+            block_views: Vec::new(), refused_uses: Vec::new(), attachment_changes: Vec::new(), own_riding: None,
+        };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state));
+        let receipt = crate::action_wire::ActionReceipt { action, fate: crate::action_identity::ActionFate::Refused, included_events: 4 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::ActionReceipt, &receipt));
+        rc.poll();
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "neither socket receipt nor movement ACK is application");
+        let changes = std::mem::take(&mut rc.pending_block_changes);
+        let chunks = std::mem::take(&mut rc.chunk_queue);
+        let mut intake = crate::chunk_intake::ChunkIntake::default();
+        let mut world = crate::world::World::new();
+        let steps = intake.plan_deltas(chunks, &changes, 1);
+        assert!(matches!(steps[0], crate::chunk_intake::Delta::Change(_)));
+        for step in steps {
+            match step {
+                crate::chunk_intake::Delta::Change(change) => { world.apply_remote_block_change(&change); }
+                crate::chunk_intake::Delta::ActionReceipt(receipt) => rc.apply_action_receipt(receipt),
+                _ => panic!("unexpected world step"),
+            }
+        }
+        assert_eq!(world.get_block(1, 1, 1), crate::block::STONE);
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "world applied but included window event4 has not");
+        rc.note_window_event(3);
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+        rc.note_window_event(4);
+        assert!(rc.action_journal.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn c3d_actual_recovery_poll_completes_pages_but_never_applies_the_fence() {
+        use crate::action_wire::{BoundedList, RebasePage, RecoveryPacket};
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = proofless_accept();
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        let cut = crate::action_identity::RecoveryCut { session: accept.action_session, id: 1, epoch: 1, life: 0, through: 0 };
+        let manifest = crate::rebase_assembly::RebaseManifest { cut, included_events: 0, parts: 1, encoded_bytes: 1 };
+        for packet in [RecoveryPacket::Prepare(cut), RecoveryPacket::Begin(manifest), RecoveryPacket::Page(RebasePage { cut, index: 0, bytes: BoundedList::new(vec![1]).unwrap() }), RecoveryPacket::End(cut), RecoveryPacket::Fence(cut)] {
+            srv.send_to_client(&protocol::serialize_packet(PacketType::Recovery, &packet));
+        }
+        rc.poll();
+        assert!(rc.is_connected());
+        assert!(!rc.recovery_assembly.as_ref().unwrap().ready(), "socket End/fence cannot activate");
+        let mut intake = crate::chunk_intake::ChunkIntake::default();
+        for step in intake.plan_deltas(std::mem::take(&mut rc.chunk_queue), &[], 1) {
+            match step {
+                crate::chunk_intake::Delta::RebaseFence(cut) => rc.apply_recovery_fence(cut),
+                _ => panic!("unexpected world step"),
+            }
+        }
+        assert!(rc.recovery_assembly.as_ref().unwrap().ready());
+        // Still no Ack/retirement until canonical bundle installation succeeds.
+        assert_eq!(rc.recovery_prepare, Some(cut));
+    }
+
+    #[test]
+    fn c3d_actual_dispatch_rejects_foreign_recovery_and_connection_mode_switch() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = proofless_accept();
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        rc.reserve_action(crate::action_wire::ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap();
+        let foreign = crate::action_identity::RecoveryCut { session: [99; 16], id: 1, epoch: 1, life: 0, through: 0 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Recovery, &crate::action_wire::RecoveryPacket::Prepare(foreign)));
+        rc.poll();
+        assert!(matches!(rc.state, ConnectionState::Failed(_)));
+        assert!(rc.recovery_prepare.is_none());
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        rc.reserve_action(crate::action_wire::ActionIntent::CancelledNoop, Box::new([]), Box::new([])).unwrap();
+        let changed = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..accept };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &changed));
+        rc.poll();
+        assert!(matches!(rc.state, ConnectionState::Failed(_)));
+        assert_eq!(rc.inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1);
     }
 
     fn flat_sand_rules() -> protocol::WorldRules {
@@ -2916,6 +3074,9 @@ mod tests {
                 worldgen_version: crate::world::worldgen_fingerprint(),
                 spawn: Some(glam::Vec3::new(100.5, 41.0, -7.5)),
                 chunk_note_radius: 0,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_session: [7; 16],
+            action_life: 0,
             })
         );
     }

@@ -1,11 +1,12 @@
 //! Bounded owned recovery pages; parsing completion is not an applied fence.
 
 use crate::action_identity::RecoveryCut;
+use serde::{Deserialize, Serialize};
 use crate::action_journal::{MAX_BUNDLE_BYTES, MAX_PAGE_BYTES};
 
 pub const MAX_REBASE_PARTS: usize = MAX_BUNDLE_BYTES / MAX_PAGE_BYTES;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebaseManifest {
     pub cut: RecoveryCut,
     pub included_events: u32,

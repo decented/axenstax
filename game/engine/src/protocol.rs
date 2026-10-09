@@ -144,6 +144,12 @@ pub enum PacketType {
     WindowSlotSet = 66,
     /// Whole player window, applied as a numbered replacement.
     InventorySync = 67,
+    /// One bounded action identity across every inventory/world mutation.
+    Action = 68,
+    /// Exact terminal fate plus the authoritative included event boundary.
+    ActionReceipt = 69,
+    /// Session-scoped prepare/describe/bundle/fence/ACK carriers.
+    Recovery = 70,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -280,6 +286,11 @@ pub struct JoinAcceptPacket {
     /// does not keep columns loaded round its joiners).
     #[serde(default)]
     pub chunk_note_radius: u8,
+    /// Operator policy, immutable for this connection (Mirror is the bridge).
+    pub inventory_mode: crate::action_identity::InventoryMode,
+    /// Fresh random action namespace; reconnect never reuses an old suffix.
+    pub action_session: [u8; 16],
+    pub action_life: u32,
 }
 
 /// The rule + generation flags of a world that a joiner needs to generate and
@@ -2729,7 +2740,12 @@ pub struct ServerAnnouncePacket {
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
-pub const PROTOCOL_VERSION: u32 = 88;
+/// - v89 (provisional, C3d source; not delivered): typed Action (68),
+///   ActionReceipt (69) and Recovery (70). JoinAccept appends fixed inventory
+///   mode, random128-bit action namespace and life. Recovery Describe is
+///   paginated; world-stream receipt/fence application is distinct from
+///   socket reception.
+pub const PROTOCOL_VERSION: u32 = 89;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2801,6 +2817,9 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         65 => PacketType::ContainerOpened,
         66 => PacketType::WindowSlotSet,
         67 => PacketType::InventorySync,
+        68 => PacketType::Action,
+        69 => PacketType::ActionReceipt,
+        70 => PacketType::Recovery,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2902,8 +2921,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // OC — v88, InventorySync carries the correction debt.
-        assert_eq!(super::PROTOCOL_VERSION, 88);
+        // C3d (provisional) — v89, typed actions after OC's v88 debt carrier.
+        assert_eq!(super::PROTOCOL_VERSION, 89);
     }
 
     #[test]
@@ -3654,7 +3673,9 @@ mod tests {
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
-        assert_eq!(PROTOCOL_VERSION, 88);
+        // v89 (provisional, C3d): Action (68), ActionReceipt (69),
+        //   Recovery (70); JoinAccept mode/namespace/life.
+        assert_eq!(PROTOCOL_VERSION, 89);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3683,6 +3704,9 @@ mod tests {
             },
             worldgen_version: 9,
             chunk_note_radius: 0,
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_session: [7; 16],
+            action_life: 0,
         }
     }
 

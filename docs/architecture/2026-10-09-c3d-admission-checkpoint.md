@@ -78,6 +78,40 @@ Generate/restore required columns before applying authoritative cell tombstones,
 then atomically install canonical world/window/context and rebuild the suffix.
 No saved prediction block may overwrite a newer canonical value.
 
+### Carrier integration checkpoint (source, not acceptance)
+
+The evolving protocol88 carriers use Action=68, ActionReceipt=69 and Recovery=70.
+JoinAccept now appends fixed inventory mode, a fresh random128-bit action
+namespace and life. Randomness failure refuses admission; an extra JoinAccept
+cannot replace an existing journal or hot-switch mode. Mirror remains the
+configured default; the Strict operator flag is not exposed at this stage.
+The joined client has explicit reserve-before-predict and retained-send APIs;
+actual gameplay mutation ingress and typed authoritative admission are still
+pending, so these APIs alone do not prove coverage.
+
+ClientOutbox stores a complete frozen recovery as one owned bounded queue
+entry. Its Begin/pages/End/fence can span tick budgets while later world steps
+wait. Recovery and ordinary action receipts clear both live and rebuilt
+coalescing indexes. Overflow during a partial bundle removes its whole remaining
+entry and reports the failed cut; the authority's restart/settlement integration
+is still pending. A truncated capture cannot emit its later End/fence.
+
+Describe uses Begin, pages of at most2048 cells and End, because8192 cells do
+not fit one ordinary64 KiB wire packet. The whole client suffix remains bounded
+by8192 cells and512 KiB including actual intermediate allocations. Complete
+union with server-derived structural dependencies must still be bounded before
+mutation/capture; cap-edge tests belong to the forthcoming typed handlers.
+
+RemoteClient parses bounded recovery parts but enqueues the fence at the real
+world-stream offset. ChunkIntake carries fence/receipts and every later step
+behind a forced-column budget stall. GameState marks a fence only from actual
+ordered world intake. Ordinary receipt retirement waits for that stream position
+and authoritative included E; movement ACK and socket parsing retire nothing.
+Canonical bundle installation, durable body release, ordinary-carrier freezing,
+replay and Ack-before-resubmission remain OPEN. Actual outbox, intake and channel
+dispatch regression tests have been added but not compiled/executed at this
+source checkpoint. Earlier21-model execution is prior-source evidence only.
+
 The wire integration will add one typed action envelope containing ActionHeader
 and a bounded existing edit/op/request or compound/toggle/hold intent. It splits
 consecutive edit batches at any intervening op/request. Legacy request/op counters

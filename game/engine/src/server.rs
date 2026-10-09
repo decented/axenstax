@@ -31,6 +31,10 @@ const REACH_DISTANCE: f32 = 5.0;
 
 /// Per-player server-side state.
 pub struct ServerPlayer {
+    /// Fixed at accepted join; trusted local slots retain their own policy.
+    pub inventory_mode: crate::action_identity::InventoryMode,
+    pub action_frontier: Option<crate::action_identity::ActionFrontier>,
+    pub action_queue: Option<crate::action_queue::ActionQueue>,
     /// Once-per-death inventory hook, reset on entering or respawning.
     pub death_handled: bool,
     pub player: Player,
@@ -514,6 +518,9 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
 impl ServerPlayer {
     pub fn new(spawn: Vec3) -> Self {
         Self {
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
+            action_frontier: None,
+            action_queue: None,
             player: Player::new(spawn),
             inventory: Inventory::new(),
             combat: PlayerCombat::new(),

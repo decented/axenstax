@@ -34,6 +34,8 @@ mod action_identity;
 mod action_queue;
 mod action_journal;
 mod action_capacity;
+mod action_wire;
+mod recovery_bundle;
 mod rebase_assembly;
 mod staged_window;
 mod audio;

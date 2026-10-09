@@ -498,6 +498,8 @@ pub struct HostedServer {
     #[cfg_attr(not(test), allow(dead_code))]
     pub port: u16,
     pub server_name: String,
+    /// Chosen before admission; each accepted connection stores its own mode.
+    pub inventory_mode: crate::action_identity::InventoryMode,
     difficulty: String,
 
     /// Per-client challenge nonces. The server issues one (with its origin) to
@@ -907,6 +909,7 @@ impl HostedServer {
         );
 
         Ok(HostedServer {
+            inventory_mode: crate::action_identity::InventoryMode::Mirror,
             local_transports,
             server,
             transports,
@@ -4335,7 +4338,21 @@ impl HostedServer {
                         });
                         #[cfg(target_arch = "wasm32")]
                         let server_identity: Option<protocol::ServerIdentityProof> = None;
+                        let mut action_session = [0; 16];
+                        if getrandom::fill(&mut action_session).is_err() {
+                            if let Some(left) = self.release_slot(i, Some("Action session randomness unavailable")) {
+                                broadcasts.push_back((i, left));
+                            }
+                            continue;
+                        }
+                        let action_life = self.server.players[i].respawns;
+                        self.server.players[i].inventory_mode = self.inventory_mode;
+                        self.server.players[i].action_frontier = Some(crate::action_identity::ActionFrontier::new(action_session, action_life));
+                        self.server.players[i].action_queue = Some(Default::default());
                         let accept = protocol::JoinAcceptPacket {
+                            inventory_mode: self.inventory_mode,
+                            action_session,
+                            action_life,
                             player_index: i as u32,
                             // G3 — send the world's REAL seed so the joiner
                             // generates matching terrain (was hardcoded 42,

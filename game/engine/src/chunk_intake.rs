@@ -77,6 +77,9 @@ use crate::world::{FaceAttachment, World, MAX_CHUNK_Y};
 /// queues it.
 #[derive(Debug)]
 pub enum StreamItem {
+    /// Exact world-stream position; parsing never activates recovery.
+    RebaseFence(crate::action_identity::RecoveryCut),
+    ActionReceipt(crate::action_wire::ActionReceipt),
     /// A pushed chunk (`ChunkData`).
     Chunk(ChunkDataPacket),
     /// "Column `(cx, cz)` is local" (`ColumnLocal`, Phase B2b), with the
@@ -95,6 +98,8 @@ pub enum StreamItem {
 /// One step of a frame's world intake, in arrival order (see [`interleave`]).
 #[derive(Debug)]
 pub enum IntakeStep {
+    RebaseFence(crate::action_identity::RecoveryCut),
+    ActionReceipt(crate::action_wire::ActionReceipt),
     /// Apply one pushed chunk packet.
     Chunk(Box<ChunkDataPacket>),
     /// Take in a "column is local" note (Phase B2b), with its hash.
@@ -114,6 +119,8 @@ pub enum IntakeStep {
 /// this one's allowance.
 #[derive(Debug)]
 pub enum Delta {
+    RebaseFence(crate::action_identity::RecoveryCut),
+    ActionReceipt(crate::action_wire::ActionReceipt),
     /// Apply one pushed chunk packet.
     Chunk(Box<ChunkDataPacket>),
     /// Take in a "column is local" note, with its hash.
@@ -139,6 +146,8 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
             done = before;
         }
         steps.push(match item {
+            StreamItem::RebaseFence(cut) => IntakeStep::RebaseFence(cut),
+            StreamItem::ActionReceipt(receipt) => IntakeStep::ActionReceipt(receipt),
             StreamItem::Chunk(chunk) => IntakeStep::Chunk(Box::new(chunk)),
             StreamItem::Local(col, hash) => IntakeStep::Local(col, hash),
             StreamItem::View(v) => IntakeStep::View(v),
@@ -365,6 +374,8 @@ impl ChunkIntake {
         let mut steps: VecDeque<Delta> = std::mem::take(&mut self.carried);
         for step in interleave(chunks, changes.len()) {
             match step {
+                IntakeStep::RebaseFence(cut) => steps.push_back(Delta::RebaseFence(cut)),
+                IntakeStep::ActionReceipt(receipt) => steps.push_back(Delta::ActionReceipt(receipt)),
                 IntakeStep::Chunk(p) => steps.push_back(Delta::Chunk(p)),
                 IntakeStep::Local(col, hash) => steps.push_back(Delta::Local(col, hash)),
                 IntakeStep::View(v) => steps.push_back(Delta::View(v)),
@@ -956,6 +967,8 @@ mod tests {
             IntakeStep::Chunk(_) => "C".to_string(),
             IntakeStep::View(_) => "V".to_string(),
             IntakeStep::Attachment(_) => "A".to_string(),
+            IntakeStep::RebaseFence(_) => "F".to_string(),
+            IntakeStep::ActionReceipt(_) => "R".to_string(),
             IntakeStep::Local(..) => "L".to_string(),
             IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
         })
@@ -1039,6 +1052,8 @@ mod tests {
                 IntakeStep::Local(col, _) => format!("L{}", col.0),
                 IntakeStep::View(v) => format!("V{}", v.cell[0]),
                 IntakeStep::Attachment(a) => format!("A{}", a.x),
+                IntakeStep::RebaseFence(_) => "F".to_string(),
+                IntakeStep::ActionReceipt(_) => "R".to_string(),
                 IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
             })
             .collect();
@@ -1209,7 +1224,7 @@ mod tests {
                 IntakeStep::Chunk(p) => {
                     intake.apply(&mut joiner, &mut loaded, &reg(), &p);
                 }
-                IntakeStep::Local(..) | IntakeStep::View(..) | IntakeStep::Attachment(..) => unreachable!(),
+                IntakeStep::Local(..) | IntakeStep::View(..) | IntakeStep::Attachment(..) | IntakeStep::RebaseFence(..) | IntakeStep::ActionReceipt(..) => unreachable!(),
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         joiner.apply_remote_block_change(bc);
@@ -1594,6 +1609,31 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn c3d_actual_forced_column_carry_holds_fence_and_later_receipt_changes() {
+        let world = World::new();
+        let mut intake = ChunkIntake::default();
+        intake.expect_notes(8, (0, 0));
+        intake.note_local((1, 0), 1);
+        intake.note_local((2, 0), 2);
+        let cut = crate::action_identity::RecoveryCut { session: [3; 16], id: 1, epoch: 1, life: 0, through: 1 };
+        let chunks = vec![
+            (0, StreamItem::Chunk(packet_of(&world, (1, 0, 0)))),
+            (0, StreamItem::Chunk(packet_of(&world, (2, 0, 0)))),
+            (0, StreamItem::RebaseFence(cut)),
+        ];
+        let first = intake.plan_deltas(chunks, &[change_in(9)], 1);
+        assert_eq!(first.len(), 1);
+        assert!(matches!(&first[0], Delta::Chunk(p) if p.cx == 1));
+        assert_eq!(intake.carried_len(), 3, "blocked snapshot, fence and later change stay together");
+        let second = intake.plan_deltas(Vec::new(), &[change_in(10)], 1);
+        assert_eq!(second.len(), 4);
+        assert!(matches!(&second[0], Delta::Chunk(p) if p.cx == 2));
+        assert!(matches!(second[1], Delta::RebaseFence(found) if found == cut));
+        assert_eq!(change_cols(&second), [9, 10]);
+        assert_eq!(intake.carried_len(), 0);
     }
 
     #[test]

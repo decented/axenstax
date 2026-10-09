@@ -145,6 +145,10 @@ fn wire_size<T: serde::Serialize>(item: &T) -> usize {
 /// One reliable delta, in server order.
 #[derive(Debug)]
 enum Delta {
+    /// Begin/pages/End/fence stay one queue entry even across tick budgets.
+    Recovery(crate::recovery_bundle::RecoveryBundle),
+    /// A terminal receipt is a world boundary, not latest-wins state.
+    Receipt(crate::action_wire::ActionReceipt),
     Block(BlockChange),
     Spawn(EntitySpawn),
     Despawn(u32),
@@ -186,6 +190,9 @@ pub struct ClientOutbox {
     /// The chunk-push share of `queued_bytes` (bounded by the push's credit
     /// window; never counted against [`CLIENT_QUEUE_MAX_BYTES`]).
     queued_chunk_bytes: usize,
+    queued_recovery_bytes: usize,
+    /// Overflow during a partial recovery invalidates the WHOLE cut.
+    failed_recovery: Option<crate::action_identity::RecoveryCut>,
     /// Backlog mode: cell → seq of its (single) queued change. `Some` only
     /// while backlogged; every queued block change is indexed while it is.
     coalesce_index: Option<HashMap<(i32, i32, i32), u64>>,
@@ -221,6 +228,8 @@ impl ClientOutbox {
             queued_bytes: 0,
             queued_block_bytes: 0,
             queued_chunk_bytes: 0,
+            queued_recovery_bytes: 0,
+            failed_recovery: None,
             coalesce_index: None,
             updates: BTreeMap::new(),
             update_cursor: 0,
@@ -275,7 +284,8 @@ impl ClientOutbox {
             match e.delta {
                 Delta::Block(_) => self.queued_block_bytes -= e.size,
                 Delta::Chunk { .. } => self.queued_chunk_bytes -= e.size,
-                Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) | Delta::Attachment(_) => {}
+                Delta::Recovery(_) => self.queued_recovery_bytes -= e.size,
+                Delta::Receipt(_) | Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) | Delta::Attachment(_) => {}
             }
         }
     }
@@ -305,7 +315,7 @@ impl ClientOutbox {
         for b in blocks {
             self.push_block(b);
             if self.tick_budget.is_some()
-                && self.queued_bytes - self.queued_chunk_bytes > CLIENT_QUEUE_MAX_BYTES
+                && self.queued_bytes - self.queued_chunk_bytes - self.queued_recovery_bytes > CLIENT_QUEUE_MAX_BYTES
             {
                 self.overflow(now);
             }
@@ -353,6 +363,31 @@ impl ClientOutbox {
         self.push_chunk((col.0, 0, col.1), vec![note]);
     }
 
+    /// Insert frozen capture after the existing world prefix. No later cell
+    /// coalesces backwards across this barrier, including backlog re-indexing.
+    pub fn push_recovery_bundle(&mut self, manifest: crate::rebase_assembly::RebaseManifest, pages: Vec<Box<[u8]>>) -> Result<(), &'static str> {
+        if self.queue.iter().any(|e| matches!(e.delta, Delta::Recovery(_))) {
+            return Err("A recovery bundle is already queued");
+        }
+        let bundle = crate::recovery_bundle::RecoveryBundle::new(manifest, pages, std::mem::size_of::<Entry>())?;
+        if let Some(index) = &mut self.coalesce_index { index.clear(); }
+        self.push_entry(Delta::Recovery(bundle));
+        Ok(())
+    }
+
+    /// The authority must restart/settle or disconnect this cut; it cannot
+    /// acknowledge a bundle whose preceding world prefix was dropped.
+    pub fn take_failed_recovery(&mut self) -> Option<crate::action_identity::RecoveryCut> {
+        self.failed_recovery.take()
+    }
+
+    /// All touched authoritative deltas and immediate event carriers precede
+    /// this terminal boundary. Later changes cannot fold backwards across it.
+    pub fn push_action_receipt(&mut self, receipt: crate::action_wire::ActionReceipt) {
+        if let Some(index) = &mut self.coalesce_index { index.clear(); }
+        self.push_entry(Delta::Receipt(receipt));
+    }
+
     /// C3b-2 — queue block-entity views (`block_views::ViewsSent::take_changed`),
     /// in line: after everything queued so far, this tick's chunk pushes
     /// included, so each lands after the snapshot it updates. Never
@@ -392,6 +427,8 @@ impl ClientOutbox {
 
     fn push_entry(&mut self, delta: Delta) {
         let size = match &delta {
+            Delta::Recovery(bundle) => bundle.wire_bytes(),
+            Delta::Receipt(receipt) => 1 + wire_size(receipt),
             Delta::Block(b) => wire_size(b),
             Delta::Spawn(s) => wire_size(s),
             Delta::Despawn(id) => wire_size(id),
@@ -401,6 +438,7 @@ impl ClientOutbox {
             Delta::Attachment(a) => wire_size(a),
         };
         match delta {
+            Delta::Recovery(_) => self.queued_recovery_bytes += size,
             Delta::Block(_) => self.queued_block_bytes += size,
             Delta::Chunk { .. } => self.queued_chunk_bytes += size,
             _ => {}
@@ -444,6 +482,10 @@ impl ClientOutbox {
         let mut latest: HashMap<usize, BlockChange> = HashMap::new();
         let mut dead = vec![false; self.queue.len()];
         for (i, e) in self.queue.iter().enumerate() {
+            if matches!(e.delta, Delta::Recovery(_) | Delta::Receipt(_)) {
+                newest.clear();
+                continue;
+            }
             // A queued chunk push is a barrier for its cells: nothing after
             // it folds into a change before it (the Phase B rule).
             if let Delta::Chunk { coord, .. } = &e.delta {
@@ -494,6 +536,7 @@ impl ClientOutbox {
                 Delta::Chunk { coord, .. } => {
                     index.retain(|&cell, _| chunk_of_cell(cell) != *coord);
                 }
+                Delta::Recovery(_) | Delta::Receipt(_) => index.clear(),
                 _ => {}
             }
         }
@@ -505,6 +548,20 @@ impl ClientOutbox {
     /// order, and they are bounded by the entity population and the push's
     /// credit window, not by block churn.
     fn overflow(&mut self, now: u64) {
+        if let Some(cut) = self.queue.iter().find_map(|entry| match &entry.delta {
+            Delta::Recovery(bundle) => Some(bundle.cut()),
+            _ => None,
+        }) {
+            self.failed_recovery = Some(cut);
+            // Remove the entire remaining bundle before any old blocks drop.
+            // Already sent pages cannot activate without its End AND fence.
+            let mut freed = 0;
+            self.queue.retain(|entry| {
+                if matches!(entry.delta, Delta::Recovery(_)) { freed += entry.size; false } else { true }
+            });
+            self.queued_bytes -= freed;
+            self.queued_recovery_bytes -= freed;
+        }
         let mut dropped = 0usize;
         let mut freed = 0usize;
         let resync = &mut self.resync;
@@ -559,6 +616,36 @@ impl ClientOutbox {
         // Has anything left the reliable queue this tick?
         let mut moved = false;
         loop {
+            if !out.is_empty()
+                && let Some(Entry { size, delta: Delta::Receipt(_), .. }) = self.queue.front()
+            {
+                if moved && spent + size > budget { break; }
+                let Some(Entry { size, delta: Delta::Receipt(receipt), .. }) = self.queue.pop_front() else { unreachable!("front is a receipt") };
+                self.queued_bytes -= size;
+                spent += size;
+                moved = true;
+                out.push(protocol::serialize_packet(protocol::PacketType::ActionReceipt, &receipt));
+                continue;
+            }
+            // Each carrier leaves from the SAME head; the enclosing entry
+            // survives a partial tick and all later world steps wait behind.
+            if !out.is_empty()
+                && let Some(Entry { delta: Delta::Recovery(bundle), .. }) = self.queue.front_mut()
+            {
+                let size = bundle.front().expect("a queued bundle is non-empty").len();
+                if moved && spent + size > budget { break; }
+                let packet = bundle.pop_front().expect("front exists");
+                let complete = bundle.is_empty();
+                let entry = self.queue.front_mut().expect("bundle entry exists");
+                entry.size -= size;
+                self.queued_bytes -= size;
+                self.queued_recovery_bytes -= size;
+                if complete { self.queue.pop_front(); }
+                spent += size;
+                moved = true;
+                out.push(packet);
+                continue;
+            }
             // A queued chunk push goes as its own packet, in line — never
             // first (the first packet of a tick carries the player positions)
             // and past the budget only when it was at the head of the queue
@@ -624,7 +711,7 @@ impl ClientOutbox {
             debug_assert_eq!(bytes.len(), size, "measured size is the real size");
             spent += bytes.len();
             out.push(bytes);
-            if matches!(self.queue.front(), Some(Entry { delta: Delta::Chunk { .. }, .. })) {
+            if matches!(self.queue.front(), Some(Entry { delta: Delta::Chunk { .. } | Delta::Recovery(_) | Delta::Receipt(_), .. })) {
                 continue;
             }
             if (queue_drained && updates_drained) || !carried {
@@ -640,7 +727,7 @@ impl ClientOutbox {
     /// block change is left queued.
     fn fill_reliable(&mut self, pkt: &mut StateUpdatePacket, size: &mut usize, limit: usize) -> bool {
         while let Some(front) = self.queue.front() {
-            if *size + front.size > limit || matches!(front.delta, Delta::Chunk { .. }) {
+            if *size + front.size > limit || matches!(front.delta, Delta::Chunk { .. } | Delta::Recovery(_) | Delta::Receipt(_)) {
                 break;
             }
             let e = self.queue.pop_front().expect("front exists");
@@ -676,6 +763,8 @@ impl ClientOutbox {
                 Delta::Refused(r) => pkt.refused_uses.push(r),
                 Delta::Attachment(a) => pkt.attachment_changes.push(a),
                 Delta::Chunk { .. } => unreachable!("a chunk push is never folded into a StateUpdate"),
+                Delta::Recovery(_) => unreachable!("a recovery carrier is never folded into a StateUpdate"),
+                Delta::Receipt(_) => unreachable!("a receipt is never folded into a StateUpdate"),
             }
         }
         if self.queued_block_bytes == 0 {
@@ -748,6 +837,101 @@ mod tests {
 
     fn bc(x: i32, block: u16) -> BlockChange {
         BlockChange::with_meta(x, 0, 0, block, 0)
+    }
+
+    fn action_receipt() -> crate::action_wire::ActionReceipt {
+        crate::action_wire::ActionReceipt {
+            action: crate::action_identity::ActionHeader { session: [3; 16], epoch: 0, life: 0, seq: 1, events_applied: 0 },
+            fate: crate::action_identity::ActionFate::Accepted,
+            included_events: 4,
+        }
+    }
+
+    #[test]
+    fn c3d_actual_outbox_receipt_is_a_coalescing_barrier_for_the_same_cell() {
+        let mut ob = ClientOutbox::new(false);
+        ob.push_block(&bc(1, 1));
+        ob.push_action_receipt(action_receipt());
+        ob.push_block(&bc(1, 2));
+        ob.enter_coalesce_mode();
+        let mut seen = Vec::new();
+        for packet in ob.drain_packets(&template()) {
+            let (kind, body) = protocol::deserialize_header(&packet).unwrap();
+            match kind {
+                protocol::PacketType::StateUpdate => {
+                    let state: StateUpdatePacket = protocol::safe_deserialize(body).unwrap();
+                    seen.extend(state.block_changes.into_iter().map(|b| format!("B{}", b.new_block)));
+                }
+                protocol::PacketType::ActionReceipt => seen.push("R".into()),
+                _ => panic!("unexpected carrier"),
+            }
+        }
+        assert_eq!(seen, ["B1", "R", "B2"]);
+        assert_eq!(ob.queued_bytes(), 0);
+    }
+
+    fn recovery_manifest() -> crate::rebase_assembly::RebaseManifest {
+        crate::rebase_assembly::RebaseManifest {
+            cut: crate::action_identity::RecoveryCut { session: [3; 16], id: 1, epoch: 1, life: 0, through: 1 },
+            included_events: 4,
+            parts: 2,
+            encoded_bytes: 8,
+        }
+    }
+
+    #[test]
+    fn c3d_actual_outbox_bundle_spans_budgets_without_later_world_overtaking() {
+        use crate::action_wire::RecoveryPacket;
+        let mut ob = ClientOutbox::new(true);
+        ob.tick_budget = Some(110);
+        ob.push_block(&bc(1, 1));
+        ob.push_recovery_bundle(recovery_manifest(), vec![Box::new([1; 4]), Box::new([2; 4])]).unwrap();
+        ob.push_block(&bc(1, 2));
+        ob.enter_coalesce_mode();
+        let mut seen = Vec::new();
+        let mut polls = 0;
+        while !ob.queue.is_empty() {
+            polls += 1;
+            assert!(polls < 20, "a carrier at the head always makes progress");
+            for packet in ob.drain_packets(&template()) {
+                let (kind, body) = protocol::deserialize_header(&packet).unwrap();
+                match kind {
+                    protocol::PacketType::StateUpdate => {
+                        let state: StateUpdatePacket = protocol::safe_deserialize(body).unwrap();
+                        seen.extend(state.block_changes.into_iter().map(|b| format!("B{}", b.new_block)));
+                    }
+                    protocol::PacketType::Recovery => seen.push(match protocol::safe_deserialize::<RecoveryPacket>(body).unwrap() {
+                        RecoveryPacket::Begin(_) => "Begin".into(),
+                        RecoveryPacket::Page(p) => format!("P{}", p.index),
+                        RecoveryPacket::End(_) => "End".into(),
+                        RecoveryPacket::Fence(_) => "Fence".into(),
+                        _ => panic!("unexpected recovery carrier"),
+                    }),
+                    _ => panic!("unexpected carrier"),
+                }
+            }
+        }
+        assert!(polls > 1, "exercise a real partial budget");
+        assert_eq!(seen, ["B1", "Begin", "P0", "P1", "End", "Fence", "B2"]);
+        assert_eq!(ob.queued_recovery_bytes, 0);
+        assert_eq!(ob.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn c3d_actual_outbox_overflow_invalidates_a_whole_partial_bundle() {
+        let mut ob = ClientOutbox::new(true);
+        ob.tick_budget = Some(110);
+        let manifest = recovery_manifest();
+        ob.push_recovery_bundle(manifest, vec![Box::new([1; 4]), Box::new([2; 4])]).unwrap();
+        let first = ob.drain_packets(&template());
+        assert!(first.iter().any(|p| matches!(protocol::deserialize_header(p), Some((protocol::PacketType::Recovery, _)))));
+        assert!(ob.queue.iter().any(|e| matches!(e.delta, Delta::Recovery(_))), "partial bundle remains");
+        ob.push_block(&bc(1, 2));
+        ob.overflow(10);
+        assert_eq!(ob.take_failed_recovery(), Some(manifest.cut));
+        assert!(!ob.queue.iter().any(|e| matches!(e.delta, Delta::Recovery(_))));
+        assert_eq!(ob.queued_recovery_bytes, 0);
+        assert!(!ob.drain_packets(&template()).iter().any(|p| matches!(protocol::deserialize_header(p), Some((protocol::PacketType::Recovery, _)))), "a truncated capture emits no later End/fence");
     }
 
     fn spawn(id: u32) -> EntitySpawn {
