@@ -10,6 +10,7 @@ mod codec;
 pub mod context;
 pub mod crypto;
 pub mod durable;
+pub mod live;
 pub mod manifest;
 pub mod personal;
 pub mod phase;

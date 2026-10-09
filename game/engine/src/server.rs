@@ -228,6 +228,13 @@ pub struct ServerPlayer {
     /// C2a — the night (`item_actions::NightCalendar`) this joiner last slept
     /// in a bed; `None` until its first sleep. Once a night.
     pub slept_night: Option<u32>,
+    /// World handover: this seat's progression has been tracked since a
+    /// verified signed admission on THIS attach (set at JoinAccept), and how
+    /// many kill credits the server has queued for it since. A tracked seat
+    /// with no credits holds default progression for the whole session (the
+    /// joined client starts from empty maps); anything else is not proven.
+    pub progression_tracked: bool,
+    pub progression_credits: u32,
     /// C3a-2a — the server's copy of a joiner's four armour slots
     /// (`ArmourSlot as usize`), moved by its window ops and worn by the hits
     /// the server lands (`window::wear_armour`). Damage still uses the
@@ -562,6 +569,8 @@ impl ServerPlayer {
             possession: crate::joiner_inventory::PossessionTally::default(),
             eat_cooldown: 0,
             slept_night: None,
+            progression_tracked: false,
+            progression_credits: 0,
             armour: [None; 4],
             cursor: None,
             craft_grid: Default::default(),
@@ -2499,6 +2508,8 @@ impl GameServer {
         if !self.is_joiner_of_gen(slot, generation) {
             return;
         }
+        let sp = &mut self.players[slot];
+        sp.progression_credits = sp.progression_credits.saturating_add(1);
         self.pending_kill_events.push((
             slot,
             crate::protocol::KillEventPacket {

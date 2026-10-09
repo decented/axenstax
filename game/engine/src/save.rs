@@ -1895,29 +1895,17 @@ pub fn save_world(
     save_world_at(name, world, players, seed, carts, saved_mobs, AtCommit::KeepAutosave)
 }
 
-/// [`save_world`], doing `at_commit` to the autosave the moment `world.dat`
-/// commits.
+/// The positional WorldSave of a live world and its local seats, exactly as
+/// `save_world` writes it. World handover builds its transfer copy from the
+/// same builder (then neutralises the copy), so the two cannot drift.
 #[cfg(not(target_arch = "wasm32"))]
-fn save_world_at(
-    name: &str,
+pub fn build_world_save(
     world: &World,
     players: &[crate::player_slot::PlayerSlot],
     seed: u32,
     carts: &[SavedCart],
     saved_mobs: &[SavedTamedPet],
-    at_commit: AtCommit,
-) -> Result<(), String> {
-    if players.is_empty() {
-        return Err("save_world: no players to save".to_string());
-    }
-    let dir = world_dir(name);
-    // Before anything — including the stale-chunk deletes below — is touched.
-    refuse_world_write(&dir)?;
-    // A committed first save cut short is published before any delete below,
-    // so a chunk mined out since can't come back with it.
-    finish_staged_first_save(&dir)?;
-    let chunks_dir = dir.join("chunks");
-
+) -> WorldSave {
     // Build per-player save data
     let player_saves: Vec<PlayerSaveData> = players.iter().map(|slot| {
         PlayerSaveData {
@@ -2021,7 +2009,7 @@ fn save_world_at(
         .map(|(&(x, y, z), chain)| SavedArchitectPlaque { x, y, z, chain: chain.clone() })
         .collect();
 
-    let save = WorldSave {
+    WorldSave {
         seed,
         player_x: p0.x,
         player_y: p0.y,
@@ -2092,7 +2080,33 @@ fn save_world_at(
             .iter_power_devices()
             .map(|((x, y, z), data)| SavedPowerDevice { x, y, z, data: data.clone() })
             .collect(),
-    };
+    }
+}
+
+/// [`save_world`], doing `at_commit` to the autosave the moment `world.dat`
+/// commits.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_world_at(
+    name: &str,
+    world: &World,
+    players: &[crate::player_slot::PlayerSlot],
+    seed: u32,
+    carts: &[SavedCart],
+    saved_mobs: &[SavedTamedPet],
+    at_commit: AtCommit,
+) -> Result<(), String> {
+    if players.is_empty() {
+        return Err("save_world: no players to save".to_string());
+    }
+    let dir = world_dir(name);
+    // Before anything — including the stale-chunk deletes below — is touched.
+    refuse_world_write(&dir)?;
+    // A committed first save cut short is published before any delete below,
+    // so a chunk mined out since can't come back with it.
+    finish_staged_first_save(&dir)?;
+    let chunks_dir = dir.join("chunks");
+
+    let save = build_world_save(world, players, seed, carts, saved_mobs);
 
     // Increment version counter + flush proof-of-play stats into meta BEFORE
     // the folder write so world_meta.json on disk matches the live state.

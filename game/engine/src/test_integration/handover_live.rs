@@ -114,3 +114,32 @@ fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release()
     }
     assert!(challenged, "the newcomer was not admitted after release");
 }
+
+#[test]
+fn handover_eligibility_refuses_live_seat_state_it_cannot_carry() {
+    use crate::handover::live::eligibility::{Refusal, Seat, seats};
+    let (mut hs, mut host) = start_lent("handover-elig");
+    let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x61; 32]);
+    let seat = Seat { slot, generation, key };
+    assert_eq!(seats(&hs.server, seat), Ok(()), "a fresh tracked seat with no credits");
+    assert!(seats(&hs.server, Seat { generation: generation.wrapping_add(1), ..seat }).is_err());
+    assert!(seats(&hs.server, Seat { key: [3; 32], ..seat }).is_err());
+    // One server credit: in flight first, then delivered — both refuse.
+    hs.server.queue_kill_event(slot, generation, crate::mob::MobType::Cow, glam::Vec3::ZERO, false, false);
+    assert!(seats(&hs.server, seat).is_err(), "credit still in flight");
+    host.lend_tick(&mut hs);
+    assert_eq!(
+        seats(&hs.server, seat),
+        Err(Refusal("That player has village or hunting progress this session, which this version can't move yet."))
+    );
+    // An unreadable record of a connected seat refuses (kept untouched).
+    let (mut hs, mut host) = start_lent("handover-elig-read");
+    let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x62; 32]);
+    hs.server.failed_joiner_reads.insert(key);
+    assert!(seats(&hs.server, Seat { slot, generation, key }).is_err());
+    // Another signed-in player present: their agreement can't be asked yet.
+    let (mut hs, mut host) = start_lent("handover-elig-other");
+    let (_a, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x63; 32]);
+    let (_b, _, _, _) = signed_join_lent(&mut hs, &mut host, [0x64; 32]);
+    assert!(seats(&hs.server, Seat { slot, generation, key }).is_err());
+}

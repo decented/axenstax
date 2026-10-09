@@ -5224,3 +5224,25 @@ seats' packets stay in their transports. A pre-retirement release unfreezes;
 packets still waiting are judged by the ordinary path once, only for the same
 seat generation (a departed seat's queue is discarded). The window-event ack
 timeout counts server ticks, so a freeze cannot apply waiting events.
+
+**Eligibility at this base (refusals, original untouched).** One local seat
+only (split-screen seats have no proven identity); the signed-in identity at
+freeze must equal the one the host action captured. Server-wide grants, kill
+and breeding events must be delivered. Every connected signed seat other than
+the recipient, and every saved `joiners/<npub>.dat` other than the source's and
+recipient's, needs that player's agreement, which this version cannot request:
+refuse. A connected seat whose saved record was unreadable
+(`failed_joiner_reads`) refuses. The recipient must be the exact seat (slot,
+generation, key), alive, with a window that is quiescent (no unacknowledged or
+valve-forced event, no correction debt, no death replacement, no retired
+overflow) and progression tracked since a verified signed admission on this
+attach (`ServerPlayer.progression_tracked`) with zero server-queued kill credits
+(`progression_credits`), i.e. default progression; any credit refuses until a
+numbered progression authority exists. On the transfer COPY of the WorldSave
+(built by the same `save::build_world_save` the ordinary save uses): proven
+source seat0 `LocalPlayer(0)` owners of vendors, tip jars, auctions, plots and
+market hubs and `local-player-0` pet owners become the source npub; npub owners
+stay; any other seat number, any auction bidder, raid contribution, killing
+blow or raid kill row, a kept steed (`kept_by`) or a legacy row pet list
+refuses. Positional player rows and legacy seat0 fields are then stripped; that
+state travels in the source's own sidecar and participant records.

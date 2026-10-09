@@ -4241,6 +4241,8 @@ impl HostedServer {
                                     }
                                     if let Some(sp) = self.server.players.get_mut(i) {
                                         sp.verified_pubkey = id.pubkey;
+                                        sp.progression_tracked = id.pubkey.is_some();
+                                        sp.progression_credits = 0;
                                         sp.display_name = id.display_name.clone();
                                         // World chat (Phase 3) — resolved at
                                         // join, never cached (§2.5, §3.3). A

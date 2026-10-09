@@ -201,6 +201,19 @@ impl WindowEvents {
 
     pub fn last_number(&self) -> u32 { self.last_sent }
 
+    /// World handover (pre-obligation-carrier base): nothing is outstanding
+    /// between the server's copy and the client for this window — no event
+    /// waiting for its acknowledgement, no valve-forced correction the client
+    /// has not confirmed, no unpaid correction debt, no pending death
+    /// replacement and no retired overflow still to deliver.
+    pub fn is_quiescent(&self) -> bool {
+        self.waiting.is_empty()
+            && self.forced_corrections.is_empty()
+            && self.debt.is_empty()
+            && self.death_replace.is_none()
+            && self.retired_overflow.is_empty()
+    }
+
     /// The number of the last event sent (0 before the first).
     #[cfg(test)]
     pub fn last_sent(&self) -> u32 {
