@@ -400,8 +400,8 @@ pub struct ResourcePackSuggestPacket {
 /// encoding as `EntitySpawn.item_kind`/`item_id` — which only round-trips
 /// blocks and materials — plus, since v61, a trailing `full_item` carrying
 /// the per-instance fidelity that pair loses (tool type/material/durability,
-/// armour slot/material/durability). Plans have no wire form and stay
-/// floor-bound: the server never grants one.
+/// armour slot/material/durability). Plans stay
+/// floor-bound on ordinary pickups; v87 creative gives carry a private marker.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InventoryGrantPacket {
     /// `item_kind::*` discriminator (`BLOCK` or `MATERIAL` in practice).
@@ -1075,9 +1075,10 @@ pub struct EntityInteractPacket {
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
 /// `GrantUnfit`; v79 `UseBlock`; v81 `Shoot`, `PlaceCart`, `Cast`, `Reel`;
-/// v83 `PlanMinted`; v84 `Attach`, `Detach`). Wire-stable, APPEND ONLY: Eat = 0,
+/// v83 `PlanMinted`; v84 `Attach`, `Detach`; v86 `OpenGrave`; v87 `CreativeGive`). Wire-stable, APPEND ONLY: Eat = 0,
 /// Sleep = 1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6,
-/// PlaceCart = 7, Cast = 8, Reel = 9, PlanMinted = 10, Attach = 11, Detach = 12
+/// PlaceCart = 7, Cast = 8, Reel = 9, PlanMinted = 10, Attach = 11, Detach = 12,
+/// OpenGrave = 13, CreativeGive = 14
 /// (pinned on the wire bytes by `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
@@ -1195,6 +1196,8 @@ pub enum ItemAction {
     Detach { x: i32, y: i32, z: i32, face: u8 },
     /// Retrieve a shared grave within server-body reach.
     OpenGrave { x: i32, y: i32, z: i32 },
+    /// v87 — Explorer give, authorised only in server creative mode.
+    CreativeGive { item: WireStack },
 }
 
 /// C3c-2 (v81) — the weapon an [`ItemAction::Shoot`] fires. Wire-stable,
@@ -2685,7 +2688,8 @@ pub struct ServerAnnouncePacket {
 ///   `mob_interact::InteractNote` code 18 (`MountTaken`).
 /// - v86 (2026-10-09): server-owned joiner death, InventorySync (tag 67),
 ///   ItemAction::OpenGrave (= 13), PlayerEventType::GraveAt (= 7).
-pub const PROTOCOL_VERSION: u32 = 86;
+/// - v87 (2026-10-09): CreativeGive (= 14), per-npub joiner sync.
+pub const PROTOCOL_VERSION: u32 = 87;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2858,8 +2862,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // Server-owned death — v86 (on MP-D2c-1's v85).
-        assert_eq!(super::PROTOCOL_VERSION, 86);
+        // Sidecar creative gives — v87, appended after server-owned death.
+        assert_eq!(super::PROTOCOL_VERSION, 87);
     }
 
     #[test]
@@ -3608,7 +3612,8 @@ mod tests {
         //   `attachment_changes`) — riding runs on the server; joiners ride.
         // v86 (2026-10-09, death): numbered InventorySync (tag 67),
         //   OpenGrave (= 13) and GraveAt (= 7).
-        assert_eq!(PROTOCOL_VERSION, 86);
+        // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
+        assert_eq!(PROTOCOL_VERSION, 87);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3810,6 +3815,27 @@ mod tests {
             (61, PacketType::KillEvent),
         ] {
             assert_eq!(t as u8, tag, "wire-stable tag");
+        }
+    }
+
+    #[test]
+    fn sidecar_creative_give_wire_is_appended_and_bounded() {
+        for item in [
+            WireStack { item_kind: item_kind::BLOCK, item_id: 3, count: 12, full_item: WireItem::None },
+            WireStack { item_kind: item_kind::PLAN, item_id: 0, count: 1,
+                full_item: WireItem::Plan { marker: [0x5A;32], developed: true } },
+        ] {
+            let request = ItemActionPacket { seq: 7, action: ItemAction::CreativeGive { item }, events_applied: 9 };
+            let wire = serialize_packet(PacketType::ItemAction, &request);
+            assert!(wire.len() <= MAX_WIRE_PACKET_LEN);
+            let (kind, payload) = deserialize_header(&wire).unwrap();
+            assert_eq!(kind, PacketType::ItemAction);
+            assert_eq!(&payload[4..8], &14u32.to_le_bytes());
+            assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), request);
+            assert!(safe_deserialize::<ItemActionPacket>(&payload[..payload.len()-1]).is_err());
+            let mut oversized = payload.to_vec();
+            oversized.resize(MAX_PACKET_SIZE as usize + 1, 0);
+            assert!(safe_deserialize::<ItemActionPacket>(&oversized).is_err());
         }
     }
 

@@ -1694,8 +1694,7 @@ joiner any more (Spec 04 §4.2c).
   tonight.", "That bed is too far away.". **A joiner's sleep does not skip the
   night**: the clock is the host's (until D4); the host's own sleep still
   skips it for everyone. The bed spawn, health, hunger and the
-  slept-tonight mark all reset when the joiner reconnects or the server
-  restarts, until the per-npub sidecar step.
+  slept-tonight mark persist per verified npub on that operator's machine (Sidecar, v87; Spec 04 §4.2i). The mark survives a reconnect in the same server run and is forgotten after a restart. The whole inventory window also returns in the same slots on that world; a returning empty bag receives no second starting kit. Guests remain ephemeral. A returning joiner appears at its saved spawn point; a dead saved player explicitly respawns as usual. Dedicated worlds opened solo start a fresh local player. Plan bodies stay in each client's own local store; another machine may see only a marker stub.
   `/kill` and `/heal` are op-only, never available to a joiner (were one run,
   `/heal` would heal only its own view: the server ignores reported heals).
 - **A joiner's crafting and Q-drops reach the server (C2b, v74, Spec 04

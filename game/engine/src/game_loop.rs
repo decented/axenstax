@@ -5150,6 +5150,7 @@ impl super::GameState {
             ) {
                 log::error!("Autosave failed: {e}");
             }
+            if let Some(h) = &self.hosted_server && let Err(e) = h.server.save_joiners() { log::error!("Joiner autosave failed: {e}"); }
         }
 
         // Spec 40 persistence — debounced wardrobe flush. Authoring sets
@@ -15529,6 +15530,7 @@ impl super::GameState {
                                 }
                                 // The Plan the server is told of (by marker).
                                 let minted = joined.then(|| crate::inventory::plan_to_wire(&candidate.data));
+                                crate::plan_store::remember(&candidate.data);
                                 let plan_stack = crate::item::ItemStack {
                                     item: crate::item::Item::Plan(candidate.data),
                                     count: 1,
@@ -17408,6 +17410,8 @@ impl super::GameState {
                         }
                         crate::inventory_explorer::ExplorerOutcome::GiveToInventory(stack) => {
                             let label = stack.item.name(&self.registry);
+                            if self.joined() { self.request_creative_give(pidx, &stack); continue; }
+                            crate::plan_store::remember_item(&stack.item);
                             let ok =
                                 self.players[pidx].inventory.add_item(stack).is_none();
                             self.toast = Some((
@@ -19881,6 +19885,8 @@ impl super::GameState {
                     }
                     crate::inventory_explorer::ExplorerOutcome::GiveToInventory(stack) => {
                         let label = stack.item.name(&self.registry);
+                        if self.joined() { self.request_creative_give(pidx, &stack); continue; }
+                        crate::plan_store::remember_item(&stack.item);
                         let ok = self.players[pidx].inventory.add_item(stack).is_none();
                         self.toast = Some((
                             if ok {
@@ -22428,6 +22434,7 @@ impl super::GameState {
             &pending,
             parent_plan.as_ref(),
         );
+        if result.plan_inserted { crate::plan_store::remember(&result.committed_plan); }
         // Sticky licence pref for next capture.
         self.players[pidx].last_chosen_license = Some(last_lic);
         // C3c-3a — joined: the server mirrors the mint on
@@ -22588,6 +22595,13 @@ impl super::GameState {
         let asked = asked(held.as_ref());
         let action = crate::protocol::ItemAction::UseBlock { cell, hotbar_slot: hot as u8, held_kind, held_id, held_full };
         self.send_use_request(pidx, asked, held, hot, action);
+    }
+
+    /// Ask the authority to add an Explorer item to this window.
+    fn request_creative_give(&mut self, pidx: usize, stack: &crate::item::ItemStack) {
+        crate::plan_store::remember_item(&stack.item);
+        self.send_use_request(pidx, crate::joiner_actions::Asked::CreativeGive, None, 0,
+            crate::protocol::ItemAction::CreativeGive { item: crate::inventory::stack_to_wire(stack) });
     }
 
     /// C3c-2 — record and send player `pidx`'s (a joiner's) item action
@@ -22828,6 +22842,9 @@ impl super::GameState {
             self.handle_tool_use(wear);
         }
         let note = crate::item_actions::ItemNote::from_wire(out.note);
+        if request.kind == crate::joiner_actions::Asked::CreativeGive && !out.accepted && note == crate::item_actions::ItemNote::InventoryFull {
+            self.toast = Some(("Inventory full — make room first".into(), Instant::now() + Duration::from_secs(3)));
+        }
         if out.accepted {
             match request.kind {
                 crate::joiner_actions::Asked::OpenGrave { .. } => {
@@ -22858,6 +22875,7 @@ impl super::GameState {
                 // item as an `InventoryGrant`.
                 crate::joiner_actions::Asked::Attach { .. } => self.audio.play_place(),
                 crate::joiner_actions::Asked::Detach { .. } => self.audio.play_break(),
+                crate::joiner_actions::Asked::CreativeGive => {},
                 _ => {}
             }
             return;

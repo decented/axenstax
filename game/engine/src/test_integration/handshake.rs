@@ -249,8 +249,8 @@ fn protocol_version_is_the_pinned_value() {
     //   `StateUpdatePacket.attachment_changes` — face attachments live in the
     //   server's world and stream to joiners.
     // v85 (D2c-1): Mount, RIDDEN/SEATED, StateUpdatePacket.own_riding.
-    // v86 (death): InventorySync, OpenGrave and GraveAt.
-    assert_eq!(protocol::PROTOCOL_VERSION, 86);
+    // v87 (sidecar): CreativeGive.
+    assert_eq!(protocol::PROTOCOL_VERSION, 87);
 }
 
 #[test]

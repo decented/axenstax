@@ -379,6 +379,9 @@ pub struct ToolUseInfo {
 /// result, vendor withdraw) before committing.
 #[derive(Clone)]
 pub struct Inventory {
+    /// Client windows remember genuine Plan bodies before any predictive spend.
+    /// Server windows and pure preview inventories keep this disabled.
+    remember_plans: bool,
     /// Slots 0-8 = hotbar, 9-35 = main inventory.
     slots: [Option<ItemStack>; 36],
     /// Set by `toggle()` but never read — the live inventory-open state lives
@@ -403,11 +406,16 @@ impl Inventory {
         // populated in chunk_stream::initial_load when the world is created
         // or loaded.
         Self {
+            remember_plans: false,
             slots: std::array::from_fn(|_| None),
             open: false,
             locked: [false; 36],
             auto_refill: true,
         }
+    }
+
+    pub(crate) fn new_client() -> Self {
+        Self { remember_plans: true, ..Self::new() }
     }
 
     /// #45 P4 — restock a just-emptied hotbar slot (0..9) with the next matching
@@ -488,6 +496,7 @@ impl Inventory {
     }
 
     pub fn set_slot(&mut self, index: usize, stack: Option<ItemStack>) {
+        if self.remember_plans && index < 36 && let Some(s) = &stack { crate::plan_store::remember_item(&s.item); }
         if index < 36 {
             self.slots[index] = stack;
         }
@@ -565,6 +574,7 @@ impl Inventory {
     /// (best-effort add, drop on full); the chest/craft paths that recover
     /// items MUST re-insert only this remainder, never the original stack.
     pub fn add_item(&mut self, stack: ItemStack) -> Option<ItemStack> {
+        if self.remember_plans { crate::plan_store::remember_item(&stack.item); }
         let mut remaining = stack.count;
         // First try to stack with existing matching items.
         for slot in self.slots.iter_mut() {

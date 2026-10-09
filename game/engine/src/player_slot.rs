@@ -358,7 +358,7 @@ impl PlayerSlot {
             player: Player::new(spawn),
             camera: Camera::new(spawn, aspect),
             input: InputState::new(),
-            inventory: Inventory::new(),
+            inventory: Inventory::new_client(),
             combat: PlayerCombat::new(),
             hotbar_slot: 0,
             hotbar_scroll_ready_tick: 0,

@@ -59,6 +59,7 @@
             }
             await new Promise(r => setTimeout(r, 20));
         }
+        await window.axenstax_plan_store_ready;
         window.__axenstax_start();
     }
 

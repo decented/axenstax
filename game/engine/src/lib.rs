@@ -234,6 +234,8 @@ mod grave;
 mod death;
 mod starter_kit;
 mod inventory_sync;
+mod joiner_save;
+mod plan_store;
 mod bear_ai;
 mod hyena_ai;
 mod brigand;

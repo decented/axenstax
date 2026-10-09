@@ -23,6 +23,7 @@
 //! spawned (native-only).
 
 mod death;
+mod sidecar;
 
 use std::collections::VecDeque;
 
@@ -433,6 +434,8 @@ pub struct HostedServer {
     /// `ProtocolId`s from any earlier server (ids are per `HostedServer`, so
     /// a stale one would collide with this server's fresh numbering).
     lent_ids_reset: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    deferred_kicks: Vec<[u8; 32]>,
     /// C3c-3b — has this server taken its world's attachment log in yet?
     /// The first take only drops what is there: a lending host's world keeps
     /// its log on after a server stops (nothing turns it off), so it can hold
@@ -917,6 +920,8 @@ impl HostedServer {
             lent_sim_changes: Vec::new(),
             lent_edit_cells: Vec::new(),
             lent_ids_reset: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            deferred_kicks: Vec::new(),
             attachments_started: false,
             // Local slots ride an in-process channel: unbudgeted outboxes.
             outboxes: (0..num_local_players)
@@ -1709,6 +1714,10 @@ impl HostedServer {
     /// no live slot is a no-op. Native-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn kick_pubkeys(&mut self, targets: &[[u8; 32]]) {
+        if self.lends_host_world() && !self.server.lent {
+            for target in targets { if !self.deferred_kicks.contains(target) { self.deferred_kicks.push(*target); } }
+            return;
+        }
         for t in targets {
             // Resolved by the stable identity (the verified npub) at the
             // moment of the kick, against LIVE remote slots only — a stale
@@ -1745,14 +1754,16 @@ impl HostedServer {
     /// dropped, and the real transport is replaced by a `ClosedTransport` —
     /// dropping it is what closes the socket, after flushing that last packet.
     /// The `ServerPlayer` stays (marked `connected = false`) until the slot is
-    /// reused. The server keeps no authoritative inventory for a remote player
-    /// (see `block_change_within_reach`'s BRIDGE), so there is nothing to drop.
+    /// reused. Its effective window and vitals are saved per verified npub,
+    /// after settling a pending death on the authoritative world.
     ///
     /// Returns the `Left` event to fan out if the slot had completed its join.
     fn release_slot(&mut self, i: usize, tell_client: Option<&str>) -> Option<Vec<u8>> {
         if self.disconnected.get(i).copied().unwrap_or(true) {
             return None;
         }
+        if self.handshake_done[i] && (!self.lends_host_world() || self.server.lent) { self.settle_leaving_life(i); }
+        if self.handshake_done[i] && let Err(e) = self.server.save_joiner(i) { log::error!("Joiner leave save failed: {e}"); }
         let was_joined = self.handshake_done[i];
         self.disconnected[i] = true;
         // FU1 — whatever it sent and the server had not yet read goes with the
@@ -2173,6 +2184,9 @@ impl HostedServer {
             protocol::ItemAction::Attach { x, y, z, face, hotbar_slot, held_kind, held_id, held_full } => {
                 let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
                 return self.serve_attach(i, req.seq, [*x, *y, *z], *face, *hotbar_slot, held);
+            }
+            protocol::ItemAction::CreativeGive { item } => {
+                return self.serve_creative_give(i, req.seq, item);
             }
             protocol::ItemAction::OpenGrave { x, y, z } => {
                 return self.serve_open_grave(i, req.seq, (*x, *y, *z));
@@ -3011,11 +3025,23 @@ impl HostedServer {
         if !sp.server_simulated || !sp.is_in_world() {
             return;
         }
-        let Some(mut stack) = crate::window_events::return_unfit(sp, event, count, now) else { return };
+        let Some(stack) = crate::window_events::return_unfit(sp, event, count, now) else { return };
+        self.route_joiner_unfit(i, event, stack);
+    }
+
+    /// Return a grant to its surviving grave, otherwise to the ground.
+    fn route_joiner_unfit(&mut self, i: usize, event: u32, stack: crate::item::ItemStack) {
+        let cell = self.server.players[i].window_events.grave_grants.iter().find(|(n, _)| *n == event).map(|(_,cell)| *cell);
+        self.route_joiner_unfit_at(i, stack, cell);
+    }
+
+    fn route_joiner_unfit_at(&mut self, i: usize, mut stack: crate::item::ItemStack, cell: Option<(i32,i32,i32)>) {
+        let sp = &self.server.players[i];
+        // A refused private creative Plan never becomes a transferable floor item.
+        if matches!(stack.item, crate::item::Item::Plan(_)) { return; }
         // C3b-fix-b (B-M2) — thrown from the joiner (it can't take it back
         // for the Q-drop delay), and only what came back.
         let feet = sp.player.pos;
-        let cell = sp.window_events.grave_grants.iter().find(|(n, _)| *n == event).map(|(_,cell)| *cell);
         if let Some(cell) = cell
             && let Some(mut grave) = self.server.world.grave_at(cell).cloned() {
             for stored in grave.slots.iter_mut().flatten() {
@@ -3233,6 +3259,7 @@ impl HostedServer {
             }
             let Some(pkt) = crate::window_ops::container_push(sp, &server.world, now) else { continue };
             self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::WindowSlotSet, &pkt));
+            self.flush_retired_overflow(i);
         }
     }
 
@@ -3627,6 +3654,8 @@ impl HostedServer {
             self.server.lent,
             "a lending HostedServer ticks only inside a LentSim window (and an owning one never does)"
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        { let kicks = std::mem::take(&mut self.deferred_kicks); self.kick_pubkeys(&kicks); }
         self.accept_new_remote_connections();
         let closed_before_fill = self.process_inbound_packets();
         self.reap_slots(&closed_before_fill);
@@ -3649,8 +3678,11 @@ impl HostedServer {
         // C3a-fix-1 — the safety valve: a window event the client has not
         // reported within `EVENT_ACK_TIMEOUT_TICKS` is applied anyway.
         let now = self.server.tick_counter;
-        for sp in self.server.players.iter_mut().filter(|sp| sp.server_simulated) {
-            crate::window_events::apply_overdue(sp, now);
+        for i in 0..self.server.players.len() {
+            if self.server.players[i].server_simulated {
+                crate::window_events::apply_overdue(&mut self.server.players[i], now);
+                self.flush_retired_overflow(i);
+            }
         }
         // C3b-1 — what others changed in the containers joiners have open.
         self.push_open_containers();
@@ -3944,6 +3976,9 @@ impl HostedServer {
             // fill, which has taken every frame it handed over before it closed).
             let closed_now = closed_before_fill.get(i).copied().unwrap_or(false) || self.transports[i].is_closed();
             loop {
+                // Drain retired genuine overflow before the next packet can
+                // disconnect or evict this life, including early continues.
+                self.flush_retired_overflow(i);
                 // C2b verify M4 — a connection that has closed gets none of
                 // its queued requests answered: they are discarded (at no
                 // read budget) so the queue empties and `reap_slots` can free
@@ -4227,6 +4262,14 @@ impl HostedServer {
                             }
                         }
 
+                        let saved_joiner = self.server.load_joiner(i);
+                        if let Some(saved) = &saved_joiner {
+                            let sp = &mut self.server.players[i];
+                            sp.spawn_pos = glam::Vec3::from_array(saved.spawn);
+                            sp.player.pos = sp.spawn_pos;
+                            sp.player.velocity = glam::Vec3::ZERO;
+                            sp.player.reset_fall();
+                        }
                         // The spawn point this slot was created at
                         // (`join_spawn`) — also where it respawns.
                         let spawn = if let Some(sp) = self.server.players.get(i) {
@@ -4298,9 +4341,17 @@ impl HostedServer {
                         if let Some(sp) = self.server.players.get_mut(i) {
                             sp.enter_world();
                         }
-                        let mut kit = crate::window_events::effective_window(&self.server.players[i]);
-                        crate::starter_kit::grant_fresh_kit(&mut kit.inv, &self.server.world.world_type,
-                            self.server.play_mode.is_creative(), self.server.world.is_workshop);
+                        if let Some(saved) = &saved_joiner { saved.restore_vitals(&mut self.server.players[i], self.server.run_id); }
+                        // A restored dead life needs the fresh client's death screen,
+                        // but its already-settled grave must not run the death hook again.
+                        if self.server.players[i].combat.dead {
+                            self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::PlayerEvent,
+                                &protocol::PlayerEventPacket { player_index: i as u32,
+                                    event: protocol::PlayerEventType::DiedOf { cause: protocol::WireDamageCause::Generic }, window_event: 0 }));
+                        }
+                        let mut kit = saved_joiner.as_ref().map(|s| s.window().expect("validated joiner window")).unwrap_or_else(|| crate::window_events::effective_window(&self.server.players[i]));
+                        if saved_joiner.is_none() { crate::starter_kit::grant_fresh_kit(&mut kit.inv, &self.server.world.world_type,
+                            self.server.play_mode.is_creative(), self.server.world.is_workshop); }
                         for at in 0..36 {
                             if let Some(stack) = kit.inv.slot(at).cloned()
                                 && let crate::item::Item::Plan(body) = stack.item {
@@ -4308,7 +4359,7 @@ impl HostedServer {
                                     crate::plan::PlanData::marker_placeholder(crate::plan::marker(&body), matches!(body.develop_state, crate::plan::DevelopState::Developed))), count: stack.count }));
                             }
                         }
-                        if (0..36).any(|at| kit.inv.slot(at).is_some()) { self.send_inventory_sync(i, kit); }
+                        if saved_joiner.is_some() || (0..36).any(|at| kit.inv.slot(at).is_some()) { self.send_inventory_sync(i, kit); }
 
                         // The operator joining without a channel binding plays
                         // normally but gets no operator tools — say so, so the
@@ -5425,6 +5476,7 @@ impl HostedServer {
             if let Some(pkt) = grant_packet(&stack, seq) {
                 self.send_to_joined_slot(i, &pkt);
             }
+            self.flush_retired_overflow(i);
         }
     }
 
@@ -8369,6 +8421,319 @@ mod tests {
         let ev = signed_auth_event(seckey, &chal.nonce_hex, &origin, current_unix_ts());
         let req = join_with_auth(ev, None);
         client.send_to_server(&protocol::serialize_packet(protocol::PacketType::JoinRequest, &req));
+    }
+
+    #[test]
+    fn sidecar_signed_reconnect_restores_window_vitals_and_spawn_in_join_accept() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-reconnect");
+        let mut hs = start_room_test_server("sidecar", 0);
+        hs.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let first = hs.attach_test_remote_with_binding(Some([17;32]));
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        hs.server.players[i].inventory.set_slot(7, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
+        hs.server.players[i].cursor = Some(crate::item::ItemStack::new_block(crate::block::DIRT, 2));
+        hs.server.players[i].craft_grid[1][2] = Some(crate::item::ItemStack::new_material(crate::item::MaterialId::Diamond, 3));
+        hs.server.players[i].combat.health = 8.0; hs.server.players[i].combat.hunger = 9;
+        let spawn = glam::Vec3::new(10.5, 80.0, 20.5); hs.server.players[i].spawn_pos = spawn;
+        let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]), 1);
+        let second = hs.attach_test_remote_with_binding(Some([34;32]));
+        send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        assert_eq!(hs.server.players[i].spawn_pos, spawn);
+        assert_eq!(hs.server.players[i].player.pos, spawn);
+        assert_eq!(hs.server.players[i].combat.hunger, 9);
+        let mut accept = None; let mut sync = None;
+        while let Some(pkt) = second.try_recv_from_server() {
+            let Some((kind, bytes)) = protocol::deserialize_header(&pkt) else { continue; };
+            match kind {
+                protocol::PacketType::JoinAccept => accept = Some(protocol::safe_deserialize::<protocol::JoinAcceptPacket>(bytes).unwrap()),
+                protocol::PacketType::InventorySync => sync = Some(protocol::safe_deserialize::<protocol::InventorySyncPacket>(bytes).unwrap()),
+                _ => {}
+            }
+        }
+        let accept = accept.unwrap(); assert_eq!([accept.spawn_x, accept.spawn_y, accept.spawn_z], spawn.to_array());
+        assert_eq!(sync.unwrap(), expected);
+        assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]), 1), expected);
+        assert!((hs.server.players[i].combat.health - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn sidecar_saved_empty_testlab_window_syncs_without_a_second_kit() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-empty-kit");
+        let mut hs = start_room_test_server("sidecar-kit", 0);
+        hs.server.world.world_type = "testlab".into();
+        let first = hs.attach_test_remote_with_binding(Some([17;32]));
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        assert!(crate::window_events::effective_window(&hs.server.players[i]).inv.slots_iter().any(|s| s.is_some()));
+        // Acknowledge the first kit, then spend everything in the authoritative copy.
+        crate::window_events::apply_through(&mut hs.server.players[i], 1, hs.server.tick_counter);
+        for at in 0..36 { hs.server.players[i].inventory.set_slot(at, None); }
+        let second = hs.attach_test_remote_with_binding(Some([34;32]));
+        send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
+        let mut sync = None;
+        while let Some(pkt) = second.try_recv_from_server() {
+            if let Some((protocol::PacketType::InventorySync, bytes)) = protocol::deserialize_header(&pkt) {
+                sync = Some(protocol::safe_deserialize::<protocol::InventorySyncPacket>(bytes).unwrap());
+            }
+        }
+        let sync = sync.expect("a returning empty window still syncs");
+        assert_eq!(sync.window_event, 1); assert!(sync.slots.iter().all(|(_, s)| s.is_none()));
+    }
+
+    #[test]
+    fn sidecar_dead_reconnect_preserves_grave_and_can_respawn_after_the_guard() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-dead-reconnect");
+        let mut hs = start_room_test_server("sidecar-dead", 0);
+        let first = hs.attach_test_remote_with_binding(Some([17;32]));
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        let cell = (1,80,1);
+        hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
+        hs.server.world.insert_grave(cell, crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE, 3))],0));
+        hs.server.players[i].combat.health = 0.0; hs.server.players[i].combat.dead = true; hs.server.players[i].death_handled = true;
+        hs.server.players[i].cursor = Some(crate::item::ItemStack::new_block(crate::block::DIRT, 2));
+        let second = hs.attach_test_remote_with_binding(Some([34;32]));
+        send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        assert!(hs.server.players[i].combat.dead); assert!(hs.server.players[i].death_handled);
+        assert!(hs.server.respawn_player(i).is_none(), "dead rejoin cannot bypass the respawn guard");
+        let mut events = Vec::new(); let mut syncs = 0;
+        while let Some(pkt) = second.try_recv_from_server() {
+            match protocol::deserialize_header(&pkt) {
+                Some((protocol::PacketType::InventorySync, bytes)) => { let sync: protocol::InventorySyncPacket = protocol::safe_deserialize(bytes).unwrap(); assert_eq!(sync.window_event,1); syncs += 1; },
+                Some((protocol::PacketType::PlayerEvent, bytes)) => events.push(protocol::safe_deserialize::<protocol::PlayerEventPacket>(bytes).unwrap().event),
+                _ => {}
+            }
+        }
+        assert_eq!(syncs,1); assert_eq!(events.iter().filter(|e| matches!(e,protocol::PlayerEventType::DiedOf { cause: protocol::WireDamageCause::Generic })).count(),1); assert!(!events.iter().any(|e| matches!(e,protocol::PlayerEventType::GraveAt { .. })));
+        for _ in 0..crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN { hs.tick(); }
+        assert_eq!(hs.server.world.iter_graves().count(),1);
+        assert_eq!(hs.server.world.grave_at(cell).unwrap().slots[0].as_ref().unwrap().count,3);
+        assert_eq!(crate::window_events::effective_window(&hs.server.players[i]).cursor.as_ref().unwrap().count,2);
+        assert!(hs.server.respawn_player(i).is_some()); assert!(!hs.server.players[i].combat.dead);
+    }
+
+    #[test]
+    fn sidecar_unhandled_fatal_reconnect_finishes_old_life_once() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-fatal-eviction");
+        let mut hs = start_room_test_server("sidecar-fatal", 0);
+        let first = hs.attach_test_remote_with_binding(Some([17;32]));
+        send_signed_join(&first, [66;32], Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        while first.try_recv_from_server().is_some() {}
+        hs.server.players[i].inventory.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 3)));
+        hs.server.pending_item_grants.push((i, crate::item::ItemStack::new_block(crate::block::DIRT, 2)));
+        hs.server.players[i].combat.die(crate::survival::DamageCause::Generic);
+        let second = hs.attach_test_remote_with_binding(Some([34;32]));
+        send_signed_join(&second, [66;32], Some([34;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        assert!(hs.server.players[i].combat.dead);
+        assert!(crate::window_events::effective_window(&hs.server.players[i]).inv.slots_iter().all(|s| s.is_none()));
+        assert_eq!(hs.server.world.iter_graves().count(),1);
+        let grave = hs.server.world.iter_graves().next().unwrap().1;
+        assert_eq!(grave.slots.iter().flatten().map(|s| s.count as u32).sum::<u32>(),5);
+        let mut died = 0; let mut at = 0;
+        while let Some(pkt) = first.try_recv_from_server() { if let Some((protocol::PacketType::PlayerEvent, bytes)) = protocol::deserialize_header(&pkt) {
+            match protocol::safe_deserialize::<protocol::PlayerEventPacket>(bytes).unwrap().event { protocol::PlayerEventType::DiedOf { .. } => died += 1, protocol::PlayerEventType::GraveAt { .. } => at += 1, _ => {} }
+        }}
+        assert_eq!((died,at),(1,1)); hs.tick(); assert_eq!(hs.server.world.iter_graves().count(),1);
+    }
+
+    #[test]
+    fn sidecar_release_spills_pending_full_and_partial_grants_exactly_once() {
+        let _g = crate::save::WorldsRootGuard::new("sidecar-release-overflow");
+        for space in [0, 2] {
+            let mut hs = start_room_test_server(&format!("sidecar-unfit-{space}"),0);
+            let client = hs.attach_test_remote_with_binding(Some([17;32]));
+            send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let i = hs.server.players.len()-1;
+            for at in 0..36 { hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64))); }
+            hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
+            hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
+            let expected = crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),1);
+            hs.release_slot(i,None); hs.release_slot(i,None);
+            let count = hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_,drop)| drop.stack.count as u32).sum::<u32>();
+            assert_eq!(count,u32::from(5-space));
+            let saved = hs.server.load_joiner(i).unwrap();
+            assert_eq!(crate::inventory_sync::packet(&saved.window().unwrap(),1),expected);
+        }
+    }
+
+    #[test]
+    fn sidecar_review_many_pending_grants_keep_every_overflow_and_origin() {
+        let _g = crate::save::WorldsRootGuard::new("sidecar-many-grants");
+        for space in [0,2] {
+            let mut hs=start_room_test_server(&format!("sidecar-many-{space}"),0);
+            let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let i=hs.server.players.len()-1; let cell=(1,80,1);
+            hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
+            hs.server.world.insert_grave(cell,crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE,1))],0));
+            for at in 0..36 {hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64)));}
+            hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
+            for grant in 0..65 {
+                hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
+                if grant==0 { hs.server.players[i].window_events.grave_grants.push_back((1,cell)); }
+            }
+            hs.release_slot(i,None); hs.release_slot(i,None);
+            let returned=hs.server.world.grave_at(cell).unwrap().slots.iter().flatten().map(|s|s.count as u32).sum::<u32>();
+            assert_eq!(returned,u32::from(6-space),"the first grant survives the64-record ring and returns to its grave");
+            let ground=hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_,drop)|drop.stack.count as u32).sum::<u32>();
+            assert_eq!(ground,64*5);
+            let bag=hs.server.load_joiner(i).unwrap().window().unwrap().inv.slots_iter().flatten().map(|s|s.count as u32).sum::<u32>();
+            assert_eq!(bag,36*64);
+            assert_eq!(bag+ground+returned,36*64-u32::from(space)+65*5+1);
+        }
+    }
+
+    #[test]
+    fn sidecar_review_acknowledged_grants_then_same_poll_disconnect_keep_overflow() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-acked-grants");
+        for space in [0,2] {
+            let mut hs=start_room_test_server(&format!("sidecar-acked-{space}"),0);
+            let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let i=hs.server.players.len()-1; let cell=(1,80,1);
+            hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
+            hs.server.world.insert_grave(cell,crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE,1))],0));
+            for at in 0..36 {hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64)));}
+            hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
+            for grant in 0..65 {
+                hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
+                if grant==0 { hs.server.players[i].window_events.grave_grants.push_back((1,cell)); }
+            }
+            let input=protocol::InputPacket { tick:1, health:20.0, events_applied:65, ..Default::default() };
+            client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ClientInput,&input));
+            client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Disconnect,&()));
+            hs.tick(); hs.release_slot(i,None);
+            let returned=hs.server.world.grave_at(cell).unwrap().slots.iter().flatten().map(|s|s.count as u32).sum::<u32>();
+            assert_eq!(returned,u32::from(6-space),"the first grant survives the64-record ring and returns to its grave");
+            let ground=hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_,drop)|drop.stack.count as u32).sum::<u32>();
+            assert_eq!(ground,64*5);
+            let bag=hs.server.load_joiner(i).unwrap().window().unwrap().inv.slots_iter().flatten().map(|s|s.count as u32).sum::<u32>();
+            assert_eq!(bag,36*64);
+            assert_eq!(bag+ground+returned,36*64-u32::from(space)+65*5+1);
+        }
+    }
+
+    #[test]
+    fn sidecar_review_private_plan_count_two_is_refused_without_window_mutation() {
+        use crate::transport::ClientTransport as _;
+        let _g=crate::save::WorldsRootGuard::new("sidecar-plan-count");
+        let mut hs=start_room_test_server("sidecar-plan-count",0); hs.server.play_mode=crate::play_mode::PlayMode::Creative;
+        let client=hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+        let i=hs.server.players.len()-1;
+        let mut wire=crate::inventory::stack_to_wire(&crate::item::ItemStack {item:crate::item::Item::Plan(crate::plan::PlanData::debug_3x3_stone()),count:1}); wire.count=2;
+        let before=crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),1);
+        client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction,&protocol::ItemActionPacket {seq:1,action:protocol::ItemAction::CreativeGive {item:wire},events_applied:0})); hs.tick();
+        let mut outcome=None; let mut grants=0;
+        while let Some(pkt)=client.try_recv_from_server() {match protocol::deserialize_header(&pkt) {
+            Some((protocol::PacketType::ItemActionOutcome,bytes)) => outcome=Some(protocol::safe_deserialize::<protocol::ItemActionOutcomePacket>(bytes).unwrap()),
+            Some((protocol::PacketType::InventoryGrant,_))=>grants+=1,
+            _=>{}
+        }}
+        assert!(!outcome.unwrap().accepted,"a count-two Plan cannot become two server items and one client item");
+        assert_eq!(grants,0); assert_eq!(crate::inventory_sync::packet(&crate::window_events::effective_window(&hs.server.players[i]),1),before);
+        hs.release_slot(i,None); assert_eq!(crate::inventory_sync::packet(&hs.server.load_joiner(i).unwrap().window().unwrap(),1),before);
+    }
+
+    #[test]
+    fn sidecar_terminal_unfit_returns_to_the_surviving_grave() {
+        let _g = crate::save::WorldsRootGuard::new("sidecar-grave-return");
+        for space in [0,2] {
+            let mut hs = start_room_test_server(&format!("sidecar-grave-{space}"),0);
+            let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let i=hs.server.players.len()-1; let cell=(1,80,1);
+            hs.server.world.set_block(cell.0,cell.1,cell.2,crate::block::GRAVE);
+            hs.server.world.insert_grave(cell,crate::grave::GraveData::from_snapshot(vec![Some(crate::item::ItemStack::new_block(crate::block::STONE,1))],0));
+            for at in 0..36 {hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64)));}
+            hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
+            hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
+            hs.server.players[i].window_events.grave_grants.push_back((1,cell));
+            hs.release_slot(i,None); hs.release_slot(i,None);
+            let grave=hs.server.world.grave_at(cell).unwrap();
+            assert_eq!(grave.slots.iter().flatten().map(|s|s.count as u32).sum::<u32>(),u32::from(6-space));
+            assert_eq!(hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().count(),0);
+        }
+    }
+
+    #[test]
+    fn sidecar_normal_death_spills_only_unfitted_grants_once() {
+        let _g = crate::save::WorldsRootGuard::new("sidecar-death-overflow");
+        for space in [0,2] {
+            let mut hs = start_room_test_server(&format!("sidecar-death-unfit-{space}"),0);
+            let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+            let i = hs.server.players.len()-1;
+            for at in 0..36 { hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64))); }
+            hs.server.players[i].inventory.set_slot(0,Some(crate::item::ItemStack::new_block(crate::block::STONE,64-space)));
+            hs.grant_to_joiner(i,[crate::item::ItemStack::new_block(crate::block::STONE,5)]);
+            hs.server.players[i].combat.die(crate::survival::DamageCause::Generic);
+            hs.handle_joiner_deaths(); hs.handle_joiner_deaths();
+            assert_eq!(hs.server.world.iter_graves().count(),1);
+            let grave = hs.server.world.iter_graves().next().unwrap().1;
+            assert_eq!(grave.slots.iter().flatten().map(|s| s.count as u32).sum::<u32>(),36*64);
+            assert!(crate::window_events::effective_window(&hs.server.players[i]).inv.slots_iter().all(|s| s.is_none()));
+            hs.return_joiner_unfit(i,1,5); hs.release_slot(i,None);
+            let count=hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_,drop)|drop.stack.count as u32).sum::<u32>();
+            assert_eq!(count,u32::from(5-space));
+        }
+    }
+
+    #[test]
+    fn sidecar_creative_plan_grant_resolves_local_body_and_never_spills_a_full_bag() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-plan-give");
+        let mut hs = start_room_test_server("sidecar-plan-give",0); hs.server.play_mode = crate::play_mode::PlayMode::Creative;
+        let client = hs.attach_test_remote_with_binding(Some([17;32])); send_signed_join(&client,[66;32],Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        let mut body = crate::plan::PlanData::debug_3x3_stone(); body.name = "Creative local Plan".into();
+        crate::plan_store::remember(&body);
+        let wire = crate::inventory::stack_to_wire(&crate::item::ItemStack { item: crate::item::Item::Plan(body.clone()), count:1 });
+        hs.serve_creative_give(i,1,&wire);
+        let mut grant = None;
+        while let Some(pkt) = client.try_recv_from_server() { if let Some((protocol::PacketType::InventoryGrant,bytes)) = protocol::deserialize_header(&pkt) { grant = Some(protocol::safe_deserialize::<protocol::InventoryGrantPacket>(bytes).unwrap()); } }
+        let mut local = crate::inventory::Inventory::new_client();
+        assert_eq!(crate::remote_entities::apply_inventory_grant(&mut local,&grant.unwrap(),&hs.server.registry),Some(0));
+        let crate::item::Item::Plan(plan) = &local.slot(0).unwrap().item else {panic!("Plan lost")}; assert_eq!(plan.cells,body.cells); assert!(plan.marker.is_none());
+        hs.release_slot(i,None);
+        let saved = hs.server.load_joiner(i).unwrap(); let w = saved.window().unwrap();
+        let crate::item::Item::Plan(plan) = &w.inv.slot(0).unwrap().item else {panic!("Plan lost")}; assert_eq!(crate::plan::marker(plan),crate::plan::marker(&body));
+        // Full authoritative bag: refuse, keep the cached body, create no ground Plan.
+        let client2 = hs.attach_test_remote_with_binding(Some([34;32])); send_signed_join(&client2,[66;32],Some([34;32])); hs.tick();
+        let i = hs.server.players.len()-1; crate::window_events::apply_through(&mut hs.server.players[i],1,hs.server.tick_counter);
+        for at in 0..36 {hs.server.players[i].inventory.set_slot(at,Some(crate::item::ItemStack::new_block(crate::block::STONE,64)));}
+        hs.serve_creative_give(i,2,&wire);
+        let mut outcome = None;
+        while let Some(pkt) = client2.try_recv_from_server() {if let Some((protocol::PacketType::ItemActionOutcome,bytes)) = protocol::deserialize_header(&pkt) {outcome=Some(protocol::safe_deserialize::<protocol::ItemActionOutcomePacket>(bytes).unwrap());}}
+        let outcome=outcome.unwrap(); assert!(!outcome.accepted); assert_eq!(outcome.note,crate::item_actions::ItemNote::InventoryFull.to_wire());
+        assert_eq!(hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().count(),0); assert!(crate::plan_store::resolve(crate::plan::marker(&body)).is_some());
+    }
+
+    #[test]
+    fn sidecar_creative_give_is_a_server_grant_and_survival_refuses() {
+        use crate::transport::ClientTransport as _;
+        let _g = crate::save::WorldsRootGuard::new("sidecar-give");
+        let mut hs = start_room_test_server("sidecar-give", 0);
+        let client = hs.attach_test_remote_with_binding(Some([17;32]));
+        send_signed_join(&client, [66;32], Some([17;32])); hs.tick();
+        let i = hs.server.players.len()-1;
+        let item = crate::inventory::stack_to_wire(&crate::item::ItemStack::new_block(crate::block::STONE, 12));
+        for (seq, mode, accepted) in [(1, crate::play_mode::PlayMode::Survival, false), (2, crate::play_mode::PlayMode::Creative, true)] {
+            hs.server.play_mode = mode;
+            client.send_to_server(&protocol::serialize_packet(protocol::PacketType::ItemAction, &protocol::ItemActionPacket { seq, action: protocol::ItemAction::CreativeGive { item: item.clone() }, events_applied: 0 })); hs.tick();
+            let mut outcome = None;
+            while let Some(pkt) = client.try_recv_from_server() {
+                if let Some((protocol::PacketType::ItemActionOutcome, bytes)) = protocol::deserialize_header(&pkt) { outcome = Some(protocol::safe_deserialize::<protocol::ItemActionOutcomePacket>(bytes).unwrap()); }
+            }
+            assert_eq!(outcome.unwrap().accepted, accepted);
+            assert_eq!(crate::window_events::effective_window(&hs.server.players[i]).inv.slots_iter().flatten().map(|s| s.count as u32).sum::<u32>(), if accepted {12} else {0});
+        }
+        hs.server.save_joiner(i).unwrap(); assert_eq!(hs.server.load_joiner(i).unwrap().window().unwrap().inv.slot(0).unwrap().count,12);
     }
 
     /// Audit 2026-09-27: join never refused a duplicate verified pubkey, so a

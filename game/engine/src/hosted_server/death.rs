@@ -4,10 +4,12 @@ impl HostedServer {
     /// Handle every death once, after inbound reports and the simulation tick.
     pub(super) fn handle_joiner_deaths(&mut self) {
         for i in 0..self.server.players.len() {
-            let sp = &mut self.server.players[i];
+            let sp = &self.server.players[i];
             if !sp.server_simulated || !sp.is_in_world() || !sp.combat.dead || sp.death_handled {
                 continue;
             }
+            self.settle_terminal_grants(i);
+            let sp = &mut self.server.players[i];
             sp.death_handled = true;
             sp.combat.just_died = false;
             let cause = damage_cause_to_wire(sp.combat.last_damage);
@@ -183,7 +185,7 @@ impl HostedServer {
         for stack in grants {
             self.grant_to_joiner(i, [stack]);
             let events = &mut self.server.players[i].window_events;
-            if events.grave_grants.len() >= crate::window_events::RECENT_GRANTS {
+            if events.grave_grants.len() >= crate::window_events::MAX_PENDING_EVENTS + crate::window_events::RECENT_GRANTS {
                 events.grave_grants.pop_front();
             }
             events.grave_grants.push_back((events.last_number(), cell));

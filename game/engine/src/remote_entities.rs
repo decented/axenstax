@@ -239,7 +239,12 @@ pub fn apply_inventory_grant(
     registry: &crate::block::BlockRegistry,
 ) -> Option<u8> {
     let crate::protocol::InventoryGrantPacket { item_kind: kind, item_id: id, count, full_item, .. } = *grant;
-    let decoded = if full_item == crate::protocol::WireItem::None {
+    let decoded = if kind == crate::protocol::item_kind::PLAN {
+        crate::inventory::plan_from_wire(&full_item).map(|item| {
+            let crate::item::Item::Plan(stub) = item else { unreachable!() };
+            crate::item::Item::Plan(crate::plan_store::resolve(crate::plan::marker(&stub)).unwrap_or_else(|| { log::warn!("Private Plan grant has no local body"); stub }))
+        })
+    } else if full_item == crate::protocol::WireItem::None {
         crate::inventory::item_from_ref(kind, id, registry)
     } else {
         crate::inventory::item_from_wire_full(&full_item)

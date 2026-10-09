@@ -866,6 +866,8 @@ fn column_loaded(loaded: &ahash::AHashSet<(i32, i32)>, pos: Vec3) -> bool {
 
 /// The authoritative game server.
 pub struct GameServer {
+    pub(crate) run_id: [u8; 16],
+    pub(crate) failed_joiner_reads: std::collections::HashSet<[u8; 32]>,
     pub world_name: String,
     /// The world's real generation seed (threaded from `new`). Source of truth
     /// for the seed in `JoinAccept` (so joiners generate matching terrain) and
@@ -1048,6 +1050,8 @@ impl GameServer {
         }
 
         Self {
+            run_id: { let mut id = [0; 16]; getrandom::fill(&mut id).expect("server run randomness unavailable"); id },
+            failed_joiner_reads: Default::default(),
             world_name,
             seed,
             world,
@@ -2675,7 +2679,8 @@ impl GameServer {
         let first_save = crate::save::is_first_save(&dir);
         let chunks_dir = dir.join("chunks");
 
-        let player_saves: Vec<crate::save::PlayerSaveData> = self.players.iter().map(|sp| {
+        self.save_joiners()?;
+        let player_saves: Vec<crate::save::PlayerSaveData> = self.players.iter().filter(|sp| !sp.server_simulated).map(|sp| {
             crate::save::PlayerSaveData {
                 x: sp.player.pos.x,
                 y: sp.player.pos.y,

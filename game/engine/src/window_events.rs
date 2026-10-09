@@ -159,12 +159,15 @@ pub struct WindowEvents {
     last_replace: u32,
     /// Refuse requests until the client acknowledges its death replacement.
     pub death_replace: Option<u32>,
-    /// Grave grants remembered for unfit returns, bounded like recent grants.
+    /// Grave origins for waiting and recent grants, bounded by their combined limits.
     pub grave_grants: VecDeque<(u32, (i32, i32, i32))>,
     /// Events sent but not applied yet, oldest first.
     waiting: VecDeque<Waiting>,
     /// Grants applied lately, oldest first ([`RECENT_GRANTS`]).
     grants: VecDeque<AppliedGrant>,
+    // Drained at hosting packet/grant/overdue boundaries. One application is
+    // bounded by MAX_PENDING_EVENTS and the server's bounded correction gives.
+    retired_overflow: Vec<GrantOverflow>,
     /// B-L6 — the last window op's `op_seq` (0 before the first).
     last_op_seq: u32,
     /// Decision 2 — the first digest comparison after join, recorded and not
@@ -336,6 +339,58 @@ pub fn apply_through(sp: &mut ServerPlayer, acked: u32, now: u64) {
     sp.window_events.forced_corrections.retain(|(seq, _)| *seq > acked);
 }
 
+/// Finish the ordered window at a terminal boundary (death or release),
+/// returning only genuine grants that never fitted and were never returned.
+/// Fitted units stay in the bag/grave; no later old-life report can spill twice.
+#[derive(Debug)]
+pub(crate) struct GrantOverflow {
+    pub event: u32,
+    pub stack: ItemStack,
+    pub grave: Option<(i32, i32, i32)>,
+}
+
+fn overflow(ev: &WindowEvents, g: &AppliedGrant) -> Option<GrantOverflow> {
+    let n = g.stack.count.saturating_sub(g.landed);
+    (!g.returned && n > 0 && !matches!(g.stack.item, Item::Plan(_))).then(|| GrantOverflow {
+        event: g.seq,
+        stack: ItemStack { item: g.stack.item.clone(), count: n },
+        grave: ev.grave_grants.iter().find(|(n, _)| *n == g.seq).map(|(_, cell)| *cell),
+    })
+}
+
+fn remember_grant(ev: &mut WindowEvents, grant: AppliedGrant) {
+    if ev.grants.len() >= RECENT_GRANTS
+        && let Some(old) = ev.grants.pop_front()
+        && let Some(unfit) = overflow(ev, &old) {
+        ev.retired_overflow.push(unfit);
+    }
+    ev.grants.push_back(grant);
+}
+
+pub(crate) fn take_retired_overflow(sp: &mut ServerPlayer) -> Vec<GrantOverflow> {
+    std::mem::take(&mut sp.window_events.retired_overflow)
+}
+
+pub(crate) fn settle_terminal_grants(sp: &mut ServerPlayer, now: u64) -> Vec<GrantOverflow> {
+    fn collect(sp: &mut ServerPlayer, returned: &mut Vec<GrantOverflow>) {
+        returned.extend(take_retired_overflow(sp));
+        let ev = &mut sp.window_events;
+        for g in &ev.grants {
+            if let Some(unfit) = overflow(ev, g) { returned.push(unfit); }
+        }
+        for g in &mut ev.grants { g.returned = true; }
+    }
+    let last = sp.window_events.last_number();
+    let mut returned = Vec::new();
+    collect(sp, &mut returned);
+    while !sp.window_events.waiting.is_empty() {
+        apply_front(sp, now, false);
+        collect(sp, &mut returned);
+    }
+    apply_through(sp, last, now);
+    returned
+}
+
 /// The safety valve: apply joiner `sp`'s events still waiting
 /// [`EVENT_ACK_TIMEOUT_TICKS`] after they were sent (tallied `forced`).
 pub fn apply_overdue(sp: &mut ServerPlayer, now: u64) {
@@ -361,11 +416,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
         (Effect::Granted { landed }, WindowEvent::Grant(stack)) => {
             let overflow = stack.count.saturating_sub(landed);
             sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
-            let grants = &mut sp.window_events.grants;
-            if grants.len() >= RECENT_GRANTS {
-                grants.pop_front();
-            }
-            grants.push_back(AppliedGrant { seq: w.seq, stack, landed, returned: false });
+            remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, landed, returned: false });
         }
         (Effect::Took { taken }, WindowEvent::Take { item, n, how, .. }) if taken < n => {
             let due = sp.possession.note_mismatch(now);
@@ -472,7 +523,6 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
             }
         }
     }
-    let grants = &mut sp.window_events.grants;
     for g in &c.client.give {
         let unfit = match c.own {
             None => 0,
@@ -485,10 +535,7 @@ fn note_correction_gives(sp: &mut ServerPlayer, seq: u32, c: &crate::window_ops:
                 None => 0,
             },
         };
-        if grants.len() >= RECENT_GRANTS {
-            grants.pop_front();
-        }
-        grants.push_back(AppliedGrant { seq, stack: g.clone(), landed: g.count - unfit, returned: false });
+        remember_grant(&mut sp.window_events, AppliedGrant { seq, stack: g.clone(), landed: g.count - unfit, returned: false });
     }
 }
 

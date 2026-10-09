@@ -41,6 +41,8 @@ pub fn apply(
             None => None,
         })
         .collect();
+    for (_, body) in &plans { crate::plan_store::remember(body); }
+    for body in &predicted_plans { crate::plan_store::remember(body); }
     let builtin = crate::satoshi::starter_hut_plan();
     for (at, wire) in &pkt.slots {
         let stack = wire
@@ -61,10 +63,13 @@ pub fn apply(
                         .find(|p| crate::plan::marker(p) == marker)
                     {
                         s.item = Item::Plan(body.clone());
+                    } else if let Some(body) = crate::plan_store::resolve(marker) {
+                        s.item = Item::Plan(body);
                     } else {
                         log::warn!("Inventory sync received a Plan marker without a local body");
                     }
                 }
+                crate::plan_store::remember_item(&s.item);
                 s
             });
         match *at {

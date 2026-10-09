@@ -448,6 +448,7 @@ impl crate::GameState {
             &crate::save::tamed_mobs_to_saved(&self.ecs),
         )
         .inspect_err(|e| log::error!("Save failed: {e}"));
+        let result = result.and_then(|()| self.hosted_server.as_ref().map_or(Ok(()), |h| h.server.save_joiners()));
         self.session_saves.note_save(result.is_ok());
         result
     }

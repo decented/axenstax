@@ -777,6 +777,63 @@ mod tests {
         hg.state.network_send_input();
     }
 
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_sidecar_dead_rejoin_enters_death_screen_and_respawns() {
+        use crate::transport::ClientTransport as _;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-sidecar-dead");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-sidecar-dead-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).unwrap();
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&[66; 32]).unwrap());
+        let mut saved = crate::server::ServerPlayer::new(server.server.world_spawn());
+        saved.server_simulated = true;
+        saved.verified_pubkey = Some(keys.public_key().to_bytes());
+        saved.enter_world();
+        saved.combat.health = 0.0;
+        saved.combat.dead = true;
+        saved.death_handled = true;
+        saved.cursor = Some(crate::item::ItemStack::new_block(crate::block::DIRT, 2));
+        server.server.players.push(saved);
+        server.server.save_joiner(0).unwrap();
+        server.server.players.pop();
+        let cell = (1, 80, 1);
+        server.server.world.set_block(cell.0, cell.1, cell.2, crate::block::GRAVE);
+        server.server.world.insert_grave(cell, crate::grave::GraveData::from_snapshot(
+            vec![Some(crate::item::ItemStack::new_block(crate::block::STONE, 3))], 0));
+        let binding = Some([17; 32]);
+        let transport = server.attach_test_remote_with_binding(binding);
+        let pkt = transport.try_recv_from_server().expect("issued challenge");
+        let (kind, bytes) = crate::protocol::deserialize_header(&pkt).unwrap();
+        assert_eq!(kind, crate::protocol::PacketType::Challenge);
+        let challenge: crate::protocol::ChallengePacket = crate::protocol::safe_deserialize(bytes).unwrap();
+        let mut request = crate::remote_client::build_join_request_guest("Saved", 0);
+        request.auth_event = Some(pollster::block_on(crate::signet::native_signer::build_join_auth_event(
+            &keys, &challenge.nonce_hex, &crate::signet::join_origin(binding))).unwrap());
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(Box::new(transport), request, None));
+        for _ in 0..8 { harness_step(&mut server, &mut hg); }
+        assert!(server.server.players[0].combat.dead);
+        assert_eq!(hg.state.players[0].crafting_ui.cursor_item.as_ref().unwrap().count, 2);
+        assert!(hg.state.players[0].combat.dead, "fresh client must enter its actual death-screen state");
+        assert_eq!(server.server.world.iter_graves().count(), 1);
+        for _ in 0..crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN { harness_step(&mut server, &mut hg); }
+        assert!(hg.state.players[0].combat.request_respawn());
+        for _ in 0..40 {
+            harness_step(&mut server, &mut hg);
+            if !server.server.players[0].combat.dead && !hg.state.players[0].combat.dead { break; }
+        }
+        assert!(!server.server.players[0].combat.dead);
+        assert!(!hg.state.players[0].combat.dead);
+        assert_eq!(hg.state.players[0].combat.health, 20.0);
+        assert_eq!(hg.state.players[0].crafting_ui.cursor_item.as_ref().unwrap().count, 2);
+        assert_eq!(server.server.world.iter_graves().count(), 1);
+        assert_eq!(server.server.world.grave_at(cell).unwrap().slots[0].as_ref().unwrap().count, 3);
+    }
+
     /// C3a-fix-1 (B-L1) — a Close then a Q-drop in one tick, through the REAL
     /// send path: the close put the cursor's stack back in hotbar slot 0 and
     /// the drop takes one from there. The drop goes out mid-frame, but the

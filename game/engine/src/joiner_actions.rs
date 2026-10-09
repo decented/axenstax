@@ -84,6 +84,7 @@ pub const MAX_PENDING: usize = 64;
 /// What a request asked the server for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asked {
+    CreativeGive,
     /// A swing at a mob (`EntityAttack`).
     Swing,
     /// A one-shot interaction with a mob, or a Lead on a fence post
@@ -490,6 +491,7 @@ pub fn uses(kind: Asked) -> u8 {
         | Asked::Sleep { .. }
         | Asked::Cast
         | Asked::Reel
+        | Asked::CreativeGive
         | Asked::OpenGrave { .. }
         | Asked::Detach { .. } => 0,
         Asked::UseBlock { claim, .. } => claim,
@@ -797,6 +799,7 @@ pub fn apply_outcome(
         | Asked::Cast
         | Asked::Reel
         | Asked::Attach { .. }
+        | Asked::CreativeGive
         | Asked::OpenGrave { .. }
         | Asked::Detach { .. } => {}
     }
