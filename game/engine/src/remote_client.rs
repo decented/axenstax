@@ -3112,9 +3112,6 @@ mod tests {
                 worldgen_version: crate::world::worldgen_fingerprint(),
                 spawn: Some(glam::Vec3::new(100.5, 41.0, -7.5)),
                 chunk_note_radius: 0,
-            inventory_mode: crate::action_identity::InventoryMode::Mirror,
-            action_session: [7; 16],
-            action_life: 0,
             })
         );
     }
@@ -3672,6 +3669,8 @@ mod tests {
                 crate::chunk_intake::StreamItem::Local((x, z), hash) => format!("L{x},{z}#{hash:x}"),
                 crate::chunk_intake::StreamItem::View(v) => format!("V{}", v.cell[0]),
                 crate::chunk_intake::StreamItem::Attachment(a) => format!("A{}", a.x),
+                crate::chunk_intake::StreamItem::RebaseFence(_) => "F".into(),
+                crate::chunk_intake::StreamItem::ActionReceipt(_) => "R".into(),
             })
             .collect();
         assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);
