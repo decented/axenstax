@@ -2,7 +2,7 @@
 //! members remain immutable evidence; authorised receiver metadata is separate.
 use super::super::{
     Error, Hash, Id, Result,
-    manifest::MemberKind,
+    manifest::{Manifest, Member, MemberKind},
     stream::{Chunk, Receiver},
 };
 use super::receipt::{durable_tree, receipt_bytes, verify_receipt};
@@ -317,7 +317,7 @@ fn extract(
         if hash != expected.digest {
             return Err(Error::Invalid("member hash"));
         }
-        validate_member(&dest, expected.kind, expected.schema)?;
+        validate_member(&dest, expected, a.manifest())?;
     }
     if entries.next().is_some() {
         return Err(Error::Invalid("extra archive member"));
@@ -398,7 +398,8 @@ fn extract(
     )?;
     Ok(())
 }
-fn validate_member(path: &Path, kind: MemberKind, schema: u32) -> Result<()> {
+fn validate_member(path: &Path, member: &Member, manifest: &Manifest) -> Result<()> {
+    let (kind, schema) = (member.kind, member.schema);
     match kind {
         MemberKind::WorldData => {
             if schema != crate::save_format::SAVE_FORMAT_VERSION {
@@ -416,6 +417,26 @@ fn validate_member(path: &Path, kind: MemberKind, schema: u32) -> Result<()> {
             }
         }
         MemberKind::Sidecar => super::bounded_decode::sidecar(&files::read(path, 65536)?)?,
+        MemberKind::Progression => {
+            if schema != super::super::personal::SCHEMA {
+                return Err(Error::Invalid("participant schema"));
+            }
+            let npub = member
+                .path
+                .strip_prefix("participants/")
+                .and_then(|n| n.strip_suffix(".dat"))
+                .ok_or(Error::Invalid("participant path"))?;
+            let context = super::super::personal::RecordContext {
+                participant: super::super::context::canonical_npub(npub)?,
+                lineage: manifest.lineage,
+                generation: manifest.generation,
+                transfer: manifest.transfer,
+            };
+            super::super::personal::PersonalRecord::decode(
+                &files::read(path, super::super::personal::RECORD_LIMIT)?,
+                &context,
+            )?;
+        }
         _ => {}
     }
     Ok(())

@@ -154,8 +154,18 @@ pub fn pack_limited(
         }
     }
     for row in source.participants {
-        if row.kind == MemberKind::Sidecar {
-            super::bounded_decode::sidecar(row.bytes)?;
+        match row.kind {
+            MemberKind::Sidecar => super::bounded_decode::sidecar(row.bytes)?,
+            MemberKind::Progression => {
+                let context = super::super::personal::RecordContext {
+                    participant: super::super::context::canonical_npub(row.npub)?,
+                    lineage: binding.lineage,
+                    generation: binding.generation,
+                    transfer: binding.transfer,
+                };
+                super::super::personal::PersonalRecord::decode(row.bytes, &context)?;
+            }
+            _ => {}
         }
         let prefix = match row.kind {
             MemberKind::Sidecar => "joiners",

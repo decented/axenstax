@@ -5142,8 +5142,21 @@ Stash opt-in, while retaining genesis, rules, authored data and gameplay history
 Current persisted/evicted chunks override old disk files; the existing evicted
 snapshot wins over neighbour-generation spill, and current all-air removes the
 old disk member. Required referenced exhibits cannot be skipped. Actual current
-JoinerSavev1 is strictly decoded; admitted progression members remain bounded
-opaque bytes until the personal-carrier codec/authority is implemented.
+JoinerSavev1 is strictly decoded. A participant record `participants/<npub>.dat`
+(schema1, `handover::personal`) is strictly decoded by both packer and importer:
+domain-framed header binding participant key, lineage, checkpoint generation and
+transfer id (the importer takes these from the authenticated MANIFEST and the
+member path, never from the record); then sorted unique village reputation
+entries (at most2048, score−100..100), sorted unique per-mob kill counts (at most
+256 known kinds), sorted unique bounty claims (at most4096) and an optional
+owner-only local restore (finite pose/yaw/pitch, hotbar0..8, 36-bit lock mask).
+Each count is checked before allocation, the whole member is at most64KiB,
+trailing bytes/unknown schema/flags refuse, and nothing is truncated, clamped or
+reset. The kill-kind index is MobType's positional bincode discriminant, pinned
+exactly as `PlayerSaveData.kill_counter` already is. Installing a record replaces
+only that participant's reputation/kill/claim maps and calls no reward, claim or
+payout routine. The record never embeds the manifest digest (the manifest hashes
+the member, the certificate binds the manifest).
 
 Admission precedes archive transfer/Ready: a bounded source-signed direct offer
 binds the complete certificate, manifest and recipient's fresh expected challenge,

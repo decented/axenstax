@@ -1178,3 +1178,82 @@ fn handover_checkpoint_offline_evidence_reverifies_offer_and_fails_closed_on_tam
         "failed recovery never deletes retained data"
     );
 }
+#[test]
+fn handover_checkpoint_participant_record_is_strictly_bound_to_manifest_context() {
+    use super::super::personal::{PersonalRecord, RecordContext};
+    let t = Temp::new();
+    let f = Fixture::new();
+    let npub = f.recipient.public_key().to_bech32().unwrap();
+    let pk = f.recipient.public_key().to_bytes();
+    let context = |transfer, generation| RecordContext {
+        participant: pk,
+        lineage: f.core.lineage,
+        generation,
+        transfer,
+    };
+    let rep = [((1, 2), -5i16)];
+    let record = |c| {
+        PersonalRecord::from_maps(c, rep.iter().map(|(k, v)| (k, v)), [], [], None)
+            .unwrap()
+            .encode()
+            .unwrap()
+    };
+    let meta = transfer_metadata(&WorldMeta::new("source")).unwrap();
+    let save = neutral_save(42);
+    let world = World::new();
+    let agreement = vec![Agreement {
+        participant: pk,
+        proof: [9; 32],
+    }];
+    let pack_with = |bytes: &[u8]| {
+        let rows = [ParticipantMember {
+            npub: &npub,
+            kind: MemberKind::Progression,
+            schema: 1,
+            bytes,
+        }];
+        pack(
+            CheckpointSource {
+                meta: &meta,
+                save: &save,
+                world: &world,
+                disk_chunks: None,
+                exhibit_dir: None,
+                participants: &rows,
+            },
+            f.binding(agreement.clone()),
+            &t.0,
+        )
+    };
+    // A record bound to another transfer is refused before it is packed.
+    assert_eq!(
+        pack_with(&record(context([5; 16], f.core.generation))).err(),
+        Some(super::super::Error::Invalid("participant context"))
+    );
+    let good = record(context(f.core.transfer, f.core.generation));
+    let p = pack_with(&good).unwrap();
+    let mut importing = Import::new(f.admitted(p.manifest()), &t.0, 0).unwrap();
+    feed(&mut importing, p.archive());
+    let done = importing.complete(0, &mut import::NoFault).unwrap();
+    let path = format!("participants/{npub}.dat");
+    assert_eq!(fs::read(done.received_world().join(&path)).unwrap(), good);
+    // The importer decodes against the MANIFEST context on its own: a
+    // genuinely hashed and signed member bound to another generation fails.
+    let t2 = Temp::new();
+    let p2 = pack_with(&good).unwrap();
+    let foreign = record(context(f.core.transfer, f.core.generation + 1));
+    let (file, manifest) = altered_archive(
+        &p2,
+        |rows| {
+            let at = rows.iter().position(|r| r.path == path).unwrap();
+            rows[at].bytes = foreign.clone();
+        },
+        true,
+    );
+    let mut importing = Import::new(f.admitted(&manifest), &t2.0, 0).unwrap();
+    feed(&mut importing, &file);
+    assert_eq!(
+        importing.complete(0, &mut import::NoFault).err(),
+        Some(super::super::Error::Invalid("participant context"))
+    );
+}
