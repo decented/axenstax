@@ -70,7 +70,7 @@ impl AdmittedManifest {
             || event.pubkey.to_bytes() != core.source_runtime
             || event.kind != Kind::Custom(super::super::STORED_KIND)
             || !event.tags.is_empty()
-            || event.created_at.as_u64() != core.issued_at
+            || event.created_at.as_secs() != core.issued_at
             || event.content != content(&core, challenge)
         {
             return Err(Error::Invalid("offer signature/binding"));
