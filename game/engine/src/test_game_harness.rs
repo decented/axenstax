@@ -2850,47 +2850,67 @@ mod tests {
         assert_eq!(plans, 1, "into a Plan");
     }
 
-    /// C3c-3r (decision 3, break arms) — a joiner breaking a block that
-    /// carries a laid Blueprint (on a face it didn't strike) and a wallpaper
-    /// gets the wallpaper and no Plan; the Blueprint stays in its world copy.
-    /// Both the survival and the creative break arm.
+    /// C3c-3b (decision 4; replaces C3c-3r's break-arm test, whose joiner
+    /// still granted itself the wallpaper — the dupe) — a joiner breaks a
+    /// block carrying a laid Blueprint and a wallpaper (on faces it didn't
+    /// strike) through the REAL break arm: its client grants itself NOTHING
+    /// (no wallpaper, no Plan, nothing on its own ground); the server spills
+    /// each attachment once as a real ground item (one wallpaper block, one
+    /// Plan with the server's body) and its stream takes both out of the
+    /// client's copy. Both the survival and the creative break arm.
     #[test]
     #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
-    fn game_harness_a_joiners_break_grants_no_plan_for_a_laid_blueprint() {
+    fn game_harness_a_joiners_break_grants_nothing_and_the_server_spills_its_attachments() {
         use crate::item::Item;
+        use crate::world::FaceAttachment;
         for creative in [false, true] {
             isolate_saves();
-            let tag = if creative { "break-bp-creative" } else { "break-bp-survival" };
+            let tag = if creative { "break-att-creative" } else { "break-att-survival" };
             let (mut hg, mut server, slot) = joined_window_client(tag);
             if creative {
                 hg.state.set_play_mode(crate::play_mode::PlayMode::Creative);
             }
             let feet = clear_pad(&mut hg, Some(&mut server));
-            let cell = [feet[0], feet[1], feet[2] - 2];
+            hold_feet_column(&mut server, slot, feet);
+            // Three ahead: past the server body's pickup reach of what spills.
+            let cell = [feet[0], feet[1], feet[2] - 3];
             let pos = (cell[0], cell[1], cell[2]);
+            let (top, west) = (crate::mesh::Face::Top.index(), crate::mesh::Face::West.index());
+            let plan = crate::plan::PlanData::debug_3x3_stone();
             for w in [&mut hg.state.world, &mut server.server.world] {
                 w.set_block(cell[0], cell[1], cell[2], crate::block::STONE);
+                w.set_face_attachment(pos, west, FaceAttachment::Wallpaper(crate::block::OAK_PLANKS));
             }
-            // Blueprint on the top face, wallpaper on the west face: the strike
-            // is on the front (+z) face, which carries neither.
-            hg.state.world.set_face_attachment(
-                pos,
-                crate::mesh::Face::Top.index(),
-                crate::world::FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(false))),
-            );
-            hg.state.world.set_face_attachment(pos, crate::mesh::Face::West.index(), crate::world::FaceAttachment::Wallpaper(crate::block::OAK_PLANKS));
+            // The server holds the real Blueprint; the client its render stub.
+            server.server.world.set_face_attachment(pos, top, FaceAttachment::Blueprint(Box::new(plan.clone())));
+            hg.state.world.set_face_attachment(pos, top, FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(false))));
             harness_step(&mut server, &mut hg);
             mine_joined(&mut hg, &mut server, slot, cell);
+            for _ in 0..4 {
+                harness_step(&mut server, &mut hg);
+            }
             assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR, "the block broke ({tag})");
-            assert!(
-                matches!(hg.state.world.face_attachment_at(pos, crate::mesh::Face::Top.index()), Some(crate::world::FaceAttachment::Blueprint(_))),
-                "the Blueprint stands in the client's copy ({tag})"
-            );
+            assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR, "on the server too ({tag})");
             let inv = &hg.state.players[0].inventory;
-            let plans = inv.slots_iter().flatten().filter(|s| matches!(s.item, Item::Plan(_))).count();
-            assert_eq!(plans, 0, "no Plan granted ({tag})");
-            assert_eq!(held_units(inv, &Item::Block(crate::block::OAK_PLANKS)), 1, "the wallpaper still comes back ({tag})");
-            assert!(hg.state.world.face_attachment_at(pos, crate::mesh::Face::West.index()).is_none(), "and is gone from the wall ({tag})");
+            assert_eq!(held_units(inv, &Item::Block(crate::block::OAK_PLANKS)), 0, "the client granted itself no wallpaper ({tag})");
+            assert!(!inv.slots_iter().flatten().any(|s| matches!(s.item, Item::Plan(_))), "nor a Plan ({tag})");
+            assert_eq!(ground_units(&hg.state.ecs, &Item::Block(crate::block::OAK_PLANKS)), 0, "nor dropped one of its own ({tag})");
+            assert_eq!(ground_units(&server.server.ecs, &Item::Block(crate::block::OAK_PLANKS)), 1, "one wallpaper on the server's ground ({tag})");
+            let ground_plans: Vec<_> = server
+                .server
+                .ecs
+                .query::<&crate::entity::ItemEntity>()
+                .iter()
+                .filter_map(|(_, it)| match &it.stack.item {
+                    Item::Plan(p) => Some(p.cells.len()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ground_plans, vec![plan.cells.len()], "one ground Plan with the server's body ({tag})");
+            for face in [top, west] {
+                assert!(server.server.world.face_attachment_at(pos, face).is_none(), "gone from the server ({tag})");
+                assert!(hg.state.world.face_attachment_at(pos, face).is_none(), "and from the client's copy, by the stream ({tag})");
+            }
         }
     }
 
@@ -3159,8 +3179,11 @@ mod tests {
         // One blank-paper tile with a block built on it, in the client's world.
         let tile = (feet[0] + 2, feet[1] - 1, feet[2]);
         let top = crate::mesh::Face::Top.index();
-        hg.state.world.set_face_attachment(tile, top, FaceAttachment::BlueprintBlank);
-        hg.state.world.set_block(tile.0, tile.1 + 1, tile.2, crate::block::OAK_PLANKS);
+        // C3c-3b — and in the server's world: the commit spends it there too.
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_face_attachment(tile, top, FaceAttachment::BlueprintBlank);
+            w.set_block(tile.0, tile.1 + 1, tile.2, crate::block::OAK_PLANKS);
+        }
         let candidate = crate::plan::capture(&hg.state.world, tile, "survival").expect("a capture");
         let pending = || crate::plan::PendingCapture { candidate: candidate.clone(), parent_match: None, mark_as_derivative: false };
         let stone = ItemStack::new_block(crate::block::STONE, 64);
@@ -3180,6 +3203,7 @@ mod tests {
             harness_step(&mut server, &mut hg);
         }
         assert_eq!(server.server.players[slot].possession.plan_minted, 0, "nothing reported");
+        assert_eq!(server.server.world.face_attachment_at(tile, top), Some(&FaceAttachment::BlueprintBlank), "the server's too");
         // 2. Room (slot 5): the Plan lands on both sides.
         for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
             inv.set_slot(5, None);
@@ -3195,6 +3219,10 @@ mod tests {
         assert_eq!(plan_in(&sp.inventory, 5).and_then(|p| p.marker), Some(crate::plan::marker(&plan)));
         assert_eq!(sp.inventory.slots_iter().flatten().filter(|s| s.item == stone.item).count(), 35, "nothing spent");
         assert_eq!((sp.possession.plan_minted, sp.possession.plan_mismatch), (1, 0));
+        // C3c-3b (decision 5) — the server spent the capture's paper, so a
+        // second capture over that spot finds none.
+        assert!(server.server.world.face_attachment_at(tile, top).is_none(), "the server's tile paper is spent");
+        assert!(crate::plan::capture(&server.server.world, tile, "survival").is_err(), "nothing to capture twice");
     }
 
     /// C3c-3a — a joiner hangs a developed Plan through the REAL arm: the
@@ -3275,5 +3303,92 @@ mod tests {
         assert_eq!(sp.possession.plan_minted, 0, "nothing reported");
         assert!(!has_plan(&sp.inventory) && !has_plan(&hg.state.players[0].inventory));
         assert!(hg.state.players[0].inventory.slot(0).is_none() && sp.inventory.slot(0).is_none(), "the paper is in the frame");
+    }
+
+    // ─── C3c-3b ────────────────────────────────────────────────────────────
+
+    /// C3c-3b — the server holds the column of `feet` as pushed to joiner
+    /// `slot`, so the attachment stream reaches it.
+    fn hold_feet_column(server: &mut crate::hosted_server::HostedServer, slot: usize, feet: [i32; 3]) {
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        server.hold_column_for_test(slot, (feet[0].div_euclid(cs), feet[2].div_euclid(cs)));
+    }
+
+    /// C3c-3b — step until the server's copy of joiner `slot`'s window holds
+    /// `n` of `item` (its window events wait for the client's report, which
+    /// the real-time loopback can delay past a fixed number of steps).
+    fn copy_holds(server: &mut crate::hosted_server::HostedServer, hg: &mut HeadlessGame, slot: usize, item: &crate::item::Item, n: u32) {
+        for _ in 0..40 {
+            if held_units(&server.server.players[slot].inventory, item) == n {
+                return;
+            }
+            harness_step(server, hg);
+        }
+        assert_eq!(held_units(&server.server.players[slot].inventory, item), n, "the server's copy of the window");
+    }
+
+    /// C3c-3b (decisions 2, 3) — through the REAL arms, a joiner paints a
+    /// wallpaper on a wall, lays blank paper on the floor and peels the
+    /// wallpaper back. Each click changes nothing in its own world or bag:
+    /// it asks the server (`Attach`, `Detach`). Once answered, the server's
+    /// world has each change, the client's copy shows it through the stream,
+    /// and its bag pays for each lay and gets the peeled block back as a
+    /// grant — the server's copy of its window in step.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_joiner_paints_lays_and_peels_by_request() {
+        use crate::item::{Item, ItemStack};
+        use crate::world::FaceAttachment;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("attach");
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        hold_feet_column(&mut server, slot, feet);
+        let wp = Item::Block(crate::block::WALLPAPER_RED);
+        let paper = Item::Block(crate::block::BLUEPRINT_PAPER);
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            inv.set_slot(0, Some(ItemStack { item: wp.clone(), count: 2 }));
+            inv.set_slot(1, Some(ItemStack { item: paper.clone(), count: 2 }));
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        let wall = wall_ahead(&mut hg, &mut server, feet);
+        let pos = (wall[0], wall[1], wall[2]);
+        let south = crate::mesh::Face::South.index();
+        harness_step(&mut server, &mut hg);
+        // 1. Paint: asked, nothing changed here yet.
+        aim_at_wall(&mut hg, wall);
+        right_click(&mut hg);
+        assert!(hg.state.world.face_attachment_at(pos, south).is_none(), "the client paints nothing itself");
+        assert_eq!(held_units(&hg.state.players[0].inventory, &wp), 2, "nor pays before the answer");
+        assert_eq!(hg.state.joiner_actions.len(), 1, "one Attach in flight");
+        settle(&mut server, &mut hg);
+        assert_eq!(server.server.world.face_attachment_at(pos, south), Some(&FaceAttachment::Wallpaper(crate::block::WALLPAPER_RED)), "the server's world");
+        assert_eq!(hg.state.world.face_attachment_at(pos, south), Some(&FaceAttachment::Wallpaper(crate::block::WALLPAPER_RED)), "the painter's copy, by the stream");
+        assert_eq!(held_units(&hg.state.players[0].inventory, &wp), 1, "paid one");
+        // The take is a window event the server's copy applies once the
+        // client's input says it paid (the loopback is real-time: step for it).
+        copy_holds(&mut server, &mut hg, slot, &wp, 1);
+        // 2. Lay blank paper on the floor's Top face.
+        hg.state.players[0].hotbar_slot = 1;
+        let floor = (feet[0], feet[1] - 1, feet[2] - 2);
+        let top = crate::mesh::Face::Top.index();
+        aim_at(&mut hg, glam::Vec3::new(floor.0 as f32 + 0.5, floor.1 as f32 + 0.98, floor.2 as f32 + 0.5));
+        right_click(&mut hg);
+        assert!(hg.state.world.face_attachment_at(floor, top).is_none(), "the client lays nothing itself");
+        settle(&mut server, &mut hg);
+        assert_eq!(server.server.world.face_attachment_at(floor, top), Some(&FaceAttachment::BlueprintBlank));
+        assert_eq!(hg.state.world.face_attachment_at(floor, top), Some(&FaceAttachment::BlueprintBlank));
+        assert_eq!(held_units(&hg.state.players[0].inventory, &paper), 1);
+        // 3. Peel the wallpaper: one strike asks once and breaks nothing.
+        strike(&mut hg, glam::Vec3::new(wall[0] as f32 + 0.5, wall[1] as f32 + 0.5, wall[2] as f32 + 0.9), 20);
+        assert_eq!(hg.state.world.get_block(wall[0], wall[1], wall[2]), crate::block::STONE, "the strike broke nothing");
+        assert!(hg.state.world.face_attachment_at(pos, south).is_some(), "and peeled nothing itself");
+        settle(&mut server, &mut hg);
+        assert!(server.server.world.face_attachment_at(pos, south).is_none(), "peeled on the server");
+        assert!(hg.state.world.face_attachment_at(pos, south).is_none(), "and in the client's copy, by the stream");
+        assert_eq!(held_units(&hg.state.players[0].inventory, &wp), 2, "the block came back as a grant");
+        copy_holds(&mut server, &mut hg, slot, &wp, 2);
+        assert_eq!(server.server.world.get_block(wall[0], wall[1], wall[2]), crate::block::STONE);
+        let sp = &server.server.players[slot];
+        assert_eq!(sp.possession.mismatched, 0, "every take paid from the server's copy");
     }
 }

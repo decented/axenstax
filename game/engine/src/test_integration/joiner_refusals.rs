@@ -60,15 +60,19 @@ fn each_refused_plan_arm_checks_joined_before_its_first_change() {
     assert!(lines[f[0] + 1].contains("if self.joined()"), "choose_auto_build must test joined() first");
 }
 
+/// C3c-3b (decision 4, replacing C3c-3r's joined-Blueprint rule) — a
+/// joined client's break arms recover NO attachment: the server spills them
+/// once and its stream takes them out of the client's copy. Both break arms
+/// recover through the shared helper, behind a `!self.joined()` gate.
 #[test]
-fn both_break_arms_leave_a_joined_clients_blueprint_standing() {
+fn both_break_arms_leave_a_joined_clients_attachments_to_the_server() {
     let lines = game_loop_lines();
     let hits = code_hits(&lines, "take_recoverable_attachments(");
     assert_eq!(hits.len(), 2, "the creative and the survival break arm each recover through the helper: {hits:?}");
     for h in hits {
         assert!(
-            lines[h - 1].contains("let joined = self.joined();") && any_in(&lines, h + 1, h + 6, "joined,"),
-            "game_loop.rs:{}: a break arm's recovery must pass `self.joined()`",
+            any_in(&lines, h.saturating_sub(2), h + 1, "!self.joined()"),
+            "game_loop.rs:{}: a break arm's recovery must sit behind `!self.joined()`",
             h + 1
         );
     }
@@ -117,11 +121,19 @@ fn every_economy_open_is_refused_for_a_joiner_first() {
 #[test]
 fn a_joined_client_runs_no_develop_or_auction_tick() {
     let lines = game_loop_lines();
+    assert_eq!(
+        code_hits(&lines, "let develops_here = !self.joined() && self.sim_runs(SimSystem::Develop);").len(),
+        1,
+        "the develop gate is `!self.joined()` and the lend table"
+    );
     for needle in ["latent_print::tick_develop(", "latent_print::tick_develop_attachments(", "auction::tick_auctions("] {
         let hits = code_hits(&lines, needle);
         assert_eq!(hits.len(), 1, "`{needle}` expected once in game_loop.rs, found {hits:?}");
+        // C3c-3b — the develop ticks sit under `develops_here`, which is
+        // `!self.joined()` and the lend table's `SimSystem::Develop`.
         assert!(
-            any_in(&lines, hits[0].saturating_sub(6), hits[0], "self.joined()"),
+            any_in(&lines, hits[0].saturating_sub(6), hits[0], "self.joined()")
+                || any_in(&lines, hits[0].saturating_sub(6), hits[0], "develops_here"),
             "game_loop.rs:{}: `{needle}` must not run on a joined client",
             hits[0] + 1
         );

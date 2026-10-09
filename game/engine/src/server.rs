@@ -1793,6 +1793,16 @@ impl GameServer {
             crate::cart::tick_carts(&mut self.ecs, &mut self.world);
         }
 
+        // C3c-3b — laid Blueprints develop in the sun on the server's world
+        // (on a lent one, here rather than on the host client: one owner,
+        // `SimSystem::Develop`). Each flip is logged on the world, so it
+        // streams to every joiner (`HostedServer::drain_attachment_changes`).
+        if self.runs(SimSystem::Develop) {
+            let time = self.world.effective_world_time(self.world_time);
+            let _ = crate::latent_print::tick_develop(&mut self.world, time);
+            let _ = crate::latent_print::tick_develop_attachments(&mut self.world, time);
+        }
+
         // C3b-fix-d (A-L5) — the tables this tick's world lost, for the
         // table grace (before `watch_table` below, as each open reads it).
         self.tables_gone.note(&mut self.world, self.tick_counter);

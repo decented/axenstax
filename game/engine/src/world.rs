@@ -424,6 +424,11 @@ pub struct BrowseEntry {
 /// past it the oldest is dropped.
 pub const MAX_TABLES_GONE_LOGGED: usize = 256;
 
+/// C3c-3b — most face-attachment changes a world's log holds between a
+/// server's takes (it takes them every tick; an honest tick logs a few, a
+/// keg blast or a falling column a few dozen); past it the oldest is dropped.
+pub const MAX_ATTACHMENT_CHANGES_LOGGED: usize = 4096;
+
 pub struct World {
     chunks: AHashMap<(i32, i32, i32), Chunk>,
     /// Spec 02 §7.5 — the evicted-chunk store. A column streamed out of range
@@ -461,6 +466,16 @@ pub struct World {
     /// `window_ops::TablesGone`), so single-player and a joiner keep nothing.
     /// Runtime-only.
     tables_gone: Option<Vec<(i32, i32, i32)>>,
+    /// C3c-3b — the faces whose attachment changed (set, removed, or a laid
+    /// Blueprint developed) since the last [`World::take_attachment_changes`],
+    /// oldest first, at most [`MAX_ATTACHMENT_CHANGES_LOGGED`]; a face can
+    /// appear more than once (the reader dedupes and reads what it holds
+    /// now). `None` = not tracking: only a world a server runs on logs them
+    /// (the server turns this on and streams them to joiners every tick:
+    /// `StateUpdatePacket::attachment_changes`), so single-player and a
+    /// joiner keep nothing. Every attachment setter logs, whoever calls it.
+    /// Runtime-only.
+    attachment_log: Option<Vec<((i32, i32, i32), u8)>>,
     /// Spec 02 §8.4 — chunk coordinates whose `.chunk` file this session read in
     /// (`save::load_chunk_dir`, from `chunks/` or `autosave/chunks/`) or wrote (every
     /// native save path). A save deletes a chunk's file — the all-air, mined-out
@@ -787,6 +802,7 @@ impl World {
             worldgen_depth: 0,
             edited_columns: None,
             tables_gone: None,
+            attachment_log: None,
             disk_chunks: std::sync::Mutex::new(ahash::AHashSet::new()),
             block_entities: AHashMap::new(),
             drying_racks: AHashMap::new(),
@@ -1041,6 +1057,35 @@ impl World {
     /// the last call, oldest first (none when not tracking), cleared.
     pub fn take_tables_gone(&mut self) -> Vec<(i32, i32, i32)> {
         self.tables_gone.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// C3c-3b — start logging face-attachment changes (see the
+    /// `attachment_log` field). Idempotent; a server calls it on the world it
+    /// runs on.
+    pub fn track_attachment_changes(&mut self) {
+        self.attachment_log.get_or_insert_with(Vec::new);
+    }
+
+    /// C3c-3b — the faces whose attachment changed since the last call,
+    /// oldest first (none when not tracking), cleared.
+    pub fn take_attachment_changes(&mut self) -> Vec<((i32, i32, i32), u8)> {
+        self.attachment_log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// C3c-3b — log a change to the attachment on face `face_idx` of the
+    /// block at `pos` (no-op when not tracking). The setters below call it;
+    /// a change made in place through [`World::face_attachment_at_mut`] (a
+    /// laid Blueprint developing) must call it too.
+    pub fn note_attachment_change(&mut self, pos: (i32, i32, i32), face_idx: usize) {
+        if face_idx >= 6 {
+            return;
+        }
+        if let Some(log) = self.attachment_log.as_mut() {
+            if log.len() >= MAX_ATTACHMENT_CHANGES_LOGGED {
+                log.remove(0);
+            }
+            log.push((pos, face_idx as u8));
+        }
     }
 
     /// Phase B2b — record an edit at block `pos` (no-op inside world-gen or
@@ -1553,6 +1598,7 @@ impl World {
             .entry(pos)
             .or_insert_with(|| std::array::from_fn(|_| None))[face_idx] = Some(data);
         self.mark_edited(pos);
+        self.note_attachment_change(pos, face_idx);
     }
 
     /// Owner-inbox #1/2/3 — the attachment on one face, if any. By reference —
@@ -1603,6 +1649,7 @@ impl World {
         }
         if removed.is_some() {
             self.mark_edited(pos);
+            self.note_attachment_change(pos, face_idx);
         }
         removed
     }
@@ -1614,6 +1661,11 @@ impl World {
         match self.face_attachments.remove(&pos) {
             Some(faces) => {
                 self.mark_edited(pos);
+                for (face_idx, slot) in faces.iter().enumerate() {
+                    if slot.is_some() {
+                        self.note_attachment_change(pos, face_idx);
+                    }
+                }
                 faces
             }
             None => std::array::from_fn(|_| None),
@@ -1655,6 +1707,9 @@ impl World {
         // forgets it (`world_exit::clear_per_world_fields`).
         self.block_entities.clear();
         self.face_attachments.clear();
+        if let Some(log) = self.attachment_log.as_mut() {
+            log.clear();
+        }
         self.drying_racks.clear();
         self.village_anchors.clear();
         self.populated_villages.clear();
@@ -3573,6 +3628,45 @@ mod tests {
         w.remove_face_attachment((0, 70, 0), 0);
         assert!(w.face_attachment_at((0, 70, 0), 0).is_none());
         assert!(w.face_attachment_at((0, 70, 0), 1).is_some());
+    }
+
+    /// C3c-3b — every attachment setter logs the face it changed, once
+    /// tracking is on (and only then), whoever calls it; a remove of a bare
+    /// face logs nothing; a take clears the log.
+    #[test]
+    fn attachment_changes_are_logged_only_while_tracking() {
+        let mut w = World::new();
+        let pos = (4, 64, -2);
+        w.set_face_attachment(pos, 0, FaceAttachment::BlueprintBlank);
+        assert!(w.take_attachment_changes().is_empty(), "not tracking: nothing kept");
+        w.track_attachment_changes();
+        w.set_face_attachment(pos, 2, FaceAttachment::Wallpaper(crate::block::WALLPAPER_RED));
+        assert!(w.remove_face_attachment(pos, 3).is_none());
+        w.remove_face_attachment(pos, 0);
+        w.set_face_attachment((1, 2, 3), 5, FaceAttachment::Wallpaper(crate::block::WALLPAPER_CYAN));
+        w.set_face_attachment((1, 2, 3), 1, FaceAttachment::BlueprintBlank);
+        let _ = w.remove_face_attachments_at((1, 2, 3));
+        w.note_attachment_change(pos, 4);
+        assert_eq!(
+            w.take_attachment_changes(),
+            vec![(pos, 2), (pos, 0), ((1, 2, 3), 5), ((1, 2, 3), 1), ((1, 2, 3), 1), ((1, 2, 3), 5), (pos, 4)],
+            "oldest first; the bare face's remove logs nothing"
+        );
+        assert!(w.take_attachment_changes().is_empty(), "a take clears it");
+    }
+
+    /// C3c-3b — the log is bounded: past [`MAX_ATTACHMENT_CHANGES_LOGGED`]
+    /// the oldest goes.
+    #[test]
+    fn attachment_log_drops_the_oldest_past_its_bound() {
+        let mut w = World::new();
+        w.track_attachment_changes();
+        for x in 0..MAX_ATTACHMENT_CHANGES_LOGGED as i32 + 3 {
+            w.note_attachment_change((x, 0, 0), 0);
+        }
+        let log = w.take_attachment_changes();
+        assert_eq!(log.len(), MAX_ATTACHMENT_CHANGES_LOGGED);
+        assert_eq!(log[0], ((3, 0, 0), 0), "the three oldest dropped");
     }
 
     #[test]

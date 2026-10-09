@@ -897,6 +897,23 @@ impl super::GameState {
                         }
                     }
                 }
+                crate::chunk_intake::Delta::Attachment(a) => {
+                    // C3c-3b — a face attachment as the server's world now
+                    // holds it, landing like a view: in a column this client
+                    // holds, after the snapshot it updates, as a render stub.
+                    let (x, y, z) = (a.x, a.y, a.z);
+                    if let Some(col) = self.chunk_intake.generate_before_at(x, z, &self.loaded_columns, &self.world) {
+                        self.load_one_column(col.0, col.1);
+                    }
+                    if !remote_change_is_loaded(&self.loaded_columns, &self.world, x, z)
+                        && !self.chunk_intake.holds_chunk(crate::state_outbox::chunk_of_cell((x, y, z)))
+                    {
+                        continue;
+                    }
+                    if crate::chunk_intake::apply_attachment_change(&mut self.world, &a) {
+                        self.rebuild_chunk_at(x, y, z);
+                    }
+                }
             }
         }
         // B2b fix LOW-3 — the queued column checks, within the frame's budget.

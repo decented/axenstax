@@ -40,7 +40,8 @@ pub fn lay_blueprint_on_floor(
 
 /// Lay blank cream draughting paper flat on the TOP face of the targeted
 /// floor block. Returns true (and sets a BlueprintBlank attachment) iff the
-/// target face is Top and the target block is solid; false (no-op) otherwise.
+/// shared rule allows it ([`attach_rule`]: the target face is Top, the target
+/// block is solid and that face is bare); false (no-op) otherwise.
 /// Zero-height — no block placed, no BlockChange. (Capture comes later.)
 pub fn lay_blank_blueprint_paper(
     world: &mut World,
@@ -48,21 +49,81 @@ pub fn lay_blank_blueprint_paper(
     target_block: (i32, i32, i32),
     target_face: [i32; 3],
 ) -> bool {
-    // Blank paper lays flat on floors only — the targeted face must be Top.
-    if target_face != [0, 1, 0] {
-        return false;
+    let Some(face) = crate::mesh::Face::from_normal(target_face) else { return false };
+    attach(world, registry, target_block, face.index(), crate::block::BLUEPRINT_PAPER).is_ok()
+}
+
+/// C3c-3b — why a block can't go on a face as an attachment ([`attach_rule`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachRefusal {
+    /// The held block is neither a wallpaper nor Blueprint Paper.
+    NotAttachable,
+    /// The target block isn't solid (never AIR or water).
+    NotSolid,
+    /// That face already carries an attachment.
+    FaceCovered,
+    /// Blank paper lies flat on floors only: the face isn't Top.
+    NotAFloor,
+}
+
+impl AttachRefusal {
+    /// The note a joiner's refused `Attach` carries.
+    pub fn note(self) -> crate::item_actions::ItemNote {
+        use crate::item_actions::ItemNote;
+        match self {
+            AttachRefusal::NotAttachable => ItemNote::NothingToTake,
+            AttachRefusal::NotSolid => ItemNote::NotThatBlock,
+            AttachRefusal::FaceCovered => ItemNote::FaceCovered,
+            AttachRefusal::NotAFloor => ItemNote::NotAFloor,
+        }
     }
-    // Only attach to a solid block (never AIR/WATER).
-    let target_id = world.get_block(target_block.0, target_block.1, target_block.2);
-    if !registry.is_solid(target_id) {
-        return false;
+}
+
+/// C3c-3b — the one rule for painting wallpaper and laying blank paper, run
+/// by every seat (single-player's and a host's arms, and the server for a
+/// joiner's `ItemAction::Attach`): what the block `held` puts on face
+/// `face_idx` (`mesh::Face::index`) of the block at `pos` — a wallpaper
+/// block its `Wallpaper`, Blueprint Paper a `BlueprintBlank` — if the target
+/// is solid, the face is bare, and (blank paper) the face is Top. Reach,
+/// plots and the play mode are the caller's.
+pub fn attach_rule(
+    world: &World,
+    registry: &crate::block::BlockRegistry,
+    pos: (i32, i32, i32),
+    face_idx: usize,
+    held: crate::block::BlockId,
+) -> Result<FaceAttachment, AttachRefusal> {
+    let att = if crate::block::is_wallpaper(held) {
+        FaceAttachment::Wallpaper(held)
+    } else if held == crate::block::BLUEPRINT_PAPER {
+        FaceAttachment::BlueprintBlank
+    } else {
+        return Err(AttachRefusal::NotAttachable);
+    };
+    if face_idx >= 6 || (att == FaceAttachment::BlueprintBlank && face_idx != crate::mesh::Face::Top.index()) {
+        return Err(AttachRefusal::NotAFloor);
     }
-    world.set_face_attachment(
-        target_block,
-        crate::mesh::Face::Top.index(),
-        FaceAttachment::BlueprintBlank,
-    );
-    true
+    if !registry.is_solid(world.get_block(pos.0, pos.1, pos.2)) {
+        return Err(AttachRefusal::NotSolid);
+    }
+    if world.face_attachment_at(pos, face_idx).is_some() {
+        return Err(AttachRefusal::FaceCovered);
+    }
+    Ok(att)
+}
+
+/// C3c-3b — [`attach_rule`], and on success the attachment is set (logged
+/// for the server's stream like every setter). The caller takes the item.
+pub fn attach(
+    world: &mut World,
+    registry: &crate::block::BlockRegistry,
+    pos: (i32, i32, i32),
+    face_idx: usize,
+    held: crate::block::BlockId,
+) -> Result<(), AttachRefusal> {
+    let att = attach_rule(world, registry, pos, face_idx, held)?;
+    world.set_face_attachment(pos, face_idx, att);
+    Ok(())
 }
 
 /// Decide which inventory item a peeled/destroyed face attachment recovers to.
@@ -80,27 +141,17 @@ pub fn recovered_item_for(att: &FaceAttachment) -> crate::item::Item {
     }
 }
 
-/// C3c-3r — take every face attachment off the block at `pos` and return what
-/// each recovers to. A single-player or host seat gets all of them
-/// (`recovered_item_for`). A JOINED client's copy of a laid Blueprint is the
-/// server's to own (C3c-3b): it grants nothing for one and leaves it standing
-/// in the client's world copy. Wallpaper and blank paper are unchanged.
-pub fn take_recoverable_attachments(
-    world: &mut World,
-    pos: (i32, i32, i32),
-    joined: bool,
-) -> Vec<crate::item::Item> {
-    let mut items = Vec::new();
-    for (face_idx, att) in world.remove_face_attachments_at(pos).into_iter().enumerate() {
-        match att {
-            Some(att @ FaceAttachment::Blueprint(_)) if joined => {
-                world.set_face_attachment(pos, face_idx, att);
-            }
-            Some(att) => items.push(recovered_item_for(&att)),
-            None => {}
-        }
-    }
-    items
+/// C3c-3b — the one rule for what a broken block's attachments give back:
+/// take every face attachment off the block at `pos` (each removal logged for
+/// the server's stream) and return what each recovers to
+/// (`recovered_item_for`), in face order. Single-player and a host's break
+/// arms put them in the breaker's inventory (overflow dropped at the block);
+/// the server, for a joiner's break, spills them as ground items at the cell
+/// (`HostedServer::spill_broken_attachments`) — a laid Blueprint as a ground
+/// Plan with the server's real body. A joined client calls neither: its copy
+/// loses them when the server's stream says so, and nothing is granted twice.
+pub fn take_recoverable_attachments(world: &mut World, pos: (i32, i32, i32)) -> Vec<crate::item::Item> {
+    world.remove_face_attachments_at(pos).iter().flatten().map(recovered_item_for).collect()
 }
 
 /// Resolve the blueprint paper tile beneath a clicked block by scanning straight
@@ -347,7 +398,7 @@ mod tests {
         }
     }
 
-    // ── C3c-3r ──
+    // ── C3c-3r / C3c-3b ──
 
     fn attachments_on(world: &mut World, pos: (i32, i32, i32)) {
         world.set_face_attachment(pos, 0, FaceAttachment::Blueprint(Box::new(PlanData::debug_3x3_stone())));
@@ -355,24 +406,39 @@ mod tests {
         world.set_face_attachment(pos, 4, FaceAttachment::BlueprintBlank);
     }
 
+    /// C3c-3b — a break recovers every attachment once, in face order, and
+    /// each removal is logged for the server's stream.
     #[test]
-    fn a_seat_that_owns_its_world_recovers_every_attachment() {
+    fn a_break_recovers_every_attachment_once_and_logs_each() {
         let (mut world, _r, pos) = solid_floor();
         attachments_on(&mut world, pos);
-        let items = take_recoverable_attachments(&mut world, pos, false);
+        world.track_attachment_changes();
+        let items = take_recoverable_attachments(&mut world, pos);
         assert_eq!(items.len(), 3);
-        assert!(items.iter().any(|i| matches!(i, crate::item::Item::Plan(_))));
-        assert!(world.remove_face_attachments_at(pos).iter().all(Option::is_none), "all removed");
+        assert!(matches!(&items[0], crate::item::Item::Plan(p) if p.name == PlanData::debug_3x3_stone().name), "the real Plan");
+        assert_eq!(items[1], crate::item::Item::Block(block::OAK_PLANKS));
+        assert_eq!(items[2], crate::item::Item::Block(block::BLUEPRINT_PAPER));
+        assert_eq!(world.take_attachment_changes(), vec![(pos, 0), (pos, 2), (pos, 4)]);
+        assert!(take_recoverable_attachments(&mut world, pos).is_empty(), "nothing a second time");
     }
 
+    /// C3c-3b — the shared attach rule: a wallpaper on any bare face of a
+    /// solid block, blank paper on a bare Top face only; anything else held
+    /// attaches nothing.
     #[test]
-    fn a_joiner_recovers_wallpaper_and_paper_but_leaves_a_blueprint_standing() {
-        let (mut world, _r, pos) = solid_floor();
-        attachments_on(&mut world, pos);
-        let items = take_recoverable_attachments(&mut world, pos, true);
-        assert_eq!(items.len(), 2, "wallpaper and blank paper only: {items:?}");
-        assert!(!items.iter().any(|i| matches!(i, crate::item::Item::Plan(_))), "no Plan granted");
-        assert!(matches!(world.face_attachment_at(pos, 0), Some(FaceAttachment::Blueprint(_))), "left in place");
-        assert!(world.face_attachment_at(pos, 2).is_none() && world.face_attachment_at(pos, 4).is_none());
+    fn the_attach_rule_wants_a_solid_block_a_bare_face_and_paper_on_top() {
+        let (mut world, registry, pos) = solid_floor();
+        let top = crate::mesh::Face::Top.index();
+        let north = crate::mesh::Face::North.index();
+        assert_eq!(attach_rule(&world, &registry, pos, north, block::WALLPAPER_RED), Ok(FaceAttachment::Wallpaper(block::WALLPAPER_RED)));
+        assert_eq!(attach_rule(&world, &registry, pos, top, block::BLUEPRINT_PAPER), Ok(FaceAttachment::BlueprintBlank));
+        assert_eq!(attach_rule(&world, &registry, pos, north, block::BLUEPRINT_PAPER), Err(AttachRefusal::NotAFloor));
+        assert_eq!(attach_rule(&world, &registry, pos, north, block::STONE), Err(AttachRefusal::NotAttachable));
+        assert_eq!(attach_rule(&world, &registry, (pos.0, pos.1 + 1, pos.2), north, block::WALLPAPER_RED), Err(AttachRefusal::NotSolid));
+        assert_eq!(attach(&mut world, &registry, pos, top, block::WALLPAPER_RED), Ok(()));
+        assert_eq!(attach_rule(&world, &registry, pos, top, block::BLUEPRINT_PAPER), Err(AttachRefusal::FaceCovered));
+        assert_eq!(attach_rule(&world, &registry, pos, top, block::WALLPAPER_BLUE), Err(AttachRefusal::FaceCovered));
+        assert!(!lay_blank_blueprint_paper(&mut world, &registry, pos, [0, 1, 0]), "blank paper never covers a wallpaper");
+        assert_eq!(world.face_attachment_at(pos, top), Some(&FaceAttachment::Wallpaper(block::WALLPAPER_RED)));
     }
 }

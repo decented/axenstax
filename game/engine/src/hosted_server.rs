@@ -431,6 +431,12 @@ pub struct HostedServer {
     /// `ProtocolId`s from any earlier server (ids are per `HostedServer`, so
     /// a stale one would collide with this server's fresh numbering).
     lent_ids_reset: bool,
+    /// C3c-3b — has this server taken its world's attachment log in yet?
+    /// The first take only drops what is there: a lending host's world keeps
+    /// its log on after a server stops (nothing turns it off), so it can hold
+    /// changes made in solo play long before this server started, which are
+    /// already in every push ([`Self::drain_attachment_changes`]).
+    attachments_started: bool,
     /// Per-slot outbound StateUpdate queue (gap-audit T1-5), indexed like
     /// `transports`: splits a tick under the packet cap, holds a remote
     /// client to its per-tick byte budget, coalesces a backlog, and turns an
@@ -909,6 +915,7 @@ impl HostedServer {
             lent_sim_changes: Vec::new(),
             lent_edit_cells: Vec::new(),
             lent_ids_reset: false,
+            attachments_started: false,
             // Local slots ride an in-process channel: unbudgeted outboxes.
             outboxes: (0..num_local_players)
                 .map(|_| crate::state_outbox::ClientOutbox::new(false))
@@ -2153,6 +2160,15 @@ impl HostedServer {
             protocol::ItemAction::PlanMinted { source, x, y, z, hotbar_slot, spent, plan, .. } => {
                 return self.mirror_joiner_mint(i, *source, [*x, *y, *z], *hotbar_slot, spent.as_ref(), plan);
             }
+            // C3c-3b (v84) — wallpaper painted, blank paper laid, either
+            // peeled: on the server's world, by the shared rule.
+            protocol::ItemAction::Attach { x, y, z, face, hotbar_slot, held_kind, held_id, held_full } => {
+                let held = held_item_from_wire(*held_kind, *held_id, held_full, &self.server.registry);
+                return self.serve_attach(i, req.seq, [*x, *y, *z], *face, *hotbar_slot, held);
+            }
+            protocol::ItemAction::Detach { x, y, z, face } => {
+                return self.serve_detach(i, req.seq, [*x, *y, *z], *face);
+            }
         };
         let (accepted, consume_held, note) = match served {
             Ok(n) => (true, n, ItemNote::None.to_wire()),
@@ -2194,8 +2210,8 @@ impl HostedServer {
     /// logged): a mint is believed until C3d. Never answered; it reached the
     /// server in the client's order with its edits, ops and requests (sent as
     /// a Q-drop is). A placeholder that doesn't fit is dropped, never spilled.
-    /// The capture commit's paper tiles stay in the server's world until
-    /// C3c-3b.
+    /// C3c-3b — a capture commit's paper tiles leave the server's world
+    /// ([`Self::take_capture_paper`]).
     fn mirror_joiner_mint(
         &mut self,
         i: usize,
@@ -2212,6 +2228,11 @@ impl HostedServer {
         let spent_unread = spent.is_some() && decoded.is_none();
         let spent = decoded.map(|s| s.item);
         let source = crate::plan_mint::MintSource::from_wire(source);
+        // C3c-3b — a capture's commit spends its paper tiles in the server's
+        // world too, whatever its copy of the window makes of the mint.
+        if source == Some(crate::plan_mint::MintSource::CaptureCommit) {
+            self.take_capture_paper(i, cell);
+        }
         let Some(sp) = self.server.players.get_mut(i) else { return };
         if !crate::item_actions::can_mirror(sp) {
             return;
@@ -2232,6 +2253,143 @@ impl HostedServer {
                 mirrored.paid && !spent_unread,
             );
         }
+    }
+
+    /// C3c-3b (v84) — joiner `i` paints the wallpaper, or lays the blank
+    /// Blueprint Paper, it claims from hotbar slot `hotbar_slot` (`held`) on
+    /// face `face` of the block at `cell` (`ItemAction::Attach`). Judged as a
+    /// block use is (in the world and alive, within the server body's reach,
+    /// the play mode and plots allow it), then by the shared rule
+    /// (`blueprint_attach::attach_rule`: a solid block, a bare face, blank
+    /// paper on a Top face only) on the SERVER's world. Accepted: the
+    /// attachment is set there (logged, so every joiner and a lending host's
+    /// client see it through the stream, the painter included) and the block
+    /// is paid as a cart is — an owed take, or believed within the bound
+    /// (past it refused, `NothingToTake`); a creative joiner pays nothing, as
+    /// single-player's creative paint takes nothing. Refused: nothing changes;
+    /// the note says why.
+    fn serve_attach(&mut self, i: usize, seq: u32, cell: [i32; 3], face: u8, hotbar_slot: u8, held: Option<crate::item::Item>) {
+        use crate::item_actions::ItemNote;
+        let now = self.server.tick_counter;
+        let creative = self.server.play_mode.is_creative();
+        let pos = (cell[0], cell[1], cell[2]);
+        let judged = (|| {
+            let sp = self.server.players.get(i).ok_or(ItemNote::NotNow)?;
+            if !sp.server_simulated || !sp.is_present_and_alive() {
+                return Err(ItemNote::NotNow);
+            }
+            let Some(crate::item::Item::Block(block)) = held.as_ref() else { return Err(ItemNote::NothingToTake) };
+            if !crate::container_window::container_in_server_reach(sp.player.eye_pos(), cell) {
+                return Err(ItemNote::OutOfReach);
+            }
+            if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+                return Err(ItemNote::NotHere);
+            }
+            crate::blueprint_attach::attach_rule(&self.server.world, &self.server.registry, pos, usize::from(face), *block)
+                .map_err(crate::blueprint_attach::AttachRefusal::note)
+        })();
+        let att = match judged {
+            Ok(att) => att,
+            Err(note) => return self.refuse_item_action(i, seq, note),
+        };
+        let Some(item) = held else { return };
+        let Some(sp) = self.server.players.get_mut(i) else { return };
+        let believed = if creative {
+            0
+        } else {
+            match crate::window_ops::believe_pay(sp, &item, 1, now) {
+                Ok(n) => n,
+                Err(over) => {
+                    self.note_believed_use(i, 0, over, now);
+                    return self.refuse_item_action(i, seq, ItemNote::NothingToTake);
+                }
+            }
+        };
+        self.server.world.set_face_attachment(pos, usize::from(face), att);
+        let window_event = if creative {
+            0
+        } else if believed > 0 {
+            self.note_believed_use(i, believed, 0, now);
+            0
+        } else {
+            let slot = self.action_slot(i, hotbar_slot);
+            self.shadow_take_owed(i, slot, &item, 1, "on a wall or floor")
+        };
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: u8::from(!creative),
+            note: 0,
+            window_event,
+            wear_held: false,
+            bite_after: 0,
+        };
+        self.send_item_outcome(i, &out);
+    }
+
+    /// C3c-3b (v84) — joiner `i` peels the wallpaper or blank paper off face
+    /// `face` of the block at `cell` (`ItemAction::Detach`). Judged as an
+    /// attach is (in the world and alive, reach, play mode and plots: a
+    /// single-player peel sits inside the same anti-grief guard), and the
+    /// face must hold wallpaper or blank paper on the SERVER's world (bare —
+    /// another player peeled it first — or a laid Blueprint, which a joiner
+    /// can't lift (C3c-3r): `NothingToTake`, silent). Accepted: it is removed
+    /// there (logged and streamed) and what it recovers to
+    /// (`blueprint_attach::recovered_item_for`) is granted
+    /// (`grant_to_joiner`: what the client can't hold comes back as a ground
+    /// item). It costs nothing.
+    fn serve_detach(&mut self, i: usize, seq: u32, cell: [i32; 3], face: u8) {
+        use crate::item_actions::ItemNote;
+        use crate::world::FaceAttachment;
+        let pos = (cell[0], cell[1], cell[2]);
+        let judged = (|| {
+            let sp = self.server.players.get(i).ok_or(ItemNote::NotNow)?;
+            if !sp.server_simulated || !sp.is_present_and_alive() {
+                return Err(ItemNote::NotNow);
+            }
+            if !crate::container_window::container_in_server_reach(sp.player.eye_pos(), cell) {
+                return Err(ItemNote::OutOfReach);
+            }
+            if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+                return Err(ItemNote::NotHere);
+            }
+            match self.server.world.face_attachment_at(pos, usize::from(face)) {
+                Some(FaceAttachment::Wallpaper(_) | FaceAttachment::BlueprintBlank) => Ok(()),
+                Some(FaceAttachment::Blueprint(_)) | None => Err(ItemNote::NothingToTake),
+            }
+        })();
+        if let Err(note) = judged {
+            return self.refuse_item_action(i, seq, note);
+        }
+        let Some(att) = self.server.world.remove_face_attachment(pos, usize::from(face)) else { return };
+        let out = protocol::ItemActionOutcomePacket {
+            seq,
+            accepted: true,
+            consume_held: 0,
+            note: 0,
+            window_event: 0,
+            wear_held: false,
+            bite_after: 0,
+        };
+        self.send_item_outcome(i, &out);
+        let item = crate::blueprint_attach::recovered_item_for(&att);
+        self.grant_to_joiner(i, [crate::item::ItemStack { item, count: 1 }]);
+    }
+
+    /// C3c-3b — joiner `i` committed a capture whose stamped tile is `cell`
+    /// (`PlanMinted { source: CaptureCommit }`): the blank paper of that
+    /// capture leaves the SERVER's world (`plan::take_capture_paper`: the
+    /// capture's own read-only flood from `cell`, re-run here, then each
+    /// tile's paper removed — logged, so every joiner's copy loses it and
+    /// nobody captures the same paper twice). A joiner whose body is gone,
+    /// or who may not touch that cell (the play mode, a plot), spends
+    /// nothing of the server's.
+    fn take_capture_paper(&mut self, i: usize, cell: [i32; 3]) {
+        let Some(sp) = self.server.players.get(i) else { return };
+        if !sp.server_simulated || !sp.is_in_world() || self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+            return;
+        }
+        let _ = crate::plan::take_capture_paper(&mut self.server.world, (cell[0], cell[1], cell[2]));
     }
 
     /// C3c-2 — the hotbar slot an item action of joiner `i` names, or its
@@ -4685,6 +4843,38 @@ impl HostedServer {
         if remote {
             self.derive_campfire_edit(cell, old_block, bc.new_block);
             self.spill_used_block(cell, old_block, bc.new_block);
+            self.settle_edit_attachments(cell, old_block, bc.new_block, as_use);
+        }
+    }
+
+    /// C3c-3b — what a joiner's accepted edit `old → new` at `cell` does to
+    /// the face attachments there, in the SERVER's world (the joined client
+    /// leaves its copy alone and is streamed the result), as the client's
+    /// own arms do to theirs:
+    /// - a break (`new` is AIR, not a use): every attachment is recovered
+    ///   once by the shared rule (`blueprint_attach::take_recoverable_attachments`)
+    ///   and spilled as real ground items at the cell, where everyone sees
+    ///   them — a laid Blueprint as a ground Plan with the server's real body
+    ///   (a joiner can't pick a Plan up; a host can);
+    /// - a use that clears the cell (the Eraser on a paper tile): removed,
+    ///   nothing recovered;
+    /// - a block put where none stood (AIR, water): any orphan removed,
+    ///   nothing recovered (single-player's defensive clear on placement).
+    ///
+    /// Anything else (a block changed in place) leaves them, as the client's
+    /// own arms do.
+    fn settle_edit_attachments(&mut self, cell: (i32, i32, i32), old: crate::block::BlockId, new: crate::block::BlockId, as_use: bool) {
+        if old == new {
+            return;
+        }
+        if new == crate::block::AIR && !as_use {
+            let at = glam::Vec3::new(cell.0 as f32 + 0.5, cell.1 as f32 + 0.5, cell.2 as f32 + 0.5);
+            let items = crate::blueprint_attach::take_recoverable_attachments(&mut self.server.world, cell);
+            for (k, item) in items.into_iter().enumerate() {
+                crate::entity::spawn_item(&mut self.server.ecs, at, crate::item::ItemStack { item, count: 1 }, 104_729 + k as u32 * 7919);
+            }
+        } else if new == crate::block::AIR || !self.server.registry.is_solid(old) {
+            let _ = self.server.world.remove_face_attachments_at(cell);
         }
     }
 
@@ -5419,8 +5609,12 @@ impl HostedServer {
             own_hunger: 0,
             block_views: Vec::new(),
             refused_uses: Vec::new(),
+            attachment_changes: Vec::new(),
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
+        // C3c-3b — the face attachments that changed this tick, whoever
+        // changed them, each as it now stands.
+        let attachment_changes = self.drain_attachment_changes();
 
         // B2a — the chunk push reads the world here, inside `tick` (on a
         // lending host: inside the lend window, the host client's own world).
@@ -5472,6 +5666,21 @@ impl HostedServer {
             } else {
                 &block_changes
             };
+            // C3c-3b — and of attachment changes by the same rule (a chunk
+            // pushed later carries its attachments). A host's own seat shares
+            // the world and is sent none.
+            let attachments: Vec<protocol::AttachmentChange> = if i < self.num_local_players {
+                Vec::new()
+            } else if filters {
+                let push = &self.chunk_pushes[i];
+                attachment_changes
+                    .iter()
+                    .filter(|a| push.has_sent(crate::state_outbox::chunk_of_cell((a.x, a.y, a.z))))
+                    .copied()
+                    .collect()
+            } else {
+                attachment_changes.clone()
+            };
             let push_centre = self.push_centre(i);
             let verdicts = self.sends_notes(i).then_some(&self.verdicts);
             let outbox = &mut self.outboxes[i];
@@ -5482,6 +5691,7 @@ impl HostedServer {
                 changes,
                 &entities.updates,
             );
+            outbox.push_attachments(&attachments);
             // B2a — then this tick's chunk pushes, AFTER its deltas: a change
             // to a chunk queued now was filtered above and is already in the
             // snapshot, and the tick's deltas never wait behind new chunks.
@@ -5535,6 +5745,36 @@ impl HostedServer {
                 self.transports[i].send_to_client(&pkt);
             }
         }
+    }
+
+    /// C3c-3b — the face attachments that changed in the world this server
+    /// runs on since the last tick (`World::take_attachment_changes`: every
+    /// setter logs, so this is the one source whoever made the change — a
+    /// host's own click on a lent world, a server sim, a joiner's request),
+    /// each face once, as it now stands. The first call turns the log on and
+    /// drops what it held. On a lent world the host's client remeshes every
+    /// cell (`lent_edit_cells`): a joiner's attach or peel, a develop flip, a
+    /// break's spill are not its own.
+    fn drain_attachment_changes(&mut self) -> Vec<protocol::AttachmentChange> {
+        let world = &mut self.server.world;
+        world.track_attachment_changes();
+        let logged = world.take_attachment_changes();
+        if !std::mem::replace(&mut self.attachments_started, true) {
+            return Vec::new();
+        }
+        let mut seen = ahash::AHashSet::new();
+        let mut out = Vec::new();
+        for (pos, face) in logged {
+            if !seen.insert((pos, face)) {
+                continue;
+            }
+            let att = world.face_attachment_at(pos, usize::from(face)).map(crate::chunk_push::pushed_attachment);
+            out.push(protocol::AttachmentChange { x: pos.0, y: pos.1, z: pos.2, face, att });
+        }
+        if self.lends_host_world() {
+            self.lent_edit_cells.extend(out.iter().map(|a| (a.x, a.y, a.z)));
+        }
+        out
     }
 
     /// B2a — what a remote client's input tells its chunk push: its

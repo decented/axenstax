@@ -32,6 +32,11 @@
 //!   with single-player); the server applies them to its real block entity
 //!   in `HostedServer::serve_block_use`, and refuses with the block-use
 //!   notes below (`OutOfReach` … `FireFull`).
+//! - **Attach / Detach** (C3c-3b, v84): paint wallpaper or lay blank paper
+//!   on a face, and peel it off, by the shared rule
+//!   (`blueprint_attach::attach_rule`) on the server's world
+//!   (`HostedServer::serve_attach` / `serve_detach`); refusals add
+//!   `FaceCovered` and `NotAFloor`.
 //!
 //! Pure rules first (unit-tested here), then the server-side steps that
 //! apply them to a [`ServerPlayer`]. `hosted_server` holds only the dispatch
@@ -155,6 +160,12 @@ pub enum ItemNote {
     /// C3c-2 — a stick's friction missed its roll: the stick is spent all the
     /// same (an ACCEPTED outcome carrying this note).
     NotDryEnough = 26,
+    /// C3c-3b (v84) — an `Attach` refused: that face already carries
+    /// wallpaper or paper.
+    FaceCovered = 27,
+    /// C3c-3b — an `Attach` of blank Blueprint Paper on a face that isn't a
+    /// floor's Top: blank paper only lies flat.
+    NotAFloor = 28,
 }
 
 impl ItemNote {
@@ -192,6 +203,8 @@ impl ItemNote {
             24 => NeedsFuel,
             25 => FrictionNeedsFuel,
             26 => NotDryEnough,
+            27 => FaceCovered,
+            28 => NotAFloor,
             _ => None,
         }
     }
@@ -222,6 +235,8 @@ impl ItemNote {
             NeedsFuel => Some("The campfire needs fuel first."),
             FrictionNeedsFuel => Some("Add fuel first (wood), then strike to light."),
             NotDryEnough => Some("The stick wasn't dry enough."),
+            FaceCovered => Some("That face is already covered."),
+            NotAFloor => Some("Blank paper only lies flat on a floor."),
         }
     }
 }
@@ -736,12 +751,17 @@ mod tests {
             ItemNote::NeedsFuel,
             ItemNote::FrictionNeedsFuel,
             ItemNote::NotDryEnough,
+            ItemNote::FaceCovered,
+            ItemNote::NotAFloor,
         ] {
             assert_eq!(ItemNote::from_wire(n.to_wire()), n);
         }
         // C3c-2 (v81) — the use-request codes follow InventoryFull, in order.
         assert_eq!(ItemNote::NoAmmo.to_wire(), 19);
         assert_eq!(ItemNote::NotDryEnough.to_wire(), 26);
+        // C3c-3b (v84) — the attach codes follow NotDryEnough.
+        assert_eq!((ItemNote::FaceCovered.to_wire(), ItemNote::NotAFloor.to_wire()), (27, 28));
+        assert_eq!(ItemNote::NotAFloor.toast(), Some("Blank paper only lies flat on a floor."));
         assert_eq!(ItemNote::NoAmmo.toast(), None, "silent, as single-player's bow with no arrow is");
         assert_eq!(ItemNote::NothingBit.toast(), Some("You reeled in early — nothing bit."));
         assert_eq!(ItemNote::NotDryEnough.toast(), Some("The stick wasn't dry enough."));

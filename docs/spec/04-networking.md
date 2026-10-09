@@ -2,7 +2,7 @@
 
 **Status**: Draft
 **Date**: 2026-03-03
-**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `83`** (C3c-3a) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
+**Addendum**: `_audit-2026-04-18.md` first established that `PROTOCOL_VERSION` had drifted ahead of this spec. **The current wire version is `84`** (C3c-3b) (see the authoritative version-history comment in `game/engine/src/protocol.rs` for the per-version detail; this addendum logs the milestones, not every bump). The version bumps since v1:
 
 - **v2** (2026-04-18): `StateUpdatePacket` gains `last_acked_input` for input-prediction reconciliation, plus `entity_spawns` / `entity_updates` / `entity_despawns` for server-authoritative entity sync. New structs `EntitySpawn`, `EntityUpdate`, `EntityKind`. `InputPacket` gains analog movement + discrete action flags. (Spec body below still describes v1 packet shapes — that's pending a fuller rewrite.)
 - **v3** (2026-05-03): `JoinRequestPacket` gains `auth_event: Option<SignetAuthEventWire>` + `handle_credential: Option<SignetCredentialWire>`; new `ChallengePacket` (packet tag 50) lands on connect. Bincode is positional, so even `Option`-only adds force a version bump. Phase 3 of the engine-Signet-auth foundation. The verify path is gated behind `signet::USE_SIGNET_AUTH` (currently `false`), so the new fields ride alongside the old `player_name` BRIDGE — see §1.8.4. *(Superseded: `USE_SIGNET_AUTH` was retired at v49 on 2026-06-16; identity is policy-driven via `hosted_server::resolve_join_identity`. See §1.8.4 and Spec 08 §9.0.1.)*
@@ -42,6 +42,7 @@
 - **v81** (2026-10-08, C3c-2): **A joiner's bow, slingshot, cart placement, fishing and campfire lighting run on the server.** `ItemAction` appends `Shoot { weapon: ShotWeapon, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem, yaw: f32, pitch: f32, charge: u16 }` (= 6; `ShotWeapon` append-only: Bow 0, Slingshot 1), `PlaceCart { cell: [i32; 3], hotbar_slot, held_kind, held_id, held_full }` (= 7), `Cast { hotbar_slot, held_kind, held_id, held_full }` (= 8) and `Reel { hotbar_slot, held_kind, held_id, held_full }` (= 9). `ItemActionOutcome` appends `bite_after: u16` after `wear_held` (an accepted cast's wait for the server's bite; 0 otherwise). Lighting an unlit campfire (a stick's friction, flint and steel, the Magnesium Firestarter) is a campfire `UseBlock`, run by the lighting rule (`block_use::light_block`). `ItemNote` appends codes 19–26 (`NoAmmo`, `CartHere`, `NoWater`, `NothingBit`, `NoLine`, `NeedsFuel`, `FrictionNeedsFuel`, `NotDryEnough`). No new `PacketType`. Pinned by `protocol::tests::item_action_packets_round_trip` and `item_actions::tests::notes_round_trip_and_unknown_codes_read_as_nothing`. See §4.2f "Use requests".
 - **v82** (2026-10-08, C3c-1-fix): **A use's overflow is the client's, and a refused use is undone.** `UseTag` appends `unfit: u8` after `tool`: how many of the use's product the client's bag could NOT take (its `add_item` leftover, 0 or 1; 0 for a use that makes nothing). The server spawns exactly that as a real ground item at the joiner (one its copy can't corroborate is believed, charged to the joiner's believed bound) and its copy adds the rest; what of that doesn't fit the copy is only counted. `StateUpdatePacket` appends `refused_uses: Vec<RefusedUse>` after `block_views` (`RefusedUse { x, y, z: i32, kind: u8, note: u8 }`; `kind` the `UseKind`, `note` an existing `ItemNote` code: `OutOfReach` for reach, `NotHere` for the play mode, a plot, an economy block or bedrock, `None` otherwise; no new code): each use-tagged edit the server refused, once, per client, in line after the tick's block changes (its send-back among them), never in the repeated template. The joined client undoes the use from its OWN record of it. No new `PacketType`. Pinned by `protocol::tests` (`input_packet_trailing_fields_are_in_append_order`, `state_update_trailing_fields_are_in_append_order`). See §4.2e "Block-edit uses".
 - **v83** (2026-10-08, C3c-3a): **A joiner's Plans are tracked by marker.** `WireItem` appends `Plan { marker: [u8; 32], developed: bool }` (= 3): a Plan by reference, never its body — `marker` is `plan::marker`, SHA-256 of the bincode of the WHOLE `PlanData` (develop state, kind, derivation chain and authored-in included, unlike `plan::content_hash`). It is a Plan's `full_item` wherever a Plan is encoded (`inventory::item_to_wire_full`: a `WireStack` of `item_kind::PLAN` id 0, a use tag's `used`, a held claim); `inventory::item_from_wire_full` decodes it to nothing (no body), so a host's Plan in a shared container, on the ground or in a frame shows exactly as before. `ItemAction` appends `PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (= 10; `plan_mint::MintSource` append-only: CaptureCommit 0, CaptureArt 1): a Plan the joined client minted in its own window, never answered. `use_edits::UseKind` appends `HangPrint` (= 11): a developed Plan hung as a cyanotype print, its tag's `used` the Plan. The server holds a joiner's Plan as a marker placeholder (`plan::PlanData::marker_placeholder`, its `marker` a `#[serde(skip)]` field, so no saved or wire encoding of a `PlanData` changes) and takes it by marker; log-only (`PossessionTally::plan_minted` / `plan_mismatch`). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `wire_item_roundtrips_every_variant`), `use_edits::tests::use_kind_wire_bytes_are_pinned` and `plan_mint::tests::mint_source_wire_bytes_are_pinned`. See §4.2e "Block-edit uses" and §4.2f "Plans".
+- **v84** (2026-10-09, C3c-3b): **Face attachments live in the server's world.** `ItemAction` appends `Attach { x, y, z: i32, face: u8, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (= 11: paint the wallpaper, or lay the blank Blueprint Paper, in hand on a face; the held claim is `UseBlock`'s, verbatim) and `Detach { x, y, z: i32, face: u8 }` (= 12: peel it), both answered with an `ItemActionOutcome`. `StateUpdatePacket` appends `attachment_changes: Vec<AttachmentChange>` after `refused_uses` (`AttachmentChange { x, y, z: i32, face: u8, att: Option<PushedAttachment> }`: a face as it now stands, `None` = bare): every attachment change in a chunk the client holds, whoever made it, reliable and in line with the block changes. New `item_actions::ItemNote` codes `FaceCovered` (27) and `NotAFloor` (28). No new `PacketType`. Pinned by `protocol::tests` (`item_action_packets_round_trip`, `state_update_trailing_fields_are_in_append_order`). See §4.2f "Face attachments".
 
 **Depends on**: ADR-001 (Full Custom Engine), ADR-002 (Tech Stack)
 
@@ -513,7 +514,7 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x11 | `InputAck` | S->C | Unreliable | Server confirms processing of input up to sequence N. |
 | 0x12 | `EntityState` | S->C | Unreliable | Batch of entity state updates. |
 | 0x13 | `PlayerState` | S->C | Reliable | Full authoritative state for the player (position, health, inventory snapshot). |
-| 0x14 | `BlockChange` | S->C | Reliable | Confirmed block mutations in the world. As built: `StateUpdatePacket.block_changes` (the server's world deltas, per client through `state_outbox`); v82 appends `refused_uses` beside them — the joiner's own use-tagged edits the server refused, each after its send-back (§4.2e "Block-edit uses"). |
+| 0x14 | `BlockChange` | S->C | Reliable | Confirmed block mutations in the world. As built: `StateUpdatePacket.block_changes` (the server's world deltas, per client through `state_outbox`); v82 appends `refused_uses` beside them — the joiner's own use-tagged edits the server refused, each after its send-back (§4.2e "Block-edit uses"); v84 appends `attachment_changes` — the face attachments that changed in chunks the client holds (§4.2f "Face attachments"). |
 | 0x15 | `BlockAction` | C->S | Reliable | Client requests a block placement/break. |
 | 0x16 | `ChunkData` | S->C | Reliable | Compressed chunk payload. |
 | 0x17 | `ChunkRequest` | C->S | Reliable | Client requests specific chunks (rare; server mostly pushes proactively). |
@@ -532,7 +533,7 @@ Bit layout (worst case 12 bytes, typical 4-8 bytes):
 | 0x3B | `EntityInteract` | C->S | Reliable | A joiner's one-shot right-click on a server mob — or, `InteractKind::LeadToPost { post: [i32; 3] }`, on a fence post (`entity` ignored): `{ seq, entity, kind: InteractKind, held_kind, held_id, held_full, hotbar_slot: u8, sneak, events_applied: u32 }` (`events_applied` v76). **Implemented tag** (`PacketType::EntityInteract = 59`, protocol v70). See §4.2d. |
 | 0x3C | `InteractOutcome` | S->C | Reliable | The server's decision on one attack or interaction, to the asker alone: `{ seq, entity, kind: Option<InteractKind>, accepted, consume_held: u8, note: u8, window_event: u32 }` (`window_event` v76: the take or swing wear it is, 0 for none). **Implemented tag** (`PacketType::InteractOutcome = 60`, protocol v70). |
 | 0x3D | `KillEvent` | S->C | Reliable | A kill credited to this player, to the killer alone: `{ victim: EntityKind, reason: u8, x, y, z, victim_flags: u8 }`; `reason` is a `kill_reason` code, `LAST_HIT` (0) or `NEAREST` (1). **Implemented tag** (`PacketType::KillEvent = 61`, protocol v70). |
-| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76), `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81), `ItemAction::PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (v83) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9, PlanMinted=10); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop, GrantUnfit and PlanMinted are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, GrantUnfit from v76, UseBlock from v79, Shoot, PlaceCart, Cast and Reel from v81, PlanMinted from v83). See §4.2f. |
+| 0x3E | `ItemAction` | C->S | Reliable | A joiner's item action: `{ seq: u32, action: ItemAction }`, `ItemAction::Eat { hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }`, `ItemAction::Sleep { bed: [i32; 3] }`, `ItemAction::Craft { grid: [(u8, u16); 9], table: Option<[i32; 3]> }` (unused since v75: ignored and tallied) , `ItemAction::Drop { hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::GrantUnfit { event: u32, count: u8 }` (v76), `ItemAction::UseBlock { cell: [i32; 3], hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem }` (v79), `ItemAction::Shoot { weapon: ShotWeapon, hotbar_slot, held_kind, held_id, held_full, yaw: f32, pitch: f32, charge: u16 }`, `ItemAction::PlaceCart { cell, hotbar_slot, held_kind, held_id, held_full }`, `ItemAction::Cast { hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Reel { … }` (v81), `ItemAction::PlanMinted { source: u8, x, y, z: i32, face: u8, hotbar_slot: u8, spent: WireSlot, plan: WireItem }` (v83), `ItemAction::Attach { x, y, z: i32, face: u8, hotbar_slot, held_kind, held_id, held_full }` or `ItemAction::Detach { x, y, z: i32, face: u8 }` (v84) (append only: Eat=0, Sleep=1, Craft=2, Drop=3, GrantUnfit=4, UseBlock=5, Shoot=6, PlaceCart=7, Cast=8, Reel=9, PlanMinted=10, Attach=11, Detach=12); then `events_applied: u32` (v76). Shares its `seq` with `EntityAttack`/`EntityInteract`. Craft, Drop, GrantUnfit and PlanMinted are fire-and-forget (no outcome). **Implemented tag** (`PacketType::ItemAction = 62`, protocol v74; Eat and Sleep from v73, Craft and Drop from v74, GrantUnfit from v76, UseBlock from v79, Shoot, PlaceCart, Cast and Reel from v81, PlanMinted from v83, Attach and Detach from v84). See §4.2f. |
 | 0x40 | `WindowOp` | C->S | Reliable | One inventory-window op a joiner's client applied: `{ op_seq: u32, op: WireWindowOp, digest: u32, events_applied: u32, touched: Vec<WireWindowSlot>, claims: Vec<(WireWindowSlot, WireSlot)>, client_ok: bool }` (`events_applied` v76; `touched` and `claims` v77, ≤ 122 each, in that order; `client_ok` v78, the client's own verdict), `WireWindowOp::Click(WindowClick)`, `OpenPlayer`, `OpenTable { cell: [i32; 3] }` or `SetAutoRefill { on: bool }` (append only: Click=0, OpenPlayer=1, OpenTable=2, SetAutoRefill=3; v77: OpenContainer { cell }=4, Container(ContainerClick)=5). Never answered, except an `OpenContainer` (by `ContainerOpened`) and a `Container` op that earns a correction (by a `WindowSlotSet`). **Implemented tag** (`PacketType::WindowOp = 64`, protocol v75). See §4.2g. |
 | 0x41 | `ContainerOpened` | S->C | Reliable | The answer to a joiner's `OpenContainer`: `{ cell, kind: ContainerKind, slots: Vec<WireSlot> (≤ 72), furnace: Option<FurnaceView>, refused: Option<OpenRefusal>, window_event: u32 }` (`window_event` v78: an opened view is a numbered window event; 0 for a refusal). **Implemented tag** (`PacketType::ContainerOpened = 65`, protocol v77). See §4.2g. |
 | 0x42 | `WindowSlotSet` | S->C | Reliable | Values for named container slots of a joiner's open container, and a correction's item delta: `{ op_seq_applied: u32, reason: u8, sets: Vec<(WireWindowSlot, WireSlot)> (≤ 122), furnace: Option<FurnaceView>, window_event: u32, take: Vec<(u8, WireStack)> (≤ 122), give: Vec<WireStack> (≤ 122) }` (`take` and `give` v78) — a correction of a container op, or a push of what changed in the open container. Never a whole window, never a player slot's value (v78). Every set is a numbered window event (v78; v77 numbered only a set of player slots). **Implemented tag** (`PacketType::WindowSlotSet = 66`, protocol v77). See §4.2g. |
@@ -1746,12 +1747,13 @@ bought blocks):
   the composter's aged output — the "keg / aged output" this list used to
   name — an item frame's mount, a campfire's cooked pickup and a drying
   rack's withdraw are server-applied requests now);
-- a wallpaper peel; vendor, auction and market purchases; raid
+- vendor, auction and market purchases; raid
   rewards; a pack unequip; armour taken off (fishing left this list in
   C3c-2: a catch is the server's roll and grant, §4.2f "Use requests");
-- face-attachment recovery on a break (wallpaper, blueprint paper and Plans
-  go straight into the breaker's inventory; the server spills no
-  attachments, so nothing is granted twice);
+- (face-attachment recovery on a break and the wallpaper peel closed in
+  C3c-3b, §4.2f "Face attachments": a joiner's peel is a `Detach` whose item
+  is granted, and its break's attachments are spilled once by the server as
+  ground items; the joined client grants itself nothing);
 - (drying-rack recovery on a break closed in C3b-2: a joiner's accepted
   break of a rack, an item frame or a composter spills what the SERVER's
   holds as ground items, `block_use::take_on_break`, and the joined client
@@ -2088,9 +2090,11 @@ item (`use_edits.rs`).
 - *Not uses (C3c-2, C3c-3).* Lighting a campfire by friction, flint and steel
   or a Firestarter, the bow, the slingshot, carts and fishing are requests
   since C3c-2 (§4.2f "Use requests"); a Plan minted by a capture is a
-  request since C3c-3a (§4.2f "Plans"); face attachments (wallpaper, blank
-  paper, a Plan laid flat, a capture commit's paper tiles), a latent print
-  lifted and Plan Build are C3c-3r (refused for joiners) and C3c-3b. Flint on
+  request since C3c-3a (§4.2f "Plans"); wallpaper, blank paper and their
+  peel are requests since C3c-3b, and a capture commit's paper tiles leave
+  the server's world with its mint (§4.2f "Face attachments"); a Plan laid
+  flat, a laid Blueprint lifted, a latent print lifted and Plan Build are
+  refused for joiners (C3c-3r). Flint on
   a flammable block (FIRE) and the hand-lit keg fuse are unreachable code
   (nested under the campfire arm) awaiting an owner call.
 
@@ -2125,9 +2129,9 @@ The server cannot yet mirror a Plan (until C3c-3a, v83, it had no wire form; a P
 | Plan Build, Auto (the panel stays open; Guided build-along is unchanged) | "Auto build works in your own worlds. Use Guided here." |
 | Opening a vendor, tip jar, auction, market hub, bazaar, bounty board, repair bench or drafting table (commission), or clicking a Builder villager | "Shops and markets work in your own worlds for now." |
 
-Also for a joined client: breaking a block that carries a laid Blueprint grants no Plan and leaves the attachment standing in the client's world copy (`blueprint_attach::take_recoverable_attachments`; wallpaper and blank paper still come back, the server owns attachments from C3c-3b); the Latent-to-Developed sun tick (`tick_develop`, `tick_develop_attachments`) and the auction settlement sweep do not run on it (a render stub pushed as Latent would otherwise develop on its own clock, independent of the host's). Pinned by `test_integration::joiner_refusals` (source lint: each refused arm tests `joined()` before its first inventory or world change) and the `game_harness_a_joiner_cannot_*` / `game_harness_a_joiners_plan_is_not_dropped` GPU tests. Not changed here: the capture, hang and capture-commit arms (C3c-3a) and wallpaper and blank-paper recoveries (C3c-3b).
+Also for a joined client: its break arms recover no attachment at all (C3c-3b, replacing C3c-3r's keep-the-Blueprint rule: the server spills each one once and its stream takes them out of the client's copy, §4.2f "Face attachments"); the Latent-to-Developed sun tick (`tick_develop`, `tick_develop_attachments`) and the auction settlement sweep do not run on it (a render stub pushed as Latent would otherwise develop on its own clock, independent of the host's). Pinned by `test_integration::joiner_refusals` (source lint: each refused arm tests `joined()` before its first inventory or world change) and the `game_harness_a_joiner_cannot_*` / `game_harness_a_joiners_plan_is_not_dropped` GPU tests. Not changed here: the capture, hang and capture-commit arms (C3c-3a) and wallpaper and blank paper (C3c-3b, requests).
 
-### 4.2f Item actions (as built, protocol v73, C2a; v74, C2b; v79, C3b-2; v81, C3c-2; v83, C3c-3a)
+### 4.2f Item actions (as built, protocol v73, C2a; v74, C2b; v79, C3b-2; v81, C3c-2; v83, C3c-3a; v84, C3c-3b)
 
 A joiner's eating and sleeping are requests the server decides, because the
 server runs the joiner's hunger and owns its health (§5.3.2). C2b adds
@@ -2148,9 +2152,10 @@ held_full: WireItem }`; v76 appends `GrantUnfit { event: u32, count: u8 }`
 (§4.2g) and v79 `UseBlock { cell, hotbar_slot, held_kind, held_id,
 held_full }` ("Block uses" below); v81 appends `Shoot`, `PlaceCart`, `Cast`
 and `Reel` ("Use requests" below); v83 appends `PlanMinted`
-("Plans" below). The enum is append only: Eat = 0, Sleep = 1, Craft = 2,
+("Plans" below); v84 appends `Attach` and `Detach` ("Face attachments"
+below). The enum is append only: Eat = 0, Sleep = 1, Craft = 2,
 Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6, PlaceCart = 7, Cast = 8,
-Reel = 9, PlanMinted = 10
+Reel = 9, PlanMinted = 10, Attach = 11, Detach = 12
 (`protocol::item_action_variant`, pinned on the wire bytes). `ItemActionOutcome = 63` (S→C, to the asker alone):
 `{ seq, accepted, consume_held: u8, note: u8 }` (v76 appends `window_event:
 u32`, v79 `wear_held: bool`, v81 `bite_after: u16`). The `seq` is shared with
@@ -2738,11 +2743,12 @@ so it never crosses the wire: a joiner's Plans are tracked BY MARKER
   hold, a placeholder with no room — dropped, never spilled — a report naming
   no Plan or an unknown source) counts `plan_mismatch`, the first logged;
   the leave summary carries both. A reported mint is believed until C3d.
-  The commit's BlueprintBlank tiles stay in the server's world until C3c-3b.
+  Since C3c-3b a commit also spends its capture's paper in the server's
+  world (§4.2f "Face attachments").
 - *The hang* is a use edit (`UseKind::HangPrint`, §4.2e "Block-edit uses").
 - *Not here.* Face attachments, wallpaper and blank paper, the server owning
-  attachment removal and the capture commit's tiles (C3c-3b); the joined
-  refusals of a Plan's Q-drop, lay-flat, Blueprint peel and recovery, Plan
+  attachment removal and the capture commit's tiles (C3c-3b, "Face
+  attachments" below); the joined refusals of a Plan's Q-drop, lay-flat, Blueprint peel and recovery, Plan
   Build (Auto) and the economy blocks (C3c-3r); a client-side Plan body store
   and Plans synced back to a client (death, sidecar); Plan transfer between
   players (later).
@@ -2758,6 +2764,114 @@ so it never crosses the wire: a joiner's Plans are tracked BY MARKER
   `…_capture_commit_mints_a_marker_and_a_full_bag_refuses_it`,
   `…_hung_print_takes_its_plan_by_marker`,
   `…_art_capture_waits_for_the_claim_on_its_paper`).
+
+**Face attachments (C3c-3b, protocol v84).** Wallpaper, blank
+Blueprint Paper and laid Blueprints (`World.face_attachments`) are owned by the
+SERVER's world: a joiner changes them only by request, every change reaches
+every joiner incrementally, and a break recovers an attachment exactly once.
+With this, no joiner inventory change is unmirrored (C3 design §3 rule 7).
+
+- *One change log* (`World::track_attachment_changes` /
+  `take_attachment_changes`, runtime-only, `None` = not tracking, so
+  single-player and a joined client keep nothing). Every attachment setter
+  logs the face it changed — `set_face_attachment`, `remove_face_attachment`,
+  `remove_face_attachments_at` — whoever calls it: a host's own click on a
+  lent world, a joiner's request, the server's break spill, a keg blast,
+  falling blocks, leaf decay, `tick_build` stamping, the plaque, the Eraser, a
+  block placed over a cell. A laid Blueprint developing changes in place
+  (`face_attachment_at_mut`), so `latent_print::tick_develop_attachments`
+  logs only its Latent → Developed flip (the exposure count between draws
+  nothing). Bounded like the table log: at most
+  `MAX_ATTACHMENT_CHANGES_LOGGED = 4096` between takes, the oldest dropped.
+- *One stream.* `HostedServer::drain_attachment_changes` takes the log in each
+  tick in `broadcast_state` (the first take turns it on and drops what it
+  held: a lending host's world keeps its log on after a server stops, and its
+  solo-play changes are already in every push), dedupes it per face and reads
+  what each face holds NOW (`chunk_push::pushed_attachment`: the render stub,
+  a Blueprint as its develop state only) into `StateUpdatePacket.
+  attachment_changes`. Gated per joiner by the same sent-set as block changes
+  (`ClientChunkPush::has_sent`, queued counts; a chunk pushed later carries
+  its attachments in the push); a host's own seat shares the world and is
+  sent none. Reliable, in line, after the tick's block changes
+  (`state_outbox::Delta::Attachment`; never coalesced, kept on overflow — an
+  overflow's chunk resync lands after it and carries the face as it stands).
+  On a lent world every drained cell is also handed to the host's client to
+  remesh (`lent_edit_cells` via `take_lent_changes`: a joiner's attach or
+  peel, a develop flip, a break's spill are not its own). The joined client
+  queues each change in its world stream after the packet's block changes
+  (`chunk_intake::StreamItem::Attachment`) and applies it like a block view —
+  in a column it holds, after the snapshot it updates — as a render stub
+  (`chunk_intake::apply_attachment_change`), then remeshes.
+- *Attach* (`ItemAction::Attach { x, y, z, face, hotbar_slot, held_kind,
+  held_id, held_full }` = 11). The joined client's wallpaper and blank-paper
+  arms check the shared rule on their copy (`blueprint_attach::attach_rule`:
+  a wallpaper or Blueprint Paper block in hand, a solid target, a bare face,
+  blank paper on a Top face only) — where single-player would paint or lay
+  — and send the request instead (`GameState::send_attach`), claiming the one
+  block (`Asked::Attach`, as a cart); a second click on the same face while
+  one is in flight sends nothing. Nothing changes on the client. The server
+  (`HostedServer::serve_attach`) judges it as a block use (in the world and
+  alive, `container_in_server_reach`, the play mode and plots:
+  `remote_may_touch`) and by the SAME rule on its world, sets the attachment
+  there (logged, so the painter sees it through the stream like everyone
+  else) and takes the block as a cart is taken: an owed take (a window event
+  the outcome carries), or believed within the joiner's bound
+  (`window_ops::believe_pay`), refused past it (`NothingToTake`). A creative
+  joiner pays nothing (`consume_held` 0, no event), as single-player's
+  creative paint takes nothing. Refusals: `NotNow`, `NothingToTake` (not a
+  wallpaper or paper; silent), `OutOfReach`, `NotHere`, `NotThatBlock` (not
+  solid), `FaceCovered` (27, "That face is already covered."), `NotAFloor`
+  (28, "Blank paper only lies flat on a floor."). An accepted one plays the
+  place sound.
+- *Detach* (`ItemAction::Detach { x, y, z, face }` = 12). The joined client's
+  first-strike peel of a wallpaper or blank paper sends it
+  (`GameState::send_detach`, once per press and per face in flight; claims
+  nothing) and spends the strike (no break behind it); a laid Blueprint stays
+  refused with C3c-3r's toast. The server (`serve_detach`) judges reach, play
+  mode and plots, and wants wallpaper or blank paper on that face of ITS world
+  (bare — someone peeled it first — or a Blueprint: `NothingToTake`, silent),
+  removes it (logged) and grants what it recovers to
+  (`blueprint_attach::recovered_item_for`, `grant_to_joiner`: an
+  `InventoryGrant`, its unfit part spilled through `GrantUnfit`). An accepted
+  one plays the break sound.
+- *Breaks recover once* (`blueprint_attach::take_recoverable_attachments`,
+  the one rule: every face's attachment removed — logged — and what each
+  recovers to, in face order). Single-player's and a host's break arms put
+  them in the breaker's inventory, overflow at the block, as before. The
+  joined client's break arms recover nothing (its copy loses them through
+  the stream). The server, for a server-simulated player's applied edit
+  (`HostedServer::settle_edit_attachments`, beside `spill_used_block`): a
+  break (`new` is AIR, not a use) spills each as a real ground item at the
+  cell — a laid Blueprint as a ground Plan with the server's real body, which
+  a joiner can't pick up and a host can; a use that clears the cell (the
+  Eraser on a paper tile) and a block put where none stood (AIR, water) only
+  remove them, as the client's own arms do; any other change leaves them.
+- *The capture commit's paper.* On `PlanMinted { source: CaptureCommit }`
+  (its cell the stamped tile, `tile_positions[0]`), the server re-runs the
+  capture's read-only flood from that cell over its world
+  (`plan::take_capture_paper` = `plan::flood_fill_tiles` + the commit's
+  removal) and spends what it finds (logged), so every copy loses it and
+  nobody captures the same paper twice. A joiner not in the world, or one the
+  play mode or a plot keeps off that cell, spends nothing of the server's.
+- *Develop on the server.* `GameServer::tick` runs `tick_develop` and
+  `tick_develop_attachments` on its world (`SimSystem::Develop`, lent owner
+  the server: on a lent world the host client skips it, one owner), on the
+  world's effective time; each flip streams. A joined client runs none
+  (C3c-3r).
+- *Known limits.* A `--no-lend` host (BRIDGE) keeps its client's attachments
+  in the client's own world: the server's copy and the joiners never see the
+  host's own paint, and a joiner's request lands only in the server's copy.
+  A Plan laid flat, a laid Blueprint lifted and Plan bodies on the server stay
+  out (C3c-3r refusals; Plan transfer later).
+- Pinned by `test_integration::attachments` (paint, lay, peel, a break's
+  spill, a host's own changes, the sent-set gate, the commit's paper, the
+  develop flip, single-player), `blueprint_attach::tests`, `world::tests`
+  (the log), `latent_print::tests`, `chunk_intake::tests`,
+  `state_outbox::tests`, `plan::tests`, `test_integration::joiner_refusals`
+  (the break and develop gates) and the GPU harness
+  (`game_harness_a_joiner_paints_lays_and_peels_by_request`,
+  `…_break_grants_nothing_and_the_server_spills_its_attachments`,
+  `…_capture_commit_mints_a_marker_and_a_full_bag_refuses_it`).
 
 ### 4.2g Window ops (as built, protocol v75, C3a-2a; v76, C3a-fix-1; v77, C3b-1)
 
@@ -3070,7 +3184,7 @@ corrected per slot (§4 of the C3 design).
 (the block-edit uses are mirrored since C3c-1 and the bow, slingshot, carts,
 fishing and campfire lighting are server requests since C3c-2; a Plan minted
 by a capture or hung as a print is mirrored by marker since C3c-3a; face
-attachments wait for C3c-3b), chests and other containers (C3b), its
+attachments are the server's since C3c-3b), chests and other containers (C3b), its
 death (the death phase), the inventory it joined with (the sidecar), and
 creative gives are not mirrored, so the next op after one mismatches. A
 Plan the server's copy holds (minted or spent through C3c-3a's paths) is its
@@ -4653,7 +4767,7 @@ refuses a damaged `world.dat` itself (leaving the world drops the server). Each 
 **Who runs what** is one table (`sim_lend::SimSystem::lent_owner`, Spec 01 §4.1.3): the server
 runs the block/entity housekeeping (fluids, fire, leaf decay, falling blocks, spawning, power,
 carts, item lifetimes, entity health timers, snowfall, rubber, salt lick, bounties, hideouts,
-the active-tick total `ActiveTicks`); the host client keeps its clock and weather (it owns `/time` and sleeping — the
+the active-tick total `ActiveTicks`, and since C3c-3b laid Blueprints developing, `Develop`); the host client keeps its clock and weather (it owns `/time` and sleeping — the
 server reads `HostClock` and never advances it), the mob-locomotion block (species AI overrides
 sit between `mob_ai` and entity physics) with the joiners as extra targets, and the death sweep
 (single kill-attribution site). A per-world tally (`World::sim_tally`) checked after every lent

@@ -264,6 +264,18 @@ impl Joiner {
                         crate::block_views::apply_view(&mut self.world, &self.registry, &v);
                     }
                 }
+                // C3c-3b — an attachment change lands like a view.
+                IntakeStep::Attachment(a) => {
+                    let (x, y, z) = (a.x, a.y, a.z);
+                    if let Some(col) = self.intake.generate_before_at(x, z, &self.loaded, &self.world) {
+                        self.generate(col);
+                    }
+                    if crate::chunk_stream::remote_change_is_loaded(&self.loaded, &self.world, x, z)
+                        || self.intake.holds_chunk(crate::state_outbox::chunk_of_cell((x, y, z)))
+                    {
+                        crate::chunk_intake::apply_attachment_change(&mut self.world, &a);
+                    }
+                }
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         self.changes_seen.push(bc.clone());

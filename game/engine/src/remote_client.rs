@@ -958,6 +958,13 @@ impl RemoteClient {
                                     crate::chunk_intake::StreamItem::View(Box::new(view)),
                                 ));
                             }
+                            // C3c-3b — and its attachment changes, the same way.
+                            for change in state.attachment_changes.drain(..) {
+                                self.chunk_queue.push((
+                                    self.pending_block_changes.len(),
+                                    crate::chunk_intake::StreamItem::Attachment(change),
+                                ));
+                            }
                             self.latest_state = Some(state);
                             changed = true;
                         }
@@ -2149,6 +2156,7 @@ mod tests {
                 own_hunger: 0,
                 block_views: Vec::new(),
                 refused_uses: Vec::new(),
+                attachment_changes: Vec::new(),
             };
             protocol::serialize_packet(PacketType::StateUpdate, &state)
         }
@@ -2249,6 +2257,7 @@ mod tests {
                     own_hunger: 0,
                     block_views: Vec::new(),
                     refused_uses: Vec::new(),
+                    attachment_changes: Vec::new(),
                 },
             )
         };
@@ -3384,6 +3393,7 @@ mod tests {
             own_hunger: 0,
             block_views: Vec::new(),
             refused_uses: Vec::new(),
+            attachment_changes: Vec::new(),
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[1, 2])));
         // More than the old 256-packet cap, which dropped the rest silently.
@@ -3414,6 +3424,7 @@ mod tests {
                 crate::chunk_intake::StreamItem::Chunk(p) => format!("C{}", p.cx),
                 crate::chunk_intake::StreamItem::Local((x, z), hash) => format!("L{x},{z}#{hash:x}"),
                 crate::chunk_intake::StreamItem::View(v) => format!("V{}", v.cell[0]),
+                crate::chunk_intake::StreamItem::Attachment(a) => format!("A{}", a.x),
             })
             .collect();
         assert_eq!(shape, ["C1", "L5,-6#abcd", "C2"]);

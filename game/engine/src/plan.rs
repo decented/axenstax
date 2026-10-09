@@ -579,9 +579,7 @@ pub fn commit_capture(
     // Consume the BlueprintBlank top-attachment from each tile, leaving
     // the player's floor block intact. No refund (paper locked in per
     // the 2026-05-20 amendment + Spec 24 §"Paper economy").
-    for &(x, y, z) in &pending.candidate.tile_positions {
-        world.remove_face_attachment((x, y, z), crate::mesh::Face::Top.index());
-    }
+    remove_capture_paper(world, &pending.candidate.tile_positions);
 
     // Insert plan into inventory.
     let stack = crate::item::ItemStack {
@@ -595,6 +593,30 @@ pub fn commit_capture(
         tile_positions: pending.candidate.tile_positions.clone(),
         plan_inserted: inserted,
     }
+}
+
+/// Remove the blank paper (`BlueprintBlank` on the Top face) from each of
+/// `tiles`, leaving the floor blocks as they are: a capture's commit spends
+/// it. Each removal is logged for a server's stream like every setter.
+fn remove_capture_paper(world: &mut World, tiles: &[(i32, i32, i32)]) {
+    let top = crate::mesh::Face::Top.index();
+    for &pos in tiles {
+        if matches!(world.face_attachment_at(pos, top), Some(crate::world::FaceAttachment::BlueprintBlank)) {
+            world.remove_face_attachment(pos, top);
+        }
+    }
+}
+
+/// C3c-3b — the server's half of a joiner's capture commit
+/// (`PlanMinted { source: CaptureCommit }`, whose cell is the stamped tile):
+/// find that capture's paper by re-running its read-only flood from `start`
+/// over THIS world ([`flood_fill_tiles`], the one the capture ran on the
+/// joiner's copy) and spend it as the commit does. Returns the tiles taken
+/// (none when `start` carries no blank paper here: already spent).
+pub fn take_capture_paper(world: &mut World, start: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
+    let tiles = flood_fill_tiles(world, start);
+    remove_capture_paper(world, &tiles);
+    tiles
 }
 
 // ─── Capture flood-fill (Phase 4) ─────────────────────────────────────
@@ -1958,6 +1980,26 @@ mod tests {
         let world = build_test_world_with_tiles(&positions);
         let tiles = flood_fill_tiles(&world, (1, 70, 1));
         assert_eq!(tiles.len(), 9);
+    }
+
+    /// C3c-3b — the server's half of a commit: the flood from the stamped
+    /// tile finds the capture's paper, takes it (logged), and a second take
+    /// over that spot finds none.
+    #[test]
+    fn take_capture_paper_spends_the_flooded_tiles_once() {
+        let positions: Vec<(i32, i32, i32)> = (0..3).flat_map(|x| (0..2).map(move |z| (x, 70, z))).collect();
+        let mut world = build_test_world_with_tiles(&positions);
+        world.set_face_attachment((9, 70, 9), crate::mesh::Face::Top.index(), crate::world::FaceAttachment::BlueprintBlank);
+        world.track_attachment_changes();
+        let taken = take_capture_paper(&mut world, (2, 70, 1));
+        assert_eq!(taken.len(), 6);
+        for p in &positions {
+            assert!(world.face_attachment_at(*p, crate::mesh::Face::Top.index()).is_none(), "{p:?} spent");
+            assert_ne!(world.get_block(p.0, p.1, p.2), block::AIR, "the floor stays");
+        }
+        assert!(world.face_attachment_at((9, 70, 9), crate::mesh::Face::Top.index()).is_some(), "unconnected paper stays");
+        assert_eq!(world.take_attachment_changes().len(), 6, "each removal logged");
+        assert!(take_capture_paper(&mut world, (2, 70, 1)).is_empty(), "nothing to capture twice");
     }
 
     #[test]

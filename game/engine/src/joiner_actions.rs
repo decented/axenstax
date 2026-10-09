@@ -120,6 +120,13 @@ pub enum Asked {
     /// C3c-2 — reel the line in (`ItemAction::Reel`): claims nothing (as a
     /// cast); the rod wears on a catch.
     Reel,
+    /// C3c-3b — paint the wallpaper or lay the blank paper in hand on face
+    /// `face` of the block at `cell` (`ItemAction::Attach`), claiming the one
+    /// block (none is taken in creative: the outcome's `consume_held` is 0).
+    Attach { cell: [i32; 3], face: u8 },
+    /// C3c-3b — peel the attachment off face `face` of the block at `cell`
+    /// (`ItemAction::Detach`): claims nothing; the item comes as a grant.
+    Detach { cell: [i32; 3], face: u8 },
 }
 
 impl Asked {
@@ -432,6 +439,13 @@ impl JoinerActions {
         self.pending.len()
     }
 
+    /// C3c-3b — is a request asking exactly `kind` still waiting for its
+    /// answer (an `Attach` or `Detach` of the same face: a held click sends
+    /// it once)?
+    pub fn is_asking(&self, kind: Asked) -> bool {
+        self.pending.iter().any(|e| e.request.kind == kind)
+    }
+
     /// Is an `Eat` still in flight (C2a verify M1)? A joiner sends no new one
     /// while it is: the entry waits for the outcome, and stops counting once
     /// the server has passed it by ([`Self::acknowledged`]), so a lost
@@ -466,12 +480,14 @@ pub fn uses(kind: Asked) -> u8 {
         )
         | Asked::Eat
         | Asked::Shoot { .. }
-        | Asked::PlaceCart { .. } => 1,
+        | Asked::PlaceCart { .. }
+        | Asked::Attach { .. } => 1,
         Asked::Interact(InteractKind::Shear | InteractKind::LeadDetach | InteractKind::SitToggle)
         | Asked::Swing
         | Asked::Sleep { .. }
         | Asked::Cast
-        | Asked::Reel => 0,
+        | Asked::Reel
+        | Asked::Detach { .. } => 0,
         Asked::UseBlock { claim, .. } => claim,
         Asked::Light { lighter, .. } => u8::from(lighter != crate::block_use::Lighter::Firestarter),
     }
@@ -775,7 +791,9 @@ pub fn apply_outcome(
         | Asked::PlaceCart { .. }
         | Asked::Light { .. }
         | Asked::Cast
-        | Asked::Reel => {}
+        | Asked::Reel
+        | Asked::Attach { .. }
+        | Asked::Detach { .. } => {}
     }
     applied
 }
@@ -802,6 +820,7 @@ pub fn apply_item_outcome(
                 | Asked::Light { .. }
                 | Asked::Shoot { .. }
                 | Asked::PlaceCart { .. }
+                | Asked::Attach { .. }
         )
     {
         return 0;

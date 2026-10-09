@@ -814,7 +814,7 @@ fn pushed_entity(e: &BlockEntityData) -> Option<PushedEntity> {
 }
 
 /// The render stub of a face attachment.
-fn pushed_attachment(a: &FaceAttachment) -> PushedAttachment {
+pub(crate) fn pushed_attachment(a: &FaceAttachment) -> PushedAttachment {
     match a {
         FaceAttachment::Wallpaper(b) => PushedAttachment::Wallpaper(*b),
         FaceAttachment::BlueprintBlank => PushedAttachment::BlueprintBlank,

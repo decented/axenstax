@@ -1060,10 +1060,10 @@ pub struct EntityInteractPacket {
 
 /// What an [`ItemActionPacket`] asks for (C2a; C2b `Craft` and `Drop`; v76
 /// `GrantUnfit`; v79 `UseBlock`; v81 `Shoot`, `PlaceCart`, `Cast`, `Reel`;
-/// v83 `PlanMinted`). Wire-stable, APPEND ONLY: Eat = 0, Sleep = 1, Craft = 2,
-/// Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6, PlaceCart = 7, Cast = 8,
-/// Reel = 9, PlanMinted = 10 (pinned on the wire bytes by
-/// `item_action_packets_round_trip`).
+/// v83 `PlanMinted`; v84 `Attach`, `Detach`). Wire-stable, APPEND ONLY: Eat = 0,
+/// Sleep = 1, Craft = 2, Drop = 3, GrantUnfit = 4, UseBlock = 5, Shoot = 6,
+/// PlaceCart = 7, Cast = 8, Reel = 9, PlanMinted = 10, Attach = 11, Detach = 12
+/// (pinned on the wire bytes by `item_action_packets_round_trip`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Eat one of the food in hotbar slot `hotbar_slot`. The held claim
@@ -1162,6 +1162,22 @@ pub enum ItemAction {
         spent: WireSlot,
         plan: WireItem,
     },
+    /// C3c-3b (v84) — paint the wallpaper, or lay the blank Blueprint Paper,
+    /// in hotbar slot `hotbar_slot` (the held claim mirrors `UseBlock`'s) on
+    /// face `face` (`mesh::Face::index`) of the block at `x, y, z`. The
+    /// server judges it by the shared rule (`blueprint_attach::attach_rule`:
+    /// a solid block, a bare face, blank paper on a Top face only) plus its
+    /// body's reach and the plot rules, sets the attachment in ITS world and
+    /// takes the item (an owed take; none in creative). Answered with an
+    /// `ItemActionOutcome`; the client changes nothing itself and sees the
+    /// attachment through `StateUpdatePacket::attachment_changes`.
+    Attach { x: i32, y: i32, z: i32, face: u8, hotbar_slot: u8, held_kind: u8, held_id: u16, held_full: WireItem },
+    /// C3c-3b (v84) — peel the wallpaper or blank paper off face `face` of
+    /// the block at `x, y, z`. The server removes it from its world and
+    /// grants what it recovers to (`blueprint_attach::recovered_item_for`,
+    /// an `InventoryGrant`). A laid Blueprint is refused (C3c-3r). Claims
+    /// nothing; answered with an `ItemActionOutcome`.
+    Detach { x: i32, y: i32, z: i32, face: u8 },
 }
 
 /// C3c-2 (v81) — the weapon an [`ItemAction::Shoot`] fires. Wire-stable,
@@ -1178,8 +1194,8 @@ pub enum ShotWeapon {
 /// (bincode writes it as a `u32` right after the packet's `seq`,
 /// [`peek_item_action_variant`]). The order is Eat = 0, Sleep = 1, Craft = 2,
 /// Drop = 3, GrantUnfit = 4 (v76), UseBlock = 5 (v79), Shoot = 6,
-/// PlaceCart = 7, Cast = 8, Reel = 9 (v81), PlanMinted = 10 (v83), pinned by
-/// `item_action_packets_round_trip`.
+/// PlaceCart = 7, Cast = 8, Reel = 9 (v81), PlanMinted = 10 (v83), Attach = 11,
+/// Detach = 12 (v84), pinned by `item_action_packets_round_trip`.
 pub mod item_action_variant {
     /// `ItemAction::Drop`, paced by the joiner's drop bucket.
     pub const DROP: u32 = 3;
@@ -1826,6 +1842,28 @@ pub struct StateUpdatePacket {
     /// APPEND-ONLY: last.
     #[serde(default)]
     pub refused_uses: Vec<RefusedUse>,
+    /// C3c-3b (v84) — the face attachments that changed in chunks this
+    /// client has been sent (wallpaper, blank paper and laid Blueprints, set,
+    /// removed or developed, whoever changed them), each as it stands after
+    /// the tick that changed it ([`AttachmentChange`]). Reliable and in line
+    /// with the block changes and chunk pushes (`state_outbox`): a chunk
+    /// pushed later carries its attachments in the push. Per client; a
+    /// host's own seat gets none. APPEND-ONLY: last.
+    #[serde(default)]
+    pub attachment_changes: Vec<AttachmentChange>,
+}
+
+/// C3c-3b (v84) — one face attachment as it now stands
+/// ([`StateUpdatePacket::attachment_changes`]): the block at `x, y, z`, its
+/// face `face` (`mesh::Face::index`, 0..6), and what is on it (`None`: bare
+/// now). The client replaces whatever its copy holds on that face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentChange {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub face: u8,
+    pub att: Option<PushedAttachment>,
 }
 
 // ─── Chunk data (Server → Client, reliable stream) ───
@@ -2583,7 +2621,17 @@ pub struct ServerAnnouncePacket {
 ///   developed Plan hung as a cyanotype print, its `used` the Plan. The
 ///   server holds a joiner's Plan as a marker placeholder
 ///   (`plan::PlanData::marker_placeholder`) and takes it by marker, log-only.
-pub const PROTOCOL_VERSION: u32 = 83;
+/// - v84 (2026-10-09, C3c-3b): face attachments live in the
+///   server's world. `ItemAction` appends `Attach { x, y, z: i32, face: u8,
+///   hotbar_slot, held_kind, held_id, held_full }` (= 11: paint wallpaper or
+///   lay blank paper, answered) and `Detach { x, y, z: i32, face: u8 }`
+///   (= 12: peel it, the recovered item granted). [`StateUpdatePacket`]
+///   appends `attachment_changes: Vec<AttachmentChange>` (after
+///   `refused_uses`; [`AttachmentChange`] `{ x, y, z: i32, face: u8, att:
+///   Option<PushedAttachment> }`): every attachment change in a chunk the
+///   client holds, reliable and in line. New `item_actions::ItemNote` codes
+///   27..=28.
+pub const PROTOCOL_VERSION: u32 = 84;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2755,8 +2803,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3c-3a — v83 (on C3c-1-fix's v82).
-        assert_eq!(super::PROTOCOL_VERSION, 83);
+        // C3c-3b — v84 (on C3c-3a's v83).
+        assert_eq!(super::PROTOCOL_VERSION, 84);
     }
 
     #[test]
@@ -3136,6 +3184,7 @@ mod tests {
             own_hunger: 0,
             block_views: Vec::new(),
             refused_uses: Vec::new(),
+            attachment_changes: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3185,6 +3234,7 @@ mod tests {
             own_hunger: 0,
             block_views: Vec::new(),
             refused_uses: Vec::new(),
+            attachment_changes: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3243,6 +3293,7 @@ mod tests {
             own_hunger: 0,
             block_views: Vec::new(),
             refused_uses: Vec::new(),
+            attachment_changes: Vec::new(),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3489,7 +3540,11 @@ mod tests {
         //   `WireItem::Plan` (= 3), `ItemAction::PlanMinted` (= 10),
         //   `UseKind::HangPrint` (= 11) — a joiner's Plans are tracked by
         //   marker on the server's copy of its inventory.
-        assert_eq!(PROTOCOL_VERSION, 83);
+        // v84 (2026-10-09, C3c-3b):
+        //   `ItemAction::Attach` (= 11), `ItemAction::Detach` (= 12),
+        //   `StateUpdatePacket.attachment_changes` (after `refused_uses`) —
+        //   face attachments live in the server's world and stream to joiners.
+        assert_eq!(PROTOCOL_VERSION, 84);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3868,6 +3923,42 @@ mod tests {
         assert_eq!(payload[68], 0, "not developed");
         assert_eq!(&payload[69..], &0x0A0B_0C0Du32.to_le_bytes(), "events_applied closes it");
         assert_ne!(peek_item_action_variant(payload), Some(item_action_variant::DROP), "not paced as a drop");
+        // v84 (C3c-3b) — Attach = 11 (the cell, the face, then the held
+        // claim as `UseBlock`'s), Detach = 12 (the cell, the face).
+        let attach = ItemActionPacket {
+            seq: 22,
+            action: ItemAction::Attach {
+                x: 3,
+                y: -64,
+                z: 1_000_003,
+                face: 5,
+                hotbar_slot: 6,
+                held_kind: item_kind::BLOCK,
+                held_id: 0x0203,
+                held_full: WireItem::None,
+            },
+            events_applied: 7,
+        };
+        let bytes = serialize_packet(PacketType::ItemAction, &attach);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), attach);
+        assert_eq!(&payload[4..8], &11u32.to_le_bytes(), "Attach = 11");
+        assert_eq!(&payload[8..12], &3i32.to_le_bytes(), "the cell leads it");
+        assert_eq!(&payload[12..16], &(-64i32).to_le_bytes());
+        assert_eq!(&payload[16..20], &1_000_003i32.to_le_bytes());
+        assert_eq!((payload[20], payload[21], payload[22]), (5, 6, item_kind::BLOCK), "the face, the hotbar slot, the held kind");
+        assert_eq!(&payload[23..25], &0x0203u16.to_le_bytes(), "the held id");
+        assert_eq!(&payload[25..29], &0u32.to_le_bytes(), "held_full: None");
+        assert_eq!(&payload[29..], &7u32.to_le_bytes(), "events_applied closes it");
+        let detach = ItemActionPacket { seq: 23, action: ItemAction::Detach { x: -1, y: 2, z: -3, face: 0 }, events_applied: 8 };
+        let bytes = serialize_packet(PacketType::ItemAction, &detach);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(safe_deserialize::<ItemActionPacket>(payload).unwrap(), detach);
+        assert_eq!(&payload[4..8], &12u32.to_le_bytes(), "Detach = 12");
+        assert_eq!(&payload[8..12], &(-1i32).to_le_bytes(), "the cell");
+        assert_eq!(&payload[16..20], &(-3i32).to_le_bytes());
+        assert_eq!(payload[20], 0, "the face");
+        assert_eq!(&payload[21..], &8u32.to_le_bytes(), "events_applied closes it");
 
         let outcome = ItemActionOutcomePacket {
             seq: 12,
@@ -3939,6 +4030,7 @@ mod tests {
                 own_hunger: 20,
                 block_views: vec![v.clone()],
                 refused_uses: Vec::new(),
+                attachment_changes: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4016,9 +4108,14 @@ mod tests {
                 own_hunger: 0,
                 block_views: vec![v],
                 refused_uses: Vec::new(),
+                attachment_changes: Vec::new(),
             };
             let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
-            assert!(bytes.ends_with(&[1u64.to_le_bytes().to_vec(), want, 0u64.to_le_bytes().to_vec()].concat()));
+            // The view, then the empty `refused_uses` (v82) and
+            // `attachment_changes` (v84) behind it.
+            assert!(bytes.ends_with(
+                &[1u64.to_le_bytes().to_vec(), want, 0u64.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec()].concat()
+            ));
         }
     }
 
@@ -4410,7 +4507,8 @@ mod tests {
     /// bincode 1 is positional, so `StateUpdatePacket`'s trailing fields must
     /// sit in the order each bump appended them: P9's weather windows (v59),
     /// then C2a's `own_hunger` (v73), then C3b-2's `block_views` (v79), then
-    /// C3c-1-fix's `refused_uses` (v82). Pinned on the wire bytes.
+    /// C3c-1-fix's `refused_uses` (v82), then C3c-3b's `attachment_changes`
+    /// (v84). Pinned on the wire bytes.
     #[test]
     fn state_update_trailing_fields_are_in_append_order() {
         let pkt = StateUpdatePacket {
@@ -4430,6 +4528,10 @@ mod tests {
             own_hunger: 0x11,
             block_views: Vec::new(),
             refused_uses: vec![RefusedUse { x: 5, y: -6, z: 7, kind: 8, note: 10 }],
+            attachment_changes: vec![
+                AttachmentChange { x: -1, y: 2, z: 3, face: 4, att: Some(PushedAttachment::Wallpaper(0x0102)) },
+                AttachmentChange { x: 9, y: 8, z: 7, face: 0, att: None },
+            ],
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let mut tail = Vec::new();
@@ -4447,10 +4549,26 @@ mod tests {
             tail.extend_from_slice(&v.to_le_bytes());
         }
         tail.extend_from_slice(&[8, 10]);
+        // v84 (C3c-3b): attachment_changes (u64 length + entries: x, y, z
+        // i32, face u8, att an Option: 1 + the PushedAttachment's u32 tag
+        // (+ a Wallpaper's u16), or 0).
+        tail.extend_from_slice(&2u64.to_le_bytes());
+        for v in [-1i32, 2, 3] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.push(4);
+        tail.push(1);
+        tail.extend_from_slice(&0u32.to_le_bytes());
+        tail.extend_from_slice(&0x0102u16.to_le_bytes());
+        for v in [9i32, 8, 7] {
+            tail.extend_from_slice(&v.to_le_bytes());
+        }
+        tail.extend_from_slice(&[0, 0]);
         assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..]);
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.own_hunger, 0x11);
         assert_eq!(back.refused_uses, pkt.refused_uses);
+        assert_eq!(back.attachment_changes, pkt.attachment_changes);
     }
 
     #[test]

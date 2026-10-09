@@ -86,6 +86,10 @@ pub enum StreamItem {
     /// after the block changes of the same packet. Not part of the numbered
     /// chunk stream: it never counts towards the acknowledgement.
     View(Box<crate::protocol::BlockEntityView>),
+    /// C3c-3b — a face attachment as it now stands
+    /// (`StateUpdatePacket::attachment_changes`), after the block changes of
+    /// the same packet. Not part of the numbered chunk stream.
+    Attachment(crate::protocol::AttachmentChange),
 }
 
 /// One step of a frame's world intake, in arrival order (see [`interleave`]).
@@ -97,6 +101,8 @@ pub enum IntakeStep {
     Local((i32, i32), u32),
     /// C3b-2 — apply one block entity's view.
     View(Box<crate::protocol::BlockEntityView>),
+    /// C3c-3b — apply one face attachment change.
+    Attachment(crate::protocol::AttachmentChange),
     /// Apply these block changes (indices into the frame's
     /// `pending_block_changes`).
     Changes(std::ops::Range<usize>),
@@ -116,6 +122,8 @@ pub enum Delta {
     Change(crate::protocol::BlockChange),
     /// C3b-2 — apply one block entity's view (`block_views::apply_view`).
     View(Box<crate::protocol::BlockEntityView>),
+    /// C3c-3b — apply one face attachment change ([`apply_attachment_change`]).
+    Attachment(crate::protocol::AttachmentChange),
 }
 
 /// Lay a frame's chunk-stream packets between its block changes in the order
@@ -134,6 +142,7 @@ pub fn interleave(chunks: Vec<(usize, StreamItem)>, changes: usize) -> Vec<Intak
             StreamItem::Chunk(chunk) => IntakeStep::Chunk(Box::new(chunk)),
             StreamItem::Local(col, hash) => IntakeStep::Local(col, hash),
             StreamItem::View(v) => IntakeStep::View(v),
+            StreamItem::Attachment(a) => IntakeStep::Attachment(a),
         });
     }
     if changes > done {
@@ -359,6 +368,7 @@ impl ChunkIntake {
                 IntakeStep::Chunk(p) => steps.push_back(Delta::Chunk(p)),
                 IntakeStep::Local(col, hash) => steps.push_back(Delta::Local(col, hash)),
                 IntakeStep::View(v) => steps.push_back(Delta::View(v)),
+                IntakeStep::Attachment(a) => steps.push_back(Delta::Attachment(a)),
                 IntakeStep::Changes(range) => {
                     steps.extend(changes[range].iter().cloned().map(Delta::Change));
                 }
@@ -840,14 +850,44 @@ fn apply_side_data(
         if !valid(a.cell) {
             continue;
         }
-        let attachment = match a.attachment {
-            PushedAttachment::Wallpaper(b) => FaceAttachment::Wallpaper(b),
-            PushedAttachment::BlueprintBlank => FaceAttachment::BlueprintBlank,
-            PushedAttachment::Blueprint { developed } => {
-                FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(developed)))
+        world.set_face_attachment(cell_pos(coord, a.cell), usize::from(a.face), stub_attachment(a.attachment));
+    }
+}
+
+/// The render stub a joined client holds for a pushed attachment: a
+/// blueprint is the server's, so its copy is a body-less Plan of the same
+/// develop state (`plan::PlanData::render_stub`).
+fn stub_attachment(a: PushedAttachment) -> FaceAttachment {
+    match a {
+        PushedAttachment::Wallpaper(b) => FaceAttachment::Wallpaper(b),
+        PushedAttachment::BlueprintBlank => FaceAttachment::BlueprintBlank,
+        PushedAttachment::Blueprint { developed } => {
+            FaceAttachment::Blueprint(Box::new(crate::plan::PlanData::render_stub(developed)))
+        }
+    }
+}
+
+/// C3c-3b — apply one streamed face-attachment change
+/// (`StateUpdatePacket::attachment_changes`) to a joined client's world, as
+/// a push's side data lands: the face now holds the render stub of `att`, or
+/// nothing. Returns whether the face changed (the caller remeshes its cell).
+/// A face index out of range is ignored (a malformed packet).
+pub fn apply_attachment_change(world: &mut World, a: &crate::protocol::AttachmentChange) -> bool {
+    let face = usize::from(a.face);
+    if face >= 6 {
+        return false;
+    }
+    let pos = (a.x, a.y, a.z);
+    match a.att {
+        Some(att) => {
+            let stub = stub_attachment(att);
+            if world.face_attachment_at(pos, face) == Some(&stub) {
+                return false;
             }
-        };
-        world.set_face_attachment(cell_pos(coord, a.cell), usize::from(a.face), attachment);
+            world.set_face_attachment(pos, face, stub);
+            true
+        }
+        None => world.remove_face_attachment(pos, face).is_some(),
     }
 }
 
@@ -915,6 +955,7 @@ mod tests {
         .map(|s| match s {
             IntakeStep::Chunk(_) => "C".to_string(),
             IntakeStep::View(_) => "V".to_string(),
+            IntakeStep::Attachment(_) => "A".to_string(),
             IntakeStep::Local(..) => "L".to_string(),
             IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
         })
@@ -941,6 +982,48 @@ mod tests {
         assert_eq!(intake.applied(), 1, "the view is not a numbered stream packet");
     }
 
+    /// C3c-3b — a streamed attachment change lands after the snapshot it
+    /// updates and replaces what the joiner's copy holds on that face: set,
+    /// then cleared; a repeat changes nothing; a bad face is ignored.
+    #[test]
+    fn a_streamed_attachment_change_lands_after_its_snapshot() {
+        use crate::protocol::{AttachmentChange, PushedAttachment};
+        let mut host = World::new();
+        host.set_block(1, 1, 1, block::STONE);
+        host.set_face_attachment((1, 1, 1), 2, FaceAttachment::Wallpaper(block::GLASS));
+        let snapshot = packet_of(&host, (0, 0, 0));
+        let painted = AttachmentChange { x: 1, y: 1, z: 1, face: 0, att: Some(PushedAttachment::Blueprint { developed: true }) };
+        let peeled = AttachmentChange { x: 1, y: 1, z: 1, face: 2, att: None };
+        let mut intake = ChunkIntake::default();
+        let mut joiner = World::new();
+        let mut loaded = ahash::AHashSet::new();
+        let steps = intake.plan_deltas(
+            vec![(0, StreamItem::Chunk(snapshot)), (0, StreamItem::Attachment(painted)), (0, StreamItem::Attachment(peeled))],
+            &[],
+            4,
+        );
+        let mut changed = Vec::new();
+        for step in steps {
+            match step {
+                Delta::Chunk(p) => {
+                    intake.apply(&mut joiner, &mut loaded, &reg(), &p);
+                }
+                Delta::Attachment(a) => changed.push(apply_attachment_change(&mut joiner, &a)),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(changed, [true, true]);
+        assert!(joiner.face_attachment_at((1, 1, 1), 2).is_none(), "the pushed wallpaper, peeled");
+        assert!(matches!(
+            joiner.face_attachment_at((1, 1, 1), 0),
+            Some(FaceAttachment::Blueprint(p)) if p.develop_state.is_developed() && p.cells.is_empty()
+        ), "a developed blueprint's render stub");
+        assert!(!apply_attachment_change(&mut joiner, &painted), "a repeat changes nothing");
+        assert!(!apply_attachment_change(&mut joiner, &peeled));
+        assert!(!apply_attachment_change(&mut joiner, &AttachmentChange { face: 6, ..painted }), "no seventh face");
+        assert_eq!(intake.applied(), 1, "an attachment change is not a numbered stream packet");
+    }
+
     #[test]
     fn interleave_keeps_each_snapshot_between_the_changes_around_it() {
         let world = World::new();
@@ -955,6 +1038,7 @@ mod tests {
                 IntakeStep::Chunk(p) => format!("C{}", p.cx),
                 IntakeStep::Local(col, _) => format!("L{}", col.0),
                 IntakeStep::View(v) => format!("V{}", v.cell[0]),
+                IntakeStep::Attachment(a) => format!("A{}", a.x),
                 IntakeStep::Changes(r) => format!("{}..{}", r.start, r.end),
             })
             .collect();
@@ -1125,7 +1209,7 @@ mod tests {
                 IntakeStep::Chunk(p) => {
                     intake.apply(&mut joiner, &mut loaded, &reg(), &p);
                 }
-                IntakeStep::Local(..) | IntakeStep::View(..) => unreachable!(),
+                IntakeStep::Local(..) | IntakeStep::View(..) | IntakeStep::Attachment(..) => unreachable!(),
                 IntakeStep::Changes(r) => {
                     for bc in &changes[r] {
                         joiner.apply_remote_block_change(bc);

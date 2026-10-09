@@ -126,6 +126,12 @@ pub fn tick_develop_attachments(
                 transitions.push((pos, face_idx));
             }
     }
+    // C3c-3b — a flip changes what a joiner draws (pale → blue): logged, so
+    // a server streams it (`World::note_attachment_change`). The exposure
+    // count in between draws nothing and is not logged.
+    for &(pos, face_idx) in &transitions {
+        world.note_attachment_change(pos, face_idx);
+    }
     transitions
 }
 
@@ -365,6 +371,21 @@ mod tests {
             "transition tick should be reported back to the caller"
         );
         assert_eq!(attachment_state(&world, (0, 70, 0)), DevelopState::Developed);
+    }
+
+    /// C3c-3b — on a tracked world (a server's) the flip is logged, so it
+    /// streams to joiners; the exposure ticks before it are not.
+    #[test]
+    fn tick_develop_attachments_logs_the_flip_and_only_the_flip() {
+        let mut world = world_with_open_sky_attachment_at(
+            (0, 70, 0),
+            DevelopState::Latent { exposure_ticks: DEVELOP_THRESHOLD_TICKS - 2 },
+        );
+        world.track_attachment_changes();
+        tick_develop_attachments(&mut world, DAYTIME);
+        assert!(world.take_attachment_changes().is_empty(), "an exposure tick draws nothing new");
+        tick_develop_attachments(&mut world, DAYTIME);
+        assert_eq!(world.take_attachment_changes(), vec![((0, 70, 0), Face::Top.index() as u8)], "the flip");
     }
 
     #[test]

@@ -95,10 +95,15 @@ pub enum SimSystem {
     EntityHealth,
     /// `combat::despawn_dead` + drops + hideout population.
     DespawnDead,
+    /// C3c-3b — laid Blueprints developing in the sun
+    /// (`latent_print::tick_develop_attachments`, with the legacy
+    /// `tick_develop`). A joined client runs none (C3c-3r): its copies are
+    /// render stubs, and the flips reach it through the attachment stream.
+    Develop,
 }
 
 impl SimSystem {
-    pub const COUNT: usize = 19;
+    pub const COUNT: usize = 20;
 
     pub const ALL: [SimSystem; Self::COUNT] = [
         SimSystem::ActiveTicks,
@@ -120,6 +125,7 @@ impl SimSystem {
         SimSystem::Carts,
         SimSystem::EntityHealth,
         SimSystem::DespawnDead,
+        SimSystem::Develop,
     ];
 
     /// The side that runs this system while the world is lent (module docs).
@@ -143,7 +149,8 @@ impl SimSystem {
             | SimSystem::ItemLifetimes
             | SimSystem::Power
             | SimSystem::Carts
-            | SimSystem::EntityHealth => SimSide::Server,
+            | SimSystem::EntityHealth
+            | SimSystem::Develop => SimSide::Server,
         }
     }
 
@@ -418,6 +425,9 @@ mod tests {
             (SimSystem::Fluids, Server),
             (SimSystem::Power, Server),
             (SimSystem::MobSpawning, Server),
+            // C3c-3b — the server's world develops laid Blueprints, so their
+            // flips stream to joiners from one owner.
+            (SimSystem::Develop, Server),
         ] {
             assert_eq!(s.lent_owner(), side, "{s:?}");
         }

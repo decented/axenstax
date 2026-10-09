@@ -244,7 +244,11 @@ fn protocol_version_is_the_pinned_value() {
     // v83 (2026-10-08, C3c-3a):
     //   `WireItem::Plan`, `ItemAction::PlanMinted`, `UseKind::HangPrint` — a
     //   joiner's Plans are tracked by marker.
-    assert_eq!(protocol::PROTOCOL_VERSION, 83);
+    // v84 (2026-10-09, C3c-3b):
+    //   `ItemAction::Attach` (= 11), `Detach` (= 12),
+    //   `StateUpdatePacket.attachment_changes` — face attachments live in the
+    //   server's world and stream to joiners.
+    assert_eq!(protocol::PROTOCOL_VERSION, 84);
 }
 
 #[test]

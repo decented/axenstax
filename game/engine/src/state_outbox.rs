@@ -157,6 +157,10 @@ enum Delta {
     /// (`StateUpdatePacket::refused_uses`), in line after the send-back of
     /// its cell: sent once, never folded into a template that repeats.
     Refused(protocol::RefusedUse),
+    /// C3c-3b — one face attachment as it now stands
+    /// (`StateUpdatePacket::attachment_changes`), in line with the block
+    /// changes of its tick.
+    Attachment(protocol::AttachmentChange),
 }
 
 #[derive(Debug)]
@@ -271,7 +275,7 @@ impl ClientOutbox {
             match e.delta {
                 Delta::Block(_) => self.queued_block_bytes -= e.size,
                 Delta::Chunk { .. } => self.queued_chunk_bytes -= e.size,
-                Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) => {}
+                Delta::Spawn(_) | Delta::Despawn(_) | Delta::View(_) | Delta::Refused(_) | Delta::Attachment(_) => {}
             }
         }
     }
@@ -370,6 +374,16 @@ impl ClientOutbox {
         }
     }
 
+    /// C3c-3b — queue face-attachment changes (`AttachmentChange`), in line:
+    /// after everything queued so far, this tick's block changes included.
+    /// Never coalesced and kept on overflow (each is the face's state as it
+    /// stands; a later one for the same face supersedes it on arrival).
+    pub fn push_attachments(&mut self, changes: &[protocol::AttachmentChange]) {
+        for c in changes {
+            self.push_entry(Delta::Attachment(*c));
+        }
+    }
+
     /// Serialized chunk-push bytes waiting to go out. Test-only.
     #[cfg(test)]
     pub fn queued_chunk_bytes(&self) -> usize {
@@ -384,6 +398,7 @@ impl ClientOutbox {
             Delta::Chunk { packet, .. } => packet.len(),
             Delta::View(v) => wire_size(v.as_ref()),
             Delta::Refused(r) => wire_size(r),
+            Delta::Attachment(a) => wire_size(a),
         };
         match delta {
             Delta::Block(_) => self.queued_block_bytes += size,
@@ -533,7 +548,8 @@ impl ClientOutbox {
                 && template.entity_updates.is_empty()
                 && template.entity_despawns.is_empty()
                 && template.block_views.is_empty()
-                && template.refused_uses.is_empty(),
+                && template.refused_uses.is_empty()
+                && template.attachment_changes.is_empty(),
             "the template carries snapshot fields only"
         );
         let base = 1 + wire_size(template);
@@ -582,7 +598,8 @@ impl ClientOutbox {
                 && pkt.entity_spawns.is_empty()
                 && pkt.entity_despawns.is_empty()
                 && pkt.block_views.is_empty()
-                && pkt.refused_uses.is_empty());
+                && pkt.refused_uses.is_empty()
+                && pkt.attachment_changes.is_empty());
             // A chunk push next in line keeps its room: entity updates past
             // the reserve take only what it leaves (else a heavy entity load
             // would crowd it, and everything behind it, out tick after tick).
@@ -598,7 +615,8 @@ impl ClientOutbox {
                 && pkt.entity_updates.is_empty()
                 && pkt.entity_despawns.is_empty()
                 && pkt.block_views.is_empty()
-                && pkt.refused_uses.is_empty());
+                && pkt.refused_uses.is_empty()
+                && pkt.attachment_changes.is_empty());
             if !out.is_empty() && !carried {
                 break;
             }
@@ -656,6 +674,7 @@ impl ClientOutbox {
                 }
                 Delta::View(v) => pkt.block_views.push(*v),
                 Delta::Refused(r) => pkt.refused_uses.push(r),
+                Delta::Attachment(a) => pkt.attachment_changes.push(a),
                 Delta::Chunk { .. } => unreachable!("a chunk push is never folded into a StateUpdate"),
             }
         }
@@ -722,6 +741,7 @@ mod tests {
             own_hunger: 0,
             block_views: Vec::new(),
             refused_uses: Vec::new(),
+            attachment_changes: Vec::new(),
         }
     }
 
@@ -772,6 +792,21 @@ mod tests {
         assert_eq!(wire_size(&bc(1, 1)), 15);
         assert_eq!(wire_size(&update(1, 0.0)), 34);
         assert_eq!(wire_size(&3u32), 4);
+    }
+
+    /// C3c-3b — attachment changes ride the reliable queue in order, kept
+    /// through an overflow (which drops only block changes).
+    #[test]
+    fn attachment_changes_ride_in_order_and_survive_an_overflow() {
+        let mut ob = ClientOutbox::new(true);
+        let wall = |x, att| protocol::AttachmentChange { x, y: 64, z: 0, face: 2, att };
+        let changes = [wall(1, Some(protocol::PushedAttachment::Wallpaper(7))), wall(1, None), wall(2, Some(protocol::PushedAttachment::BlueprintBlank))];
+        ob.push_tick(0, &[], &[], &[bc(5, 1)], &[]);
+        ob.push_attachments(&changes);
+        ob.overflow(0);
+        let got: Vec<_> = tick(&mut ob, true).into_iter().flat_map(|s| s.attachment_changes).collect();
+        assert_eq!(got, changes.to_vec());
+        assert_eq!(ob.queued_bytes(), 0);
     }
 
     #[test]

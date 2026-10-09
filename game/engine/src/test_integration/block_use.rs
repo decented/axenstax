@@ -56,6 +56,8 @@ pub(super) struct Client {
     pub(super) wore: u32,
     /// `GrantUnfit` units reported.
     pub(super) unfit: u32,
+    /// C3c-3b — every attachment change received, in order.
+    pub(super) attachments: Vec<protocol::AttachmentChange>,
 }
 
 impl Client {
@@ -75,6 +77,7 @@ impl Client {
             changes: Vec::new(),
             wore: 0,
             unfit: 0,
+            attachments: Vec::new(),
         }
     }
 
@@ -123,6 +126,11 @@ impl Client {
                         crate::block_views::apply_view(&mut self.world, registry, &v);
                         self.views.push(v);
                     }
+                    // C3c-3b — and its attachment changes, as render stubs.
+                    for a in &state.attachment_changes {
+                        crate::chunk_intake::apply_attachment_change(&mut self.world, a);
+                    }
+                    self.attachments.extend(state.attachment_changes);
                 }
                 _ => {}
             }

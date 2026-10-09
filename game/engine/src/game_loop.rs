@@ -5309,7 +5309,11 @@ impl super::GameState {
         // C3c-3r — neither develop tick runs on a joined client: a stub
         // attachment it was pushed would flip to Developed in its own copy,
         // independent of the host's (the server owns attachments from C3c-3b).
-        if !self.joined() {
+        // C3c-3b — and on a lent world the server runs them
+        // (`SimSystem::Develop`): its flips reach the host's client through
+        // `take_lent_changes` and every joiner through the attachment stream.
+        let develops_here = !self.joined() && self.sim_runs(SimSystem::Develop);
+        if develops_here {
             let _ = crate::latent_print::tick_develop(
                 &mut self.world, eff_world_time,
             );
@@ -5320,12 +5324,12 @@ impl super::GameState {
         // above, we DO consume the transitions: each Latent → Developed
         // flip rebuilds its chunk so the decal recolours pale → blue
         // immediately.
-        let developed_attachments = if self.joined() {
-            Vec::new()
-        } else {
+        let developed_attachments = if develops_here {
             crate::latent_print::tick_develop_attachments(
                 &mut self.world, eff_world_time,
             )
+        } else {
+            Vec::new()
         };
         for (pos, _face_idx) in developed_attachments {
             self.rebuild_chunk_at(pos.0, pos.1, pos.2);
@@ -11691,6 +11695,19 @@ impl super::GameState {
                                         self.players[pidx].peel_latch = true;
                                     }
                                     true
+                                } else if self.joined() && peel_item.is_some() {
+                                    // C3c-3b — a joiner's peel is the server's
+                                    // (`ItemAction::Detach`): its world loses the
+                                    // paper, every copy is streamed that, and the
+                                    // item comes back as a grant. Nothing changes
+                                    // here; the strike is spent, once per press.
+                                    if !self.players[pidx].peel_latch {
+                                        self.send_detach(pidx, [pos[0], pos[1], pos[2]], fi);
+                                    }
+                                    self.players[pidx].breaking_pos = None;
+                                    self.players[pidx].break_progress = 0;
+                                    self.players[pidx].peel_latch = true;
+                                    true
                                 } else if let Some(item) = peel_item {
                                     self.world.remove_face_attachment((pos[0], pos[1], pos[2]), fi);
                                     let stack = crate::item::ItemStack {
@@ -11898,14 +11915,15 @@ impl super::GameState {
                                 // blueprint paper → BLUEPRINT_PAPER, captured
                                 // plan → the Plan item. `recovered_item_for`
                                 // covers all three variants.
-                                // C3c-3r — a joined client grants nothing for a laid Blueprint and
-                                // leaves it standing in its world copy (`take_recoverable_attachments`).
-                                let joined = self.joined();
-                                for item in crate::blueprint_attach::take_recoverable_attachments(
-                                    &mut self.world,
-                                    (pos[0], pos[1], pos[2]),
-                                    joined,
-                                ) {
+                                // C3c-3b — a joined client recovers none of them: the server
+                                // spills them once (`HostedServer::settle_edit_attachments`) and
+                                // its stream takes them out of this copy (no dupe).
+                                let recovered = if !self.joined() {
+                                    crate::blueprint_attach::take_recoverable_attachments(&mut self.world, (pos[0], pos[1], pos[2]))
+                                } else {
+                                    Vec::new()
+                                };
+                                for item in recovered {
                                     let stack = crate::item::ItemStack {
                                         item,
                                         count: 1,
@@ -12206,14 +12224,15 @@ impl super::GameState {
                                     // block, blank blueprint paper →
                                     // BLUEPRINT_PAPER, captured plan → the Plan
                                     // item. `recovered_item_for` covers all three.
-                                    // C3c-3r — a joined client grants nothing for a laid Blueprint and
-                                    // leaves it standing in its world copy (`take_recoverable_attachments`).
-                                    let joined = self.joined();
-                                    for item in crate::blueprint_attach::take_recoverable_attachments(
-                                        &mut self.world,
-                                        (pos[0], pos[1], pos[2]),
-                                        joined,
-                                    ) {
+                                    // C3c-3b — a joined client recovers none of them: the server
+                                    // spills them once (`HostedServer::settle_edit_attachments`) and
+                                    // its stream takes them out of this copy (no dupe).
+                                    let recovered = if !self.joined() {
+                                        crate::blueprint_attach::take_recoverable_attachments(&mut self.world, (pos[0], pos[1], pos[2]))
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    for item in recovered {
                                         let stack = crate::item::ItemStack {
                                             item,
                                             count: 1,
@@ -15635,6 +15654,27 @@ impl super::GameState {
                         if holding_blank_paper {
                             // Block 56 must never reach the generic cube-placement
                             // path below — always consume this branch with a continue.
+                            // C3c-3b — the shared rule (`attach_rule`: a solid
+                            // floor's bare Top face) decides; a joiner asks the
+                            // server to lay it (`ItemAction::Attach`) and sees the
+                            // paper through the server's stream.
+                            let paper_face = crate::mesh::Face::from_normal(face).map(|f| f.index()).filter(|&fi| {
+                                crate::blueprint_attach::attach_rule(
+                                    &self.world,
+                                    &self.registry,
+                                    (pos[0], pos[1], pos[2]),
+                                    fi,
+                                    crate::block::BLUEPRINT_PAPER,
+                                )
+                                .is_ok()
+                            });
+                            if let Some(fi) = paper_face
+                                && self.play_mode.can_edit_world()
+                                && self.joined()
+                            {
+                                self.send_attach(pidx, pos, fi);
+                                continue;
+                            }
                             if self.play_mode.can_edit_world() {
                                 let laid = crate::blueprint_attach::lay_blank_blueprint_paper(
                                     &mut self.world,
@@ -15676,23 +15716,31 @@ impl super::GameState {
                                 _ => None,
                             });
                         if let Some(wp_block) = wallpaper_block {
-                            let target = self.world.get_block(pos[0], pos[1], pos[2]);
                             // Paint only a bare face of a solid block; an
                             // already-papered face or a non-solid target yields
                             // None and falls through to the generic solid place.
+                            // C3c-3b — the shared rule (`attach_rule`) decides.
                             let paint_face = crate::mesh::Face::from_normal(face)
                                 .map(|f| f.index())
                                 .filter(|&fi| {
-                                    self.registry.is_solid(target)
-                                        && self
-                                            .world
-                                            .face_attachment_at((pos[0], pos[1], pos[2]), fi)
-                                            .is_none()
+                                    crate::blueprint_attach::attach_rule(
+                                        &self.world,
+                                        &self.registry,
+                                        (pos[0], pos[1], pos[2]),
+                                        fi,
+                                        wp_block,
+                                    )
+                                    .is_ok()
                                 });
                             if let Some(fi) = paint_face {
                                 // Gate the world-edit; always continue to avoid
                                 // placing the wallpaper as a generic solid cube.
-                                if self.play_mode.can_edit_world() {
+                                // C3c-3b — a joiner asks the server to paint it
+                                // (`ItemAction::Attach`) and sees it through the
+                                // server's stream; nothing changes here.
+                                if self.play_mode.can_edit_world() && self.joined() {
+                                    self.send_attach(pidx, pos, fi);
+                                } else if self.play_mode.can_edit_world() {
                                     self.world.set_face_attachment(
                                         (pos[0], pos[1], pos[2]),
                                         fi,
@@ -22666,6 +22714,50 @@ impl super::GameState {
         self.send_use_request(pidx, crate::joiner_actions::Asked::PlaceCart { cell }, held, hot, action);
     }
 
+    /// C3c-3b — player `pidx` (a joiner) paints the wallpaper, or lays the
+    /// blank paper, in hand on face `face` of the block at `cell`
+    /// (`ItemAction::Attach`; the arm already checked the shared rule on our
+    /// copy). The server sets it in its world by the same rule and takes the
+    /// block (the outcome); we see it through the attachment stream. Claimed
+    /// like a cart (one block); a second click on the same face while the
+    /// first is in flight sends nothing.
+    pub(crate) fn send_attach(&mut self, pidx: usize, cell: [i32; 3], face: usize) {
+        self.players[pidx].place_cooldown = 8;
+        let face = face.min(5) as u8;
+        let asked = crate::joiner_actions::Asked::Attach { cell, face };
+        if self.joiner_actions.is_asking(asked) {
+            return;
+        }
+        let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
+        let action = crate::protocol::ItemAction::Attach {
+            x: cell[0],
+            y: cell[1],
+            z: cell[2],
+            face,
+            hotbar_slot: hot as u8,
+            held_kind,
+            held_id,
+            held_full,
+        };
+        self.send_use_request(pidx, asked, held, hot, action);
+    }
+
+    /// C3c-3b — player `pidx` (a joiner) peels the wallpaper or blank paper
+    /// off face `face` of the block at `cell` (`ItemAction::Detach`): the
+    /// server removes it from its world and grants the item back; we see it
+    /// go through the attachment stream. Claims nothing; one in flight per
+    /// face.
+    pub(crate) fn send_detach(&mut self, pidx: usize, cell: [i32; 3], face: usize) {
+        let face = face.min(5) as u8;
+        let asked = crate::joiner_actions::Asked::Detach { cell, face };
+        if self.joiner_actions.is_asking(asked) {
+            return;
+        }
+        let hot = self.players[pidx].hotbar_slot;
+        let action = crate::protocol::ItemAction::Detach { x: cell[0], y: cell[1], z: cell[2], face };
+        self.send_use_request(pidx, asked, None, hot, action);
+    }
+
     /// C3c-2 — player `pidx` (a joiner) casts the rod in hand
     /// (`ItemAction::Cast`) or, with a line out, reels it in (`Reel`). The
     /// server casts from its body and rolls the bite and the catch; here a
@@ -22801,6 +22893,11 @@ impl super::GameState {
                     self.audio.play_place();
                     self.toast = Some(("You landed a catch!".to_string(), Instant::now() + Duration::from_secs(3)));
                 }
+                // C3c-3b — the sounds single-player's paint and peel make;
+                // the attachment itself arrives through the stream, a peel's
+                // item as an `InventoryGrant`.
+                crate::joiner_actions::Asked::Attach { .. } => self.audio.play_place(),
+                crate::joiner_actions::Asked::Detach { .. } => self.audio.play_break(),
                 _ => {}
             }
             return;
