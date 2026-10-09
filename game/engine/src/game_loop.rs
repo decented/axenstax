@@ -4617,6 +4617,9 @@ impl super::GameState {
             .map(|p| (p.player.pos, p.camera.yaw, p.camera.pitch, p.combat.health))
             .collect();
         hs.sync_local_slots(&local_slots);
+        // MP-D2c-1 — which of our seats ride, for the joiners' view.
+        let seated: Vec<bool> = self.players.iter().map(crate::player_slot::PlayerSlot::seated).collect();
+        hs.sync_local_seats(&seated);
         // C1 — the server rolls joiners' Satori drops with this world's
         // Proof-of-Play secret: the host client's, which it adopts from the
         // world's meta on load (`persist_pop_secret_if_missing`).
@@ -5727,12 +5730,14 @@ impl super::GameState {
         for (i, intent) in intents.iter().enumerate() {
             if i >= self.players.len() { break; }
             let slot = &mut self.players[i];
-            // Ride-along (Task 1.5) — a mounted player is driven by the cart,
-            // not by walk/gravity physics. Skip the physics tick entirely; the
-            // post-`tick_carts` follow (`apply_riding_follow`) pins their eye to
-            // the cart seat this same game tick. Zero the carried velocity so a
-            // dismount doesn't fling them with stale momentum.
-            if slot.riding.is_some() {
+            // Ride-along — a seated player is carried by its mount, not by
+            // walk/gravity physics. Skip the physics tick entirely; the
+            // post-physics follow (`apply_riding_follow`) pins their eye to
+            // the seat this same game tick (a joiner's: to the server's mount
+            // as mirrored — its body is not predicted while seated, D2c-1).
+            // Zero the carried velocity so a dismount doesn't fling them with
+            // stale momentum.
+            if slot.seated() {
                 slot.player.velocity = glam::Vec3::ZERO;
                 // W2 — a ride is not a fall: dismounting must not "land" a
                 // fall that started before mounting.
@@ -6623,7 +6628,20 @@ impl super::GameState {
         // Entity physics (every tick, not just every 4th). The host client's
         // on a lent world, with `mob_ai` (D1).
         if self.sim_runs(SimSystem::EntityPhysics) {
-            crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
+            // MP-D2c-1 — the seats steer their mounts first: after every
+            // system above that writes a mob's velocity (mob AI, species AI,
+            // tethers) and right before physics integrates it, so the rider
+            // has the last word. One rule for every seat (`riding::steer`):
+            // our own seats, and — on a lent world, whose entity physics this
+            // is — the joiners' seats the server holds, from their latest
+            // input (`sim_lend::host_entity_physics`).
+            self.steer_own_seats(&intents);
+            crate::sim_lend::host_entity_physics(
+                self.hosted_server.as_mut(),
+                &mut self.ecs,
+                &self.world,
+                &self.registry,
+            );
         }
         // Satoshi co-presence — move him toward you (summoned via H) or back to
         // his hut, AFTER the AI + physics passes so this is the last word on his
@@ -6689,19 +6707,18 @@ impl super::GameState {
             crate::cart::tick_carts(&mut self.ecs, &mut self.world);
         }
 
-        // Ride-along (Task 1.5) — for every player mounted on a cart, pin their
-        // eye to the cart seat now that `tick_carts` has written the cart's
-        // current Position. Runs AFTER the cart advance so the camera tracks the
-        // cart with zero lag. Also dismounts on arrival / vanished cart. The
-        // jump-to-dismount edge is handled in the frame intent loop (input).
+        // Ride-along — pin every rider to its seat now that entity physics
+        // and `tick_carts` have moved the mounts (zero lag), and end the rides
+        // that are over: a parked cart, a mount gone or dead (`riding::follow`).
+        // The dismount gestures are the steer's, above.
         self.apply_riding_follow();
 
         // ── Per-player entity collision + combat ─────────────────────────────
         for i in 0..self.players.len() {
-            // Push player out of mob hitboxes — but NOT while riding: the cart
-            // owns the rider's position (re-pinned each tick by the follow),
-            // and a mob shouldn't be able to shove them off the seat.
-            if self.players[i].riding.is_none() {
+            // Push player out of mob hitboxes — but NOT while seated: the
+            // mount owns the rider's position (re-pinned each tick by the
+            // follow), and a mob shouldn't be able to shove them off the seat.
+            if !self.players[i].seated() {
                 let player = &mut self.players[i].player;
                 crate::entity::push_player_from_entities(
                     &self.ecs,
@@ -7096,6 +7113,16 @@ impl super::GameState {
 
         // ── Death + respawn loop ──────────────────────────────────────────────
         for i in 0..self.players.len() {
+            // MP-D2c-1 — a rider's death ends its ride, whatever killed it:
+            // off, the mount free, the body down where it fell (the rule a
+            // server runs for a joiner, `GameServer::end_dead_riders`).
+            // Before the respawn below, so a respawn never finds a seat to
+            // pin it back to.
+            if self.players[i].combat.dead
+                && let Some(mount) = self.players[i].riding
+            {
+                self.dismount(i, mount);
+            }
             if self.is_creative {
                 // Creative players are invulnerable + don't drop inventory
                 // (the rule a server applies to joiners too, C2a).
@@ -10556,151 +10583,16 @@ impl super::GameState {
                         }
             }
 
-            // ── Ride-along (Task 1.5) — "you're on the train" ─────────────────
-            // While mounted on a cart the player is occupied: they keep their
-            // view freedom (mouse + gamepad look ran ABOVE this point) but can't
-            // mine, place, or re-dispatch (no acting at a distance — the
-            // multiplayer-coherent rule). A jump hops them off in place; the
-            // per-tick follow stops driving them next tick and normal physics
-            // resume. Placed after look so riders can look around, before the
-            // raycast/break/place handlers so those are skipped while mounted.
-            if let Some(mount) = self.players[pidx].riding {
-                // A rideable mob is rider-STEERED (carts self-move on rails).
-                // Horse/Donkey/Mule = steady gallop; Nostrich = the wacky
-                // speed-building, drifting, water-skimming arcade mount.
-                let mount_kind = self
-                    .ecs
-                    .get::<&crate::entity::MobKind>(mount)
-                    .map(|k| k.0)
-                    .ok();
-                let is_ride = mount_kind.map(crate::mob::is_rideable).unwrap_or(false);
-                if is_ride {
-                    // Crouch dismounts — but on a Nostrich, crouch is the DRIFT
-                    // button while you're moving; it only hops you off once you've
-                    // slowed to a near-stop (so you can't bail mid-corner).
-                    let crouch_dismount = intent.sneak
-                        && (mount_kind != Some(crate::mob::MobType::Nostrich)
-                            || self.players[pidx].ride_speed < crate::nostrich_ride::DISMOUNT_SPEED);
-                    if crouch_dismount {
-                        self.players[pidx].riding = None;
-                        self.players[pidx].ride_speed = 0.0;
-                        self.players[pidx].ride_heading = glam::Vec2::ZERO;
-                        let _ = self.ecs.remove_one::<crate::entity::Ridden>(mount);
-                        self.settle_dismounted_player(pidx);
-                    } else if mount_kind == Some(crate::mob::MobType::Nostrich) {
-                        // ── Nostrich: Mario-Kart physics (see `nostrich_ride`) ──
-                        let cam = &self.players[pidx].camera;
-                        let mut dir = cam.horizontal_forward() * intent.move_forward
-                            + cam.right() * intent.move_right;
-                        dir.y = 0.0;
-                        let input = glam::Vec2::new(dir.x, dir.z);
-                        // Water under the mount's feet — checked at AND just below
-                        // the feet so a surface-skimming bird still reads "over
-                        // water" (its feet sit on the surface, water is the cell below).
-                        let mpos = self
-                            .ecs
-                            .get::<&crate::entity::Position>(mount)
-                            .map(|p| p.0)
-                            .unwrap_or(glam::Vec3::ZERO);
-                        let (fx, fy, fz) =
-                            (mpos.x.floor() as i32, mpos.y.floor() as i32, mpos.z.floor() as i32);
-                        let over_water =
-                            self.world.is_water(fx, fy, fz) || self.world.is_water(fx, fy - 1, fz);
-                        let st = crate::nostrich_ride::step(
-                            self.players[pidx].ride_speed,
-                            self.players[pidx].ride_heading,
-                            input,
-                            intent.sneak, // crouch held = drift (onsets at lower speeds)
-                            over_water,
-                            1.0 / 20.0,
-                        );
-                        self.players[pidx].ride_speed = st.speed;
-                        self.players[pidx].ride_heading = st.heading;
-                        if st.dismount {
-                            // Too slow over water — sink + fall off with a splash.
-                            self.players[pidx].riding = None;
-                            self.players[pidx].ride_speed = 0.0;
-                            self.players[pidx].ride_heading = glam::Vec2::ZERO;
-                            let _ = self.ecs.remove_one::<crate::entity::Ridden>(mount);
-                            self.settle_dismounted_player(pidx);
-                            if pidx == 0 {
-                                self.toast = Some((
-                                    "Too slow — SPLASH! The Nostrich sank and you fell off."
-                                        .to_string(),
-                                    Instant::now() + Duration::from_secs(3),
-                                ));
-                            }
-                        } else {
-                            let on_ground = self
-                                .ecs
-                                .get::<&crate::entity::OnGround>(mount)
-                                .map(|g| g.0)
-                                .unwrap_or(false);
-                            let jumping = intent.jump_held || intent.jump_pressed;
-                            if let Ok(mut vel) = self.ecs.get::<&mut crate::entity::Velocity>(mount) {
-                                vel.0.x = st.vel_xz.x / 20.0; // b/s → b/tick
-                                vel.0.z = st.vel_xz.y / 20.0;
-                                if st.water_run {
-                                    vel.0.y = 0.0; // skim flat across the surface
-                                } else if jumping && on_ground {
-                                    vel.0.y = 0.42;
-                                }
-                            }
-                            if st.heading.length_squared() > 1e-6
-                                && let Ok(mut ai) = self.ecs.get::<&mut crate::mob_ai::MobAi>(mount) {
-                                    ai.facing = st.heading.y.atan2(st.heading.x);
-                                }
-                            // Skimming: pin the bird ON TOP of the water surface so
-                            // it runs across rather than bobbing/sinking into it.
-                            if st.water_run {
-                                let mut top = fy;
-                                while self.world.is_water(fx, top + 1, fz) {
-                                    top += 1;
-                                }
-                                let surface = (top + 1) as f32;
-                                if let Ok(mut p) =
-                                    self.ecs.get::<&mut crate::entity::Position>(mount)
-                                    && p.0.y < surface {
-                                        p.0.y = surface;
-                                    }
-                            }
-                            continue;
-                        }
-                    } else {
-                        // ── Horse / Donkey / Mule: steady ~6 b/s gallop ──
-                        const MOUNT_SPEED_PER_TICK: f32 = 6.0 / 20.0;
-                        let cam = &self.players[pidx].camera;
-                        let mut dir = cam.horizontal_forward() * intent.move_forward
-                            + cam.right() * intent.move_right;
-                        dir.y = 0.0;
-                        let dir = dir.normalize_or_zero();
-                        let on_ground = self
-                            .ecs
-                            .get::<&crate::entity::OnGround>(mount)
-                            .map(|g| g.0)
-                            .unwrap_or(false);
-                        let jumping = intent.jump_held || intent.jump_pressed;
-                        if let Ok(mut vel) = self.ecs.get::<&mut crate::entity::Velocity>(mount) {
-                            vel.0.x = dir.x * MOUNT_SPEED_PER_TICK;
-                            vel.0.z = dir.z * MOUNT_SPEED_PER_TICK;
-                            if jumping && on_ground {
-                                vel.0.y = 0.42; // same impulse as a player jump
-                            }
-                        }
-                        if dir.length_squared() > 1e-6
-                            && let Ok(mut ai) = self.ecs.get::<&mut crate::mob_ai::MobAi>(mount) {
-                                ai.facing = dir.z.atan2(dir.x);
-                            }
-                        continue;
-                    }
-                } else if intent.jump_held || intent.jump_pressed {
-                    // Cart: a jump hops the rider off in place (unchanged).
-                    self.players[pidx].riding = None;
-                    self.settle_dismounted_player(pidx);
-                } else {
-                    // Occupied on a cart: skip the rest of the per-player frame.
-                    continue;
-                }
+            // ── Ride-along — "you're on the train" ─────────────────────────────
+            // While seated (a mount or cart in our own sim, or — joined — the
+            // server's) the player is occupied: they keep their view freedom
+            // (mouse + gamepad look ran ABOVE this point) but can't mine,
+            // place, or re-dispatch (no acting at a distance — the
+            // multiplayer-coherent rule). Steering and the dismount gestures
+            // are the tick's (`riding::steer`, MP-D2c-1), one rule for every
+            // seat; this frame path only skips the rest of the rider's frame.
+            if self.players[pidx].seated() {
+                continue;
             }
 
             // Debug toggle (from intent)
@@ -12890,8 +12782,9 @@ impl super::GameState {
             // (feed, tame, shear, milk, a Lead on or off, a pet command) is
             // an interaction the server performs: sent as an
             // `EntityInteract`; what it uses comes out of the hand only when
-            // the server accepts it. Riding and trading stay refused with a
-            // toast (D2c). Anything else in hand goes ahead with its own use
+            // the server accepts it; so is mounting a steed (MP-D2c-1). A
+            // steed's pack and trading stay refused with a toast (D2c-2/-3).
+            // Anything else in hand goes ahead with its own use
             // — eating, a bow, a bucket, building beside a cow (review D2a
             // LOW-2).
             if intent.place_block
@@ -12916,6 +12809,13 @@ impl super::GameState {
                         self.players[pidx].place_cooldown = 16;
                         self.toast = Some((
                             crate::remote_mobs::JOINED_INTERACTION_TOAST.to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                    }
+                    crate::remote_mobs::MirrorClick::PackNotYet => {
+                        self.players[pidx].place_cooldown = 16;
+                        self.toast = Some((
+                            crate::remote_mobs::JOINED_PACK_TOAST.to_string(),
                             Instant::now() + Duration::from_secs(3),
                         ));
                     }
@@ -13377,8 +13277,8 @@ impl super::GameState {
 
             // P9 — mount a horse. Right-click a Horse (the Lead path above
             // already ate the click if a Lead was held) to ride it; steering +
-            // dismount live in the mounted-input block below. Marks the horse
-            // `Ridden` so its wander AI yields to the rider.
+            // dismount are the tick's (`riding::steer`, MP-D2c-1). Marks the
+            // horse `Ridden` so its wander AI yields to the rider.
             let mut mounted = false;
             if intent.place_block
                 && intent.cursor_captured
@@ -13391,13 +13291,15 @@ impl super::GameState {
                 if let Some((target, Some(kind))) =
                     crate::combat::find_attack_target(&self.ecs, eye, look_dir)
                     .filter(|(_, k)| k.is_some_and(crate::mob::is_rideable))
+                    // MP-D2c-1 — one rider a mount: a steed another seat (a
+                    // split-screen player, or on a lent world a joiner) is
+                    // riding is no mount.
+                    .filter(|(t, _)| crate::riding::may_mount(&self.ecs, *t).is_ok())
                 {
                     self.players[pidx].riding = Some(target);
-                    // Fresh ride state (Nostrich speed/heading wind-up from a stop).
-                    self.players[pidx].ride_speed = 0.0;
-                    self.players[pidx].ride_heading = glam::Vec2::ZERO;
+                    // `Ridden`, and a fresh ride (the Nostrich winds up from a stop).
+                    crate::riding::mount(&mut self.ecs, target, &mut self.players[pidx].ride);
                     self.fire_challenge(crate::scenario::ChallengeEvent::RideEntity);
-                    let _ = self.ecs.insert_one(target, crate::entity::Ridden);
                     // Steed persistence (2026-07-04): first ride keeps the
                     // steed — it now survives save/load with you. Task 3
                     // (2026-07-07): also drops `Scattered` so chunk unload
@@ -13406,14 +13308,8 @@ impl super::GameState {
                     self.players[pidx].place_cooldown = 10;
                     mounted = true;
                     if pidx == 0 {
-                        let nostrich = kind == crate::mob::MobType::Nostrich;
                         self.toast = Some((
-                            if nostrich {
-                                "Yeehaw! Hold forward to wind up, hold Crouch to DRIFT, go FAST to skim water. Crouch when stopped to hop off."
-                                    .to_string()
-                            } else {
-                                "Mounted! WASD to ride, Space to jump, Sneak to dismount.".to_string()
-                            },
+                            crate::riding::mount_toast(kind).to_string(),
                             Instant::now() + Duration::from_secs(4),
                         ));
                     }
@@ -14472,6 +14368,19 @@ impl super::GameState {
                         continue;
                     } else if target_blk == crate::rail::TRACK
                         && !self.play_mode.is_spectator()
+                        && self.joined()
+                        && let Some(cart) = self.remote_mobs.parked_cart_at((pos[0], pos[1], pos[2]))
+                    {
+                        // MP-D2c-1 — joined, the carts are the server's
+                        // (mirrored): the same click asks it (`InteractKind::
+                        // Mount` on the cart). It dispatches the cart (with
+                        // the depot's freight) and seats us when the hand is
+                        // empty; `own_riding` says when we are on.
+                        self.players[pidx].place_cooldown = 8;
+                        self.send_interaction(pidx, None, cart, crate::protocol::InteractKind::Mount, intent.sneak);
+                        continue;
+                    } else if target_blk == crate::rail::TRACK
+                        && !self.play_mode.is_spectator()
                         && self
                             .ecs
                             .query::<&crate::cart::CartData>()
@@ -14504,12 +14413,13 @@ impl super::GameState {
                         if let Some(cart_entity) =
                             crate::cart::dispatch_cart(&mut self.ecs, &mut self.world, cell, look)
                         {
-                            if empty_hand {
+                            if empty_hand && crate::riding::may_mount(&self.ecs, cart_entity).is_ok() {
                                 // Mount: pin the player to this cart's seat. The
                                 // per-tick follow (after `tick_carts`) drives the
                                 // player's position + camera and gates physics /
                                 // input until the cart parks or the player jumps.
                                 self.players[pidx].riding = Some(cart_entity);
+                                crate::riding::mount(&mut self.ecs, cart_entity, &mut self.players[pidx].ride);
                                 self.fire_challenge(crate::scenario::ChallengeEvent::RideEntity);
                             }
                             self.players[pidx].place_cooldown = 8;
@@ -18871,7 +18781,7 @@ impl super::GameState {
                         true,
                     );
                     // C3b-1 — each click through the one container rule. A
-                    // pack is never a joiner's (riding and packs are refused
+                    // pack is never a joiner's (packs are refused
                     // on a mirrored steed until D2c), so it isn't logged as a
                     // window op.
                     let ctx = self.container_ctx(pidx, false);
@@ -20319,11 +20229,16 @@ impl super::GameState {
                             .map(|k| k.0 == crate::mob::MobType::Nostrich)
                             .unwrap_or(false)
                     });
-                    if on_nostrich {
+                    // MP-D2c-1 — joined, the ride is the server's: its speed
+                    // is the mirrored bird's (b/tick on the wire → b/s).
+                    let joined_speed = self.players[0]
+                        .mirror_mount
+                        .and_then(|id| self.remote_mobs.nostrich_speed(id));
+                    if on_nostrich || joined_speed.is_some() {
                         crate::hud_ui::draw_nostrich_speed(
                             &self.renderer.egui.ctx,
                             &screen.viewport,
-                            self.players[0].ride_speed,
+                            joined_speed.unwrap_or(self.players[0].ride.speed),
                         );
                     }
                 }
@@ -21992,14 +21907,20 @@ impl super::GameState {
                 // f32-to-i32 casts during rendering). Mirrors the host path.
                 .filter(|p| p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
                 .collect();
+            // MP-D2c-1 — our seat is the server's: on while it says so
+            // (`own_riding`, so a forced dismount reaches us too).
+            if let Some(slot) = self.players.first_mut() {
+                slot.mirror_mount = if joined { state.own_riding } else { None };
+            }
             if let Some(server_pos) = own_server_pos
                 && let Some(slot) = self.players.first_mut()
             {
-                if slot.riding.is_some() {
-                    // Our ride is our own sim (BRIDGE, see
-                    // `network_send_input`): nothing to reconcile, but
-                    // getting off goes back to where the server holds us.
-                    self.own_prediction.note_server_pos(server_pos);
+                if slot.mirror_mount.is_some() {
+                    // Seated: the server moves the mount and pins our body to
+                    // it; we follow the mirror (`follow_mirror_seat`), and the
+                    // first update after getting off rebases us on the body
+                    // the server set down.
+                    self.own_prediction.seated(acked);
                 } else {
                     let outcome = self.own_prediction.reconcile(
                         acked,
@@ -22057,6 +21978,8 @@ impl super::GameState {
                 .replace(now)
                 .map_or(0.0, |prev| (now - prev).as_secs_f32().min(0.25));
             self.remote_mobs.advance(dt);
+            // MP-D2c-1 — a seat rides the mount as drawn, every frame.
+            let _ = self.follow_mirror_seat();
         }
 
         // MP-A3 — the server's word on our own body. `Died`: the server holds
@@ -22967,10 +22890,24 @@ impl super::GameState {
                 {
                     Some(crate::scenario::ChallengeEvent::TameMob)
                 }
+                // MP-D2c-1 — we are on (a steed, or a cart with an empty
+                // hand: with something in hand it only dispatches the cart).
+                Asked::Interact(InteractKind::Mount) if request.mob.is_some() || request.held.is_none() => {
+                    Some(crate::scenario::ChallengeEvent::RideEntity)
+                }
                 _ => None,
             };
             if let Some(ev) = challenge {
                 self.fire_challenge(ev);
+            }
+            if request.kind == Asked::Interact(InteractKind::Mount)
+                && let Some(kind) = request.mob
+            {
+                self.toast = Some((
+                    crate::riding::mount_toast(kind).to_string(),
+                    Instant::now() + Duration::from_secs(4),
+                ));
+                return;
             }
             if matches!(request.kind, Asked::Interact(_)) {
                 if request.kind == Asked::Interact(InteractKind::LeadDetach) {
@@ -23398,16 +23335,7 @@ impl super::GameState {
             client.note_edit_uses(edit_uses);
             client.note_order_cut(self.players[0].crafting_ui.ops.first_stamp());
             let slot = &mut self.players[0];
-            let riding = slot.riding.is_some();
-            let seq = self.own_prediction.send(
-                client,
-                &joined_input,
-                &mut slot.player,
-                riding,
-                &self.world,
-                &self.registry,
-                self.play_mode,
-            );
+            let seq = self.own_prediction.send(client, &joined_input, &slot.player);
             // The reported change is in flight under the stamped sequence; an
             // unsent input (not joined yet) keeps it for the next one.
             if let Some(seq) = seq {
@@ -23622,85 +23550,107 @@ impl super::GameState {
         ));
     }
 
-    /// Ride-along per-tick follow (Task 1.5). For every player whose `riding`
-    /// references a live cart, pin their eye to the cart seat
-    /// (`cart::rider_eye_position`) and keep the camera there. Dismounts a
-    /// player when the cart has parked (arrival) or when the cart entity is
-    /// gone (defensive). Called once per game tick, AFTER `cart::tick_carts`
-    /// so the cart `Position` it reads is this tick's value.
-    ///
-    /// The player's own eye height is derived from the engine's physics model
-    /// (`eye_pos().y - pos.y`) rather than hardcoded, so it stays in lockstep
-    /// with `PLAYER_EYE_HEIGHT` if that constant ever changes. We back-solve the
-    /// foot position from the desired eye so the rest of the engine (HUD, save,
-    /// collision-on-dismount) keeps seeing a normal foot-anchored player.
-    fn apply_riding_follow(&mut self) {
-        for i in 0..self.players.len() {
+    /// MP-D2c-1 — steer every local seat's mount one tick (`riding::steer`)
+    /// from this tick's intent and its camera's yaw. Runs right before entity
+    /// physics, after every system that writes a mob's velocity, so the
+    /// rider has the last word. A dismount gesture gets the rider off and
+    /// onto its feet; a Nostrich that sinks says so.
+    fn steer_own_seats(&mut self, intents: &[PlayerIntent]) {
+        for (i, intent) in intents.iter().enumerate().take(self.players.len()) {
             let Some(mount) = self.players[i].riding else { continue };
-
-            // The ridden entity's live world anchor — a cart OR a horse (P9).
-            let Some(mount_pos) = self
-                .ecs
-                .get::<&crate::entity::Position>(mount)
-                .ok()
-                .map(|p| p.0)
-            else {
-                // Mount vanished — dismount in place + settle onto footing.
-                self.players[i].riding = None;
-                let _ = self.ecs.remove_one::<crate::entity::Ridden>(mount);
-                self.settle_dismounted_player(i);
-                continue;
-            };
-            // Carts self-park (speed 0 = arrived → auto-dismount). A horse has
-            // no CartData, so this is None and it never auto-dismounts here —
-            // the rider dismounts it deliberately (sneak) in the input loop.
-            let cart_speed = self
-                .ecs
-                .get::<&crate::cart::CartData>(mount)
-                .ok()
-                .map(|c| c.speed);
-
-            // Derive this player's eye height from the physics model so we never
-            // hardcode PLAYER_EYE_HEIGHT here.
-            let player = &mut self.players[i].player;
-            let eye_height = player.eye_pos().y - player.pos.y;
-            let eye = crate::cart::rider_eye_position(mount_pos, eye_height);
-            // Back-solve the foot position from the seat eye.
-            player.pos = eye - glam::Vec3::new(0.0, eye_height, 0.0);
-            player.velocity = glam::Vec3::ZERO;
-            player.on_ground = false;
-            self.players[i].camera.position = eye;
-
-            // B5 — the riding gate skips the normal physics path, which is where
-            // the 3P camera retracts from walls + auto-recenters. Run the same
-            // updates here so the camera doesn't clip through tunnel geometry the
-            // cart drives into. First-person is a no-op. dt = fixed 20 TPS tick.
-            let tick_dt = 1.0 / 20.0;
-            let target = crate::raycast::camera_collision_fraction(
-                &self.players[i].camera,
-                &self.world,
-                &self.registry,
-            );
-            self.players[i].camera.update_collision(target, tick_dt);
-            self.players[i].camera.user_distance = self.graphics.third_person_distance;
-            self.players[i].camera.recenter_speed = self.graphics.auto_centre_speed;
-            self.players[i].camera.recenter_delay = self.graphics.auto_centre_delay;
-            if self.graphics.third_person_freelook {
-                let steering =
-                    i == 0 && self.input.is_held(winit::keyboard::KeyCode::AltLeft);
-                // Rider velocity is zeroed while mounted, so the orbit eases home.
-                self.players[i].camera.tick_auto_recenter(steering, 0.0, tick_dt);
+            if self.players[i].combat.dead {
+                continue; // the follow gets a dead rider off
             }
-
-            // Arrival: the cart has parked (speed 0). Dismount and settle the
-            // rider onto solid footing (they sit on the non-solid TRACK block,
-            // so without this they'd fall through it over a gap). Horses
-            // (cart_speed None) never auto-dismount here.
-            if cart_speed == Some(0.0) {
-                self.players[i].riding = None;
-                self.settle_dismounted_player(i);
+            let input = crate::riding::SeatInput::from_intent(intent, self.players[i].camera.yaw);
+            let off = crate::riding::steer(&mut self.ecs, &self.world, mount, &input, &mut self.players[i].ride);
+            if let Some(why) = off {
+                self.dismount(i, mount);
+                if why == crate::riding::Dismount::Sank && i == 0 {
+                    self.toast = Some((
+                        crate::riding::SANK_TOAST.to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                }
             }
         }
+    }
+
+    /// MP-D2c-1 — the seat follow, once per tick after entity physics and the
+    /// cart roll (`riding::follow`): each rider's body and camera are pinned
+    /// to its seat. A parked cart (arrival), a mount gone or dead, or a dead
+    /// rider ends the ride. A joiner's seat follows the server's mount as
+    /// mirrored ([`Self::follow_mirror_seat`]); its dismounts are the
+    /// server's (`own_riding`).
+    fn apply_riding_follow(&mut self) {
+        for i in 0..self.players.len() {
+            let Some(mount) = self.players[i].riding else {
+                if i == 0
+                    && let Some(eye) = self.follow_mirror_seat()
+                {
+                    self.seat_camera(i, eye);
+                }
+                continue;
+            };
+            if self.players[i].combat.dead {
+                self.dismount(i, mount);
+                continue;
+            }
+            match crate::riding::follow(&self.ecs, mount, &mut self.players[i].player) {
+                crate::riding::Follow::Seated { eye } => self.seat_camera(i, eye),
+                crate::riding::Follow::Arrived { eye } => {
+                    self.seat_camera(i, eye);
+                    self.dismount(i, mount);
+                }
+                crate::riding::Follow::Gone => self.dismount(i, mount),
+            }
+        }
+    }
+
+    /// MP-D2c-1 — a joiner's seat follows the server's mount where its
+    /// mirror draws it (called each frame as the mirror glides, and from the
+    /// tick's follow): body and camera pinned to the seat. Its body is not
+    /// predicted while seated. `None` when not seated or the mount is not
+    /// mirrored (yet).
+    fn follow_mirror_seat(&mut self) -> Option<glam::Vec3> {
+        let id = self.players.first()?.mirror_mount?;
+        let at = self.remote_mobs.position_of(id)?;
+        let slot = &mut self.players[0];
+        let eye = crate::riding::pin(at, &mut slot.player);
+        slot.camera.position = eye;
+        Some(eye)
+    }
+
+    /// The camera of seat `i` at the seat eye `eye`. The riding gate skips the
+    /// normal physics path, which is where the 3P camera retracts from walls
+    /// and auto-recenters (B5): run the same updates here so the camera
+    /// doesn't clip through the tunnel a cart drives into. First-person is a
+    /// no-op. dt = the fixed 20 TPS tick.
+    fn seat_camera(&mut self, i: usize, eye: glam::Vec3) {
+        self.players[i].camera.position = eye;
+        let tick_dt = 1.0 / 20.0;
+        let target = crate::raycast::camera_collision_fraction(
+            &self.players[i].camera,
+            &self.world,
+            &self.registry,
+        );
+        self.players[i].camera.update_collision(target, tick_dt);
+        self.players[i].camera.user_distance = self.graphics.third_person_distance;
+        self.players[i].camera.recenter_speed = self.graphics.auto_centre_speed;
+        self.players[i].camera.recenter_delay = self.graphics.auto_centre_delay;
+        if self.graphics.third_person_freelook {
+            let steering = i == 0 && self.input.is_held(winit::keyboard::KeyCode::AltLeft);
+            // Rider velocity is zeroed while mounted, so the orbit eases home.
+            self.players[i].camera.tick_auto_recenter(steering, 0.0, tick_dt);
+        }
+    }
+
+    /// The ride of local seat `i` on `mount` is over: the seat empty, the
+    /// mount free (`riding::unmount`) and the body on its feet
+    /// (`riding::settle`).
+    fn dismount(&mut self, i: usize, mount: hecs::Entity) {
+        self.players[i].riding = None;
+        crate::riding::unmount(&mut self.ecs, mount, &mut self.players[i].ride);
+        crate::riding::settle(&mut self.players[i].player, &self.world, &self.registry);
     }
 
     /// Pets wave Task 11 (design P6) — call after any damage source has
@@ -23720,29 +23670,6 @@ impl super::GameState {
                 6,
                 self.tick_counter ^ (id.to_bits().get() << 8),
             );
-        }
-    }
-
-    /// Place a just-dismounted rider on solid footing. A mounted player sits on
-    /// the non-solid TRACK block, so on dismount they'd fall straight through it
-    /// over any gap/void. Scan a bounded distance down for the first solid block
-    /// and stand them on top. If nothing solid is within range (rail over a true
-    /// void), leave them to fall naturally — same as stepping off any ledge.
-    fn settle_dismounted_player(&mut self, i: usize) {
-        let pos = self.players[i].player.pos;
-        let bx = pos.x.floor() as i32;
-        let bz = pos.z.floor() as i32;
-        let top = pos.y.floor() as i32;
-        const MAX_DROP: i32 = 8;
-        for dy in 0..=MAX_DROP {
-            let by = top - dy;
-            if self.world.is_solid(bx, by, bz, &self.registry) {
-                self.players[i].player.pos.y = (by + 1) as f32;
-                self.players[i].player.velocity = glam::Vec3::ZERO;
-                self.players[i].player.reset_fall();
-                self.players[i].player.on_ground = true;
-                return;
-            }
         }
     }
 }

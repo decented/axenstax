@@ -103,7 +103,8 @@ pub enum PacketType {
     /// Client → Server: a one-shot right-click interaction with one of the
     /// server's mobs (MP-D2b): feed, tame, shear, milk, lead on/off, sit
     /// toggle. Same shape of trust as `EntityAttack`; answered with an
-    /// `InteractOutcome`. Riding and villager trading are not on it (D2c).
+    /// `InteractOutcome`. Mounting uses appended `Mount` (D2c-1); steed
+    /// packs and villager quests remain deferred (D2c-2/-3).
     EntityInteract = 59,
     /// Server → Client: the server's decision on one `EntityAttack` or
     /// `EntityInteract` (MP-D2b), sent to that player alone. The client owns
@@ -788,6 +789,9 @@ pub mod player_flags {
     pub const SWINGING: u8 = 1;
     pub const CROUCHING: u8 = 2;
     pub const ON_GROUND: u8 = 4;
+    /// v85 (MP-D2c-1) — on a mount or cart: the position is the seat the
+    /// server (or, for a host's own seat, its client) pinned the body to.
+    pub const SEATED: u8 = 8;
 }
 
 /// Per-player state as seen by other clients.
@@ -1011,7 +1015,7 @@ pub struct EntityAttackPacket {
 }
 
 /// What an [`EntityInteractPacket`] asks for (MP-D2b). Wire-stable, append
-/// only. Riding and trading are not here (D2c).
+/// only. v85 (MP-D2c-1) appends `Mount`. Trading is not here (D2c-3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InteractKind {
     /// The species' breeding food on an adult: love mode.
@@ -1034,6 +1038,14 @@ pub enum InteractKind {
     /// and a Lead is used, as in single-player. Names no entity — the
     /// request's `entity` is ignored; the server picks the mob.
     LeadToPost { post: [i32; 3] },
+    /// v85 (MP-D2c-1) — ride the request's `entity`: a rideable mob
+    /// (`mob::is_rideable`) or a parked rail cart, which nobody rides, in
+    /// reach. The server seats the joiner (`ServerPlayer::riding`) and steers
+    /// the mount from its input each tick; `StateUpdatePacket.own_riding`
+    /// says it is on. On a cart it is single-player's cart click: the cart is
+    /// dispatched (the depot's freight aboard) and the joiner is seated only
+    /// when its hand is empty. Takes nothing from the hand.
+    Mount,
 }
 
 /// Client → Server: a one-shot right-click on the server mob `entity`
@@ -1737,6 +1749,10 @@ pub mod entity_flags {
     /// milked. 0 means ready OR unknown, so an older server (never sets it)
     /// and an older joiner (ignores it) behave as they did.
     pub const PRODUCT_NOT_READY: u8 = 32;
+    /// v85 (MP-D2c-1) — somebody rides it (`entity::Ridden`): a steed or a
+    /// cart. A second rider is refused; a joiner's click on a cart carrying
+    /// one goes on to the track.
+    pub const RIDDEN: u8 = 64;
 }
 
 /// Server → client: an existing entity's position/state changed.
@@ -1852,6 +1868,15 @@ pub struct StateUpdatePacket {
     /// host's own seat gets none. APPEND-ONLY: last.
     #[serde(default)]
     pub attachment_changes: Vec<AttachmentChange>,
+    /// v85 (MP-D2c-1) — the `ProtocolId` of the mount (steed or cart) the
+    /// addressed client rides, as the server holds it (`None` on foot): the
+    /// server seats a joiner, steers the mount from its input and ends the
+    /// ride (its sneak or jump, a sinking Nostrich, a parked cart, the mount
+    /// gone), so this is how the joiner learns it is on or off. Per client
+    /// (re-stamped per recipient, like `own_hunger`); `None` for a host's
+    /// local slot, whose seat is its own client's. APPEND-ONLY: last.
+    #[serde(default)]
+    pub own_riding: Option<u32>,
 }
 
 /// C3c-3b (v84) — one face attachment as it now stands
@@ -2632,7 +2657,16 @@ pub struct ServerAnnouncePacket {
 ///   Option<PushedAttachment> }`): every attachment change in a chunk the
 ///   client holds, reliable and in line. New `item_actions::ItemNote` codes
 ///   27..=28.
-pub const PROTOCOL_VERSION: u32 = 84;
+/// - v85 (2026-10-09, MP-D2c-1): riding runs on the server.
+///   [`InteractKind`] appends `Mount` (= 8): a joiner rides a steed or a
+///   parked cart by request; the server seats it, steers the mount from its
+///   input each tick (the input's movement axes, yaw, sneak and held jump)
+///   and pins its body to the seat. [`entity_flags`] appends `RIDDEN = 64`
+///   (mobs and carts), [`player_flags`] `SEATED = 8`. [`StateUpdatePacket`]
+///   appends `own_riding: Option<u32>` (after `attachment_changes`): the
+///   addressed client's mount, server-driven. New
+///   `mob_interact::InteractNote` code 18 (`MountTaken`).
+pub const PROTOCOL_VERSION: u32 = 85;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2804,8 +2838,8 @@ mod tests {
 
     #[test]
     fn protocol_version_bumped() {
-        // C3c-3b — v84 (on C3c-3a's v83).
-        assert_eq!(super::PROTOCOL_VERSION, 84);
+        // MP-D2c-1 — v85 (on C3c-3b's v84).
+        assert_eq!(super::PROTOCOL_VERSION, 85);
     }
 
     #[test]
@@ -3186,6 +3220,7 @@ mod tests {
             block_views: Vec::new(),
             refused_uses: Vec::new(),
             attachment_changes: Vec::new(),
+            own_riding: None,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3236,6 +3271,7 @@ mod tests {
             block_views: Vec::new(),
             refused_uses: Vec::new(),
             attachment_changes: Vec::new(),
+            own_riding: None,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3295,6 +3331,7 @@ mod tests {
             block_views: Vec::new(),
             refused_uses: Vec::new(),
             attachment_changes: Vec::new(),
+            own_riding: None,
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
@@ -3545,7 +3582,11 @@ mod tests {
         //   `ItemAction::Attach` (= 11), `ItemAction::Detach` (= 12),
         //   `StateUpdatePacket.attachment_changes` (after `refused_uses`) —
         //   face attachments live in the server's world and stream to joiners.
-        assert_eq!(PROTOCOL_VERSION, 84);
+        // v85 (2026-10-09, MP-D2c-1):
+        //   `InteractKind::Mount` (= 8), `entity_flags::RIDDEN` (64),
+        //   `player_flags::SEATED` (8), `StateUpdatePacket.own_riding` (after
+        //   `attachment_changes`) — riding runs on the server; joiners ride.
+        assert_eq!(PROTOCOL_VERSION, 85);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -3702,6 +3743,13 @@ mod tests {
         let bytes = serialize_packet(PacketType::EntityInteract, &to_post);
         let (_, payload) = deserialize_header(&bytes).unwrap();
         assert_eq!(safe_deserialize::<EntityInteractPacket>(payload).unwrap(), to_post);
+        // v85 (MP-D2c-1) — `Mount` is appended: variant 8, after the
+        // fence-post transfer (bincode's u32 tag, right after seq and entity).
+        let mount = EntityInteractPacket { kind: InteractKind::Mount, ..interact.clone() };
+        let bytes = serialize_packet(PacketType::EntityInteract, &mount);
+        let (_, payload) = deserialize_header(&bytes).unwrap();
+        assert_eq!(&payload[8..12], &8u32.to_le_bytes());
+        assert_eq!(safe_deserialize::<EntityInteractPacket>(payload).unwrap(), mount);
 
         let outcome = InteractOutcomePacket {
             seq: 8,
@@ -4032,6 +4080,7 @@ mod tests {
                 block_views: vec![v.clone()],
                 refused_uses: Vec::new(),
                 attachment_changes: Vec::new(),
+                own_riding: None,
             };
             let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
             let (_, payload) = deserialize_header(&bytes).unwrap();
@@ -4110,12 +4159,14 @@ mod tests {
                 block_views: vec![v],
                 refused_uses: Vec::new(),
                 attachment_changes: Vec::new(),
+                own_riding: None,
             };
             let bytes = serialize_packet(PacketType::StateUpdate, &pkt);
             // The view, then the empty `refused_uses` (v82) and
-            // `attachment_changes` (v84) behind it.
+            // `attachment_changes` (v84) and no `own_riding` (v85) behind it.
             assert!(bytes.ends_with(
-                &[1u64.to_le_bytes().to_vec(), want, 0u64.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec()].concat()
+                &[1u64.to_le_bytes().to_vec(), want, 0u64.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), vec![0]]
+                    .concat()
             ));
         }
     }
@@ -4509,7 +4560,7 @@ mod tests {
     /// sit in the order each bump appended them: P9's weather windows (v59),
     /// then C2a's `own_hunger` (v73), then C3b-2's `block_views` (v79), then
     /// C3c-1-fix's `refused_uses` (v82), then C3c-3b's `attachment_changes`
-    /// (v84). Pinned on the wire bytes.
+    /// (v84), then D2c-1's `own_riding` (v85). Pinned on the wire bytes.
     #[test]
     fn state_update_trailing_fields_are_in_append_order() {
         let pkt = StateUpdatePacket {
@@ -4533,6 +4584,7 @@ mod tests {
                 AttachmentChange { x: -1, y: 2, z: 3, face: 4, att: Some(PushedAttachment::Wallpaper(0x0102)) },
                 AttachmentChange { x: 9, y: 8, z: 7, face: 0, att: None },
             ],
+            own_riding: Some(0x0A0B_0C0D),
         };
         let bytes = bincode::serialize(&pkt).unwrap();
         let mut tail = Vec::new();
@@ -4565,11 +4617,15 @@ mod tests {
             tail.extend_from_slice(&v.to_le_bytes());
         }
         tail.extend_from_slice(&[0, 0]);
+        // v85 (D2c-1): own_riding, an Option: 1 + the u32.
+        tail.push(1);
+        tail.extend_from_slice(&0x0A0B_0C0Du32.to_le_bytes());
         assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..]);
         let back: StateUpdatePacket = safe_deserialize(&bytes).unwrap();
         assert_eq!(back.own_hunger, 0x11);
         assert_eq!(back.refused_uses, pkt.refused_uses);
         assert_eq!(back.attachment_changes, pkt.attachment_changes);
+        assert_eq!(back.own_riding, Some(0x0A0B_0C0D));
     }
 
     #[test]

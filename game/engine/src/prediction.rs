@@ -112,17 +112,6 @@ pub enum Reconciled {
     Snapped { error: Vec3 },
 }
 
-/// Clear the movement keys from an input — what a riding joiner sends (see
-/// [`OwnPrediction::send`]). Look, hand and edits are kept.
-pub fn hold_still(input: &mut InputPacket) {
-    input.move_forward = 0.0;
-    input.move_right = 0.0;
-    input.sprint = false;
-    input.sneak = false;
-    input.jump = false;
-    input.toggle_flight = false;
-}
-
 /// A joiner's prediction of its own body. Empty (and inert) when not joined.
 #[derive(Default)]
 pub struct OwnPrediction {
@@ -130,10 +119,9 @@ pub struct OwnPrediction {
     /// Added to the camera: where the player was last shown minus where the
     /// body now is. Decays to zero.
     visual_offset: Vec3,
-    /// The last input went out while riding (see [`Self::send`]).
-    riding: bool,
-    /// Where the server last said our body is.
-    server_pos: Option<Vec3>,
+    /// MP-D2c-1 — the server said we ride ([`Self::seated`]); cleared by the
+    /// first [`Self::reconcile`] after.
+    seated: bool,
 }
 
 impl OwnPrediction {
@@ -152,12 +140,24 @@ impl OwnPrediction {
         self.visual_offset = Vec3::ZERO;
     }
 
-    /// Note where the server holds our body, without reconciling: while
-    /// riding, there is nothing to reconcile, but getting off goes back here.
-    pub fn note_server_pos(&mut self, server_pos: Vec3) {
-        if server_pos.is_finite() {
-            self.server_pos = Some(server_pos);
+    /// MP-D2c-1 — the server's word while we ride (`own_riding`): the server
+    /// moves the mount and pins our body to its seat, so there is nothing to
+    /// reconcile — the body follows the mirrored mount. The inputs it has
+    /// applied are dropped as usual (the last kept as the base), so the
+    /// first update after getting off ([`Self::reconcile`]) rebases on the
+    /// body the server set down and replays the inputs still in flight: they
+    /// walk on the server, and so here (a snap off the seat, then agreement).
+    ///
+    /// An input sent seated is held with the body the server sets a rider
+    /// down as (`riding::settle`: on its feet, at rest), so the replay from
+    /// the first one the server applies after the ride starts as the
+    /// server's body does.
+    pub fn seated(&mut self, acked: u64) {
+        self.seated = true;
+        while self.sent.len() > 1 && self.sent.front().is_some_and(|s| s.seq < acked) {
+            self.sent.pop_front();
         }
+        self.visual_offset = Vec3::ZERO;
     }
 
     /// Inputs sent and not yet acknowledged (plus the last acknowledged one,
@@ -173,74 +173,17 @@ impl OwnPrediction {
     /// its own; `input.tick` is ignored). Returns that number; `None` when
     /// nothing was sent.
     ///
-    /// `riding`: the body is on a cart or mount, which this client
-    /// simulates on its own (BRIDGE: rides stay client-side until the server
-    /// simulates them — Spec 04 §5.3.1). Its steering keys must not walk the
-    /// server's body, so the input goes out with no movement ([`hold_still`])
-    /// and the server's body stands where the ride began; nothing is held.
-    /// On the first input after getting off (also sent still), the body is
-    /// put back on the server's at once ([`Self::take_server_body`]) — one
-    /// clean jump, after which prediction and server agree again.
-    #[allow(clippy::too_many_arguments)]
-    pub fn send(
-        &mut self,
-        client: &mut RemoteClient,
-        input: &InputPacket,
-        body: &mut Player,
-        riding: bool,
-        world: &World,
-        registry: &BlockRegistry,
-        mode: PlayMode,
-    ) -> Option<u64> {
-        let got_off = !riding && self.riding;
-        let still;
-        let input = if riding || got_off {
-            let mut i = input.clone();
-            hold_still(&mut i);
-            still = i;
-            &still
-        } else {
-            input
-        };
+    /// Seated (MP-D2c-1) the input goes out as it is — its movement axes,
+    /// sneak and jump steer the server's mount — and is held like any other,
+    /// with the seat body: the server walks it once it has set us down, and
+    /// the replay after getting off needs it ([`Self::seated`]).
+    pub fn send(&mut self, client: &mut RemoteClient, input: &InputPacket, body: &Player) -> Option<u64> {
         let seq = client.send_input(input);
         if let Some(seq) = seq {
-            if riding {
-                self.riding = true;
-                self.clear_history();
-            } else {
-                if got_off {
-                    self.riding = false;
-                    self.take_server_body(body, world, registry, mode);
-                }
-                self.record(seq, input, body);
-            }
+            self.record(seq, input, body);
         }
         self.decay();
         seq
-    }
-
-    /// The end of a ride: put `body` where the server holds it, at rest, and
-    /// forget everything in flight. The server's body stood still meanwhile
-    /// (the ride sent no movement), so one still step settles ours as its is —
-    /// grounded, nothing left of the ride's speed. No server position yet:
-    /// the body stays, and the first acknowledgement corrects it.
-    fn take_server_body(
-        &mut self,
-        body: &mut Player,
-        world: &World,
-        registry: &BlockRegistry,
-        mode: PlayMode,
-    ) {
-        self.clear_history();
-        let Some(pos) = self.server_pos else {
-            return;
-        };
-        body.pos = pos;
-        body.velocity = Vec3::ZERO;
-        body.on_ground = false;
-        let cam = crate::camera::Camera::new(pos, 1.0);
-        body.tick(&PlayerIntent::default(), &cam, world, registry, mode);
-        body.reset_fall();
     }
 
     /// Record input `seq` just sent, with the body its step produced. A
@@ -254,12 +197,17 @@ impl OwnPrediction {
         if self.sent.len() >= HISTORY_CAP {
             self.sent.pop_front();
         }
+        let mut after = BodyState::of(body);
+        if self.seated {
+            after.velocity = Vec3::ZERO;
+            after.on_ground = true;
+        }
         self.sent.push_back(Sent {
             seq,
             intent: PlayerIntent::from_input_packet(input),
             yaw: input.yaw,
             pitch: input.pitch,
-            after: BodyState::of(body),
+            after,
         });
     }
 
@@ -280,27 +228,47 @@ impl OwnPrediction {
         if !server_pos.is_finite() {
             return Reconciled::Skipped;
         }
-        self.server_pos = Some(server_pos);
-        if acked == 0 {
+        let dismounted = std::mem::replace(&mut self.seated, false);
+        if acked == 0 && !dismounted {
             return Reconciled::Skipped;
         }
         while self.sent.front().is_some_and(|s| s.seq < acked) {
             self.sent.pop_front();
         }
-        let Some(base) = self.sent.front_mut().filter(|s| s.seq == acked) else {
-            return Reconciled::Skipped;
-        };
-        if (server_pos - base.after.pos).length() <= AGREE_EPSILON {
-            return Reconciled::Agreed;
-        }
-
-        // Rebase on the server's position and replay what it hasn't applied.
-        // The base is rewritten too, so the same update arriving again agrees.
-        base.after.pos = server_pos;
+        let base = self.sent.front_mut().filter(|s| s.seq == acked);
         let mut sim = Player::new(server_pos);
         sim.sprint_boots_mult = body.sprint_boots_mult;
-        base.after.apply_to(&mut sim);
-        for sent in self.sent.iter_mut().skip(1) {
+        if let Some(base) = base {
+            if !dismounted && (server_pos - base.after.pos).length() <= AGREE_EPSILON {
+                return Reconciled::Agreed;
+            }
+            base.after.pos = server_pos;
+            base.after.apply_to(&mut sim);
+        } else if !dismounted {
+            return Reconciled::Skipped;
+        } else {
+            sim.flying = body.flying;
+        }
+
+        // The mirrored seat can have moved since the acknowledged record,
+        // even when that record agrees. Dismount always starts from the
+        // server's body at rest, including when its base is no longer held.
+        // Infer footing through the shared rule without moving server_pos:
+        // a true void (or a lower nearby floor) must leave this body to fall.
+        if dismounted {
+            sim.velocity = Vec3::ZERO;
+            sim.on_ground = false;
+            let mut footing = Player::new(server_pos);
+            crate::riding::settle(&mut footing, world, registry);
+            sim.on_ground = footing.on_ground && footing.pos.distance(server_pos) <= AGREE_EPSILON;
+            sim.reset_fall();
+            if let Some(base) = self.sent.front_mut().filter(|s| s.seq == acked) {
+                base.after = BodyState::of(&sim);
+            }
+        }
+        // Replay only inputs the server has not applied. This also handles
+        // ack zero and a missing acknowledged base on the dismount edge.
+        for sent in self.sent.iter_mut().filter(|sent| sent.seq > acked) {
             let mut cam = crate::camera::Camera::new(sim.pos, 1.0);
             cam.yaw = sent.yaw;
             cam.pitch = sent.pitch;
@@ -311,7 +279,10 @@ impl OwnPrediction {
         let error = sim.pos - body.pos;
         let shown = body.pos + self.visual_offset;
         BodyState::of(&sim).apply_to(body);
-        if error.length() > SNAP_DISTANCE {
+        if dismounted {
+            body.reset_fall();
+        }
+        if dismounted || error.length() > SNAP_DISTANCE {
             self.visual_offset = Vec3::ZERO;
             Reconciled::Snapped { error }
         } else {
@@ -376,6 +347,68 @@ mod tests {
         let mut p = Player::new(at);
         p.on_ground = true;
         p
+    }
+
+    #[test]
+    fn dismount_rebases_even_when_the_acknowledged_seat_agrees() {
+        let world = floor_world(8);
+        let reg = BlockRegistry::new();
+        let mut pred = OwnPrediction::new();
+        let server = Vec3::new(0.5, 64.0, 0.5);
+        let mut body = grounded(server);
+        pred.seated(0);
+        pred.record(1, &input(1, 0.0), &body);
+        pred.record(2, &input(2, 1.0), &body);
+        // The mirrored mount has interpolated beyond the acknowledged seat.
+        body.pos += Vec3::new(0.4, 0.2, 0.0);
+        pred.visual_offset = Vec3::new(0.1, 0.0, 0.0);
+        let mut expected = grounded(server);
+        let cam = crate::camera::Camera::new(server, 1.0);
+        expected.tick(&PlayerIntent::from_input_packet(&input(2, 1.0)), &cam, &world, &reg, PlayMode::Survival);
+        let result = pred.reconcile(1, server, &mut body, &world, &reg, PlayMode::Survival);
+        assert!(matches!(result, Reconciled::Snapped { .. }), "dismount snaps even below the smoothing threshold: {result:?}");
+        assert!((body.pos - expected.pos).length() < 1e-4, "rebase then replay the pending walk");
+        assert_eq!(pred.visual_offset(), Vec3::ZERO);
+        assert_eq!(pred.reconcile(1, server, &mut body, &world, &reg, PlayMode::Survival), Reconciled::Agreed);
+    }
+
+    #[test]
+    fn dismount_without_an_acknowledged_base_still_rebases_and_replays() {
+        let world = floor_world(8);
+        let reg = BlockRegistry::new();
+        let server = Vec3::new(0.5, 64.0, 0.5);
+        for ack in [0, 4] {
+            let mut pred = OwnPrediction::new();
+            let mut body = grounded(server + Vec3::new(0.4, 0.2, 0.0));
+            pred.seated(ack);
+            pred.record(ack + 1, &input(ack + 1, 1.0), &body);
+            let mut expected = grounded(server);
+            let cam = crate::camera::Camera::new(server, 1.0);
+            expected.tick(&PlayerIntent::from_input_packet(&input(ack + 1, 1.0)), &cam, &world, &reg, PlayMode::Survival);
+            let result = pred.reconcile(ack, server, &mut body, &world, &reg, PlayMode::Survival);
+            assert!(matches!(result, Reconciled::Snapped { .. }), "ack {ack}: {result:?}");
+            assert!((body.pos - expected.pos).length() < 1e-4, "ack {ack}: pending input replayed from server");
+            assert_eq!(pred.visual_offset(), Vec3::ZERO);
+        }
+    }
+
+    #[test]
+    fn dismount_over_void_keeps_the_server_baseline_and_cannot_jump_from_a_seat() {
+        let world = World::new();
+        let reg = BlockRegistry::new();
+        let server = Vec3::new(0.5, 64.0, 0.5);
+        let mut pred = OwnPrediction::new();
+        let mut body = grounded(server);
+        pred.seated(0);
+        pred.record(1, &input(1, 0.0), &body);
+        let mut jump = input(2, 0.0);
+        jump.jump = true;
+        pred.record(2, &jump, &body);
+        body.pos += Vec3::new(0.4, 0.2, 0.0);
+        pred.reconcile(1, server, &mut body, &world, &reg, PlayMode::Survival);
+        assert!(body.pos.y < server.y, "void dismount falls rather than jumping from synthetic seat grounding");
+        assert!(!body.on_ground);
+        assert_eq!(pred.visual_offset(), Vec3::ZERO);
     }
 
     #[test]

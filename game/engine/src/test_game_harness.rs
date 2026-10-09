@@ -1854,6 +1854,123 @@ mod tests {
         feet
     }
 
+    /// D2c-1: drive only logical ticks with held keys, so steering cannot
+    /// accidentally depend on the frame loop. Death must release the seat.
+    fn tick_ridden_mob(kind: crate::mob::MobType, tag: &str) {
+        use crate::entity::{Position, Ridden};
+        use winit::keyboard::KeyCode;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world(tag);
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        clear_pad(&mut hg, None);
+        let at = hg.state.players[0].player.pos;
+        let mount = crate::entity::spawn_mob(&mut hg.state.ecs, kind, at);
+        crate::riding::mount(&mut hg.state.ecs, mount, &mut hg.state.players[0].ride);
+        hg.state.players[0].riding = Some(mount);
+        hg.state.players[0].camera.yaw = 0.0;
+        hg.state.input.cursor_captured = true;
+        hg.state.input.key_pressed(KeyCode::KeyW);
+        hg.ticks(4);
+        let end = hg.state.ecs.get::<&Position>(mount).unwrap().0;
+        assert!(at.z - end.z > 0.8, "held forward steers from the tick: {at} -> {end}");
+        let body = hg.state.players[0].player.pos;
+        assert!((body.x - end.x).abs() < 1e-4 && (body.z - end.z).abs() < 1e-4);
+        assert!(hg.state.ecs.get::<&Ridden>(mount).is_ok());
+        hg.state.players[0].combat.take_damage_from(100.0, crate::survival::DamageCause::Generic);
+        hg.ticks(1);
+        assert!(hg.state.players[0].riding.is_none(), "death releases the seat before respawn");
+        assert!(hg.state.ecs.get::<&Ridden>(mount).is_err());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_riding_horse_steering_runs_from_ticks_and_death_releases_it() {
+        tick_ridden_mob(crate::mob::MobType::Horse, "harness-riding-horse");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_riding_nostrich_steering_runs_from_ticks_and_death_releases_it() {
+        tick_ridden_mob(crate::mob::MobType::Nostrich, "harness-riding-nostrich");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_riding_cart_follows_from_ticks_and_jump_releases_it() {
+        use crate::entity::{Position, Ridden};
+        use winit::keyboard::KeyCode;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-riding-cart");
+        let feet = clear_pad(&mut hg, None);
+        let cell = (feet[0], feet[1], feet[2]);
+        for z in feet[2] - 4..=feet[2] {
+            hg.state.world.set_block(feet[0], feet[1], z, crate::rail::TRACK);
+        }
+        let cart = crate::cart::spawn_cart(&mut hg.state.ecs, cell);
+        assert_eq!(crate::cart::dispatch_cart(&mut hg.state.ecs, &mut hg.state.world, cell, -glam::Vec3::Z), Some(cart));
+        crate::riding::mount(&mut hg.state.ecs, cart, &mut hg.state.players[0].ride);
+        hg.state.players[0].riding = Some(cart);
+        let before = hg.state.ecs.get::<&Position>(cart).unwrap().0;
+        hg.ticks(4);
+        let after = hg.state.ecs.get::<&Position>(cart).unwrap().0;
+        assert!(before.distance(after) > 0.1, "cart rolls from the tick");
+        assert!(hg.state.players[0].riding.is_some());
+        let body = hg.state.players[0].player.pos;
+        assert!((body.x - after.x).abs() < 1e-4 && (body.z - after.z).abs() < 1e-4);
+        hg.state.input.cursor_captured = true;
+        hg.state.input.key_pressed(KeyCode::Space);
+        hg.ticks(1);
+        assert!(hg.state.players[0].riding.is_none());
+        assert!(hg.state.ecs.get::<&Ridden>(cart).is_err());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_riding_joiner_clicks_a_server_horse_follows_its_mirror_and_sneaks_off() {
+        use crate::entity::{Position, ProtocolId};
+        use winit::keyboard::KeyCode;
+        isolate_saves();
+        let (mut hg, mut server, slot) = joined_window_client("riding-joiner");
+        clear_pad(&mut hg, Some(&mut server));
+        let at = server.server.players[slot].player.pos + glam::Vec3::new(0.0, 0.0, -2.0);
+        let horse = crate::entity::spawn_mob(&mut server.server.ecs, crate::mob::MobType::Horse, at);
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        let id = server.server.ecs.get::<&ProtocolId>(horse).unwrap().0;
+        let at = server.server.ecs.get::<&Position>(horse).unwrap().0;
+        aim_at(&mut hg, at + glam::Vec3::Y);
+        right_click(&mut hg);
+        settle(&mut server, &mut hg);
+        assert_eq!(server.server.players[slot].riding, Some(horse));
+        assert_eq!(hg.state.players[0].mirror_mount, Some(id));
+        hg.state.input.cursor_captured = true;
+        hg.state.input.key_pressed(KeyCode::KeyW);
+        // Real frames can auto-send ten inputs before our explicit send.
+        // Wait for the server's packet budget to reach the held forward
+        // input rather than assuming four fast rounds consumed its backlog.
+        for _ in 0..40 {
+            harness_step(&mut server, &mut hg);
+            if server.server.players[slot].seat_input.forward == 1.0 { break; }
+        }
+        assert_eq!(server.server.players[slot].seat_input.forward, 1.0, "the server consumed held W");
+        let start = server.server.ecs.get::<&Position>(horse).unwrap().0;
+        for _ in 0..4 { harness_step(&mut server, &mut hg); }
+        let end = server.server.ecs.get::<&Position>(horse).unwrap().0;
+        assert!(end.distance(start) > 0.5, "four server steering ticks: {start:?} -> {end:?}");
+        let mirrored = hg.state.remote_mobs.position_of(id).unwrap();
+        let body = hg.state.players[0].player.pos;
+        assert!((body.x - mirrored.x).abs() < 1e-4 && (body.z - mirrored.z).abs() < 1e-4);
+        hg.state.input.key_released(KeyCode::KeyW);
+        hg.state.input.key_pressed(KeyCode::ShiftLeft);
+        for _ in 0..40 {
+            harness_step(&mut server, &mut hg);
+            if hg.state.players[0].mirror_mount.is_none() { break; }
+        }
+        assert!(server.server.players[slot].riding.is_none());
+        assert!(hg.state.players[0].mirror_mount.is_none(), "the server's dismount reached the client");
+        assert_eq!(hg.state.own_prediction.visual_offset(), glam::Vec3::ZERO, "first off-seat state snaps without smoothing");
+        assert!(hg.state.players[0].player.pos.distance(server.server.players[slot].player.pos) < 1e-4, "first off-seat body agrees with the server");
+    }
+
     /// C3b-2-fix (M1) — a joiner right-clicks an empty item frame with its
     /// ONLY diamond block (the REAL frame arm: the request claims it), then,
     /// inside the round trip, right-clicks the floor with the same slot (the

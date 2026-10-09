@@ -318,21 +318,25 @@ pub struct PlayerSlot {
     /// Cleared on Confirm (commission moves onto the villager) or
     /// Cancel.
     pub pending_commission: Option<crate::builder::CommissionDraft>,
-    /// Rail freight (Phase 1, Task 1.5) — the cart entity this player is
-    /// currently RIDING, or `None` when on foot. While `Some`, the per-tick
-    /// follow in `game_loop` pins the player's eye to the cart's seat
-    /// (`cart::rider_eye_position`), normal movement physics + input are
-    /// suppressed (the cart drives the player), and block break/place is gated
-    /// ("you're on the train" — no acting at a distance). Cleared on arrival
-    /// (cart parks), on a jump input (hop off), or defensively if the cart
-    /// entity vanishes. Transient — not persisted (a session that quits
-    /// mid-ride reloads on foot).
+    /// The mount (a rideable mob or a rail cart) in THIS client's sim ECS
+    /// this player is riding, or `None` when on foot. While `Some`, the
+    /// tick steers the mount from this player's input and pins the body to
+    /// the seat (`riding::steer` / `riding::follow`, MP-D2c-1), movement
+    /// physics is skipped, and block break/place is gated ("you're on the
+    /// train" — no acting at a distance). Cleared by the dismount rules
+    /// (`riding::Dismount`). Transient — not persisted (a session that quits
+    /// mid-ride reloads on foot). Always `None` for a joiner, whose mount is
+    /// the server's ([`Self::mirror_mount`]).
     pub riding: Option<hecs::Entity>,
-    /// Nostrich ride physics state (see `nostrich_ride`): current speed (b/s) and
-    /// drifted heading `(x, z)`. Transient; reset to `0` on mount + dismount. Only
-    /// meaningful while `riding` a Nostrich.
-    pub ride_speed: f32,
-    pub ride_heading: glam::Vec2,
+    /// The ride's own state (the Nostrich's wind-up speed and drifted
+    /// heading). Transient; fresh on each mount.
+    pub ride: crate::riding::RideState,
+    /// MP-D2c-1 — a joiner's seat: the server's `ProtocolId` of the mount it
+    /// rides (`StateUpdatePacket.own_riding`, server-driven, so a forced
+    /// dismount reaches it). The body follows the mirrored mount at the
+    /// seat and is not predicted; `None` on foot and always for a
+    /// non-joined slot.
+    pub mirror_mount: Option<u32>,
     /// #7 — WorldEdit region selection corners + clipboard. Transient (not
     /// persisted); single-player power-user editing.
     pub worldedit: crate::worldedit::WorldEditSession,
@@ -343,6 +347,12 @@ pub struct PlayerSlot {
 }
 
 impl PlayerSlot {
+    /// On a mount or cart: one in this client's own sim ([`Self::riding`])
+    /// or, joined, the server's ([`Self::mirror_mount`]).
+    pub fn seated(&self) -> bool {
+        self.riding.is_some() || self.mirror_mount.is_some()
+    }
+
     pub fn new(index: usize, spawn: Vec3, aspect: f32) -> Self {
         Self {
             player: Player::new(spawn),
@@ -409,8 +419,8 @@ impl PlayerSlot {
             open_commission_villager: None,
             pending_commission: None,
             riding: None,
-            ride_speed: 0.0,
-            ride_heading: glam::Vec2::ZERO,
+            ride: crate::riding::RideState::default(),
+            mirror_mount: None,
             worldedit: crate::worldedit::WorldEditSession::default(),
             last_grave: None,
         }

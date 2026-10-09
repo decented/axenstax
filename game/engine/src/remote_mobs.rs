@@ -30,8 +30,11 @@
 //! [`RemoteMobs::ray_target`] tells the caller a click landed on a mirrored
 //! mob (the crosshair ray, clamped to the first block), and
 //! [`MirrorTarget::right_click_action`] what a right-click with what is in
-//! hand asks for. Riding and villager trading stay refused with a toast
-//! (D2c).
+//! hand asks for. Riding is a request too (MP-D2c-1, `InteractKind::Mount`,
+//! on a steed or a parked cart — [`RemoteMobs::parked_cart_at`]): the server
+//! seats the joiner and steers the mount from its input, and the joiner's
+//! body follows the mirrored mount ([`RemoteMobs::position_of`]). A steed's
+//! pack (D2c-2) and villager trading (D2c-3) stay refused with a toast.
 //!
 //! **No private mobs.** [`purge_private_mobs`] removes any mob that appeared
 //! in a joiner's own sim ECS (chunk scatter, a spawn egg, a command): the
@@ -99,9 +102,12 @@ pub struct MirrorTarget {
 pub enum MirrorClick {
     /// Ask the server for this interaction (`EntityInteract`).
     Interact(crate::protocol::InteractKind),
-    /// Riding (and a steed's pack) or villager trading: not yet for a joiner
-    /// (D2c) — refused here with [`JOINED_INTERACTION_TOAST`].
+    /// Villager trading: not yet for a joiner (D2c-3) — refused here with
+    /// [`JOINED_INTERACTION_TOAST`].
     NotYet,
+    /// A steed's pack, fitted or opened: not yet for a joiner (D2c-2) —
+    /// refused here with [`JOINED_PACK_TOAST`].
+    PackNotYet,
 }
 
 impl MirrorTarget {
@@ -111,13 +117,17 @@ impl MirrorTarget {
     /// a passive mob; breeding food (horse family only while sneaking,
     /// never a baby); a bucket on a cow, shears on a sheep (none at all if
     /// the server says it isn't ready, FU3); companion food
-    /// (a Cat Treat on a cat); a steed (anything in hand: pack or mount —
-    /// D2c); a Lead taken off a tethered mob (anything but a Lead in hand);
-    /// a villager (talk / trade — D2c); a Bone on a wolf (Mixed Berries on a
-    /// Nostrich never get there: it is a steed, mounted first, as in
-    /// single-player); an empty hand on a tamed pet (sit / follow — the
-    /// server checks it is ours). `None`: the item's own use goes ahead — eating, a
-    /// bow, a bucket at water, a block beside a cow (review D2a LOW-2).
+    /// (a Cat Treat on a cat); a steed: its pack (a Chest in hand on a
+    /// Donkey or Mule, or sneak with an empty hand on one somebody keeps —
+    /// refused, D2c-2; the joiner can't see whether it carries a pack, so
+    /// `TAMED` stands in for single-player's kept-with-a-pack test), else
+    /// mount it (anything in hand, MP-D2c-1); a Lead taken off a tethered mob
+    /// (anything but a Lead in hand); a villager (talk / trade — D2c-3); a
+    /// Bone on a wolf (Mixed Berries on a Nostrich never get there: it is a
+    /// steed, mounted first, as in single-player); an empty hand on a tamed
+    /// pet (sit / follow — the server checks it is ours). `None`: the item's
+    /// own use goes ahead — eating, a bow, a bucket at water, a block beside
+    /// a cow (review D2a LOW-2).
     pub fn right_click_action(
         &self,
         held: Option<&crate::item::Item>,
@@ -163,7 +173,13 @@ impl MirrorTarget {
             return ask(InteractKind::Tame);
         }
         if crate::mob::is_rideable(kind) {
-            return Some(MirrorClick::NotYet);
+            if crate::mob::can_carry_pack(kind) {
+                let chest = matches!(held, Some(Item::Block(b)) if *b == crate::block::CHEST);
+                if chest || (sneak && held.is_none() && self.tamed) {
+                    return Some(MirrorClick::PackNotYet);
+                }
+            }
+            return ask(InteractKind::Mount);
         }
         if self.tethered && mat != Some(MaterialId::Lead) {
             return ask(InteractKind::LeadDetach);
@@ -359,6 +375,41 @@ impl RemoteMobs {
         })
     }
 
+    /// MP-D2c-1 — where wire id `id` is drawn now (a joiner's seat follows
+    /// its mount here), if mirrored.
+    pub fn position_of(&self, id: u32) -> Option<Vec3> {
+        let e = *self.ids.get(&id)?;
+        self.ecs.get::<&Position>(e).ok().map(|p| p.0)
+    }
+
+    /// MP-D2c-1 — the speed (b/s) of the mirrored Nostrich `id` as the
+    /// server last moved it (its wire velocity), for a joiner's speedometer;
+    /// `None` for anything else.
+    pub fn nostrich_speed(&self, id: u32) -> Option<f32> {
+        let e = *self.ids.get(&id)?;
+        if self.ecs.get::<&MobKind>(e).ok()?.0 != MobType::Nostrich {
+            return None;
+        }
+        let v = self.ecs.get::<&Mirrored>(e).ok()?.vel;
+        Some(glam::Vec2::new(v.x, v.z).length() * 20.0)
+    }
+
+    /// MP-D2c-1 — the server cart standing on track cell `cell` (its
+    /// position as the server last sent it — the mirror's own `CartData`
+    /// stays parked where it was spawned): the wire id a joiner's right-click
+    /// on that track asks to ride (`InteractKind::Mount`). Moving or parked
+    /// the server decides; one riding it already is left out.
+    pub fn parked_cart_at(&self, cell: (i32, i32, i32)) -> Option<u32> {
+        self.ecs
+            .query::<(&crate::cart::CartData, &Mirrored)>()
+            .iter()
+            .find(|(_, (_, m))| {
+                m.flags & entity_flags::RIDDEN == 0
+                    && (m.to.x.floor() as i32, m.to.y.floor() as i32, m.to.z.floor() as i32) == cell
+            })
+            .map(|(_, (_, m))| m.id)
+    }
+
     /// The mirror entity for wire id `id` (test hook).
     #[cfg(test)]
     fn entity(&self, id: u32) -> Option<hecs::Entity> {
@@ -468,11 +519,13 @@ pub fn purge_private_mobs(ecs: &mut hecs::World) -> usize {
     mobs.len()
 }
 
-/// The toast a joiner sees when it tries to ride a steed (or fit its pack)
-/// or talk to a villager on someone else's world: riding needs a server-side
-/// mount with prediction, trading an offer-list flow (D2c).
-pub const JOINED_INTERACTION_TOAST: &str =
-    "Riding and trading aren't available in someone else's world yet.";
+/// The toast a joiner sees when it tries to talk to a villager on someone
+/// else's world: quests and trading need a server-side flow (D2c-3).
+pub const JOINED_INTERACTION_TOAST: &str = "Trading isn't available in someone else's world yet.";
+
+/// MP-D2c-1 — the toast a joiner sees when it tries to fit or open a steed's
+/// pack on someone else's world (D2c-2).
+pub const JOINED_PACK_TOAST: &str = "Packs work in your own worlds for now.";
 
 // C3c-3r — what a joiner sees when it tries a Plan or economy action the
 // server can't mirror yet. Each refusal changes nothing on the client.
@@ -717,8 +770,9 @@ mod tests {
     }
 
     /// MP-D2b — a right-click on a mirror asks the server for what it would
-    /// do in single-player; only riding and trading stay refused (D2c), and
-    /// the item's own use goes ahead (review D2a LOW-2).
+    /// do in single-player (MP-D2c-1: riding too); only a steed's pack and
+    /// trading stay refused (D2c-2/-3), and the item's own use goes ahead
+    /// (review D2a LOW-2).
     #[test]
     fn a_right_click_asks_for_the_single_player_interaction() {
         use crate::crafting::{ToolMaterial, ToolType};
@@ -744,18 +798,29 @@ mod tests {
         assert_eq!(target(MobType::Chicken).right_click_action(Some(&shears), false), None);
         assert_eq!(target(MobType::Wolf).right_click_action(Some(&mat(MaterialId::Bone)), false), ask(Tame));
         // A Nostrich is a steed: single-player mounts it on any right-click
-        // before its berry-tame branch is reached, so a joiner's is D2c too.
+        // before its berry-tame branch is reached, so a joiner's mounts too.
         assert_eq!(
             target(MobType::Nostrich).right_click_action(Some(&mat(MaterialId::Berries)), false),
-            Some(MirrorClick::NotYet)
+            ask(Mount)
         );
         assert_eq!(target(MobType::Cat).right_click_action(Some(&mat(MaterialId::CatTreat)), false), ask(Tame));
         let pet = MirrorTarget { tamed: true, ..target(MobType::Wolf) };
         assert_eq!(pet.right_click_action(None, false), ask(SitToggle), "sit / follow");
-        // Riding and trading: D2c.
+        // MP-D2c-1 — any steed is ridden by request, whatever is in hand.
         let stone = Item::Block(crate::block::STONE);
+        assert_eq!(target(MobType::Horse).right_click_action(None, false), ask(Mount));
+        assert_eq!(target(MobType::Mule).right_click_action(Some(&stone), false), ask(Mount));
+        // A steed's pack: D2c-2. A Chest on a Donkey or Mule, or sneak with
+        // an empty hand on one somebody keeps (TAMED) — not on a Horse,
+        // which carries none, and not on a wild one (single-player mounts it).
+        let chest = Item::Block(crate::block::CHEST);
+        let kept_donkey = MirrorTarget { tamed: true, ..target(MobType::Donkey) };
+        assert_eq!(target(MobType::Donkey).right_click_action(Some(&chest), false), Some(MirrorClick::PackNotYet));
+        assert_eq!(kept_donkey.right_click_action(None, true), Some(MirrorClick::PackNotYet));
+        assert_eq!(target(MobType::Donkey).right_click_action(None, true), ask(Mount));
+        assert_eq!(target(MobType::Horse).right_click_action(Some(&chest), false), ask(Mount));
+        // Trading: D2c-3.
         assert_eq!(target(MobType::Villager).right_click_action(Some(&stone), false), Some(MirrorClick::NotYet));
-        assert_eq!(target(MobType::Horse).right_click_action(None, false), Some(MirrorClick::NotYet));
         // A bucket aimed past a fish scoops water, as in single-player.
         assert_eq!(target(MobType::Fish).right_click_action(Some(&mat(MaterialId::Bucket)), false), None);
     }
@@ -795,6 +860,38 @@ mod tests {
         let hit = m.ray_target(Vec3::new(0.0, 64.0, 0.0), Vec3::new(0.0, 0.0, -1.0), 5.0).expect("on the cow");
         assert!(hit.product_not_ready);
         assert_eq!(hit.right_click_action(Some(&bucket), false), None);
+    }
+
+    /// MP-D2c-1 — a joiner's click on a track asks to ride the server cart
+    /// standing there (by where the server last put it — the mirror's own
+    /// `CartData` stays at its spawn cell), not one already carrying a
+    /// rider; its seat follows the mount where the mirror draws it; and its
+    /// speedometer reads a mirrored Nostrich's wire speed.
+    #[test]
+    fn a_cart_on_a_track_cell_a_seat_and_a_nostrichs_speed_read_off_the_mirror() {
+        let mut m = RemoteMobs::default();
+        let at = Vec3::new(3.5, 64.1, -2.5);
+        m.apply(&[spawn(7, EntityKind::Cart, at)], &[], &[]);
+        assert_eq!(m.parked_cart_at((3, 64, -3)), Some(7));
+        assert_eq!(m.parked_cart_at((4, 64, -3)), None);
+        // The server moved it a cell on: found where it is now.
+        let on = Vec3::new(4.5, 64.1, -2.5);
+        m.apply(&[], &[update(7, on, 0)], &[]);
+        assert_eq!(m.parked_cart_at((4, 64, -3)), Some(7));
+        assert_eq!(m.parked_cart_at((3, 64, -3)), None);
+        m.apply(&[], &[update(7, on, entity_flags::RIDDEN)], &[]);
+        assert_eq!(m.parked_cart_at((4, 64, -3)), None, "somebody rides it");
+
+        m.advance(1.0);
+        assert_eq!(m.position_of(7), Some(on), "the seat follows where it is drawn");
+        assert_eq!(m.position_of(8), None);
+
+        let bird = Vec3::new(0.0, 64.0, 0.0);
+        m.apply(&[spawn(9, EntityKind::Nostrich, bird)], &[], &[]);
+        m.apply(&[], &[EntityUpdate { vx: 0.3, vz: 0.4, ..update(9, bird, entity_flags::RIDDEN) }], &[]);
+        let speed = m.nostrich_speed(9).expect("a Nostrich");
+        assert!((speed - 10.0).abs() < 1e-4, "0.5 b/tick = 10 b/s: {speed}");
+        assert_eq!(m.nostrich_speed(7), None, "a cart has no speedometer");
     }
 
     #[test]

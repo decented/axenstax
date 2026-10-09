@@ -290,6 +290,10 @@ fn collect_live(ecs: &hecs::World, tick: u64) -> BTreeMap<u32, LiveEntity> {
         if ecs.get::<&crate::tether::Tethered>(e).is_ok() {
             flags |= entity_flags::TETHERED;
         }
+        // MP-D2c-1 — somebody rides it.
+        if ecs.get::<&crate::entity::Ridden>(e).is_ok() {
+            flags |= entity_flags::RIDDEN;
+        }
         // FU3 (FU1 verify N8) — by the rule the server milks and shears by.
         if matches!(kind.0, crate::mob::MobType::Cow | crate::mob::MobType::Sheep)
             && !crate::mob_interact::product_ready(ecs, e, tick)
@@ -323,6 +327,8 @@ fn collect_live(ecs: &hecs::World, tick: u64) -> BTreeMap<u32, LiveEntity> {
             y: pos.0.y,
             z: pos.0.z,
             yaw: cart.facing,
+            // MP-D2c-1 — a cart carrying a rider.
+            flags: if ecs.get::<&crate::entity::Ridden>(e).is_ok() { entity_flags::RIDDEN } else { 0 },
             ..Default::default()
         };
         live.insert(pid.0, LiveEntity { entity: e, class: Class::Cart, update });
@@ -578,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_carry_hurt_baby_tamed_satoshi_and_tethered() {
+    fn flags_carry_hurt_baby_tamed_satoshi_tethered_and_ridden() {
         let (mut ecs, mut b) = fresh();
         let calf = entity::spawn_mob(&mut ecs, MobType::Cow, Vec3::new(0.0, 64.0, 0.0));
         ecs.insert_one(calf, crate::breeding::Baby { adult_at_tick: 99 }).unwrap();
@@ -595,6 +601,12 @@ mod tests {
             crate::tether::Tethered { target: crate::tether::TetherTarget::Player(0) },
         )
         .unwrap();
+        // MP-D2c-1 — a ridden steed and a ridden cart.
+        let steed = entity::spawn_mob(&mut ecs, MobType::Horse, Vec3::new(10.0, 64.0, 0.0));
+        ecs.insert_one(steed, entity::Ridden).unwrap();
+        let cart = crate::cart::spawn_cart(&mut ecs, (12, 64, 0));
+        ecs.insert_one(cart, entity::Ridden).unwrap();
+        let idle_cart = crate::cart::spawn_cart(&mut ecs, (14, 64, 0));
 
         let tick = b.diff(&mut ecs, 0);
         let flags = |e: hecs::Entity| {
@@ -606,6 +618,9 @@ mod tests {
         assert_eq!(flags(pup), entity_flags::TAMED);
         assert_eq!(flags(guide), entity_flags::SATOSHI);
         assert_eq!(flags(leashed), entity_flags::TETHERED);
+        assert_eq!(flags(steed), entity_flags::RIDDEN);
+        assert_eq!(flags(cart), entity_flags::RIDDEN);
+        assert_eq!(flags(idle_cart), 0);
 
         // The flash ending is a change: one update clears the HURT bit.
         for _ in 0..crate::combat::DAMAGE_FLASH_TICKS {

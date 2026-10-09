@@ -66,6 +66,9 @@ pub enum InteractNote {
     /// Review D2b MEDIUM-2 — the server does not simulate what this needs
     /// (breeding, Leads, pets following): refused, nothing used.
     NotOnThisServer = 17,
+    /// MP-D2c-1 — someone is already riding that steed or cart: one rider a
+    /// mount.
+    MountTaken = 18,
 }
 
 impl InteractNote {
@@ -94,6 +97,7 @@ impl InteractNote {
             15 => SignInToTame,
             16 => NotYourPet,
             17 => NotOnThisServer,
+            18 => MountTaken,
             _ => None,
         }
     }
@@ -138,6 +142,7 @@ impl InteractNote {
             SignInToTame => s("Sign in to tame animals in someone else's world.", 3),
             NotYourPet => s("That's not your pet.", 2),
             NotOnThisServer => s("This server doesn't support that yet.", 3),
+            MountTaken => s("Someone's already riding that.", 2),
         }
     }
 
@@ -182,6 +187,11 @@ impl Interaction {
 
     pub fn refused(note: InteractNote) -> Self {
         Self { done: false, consume: 0, give: Vec::new(), note, challenge: None, tamed: false }
+    }
+
+    /// MP-D2c-1 — it happened, and used nothing (a mount; a cart dispatched).
+    pub fn accepted() -> Self {
+        Self::done(0, InteractNote::None)
     }
 }
 
@@ -597,7 +607,9 @@ pub fn needs_animal_life(action: InteractKind) -> bool {
         | InteractKind::LeadAttach
         | InteractKind::SitToggle
         | InteractKind::LeadToPost { .. } => true,
-        InteractKind::Shear | InteractKind::Milk | InteractKind::LeadDetach => false,
+        // MP-D2c-1 — riding needs no species AI: the server's own riding
+        // pass steers a mount, a dedicated server's too.
+        InteractKind::Shear | InteractKind::Milk | InteractKind::LeadDetach | InteractKind::Mount => false,
     }
 }
 
@@ -622,7 +634,9 @@ pub fn run(
         InteractKind::LeadAttach => lead_attach(ecs, target, kind, held, actor),
         InteractKind::LeadDetach => lead_detach(ecs, target, held),
         InteractKind::SitToggle => sit_toggle(ecs, target, kind, held, actor),
-        InteractKind::LeadToPost { .. } => None,
+        // A Lead on a post names no mob (`lead_to_post`); a mount is the
+        // server's riding pass (`riding`), not a mob interaction.
+        InteractKind::LeadToPost { .. } | InteractKind::Mount => None,
     }
 }
 
@@ -645,7 +659,7 @@ mod tests {
 
     #[test]
     fn notes_round_trip_the_wire_and_unknown_codes_read_as_nothing() {
-        for code in 0..=17u8 {
+        for code in 0..=18u8 {
             assert_eq!(InteractNote::from_wire(code).to_wire(), code);
         }
         assert_eq!(InteractNote::from_wire(200), InteractNote::None);

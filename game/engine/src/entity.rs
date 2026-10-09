@@ -126,7 +126,7 @@ pub const ITEM_MAGNET_PULL: f32 = 0.16;
 // --- Physics ---
 
 const GRAVITY: f32 = 0.08;
-const DRAG: f32 = 0.91;
+pub(crate) const DRAG: f32 = 0.91;
 /// Net upward lift (blocks/tick²) applied to a submerged entity on top of
 /// cancelling gravity, so a mob knocked into water rises to the surface and
 /// swims out rather than drowning at the lakebed (2026-05-30 playtest).

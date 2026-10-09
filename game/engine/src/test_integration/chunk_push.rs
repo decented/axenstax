@@ -480,9 +480,11 @@ fn an_outbox_overflow_is_healed_by_pushing_the_chunks_again() {
     }
 }
 
-/// A ride along +x: the joiner's inputs carry no movement (`hold_still`), so
-/// its SERVER body stays at the start while its client body goes 21 columns
-/// and back, its streamer unloading round the client body every tick.
+/// A client body that leaves its server body behind: the joiner's inputs
+/// carry no movement, so its SERVER body stays at the start while its client
+/// body goes 21 columns along +x and back, its streamer unloading round the
+/// client body every tick. (A client-side ride did this until MP-D2c-1 put
+/// rides on the server; the push must still follow the server body.)
 /// Returns the columns it let go of.
 fn ride(hs: &mut HostedServer, j: &mut Joiner, rd: i32, keep_near_server: bool) -> usize {
     let start = j.column(hs);
@@ -490,8 +492,15 @@ fn ride(hs: &mut HostedServer, j: &mut Joiner, rd: i32, keep_near_server: bool) 
     let legs = (0..=21).chain((0..21).rev());
     for step in legs {
         for _ in 0..2 {
-            let mut input = j.input();
-            crate::prediction::hold_still(&mut input);
+            let input = crate::protocol::InputPacket {
+                move_forward: 0.0,
+                move_right: 0.0,
+                sprint: false,
+                sneak: false,
+                jump: false,
+                toggle_flight: false,
+                ..j.input()
+            };
             j.rc.send_input(&input).expect("connected");
             hs.tick();
             j.take_in();

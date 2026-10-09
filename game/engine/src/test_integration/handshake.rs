@@ -248,7 +248,8 @@ fn protocol_version_is_the_pinned_value() {
     //   `ItemAction::Attach` (= 11), `Detach` (= 12),
     //   `StateUpdatePacket.attachment_changes` — face attachments live in the
     //   server's world and stream to joiners.
-    assert_eq!(protocol::PROTOCOL_VERSION, 84);
+    // v85 (D2c-1): Mount, RIDDEN/SEATED, StateUpdatePacket.own_riding.
+    assert_eq!(protocol::PROTOCOL_VERSION, 85);
 }
 
 #[test]

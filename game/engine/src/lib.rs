@@ -372,6 +372,8 @@ mod remote_client;
 mod remote_entities;
 mod entity_broadcast;
 mod remote_mobs;
+// MP-D2c-1 — one riding rule, per tick, for every seat (single-player, host, server).
+mod riding;
 mod health_sync;
 mod joiner_actions;
 mod joiner_inventory;

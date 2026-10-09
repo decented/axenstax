@@ -273,6 +273,25 @@ pub struct ServerPlayer {
     /// last broadcast (`HostedServer::refuse_use`), sent once each in its
     /// next `StateUpdate` (`refused_uses`). Fresh per attach.
     pub refused_uses: Vec<crate::protocol::RefusedUse>,
+    /// MP-D2c-1 — the mount (a rideable mob or a cart, in this server's ECS)
+    /// this server-simulated player rides, seated by its `Mount` request.
+    /// While `Some` its inputs walk nothing: the latest steers the mount
+    /// ([`Self::seat_input`]) right before entity physics, and after physics
+    /// the body is pinned to the seat (`riding::follow`) — no `Player::tick`,
+    /// speed cap or entity push. Sent to its client as
+    /// `StateUpdatePacket.own_riding`. Always `None` for a local slot (a
+    /// host's own seat is its client's).
+    pub riding: Option<hecs::Entity>,
+    /// MP-D2c-1 — the ride's own state (the Nostrich's wind-up).
+    pub ride: crate::riding::RideState,
+    /// MP-D2c-1 — what the latest input applied asks of the mount (its
+    /// movement axes, yaw, sneak, held jump). Held between inputs, as keys
+    /// are held.
+    pub seat_input: crate::riding::SeatInput,
+    /// MP-D2c-1 — a host's local slot is seated (its client says so each
+    /// tick, `HostedServer::sync_local_seats`): broadcast as
+    /// `player_flags::SEATED`.
+    pub local_seated: bool,
 }
 
 /// MP-D2b — a client death sweep's kill attribution (single-player, or a
@@ -410,6 +429,25 @@ pub fn player_anim_fields(speed: f32, on_ground: bool, sneak: bool, acting: bool
     (anim_state, flags)
 }
 
+/// MP-D2c-1 — steer every seated joiner's mount one tick from its latest
+/// input (`riding::steer`, the rule every seat runs): right before entity
+/// physics, wherever that runs — `GameServer::tick` on a world the server
+/// owns, the host client's tick on a lent one (`HostedServer::steer_joiner_seats`).
+/// A dismount gesture (sneak, a sinking Nostrich, a jump off a cart) gets the
+/// rider off and onto its feet. A rider dead or gone is left to the follow
+/// (`GameServer::follow_seats`).
+pub fn steer_seats(players: &mut [ServerPlayer], ecs: &mut hecs::World, world: &World, registry: &BlockRegistry) {
+    for sp in players.iter_mut() {
+        let Some(mount) = sp.riding else { continue };
+        if !sp.is_present_and_alive() {
+            continue;
+        }
+        if crate::riding::steer(ecs, world, mount, &sp.seat_input, &mut sp.ride).is_some() {
+            sp.dismount(ecs, world, registry);
+        }
+    }
+}
+
 /// Build the broadcast PlayerState for one player. Single source of truth for
 /// the per-player state-collection logic used by HostedServer::broadcast_state
 /// and exercised directly by integration tests.
@@ -435,7 +473,15 @@ pub fn collect_player_state(sp: &ServerPlayer, idx: u32) -> crate::protocol::Pla
     } else {
         (sp.last_move_mag, true)
     };
-    let (anim_state, flags) = player_anim_fields(speed, on_ground, sp.last_sneak, sp.last_acting);
+    let (mut anim_state, mut flags) = player_anim_fields(speed, on_ground, sp.last_sneak, sp.last_acting);
+    // MP-D2c-1 — a seated rider sits still on its mount (its sneak steers a
+    // Nostrich's drift; it is not a crouch), at the seat its body is pinned
+    // to. No sit pose is drawn yet: `SEATED` says which it is.
+    if sp.seated() {
+        use crate::protocol::player_flags as pf;
+        anim_state = 0;
+        flags = (flags & pf::SWINGING) | pf::SEATED;
+    }
     crate::protocol::PlayerState {
         player_index: idx,
         x: sp.player.pos.x,
@@ -515,6 +561,25 @@ impl ServerPlayer {
             last_window_op_seq: 0,
             block_views: Default::default(),
             refused_uses: Vec::new(),
+            riding: None,
+            ride: Default::default(),
+            seat_input: Default::default(),
+            local_seated: false,
+        }
+    }
+
+    /// MP-D2c-1 — on a mount: one the server holds for this joiner, or a
+    /// host's own seat (its client's).
+    pub fn seated(&self) -> bool {
+        self.riding.is_some() || self.local_seated
+    }
+
+    /// MP-D2c-1 — this joiner's ride is over: the seat empty, the mount free
+    /// (`riding::unmount`) and the body on its feet (`riding::settle`).
+    pub fn dismount(&mut self, ecs: &mut hecs::World, world: &World, registry: &BlockRegistry) {
+        if let Some(mount) = self.riding.take() {
+            crate::riding::unmount(ecs, mount, &mut self.ride);
+            crate::riding::settle(&mut self.player, world, registry);
         }
     }
 
@@ -922,6 +987,12 @@ pub struct GameServer {
     /// ([`Self::forget_released_joiners`]), inside the lend window on a
     /// lending host (a release can happen outside it — an operator kick).
     pub released_joiners: Vec<(usize, u32)>,
+    /// MP-D2c-1 — the mounts of joiners released since the last tick
+    /// (`HostedServer::release_slot` takes the seat with the slot): freed —
+    /// their `Ridden` taken off — at the top of the next tick, in this
+    /// server's ECS (inside the lend window on a lending host; a release can
+    /// happen outside it).
+    pub released_mounts: Vec<hecs::Entity>,
     /// Review D2b MEDIUM-2 — is the animal life a joiner's interactions rely
     /// on simulated on this server's world: breeding (`breeding::tick_breeding`),
     /// Leads (`tether::tick_tethers`) and pets following, sitting and
@@ -1006,6 +1077,7 @@ impl GameServer {
             tables_gone: Default::default(),
             next_attach_gen: 0,
             released_joiners: Vec::new(),
+            released_mounts: Vec::new(),
             animal_life_simulated: false,
             render_distance: crate::graphics_settings::DEFAULT_RENDER_DISTANCE,
             difficulty: crate::survival::Difficulty::Normal,
@@ -1376,6 +1448,10 @@ impl GameServer {
         // left leaves no slot-keyed credit or grudge for its slot's next
         // occupant (on a lending host this is the host's real ECS).
         self.forget_released_joiners();
+        // MP-D2c-1 — and a departed rider's mount is free again.
+        for mount in std::mem::take(&mut self.released_mounts) {
+            let _ = self.ecs.remove_one::<crate::entity::Ridden>(mount);
+        }
         // Per-world active-tick clock (Goal 1) — mirrors GameState::tick so
         // hosted / headless (TestHost) worlds accrue the same world-clock stat
         // (total_ticks). Source of truth on disk is WorldMeta.
@@ -1662,7 +1738,12 @@ impl GameServer {
         }
 
         // Entity physics (the host client's, on a lent world — see MobAi).
+        // MP-D2c-1 — the joiners' seats steer their mounts first, from their
+        // latest input: right before physics integrates the velocity, after
+        // every system above that writes one (`steer_seats`). A lent world's
+        // are steered by its host client, before its own physics step.
         if self.runs(SimSystem::EntityPhysics) {
+            steer_seats(&mut self.players, &mut self.ecs, &self.world, &self.registry);
             crate::entity::tick_entities(&mut self.ecs, &self.world, &self.registry);
         }
 
@@ -1794,6 +1875,11 @@ impl GameServer {
             crate::cart::tick_carts(&mut self.ecs, &mut self.world);
         }
 
+        // MP-D2c-1 — every joiner's seat, now its mount has moved (entity
+        // physics, here or on the host client; the cart roll above): the
+        // body pinned to the seat, and the rides that are over ended.
+        self.follow_seats();
+
         // C3c-3b — laid Blueprints develop in the sun on the server's world
         // (on a lent one, here rather than on the host client: one owner,
         // `SimSystem::Develop`). Each flip is logged on the world, so it
@@ -1810,8 +1896,9 @@ impl GameServer {
 
         // Per-player entity collision + combat timers
         for i in 0..self.players.len() {
-            // A dead body runs no physics (MP-A3): nothing shoves it.
-            if !self.players[i].combat.dead {
+            // A dead body runs no physics (MP-A3): nothing shoves it. Nor a
+            // seated one: its mount holds it (D2c-1).
+            if !self.players[i].combat.dead && self.players[i].riding.is_none() {
                 let player = &mut self.players[i].player;
                 crate::entity::push_player_from_entities(
                     &self.ecs,
@@ -1866,6 +1953,24 @@ impl GameServer {
         // needs the attacker this sweep would discard (Q1 trap 2).
         if self.runs(SimSystem::DespawnDead) {
             self.despawn_dead_with_drops();
+        }
+
+        // MP-D2c-1 — last: a joiner who died this tick, by any path (a hit
+        // landed above, its metabolism, a fall or its own report), is off
+        // its mount before this tick's broadcast says where it is.
+        self.end_dead_riders();
+    }
+
+    /// MP-D2c-1 — a rider's death ends its ride, whatever killed it: the
+    /// seat empty (its client hears it through `own_riding`), the mount free,
+    /// and the body down where it fell. Run at the end of every tick (and the
+    /// seat follow ends a dead rider's ride too), so neither the follow nor a
+    /// respawn ever pins a dead body back to the mount.
+    pub fn end_dead_riders(&mut self) {
+        for sp in &mut self.players {
+            if sp.combat.dead && sp.riding.is_some() {
+                sp.dismount(&mut self.ecs, &self.world, &self.registry);
+            }
         }
     }
 
@@ -1997,6 +2102,14 @@ impl GameServer {
                     sp.intent_queue.clear();
                     break;
                 }
+                // MP-D2c-1 — seated, the input walks nothing: it steers the
+                // mount (the latest one applied, right before entity
+                // physics, `steer_seats`), and the body is pinned to the
+                // seat after physics (`follow_seats`).
+                if sp.riding.is_some() {
+                    sp.seat_input = crate::riding::SeatInput::from_intent(&input.intent, input.yaw);
+                    continue;
+                }
                 let pre = sp.player.pos;
                 // Server has no GPU camera; construct a throwaway one from the
                 // look this input was simulated with on the client.
@@ -2053,6 +2166,45 @@ impl GameServer {
         }
 
         self.tick_player_survival();
+    }
+
+    /// MP-D2c-1 — the seat follow for every joiner the server seats, once a
+    /// tick after entity physics and the cart roll (`riding::follow`): the
+    /// body pinned to the seat, at rest, no fall accruing. A ride ends — the
+    /// mount freed, the body set down (`riding::settle`) — when the cart
+    /// parks, the mount is gone or dead, or the rider has died or left.
+    /// Its client hears it through `own_riding`.
+    fn follow_seats(&mut self) {
+        for sp in &mut self.players {
+            let Some(mount) = sp.riding else { continue };
+            if sp.combat.dead {
+                sp.dismount(&mut self.ecs, &self.world, &self.registry);
+                continue;
+            }
+            if !sp.is_in_world() {
+                sp.riding = None;
+                crate::riding::unmount(&mut self.ecs, mount, &mut sp.ride);
+                continue;
+            }
+            match crate::riding::follow(&self.ecs, mount, &mut sp.player) {
+                crate::riding::Follow::Seated { .. } => {}
+                crate::riding::Follow::Arrived { .. } | crate::riding::Follow::Gone => {
+                    sp.dismount(&mut self.ecs, &self.world, &self.registry);
+                }
+            }
+        }
+    }
+
+    /// MP-D2c-1 — seat joiner `i` on `mount` (checked: `riding::may_mount`,
+    /// reach): `Ridden` on the mount, a fresh ride, held keys forgotten. The
+    /// body is pinned to the seat at once, so this tick's broadcast already
+    /// shows it seated.
+    pub fn seat(&mut self, i: usize, mount: hecs::Entity) {
+        let Some(sp) = self.players.get_mut(i) else { return };
+        sp.riding = Some(mount);
+        sp.seat_input = crate::riding::SeatInput::default();
+        crate::riding::mount(&mut self.ecs, mount, &mut sp.ride);
+        let _ = crate::riding::follow(&self.ecs, mount, &mut sp.player);
     }
 
     /// Generate the unloaded columns round each server-simulated body in the
@@ -2410,6 +2562,12 @@ impl GameServer {
         let sp = &mut self.players[idx];
         if !sp.combat.dead || sp.dead_ticks < MIN_DEAD_TICKS_BEFORE_RESPAWN {
             return None;
+        }
+        // MP-D2c-1 — a respawn never keeps a seat (its death already ended
+        // the ride, `end_dead_riders`; this is the backstop): the follow
+        // must not pin the body back to the mount.
+        if let Some(mount) = sp.riding.take() {
+            crate::riding::unmount(&mut self.ecs, mount, &mut sp.ride);
         }
         sp.combat.respawn();
         sp.combat.just_died = false;

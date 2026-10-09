@@ -294,6 +294,28 @@ fn swap_parts(server: &mut crate::server::GameServer, parts: &mut SimParts<'_>) 
     std::mem::swap(&mut server.loaded_columns, parts.loaded_columns);
 }
 
+/// MP-D2c-1 — the host client's entity-physics step ([`SimSystem::EntityPhysics`],
+/// the host client's on a lent world): the joiners' seats the server holds
+/// steer their mounts from their latest input
+/// ([`HostedServer::steer_joiner_seats`]) right before `entity::tick_entities`
+/// moves them — after every velocity writer the client ran before it (mob
+/// AI, species AI, tethers) — so a joiner's steering lands before the
+/// physics step that integrates it, as on a world the server owns
+/// (`GameServer::tick`). `hs`: the embedded server, steered only while it
+/// lends this world. The client's own seats are steered by its caller just
+/// before (`GameState::steer_own_seats`).
+pub(crate) fn host_entity_physics(
+    hs: Option<&mut HostedServer>,
+    ecs: &mut hecs::World,
+    world: &World,
+    registry: &crate::block::BlockRegistry,
+) {
+    if let Some(hs) = hs.filter(|hs| hs.lends_host_world()) {
+        hs.steer_joiner_seats(ecs, world);
+    }
+    crate::entity::tick_entities(ecs, world, registry);
+}
+
 /// An owned set of [`SimParts`] — a stand-in for the host client's fields in
 /// tests that drive a lending `HostedServer` without a `GameState`.
 #[cfg(test)]

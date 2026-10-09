@@ -137,7 +137,7 @@ struct Joiner {
     max_error: f32,
     /// Acknowledged inputs compared.
     compared: usize,
-    /// The last input went out riding (see [`Joiner::ride_step`]).
+    /// The last StateUpdate said we ride (`own_riding`, MP-D2c-1).
     riding: bool,
     outcomes: Vec<Reconciled>,
 }
@@ -240,7 +240,10 @@ impl Joiner {
         let intent = PlayerIntent::from_input_packet(&input);
         let mut cam = crate::camera::Camera::new(self.body.pos, 1.0);
         cam.yaw = m.yaw;
-        self.body.tick(&intent, &cam, &self.world, &self.registry, PlayMode::Survival);
+        // Seated (until the server says otherwise) the body takes no step.
+        if !self.riding {
+            self.body.tick(&intent, &cam, &self.world, &self.registry, PlayMode::Survival);
+        }
         input.x = self.body.pos.x;
         input.y = self.body.pos.y;
         input.z = self.body.pos.z;
@@ -253,30 +256,17 @@ impl Joiner {
                 self.prediction.record(self.seq, &input, &self.body);
                 self.seq
             }
-            Link::Client(rc) => self
-                .prediction
-                .send(
-                    rc,
-                    &input,
-                    &mut self.body,
-                    false,
-                    &self.world,
-                    &self.registry,
-                    PlayMode::Survival,
-                )
-                .expect("connected: the input went out"),
+            Link::Client(rc) => self.prediction.send(rc, &input, &self.body).expect("connected: the input went out"),
         };
-        self.riding = false;
         self.predicted.insert(seq, self.body.pos);
     }
 
-    /// One tick riding a cart or mount this client simulates on its own
-    /// (`game_loop.rs`: no physics step; `apply_riding_follow` pins the body
-    /// to the seat at `seat`), steering with `m` — then one server tick.
-    fn ride_step(&mut self, hs: &mut HostedServer, m: Move, seat: Vec3) {
-        self.body.pos = seat;
-        self.body.velocity = Vec3::ZERO;
-        self.body.on_ground = false;
+    /// One tick seated on the server's mount (MP-D2c-1): no physics step
+    /// (`game_loop.rs`: the body follows the mirrored mount at the seat —
+    /// here, where the server last said our body is), and the input goes out
+    /// as it is, its axes steering the mount — then one server tick.
+    fn ride_step(&mut self, hs: &mut HostedServer, m: Move) {
+        assert!(self.riding, "seated");
         self.seq += 1;
         let input = InputPacket {
             tick: self.seq,
@@ -287,18 +277,15 @@ impl Joiner {
             jump: m.jump,
             sprint: m.sprint,
             sneak: m.sneak,
-            x: seat.x,
-            y: seat.y,
-            z: seat.z,
+            x: self.body.pos.x,
+            y: self.body.pos.y,
+            z: self.body.pos.z,
             ..Default::default()
         };
         let Link::Client(rc) = &mut self.link else {
             panic!("riding needs a RemoteClient link");
         };
-        self.prediction
-            .send(rc, &input, &mut self.body, true, &self.world, &self.registry, PlayMode::Survival)
-            .expect("connected: the input went out");
-        self.riding = true;
+        self.prediction.send(rc, &input, &self.body).expect("connected: the input went out");
         self.server_tick(hs);
     }
 
@@ -341,8 +328,14 @@ impl Joiner {
             return;
         };
         let server = Vec3::new(own.x, own.y, own.z);
+        // MP-D2c-1 — `network_receive`: seated while the server says so; the
+        // body rides the mount (here: where the server pins it).
+        self.riding = state.own_riding.is_some();
         if self.riding {
-            self.prediction.note_server_pos(server);
+            self.prediction.seated(state.last_acked_input);
+            self.body.pos = server;
+            self.body.velocity = Vec3::ZERO;
+            self.body.on_ground = false;
             return;
         }
         if let Some(predicted) = self.predicted.get(&state.last_acked_input) {
@@ -491,42 +484,49 @@ fn the_real_client_records_each_input_under_the_number_it_went_out_with() {
 }
 
 #[test]
-fn a_ride_leaves_the_server_body_where_it_began_and_getting_off_rejoins_it() {
-    // A ride is this client's own sim (BRIDGE until the server simulates
-    // rides). Its steering keys — forward, jump, sprint, sneak — must not walk
-    // the server's body away (or into a pit) meanwhile; on getting off the
-    // joiner is put straight back on the server's body, and from there the
-    // prediction agrees with the server again.
+fn a_seated_joiner_steers_the_servers_mount_and_getting_off_rejoins_the_servers_body() {
+    // MP-D2c-1 (replaces the client-side ride BRIDGE's test): a ride is the
+    // server's. The joiner's input steers the server's mount; its body is the
+    // seat the server pins, which it follows without predicting. Sneak gets
+    // it off on the server; the first update that says so rebases the
+    // joiner on the body the server set down and replays the inputs still in
+    // flight — one snap off the seat — and from there the prediction agrees.
     let mut hs = start_dedicated("ride");
     let mut j = Joiner::join_via_remote_client(&mut hs, on_floor(-3.5, -9.5), 2);
     j.run(&mut hs, Move::default(), 5);
-    j.run(&mut hs, Move { forward: 1.0, yaw: SOUTH, ..Default::default() }, 5);
-    j.run(&mut hs, Move::default(), 5);
-    let got_on = j.server_pos(&hs);
-    assert!((j.body.pos - got_on).length() < 1e-4);
-
-    let steer = Move { forward: 1.0, right: 0.5, jump: true, sprint: true, sneak: true, yaw: EAST };
-    for i in 1..=40 {
-        j.ride_step(&mut hs, steer, got_on + Vec3::new(0.25 * i as f32, 0.6, 0.0));
+    let start = j.server_pos(&hs);
+    let horse = crate::entity::spawn_mob(&mut hs.server.ecs, crate::mob::MobType::Horse, start);
+    for _ in 0..5 {
+        crate::entity::tick_entities(&mut hs.server.ecs, &hs.server.world, &hs.server.registry);
     }
-    assert!(
-        (j.server_pos(&hs) - got_on).length() < 1e-4,
-        "the server's body stood still: {got_on} -> {}",
-        j.server_pos(&hs)
-    );
-    assert!((j.body.pos - got_on).length() > 5.0, "the ride carried the joiner: {}", j.body.pos);
+    hs.server.seat(j.slot, horse);
+    j.run(&mut hs, Move::default(), 4);
+    assert!(j.riding, "own_riding: on");
 
-    // Off, and walk on.
+    let steer = Move { forward: 1.0, sprint: true, yaw: EAST, ..Default::default() };
+    for _ in 0..20 {
+        j.ride_step(&mut hs, steer);
+    }
+    let mount = hs.server.ecs.get::<&crate::entity::Position>(horse).unwrap().0;
+    assert!(mount.x - start.x > 4.0, "the horse galloped east on the server: {start} -> {mount}");
+    let seat = mount + Vec3::new(0.0, crate::cart::SEAT_LIFT, 0.0);
+    assert!((j.server_pos(&hs) - seat).length() < 1e-4, "the server's body is on the seat");
+    assert!((j.body.pos - seat).length() < 0.7, "and so is ours, a tick or two behind: {}", j.body.pos);
+
+    // Sneak: off on the server, then walk on.
+    j.ride_step(&mut hs, Move { sneak: true, ..steer });
     let (before, agreed_before) = (j.outcomes.len(), j.agreed());
-    j.step(&mut hs, Move { forward: 1.0, yaw: EAST, ..Default::default() });
-    assert!((j.body.pos - got_on).length() < 1e-4, "back on the server's body: {}", j.body.pos);
     j.run(&mut hs, Move { forward: 1.0, yaw: SOUTH, ..Default::default() }, 15);
     j.run(&mut hs, Move::default(), 5);
+    assert!(!j.riding, "own_riding: off");
+    assert!(hs.server.players[j.slot].riding.is_none());
+    assert!(hs.server.ecs.get::<&crate::entity::Ridden>(horse).is_err(), "the horse is free");
     let after = &j.outcomes[before..];
-    assert!(
-        !after.iter().any(|r| matches!(r, Reconciled::Smoothed { .. } | Reconciled::Snapped { .. })),
-        "getting off corrected nothing: {after:?}"
-    );
+    let corrections = after
+        .iter()
+        .filter(|r| matches!(r, Reconciled::Smoothed { .. } | Reconciled::Snapped { .. }))
+        .count();
+    assert!(corrections <= 1, "one rebase off the seat at most: {after:?}");
     assert!(j.agreed() > agreed_before + 15, "{after:?}");
     assert!((j.body.pos - j.server_pos(&hs)).length() < 1e-4);
 }

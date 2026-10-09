@@ -2174,6 +2174,7 @@ mod tests {
                 block_views: Vec::new(),
                 refused_uses: Vec::new(),
                 attachment_changes: Vec::new(),
+                own_riding: None,
             };
             protocol::serialize_packet(PacketType::StateUpdate, &state)
         }
@@ -2275,6 +2276,7 @@ mod tests {
                     block_views: Vec::new(),
                     refused_uses: Vec::new(),
                     attachment_changes: Vec::new(),
+                    own_riding: None,
                 },
             )
         };
@@ -3411,6 +3413,7 @@ mod tests {
             block_views: Vec::new(),
             refused_uses: Vec::new(),
             attachment_changes: Vec::new(),
+            own_riding: None,
         };
         srv.send_to_client(&protocol::serialize_packet(PacketType::StateUpdate, &state(&[1, 2])));
         // More than the old 256-packet cap, which dropped the rest silently.

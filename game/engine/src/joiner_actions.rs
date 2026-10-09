@@ -482,7 +482,9 @@ pub fn uses(kind: Asked) -> u8 {
         | Asked::Shoot { .. }
         | Asked::PlaceCart { .. }
         | Asked::Attach { .. } => 1,
-        Asked::Interact(InteractKind::Shear | InteractKind::LeadDetach | InteractKind::SitToggle)
+        Asked::Interact(
+            InteractKind::Shear | InteractKind::LeadDetach | InteractKind::SitToggle | InteractKind::Mount,
+        )
         | Asked::Swing
         | Asked::Sleep { .. }
         | Asked::Cast

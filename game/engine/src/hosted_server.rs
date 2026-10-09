@@ -1165,6 +1165,31 @@ impl HostedServer {
         }
     }
 
+    /// MP-D2c-1 — which of the host's own seats ride (its client's
+    /// `PlayerSlot::seated`, slot 0 first): broadcast as
+    /// `player_flags::SEATED`. Slots past the list are on foot.
+    pub fn sync_local_seats(&mut self, seated: &[bool]) {
+        for i in 0..self.num_local_players.min(self.server.players.len()) {
+            let sp = &mut self.server.players[i];
+            if !sp.server_simulated {
+                sp.local_seated = seated.get(i).copied().unwrap_or(false);
+            }
+        }
+    }
+
+    /// MP-D2c-1 — steer the joiners' mounts one tick from their latest input
+    /// (`server::steer_seats`) on the lent world `ecs` / `world`: called by
+    /// the host client, whose entity physics this world's is, right before
+    /// it runs (`GameState::tick`), so a joiner's steering lands before the
+    /// physics step that moves the mount — the same place a world the
+    /// server owns steers it (`GameServer::tick`). The input it steers with
+    /// was applied in the previous server tick (the host client ticks
+    /// first).
+    pub fn steer_joiner_seats(&mut self, ecs: &mut hecs::World, world: &crate::world::World) {
+        let server = &mut self.server;
+        crate::server::steer_seats(&mut server.players, ecs, world, &server.registry);
+    }
+
     /// One more local slot, set up as `start_inner` sets up its local slots
     /// (handshake done, unbudgeted outbox), behind a [`transport::NullServerTransport`]:
     /// the host client feeds it through [`Self::sync_local_slots`] and never
@@ -1754,6 +1779,11 @@ impl HostedServer {
             // occupant can act.
             if sp.server_simulated {
                 self.server.released_joiners.push((i, sp.attach_gen));
+            }
+            // MP-D2c-1 — and its mount is free again at the top of the next
+            // tick (in the world's ECS, which may not be here now).
+            if let Some(mount) = sp.riding.take() {
+                self.server.released_mounts.push(mount);
             }
         }
         if i >= self.num_local_players {
@@ -3273,6 +3303,10 @@ impl HostedServer {
         if let protocol::InteractKind::LeadToPost { post } = req.kind {
             return self.run_joiner_lead_to_post(i, req, post);
         }
+        // MP-D2c-1 — a mount may be a cart, which is no mob.
+        if req.kind == protocol::InteractKind::Mount {
+            return self.run_joiner_mount(i, req);
+        }
         let (target, kind) = self.joiner_target(i, req.entity)?;
         // Review D2b MEDIUM-2 — what this world doesn't simulate (breeding,
         // Leads, pets following) is refused, not taken for nothing.
@@ -3308,6 +3342,84 @@ impl HostedServer {
             &actor,
             tick,
         )
+    }
+
+    /// MP-D2c-1 — joiner `i` asks to ride `req.entity`: a rideable mob
+    /// (`joiner_target`: alive, in reach, ahead of the server's body) or a
+    /// parked cart within block reach ([`Self::joiner_cart`]). Refused,
+    /// nothing changed, when the joiner already rides, the interaction
+    /// cooldown runs, or the mount is someone else's seat (`MountTaken`). A
+    /// cart is dispatched as single-player's click dispatches it
+    /// (`cart::dispatch_cart`: seeded from the look, the depot's freight
+    /// aboard) — it takes nothing from the hand — and the joiner is seated
+    /// only when its hand is empty. Riding needs no owner and no species AI:
+    /// a guest rides, on a dedicated server too; a mount's
+    /// `HorseData.kept_by` is never set (steed keeping is D2c-2).
+    fn run_joiner_mount(
+        &mut self,
+        i: usize,
+        req: &protocol::EntityInteractPacket,
+    ) -> Option<crate::mob_interact::Interaction> {
+        let sp = self.server.players.get(i)?;
+        if !sp.server_simulated || !sp.is_present_and_alive() || sp.riding.is_some() {
+            return None;
+        }
+        let (mount, cart) = match self.joiner_target(i, req.entity) {
+            Some((e, kind)) if crate::mob::is_rideable(kind) => (e, None),
+            Some(_) => return None,
+            None => {
+                let (e, cell) = self.joiner_cart(i, req.entity)?;
+                (e, Some(cell))
+            }
+        };
+        match crate::riding::may_mount(&self.server.ecs, mount) {
+            Ok(()) => {}
+            Err(crate::riding::MountRefusal::Taken) => {
+                return Some(crate::mob_interact::Interaction::refused(
+                    crate::mob_interact::InteractNote::MountTaken,
+                ));
+            }
+            Err(crate::riding::MountRefusal::NotRideable) => return None,
+        }
+        let sp = &mut self.server.players[i];
+        if sp.interact_cooldown > 0 {
+            return None;
+        }
+        sp.interact_cooldown = INTERACT_COOLDOWN_TICKS;
+        if let Some(cell) = cart {
+            let look = crate::camera::forward_from(sp.yaw, sp.pitch);
+            crate::cart::dispatch_cart(&mut self.server.ecs, &mut self.server.world, cell, look)?;
+            // BRIDGE: possession check — the empty hand is the client's word,
+            // as every held claim is (a hand it says holds something only
+            // dispatches the freight).
+            let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+            if held.is_some() {
+                return Some(crate::mob_interact::Interaction::accepted());
+            }
+        }
+        self.server.seat(i, mount);
+        Some(crate::mob_interact::Interaction::accepted())
+    }
+
+    /// MP-D2c-1 — the server cart `id` (its `ProtocolId`) as joiner `i` may
+    /// ride it: parked, on a track cell within block reach of the eye of the
+    /// body the server holds for `i` (single-player's click is on the track
+    /// block). Returns the cart and its cell.
+    fn joiner_cart(&self, i: usize, id: u32) -> Option<(hecs::Entity, crate::rail::Cell)> {
+        let sp = self.server.players.get(i)?;
+        let ecs = &self.server.ecs;
+        let (e, cart) = ecs
+            .query::<(&crate::entity::ProtocolId, &crate::cart::CartData)>()
+            .iter()
+            .find(|(_, (p, _))| p.0 == id)
+            .map(|(e, (_, c))| (e, c.clone()))?;
+        if cart.speed > 0.0 {
+            return None;
+        }
+        let (x, y, z) = cart.cell;
+        let centre = glam::Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        block_change_within_reach((centre - sp.player.eye_pos()).length_squared(), 0, 0, true)
+            .then_some((e, cart.cell))
     }
 
     /// Review D2b B3 — joiner `i` puts a Lead on the fence post at `post`:
@@ -5642,6 +5754,8 @@ impl HostedServer {
             block_views: Vec::new(),
             refused_uses: Vec::new(),
             attachment_changes: Vec::new(),
+            // Per client — stamped in the loop below (D2c-1).
+            own_riding: None,
         };
         let block_changes = std::mem::take(&mut self.pending_block_changes);
         // C3c-3b — the face attachments that changed this tick, whoever
@@ -5773,6 +5887,14 @@ impl HostedServer {
                 .get(i)
                 .filter(|sp| sp.server_simulated)
                 .map_or(0, |sp| sp.combat.hunger);
+            // MP-D2c-1 — and the mount it rides, which the server seats and
+            // unseats (a host's own seat is its client's: `None`).
+            template.own_riding = self
+                .server
+                .players
+                .get(i)
+                .and_then(|sp| sp.riding)
+                .and_then(|m| self.server.ecs.get::<&crate::entity::ProtocolId>(m).ok().map(|p| p.0));
             for pkt in outbox.drain_packets(&template) {
                 self.transports[i].send_to_client(&pkt);
             }

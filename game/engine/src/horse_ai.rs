@@ -6,11 +6,8 @@
 //! - `Flee`: triggered by recent damage; runs from the attacker for a
 //!   bounded window then reverts to Wander.
 //!
-//! No taming / no riding in this chunk — those layer on when the
-//! Saddle item + mount system lands. Live spawn is deferred too; the
-//! AI module ships here so when ECS wire-up arrives a single import
-//! brings the behaviour up.
-//!
+//! Riding is tick-based (`riding`); species AI skips occupied mounts.
+//! Steed keeping and packs layer on top of the passive herd behaviour.
 //! Pure: state transitions only; the game_loop applies the returned
 //! action against the ECS.
 

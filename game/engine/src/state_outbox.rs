@@ -742,6 +742,7 @@ mod tests {
             block_views: Vec::new(),
             refused_uses: Vec::new(),
             attachment_changes: Vec::new(),
+            own_riding: None,
         }
     }
 
