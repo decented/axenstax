@@ -17,6 +17,7 @@ pub struct RecoveryBundle {
 impl RecoveryBundle {
     /// Takes already frozen owned pages; all validation precedes queue commit.
     /// `owner_overhead` charges the actual enclosing queue entry as well.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn new(manifest: RebaseManifest, pages: Vec<Box<[u8]>>, owner_overhead: usize) -> Result<Self, &'static str> {
         if pages.is_empty() || pages.len() > MAX_REBASE_PARTS || pages.len() != usize::from(manifest.parts) {
             return Err("Recovery part count mismatch");

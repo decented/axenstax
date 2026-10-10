@@ -18,6 +18,7 @@ pub struct MarkerWindow {
 }
 
 impl MarkerWindow {
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d client reserve-before-predict milestone (stages the client's own WindowMut)"))]
     pub fn capture(view: &WindowMut, registry: &crate::block::BlockRegistry) -> Self {
         Self::capture_parts(view.inv, view.armour, view.cursor, view.grid, registry)
     }

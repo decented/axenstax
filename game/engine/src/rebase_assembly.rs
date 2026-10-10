@@ -72,8 +72,10 @@ impl RebaseAssembly {
         Ok(())
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn ready(&self) -> bool { self.ended && self.applied }
     pub fn manifest(&self) -> RebaseManifest { self.manifest }
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn pages(&self) -> impl Iterator<Item = &[u8]> { self.pages.iter().filter_map(|p| p.as_deref()) }
 }
 

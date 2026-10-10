@@ -7,12 +7,14 @@ pub const MAX_PRIVATE_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_RESIDENT_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
 pub struct Occupancy {
     pub entries: usize,
     pub bytes: usize,
 }
 
 impl Occupancy {
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
     fn plus(self, other: Self, entries: usize, bytes: usize) -> Option<Self> {
         let result = Self { entries: self.entries.checked_add(other.entries)?, bytes: self.bytes.checked_add(other.bytes)? };
         (result.entries <= entries && result.bytes <= bytes).then_some(result)
@@ -20,6 +22,7 @@ impl Occupancy {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
 pub struct ImmediateEffects {
     pub events: Occupancy,
     pub results: Occupancy,
@@ -28,11 +31,13 @@ pub struct ImmediateEffects {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
 pub enum CapacityError { Events, Results, Views, Body, ResidentBodies }
 
 /// The returned reservation is owned by the staged transaction. Replacing
 /// occupancy is the commit step; failed staging leaves the original untouched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
 pub struct EffectCapacity {
     pub events: Occupancy,
     pub results: Occupancy,
@@ -40,6 +45,7 @@ pub struct EffectCapacity {
 }
 
 impl EffectCapacity {
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
     pub fn reserve(&self, all: ImmediateEffects) -> Result<Self, CapacityError> {
         Ok(Self {
             events: self.events.plus(all.events, MAX_EVENT_ENTRIES, MAX_RETAINED_BYTES).ok_or(CapacityError::Events)?,

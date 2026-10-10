@@ -100,6 +100,7 @@ impl ActionFrontier {
     }
 
     /// The transport ACK must name the full cut, not merely its newer epoch.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn acknowledge(&mut self, cut: RecoveryCut) -> bool {
         if self.recovery != Some(cut) { return false; }
         self.recovery = None;
@@ -109,6 +110,7 @@ impl ActionFrontier {
     /// Death supersedes generic recovery. The bounded death describe names the
     /// highest allocated old-life action, including unsent predictions. Its
     /// validated cancellation frontier closes that suffix before the new life.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d death/life-change milestone (old-life suffix cancellation)"))]
     pub fn change_life(&mut self, life: u32, cancelled_through: u64) -> Result<(), ActionAdmission> {
         if life <= self.life || cancelled_through < self.through { return Err(ActionAdmission::Superseded); }
         self.epoch = self.epoch.checked_add(1).ok_or(ActionAdmission::Exhausted)?;

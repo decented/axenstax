@@ -146,6 +146,7 @@ fn wire_size<T: serde::Serialize>(item: &T) -> usize {
 #[derive(Debug)]
 enum Delta {
     /// Begin/pages/End/fence stay one queue entry even across tick budgets.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     Recovery(crate::recovery_bundle::RecoveryBundle),
     /// A terminal receipt is a world boundary, not latest-wins state.
     Receipt(crate::action_wire::ActionReceipt),
@@ -367,6 +368,7 @@ impl ClientOutbox {
 
     /// Insert frozen capture after the existing world prefix. No later cell
     /// coalesces backwards across this barrier, including backlog re-indexing.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn push_recovery_bundle(&mut self, manifest: crate::rebase_assembly::RebaseManifest, pages: Vec<Box<[u8]>>) -> Result<(), &'static str> {
         if self.queue.iter().any(|e| matches!(e.delta, Delta::Recovery(_))) {
             return Err("A recovery bundle is already queued");

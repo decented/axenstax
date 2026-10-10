@@ -30,7 +30,7 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
     Ok(Some(match event {
         WindowEvent::Grant(stack) => WindowEvent::Grant(marker_stack(stack, registry)),
         WindowEvent::Take { slot, item, n, how } => WindowEvent::Take {
-            slot: *slot, item: marker_item(item), n: *n, how: *how,
+            slot: *slot, item: marker_item(item), n: *n, how,
         },
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { slot, tool } => WindowEvent::WearWeapon { slot: *slot, tool: *tool },

@@ -13,6 +13,7 @@ pub const MAX_CONTEXT_CELLS: usize = 8192;
 pub const MAX_CONTEXT_BYTES: usize = 512 * 1024;
 pub const MAX_BUNDLE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PAGE_BYTES: usize = 32 * 1024;
+#[cfg_attr(not(test), expect(dead_code, reason = "C3d compound-action milestone (complete event/result/view reservation across one action)"))]
 pub const MAX_RESULT_ENTRIES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,8 +62,11 @@ impl ActionJournal {
         Self { session, epoch: 0, life, next: 1, retired_through: 0, included_events: 0, context_cells: 0, bytes, actions }
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn len(&self) -> usize { self.actions.len() }
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn is_empty(&self) -> bool { self.actions.is_empty() }
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn retained_bytes(&self) -> usize { self.bytes }
     pub fn actions(&self) -> impl Iterator<Item = &RetainedAction> { self.actions.iter() }
     pub fn next_header(&self, events_applied: u32) -> Result<ActionHeader, JournalError> {
@@ -135,6 +139,7 @@ impl ActionJournal {
 
     /// Call only after old body keys are durably retained and death's window
     /// applies. Cancel through the exact highest allocated old-life sequence.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d death/life-change milestone (old-life suffix cancellation)"))]
     pub fn change_life(&mut self, life: u32, epoch: u32) -> Result<u64, JournalError> {
         if life <= self.life || epoch <= self.epoch { return Err(JournalError::InvalidFrontier); }
         let through = self.next - 1;
@@ -149,6 +154,7 @@ impl ActionJournal {
 
     /// Caller supplies proof from actual world intake AFTER complete assembly,
     /// never socket reception. Events included in the base have also applied.
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn activate(&mut self, cut: RecoveryCut, included_events: u32, applied_events: u32, applied_fence: Option<u64>) -> Result<(), JournalError> {
         if cut.session != self.session || cut.life != self.life || cut.epoch <= self.epoch || cut.through >= self.next || cut.through < self.retired_through
             || included_events < self.included_events || applied_events < included_events || applied_fence != Some(cut.id) {

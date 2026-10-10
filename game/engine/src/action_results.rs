@@ -26,6 +26,7 @@ impl ActionResults {
     fn owns(&self, action: ActionHeader) -> bool {
         action.session == self.owner.session && action.epoch == self.owner.epoch && action.life == self.owner.life
     }
+    #[expect(dead_code, reason = "C3d recovery milestone: the server-known suffix footprint unions these cells into RebasePrepare")]
     pub fn retained_cells(&self) -> impl Iterator<Item = &[i32; 3]> { self.rows.iter().flat_map(|r| r.cells.iter()) }
     pub fn retained_bytes(&self) -> usize { std::mem::size_of::<Self>() + self.rows.capacity() * std::mem::size_of::<ResultRow>() + self.cell_count * std::mem::size_of::<[i32; 3]>() }
     pub fn prepare(&mut self, receipt: ActionReceipt, cells: Box<[[i32; 3]]>) -> Result<PreparedResult, ResultError> {

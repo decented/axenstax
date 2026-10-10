@@ -31,8 +31,10 @@ impl Default for ActionQueue {
 }
 
 impl ActionQueue {
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn retained_bytes(&self) -> usize { self.bytes }
     pub fn front(&self) -> Option<&QueuedAction> { self.entries.front() }
 
@@ -66,6 +68,7 @@ impl ActionQueue {
         Some(action)
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "C3d recovery milestone (RebasePrepare, Describe, capture, applied fence and replay)"))]
     pub fn supersede(&mut self) {
         self.entries.clear();
         self.bytes = std::mem::size_of::<Self>() + self.entries.capacity() * std::mem::size_of::<QueuedAction>();

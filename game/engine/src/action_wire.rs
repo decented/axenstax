@@ -81,7 +81,6 @@ impl<T, const N: usize> BoundedList<T, N> {
         if values.len() > N { return Err("List exceeds its count limit"); }
         Ok(Self(values))
     }
-    pub fn as_slice(&self) -> &[T] { &self.0 }
     pub fn into_vec(self) -> Vec<T> { self.0 }
 }
 
@@ -115,6 +114,7 @@ pub struct RebaseDescribe {
 
 /// 24 KiB of cells, leaving ample carrier room below both page/wire caps.
 pub const DESCRIBE_PAGE_CELLS: usize = 2048;
+#[expect(dead_code, reason = "C3d recovery milestone: bounds DescribeManifest.parts when the server assembles a Describe")]
 pub const MAX_DESCRIBE_PARTS: usize = MAX_CONTEXT_CELLS / DESCRIBE_PAGE_CELLS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
