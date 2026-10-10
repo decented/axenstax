@@ -1138,10 +1138,10 @@ impl super::GameState {
             .unwrap_or_default();
         // World handover: one row per present, authenticated seat — the
         // click carries the seat, which the action re-reads; never a label.
-        let handover: Vec<(usize, String)> = self
-            .handover_candidates()
-            .into_iter()
-            .map(|(slot, key)| {
+        let drawn = self.handover_candidates();
+        let handover: Vec<(usize, String)> = drawn
+            .iter()
+            .map(|&(slot, _, key)| {
                 let name = self
                     .hosted_server
                     .as_ref()
@@ -1173,8 +1173,9 @@ impl super::GameState {
                 hand_to = crate::friends_ui::draw_online_panel(ui, &view);
             });
         self.show_online_panel = open;
-        if let Some(slot) = hand_to {
-            self.begin_handover(slot);
+        // L6: the click carries the drawn row's (slot, generation, key).
+        if let Some(row) = hand_to.and_then(|slot| drawn.iter().find(|r| r.0 == slot)) {
+            self.begin_handover(*row);
         }
     }
 
@@ -8720,7 +8721,14 @@ impl super::GameState {
             // A recipient's handover outlives the joined world it began in.
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), false, true);
+                let click = crate::handover_game::draw(
+                    &self.renderer.egui.ctx,
+                    self.handover.as_ref(),
+                    false,
+                    true,
+                    // Field-level (the menu is borrowed): `handover_consent_armed`.
+                    self.handover_consent_shown.is_some_and(|t| t.elapsed() >= crate::handover_game::CONSENT_ARM),
+                );
                 self.handover_click = click.or(self.handover_click);
             }
 
@@ -10228,7 +10236,7 @@ impl super::GameState {
             // Over the pause menu too: a failed Save says why where it was asked.
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused, true);
+                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused, true, self.handover_consent_armed());
                 self.handover_click = click.or(self.handover_click);
             }
             self.draw_toast();
@@ -21729,7 +21737,13 @@ impl super::GameState {
         // ── World handover window (consent / status / paused banner) ─────────
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused, !self.input.cursor_captured);
+            let click = crate::handover_game::draw(
+                &self.renderer.egui.ctx,
+                self.handover.as_ref(),
+                self.host_paused,
+                !self.input.cursor_captured,
+                self.handover_consent_armed(),
+            );
             self.handover_click = click.or(self.handover_click);
         }
 

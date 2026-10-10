@@ -129,6 +129,12 @@ impl InboundQueue {
         Some(packet)
     }
 
+    /// What the waiting packets are charged (tests).
+    #[cfg(test)]
+    pub fn charged_bytes(&self) -> usize {
+        self.bytes
+    }
+
     /// Packets waiting.
     pub fn len(&self) -> usize {
         self.packets.len()

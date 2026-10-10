@@ -98,6 +98,28 @@ pub struct RecipientSession {
     checkpoint: Option<DurableCheckpoint>,
     listener: Option<LatchedListener>,
     receiver: Option<Receiver>,
+    /// L2: when the host was last heard from (consent onwards).
+    last_heard: u64,
+    /// L5: the joined session's router lease (UPnP), moved in at consent so
+    /// leaving the joined world can't release a mapping this link may use.
+    lease: Option<Box<dyn HeldLease>>,
+}
+
+/// L5: a router mapping the joined session asked for (native: the UPnP
+/// `LeaseKeeper`). The session renews it while it holds the link and gives
+/// it back to the router when the session ends without returning it.
+pub trait HeldLease {
+    fn renew(&mut self);
+    fn give_back(self: Box<Self>);
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+}
+
+impl Drop for RecipientSession {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            lease.give_back();
+        }
+    }
 }
 
 fn npub(key: [u8; 32]) -> String {
@@ -178,6 +200,8 @@ impl RecipientSession {
             checkpoint: None,
             listener: None,
             receiver: None,
+            last_heard: now,
+            lease: None,
         })
     }
 
@@ -235,6 +259,19 @@ impl RecipientSession {
     /// the session held it, oldest first, for the joined client to resume
     /// with. `None` if gameplay overflowed the parked bound (the player
     /// rejoins instead) or the connection already closed.
+    /// L5: hold the joined session's router lease for as long as this
+    /// session holds the link.
+    pub fn hold_lease(&mut self, lease: Box<dyn HeldLease>) {
+        self.lease = Some(lease);
+    }
+    pub fn holds_lease(&self) -> bool {
+        self.lease.is_some()
+    }
+    /// The lease back, for a joined session that gets its link back.
+    pub fn take_lease(&mut self) -> Option<Box<dyn HeldLease>> {
+        self.lease.take()
+    }
+
     pub fn return_link(&mut self) -> Option<(Box<dyn ClientTransport>, VecDeque<Vec<u8>>)> {
         if !matches!(self.stage, RecipientStage::Aborted(_)) {
             return None;
@@ -281,6 +318,7 @@ impl RecipientSession {
             challenge: self.challenge,
         };
         self.acceptance = acceptance;
+        self.last_heard = now;
         self.socket = Some(listen);
         self.link = Some(link);
         self.send(&accept);
@@ -304,11 +342,20 @@ impl RecipientSession {
         if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::AwaitingConsent) {
             return Ok(());
         }
+        if let Some(lease) = self.lease.as_mut() {
+            lease.renew();
+        }
         let Some(link) = &self.link else { return Ok(()) };
         if link.is_closed() {
             return Err(self.fail(Refusal("The connection to the host closed.")));
         }
+        // L2: mirrors the source's `STALL_SECS` in every stage that waits on
+        // the host (it sends a heartbeat while it packs).
+        if now.saturating_sub(self.last_heard) > super::source::STALL_SECS {
+            return Err(self.fail(Refusal("The host stopped responding, so the handover was cancelled.")));
+        }
         while let Some(pkt) = self.link.as_ref().and_then(|l| l.try_recv_from_server()) {
+            self.last_heard = now;
             let Some(bytes) = handover_payload(&pkt) else {
                 // Gameplay sent before the host froze: kept for a resume.
                 self.parked_bytes += pkt.len();

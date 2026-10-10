@@ -31,6 +31,9 @@ use web_time::{Duration, Instant};
 
 /// How long a certificate stays valid, clipped to the invitation's expiry.
 pub(crate) const CERTIFICATE_SECS: u64 = 3600;
+/// L7: the consent buttons arm this long after the window first shows, so a
+/// click already under way (a chest open mid-play) can't land on Accept.
+pub(crate) const CONSENT_ARM: Duration = Duration::from_millis(750);
 
 /// The one handover this machine is part of.
 pub(crate) enum Handover {
@@ -53,6 +56,19 @@ pub(crate) struct RecipientEnv {
     pub identity: RecipientIdentity,
     pub imports: PathBuf,
     pub markers: MarkerStore,
+}
+
+/// L5: the joined session's router lease, held by its recipient session.
+impl crate::handover::live::recipient::HeldLease for crate::online_prep::LeaseKeeper {
+    fn renew(&mut self) {
+        self.tick(Instant::now());
+    }
+    fn give_back(self: Box<Self>) {
+        self.release();
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
 }
 
 /// Test stand-ins for the signer and the data directory.
@@ -106,8 +122,9 @@ fn recipient_env() -> Result<RecipientEnv, String> {
 
 /// The handover window: the consent screen, the status of a running
 /// handover with its Cancel, or the paused banner. Returns the click.
-pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused: bool, interactable: bool) -> Option<UiAction> {
+pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused: bool, interactable: bool, armed: bool) -> Option<UiAction> {
     let mut action = None;
+    let consent = matches!(handover, Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent);
     let (title, lines, buttons): (&str, Vec<String>, &[(&str, UiAction)]) = match handover {
         Some(Handover::Recipient(s)) => {
             let p = s.proposal();
@@ -155,7 +172,7 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
             }
             ui.horizontal(|ui| {
                 for (label, a) in buttons {
-                    if ui.button(*label).clicked() {
+                    if ui.add_enabled(armed || !consent, egui::Button::new(*label)).clicked() {
                         action = Some(*a);
                     }
                 }
@@ -219,17 +236,26 @@ impl crate::GameState {
     /// Present, authenticated players this host may hand the world to, by
     /// seat: `(slot, verified key)`. Never a name typed in, never a seat
     /// that has gone.
-    pub(crate) fn handover_candidates(&self) -> Vec<(usize, [u8; 32])> {
+    /// Each row carries the seat's attach generation and key as drawn (L6):
+    /// the click is checked against them, not just the slot.
+    pub(crate) fn handover_candidates(&self) -> Vec<(usize, u32, [u8; 32])> {
         let Some(hs) = &self.hosted_server else { return Vec::new() };
         if self.handover.is_some() {
             return Vec::new();
         }
-        (0..hs.server.players.len()).filter_map(|slot| hs.handover_seat(slot).map(|(_, key)| (slot, key))).collect()
+        (0..hs.server.players.len())
+            .filter_map(|slot| hs.handover_seat(slot).map(|(generation, key)| (slot, generation, key)))
+            .collect()
+    }
+
+    /// L7: the consent window has been up long enough for its buttons.
+    pub(crate) fn handover_consent_armed(&self) -> bool {
+        self.handover_consent_shown.is_some_and(|t| t.elapsed() >= CONSENT_ARM)
     }
 
     /// The host action from the Online panel. Only an online-hosted world
     /// has an invitation to bind the handover to.
-    pub(crate) fn begin_handover(&mut self, slot: usize) {
+    pub(crate) fn begin_handover(&mut self, drawn: (usize, u32, [u8; 32])) {
         let now = crate::game_loop::wardrobe_now();
         let env = self.online_host.as_ref().and_then(|host| {
             let root = host.root_context(now).ok()?;
@@ -246,14 +272,15 @@ impl crate::GameState {
                 return;
             }
         };
-        if let Err(e) = self.begin_handover_with(slot, SourceEnv { runtime, root, scratch }, now) {
+        if let Err(e) = self.begin_handover_with(drawn, SourceEnv { runtime, root, scratch }, now) {
             self.handover_toast(e);
         }
     }
 
     /// Start a handover to the authenticated player in `slot`: re-read its
     /// seat now, derive lineage and authority from the invitation, propose.
-    pub(crate) fn begin_handover_with(&mut self, slot: usize, env: SourceEnv, now: u64) -> Result<(), String> {
+    pub(crate) fn begin_handover_with(&mut self, drawn: (usize, u32, [u8; 32]), env: SourceEnv, now: u64) -> Result<(), String> {
+        let slot = drawn.0;
         if self.handover.is_some() {
             return Err(copy::BUSY.into());
         }
@@ -263,6 +290,9 @@ impl crate::GameState {
         let world = if meta.display_name.trim().is_empty() { self.world_name.clone() } else { meta.display_name };
         let Some(hs) = self.hosted_server.as_mut() else { return Err(copy::NEEDS_ONLINE.into()) };
         let (generation, key) = hs.handover_seat(slot).ok_or("That player is no longer signed in to this world.")?;
+        if (generation, key) != (drawn.1, drawn.2) {
+            return Err(copy::SEAT_CHANGED.into());
+        }
         // The lineage is derived from the invitation (the recipient derives
         // the same from the host it verified); the authority is the root's.
         let lineage = root_lineage(&env.root);
@@ -367,7 +397,10 @@ impl crate::GameState {
             return;
         };
         match RecipientSession::propose(payload, host, env.identity, env.imports, env.markers, now) {
-            Ok(s) => self.handover = Some(Handover::Recipient(Box::new(s))),
+            Ok(s) => {
+                self.handover = Some(Handover::Recipient(Box::new(s)));
+                self.handover_consent_shown = Some(Instant::now());
+            }
             Err(Refusal(why)) => {
                 self.decline_over_joined(transfer, DeclineReason::Invalid);
                 self.handover_toast(why);
@@ -439,6 +472,10 @@ impl crate::GameState {
                 if let Some(rc) = self.remote_client.as_mut() {
                     rc.restore_transport(link, waiting);
                 }
+                // The joined session carries on: its router lease comes back.
+                if let Some(lease) = s.take_lease().and_then(|l| l.into_any().downcast::<crate::online_prep::LeaseKeeper>().ok()) {
+                    self.upnp_lease = Some(*lease);
+                }
                 self.handover_toast(msg);
             }
             (true, None) => self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, copy::RESUME_FAILED.into()),
@@ -447,6 +484,9 @@ impl crate::GameState {
     }
 
     fn handover_action(&mut self, action: UiAction, now: u64) {
+        if matches!(action, UiAction::Accept | UiAction::Decline) && !self.handover_consent_armed() {
+            return;
+        }
         match (action, self.handover.as_mut()) {
             (UiAction::Accept, Some(Handover::Recipient(s))) if s.stage() == RecipientStage::AwaitingConsent => {
                 let p = s.proposal().clone();
@@ -462,10 +502,19 @@ impl crate::GameState {
                 };
                 let link = rc.park_transport();
                 let consent = RecipientConsent { transfer: p.transfer, world_name: p.world_name, source_npub: p.source_npub };
-                if let Err(Refusal(why)) = s.consent(consent, socket, link, now) {
-                    // The refused consent took the connection with it.
-                    self.handover = None;
-                    self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, why.into());
+                match s.consent(consent, socket, link, now) {
+                    // L5: the router lease goes with the link it serves, so
+                    // leaving the joined world can't give it back early.
+                    Ok(()) => {
+                        if let Some(lease) = self.upnp_lease.take() {
+                            s.hold_lease(Box::new(lease));
+                        }
+                    }
+                    Err(Refusal(why)) => {
+                        // The refused consent took the connection with it.
+                        self.handover = None;
+                        self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, why.into());
+                    }
                 }
             }
             (UiAction::Decline, Some(Handover::Recipient(s))) if s.stage() == RecipientStage::AwaitingConsent => {
@@ -535,6 +584,18 @@ impl crate::GameState {
     }
 }
 
+/// L4: the transfer copy of the world's settings carries the LIVE world's
+/// Proof-of-Play total and clock (the saved meta can be an autosave behind),
+/// then is sanitised.
+pub(crate) fn live_transfer_metadata(
+    mut saved: crate::save::WorldMeta,
+    world: &crate::world::World,
+) -> crate::handover::Result<crate::save::WorldMeta> {
+    saved.total_work = world.total_work;
+    saved.total_ticks = world.total_ticks;
+    crate::handover::checkpoint::transfer_metadata(&saved)
+}
+
 /// The real frozen world and seats the capture reads.
 struct Frozen<'a> {
     world_name: &'a str,
@@ -561,7 +622,7 @@ fn capture_and_offer(
     let Some(seat0) = f.players.first() else {
         return fail(session, hs, Refusal("This world has no local player to hand over from."));
     };
-    let meta = match crate::handover::checkpoint::transfer_metadata(&crate::save::load_world_meta(f.world_name)) {
+    let meta = match live_transfer_metadata(crate::save::load_world_meta(f.world_name), f.world) {
         Ok(m) => m,
         Err(_) => return fail(session, hs, Refusal("This world's settings couldn't be copied.")),
     };

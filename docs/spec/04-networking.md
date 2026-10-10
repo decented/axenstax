@@ -5353,13 +5353,20 @@ the joined client, which resumes in order (past the bound, the player rejoins).
 **Game callers (`handover_game`, native).** The host action is the Online
 panel's `Hand this world to …`, one row per present, authenticated seat
 (`HostedServer::handover_seat`: connected, handshake done, server-simulated,
-verified key, live attach generation); the click carries the seat, which
-`begin_handover_with` re-reads, never a label or a remembered npub. Only an
+verified key, live attach generation); the click carries the drawn row's
+`(slot, attach generation, key)`, which `begin_handover_with` compares with the
+seat re-read at the click (a mismatch starts nothing and says the seat changed,
+review L6), never a label or a remembered npub. Only a host that lends its one
+world to its server can hand it over (`lends_host_world`; a `--no-lend` host,
+whose joiners' block-use contents live only in the server's copy, is refused
+with `copy::NO_LEND` at every boundary, review L3). Only an
 online-hosted world can offer a handover: its root context is the live
 invitation's `k`/`h`/`x`/`r` (`OnlineHost::root_context`, bearer excluded), the
 runtime key is the one the host answers with, the lineage is
 `root_lineage(root)` and the authority is the root's (epoch 0, so the first
-checkpoint generation is 1). The snapshot world id is fresh per checkpoint
+checkpoint generation is 1). The transfer metadata is the saved meta with the
+live world's `total_work` and `total_ticks` (review L4: the saved meta can be an
+autosave behind), then sanitised. The snapshot world id is fresh per checkpoint
 (worlds carry no UUID at this base). The signed-in identity is re-read at
 every boundary. At the frozen capture the game supplies the RAW save built
 exactly as a save would (`build_world_save` over the real lent `World`, ECS
@@ -5385,9 +5392,16 @@ window, whenever it has something to click (consent or Cancel), joins the
 cursor-release predicate (`GameState::cursor_must_be_free`, beside
 `p0_ui_modal_open`, the death screen and the end card), so a recipient can
 answer mid-play; in Playing it is interactable exactly when the cursor is free.
-Accept parks the
+Its Accept and Decline arm 0.75 s after the window first shows
+(`CONSENT_ARM`, review L7): an earlier click is ignored, so a click already
+under way can't land on Accept. Accept parks the
 `RemoteClient` connection into the session and binds the latched listener on
-a fresh ephemeral UDP socket. The control pump (`poll_handover`) runs every
+a fresh ephemeral UDP socket. The joined session's UPnP lease moves into the
+recipient session at consent (`RecipientSession::hold_lease`, renewed by its
+pump), so leaving the joined world (`stop_online`) can't release a mapping
+the parked link may rely on; it returns to the joined game if the link is
+handed back, and is given back to the router when the session ends without
+it (review L5). The control pump (`poll_handover`) runs every
 frame in every mode next to `poll_online`, never from the game tick. The
 handover session is not cleared by leaving the world: a recipient past
 consent keeps its connection and continues to Ready after its joined world,
@@ -5427,3 +5441,27 @@ tick's tripwire expects zero runs of every shared system while frozen. The
 render keeps running and the handover window shows the status, Cancel, and
 for joiners the paused banner. Releasing the freeze resets the tick timing so
 no catch-up burst follows.
+
+The frozen pack runs off the frame thread (review M-B): at the capture the
+session copies the frozen cut into an owned `checkpoint::Snapshot` (loaded
+chunks as their persisted bytes, bounded by the pack's chunk count and
+logical-size limits; the neutralised save; the participant rows), then
+`pack_snapshot` (disk chunks, exhibits, hashing, gzip) runs on a
+`handover-pack` worker thread. The source stage is `Packing` meanwhile: the
+frame renders, the control pump reads frames (a recipient Abort releases),
+Cancel works, and every `HEARTBEAT_SECS` (5 s) a `Notice{paused}` keeps the
+recipient's stall deadline fed. The worker's result carries a generation and
+transfer id; the pump drains it every frame, even after an abort, and uses it
+only if both match and the stage is still `Packing` (the generation fence).
+Abort sets the worker's cancel flag (checked before every member) and bumps
+the generation, so a cancelled or superseded pack's result is dropped and its
+`PackedCheckpoint` removes its scratch; it can never be offered or sent (the
+link is also released). A dropped session drops the receiver, so the worker's
+result is dropped where it finishes. While frozen, every other seat's packets
+move into its own bounded inbound queue without being processed; a seat that
+overflows the bound is read no further and is disconnected at release by the
+ordinary overflow kick (review L1). Stall deadlines (review L2): the source
+times out a silent recipient at `STALL_SECS` (60 s) while streaming and after
+Ready (`ReadyVerified`, until Prepared advances it); the recipient times out a
+silent host at the same `STALL_SECS` in Accepted, Receiving and Ready. Before
+Retired a timeout is an abort: play resumes on both sides.

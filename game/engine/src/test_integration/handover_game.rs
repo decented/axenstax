@@ -147,10 +147,19 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
         hg.hosted_ticks(1);
     });
     hg.state.handover_fixture = Some(Fixture { signed_in: Some(key(SOURCE_PERSONA)), recipient: None });
-    assert_eq!(hg.state.handover_candidates(), vec![(slot, key(RECIPIENT_PERSONA))], "the present signed joiner");
-    let env = SourceEnv { runtime: keys(SOURCE_RUNTIME), root: root(), scratch: dir.0.join("scratch") };
-    assert!(hg.state.begin_handover_with(0, SourceEnv { runtime: keys(SOURCE_RUNTIME), root: root(), scratch: dir.0.join("scratch") }, now()).is_err(), "the host's own seat");
-    hg.state.begin_handover_with(slot, env, now()).expect("eligible");
+    let generation = hg.state.hosted_server.as_ref().unwrap().handover_seat(slot).unwrap().0;
+    let drawn = (slot, generation, key(RECIPIENT_PERSONA));
+    assert_eq!(hg.state.handover_candidates(), vec![drawn], "the present signed joiner");
+    let env = || SourceEnv { runtime: keys(SOURCE_RUNTIME), root: root(), scratch: dir.0.join("scratch") };
+    assert!(hg.state.begin_handover_with((0, 0, key(SOURCE_PERSONA)), env(), now()).is_err(), "the host's own seat");
+    // L6: a row drawn for an earlier attach of that seat starts nothing.
+    assert_eq!(
+        hg.state.begin_handover_with((slot, generation.wrapping_add(1), drawn.2), env(), now()),
+        Err(crate::handover::live::copy::SEAT_CHANGED.to_string()),
+        "a changed seat started a handover"
+    );
+    assert!(hg.state.handover.is_none());
+    hg.state.begin_handover_with(drawn, env(), now()).expect("eligible");
     let rc = RemoteClient::from_transport(Box::new(client), crate::remote_client::build_join_request_guest("far", 0), None);
     (hg, Far { rc, dst: None }, slot)
 }
@@ -385,9 +394,19 @@ fn consented(j: &mut Joined) -> SourceSession {
         }
     }
     assert_eq!(recipient_stage(&j.hg), Some(RecipientStage::AwaitingConsent), "the joined game never saw the proposal");
+    // L7: a click on the frame the window appears is not consent.
+    j.hg.state.handover_click = Some(UiAction::Accept);
+    j.hg.frames(1);
+    assert_eq!(recipient_stage(&j.hg), Some(RecipientStage::AwaitingConsent), "an unarmed Accept consented");
+    assert!(!j.hg.state.remote_client.as_ref().unwrap().is_parked());
+    arm_consent(&mut j.hg);
+    // L5: the joined session's router lease moves into the session.
+    j.hg.state.upnp_lease = Some(crate::online_prep::LeaseKeeper::lost_for_test());
     j.hg.state.handover_click = Some(UiAction::Accept);
     j.hg.frames(1);
     assert!(j.hg.state.remote_client.as_ref().unwrap().is_parked(), "consent took the connection");
+    assert!(j.hg.state.upnp_lease.is_none(), "the lease stayed with the joined session");
+    assert!(matches!(&j.hg.state.handover, Some(Handover::Recipient(s)) if s.holds_lease()), "the session holds the lease");
     assert!(j.hg.state.handover_holds_play());
     for _ in 0..4 {
         j.host.lend_tick(&mut j.hs);
@@ -410,7 +429,13 @@ fn consented(j: &mut Joined) -> SourceSession {
         source_progress: &progress,
     };
     src.offer(&mut j.hs, live(), cap, now()).unwrap();
+    src.settle_pack(&mut j.hs, live(), now()).unwrap();
     src
+}
+
+/// The consent window has been up past `CONSENT_ARM` (L7).
+fn arm_consent(hg: &mut HeadlessGame) {
+    hg.state.handover_consent_shown = Some(web_time::Instant::now() - std::time::Duration::from_secs(1));
 }
 
 #[test]
@@ -422,6 +447,10 @@ fn game_harness_handover_recipient_consents_while_joined_and_keeps_its_session_a
     // the world go, the session (and its connection) carry on to Ready.
     assert!(j.hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby));
     assert!(j.hg.state.remote_client.is_none());
+    assert!(
+        matches!(&j.hg.state.handover, Some(Handover::Recipient(s)) if s.holds_lease()),
+        "leaving the world released the lease the session holds"
+    );
     for _ in 0..ROUNDS {
         j.hg.frames(1);
         if src.pump(&mut j.hs, live(), now()).is_err() || src.stage() == SourceStage::ReadyVerified {
@@ -586,6 +615,7 @@ fn game_harness_handover_consent_window_frees_the_cursor_mid_play() {
     }
     assert_eq!(recipient_stage(&j.hg), Some(RecipientStage::AwaitingConsent));
     assert!(j.hg.state.cursor_must_be_free(), "the consent window left the cursor grabbed");
+    arm_consent(&mut j.hg);
     j.hg.state.handover_click = Some(UiAction::Decline);
     j.hg.frames(1);
     assert!(!j.hg.state.cursor_must_be_free(), "the cursor stayed free after Decline");
@@ -649,4 +679,26 @@ fn game_harness_handover_freeze_closes_and_gates_hud_dialogs() {
     hg.state.test_hud_click = Some(TestHudClick::Chest(ContainerClick::Withdraw { slot: 2, all: true }));
     hg.frames(1);
     assert_eq!(hg.state.world.chest_at(chest).unwrap().slots[2], None, "the released chest dialog didn't work");
+}
+
+/// M-A controls with a headless path: the pause-menu world-setting gate,
+/// and a request on a parked connection (settled unsent, never written into
+/// the closed stand-in). The disabled pause notice drawn in place of a HUD
+/// dialog is egui-only (the harness has no pointer to read it back).
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_frozen_pause_settings_gate_and_parked_requests_settle_unsent() {
+    let dir = Tmp::new("pausegate");
+    let (mut hg, _far) = frozen("pausegate", &dir);
+    assert_eq!(hg.state.handover_gate_pause_click(crate::menu::PAUSE_DIFFICULTY_CHANGED), -1, "a world setting landed while frozen");
+    assert_eq!(hg.state.handover_gate_pause_click(crate::menu::PAUSE_SWITCH_CREATIVE), -1);
+    drop(hg);
+    let mut j = joined("dst-parked-request");
+    let _src = consented(&mut j);
+    use crate::item::{ItemStack, MaterialId};
+    j.hg.state.players[0].inventory.set_slot(0, Some(ItemStack::new_material(MaterialId::Bread, 1)));
+    j.hg.state.players[0].hotbar_slot = 0;
+    j.hg.state.send_eat_request(0);
+    assert!(!j.hg.state.joiner_actions.eat_in_flight(), "a request was written into a parked connection");
+    assert_eq!(j.hg.state.joiner_actions.len(), 0);
 }

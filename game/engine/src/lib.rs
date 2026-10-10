@@ -1241,6 +1241,9 @@ pub(crate) struct GameState {
     /// `poll_handover`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) handover_click: Option<crate::handover_game::UiAction>,
+    /// When the consent window first showed (L7: its buttons arm later).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) handover_consent_shown: Option<web_time::Instant>,
     /// Tests: one HUD dialog click, in place of the egui pointer.
     #[cfg(test)]
     pub(crate) test_hud_click: Option<crate::handover_game::TestHudClick>,
@@ -1919,6 +1922,8 @@ impl GameState {
             host_paused: false,
             #[cfg(not(target_arch = "wasm32"))]
             handover_click: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_consent_shown: None,
             #[cfg(test)]
             test_hud_click: None,
             #[cfg(all(test, not(target_arch = "wasm32")))]

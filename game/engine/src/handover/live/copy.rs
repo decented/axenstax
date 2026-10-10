@@ -71,6 +71,11 @@ pub const COMMAND_PAUSED: &str = "Commands wait while play is paused for a hando
 pub const NEEDS_ONLINE: &str =
     "Handing a world over needs it hosted online, so there is an invitation to carry over. Use Host online first.";
 pub const BUSY: &str = "A handover is already in progress.";
+/// L3: a `--no-lend` host keeps a second copy of the world for its server.
+pub const NO_LEND: &str =
+    "This world is running with a second server copy (--no-lend), so it can't be handed over. Restart it normally first.";
+/// L6: the row the host clicked no longer names the same signed-in seat.
+pub const SEAT_CHANGED: &str = "That player's seat changed before you clicked, so nothing was started. Choose again.";
 pub const UNVERIFIED_HOST: &str =
     "This world's host offered to hand it over, but this connection didn't verify who the host is, so it was declined.";
 pub const NOT_READY_HERE: &str = "This machine isn't signed in for online play, so the handover was declined.";

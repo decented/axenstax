@@ -85,7 +85,162 @@ pub fn pack_limited(
     scratch_parent: &Path,
     limits: super::Limits,
 ) -> Result<PackedCheckpoint> {
+    let parts = Parts {
+        meta: source.meta,
+        save: source.save,
+        chunks: Chunks::World(source.world),
+        disk_chunks: source.disk_chunks,
+        exhibit_dir: source.exhibit_dir,
+        participants: source.participants,
+    };
+    pack_parts(parts, binding, scratch_parent, limits, &PackControl::default())
+}
+
+/// An owned copy of a frozen capture, so the pack (disk reads, hashing,
+/// gzip) runs on a worker thread while the frame keeps rendering and the
+/// control pump keeps running (handover review M-B). The world is frozen
+/// while it is taken, so the copy is the checkpoint's exact cut; loaded
+/// chunks are copied as their persisted bytes, bounded like the pack.
+pub struct Snapshot {
+    meta: WorldMeta,
+    save: WorldSave,
+    chunks: Vec<((i32, i32, i32), Option<Vec<u8>>)>,
+    disk_chunks: Option<PathBuf>,
+    exhibit_dir: Option<PathBuf>,
+    participants: Vec<OwnedParticipant>,
+}
+/// The borrowed frozen parts a `Snapshot` copies.
+pub struct SnapshotSource<'a> {
+    pub meta: &'a WorldMeta,
+    pub world: &'a World,
+    pub disk_chunks: Option<&'a Path>,
+    pub exhibit_dir: Option<&'a Path>,
+    pub participants: &'a [ParticipantMember<'a>],
+}
+pub struct OwnedParticipant {
+    pub npub: String,
+    pub kind: MemberKind,
+    pub schema: u32,
+    pub bytes: Vec<u8>,
+}
+impl Snapshot {
+    /// `save` moves in (it is the session's own neutralised copy); every
+    /// other part is copied out of the frozen borrow.
+    pub fn take(save: WorldSave, source: SnapshotSource<'_>, limits: super::Limits) -> Result<Self> {
+        limits.validate()?;
+        let mut chunks = Vec::new();
+        let mut bytes = 0u64;
+        for (n, (at, chunk)) in source.world.persistable_chunks().enumerate() {
+            if n >= 65534 {
+                return Err(Error::Limit("snapshot chunks"));
+            }
+            if chunk.is_empty() {
+                chunks.push((at, None));
+                continue;
+            }
+            let b = chunk.as_bytes();
+            bytes = bytes.saturating_add(b.len() as u64);
+            if bytes > limits.logical {
+                return Err(Error::Limit("logical members"));
+            }
+            chunks.push((at, Some(b)));
+        }
+        Ok(Self {
+            meta: source.meta.clone(),
+            save,
+            chunks,
+            disk_chunks: source.disk_chunks.map(Path::to_path_buf),
+            exhibit_dir: source.exhibit_dir.map(Path::to_path_buf),
+            participants: source
+                .participants
+                .iter()
+                .map(|p| OwnedParticipant {
+                    npub: p.npub.to_owned(),
+                    kind: p.kind,
+                    schema: p.schema,
+                    bytes: p.bytes.to_vec(),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Cancellation for a pack running on a worker: checked before every
+/// member, so a cancelled pack stops early and its scratch is removed.
+#[derive(Default)]
+pub struct PackControl {
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test hook: the worker says it got there, then waits (archive written).
+    #[cfg(test)]
+    pub hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+}
+impl PackControl {
+    fn check(&self) -> Result<()> {
+        if self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Cancelled);
+        }
+        Ok(())
+    }
+    fn pause_point(&self) {
+        #[cfg(test)]
+        if let Some((reached, release)) = &self.hold {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
+    }
+}
+
+/// Pack an owned snapshot (on the session's worker thread).
+pub fn pack_snapshot(
+    snapshot: &Snapshot,
+    binding: PackBinding,
+    scratch_parent: &Path,
+    limits: super::Limits,
+    control: &PackControl,
+) -> Result<PackedCheckpoint> {
+    let rows: Vec<ParticipantMember<'_>> = snapshot
+        .participants
+        .iter()
+        .map(|p| ParticipantMember {
+            npub: &p.npub,
+            kind: p.kind,
+            schema: p.schema,
+            bytes: &p.bytes,
+        })
+        .collect();
+    let parts = Parts {
+        meta: &snapshot.meta,
+        save: &snapshot.save,
+        chunks: Chunks::Owned(&snapshot.chunks),
+        disk_chunks: snapshot.disk_chunks.as_deref(),
+        exhibit_dir: snapshot.exhibit_dir.as_deref(),
+        participants: &rows,
+    };
+    pack_parts(parts, binding, scratch_parent, limits, control)
+}
+
+enum Chunks<'a> {
+    World(&'a World),
+    Owned(&'a [((i32, i32, i32), Option<Vec<u8>>)]),
+}
+struct Parts<'a> {
+    meta: &'a WorldMeta,
+    save: &'a WorldSave,
+    chunks: Chunks<'a>,
+    disk_chunks: Option<&'a Path>,
+    exhibit_dir: Option<&'a Path>,
+    participants: &'a [ParticipantMember<'a>],
+}
+
+fn pack_parts(
+    source: Parts<'_>,
+    binding: PackBinding,
+    scratch_parent: &Path,
+    limits: super::Limits,
+    control: &PackControl,
+) -> Result<PackedCheckpoint> {
     limits.validate()?;
+    control.check()?;
     validate_metadata(source.meta)?;
     validate_neutral(source.save)?;
     if source.participants.len() > 8192 || source.save.exhibits.len() > 1024 {
@@ -142,15 +297,27 @@ pub fn pack_limited(
             inputs.insert(path, Input::File(entry.path(), MemberKind::Chunk, 1))?;
         }
     }
-    for (n, ((x, y, z), chunk)) in source.world.persistable_chunks().enumerate() {
+    let loaded: Box<dyn Iterator<Item = ((i32, i32, i32), Option<Input<'_>>)>> = match source.chunks {
+        Chunks::World(world) => Box::new(
+            world
+                .persistable_chunks()
+                .map(|(at, c)| (at, (!c.is_empty()).then_some(Input::Chunk(c)))),
+        ),
+        Chunks::Owned(rows) => Box::new(
+            rows.iter()
+                .map(|(at, b)| (*at, b.as_deref().map(|b| Input::Bytes(b, MemberKind::Chunk, 1)))),
+        ),
+    };
+    for (n, ((x, y, z), chunk)) in loaded.enumerate() {
         if n >= 65534 {
             return Err(Error::Limit("snapshot chunks"));
         }
         let path = format!("chunks/{x}_{y}_{z}.chunk");
-        if chunk.is_empty() {
-            inputs.remove(&path);
-        } else {
-            inputs.insert(path, Input::Chunk(chunk))?;
+        match chunk {
+            None => inputs.remove(&path),
+            Some(input) => {
+                inputs.insert(path, input)?;
+            }
         }
     }
     for row in source.participants {
@@ -206,6 +373,7 @@ pub fn pack_limited(
     if inputs.rows.len() > limits.members {
         return Err(Error::Limit("member count"));
     }
+    control.check()?;
     let archive = scratch.0.join("checkpoint.tar.gz");
     let output = files::new_file(&archive)?;
     let count = files::Count {
@@ -219,6 +387,7 @@ pub fn pack_limited(
     {
         let mut ar = tar::Builder::new(&mut gz);
         for (path, input) in inputs.rows {
+            control.check()?;
             let (kind, schema) = input.kind_schema();
             let (length, digest) = match &input {
                 Input::File(p, _, _) => files::digest(files::open(p)?, DECOMPRESSED_LIMIT)?,
@@ -286,6 +455,9 @@ pub fn pack_limited(
         stream_hash,
     };
     manifest.validate()?;
+    // A test can hold a pack that finishes after its session cancelled: the
+    // late result must be fenced and dropped (removing this scratch), never sent.
+    control.pause_point();
     let directory = scratch.0.clone();
     std::mem::forget(scratch);
     Ok(PackedCheckpoint {

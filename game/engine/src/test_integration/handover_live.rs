@@ -139,6 +139,36 @@ fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release()
     assert!(challenged, "the newcomer was not admitted after release");
 }
 
+/// CP2 review L1: while frozen a guest's flood moves only into its own
+/// bounded queue (unprocessed); past the bound it is read no further and is
+/// disconnected at release by the ordinary overflow kick.
+#[test]
+fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
+    let (mut hs, mut host) = start_lent("handover-flood");
+    let (_client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x54; 32]);
+    let (guest, guest_slot, _, _) = signed_join_lent(&mut hs, &mut host, [0x55; 32]);
+    let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    hs.handover_freeze().unwrap();
+    let junk = vec![0u8; 60 * 1024];
+    let n = crate::transport::MAX_INBOUND_BYTES / junk.len() + 8;
+    for _ in 0..n {
+        guest.send_to_server(&junk);
+    }
+    hs.handover_take_frames().unwrap();
+    assert!(hs.handover_test_inbound_bytes(guest_slot) > 0, "the guest's packets were left in its unbounded transport");
+    let bound = crate::transport::MAX_INBOUND_BYTES + junk.len() + crate::transport::INBOUND_ENTRY_OVERHEAD;
+    for _ in 0..n {
+        guest.send_to_server(&junk);
+    }
+    for _ in 0..4 {
+        hs.handover_take_frames().unwrap();
+    }
+    assert!(hs.handover_test_inbound_bytes(guest_slot) <= bound, "the guest's queue grew past its bound while frozen");
+    assert!(hs.handover_seat(guest_slot).is_some(), "kicked while frozen");
+    hs.handover_release();
+    assert!(hs.handover_seat(guest_slot).is_none(), "an overflowed guest stayed at release");
+}
+
 #[test]
 fn handover_eligibility_refuses_live_seat_state_it_cannot_carry() {
     use crate::handover::live::eligibility::{Refusal, Seat, seats};
@@ -566,7 +596,149 @@ mod session {
             source_sidecar: &sidecar,
             source_progress: &progress,
         };
-        (p.src.offer(&mut p.hs, p.live, cap, now()), sidecar)
+        // M-B: the pack runs on a worker; wait for it as later pumps would.
+        let r = p.src.offer(&mut p.hs, p.live, cap, now()).and_then(|()| p.src.settle_pack(&mut p.hs, p.live, now()));
+        (r, sidecar)
+    }
+
+    /// The frozen capture's parts, without offering them.
+    fn start_offer(p: &mut Pair, seat0: &crate::player_slot::PlayerSlot) {
+        let transfer = p.src.transfer();
+        let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
+        let context = RecordContext { participant: source_key, lineage: root_lineage(&p.root), generation: 1, transfer };
+        let sidecar = capture::local0_sidecar(seat0, [9; 16]).unwrap();
+        let progress = capture::local0_progress(seat0, context).unwrap();
+        let meta = crate::handover::checkpoint::transfer_metadata(&crate::save::WorldMeta::new("Loop")).unwrap();
+        let save = crate::save::build_world_save(&p.host.world, std::slice::from_ref(seat0), 42, &[], &[]).unwrap();
+        let cap = Capture {
+            meta: &meta,
+            save,
+            world: &p.host.world,
+            disk_chunks: None,
+            exhibit_dir: None,
+            source_sidecar: &sidecar,
+            source_progress: &progress,
+        };
+        p.src.offer(&mut p.hs, p.live, cap, now()).unwrap();
+    }
+
+    fn scratch_entries(p: &Pair) -> usize {
+        std::fs::read_dir(p.dir.0.join("scratch")).unwrap().count()
+    }
+
+    /// CP2 review M-B: the pack runs on a worker. While it runs the pump
+    /// returns at once (the frame and Cancel keep running); a cancel during a
+    /// slow pack fences its late result off: nothing is offered, its scratch
+    /// is removed, the recipient hears only the abort, and play resumes.
+    #[test]
+    fn handover_cancel_during_a_slow_pack_sends_nothing_and_leaves_no_scratch() {
+        let mut p = pair("slowpack");
+        consent(&mut p);
+        let (reached, release) = p.src.hold_pack();
+        start_offer(&mut p, &seat0());
+        assert_eq!(p.src.stage(), SourceStage::Packing);
+        // The worker has written the whole archive and waits: its result
+        // will be complete, so only the fence can keep it from being used.
+        reached.recv().unwrap();
+        assert!(scratch_entries(&p) > 0, "the held pack has scratch data");
+        for _ in 0..3 {
+            p.src.pump(&mut p.hs, p.live, now()).unwrap();
+        }
+        assert_eq!(p.src.stage(), SourceStage::Packing, "the pump waited for the pack");
+        let tally = p.host.world.sim_tally;
+        p.src.abort(&mut p.hs, "cancelled");
+        release.send(()).unwrap();
+        p.src.join_pack_worker();
+        // The finished (late) pack is drained by the next pump and dropped.
+        assert!(p.src.pump(&mut p.hs, p.live, now()).is_ok(), "a cancelled pack's result was used");
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)));
+        assert!(p.src.core().is_none(), "a cancelled pack was certified");
+        assert_eq!(scratch_entries(&p), 0, "a cancelled pack left scratch data");
+        assert!(!p.hs.handover_frozen() && p.hs.handover_link().is_none());
+        p.host.lend_tick(&mut p.hs);
+        assert!(p.host.world.sim_tally != tally, "play resumed");
+        // The recipient heard the abort and nothing of the copy.
+        let dst = p.dst.as_mut().unwrap();
+        assert!(dst.pump(now()).is_err(), "the recipient heard the cancel");
+        let (link, _) = dst.return_link().expect("connection handed back");
+        while let Some(pkt) = link.try_recv_from_server() {
+            if let Some(b) = crate::handover::live::recipient::handover_payload(&pkt) {
+                let f = Frame::decode(b).unwrap();
+                assert!(
+                    !matches!(f, Frame::ManifestPart { .. } | Frame::Offer { .. } | Frame::Chunk { .. }),
+                    "a cancelled pack was sent: {f:?}"
+                );
+            }
+        }
+    }
+
+    /// While the pack runs the source keeps the recipient's stall deadline
+    /// fed (heartbeat); a finished pack is then offered as before.
+    #[test]
+    fn handover_pack_heartbeat_keeps_the_recipient_waiting_then_offers() {
+        let mut p = pair("beat");
+        consent(&mut p);
+        let (_reached, release) = p.src.hold_pack();
+        start_offer(&mut p, &seat0());
+        let later = now() + crate::handover::live::source::HEARTBEAT_SECS;
+        p.src.pump(&mut p.hs, p.live, later).unwrap();
+        let stall = later + crate::handover::live::source::STALL_SECS - 1;
+        p.dst.as_mut().unwrap().pump(later).unwrap();
+        p.dst.as_mut().unwrap().pump(stall).unwrap();
+        assert_eq!(p.dst.as_ref().unwrap().stage(), RecipientStage::Accepted, "the heartbeat kept the recipient waiting");
+        release.send(()).unwrap();
+        p.src.settle_pack(&mut p.hs, p.live, now()).unwrap();
+        assert_eq!(p.src.stage(), SourceStage::Streaming);
+        stream(&mut p, 200);
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+    }
+
+    /// L2: after Ready a silent recipient times the source out, and a silent
+    /// host times the recipient out; before Retired both mean abort and play.
+    #[test]
+    fn handover_stall_deadlines_after_ready_and_on_the_recipient_restore_play() {
+        let stall = crate::handover::live::source::STALL_SECS + 1;
+        let mut p = pair("stall-src");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 200);
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+        assert!(p.src.pump(&mut p.hs, p.live, now() + stall).is_err(), "a silent recipient held the source after Ready");
+        assert!(!p.hs.handover_frozen(), "the source resumed");
+        let mut q = pair("stall-dst");
+        consent(&mut q);
+        let dst = q.dst.as_mut().unwrap();
+        assert!(dst.pump(now() + stall).is_err(), "a silent host held the recipient");
+        assert!(matches!(dst.stage(), RecipientStage::Aborted(_)));
+        assert!(dst.return_link().is_some(), "the joined connection comes back");
+    }
+
+    /// L3: a `--no-lend` host refuses (its joiners' items live in a copy).
+    #[test]
+    fn handover_no_lend_host_refuses_with_a_reason() {
+        let mut p = pair("nolend");
+        consent_only(&mut p);
+        // The Accept is routed; the host now runs as `--no-lend` would.
+        p.hs.handover_test_set_owned();
+        let r = p.src.pump(&mut p.hs, p.live, now()).unwrap_err();
+        assert_eq!(r.0, crate::handover::live::copy::NO_LEND);
+        assert!(!p.hs.handover_frozen());
+    }
+
+    /// L4: the transfer metadata carries the live world's work and clock.
+    #[test]
+    fn handover_transfer_metadata_takes_the_live_work_and_clock() {
+        let p = pair("meta");
+        let mut world = crate::world::World::new();
+        world.total_work = 777;
+        world.total_ticks = 4242;
+        let mut saved = crate::save::WorldMeta::new("Loop");
+        saved.total_work = 1;
+        saved.pop_secret = Some([5; 32]);
+        let meta = crate::handover_game::live_transfer_metadata(saved, &world).unwrap();
+        assert_eq!((meta.total_work, meta.total_ticks), (777, 4242));
+        assert!(meta.pop_secret.is_none(), "still sanitised");
+        drop(p);
     }
 
     /// Pump both sides, ticking the frozen source the way an ungated caller

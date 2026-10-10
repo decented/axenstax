@@ -14,7 +14,8 @@ pub use admission::{AdmittedManifest, OfferContext, sign_offer};
 pub use evidence::{OfflineRecovery, RecoveredCheckpoint};
 pub use import::{DurableCheckpoint, Import, ImportBoundary, ImportObserver, NoFault};
 pub use pack::{
-    CheckpointSource, PackBinding, PackedCheckpoint, ParticipantMember, pack, pack_limited,
+    CheckpointSource, PackBinding, PackControl, PackedCheckpoint, ParticipantMember, Snapshot,
+    SnapshotSource, pack, pack_limited, pack_snapshot,
 };
 
 /// A transfer COPY, preserving world history but carrying no source operator

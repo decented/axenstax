@@ -36,6 +36,9 @@ pub struct HandoverLink {
     broken: Option<&'static str>,
     transfer: crate::handover::Id,
     lease: std::sync::Weak<()>,
+    /// L1: other seats whose bounded inbound queue overflowed while frozen.
+    /// They are read no further and disconnected at release.
+    overflowed: Vec<usize>,
 }
 
 /// Why a link refused or broke. Short reasons, no keys or frame text.
@@ -90,6 +93,7 @@ impl HostedServer {
             broken: None,
             transfer,
             lease: std::sync::Arc::downgrade(&lease),
+            overflowed: Vec::new(),
         });
         Ok(lease)
     }
@@ -203,8 +207,39 @@ impl HostedServer {
                 p.remove(0);
                 p
             }));
+            self.handover_fill_guests(slot);
         }
         Ok(out)
+    }
+
+    /// L1: while frozen, every other seat's packets move into its own
+    /// bounded inbound queue, unprocessed (they wait for release in order).
+    /// A seat that overflows its bound is read no further and is
+    /// disconnected at release by the ordinary overflow kick.
+    fn handover_fill_guests(&mut self, bound: usize) {
+        for j in 0..self.transports.len() {
+            let over = self.handover.as_ref().is_some_and(|l| l.overflowed.contains(&j));
+            if j == bound || over || self.disconnected[j] {
+                continue;
+            }
+            if self.inbound[j].fill_from(&*self.transports[j]).is_err()
+                && let Some(l) = &mut self.handover
+            {
+                l.overflowed.push(j);
+            }
+        }
+    }
+
+    /// Pretend this host runs `--no-lend` (tests; L3).
+    #[cfg(test)]
+    pub fn handover_test_set_owned(&mut self) {
+        self.host_world = super::HostWorld::Owned;
+    }
+
+    /// Bytes waiting in `slot`'s bounded inbound queue (tests).
+    #[cfg(test)]
+    pub fn handover_test_inbound_bytes(&self, slot: usize) -> usize {
+        self.inbound[slot].charged_bytes()
     }
 
     /// Route a control frame that arrived through ordinary processing.
@@ -234,6 +269,16 @@ impl HostedServer {
         }
         if l.frozen {
             self.handover_notice_all(l.transfer, false);
+        }
+        for j in l.overflowed {
+            log::warn!("Player {j} overflowed its inbound bound during a handover freeze — disconnecting it");
+            if let Some(left) = self.release_slot(j, Some(super::INBOUND_OVERFLOW_REASON)) {
+                for k in 0..self.transports.len() {
+                    if k != j && self.handshake_done[k] && !self.disconnected[k] {
+                        self.transports[k].send_to_client(&left);
+                    }
+                }
+            }
         }
     }
 }

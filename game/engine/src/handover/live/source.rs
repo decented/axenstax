@@ -8,7 +8,7 @@ use super::wire::{Frame, PART_LIMIT, acceptance_content, source_agreement_conten
 use crate::handover::{
     Id,
     certificate::Core,
-    checkpoint::{self, CheckpointSource, PackBinding, PackedCheckpoint, ParticipantMember},
+    checkpoint::{self, PackBinding, PackedCheckpoint, ParticipantMember},
     context::RootContext,
     manifest::{Agreement, MemberKind},
     personal::RecordContext,
@@ -57,12 +57,22 @@ pub struct Live {
 /// any message from the recipient before the source gives up and resumes.
 pub const CONSENT_SECS: u64 = 300;
 pub const STALL_SECS: u64 = 60;
+/// While the pack runs on its worker the source tells the recipient it is
+/// still there (the recipient's own stall deadline is `STALL_SECS`).
+pub const HEARTBEAT_SECS: u64 = 5;
+
+/// What a pack worker hands back: its generation, the transfer it packed
+/// for, and the packed copy (whose scratch is removed when it is dropped).
+type PackResult = (u64, Id, crate::handover::Result<PackedCheckpoint>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceStage {
     Proposed,
     /// Consent verified and the source frozen: the caller captures now.
     Frozen,
+    /// The frozen copy is being packed on a worker thread; the frame, the
+    /// control pump and Cancel keep running.
+    Packing,
     Streaming,
     /// Recipient durably holds the checkpoint; inert until Prepared/Commit.
     ReadyVerified,
@@ -99,6 +109,16 @@ pub struct SourceSession {
     /// Shared with the bound link: dropping the session releases it.
     _lease: std::sync::Arc<()>,
     last_heard: u64,
+    last_beat: u64,
+    /// The pack worker's generation fence: only a result carrying this
+    /// generation and transfer, arriving while `Packing`, is ever used.
+    pack_generation: u64,
+    pack_rx: Option<std::sync::mpsc::Receiver<PackResult>>,
+    pack_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pack_worker: Option<std::thread::JoinHandle<()>>,
+    source_agreement: Option<String>,
+    #[cfg(test)]
+    pack_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 fn random_id() -> Id {
@@ -131,6 +151,14 @@ impl SourceSession {
             ready: None,
             _lease: lease,
             last_heard: now,
+            last_beat: now,
+            pack_generation: 0,
+            pack_rx: None,
+            pack_cancel: Default::default(),
+            pack_worker: None,
+            source_agreement: None,
+            #[cfg(test)]
+            pack_hold: None,
             action,
             cfg,
         };
@@ -198,6 +226,10 @@ impl SourceSession {
         }
         let _ = self.send(hs, &Frame::Abort { transfer: self.transfer });
         hs.handover_release();
+        // M-B: a running pack is cancelled and fenced off; its result, if it
+        // still arrives, is dropped (and its scratch with it), never sent.
+        self.pack_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.pack_generation += 1;
         self.sender = None;
         self.file = None;
         self.packed = None;
@@ -214,6 +246,13 @@ impl SourceSession {
     /// After Ready the source is still frozen and still listening: a
     /// recipient Abort releases it.
     pub fn pump(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
+        // A finished pack is drained first, even after an abort: a cancelled
+        // or superseded result is dropped here, never sent.
+        if let Some(msg) = self.take_pack(false)
+            && let Err(r) = self.on_pack(hs, live, msg, now)
+        {
+            return Err(self.fail(hs, r));
+        }
         if matches!(self.stage, SourceStage::Aborted(_)) {
             return Ok(());
         }
@@ -232,13 +271,21 @@ impl SourceSession {
             }
         }
         let quiet = now.saturating_sub(self.last_heard);
+        // L2: a silent recipient times out while streaming and after Ready
+        // (until Prepared advances it); the pack is this machine's own work.
         let stalled = match self.stage {
             SourceStage::Proposed => quiet > CONSENT_SECS,
-            SourceStage::Streaming => quiet > STALL_SECS,
+            SourceStage::Streaming | SourceStage::ReadyVerified => quiet > STALL_SECS,
             _ => false,
         };
         if stalled {
             return Err(self.fail(hs, Refusal("The other player stopped responding. Play has resumed.")));
+        }
+        if self.stage == SourceStage::Packing && now.saturating_sub(self.last_beat) >= HEARTBEAT_SECS {
+            self.last_beat = now;
+            if let Err(r) = self.send(hs, &Frame::Notice { transfer: self.transfer, paused: true }) {
+                return Err(self.fail(hs, r));
+            }
         }
         if self.stage == SourceStage::Streaming
             && let Err(r) = self.fill(hs)
@@ -246,6 +293,58 @@ impl SourceSession {
             return Err(self.fail(hs, r));
         }
         Ok(())
+    }
+
+    fn take_pack(&mut self, block: bool) -> Option<PackResult> {
+        let rx = self.pack_rx.as_ref()?;
+        let msg = if block {
+            rx.recv_timeout(std::time::Duration::from_secs(120)).ok()
+        } else {
+            rx.try_recv().ok()
+        };
+        if msg.is_some() {
+            self.pack_rx = None;
+        }
+        msg
+    }
+
+    /// The generation fence. Anything but this session's live pack, still
+    /// awaited, is dropped (its `PackedCheckpoint` removes its scratch).
+    fn on_pack(&mut self, hs: &mut HostedServer, live: Live, msg: PackResult, now: u64) -> Result<(), Refusal> {
+        let (generation, transfer, result) = msg;
+        if generation != self.pack_generation || transfer != self.transfer || self.stage != SourceStage::Packing {
+            drop(result);
+            return Ok(());
+        }
+        let packed = result.map_err(|_| {
+            Refusal("The world couldn't be packed for the handover (too large, or something in it can't move yet).")
+        })?;
+        self.after_pack(hs, live, packed, now)
+    }
+
+    /// Test hook: hold the pack worker once its archive is written. The
+    /// first receiver hears when it got there; it waits for the sender.
+    #[cfg(test)]
+    pub fn hold_pack(&mut self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        self.pack_hold = Some((reached_tx, release_rx));
+        (reached_rx, release_tx)
+    }
+    /// Test hook: wait for the pack worker thread to end.
+    #[cfg(test)]
+    pub fn join_pack_worker(&mut self) {
+        if let Some(w) = self.pack_worker.take() {
+            w.join().expect("pack worker");
+        }
+    }
+    /// Test hook: wait for the pack and use it, as a later pump would.
+    #[cfg(test)]
+    pub fn settle_pack(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
+        match self.take_pack(true) {
+            Some(msg) => self.on_pack(hs, live, msg, now).map_err(|r| self.fail(hs, r)),
+            None => Ok(()),
+        }
     }
 
     /// Every boundary re-reads identity, seats, live seat state and the
@@ -371,35 +470,69 @@ impl SourceSession {
         )
         .map_err(|_| Refusal("Your agreement couldn't be signed."))?
         .as_json();
+        let source_agreement_hash = crate::handover::hash(source_agreement.as_bytes());
+        self.source_agreement = Some(source_agreement);
         let mut agreements = vec![
-            Agreement { participant: self.action.source_key, proof: crate::handover::hash(source_agreement.as_bytes()) },
+            Agreement { participant: self.action.source_key, proof: source_agreement_hash },
             Agreement {
                 participant: seat.key,
                 proof: crate::handover::hash(self.acceptance.as_deref().unwrap_or_default().as_bytes()),
             },
         ];
         agreements.sort_by_key(|a| a.participant);
-        let packed = checkpoint::pack(
-            CheckpointSource {
+        // M-B: copy the frozen cut, then pack (disk reads, hashing, gzip) on
+        // a worker; the frame, the control pump and Cancel keep running.
+        let limits = checkpoint::Limits::default();
+        let snapshot = checkpoint::Snapshot::take(
+            save,
+            checkpoint::SnapshotSource {
                 meta: c.meta,
-                save: &save,
                 world: c.world,
                 disk_chunks: c.disk_chunks,
                 exhibit_dir: c.exhibit_dir,
                 participants: &rows,
             },
-            PackBinding {
-                source: self.action.source_key,
-                receiver: seat.key,
-                world: self.cfg.world,
-                lineage: self.cfg.lineage,
-                transfer: self.transfer,
-                generation: self.cfg.generation,
-                agreements,
-            },
-            &self.cfg.scratch,
+            limits,
         )
         .map_err(|_| Refusal("The world couldn't be packed for the handover (too large, or something in it can't move yet)."))?;
+        let binding = PackBinding {
+            source: self.action.source_key,
+            receiver: seat.key,
+            world: self.cfg.world,
+            lineage: self.cfg.lineage,
+            transfer: self.transfer,
+            generation: self.cfg.generation,
+            agreements,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (generation, transfer, scratch) = (self.pack_generation, self.transfer, self.cfg.scratch.clone());
+        let control = checkpoint::PackControl {
+            cancel: self.pack_cancel.clone(),
+            #[cfg(test)]
+            hold: self.pack_hold.take(),
+        };
+        let worker = std::thread::Builder::new()
+            .name("handover-pack".into())
+            .spawn(move || {
+                let r = checkpoint::pack_snapshot(&snapshot, binding, &scratch, limits, &control);
+                // A dropped session's receiver is gone: the result (and its
+                // scratch) is dropped right here.
+                let _ = tx.send((generation, transfer, r));
+            })
+            .map_err(|_| Refusal("The world couldn't be packed for the handover."))?;
+        self.pack_rx = Some(rx);
+        self.pack_worker = Some(worker);
+        self.last_beat = now;
+        self.stage = SourceStage::Packing;
+        Ok(())
+    }
+
+    /// The pack is back (fenced): re-check, certify, offer, stream.
+    fn after_pack(&mut self, hs: &mut HostedServer, live: Live, packed: PackedCheckpoint, now: u64) -> Result<(), Refusal> {
+        hs.handover_check().map_err(Refusal)?;
+        self.check(hs, live)?;
+        let seat = self.action.seat;
+        let source_agreement = self.source_agreement.take().ok_or(Refusal("No agreement."))?;
         let manifest = packed.manifest().encode().map_err(|_| Refusal("The world's manifest is too large."))?;
         let epoch = self.cfg.authority.epoch() + 1;
         let core = Core {
@@ -471,6 +604,11 @@ impl SourceSession {
 fn check(hs: &HostedServer, action: &HostAction, cfg: &SourceConfig, live: Live) -> Result<(), Refusal> {
     eligibility::local_seats(live.local_seats)?;
     eligibility::source_identity(action.source_key, live.signed_in)?;
+    // L3: only a host that lends its one world can capture what its joiners
+    // put into it; a `--no-lend` host's server copy diverges from it.
+    if !hs.lends_host_world() {
+        return Err(Refusal(super::copy::NO_LEND));
+    }
     if cfg.authority.runtime() != cfg.runtime.public_key().to_bytes() {
         return Err(Refusal("This machine doesn't hold this world's invitation."));
     }
