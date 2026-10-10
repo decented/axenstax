@@ -30,7 +30,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 /// Bounded backoff between attempts: `first`, doubling, capped at `ceiling`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
