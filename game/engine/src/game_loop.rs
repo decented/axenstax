@@ -1139,16 +1139,16 @@ impl super::GameState {
         // World handover: one row per present, authenticated seat — the
         // click carries the seat, which the action re-reads; never a label.
         let drawn = self.handover_candidates();
-        let handover: Vec<(usize, String)> = drawn
+        let handover: Vec<(crate::friends_ui::HandoverRow, String)> = drawn
             .iter()
-            .map(|&(slot, _, key)| {
+            .map(|&(slot, generation, key)| {
                 let name = self
                     .hosted_server
                     .as_ref()
                     .and_then(|hs| hs.server.players.get(slot))
                     .map(|p| p.display_name.clone())
                     .unwrap_or_default();
-                (slot, crate::friends_ui::connected_label(&name, Some(&key), host.book()))
+                ((slot, generation, key), crate::friends_ui::connected_label(&name, Some(&key), host.book()))
             })
             .collect();
         let view = crate::friends_ui::OnlinePanelView {
@@ -1173,9 +1173,11 @@ impl super::GameState {
                 hand_to = crate::friends_ui::draw_online_panel(ui, &view);
             });
         self.show_online_panel = open;
-        // L6: the click carries the drawn row's (slot, generation, key).
-        if let Some(row) = hand_to.and_then(|slot| drawn.iter().find(|r| r.0 == slot)) {
-            self.begin_handover(*row);
+        // L6 / review LOW-4: the click carries the (slot, generation, key)
+        // of the row widget the press began on (rows are identified by
+        // seat), re-checked against the live seat by `begin_handover_with`.
+        if let Some(row) = hand_to {
+            self.begin_handover(row);
         }
     }
 
@@ -7564,6 +7566,11 @@ impl super::GameState {
             self.skin_picker_open = false;
             return true;
         }
+        // Review LOW-5: closing crafting moves its grid and cursor items
+        // into the inventory, so while play is held it stays open.
+        if self.players.first().is_some_and(|p| p.crafting_ui.open) && self.handover_blocks_world_action() {
+            return true;
+        }
         let Some(p) = self.players.first_mut() else { return false };
         if p.crafting_ui.open {
             p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
@@ -8223,8 +8230,10 @@ impl super::GameState {
                 match &self.mode {
                     GameMode::Playing => {
                         // Close crafting UI for all players that have it open
+                        // (not while play is held for a handover: review LOW-5).
+                        let held = self.handover_holds_play();
                         for p in &mut self.players {
-                            if p.crafting_ui.open {
+                            if p.crafting_ui.open && !held {
                                 p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
                             }
                         }
@@ -17360,11 +17369,7 @@ impl super::GameState {
                     crate::trials::TrialDoneAction::BackToTrials => {
                         self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
                     }
-                    crate::trials::TrialDoneAction::TryAgain => {
-                        self.trial_outcome = None;
-                        self.start_trial(&outcome.trial_id);
-                        self.capture_cursor();
-                    }
+                    crate::trials::TrialDoneAction::TryAgain => self.trial_try_again(&outcome.trial_id),
                     crate::trials::TrialDoneAction::None => {}
                 }
             } else if self.scenario.as_ref().is_some_and(|s| s.shows_blocking_end_card()) {
@@ -17403,12 +17408,7 @@ impl super::GameState {
                     | crate::hud_ui::ScenarioEndAction::BackToTrials => {
                         self.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby);
                     }
-                    crate::hud_ui::ScenarioEndAction::TryAgain => {
-                        // Re-run the same challenge in place (fresh progress).
-                        let def = self.scenario.as_ref().unwrap().def().clone();
-                        self.start_scenario(def);
-                        self.capture_cursor();
-                    }
+                    crate::hud_ui::ScenarioEndAction::TryAgain => self.scenario_try_again(),
                     crate::hud_ui::ScenarioEndAction::None => {}
                 }
             } else if is_dead {

@@ -702,3 +702,39 @@ fn game_harness_handover_frozen_pause_settings_gate_and_parked_requests_settle_u
     assert!(!j.hg.state.joiner_actions.eat_in_flight(), "a request was written into a parked connection");
     assert_eq!(j.hg.state.joiner_actions.len(), 0);
 }
+
+/// Review LOW-5: the trial "Try again" and closing the crafting screen sit
+/// outside the HUD's frozen branch; while frozen both are dropped through
+/// the central gate (nothing teleports, nothing moves into the inventory),
+/// and once play resumes the crafting screen closes as normal.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_frozen_try_again_and_crafting_close_change_nothing() {
+    let dir = Tmp::new("tryagain");
+    let (mut hg, _far) = frozen("tryagain", &dir);
+    let pos = hg.state.players[0].player.pos;
+    hg.state.trial_outcome = Some(crate::trials::TrialOutcome {
+        trial_id: "race".into(),
+        name: "Race".into(),
+        headline: "done".into(),
+        is_best: false,
+    });
+    hg.state.trial_try_again("race");
+    assert!(hg.state.trial_outcome.is_some(), "a trial restarted while frozen");
+    assert_eq!(hg.state.players[0].player.pos, pos, "the seat moved while frozen");
+    {
+        let p = &mut hg.state.players[0];
+        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+        p.crafting_ui.grid[0][0] = Some(crate::item::ItemStack::new_block(crate::block::GLASS, 3));
+    }
+    let inv_before: Vec<_> = (0..36).map(|i| hg.state.players[0].inventory.slot(i).cloned()).collect();
+    assert!(hg.state.close_topmost_ui_panel());
+    assert!(hg.state.players[0].crafting_ui.open, "the crafting screen closed while frozen");
+    let inv_now: Vec<_> = (0..36).map(|i| hg.state.players[0].inventory.slot(i).cloned()).collect();
+    assert_eq!(inv_now, inv_before, "closing crafting moved items while frozen");
+    hg.state.handover_click = Some(crate::handover_game::UiAction::Cancel);
+    round(&mut hg);
+    assert!(!hg.state.handover_holds_play(), "the cancel released play");
+    assert!(hg.state.close_topmost_ui_panel());
+    assert!(!hg.state.players[0].crafting_ui.open, "crafting didn't close once play resumed");
+}

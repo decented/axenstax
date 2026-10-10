@@ -222,10 +222,15 @@ impl HostedServer {
             if j == bound || over || self.disconnected[j] {
                 continue;
             }
-            if self.inbound[j].fill_from(&*self.transports[j]).is_err()
-                && let Some(l) = &mut self.handover
-            {
-                l.overflowed.push(j);
+            if self.inbound[j].fill_from(&*self.transports[j]).is_err() {
+                if let Some(l) = &mut self.handover {
+                    l.overflowed.push(j);
+                }
+                // Review LOW-1: close it now. Dropping the real transport ends
+                // its reader and the connection, so nothing keeps buffering
+                // for the rest of the freeze; the slot bookkeeping (leave,
+                // save) still waits for release.
+                self.transports[j] = Box::new(crate::transport::ClosedTransport);
             }
         }
     }
@@ -234,6 +239,12 @@ impl HostedServer {
     #[cfg(test)]
     pub fn handover_test_set_owned(&mut self) {
         self.host_world = super::HostWorld::Owned;
+    }
+
+    /// `slot`'s server-side transport is closed (tests; review LOW-1).
+    #[cfg(test)]
+    pub fn handover_test_transport_closed(&self, slot: usize) -> bool {
+        self.transports[slot].is_closed()
     }
 
     /// Bytes waiting in `slot`'s bounded inbound queue (tests).

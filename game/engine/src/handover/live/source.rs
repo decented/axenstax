@@ -413,6 +413,8 @@ impl SourceSession {
                 self.stage = SourceStage::Frozen;
                 Ok(())
             }
+            // M1: the recipient's heartbeat while its import runs on a worker.
+            (SourceStage::Streaming, Frame::Notice { .. }) => Ok(()),
             (SourceStage::Streaming, Frame::Ack { transfer, through }) => {
                 let sender = self.sender.as_mut().ok_or(Refusal("No transfer is running."))?;
                 sender

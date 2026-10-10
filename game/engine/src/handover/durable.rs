@@ -73,6 +73,9 @@ impl MarkerStore {
         }
         Ok(Self { directory })
     }
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
     fn path(&self, kind: MarkerKind, id: Id) -> PathBuf {
         self.directory
             .join(format!("{}-{}.dat", kind.label(), hex::encode(id)))

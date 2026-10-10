@@ -15,7 +15,7 @@ use super::wire::{Frame, acceptance_content, root_lineage, source_agreement_cont
 use crate::handover::{
     Id,
     certificate::Core,
-    checkpoint::{AdmittedManifest, DurableCheckpoint, Import, NoFault, OfferContext},
+    checkpoint::{AdmittedManifest, DurableCheckpoint, Import, ImportBoundary, ImportObserver, OfferContext},
     context::RootContext,
     durable::MarkerStore,
     phase::{Authority, Receiver},
@@ -24,7 +24,32 @@ use crate::handover::{
 use crate::transport::ClientTransport;
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Timestamp, ToBech32};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
+
+/// M1: what the import worker hands back: its generation, the transfer it
+/// imported, and the durable checkpoint (or why not).
+type ImportResult = (u64, Id, crate::handover::Result<DurableCheckpoint>);
+
+/// M1: who cleans up a cancelled import. The worker decides under this lock:
+/// a worker that sees `cancelled` discards its own inert import; once it has
+/// set `finished` (or died) the session discards on abort instead.
+#[derive(Default)]
+struct ImportFence {
+    cancelled: bool,
+    finished: bool,
+}
+/// Stops the import at its next file boundary once cancelled.
+struct CancelImport(Arc<Mutex<ImportFence>>);
+impl ImportObserver for CancelImport {
+    fn reached(&mut self, _: ImportBoundary, _: &Path) -> std::io::Result<()> {
+        if self.0.lock().map(|g| g.cancelled).unwrap_or(true) {
+            Err(std::io::Error::other("handover import cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// The host this client verified when it joined: the persona from its
 /// verified answer and the runtime it connected to (online play's
@@ -66,6 +91,9 @@ pub enum RecipientStage {
     AwaitingConsent,
     Accepted,
     Receiving,
+    /// M1: every byte arrived; the import (extract, sync, verify, rename)
+    /// runs on a worker while the frame, Cancel and the heartbeat go on.
+    Importing,
     /// Durable checkpoint, latched listener and persisted Ready: inert.
     Ready,
     Aborted(&'static str),
@@ -100,6 +128,14 @@ pub struct RecipientSession {
     receiver: Option<Receiver>,
     /// L2: when the host was last heard from (consent onwards).
     last_heard: u64,
+    /// M1: the import worker's fence, result channel and thread.
+    import_generation: u64,
+    import_fence: Option<Arc<Mutex<ImportFence>>>,
+    import_rx: Option<mpsc::Receiver<ImportResult>>,
+    import_worker: Option<std::thread::JoinHandle<()>>,
+    last_beat: u64,
+    #[cfg(test)]
+    import_hold: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     /// P4: when this player consented; the whole operation must reach
     /// Activated within `source::OPERATION_SECS` of it.
     consented_at: u64,
@@ -204,6 +240,13 @@ impl RecipientSession {
             listener: None,
             receiver: None,
             last_heard: now,
+            import_generation: 0,
+            import_fence: None,
+            import_rx: None,
+            import_worker: None,
+            last_beat: now,
+            #[cfg(test)]
+            import_hold: None,
             consented_at: now,
             lease: None,
         })
@@ -249,8 +292,17 @@ impl RecipientSession {
         self.import = None;
         self.listener = None;
         self.socket = None;
+        // M1: fence off a running import worker; if it hasn't finished it
+        // discards its own import when it sees the cancel.
+        self.import_generation += 1;
+        self.import_rx = None;
+        let worker_cleans = self.import_fence.take().is_some_and(|f| {
+            let mut g = f.lock().unwrap_or_else(|e| e.into_inner());
+            g.cancelled = true;
+            !g.finished
+        });
         let inert = self.receiver.as_ref().is_none_or(|r| r.stage() == crate::handover::phase::ReceiverStage::Ready);
-        if inert {
+        if inert && !worker_cleans {
             self.checkpoint = None;
             self.receiver = None;
             // An unmarked import is never touched; a failed discard is left
@@ -355,13 +407,27 @@ impl RecipientSession {
         if let Some(lease) = self.lease.as_mut() {
             lease.renew();
         }
+        match self.take_import() {
+            Ok(Some(r)) => {
+                if let Err(r) = r.map_err(|_| Refusal("The world couldn't be stored safely on this device.")).and_then(|c| self.finish(c, now)) {
+                    return Err(self.fail(r));
+                }
+            }
+            Ok(None) => {}
+            Err(r) => return Err(self.fail(r)),
+        }
         let Some(link) = &self.link else { return Ok(()) };
         if link.is_closed() {
             return Err(self.fail(Refusal("The connection to the host closed.")));
         }
+        self.read_link(now)?;
+        if matches!(self.stage, RecipientStage::Aborted(_)) {
+            return Ok(());
+        }
         // L2: mirrors the source's `STALL_SECS` in every stage that waits on
-        // the host (it sends a heartbeat while it packs).
-        if now.saturating_sub(self.last_heard) > super::source::STALL_SECS {
+        // the host (it sends a heartbeat while it packs). Checked after the
+        // link is read, so a frame already waiting is never ignored.
+        if self.stage != RecipientStage::Importing && now.saturating_sub(self.last_heard) > super::source::STALL_SECS {
             return Err(self.fail(Refusal("The host stopped responding, so the handover was cancelled.")));
         }
         // P4: heartbeats keep the stall deadlines fed, so one total deadline
@@ -369,6 +435,15 @@ impl RecipientSession {
         if !self.gameplay_admitted() && now.saturating_sub(self.consented_at) > super::source::OPERATION_SECS {
             return Err(self.fail(Refusal(super::copy::TOO_LONG)));
         }
+        // M1: the import runs on a worker; the source's stall clock hears this.
+        if self.stage == RecipientStage::Importing && now.saturating_sub(self.last_beat) >= super::source::HEARTBEAT_SECS {
+            self.last_beat = now;
+            self.send(&Frame::Notice { transfer: self.transfer(), paused: true });
+        }
+        Ok(())
+    }
+
+    fn read_link(&mut self, now: u64) -> Result<(), Refusal> {
         while let Some(pkt) = self.link.as_ref().and_then(|l| l.try_recv_from_server()) {
             self.last_heard = now;
             let Some(bytes) = handover_payload(&pkt) else {
@@ -426,7 +501,7 @@ impl RecipientSession {
                 }
                 self.send(&Frame::Ack { transfer, through: self.received });
                 if self.received == self.expected {
-                    self.finish(now)?;
+                    self.start_import(now)?;
                 }
                 Ok(())
             }
@@ -492,13 +567,105 @@ impl RecipientSession {
         Ok(())
     }
 
+    /// M1: every byte arrived. The import (stream finish, extract, tree
+    /// sync, receipt verify, rename, parent sync) runs on a worker under a
+    /// generation fence: the frame, Cancel and the heartbeat keep going, and
+    /// a cancelled or superseded import never reaches Ready.
+    fn start_import(&mut self, now: u64) -> Result<(), Refusal> {
+        let mut import = self.import.take().ok_or(Refusal("No import is running."))?;
+        let fence: Arc<Mutex<ImportFence>> = Default::default();
+        let (tx, rx) = mpsc::channel();
+        let (generation, transfer) = (self.import_generation, self.transfer());
+        let (imports, markers) = (self.imports.clone(), self.markers.directory().to_owned());
+        let worker_fence = fence.clone();
+        #[cfg(test)]
+        let hold = self.import_hold.take();
+        let worker = std::thread::Builder::new()
+            .name("handover-import".into())
+            .spawn(move || {
+                let r = import.complete(now, &mut CancelImport(worker_fence.clone()));
+                // A failed pre-rename import removes its own scratch here.
+                drop(import);
+                #[cfg(test)]
+                if let Some((reached, release)) = hold {
+                    let _ = reached.send(());
+                    let _ = release.recv();
+                }
+                let mut g = worker_fence.lock().unwrap_or_else(|e| e.into_inner());
+                if g.cancelled {
+                    drop(g);
+                    if let Ok(m) = MarkerStore::new(markers) {
+                        let _ = super::inert::discard(&imports, &m, transfer);
+                    }
+                    return;
+                }
+                g.finished = true;
+                drop(g);
+                let _ = tx.send((generation, transfer, r));
+            })
+            .map_err(|_| Refusal("The world couldn't be stored on this device."))?;
+        self.import_fence = Some(fence);
+        self.import_rx = Some(rx);
+        self.import_worker = Some(worker);
+        self.last_beat = now;
+        self.stage = RecipientStage::Importing;
+        self.send(&Frame::Notice { transfer, paused: true });
+        Ok(())
+    }
+
+    /// The import worker's result, if one is here for this generation. A
+    /// worker that ended without one (a panic) refuses while it is awaited.
+    fn take_import(&mut self) -> Result<Option<crate::handover::Result<DurableCheckpoint>>, Refusal> {
+        let Some(rx) = self.import_rx.as_ref() else { return Ok(None) };
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(mpsc::TryRecvError::Empty) => return Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.import_rx = None;
+                if self.stage != RecipientStage::Importing {
+                    return Ok(None);
+                }
+                // The worker is gone: its files are the session's to discard.
+                if let Some(f) = &self.import_fence {
+                    f.lock().unwrap_or_else(|e| e.into_inner()).finished = true;
+                }
+                return Err(Refusal("The world couldn't be stored on this device, so the handover was cancelled."));
+            }
+        };
+        self.import_rx = None;
+        let (generation, transfer, result) = msg;
+        if generation != self.import_generation || transfer != self.transfer() || self.stage != RecipientStage::Importing {
+            return Ok(None);
+        }
+        Ok(Some(result))
+    }
+
+    #[cfg(test)]
+    pub fn hold_import(&mut self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        self.import_hold = Some((reached_tx, release_rx));
+        (reached_rx, release_tx)
+    }
+    #[cfg(test)]
+    pub fn join_import_worker(&mut self) {
+        if let Some(w) = self.import_worker.take() {
+            w.join().expect("import worker");
+        }
+    }
+    #[cfg(test)]
+    pub fn test_lose_import_worker(&mut self) {
+        let (tx, rx) = mpsc::channel::<ImportResult>();
+        drop(tx);
+        self.import_rx = Some(rx);
+    }
+
     /// Durable checkpoint, then the latched listener, then the persisted
     /// Ready receipt, and only then Ready is sent.
-    fn finish(&mut self, now: u64) -> Result<(), Refusal> {
-        let mut import = self.import.take().ok_or(Refusal("No import is running."))?;
-        let checkpoint = import
-            .complete(now, &mut NoFault)
-            .map_err(|_| Refusal("The world couldn't be stored safely on this device."))?;
+    fn finish(&mut self, checkpoint: DurableCheckpoint, now: u64) -> Result<(), Refusal> {
+        self.import_fence = None;
+        // Waiting on the host starts again now (the import was this side's).
+        self.last_heard = now;
         self.checkpoint = Some(checkpoint);
         let socket = self.socket.take().ok_or(Refusal("No listening socket."))?;
         self.listener = Some(LatchedListener::bind(socket).map_err(|_| Refusal("This device couldn't open its listener."))?);

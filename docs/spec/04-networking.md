@@ -5469,6 +5469,32 @@ Ready (`ReadyVerified`, until Prepared advances it); the recipient times out a
 silent host at the same `STALL_SECS` in Accepted, Receiving and Ready. Before
 Retired a timeout is an abort: play resumes on both sides.
 
+The recipient's import runs off the frame thread too (review M1): when the
+last byte arrives the session hands its `Import` to a `handover-import`
+worker (stream finish, extract, tree sync, receipt verify, no-replace rename,
+parent sync) and enters `Importing`; the frame, Cancel and the pump keep
+running, and every `HEARTBEAT_SECS` the recipient sends `Notice{paused}`,
+which the source accepts while `Streaming` (its stall clock hears it; the
+total deadline still bounds it). The worker's result carries a generation
+and transfer id and is used only while `Importing` (the generation fence).
+Cancelling stops the import at its next file boundary (its observer refuses);
+the worker and the session decide under one lock who discards the inert
+import, so a cancelled or superseded import never reaches Ready and leaves no
+folder, Ready marker or inert marker. A worker that ends without a result is
+a refusal and the session discards. The recipient reads waiting frames before
+its stall check, and its stall clock restarts when the import finishes.
+
+Remaining frozen-gate paths (review LOW-1/4/5): an overflowed guest's
+transport is replaced by a closed one at once (its reader and connection
+end; the leave and save still wait for release). The host-action rows are
+egui widgets identified by the seat (slot, attach generation, key), so a
+press on one seat's row cannot complete as a click on the seat that replaced
+it; the click carries that row. The trial-complete and scenario end-card
+"Try again" and every crafting-screen close (Esc, the topmost-panel close,
+the pause key) go through `handover_blocks_world_action`: while play is held
+they are dropped with the paused notice (crafting stays open; its grid and
+cursor items move nowhere).
+
 Whole-operation deadline (P4): heartbeats keep the per-phase stall timers fed,
 so both sides also hold one total deadline, `OPERATION_SECS` = 15 minutes,
 from the recipient's consent (the source: the verified Accept that froze it)

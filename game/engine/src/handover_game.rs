@@ -223,6 +223,41 @@ impl crate::GameState {
         clicked
     }
 
+    /// Review LOW-5: the one gate for the world- or inventory-changing
+    /// actions that sit outside the HUD's frozen branch: the trial and
+    /// scenario "Try again" (teleport, lanterns, provisioning, a direct
+    /// world_meta write) and closing the crafting screen (it moves grid and
+    /// cursor items into the inventory). While play is held the action is
+    /// dropped with a notice; `true` = blocked.
+    pub(crate) fn handover_blocks_world_action(&mut self) -> bool {
+        if self.handover_holds_play() {
+            self.handover_toast(copy::SETTINGS_PAUSED);
+            return true;
+        }
+        false
+    }
+
+    /// The trial-complete "Try again" (gated, review LOW-5).
+    pub(crate) fn trial_try_again(&mut self, trial_id: &str) {
+        if self.handover_blocks_world_action() {
+            return;
+        }
+        self.trial_outcome = None;
+        self.start_trial(trial_id);
+        self.capture_cursor();
+    }
+
+    /// The scenario end-card "Try again": re-run the same challenge in place
+    /// with fresh progress (gated, review LOW-5).
+    pub(crate) fn scenario_try_again(&mut self) {
+        if self.handover_blocks_world_action() {
+            return;
+        }
+        let Some(def) = self.scenario.as_ref().map(|s| s.def().clone()) else { return };
+        self.start_scenario(def);
+        self.capture_cursor();
+    }
+
     /// The identity signed in now (re-read at every boundary).
     fn handover_signed_in(&self) -> Option<[u8; 32]> {
         #[cfg(test)]

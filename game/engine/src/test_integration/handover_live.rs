@@ -154,8 +154,13 @@ fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
     for _ in 0..n {
         guest.send_to_server(&junk);
     }
+    assert!(!hs.handover_test_transport_closed(guest_slot));
     hs.handover_take_frames().unwrap();
     assert!(hs.handover_test_inbound_bytes(guest_slot) > 0, "the guest's packets were left in its unbounded transport");
+    assert!(
+        hs.handover_test_transport_closed(guest_slot),
+        "an overflowed guest's connection stayed open (and buffering) while frozen"
+    );
     let bound = crate::transport::MAX_INBOUND_BYTES + junk.len() + crate::transport::INBOUND_ENTRY_OVERHEAD;
     for _ in 0..n {
         guest.send_to_server(&junk);
@@ -164,7 +169,10 @@ fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
         hs.handover_take_frames().unwrap();
     }
     assert!(hs.handover_test_inbound_bytes(guest_slot) <= bound, "the guest's queue grew past its bound while frozen");
-    assert!(hs.handover_seat(guest_slot).is_some(), "kicked while frozen");
+    // LOW-1: the connection is closed at once, but the slot's bookkeeping
+    // (leave, save) waits for release.
+    assert!(hs.server.players[guest_slot].verified_pubkey.is_some(), "the slot was released while frozen");
+    assert!(hs.handover_seat(guest_slot).is_none(), "an overflowed guest is still offered as a seat");
     hs.handover_release();
     assert!(hs.handover_seat(guest_slot).is_none(), "an overflowed guest stayed at release");
 }
@@ -725,6 +733,7 @@ mod session {
         let mut q = pair("stall-dst");
         consent(&mut q);
         let dst = q.dst.as_mut().unwrap();
+        dst.pump(now()).unwrap(); // what was already waiting is read first
         assert!(dst.pump(now() + stall).is_err(), "a silent host held the recipient");
         assert!(matches!(dst.stage(), RecipientStage::Aborted(_)));
         assert!(dst.return_link().is_some(), "the joined connection comes back");
@@ -762,7 +771,16 @@ mod session {
     /// would every round: it must simulate nothing.
     fn stream(p: &mut Pair, rounds: usize) {
         let tally = p.host.world.sim_tally;
-        for _ in 0..rounds {
+        // M1: the import runs on a worker; rounds spent waiting for it don't
+        // count, but a wall-clock bound does.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut n = 0;
+        while n < rounds && std::time::Instant::now() < deadline {
+            if p.dst.as_ref().unwrap().stage() == RecipientStage::Importing {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            } else {
+                n += 1;
+            }
             p.host.lend_tick(&mut p.hs);
             p.dst.as_mut().unwrap().pump(now()).unwrap();
             if p.src.pump(&mut p.hs, p.live, now()).is_err() || p.src.stage() == SourceStage::ReadyVerified {
@@ -901,6 +919,9 @@ mod session {
         let mut refusal = None;
         for _ in 0..10_000 {
             let _ = p.dst.as_mut().unwrap().pump(now());
+            if p.dst.as_ref().unwrap().stage() == RecipientStage::Importing {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             if let Err(r) = p.src.pump(&mut p.hs, p.live, now()) {
                 refusal = Some(r);
                 break;
@@ -1043,6 +1064,89 @@ mod session {
         inert::mark(&imports, [0x33; 16], [0x44; 16]).unwrap();
         store.persist(MarkerKind::Prepared, [0x33; 16], b"prepared").unwrap();
         assert!(inert::discard(&imports, &store, [0x33; 16]).is_err(), "a Prepared import was discarded");
+    }
+
+    /// Pump until the recipient reaches `want` (M1 tests stop at Importing).
+    fn stream_until(p: &mut Pair, want: RecipientStage) {
+        for _ in 0..10_000 {
+            p.host.lend_tick(&mut p.hs);
+            p.dst.as_mut().unwrap().pump(now()).unwrap();
+            if p.dst.as_ref().unwrap().stage() == want {
+                return;
+            }
+            p.src.pump(&mut p.hs, p.live, now()).unwrap();
+        }
+        panic!("the recipient never reached {want:?}");
+    }
+
+    /// Review M1: the import runs on a worker. While it is slow the
+    /// recipient's heartbeat keeps the source's stall clock fed past
+    /// `STALL_SECS`, and the finished import then reaches Ready as before.
+    #[test]
+    fn handover_slow_import_runs_on_a_worker_and_its_heartbeat_holds_the_source() {
+        use crate::handover::live::source::STALL_SECS;
+        let mut p = pair("slowimport");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        let (reached, release) = p.dst.as_mut().unwrap().hold_import();
+        stream_until(&mut p, RecipientStage::Importing);
+        reached.recv().unwrap();
+        let t0 = now();
+        for k in 1..=4u64 {
+            let t = t0 + k * 30;
+            p.dst.as_mut().unwrap().pump(t).expect("the importing recipient gave up");
+            p.host.lend_tick(&mut p.hs);
+            p.src.pump(&mut p.hs, p.live, t).expect("the source timed out a recipient that was importing");
+        }
+        assert!(t0 + 4 * 30 > t0 + STALL_SECS, "the import outlasted the stall deadline");
+        assert_eq!(p.dst.as_ref().unwrap().stage(), RecipientStage::Importing);
+        assert_eq!(p.src.stage(), SourceStage::Streaming);
+        release.send(()).unwrap();
+        p.dst.as_mut().unwrap().join_import_worker();
+        let t = t0 + 4 * 30;
+        p.dst.as_mut().unwrap().pump(t).unwrap();
+        assert_eq!(p.dst.as_ref().unwrap().stage(), RecipientStage::Ready);
+        p.host.lend_tick(&mut p.hs);
+        p.src.pump(&mut p.hs, p.live, t).unwrap();
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+    }
+
+    /// Review M1: a cancel while the (complete, renamed) import is held on
+    /// its worker never reaches Ready, and the worker discards exactly that
+    /// inert import: no folder, Ready marker or inert marker remains. A
+    /// worker that dies without a result refuses the same way.
+    #[test]
+    fn handover_cancelled_or_lost_import_worker_never_reaches_ready_and_leaves_nothing() {
+        let t_of = |p: &Pair| p.src.transfer();
+        for lost in [false, true] {
+            let mut p = pair(if lost { "lostimport" } else { "cancelimport" });
+            consent(&mut p);
+            offer(&mut p, &seat0());
+            let (reached, release) = p.dst.as_mut().unwrap().hold_import();
+            stream_until(&mut p, RecipientStage::Importing);
+            reached.recv().unwrap();
+            let dst = p.dst.as_mut().unwrap();
+            if lost {
+                dst.test_lose_import_worker();
+                assert!(dst.pump(now()).is_err(), "a lost import worker was waited on");
+            } else {
+                dst.abort("cancelled");
+            }
+            assert!(matches!(dst.stage(), RecipientStage::Aborted(_)));
+            release.send(()).unwrap();
+            dst.join_import_worker();
+            assert!(dst.pump(now()).is_ok());
+            assert!(matches!(dst.stage(), RecipientStage::Aborted(_)), "a cancelled import reached Ready");
+            assert!(dst.checkpoint().is_none());
+            assert_eq!(import_dirs(&p), Vec::<String>::new(), "a cancelled import left its data");
+            let t = t_of(&p);
+            assert!(markers(&p.dir).read(MarkerKind::Ready, t).unwrap().is_none(), "a cancelled import wrote Ready");
+            assert!(crate::handover::live::inert::marked(&p.dir.0.join("imports"), t).unwrap().is_none());
+            assert!(p.dst.as_mut().unwrap().return_link().is_some(), "the joined connection comes back");
+            p.host.lend_tick(&mut p.hs);
+            assert!(p.src.pump(&mut p.hs, p.live, now()).is_err(), "the source hears the cancel");
+            assert!(!p.hs.handover_frozen(), "and resumes play");
+        }
     }
 
     /// P4: the heartbeat keeps both stall deadlines fed while the pack is

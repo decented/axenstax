@@ -2627,9 +2627,12 @@ impl ApplicationHandler for App {
                                     state.players[0].crafting_ui.book_open = false;
                                 }
                                 EscAction::CloseCraft => {
-                                    let p = &mut state.players[0];
-                                    p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
-                                    state.capture_cursor();
+                                    // Review LOW-5: held for a handover, crafting stays open.
+                                    if !state.handover_blocks_world_action() {
+                                        let p = &mut state.players[0];
+                                        p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+                                        state.capture_cursor();
+                                    }
                                 }
                                 EscAction::CloseVillager => {
                                     state.players[0].dialogue_villager = None;
