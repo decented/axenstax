@@ -43,7 +43,7 @@
 //! the count the input reports (`GameState::apply_window_inbox`).
 
 mod strict;
-pub use strict::{stage_strict_click, stage_strict_effects, strict_effective_marker, prepare_strict_events, PreparedEvents, StrictStageError, StrictWindowStage};
+pub use strict::{stage_strict_click, stage_strict_effects, strict_effective_marker, prepare_strict_events};
 
 use std::collections::VecDeque;
 

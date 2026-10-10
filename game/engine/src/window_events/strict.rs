@@ -35,7 +35,7 @@ fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> 
         WindowEvent::WearArmour { hits } => WindowEvent::WearArmour { hits: *hits },
         WindowEvent::WearWeapon { slot, tool } => WindowEvent::WearWeapon { slot: *slot, tool: *tool },
         WindowEvent::ContainerView(_) => return Ok(None),
-        WindowEvent::Replace(_) => return Err(StrictStageError::Replacement),
+        WindowEvent::Replace { .. } => return Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => return Err(StrictStageError::Debt),
     }))
 }
@@ -177,7 +177,7 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
         WindowEvent::WearArmour { .. } | WindowEvent::WearWeapon { .. } => Ok(0),
         // These require their own complete typed allocation reservation. Never
         // treat unknown correction/view allocations as a zero-byte event.
-        WindowEvent::Replace(_) => Err(StrictStageError::Replacement),
+        WindowEvent::Replace { .. } => Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => Err(StrictStageError::Debt),
         WindowEvent::ContainerView(_) => Err(StrictStageError::Fit),
     }

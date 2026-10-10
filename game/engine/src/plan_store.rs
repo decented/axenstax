@@ -166,9 +166,12 @@ mod tests {
         body.name = "Held body survives checked directory sync failure".into();
         let marker = crate::plan::marker(&body);
         let mut inv = crate::inventory::Inventory::new_client();
-        inv.set_slot(0, Some(crate::item::ItemStack { item: crate::item::Item::Plan(body), count: 1 }));
         std::fs::create_dir_all(root()).unwrap();
+        // A client inventory remembers a Plan body as it is set
+        // (`remember_plans`): inject the failure first, so that store is
+        // the failing one too and nothing is cached before the retain.
         FAIL_DIRECTORY_SYNC.with(|failure| failure.set(true));
+        inv.set_slot(0, Some(crate::item::ItemStack { item: crate::item::Item::Plan(body), count: 1 }));
         let failed = crate::window_prediction::retain_private_window(&inv, &None, &Default::default());
         FAIL_DIRECTORY_SYNC.with(|failure| failure.set(false));
         assert!(failed.is_err());

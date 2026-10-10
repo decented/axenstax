@@ -52,7 +52,12 @@ fn record_path(hs: &HostedServer, i: usize) -> std::path::PathBuf {
 }
 
 /// A correction take of an absent item on the server copy: `n` units owed.
+/// The client has applied everything sent so far first (the join's
+/// `Replace` among it), as a real correction follows the join sync; a raw
+/// debt under a waiting `Replace` would be overwritten by it in the fold.
 fn owe(sp: &mut crate::server::ServerPlayer, item: crate::item::Item, n: u8) {
+    let sent = sp.window_events.last_number();
+    crate::window_events::apply_through(sp, sent, 0);
     let take = crate::container_window::ItemDelta { take: vec![(0, crate::item::ItemStack { item, count: n })], give: vec![] };
     sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take);
 }
