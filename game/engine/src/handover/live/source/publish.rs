@@ -1,0 +1,134 @@
+//! Disclosure and the stored publication of Prepared: the bearer frame,
+//! the fenced publish worker and its witness.
+use super::*;
+
+impl SourceSession {
+    /// P2 + M-2: seal the inert Prepared to the key the bearer derives,
+    /// disclose the bearer (the point of no return for it), then publish and
+    /// read Prepared back on a fenced worker.
+    pub(super) fn disclose(&mut self, hs: &mut HostedServer, now: u64) -> Result<(), Refusal> {
+        hs.handover_check().map_err(Refusal)?;
+        if self.cfg.world_dir.is_none() {
+            return Err(Refusal(crate::handover::live::copy::NEVER_SAVED));
+        }
+        let unsealed = Refusal("The handover record couldn't be sealed. Play has resumed.");
+        let core = self.core.clone().ok_or(Refusal("No certificate."))?;
+        let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;
+        let successor = self.recipient_attestation.clone().ok_or(Refusal("No recipient attestation."))?;
+        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).map_err(|_| unsealed.clone())?;
+        let seal = Seal {
+            source: &self.cfg.runtime,
+            recipient: &keys,
+            core: &core,
+            ready: &ready,
+            challenge: self.challenge,
+            source_attestation: &self.cfg.attestation,
+            successor_attestation: &successor,
+            prepared: None,
+        };
+        let event = pollster::block_on(crypto::seal(seal, &self.cfg.root, now)).map_err(|_| unsealed.clone())?;
+        let Ok(Verified::Prepared(vp)) = crypto::open(&event, &keys, core.source_runtime, &self.cfg.root, now, None) else {
+            return Err(unsealed);
+        };
+        let phase = crate::handover::phase::Source::frozen(core, &self.cfg.authority).map_err(|_| unsealed)?;
+        // Set before the send: a partly written frame may have left.
+        self.disclosed = true;
+        self.send(hs, &Frame::Bearer { transfer: self.transfer, bearer: self.cfg.bearer.clone() })?;
+        self.phase = Some(phase);
+        self.spawn_publish(event.clone(), Verified::Prepared(vp.clone()), None, keys.public_key().to_bytes())?;
+        self.prepared = Some((event, vp));
+        self.stage = SourceStage::Publishing;
+        Ok(())
+    }
+
+    /// One stored publication (publish, matching OK, fresh readback) on a
+    /// worker with its own reactor, charged to the operation's one Budget.
+    /// Relays are tried in the invitation's order until one stores it.
+    pub(super) fn spawn_publish(&mut self, event: Event, verified: Verified, permit: Option<PublicationPermit>, recipient: Hash) -> Result<(), Refusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (generation, transfer) = (self.publish_generation, self.transfer);
+        let root = self.cfg.root.clone();
+        let author = self.cfg.runtime.public_key().to_bytes();
+        let mut budget = self.budget.take().unwrap_or_default();
+        let cancel = self.publish_cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("handover-publish".into())
+            .spawn(move || {
+                let route = Route { author, recipient, until: root.expiry() };
+                let r = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Err(_) => Err(crate::handover::Error::Io),
+                    Ok(rt) => rt.block_on(async {
+                        let mut last = Err(crate::handover::Error::Invalid("no relay"));
+                        for url in root.relays() {
+                            let p = Publication { event: &event, verified: &verified, permit: permit.as_ref(), route };
+                            match crate::handover::stored::publish_readback(url, &root, p, &mut budget, &cancel).await {
+                                Ok(stored) => return Ok(stored),
+                                Err(e) => last = Err(e),
+                            }
+                        }
+                        last
+                    }),
+                };
+                let _ = tx.send((generation, transfer, budget, r));
+            })
+            .map_err(|_| Refusal("The handover record couldn't be published. Play has resumed."))?;
+        self.publish_rx = Some(rx);
+        self.publish_worker = Some(worker);
+        Ok(())
+    }
+
+    /// The publish worker's result for this generation, if it has arrived.
+    /// A worker that ended without one refuses while it is awaited.
+    pub(super) fn take_publish(&mut self) -> Result<Option<crate::handover::Result<StoredProof>>, Refusal> {
+        use std::sync::mpsc::TryRecvError;
+        let Some(rx) = self.publish_rx.as_ref() else { return Ok(None) };
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(TryRecvError::Empty) => return Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                self.publish_rx = None;
+                return if self.stage == SourceStage::Publishing {
+                    Err(Refusal(crate::handover::live::copy::PREPARED_UNSTORED))
+                } else {
+                    Ok(None)
+                };
+            }
+        };
+        self.publish_rx = None;
+        let (generation, transfer, budget, r) = msg;
+        if generation != self.publish_generation || transfer != self.transfer {
+            return Ok(None);
+        }
+        self.budget = Some(budget);
+        Ok(Some(r))
+    }
+
+    /// Test builds: wait for the publish worker to finish.
+    #[cfg(test)]
+    pub fn join_publish_worker(&mut self) {
+        if let Some(w) = self.publish_worker.take() {
+            w.join().expect("publish worker");
+        }
+    }
+
+    /// Prepared is stored (witnessed by the readback): the phase model moves
+    /// to Prepared and the recipient gets the exact event.
+    pub(super) fn on_stored(&mut self, hs: &mut HostedServer, stored: crate::handover::Result<StoredProof>, now: u64) -> Result<(), Refusal> {
+        if self.stage != SourceStage::Publishing {
+            return Ok(());
+        }
+        let stored = stored.map_err(|_| Refusal(crate::handover::live::copy::PREPARED_UNSTORED))?;
+        let (event, vp) = self.prepared.as_ref().ok_or(Refusal("No Prepared."))?;
+        let event = event.as_json();
+        self.phase
+            .as_mut()
+            .ok_or(Refusal("No Prepared."))?
+            .prepared(vp, &stored)
+            .map_err(|_| Refusal(crate::handover::live::copy::PREPARED_UNSTORED))?;
+        self.send(hs, &Frame::Prepared { transfer: self.transfer, event })?;
+        // The recipient's clock for persisting it and answering starts now.
+        self.last_heard = now;
+        self.stage = SourceStage::Prepared;
+        Ok(())
+    }
+}
