@@ -16,6 +16,8 @@ pub enum MarkerKind {
     Activated,
     Prepared,
     Prefix,
+    /// CP9: a retired source's "Committed published" record.
+    Published,
 }
 impl MarkerKind {
     fn number(self) -> u8 {
@@ -25,6 +27,7 @@ impl MarkerKind {
             Self::Activated => 2,
             Self::Prepared => 3,
             Self::Prefix => 4,
+            Self::Published => 5,
         }
     }
     fn label(self) -> &'static str {
@@ -34,6 +37,7 @@ impl MarkerKind {
             Self::Activated => "activated",
             Self::Prepared => "prepared",
             Self::Prefix => "prefix",
+            Self::Published => "published",
         }
     }
 }
@@ -423,6 +427,7 @@ pub(crate) mod tests {
             MarkerKind::Activated,
             MarkerKind::Prepared,
             MarkerKind::Prefix,
+            MarkerKind::Published,
         ] {
             let id = [kind.number() + 1; 16];
             s.persist(kind, id, b"exact phase binding").unwrap();

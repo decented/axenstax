@@ -507,6 +507,12 @@ impl crate::GameState {
                 },
             );
         }
+        // CP9: at Retired the Committed publication goes to the one
+        // background resumer, which outlives this world: leaving, closing
+        // the window or dropping GameState never stops it.
+        if session.stage() == SourceStage::Retired && !session.publication_handed() {
+            session.hand_publication(crate::handover::live::resumer::Resumer::global());
+        }
         if let SourceStage::Aborted(why) = session.stage() {
             let msg = match result {
                 Err(Refusal(r)) => r,

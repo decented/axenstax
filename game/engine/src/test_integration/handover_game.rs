@@ -26,7 +26,7 @@ use crate::remote_client::RemoteClient;
 use crate::sim_lend::OwnedSimParts;
 use crate::test_game_harness::HeadlessGame;
 use crate::transport::{ChannelClientTransport, ClientTransport};
-use nostr::{Keys, SecretKey, Timestamp, ToBech32};
+use nostr::{JsonUtil, Keys, SecretKey, Timestamp, ToBech32};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,9 +50,12 @@ fn npub(b: u8) -> String {
     keys(b).public_key().to_bech32().unwrap()
 }
 /// H5: the loopback fixture relay, never a real one.
-fn root() -> RootContext {
+fn relay() -> &'static crate::handover::relay_fixture::Relay {
     static RELAY: std::sync::OnceLock<crate::handover::relay_fixture::Relay> = std::sync::OnceLock::new();
-    let url = RELAY.get_or_init(crate::handover::relay_fixture::Relay::start).url();
+    RELAY.get_or_init(crate::handover::relay_fixture::Relay::start)
+}
+fn root() -> RootContext {
+    let url = relay().url();
     RootContext::new(key(SOURCE_RUNTIME), &npub(SOURCE_PERSONA), now() + 3600, &[url], now()).unwrap()
 }
 fn bearer() -> crate::handover::live::bearer::Bearer {
@@ -797,4 +800,119 @@ fn game_harness_handover_disclosed_abort_rotation_keeps_the_root_and_retires_the
     assert!(matches!(host.admission_for_link(&stranger, &old_link, now()), Admission::Refuse(_)), "the old invite still admits");
     assert!(matches!(host.admission_for_link(&stranger, &host.invite_link(), now()), Admission::Accept(_)), "the new invite doesn't admit");
     assert_eq!(host.root_context(now()).unwrap().digest(), root, "rotation changed the root");
+}
+
+// ── CP9: a retired world leaves without a save; its Commit still publishes ──
+
+/// Every file under `dir` except the authority records in `handover/`.
+fn snapshot(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(base: &Path, d: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(d) else { return };
+        for e in entries {
+            let p = e.unwrap().path();
+            if p == crate::handover::live::authority::dir(base) {
+                continue;
+            }
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else {
+                out.insert(p.strip_prefix(base).unwrap().to_path_buf(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// CP7 review HIGH-1 rest + CP9 step 1: the game hosting a world drives the
+/// handover to Retired, then the player picks Save & Quit and closes the
+/// window. The leave writes nothing (no save, no autosave), the
+/// HostedServer and the online host are gone, the recipient never hears an
+/// Abort, the open guard still says retired, and the background resumer
+/// (handed the publication at Retired) publishes the record's exact Commit
+/// bytes on the loopback relay and lands the "Committed published" record.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_retired_world_leaves_without_saving_and_its_commit_still_publishes() {
+    use crate::handover::live::resumer::Resumer;
+    use crate::handover::phase::RetiredCommit;
+    use crate::runtime_identity::{RuntimeIdentity, mint_player_attestation};
+    let dir = Tmp::new("retired-leave");
+    let (mut hg, mut far) = frozen("retired-leave", &dir);
+    let world_dir = crate::save::world_dir(&hg.state.world_name);
+    // The online host the leave must stop (fake rendezvous hub, never a relay).
+    let hub = crate::rendezvous::relay_client::FakeRelayHub::new();
+    let runtime = keys(SOURCE_RUNTIME);
+    let att = pollster::block_on(mint_player_attestation(&keys(SOURCE_PERSONA), &runtime.public_key(), Timestamp::from(now() - 10), 90))
+        .unwrap();
+    let host = crate::online_host::OnlineHost::start(
+        RuntimeIdentity::from_parts(runtime, Some(att)),
+        key(SOURCE_PERSONA),
+        Box::new(hub.client()),
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+        Vec::new(),
+        "Loop".into(),
+        vec!["wss://relay.example".into()],
+        Vec::new(),
+        now(),
+    )
+    .map_err(|(e, _)| e)
+    .unwrap();
+    hg.state.online_host = Some(host);
+    let abort = RecipientStage::Quarantined("The host cancelled the handover.");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while source_stage(&hg) != Some(SourceStage::Retired) && std::time::Instant::now() < deadline {
+        let _ = far.dst.as_mut().unwrap().pump(now());
+        if let Some(Handover::Source { session, .. }) = hg.state.handover.as_mut()
+            && session.stage() == SourceStage::Publishing
+        {
+            session.join_publish_worker();
+        }
+        round(&mut hg);
+    }
+    assert_eq!(source_stage(&hg), Some(SourceStage::Retired), "the host game never retired");
+    let Some(Handover::Source { session, .. }) = &hg.state.handover else { panic!("no source session") };
+    let (t, commit) = (session.transfer(), session.commit_event().expect("no Commit").as_json());
+    let handed = session.publication_handed();
+    // CP8 review LOW-3: a Cancel that slips through past retirement cancels
+    // nothing: the session (and the freeze) stay.
+    hg.state.handover_click = Some(UiAction::Cancel);
+    hg.frames(1);
+    assert_eq!(source_stage(&hg), Some(SourceStage::Retired), "a Cancel after Retired ended the source session");
+    assert!(hg.state.handover_freezes_world(), "a Cancel after Retired unfroze the world");
+    let before = snapshot(&world_dir);
+    // Save & Quit, then the window's close button.
+    assert!(hg.state.leave_world(crate::world_exit::SaveChoice::Save, crate::world_exit::ExitTo::Lobby), "the leave failed");
+    assert!(hg.state.handover.is_none(), "the session outlived the leave");
+    assert!(hg.state.hosted_server.is_none(), "the HostedServer outlived the leave");
+    assert!(hg.state.online_host.is_none(), "the online host wasn't stopped");
+    assert!(hg.state.close_window(), "the window didn't close");
+    for _ in 0..6 {
+        hg.frames(1);
+        let _ = far.dst.as_mut().unwrap().pump(now());
+        assert_ne!(far.dst.as_ref().unwrap().stage(), abort, "the recipient got an Abort after Retired");
+    }
+    assert_eq!(snapshot(&world_dir), before, "the retired world's files changed (a save was written)");
+    assert!(!crate::save::has_autosave(&hg.state.world_name), "a retired world autosaved");
+    assert_eq!(
+        crate::handover::live::authority::open_guard(&world_dir).unwrap_err().0,
+        copy::RETIRED,
+        "the retired world opens again"
+    );
+    let store = crate::handover::live::authority::store(&world_dir).unwrap();
+    let retired = RetiredCommit::read(&store, t).unwrap().expect("no retirement record");
+    assert_eq!(retired.exact_bytes(), commit.as_bytes());
+    assert!(Resumer::global().holds(t) || retired.is_published(&store).unwrap(), "nothing holds the publication");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !retired.is_published(&store).unwrap() {
+        assert!(std::time::Instant::now() < deadline, "the Committed published record never landed");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        relay().stored().iter().any(|e| e.as_json().as_bytes() == retired.exact_bytes()),
+        "the relay doesn't hold the record's exact Commit bytes"
+    );
+    assert_eq!(crate::handover::live::authority::open_guard(&world_dir).unwrap_err().0, copy::RETIRED, "publication reopened it");
+    assert!(handed, "the publication wasn't handed to the resumer at Retired");
 }

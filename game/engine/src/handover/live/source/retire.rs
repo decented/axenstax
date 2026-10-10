@@ -66,6 +66,7 @@ impl SourceSession {
             self.retained_copy,
             capability,
             vec![RetiredRoot { capability, expiry: self.cfg.root.expiry() }],
+            self.cfg.root.relays().to_vec(),
         )
         .map_err(|_| unsealed)?;
         let phase = self.phase.as_mut().ok_or(Refusal("No Prepared."))?;

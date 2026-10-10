@@ -5558,8 +5558,16 @@ lives in its own folder's `handover/` directory, a `MarkerStore` (temp file
 0600, sync, rename, directory sync, injectable boundary failures): the
 source's `retired-<transfer>.dat` is `phase::Retirement` (certificate core
 with lineage, epoch and root context, the Prepared binding, the exact signed
-Commit bytes, the retired root capabilities), written by
-`phase::Source::retire`. No `WorldSave` field is added. The open guard
+Commit bytes, the retired root capabilities and, since CP9 (record v2), the
+root's relay URLs), written by `phase::Source::retire`. Nothing secret is in
+it: no bearer, no root secret, no key material. The relays are bound: with
+the core's root runtime, persona and expiry they must hash to the core's
+context digest, or the record doesn't decode. An undecodable record (a v1
+record included; the format is unreleased) reads as unreadable and is still
+refused. Beside it, once the Committed is proven stored, the resumer writes
+`published-<transfer>.dat` ("Committed published": transfer and Commit hash,
+deterministic so an exact retry lands the same bytes). No `WorldSave` field
+is added. The open guard
 (`live::authority::open_guard`) refuses on ANY retirement record there
 (`RETIRED` if it decodes, `AUTHORITY_UNREADABLE` if not) and on an
 unreadable directory (fail closed), never filtering by lineage (a new host
@@ -5620,9 +5628,10 @@ session sends no Abort and lifts no freeze; only tearing the HostedServer
 down ends it. Leaving the world or closing the window past retirement saves
 nothing and touches nothing on disk (`SaveChoice::Abandon`, forced by
 `leave_world`) and tears down the world, its HostedServer and the online
-host; the Cancel arm ignores a click past retirement. Not built yet: handing
-the Committed publication to a background resumer on that leave (slice B),
-and the recipient's durable bearer before its ack (CP7 review HIGH-2). After
+host; the Cancel arm ignores a click past retirement. The Committed
+publication is not stopped by any of that: see "Committed publication"
+below. Not built yet: the recipient's durable bearer before its ack (CP7
+review HIGH-2). After
 Prepared the recipient never deletes the import: any failure ends its
 session `Quarantined` (import, markers and received world kept). An abort
 after the bearer was disclosed but before Retired resumes play and rotates
@@ -5638,8 +5647,45 @@ drop, and the buffers this code owns that held it (the source's encode
 buffer, the recipient's received packet) are zeroed after use (CP7 review
 LOW-1). Residual copies outside our control are not wiped: the transport's
 send queue and socket buffers, the QUIC/TLS stack's plaintext, and the
-serialiser's internal buffers. Committed publication, the recipient's Activated record and
-host start, and the retained copy are the next slices.
+serialiser's internal buffers. The recipient's Activated record and host
+start, and the retained copy, are the next slices.
+
+Committed publication (CP9). One background resumer per process
+(`live::resumer::Resumer::global()`), owned by nothing a world owns:
+leaving the world, closing the window and dropping `GameState` never stop
+it. At Retired the source's pump hands it the publication
+(`SourceSession::hand_publication`, once); at start-up
+(`native_boot_services`) `Resumer::resume_all(worlds_root)` takes over every
+world whose `handover/` holds a retirement record and no "Committed
+published" record (bounded scan; it never creates `handover/` and never
+opens a world). Both read the record through the world's `MarkerStore` into
+a `phase::RetiredCommit`, the permit a restarted source publishes with: it
+has no bearer, so it can't rebuild a `VerifiedCommit`; `RetiredCommit` is
+built only by decoding a retirement record read through that store, and
+carries the exact Commit bytes (checked to round-trip byte for byte), the
+core, the root's public context rebuilt from the stored relays, and the
+recipient key from the Commit's own signed `p` tag. `stored::publish_retired`
+accepts it (the same root binding, route, signature and size checks as
+`publish_readback`, then EVENT, matching OK and a fresh readback). Each
+attempt has a fresh `stored::Budget` bound to the one root (25 s); relays in
+the root's order until one witnesses the exact event by readback (the
+proof); then, in the same attempt, `stored::copy_retired` sends a
+best-effort copy (EVENT and matching OK, no readback, never a proof) to each
+other relay of the root, and the count is logged (not stored: the record
+stays deterministic). Between attempts the resumer waits 5 s, doubling to a
+300 s ceiling, and never gives up. Once proven it writes
+`published-<transfer>.dat` durably (0600; temp, fsync, rename, directory
+fsync) and drops that world; a world whose `handover/` has been deleted
+meanwhile has nowhere to record it and is dropped after the proof. The open
+guard still refuses the world after publication: retired is forever. The
+resumer is a detached thread, which does not outlive `main`: a publication
+cut short by quitting resumes at the next start from the record. Native
+only (the whole `handover` module is). Tests: the real game leaving a
+retired world (Save & Quit, then the close button) writes nothing, stops the
+server and online host, sends no Abort, and the resumer still publishes the
+exact bytes on the loopback relay fixture and lands the record; a restart
+between Retired and the proof resumes from the start-up scan; failed
+attempts back off and each had a fresh Budget.
 
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,

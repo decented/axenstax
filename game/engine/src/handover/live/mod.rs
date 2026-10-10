@@ -8,6 +8,7 @@ pub mod eligibility;
 pub mod inert;
 pub mod listener;
 pub mod recipient;
+pub mod resumer;
 pub mod source;
 pub mod wire;
 pub mod copy;

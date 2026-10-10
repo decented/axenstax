@@ -23,6 +23,10 @@ pub struct Retirement {
     retained_copy: Id,
     active_capability: Hash,
     roots: Vec<RetiredRoot>,
+    /// CP9: the root's relay URLs (canonical order), so a restarted source
+    /// can publish the exact Commit without the bearer. Bound by `validate`:
+    /// with the core's root fields they must hash to `core.context`.
+    relays: Vec<String>,
     verified: bool,
 }
 impl Retirement {
@@ -42,6 +46,7 @@ impl Retirement {
         retained_copy: Id,
         active_capability: Hash,
         roots: Vec<RetiredRoot>,
+        relays: Vec<String>,
     ) -> Result<Self> {
         if commit.core() != prepared.core() || commit.prepared_hash() != prepared.event_hash() {
             return Err(Error::Invalid("retirement Prepared"));
@@ -54,10 +59,33 @@ impl Retirement {
             retained_copy,
             active_capability,
             roots,
+            relays,
             verified: true,
         };
         r.validate()?;
         Ok(r)
+    }
+    /// The root context this retirement's core names, rebuilt from the
+    /// stored relays and the core's root fields; its digest must be the
+    /// core's context. `now = 0`: the root may have expired by a restart,
+    /// and the Commit was sealed (and its route bounded) before that.
+    fn root(&self) -> Result<super::context::RootContext> {
+        use nostr::ToBech32;
+        let npub = nostr::PublicKey::from_slice(&self.core.root_persona)
+            .ok()
+            .and_then(|k| k.to_bech32().ok())
+            .ok_or(Error::Invalid("retirement root persona"))?;
+        let root = super::context::RootContext::new(
+            self.core.root_runtime,
+            &npub,
+            self.core.root_expiry,
+            &self.relays,
+            0,
+        )?;
+        if root.digest() != self.core.context || root.relays() != self.relays.as_slice() {
+            return Err(Error::Invalid("retirement root relays"));
+        }
+        Ok(root)
     }
     fn validate(&self) -> Result<()> {
         if self.retained_copy == [0; 16]
@@ -97,12 +125,13 @@ impl Retirement {
         if !bound {
             return Err(Error::Invalid("retired active root missing"));
         }
+        self.root()?;
         Ok(())
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
         let mut v = Vec::new();
-        frame(&mut v, b"AxeNStax/handover/retirement/v1");
+        frame(&mut v, b"AxeNStax/handover/retirement/v2");
         frame(&mut v, &self.core.encode());
         v.extend_from_slice(&self.prepared);
         v.extend_from_slice(&self.committed);
@@ -114,11 +143,17 @@ impl Retirement {
             v.extend_from_slice(&root.capability);
             v.extend_from_slice(&root.expiry.to_be_bytes());
         }
+        v.extend_from_slice(&(self.relays.len() as u32).to_be_bytes());
+        for relay in &self.relays {
+            frame(&mut v, relay.as_bytes());
+        }
         Ok(v)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes, super::durable::MARKER_LIMIT)?;
-        r.label("AxeNStax/handover/retirement/v1")?;
+        // CP9: v2 adds the root's relays. A v1 record (unreleased) no
+        // longer decodes, so it reads as unreadable: still refused.
+        r.label("AxeNStax/handover/retirement/v2")?;
         let core = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
         let prepared = r.array()?;
         let committed = r.array()?;
@@ -136,6 +171,15 @@ impl Retirement {
                 expiry: r.u64()?,
             });
         }
+        let n = r.u32()?;
+        if n == 0 || n > 8 {
+            return Err(Error::Limit("retirement relays"));
+        }
+        let mut relays = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let relay = std::str::from_utf8(r.framed(2048)?).map_err(|_| Error::Invalid("retirement relay"))?;
+            relays.push(relay.to_owned());
+        }
         r.end()?;
         let value = Self {
             core,
@@ -145,6 +189,7 @@ impl Retirement {
             retained_copy,
             active_capability,
             roots,
+            relays,
             verified: false,
         };
         value.validate()?;
@@ -167,6 +212,122 @@ impl Retirement {
             && expected_world == self.retained_copy
             && already_contact
             && !offered_context.is_some_and(|context| self.refuses_root(context, 0))
+    }
+}
+
+/// CP9: a retired source's Committed publication, rebuilt from its durable
+/// retirement record ALONE. A restarted source holds no bearer, so it can't
+/// rebuild a `VerifiedCommit`; this is the permit it publishes with instead.
+/// The only constructors read the record through the world's `MarkerStore`
+/// (`read`, `scan`): never loose bytes, never a remote frame. It carries
+/// nothing secret: the exact signed Commit bytes, the core and the root's
+/// public context (relays included), and the recipient key from the
+/// Commit's own signed `p` tag.
+pub struct RetiredCommit {
+    core: Core,
+    root: super::context::RootContext,
+    event: Event,
+    exact_event: Vec<u8>,
+    hash: Hash,
+    recipient: Hash,
+}
+impl RetiredCommit {
+    /// The retirement record of `transfer` in `store`, if there is one.
+    pub fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
+        let Some(bytes) = store.read(MarkerKind::Retired, transfer)? else {
+            return Ok(None);
+        };
+        Self::from_record(Retirement::decode(&bytes)?, transfer).map(Some)
+    }
+    /// Every retirement record in `store` (bounded by `retirements`). Any
+    /// record that doesn't decode fails the scan (fail closed).
+    pub fn scan(store: &MarkerStore) -> Result<Vec<Self>> {
+        store
+            .retirements()?
+            .into_iter()
+            .map(|(id, bytes)| Self::from_record(Retirement::decode(&bytes)?, id))
+            .collect()
+    }
+    fn from_record(r: Retirement, transfer: Id) -> Result<Self> {
+        if r.core.transfer != transfer {
+            return Err(Error::Invalid("retirement filename binding"));
+        }
+        let root = r.root()?;
+        let event = Event::from_json(&r.exact_event).map_err(|_| Error::Invalid("retirement event"))?;
+        // What is published is exactly what was persisted.
+        if event.as_json().as_bytes() != r.exact_event.as_slice() {
+            return Err(Error::Invalid("retirement event bytes"));
+        }
+        let tags: Vec<_> = event.tags.iter().collect();
+        let recipient: Hash = match tags.as_slice() {
+            [t] if t.as_slice().len() == 2 && t.as_slice()[0] == "p" => hex::decode(&t.as_slice()[1])
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or(Error::Invalid("retirement event route"))?,
+            _ => return Err(Error::Invalid("retirement event route")),
+        };
+        Ok(Self {
+            core: r.core,
+            root,
+            event,
+            exact_event: r.exact_event,
+            hash: r.committed,
+            recipient,
+        })
+    }
+    pub fn transfer(&self) -> Id {
+        self.core.transfer
+    }
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+    pub fn root(&self) -> &super::context::RootContext {
+        &self.root
+    }
+    pub fn event(&self) -> &Event {
+        &self.event
+    }
+    /// The exact signed Commit bytes the retirement record holds.
+    pub fn exact_bytes(&self) -> &[u8] {
+        &self.exact_event
+    }
+    pub fn event_hash(&self) -> Hash {
+        self.hash
+    }
+    /// The stored route: the source runtime that signed it, the recipient
+    /// its `p` tag names, bounded by the root's expiry.
+    pub fn route(&self) -> super::stored::Route {
+        super::stored::Route {
+            author: self.core.source_runtime,
+            recipient: self.recipient,
+            until: self.root.expiry(),
+        }
+    }
+    /// "Committed published": written once a relay of the root witnessed
+    /// this exact event (`stored::publish_retired`'s readback). The payload
+    /// is deterministic (an exact retry after a failed write lands the same
+    /// bytes): transfer and Commit hash, nothing else.
+    pub fn record_published(&self, store: &MarkerStore, proof: &StoredProof) -> Result<()> {
+        if proof.event_hash() != self.hash {
+            return Err(Error::State("published proof of another event"));
+        }
+        store.persist(MarkerKind::Published, self.core.transfer, &self.published_payload())
+    }
+    /// Whether the "Committed published" record of this Commit exists. A
+    /// record that names another Commit is an error (fail closed).
+    pub fn is_published(&self, store: &MarkerStore) -> Result<bool> {
+        match store.read(MarkerKind::Published, self.core.transfer)? {
+            None => Ok(false),
+            Some(b) if b == self.published_payload() => Ok(true),
+            Some(_) => Err(Error::Invalid("published record binding")),
+        }
+    }
+    fn published_payload(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        frame(&mut v, b"AxeNStax/handover/committed-published/v1");
+        v.extend_from_slice(&self.core.transfer);
+        v.extend_from_slice(&self.hash);
+        v
     }
 }
 
@@ -764,6 +925,7 @@ mod tests {
                 [9; 16],
                 capability,
                 vec![RetiredRoot { capability, expiry: root.expiry() }],
+                root.relays().to_vec(),
             )
             .unwrap();
             let permit = source.retire(&store, retirement).unwrap();
@@ -1027,6 +1189,7 @@ mod tests {
                     capability: crypto::root_capability(&root, &[1; 16]).unwrap(),
                     expiry: root.expiry(),
                 }],
+                root.relays().to_vec(),
             )
             .unwrap();
             assert!(
@@ -1158,6 +1321,7 @@ mod tests {
                             capability,
                             expiry: 900,
                         }],
+                        root.relays().to_vec(),
                     )
                     .unwrap(),
                 )
@@ -1209,6 +1373,7 @@ mod tests {
                             capability,
                             expiry: 900,
                         }],
+                        root.relays().to_vec(),
                     )
                     .unwrap(),
                 )
@@ -1287,6 +1452,7 @@ mod tests {
                             capability,
                             expiry: 900,
                         }],
+                        root.relays().to_vec(),
                     )
                     .unwrap(),
                 )

@@ -184,6 +184,8 @@ pub struct SourceSession {
     /// After Retired: the exact signed Commit and the permit to publish it.
     commit: Option<Event>,
     permit: Option<PublicationPermit>,
+    /// CP9: the Committed publication went to the background resumer.
+    handed: bool,
     #[cfg(test)]
     pack_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
@@ -242,6 +244,7 @@ impl SourceSession {
             retained_copy: random_id(),
             commit: None,
             permit: None,
+            handed: false,
             #[cfg(test)]
             pack_hold: None,
             action,
@@ -313,6 +316,31 @@ impl SourceSession {
     /// After Retired: the exact signed Commit bytes this source persisted.
     pub fn commit_event(&self) -> Option<&Event> {
         self.commit.as_ref()
+    }
+    /// CP9: at Retired, hand the Committed publication to `resumer`, which
+    /// outlives this session, its world and `GameState`. It reads the
+    /// record back through the world's store (`RetiredCommit`), the same
+    /// path the start-up scan takes, so the exact persisted bytes are what
+    /// is published. Once per session; false until handed.
+    pub fn hand_publication(&mut self, resumer: &super::resumer::Resumer) -> bool {
+        if self.handed || self.stage != SourceStage::Retired {
+            return self.handed;
+        }
+        let Some(dir) = self.cfg.world_dir.as_ref() else { return false };
+        let read = crate::handover::live::authority::store(dir)
+            .and_then(|s| crate::handover::phase::RetiredCommit::read(&s, self.transfer));
+        match read {
+            Ok(Some(retired)) => {
+                resumer.adopt(dir, retired);
+                self.handed = true;
+            }
+            Ok(None) => log::error!("handover: retired, but no retirement record to publish"),
+            Err(e) => log::error!("handover: the retirement record can't be read back: {e}"),
+        }
+        self.handed
+    }
+    pub fn publication_handed(&self) -> bool {
+        self.handed
     }
     /// Retired or quarantined: the original world never resumes.
     pub fn past_retirement(&self) -> bool {

@@ -409,13 +409,59 @@ pub(crate) fn publication_allowed(
         }
     }
 }
-async fn publish_inner(
+/// CP9: the Committed publication of a retired source, from its durable
+/// record alone (`phase::RetiredCommit`, no bearer): the same root binding,
+/// route and exact fresh readback as `publish_readback`. The first relay
+/// that witnesses it is the proof.
+pub async fn publish_retired(
     url: &str,
-    event: &Event,
-    route: Route,
+    retired: &super::phase::RetiredCommit,
     budget: &mut Budget,
     cancel: &AtomicBool,
 ) -> Result<StoredProof> {
+    let event = retired_publication(url, retired, budget)?;
+    publish_inner(url, event, retired.route(), budget, cancel).await
+}
+/// CP9: after the proof, a best-effort copy of the same exact event to
+/// another relay of the same root: publish and its matching OK, no
+/// readback (no witness, never a proof).
+pub async fn copy_retired(
+    url: &str,
+    retired: &super::phase::RetiredCommit,
+    budget: &mut Budget,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let event = retired_publication(url, retired, budget)?;
+    publish_only(url, event, budget, cancel).await
+}
+fn retired_publication<'a>(
+    url: &str,
+    retired: &'a super::phase::RetiredCommit,
+    budget: &mut Budget,
+) -> Result<&'a Event> {
+    super::context::validate_relay(url)?;
+    budget.authorise_relay(url, retired.root())?;
+    if !same_root(retired.core(), retired.root()) {
+        return Err(Error::Invalid("publication of another root's certificate"));
+    }
+    let event = retired.event();
+    if event.id.to_bytes() != retired.event_hash()
+        || event.as_json().as_bytes() != retired.exact_bytes()
+        || !retired.route().matches(event)
+        || event.verify().is_err()
+        || event.as_json().len() > super::EVENT_LIMIT
+    {
+        return Err(Error::Invalid("publication proof"));
+    }
+    Ok(event)
+}
+/// Publish and wait for the relay's matching OK (no readback).
+async fn publish_only(
+    url: &str,
+    event: &Event,
+    budget: &mut Budget,
+    cancel: &AtomicBool,
+) -> Result<()> {
     cancelled(cancel)?;
     budget.check()?;
     let deadline = budget.deadline();
@@ -456,7 +502,16 @@ async fn publish_inner(
         ws.close(None),
     )
     .await;
-    result?;
+    result
+}
+async fn publish_inner(
+    url: &str,
+    event: &Event,
+    route: Route,
+    budget: &mut Budget,
+    cancel: &AtomicBool,
+) -> Result<StoredProof> {
+    publish_only(url, event, budget, cancel).await?;
     readback_inner(url, event, route, budget, cancel).await
 }
 

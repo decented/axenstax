@@ -1542,4 +1542,138 @@ mod session {
         assert!(p.src.pump(&mut p.hs, p.live, later).is_ok(), "a long pack counted against the recipient");
         assert_eq!(p.src.stage(), SourceStage::Streaming, "the source stalled on its own packing time");
     }
+
+    // ── CP9: the Committed publication outlives the session ─────────────
+
+    /// A source past Retired whose first run is gone entirely (session,
+    /// server, joined link and recipient dropped), so only the world folder
+    /// and the relay remain.
+    fn retired_and_dropped(tag: &str) -> (crate::handover::Id, String, crate::handover::relay_fixture::Relay, Dir) {
+        let mut p = ready_pair(tag);
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let (t, commit) = (p.src.transfer(), p.src.commit_event().expect("no Commit").as_json());
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        drop((src, dst, rc, hs, host));
+        assert!(!relay.stored().iter().any(|e| e.as_json() == commit), "the Commit escaped before the restart");
+        (t, commit, relay, dir)
+    }
+    fn wait_published(store: &MarkerStore, retired: &crate::handover::phase::RetiredCommit) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !retired.is_published(store).unwrap() {
+            assert!(std::time::Instant::now() < deadline, "the Committed published record never landed");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    const FAST: crate::handover::live::resumer::Backoff = crate::handover::live::resumer::Backoff {
+        first: std::time::Duration::from_millis(100),
+        ceiling: std::time::Duration::from_millis(400),
+    };
+
+    /// A source restarted between Retired and the Committed proof: a fresh
+    /// resumer's start-up scan over the same worlds folder finds the
+    /// retirement record, publishes its exact Commit bytes (witnessed on
+    /// the loopback relay), writes the durable "Committed published" record
+    /// (0600), and the world stays refused. A later start-up has nothing to do.
+    #[test]
+    fn handover_restart_between_retired_and_the_proof_resumes_the_exact_commit() {
+        use crate::handover::live::resumer::Resumer;
+        let (t, commit, relay, dir) = retired_and_dropped("restart-commit");
+        let world = dir.0.join("world");
+        let store = crate::handover::live::authority::store(&world).unwrap();
+        let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().expect("no retirement record");
+        assert_eq!(retired.exact_bytes(), commit.as_bytes(), "the record doesn't hold the exact Commit bytes");
+        assert!(!retired.is_published(&store).unwrap());
+        let resumer = Resumer::new(FAST);
+        assert_eq!(resumer.resume_all(&dir.0), 1, "the start-up scan didn't resume the Committed publication");
+        wait_published(&store, &retired);
+        let stored: Vec<_> = relay.stored().into_iter().filter(|e| e.id.to_bytes() == retired.event_hash()).collect();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].as_json().as_bytes(), retired.exact_bytes(), "not the exact record bytes");
+        assert_eq!(
+            crate::handover::live::authority::open_guard(&world).unwrap_err().0,
+            crate::handover::live::copy::RETIRED,
+            "a published retirement reopened the world"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = crate::handover::live::authority::dir(&world).join(format!("published-{}.dat", hex::encode(t)));
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while resumer.holds(t) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!resumer.holds(t), "the resumer kept a proven world");
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0), 0, "a published world was resumed again");
+    }
+
+    /// Bounded backoff that never gives up: while the relay withholds what
+    /// it stores, attempts fail (no witness); once it serves again a later
+    /// attempt proves it. Every attempt had a fresh Budget (nothing received
+    /// at its start, a deadline of its own) and waited out the backoff.
+    #[test]
+    fn handover_committed_retry_backs_off_with_a_fresh_budget_each_attempt() {
+        use crate::handover::live::resumer::Resumer;
+        let (t, _, relay, dir) = retired_and_dropped("commit-backoff");
+        relay.withhold(true);
+        let world = dir.0.join("world");
+        let store = crate::handover::live::authority::store(&world).unwrap();
+        let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().unwrap();
+        let resumer = Resumer::new(FAST);
+        assert_eq!(resumer.resume_all(&dir.0), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while resumer.attempts().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "no retries");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!retired.is_published(&store).unwrap(), "published without a witness");
+        assert!(resumer.holds(t), "the resumer gave up");
+        relay.withhold(false);
+        wait_published(&store, &retired);
+        let a = resumer.attempts();
+        assert!(a.len() >= 3, "{a:?}");
+        assert!(!a[0].proven && !a[1].proven, "a withheld relay proved it");
+        assert!(a.last().unwrap().proven && a[..a.len() - 1].iter().all(|x| !x.proven));
+        for (i, x) in a.iter().enumerate() {
+            assert_eq!(x.transfer, t);
+            assert_eq!(x.budget_bytes_at_start, 0, "attempt {i} reused a Budget");
+            assert!(x.budget_deadline.into_std() >= x.started + std::time::Duration::from_secs(24), "attempt {i} reused a Budget");
+            if i > 0 {
+                assert!(x.budget_deadline > a[i - 1].budget_deadline, "attempt {i} reused a Budget");
+                let gap = x.started.duration_since(a[i - 1].started);
+                assert!(gap >= FAST.delay(i as u32), "attempt {i} didn't back off: {gap:?}");
+            }
+        }
+        assert!(relay.stored().iter().any(|e| e.as_json().as_bytes() == retired.exact_bytes()));
+    }
+
+    /// CP8 review LOW-3: a retirement write that fails in a way that may
+    /// have reached the disk (`retire` returns Err, `RetirementUncertain`)
+    /// still marks the link retired: the session dropped and an explicit
+    /// release leave the world frozen, and no Abort reaches the recipient.
+    #[test]
+    fn handover_retirement_uncertain_marks_the_link_retired() {
+        let mut p = ready_pair("retire-uncertain");
+        let t = p.src.transfer();
+        // A stale temporary record with other bytes: the durable write
+        // refuses after the phase model entered RetirementUncertain.
+        let world = p.dir.0.join("world");
+        crate::handover::live::authority::store(&world).unwrap();
+        std::fs::write(crate::handover::live::authority::dir(&world).join(format!("retired.tmp-{}", hex::encode(t))), b"other bytes").unwrap();
+        drive(&mut p, SourceStage::RetirementUncertain);
+        assert_eq!(p.src.stage(), SourceStage::RetirementUncertain, "the failed retirement wasn't uncertain");
+        assert!(p.src.past_retirement());
+        let Pair { mut hs, mut host, src, mut dst, .. } = p;
+        drop(src);
+        for _ in 0..5 {
+            host.lend_tick(&mut hs);
+        }
+        hs.handover_release();
+        assert!(hs.handover_frozen(), "an uncertain retirement unfroze the world");
+        let dst = dst.as_mut().unwrap();
+        let _ = dst.pump(now());
+        assert_eq!(dst.stage(), RecipientStage::Prepared, "the recipient heard an Abort after an uncertain retirement");
+    }
 }
