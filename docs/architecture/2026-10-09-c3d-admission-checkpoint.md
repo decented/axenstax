@@ -116,8 +116,13 @@ ordered world intake. Ordinary receipt retirement waits for that stream position
 and authoritative included E; movement ACK and socket parsing retire nothing.
 Canonical bundle installation, durable body release, ordinary-carrier freezing,
 replay and Ack-before-resubmission remain OPEN. Actual outbox, intake and channel
-dispatch regression tests have been added but not compiled/executed at this
-source checkpoint. Earlier21-model execution is prior-source evidence only.
+dispatch regression tests were first compiled and executed on the OC base
+(2026-10-10, `57818111`): 110/0 targets. Real `HostedServer` tests now cover
+Strict admission, the action FIFO's exact duplicate result and the lost-receipt
+teardown (`hosted_server/c3d_tests.rs`); twelve negative controls on the
+admission source each failed an actual assertion and were restored byte-exact.
+This is source/test evidence, not Strict acceptance: the typed breadth,
+canonical install and replay remain OPEN and the operator flag is unexposed.
 
 The wire integration will add one typed action envelope containing ActionHeader
 and a bounded existing edit/op/request or compound/toggle/hold intent. It splits
