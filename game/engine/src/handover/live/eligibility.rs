@@ -75,7 +75,30 @@ pub fn seats(server: &GameServer, recipient: Seat) -> Result<(), Refusal> {
     if !sp.window_events.is_quiescent() {
         return Err(Refusal("That player's inventory is still settling with yours. Try again in a moment."));
     }
+    // OC: every connected joiner the checkpoint includes must provably owe
+    // nothing (a `Complete` session history and an empty effective debt).
+    // A session that began from an older or unreadable record, or whose
+    // debt overflowed, is not proven, however its live window looks now.
+    if !sp.obligations_proven_zero() {
+        return Err(OWED);
+    }
     Ok(())
+}
+
+/// The refusal for a participant whose correction debt isn't proven zero.
+pub const OWED: Refusal = Refusal(
+    "That player's inventory may still owe items from an earlier correction, which this version can't move. Nothing was changed.",
+);
+
+/// OC: the recipient's own record, which becomes host seat 0 in the handed-on
+/// world, must prove it owes nothing: a trusted local seat has no debt to
+/// carry, so a record with owed units (or an incomplete history) would erase
+/// them. No record at all is proven (a fresh player owes nothing).
+pub(crate) fn recipient_record(record: Option<&crate::joiner_save::JoinerSave>) -> Result<(), Refusal> {
+    match record {
+        Some(r) if !r.obligations_proven_zero() => Err(OWED),
+        _ => Ok(()),
+    }
 }
 
 /// Saved participant records on disk (`joiners/<npub>.dat`) other than the

@@ -146,9 +146,10 @@ pub enum PacketType {
     InventorySync = 67,
     /// Both ways, between a source host and ONE selected joiner only: an
     /// opaque bounded world-handover control frame (`handover::live::wire`).
-    /// PRIVATE PROVISIONAL (branch mp-handover, v88): renumbered at rebase,
+    /// PRIVATE PROVISIONAL (branch mp-handover, v90; C3d's branch holds v89
+    /// and tags 68–71): the final number is assigned at the final rebase,
     /// never advertised as delivered.
-    Handover = 68,
+    Handover = 72,
 }
 
 // ─── Handshake ───────────────────────────────────────────────
@@ -2734,10 +2735,11 @@ pub struct ServerAnnouncePacket {
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
-/// - v88 PRIVATE PROVISIONAL (branch mp-handover, never delivered as such;
-///   renumbered at rebase): `PacketType::Handover` (tag 68), the bounded
+/// - v90 PRIVATE PROVISIONAL (branch mp-handover, never delivered as such;
+///   C3d's branch holds v89 and tags 68–71; final numbers are assigned at the
+///   final rebase): `PacketType::Handover` (tag 72), the bounded
 ///   world-handover control frame between a host and one selected joiner.
-pub const PROTOCOL_VERSION: u32 = 88;
+pub const PROTOCOL_VERSION: u32 = 90;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this
 /// build's `JoinRequestPacket` (an older or newer client's shape). It is the
@@ -2809,7 +2811,7 @@ pub fn deserialize_header(data: &[u8]) -> Option<(PacketType, &[u8])> {
         65 => PacketType::ContainerOpened,
         66 => PacketType::WindowSlotSet,
         67 => PacketType::InventorySync,
-        68 => PacketType::Handover,
+        72 => PacketType::Handover,
         _ => return None,
     };
     Some((tag, &data[1..]))
@@ -2912,8 +2914,8 @@ mod tests {
     #[test]
     fn protocol_version_bumped() {
         // OC — v88, InventorySync carries the correction debt.
-        // v88 PRIVATE PROVISIONAL (mp-handover): the Handover control tag.
-        assert_eq!(super::PROTOCOL_VERSION, 88);
+        // v90 PRIVATE PROVISIONAL (mp-handover): the Handover control tag.
+        assert_eq!(super::PROTOCOL_VERSION, 90);
     }
 
     #[test]
@@ -3664,8 +3666,9 @@ mod tests {
         //   OpenGrave (= 13) and GraveAt (= 7).
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
-        // v88 PRIVATE PROVISIONAL (mp-handover): Handover (tag 68).
-        assert_eq!(PROTOCOL_VERSION, 88);
+        // v90 PRIVATE PROVISIONAL (mp-handover): Handover (tag 72); v89 and
+        //   tags 68–71 are C3d's.
+        assert_eq!(PROTOCOL_VERSION, 90);
     }
 
     fn sample_accept() -> JoinAcceptPacket {
@@ -4367,9 +4370,14 @@ mod tests {
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
         // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync);
-        // the provisional handover control frame takes 68.
-        assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Handover));
-        assert_eq!(deserialize_header(&[69, 0]), None, "nothing past 68 yet");
+        // 68–71 are C3d's (not on this branch); the provisional handover
+        // control frame takes 72.
+        for tag in 68..=71u8 {
+            assert_eq!(deserialize_header(&[tag, 0]), None, "{tag} is C3d's, not this branch's");
+        }
+        assert_eq!(PacketType::Handover as u8, 72);
+        assert_eq!(deserialize_header(&[72, 0]).map(|(p, _)| p), Some(PacketType::Handover));
+        assert_eq!(deserialize_header(&[73, 0]), None, "nothing past 72 yet");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)

@@ -5048,7 +5048,7 @@ makes no unconditional durability claim.
 
 The native `handover` library core defines a bounded checkpoint-transfer protocol;
 it has no gameplay packet allocation, lobby control, automatic publication or
-host-activation hook. The core milestone left Protocol87 unchanged; the live session below adds private provisional v88. Complete
+host-activation hook. The core milestone left Protocol87 unchanged; the live session below adds private provisional v90 (on top of OC's delivered v88; C3d's branch holds v89). Complete
 live snapshot capture, consent, personal progression/ownership conversion and
 recipient role restoration are required before the handover feature can open.
 A joined render mirror is never a checkpoint source. Existing unsupported or
@@ -5211,7 +5211,9 @@ agreement/progression authority, recipient personal adapter, direct-control
 session, listener latch, Prepared/Commit and gameplay callers remain unwired.
 
 **Live source link and freeze (branch mp-handover, private provisional wire tag
-`PacketType::Handover = 68`, renumbered at rebase; not a delivered protocol).**
+`PacketType::Handover = 72`, protocol v90, both PROVISIONAL: C3d's branch holds
+v89 and tags 68–71, and the final numbers are assigned at the final rebase; not a
+delivered protocol).**
 A source host binds one control link to an exact authenticated seat for one
 transfer: slot, attach generation and verified key, all re-checked at bind,
 freeze and every send/read; a departed, reconnected or differently keyed seat
@@ -5254,7 +5256,16 @@ valve-forced event, no correction debt, no death replacement, no retired
 overflow: "inventory still settling") and progression tracked since a verified
 signed admission on this attach (`ServerPlayer.progression_tracked`) with zero
 server-queued kill credits (`progression_credits`), i.e. default progression;
-any credit refuses until a numbered progression authority exists. The caller
+any credit refuses until a numbered progression authority exists. Obligations
+use OC's predicates (v88): every connected joiner the checkpoint includes must
+satisfy `ServerPlayer::obligations_proven_zero()` (a `Complete` session history
+and an empty effective debt, so a session that began from a v1 or unreadable
+record, or overflowed, refuses even with a settled window), and the recipient's
+own record, captured at the frozen boundary and about to become host seat 0,
+must satisfy `JoinerSave::obligations_proven_zero()` (no record is proven); a
+trusted local seat has no debt machinery, so converting a record with owed units
+would erase them. The source's own seat-0 record is written by OC's
+`JoinerSave::from_parts` (empty owed, `Complete`). The caller
 supplies the RAW WorldSave built from the frozen real seats, carts and kept mobs
 by the same `save::build_world_save` the ordinary save uses (which returns
 `None`, never panics, for no seats); the SESSION neutralises its copy: proven

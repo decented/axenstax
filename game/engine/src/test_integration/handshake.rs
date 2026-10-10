@@ -252,7 +252,9 @@ fn protocol_version_is_the_pinned_value() {
     // v87 (sidecar): CreativeGive.
     // v88 (OC): `InventorySyncPacket.owed` — the join's replacement carries
     //   the joiner's correction debt to both copies.
-    assert_eq!(protocol::PROTOCOL_VERSION, 88);
+    // v90 PRIVATE PROVISIONAL (mp-handover): PacketType::Handover (tag 72);
+    //   v89 is C3d's. Final numbers are assigned at the final rebase.
+    assert_eq!(protocol::PROTOCOL_VERSION, 90);
 }
 
 #[test]

@@ -226,6 +226,28 @@ fn handover_refuses_while_the_recipients_inventory_is_still_settling() {
     );
 }
 
+/// OC (D4): a connected recipient whose session history isn't `Complete`
+/// (here: it began from a v1 record) refuses even with a settled window, and
+/// a recipient record with owed units or an incomplete history refuses at
+/// the frozen capture; no record at all is proven.
+#[test]
+fn handover_refuses_a_participant_whose_obligations_are_not_proven_zero() {
+    use crate::handover::live::eligibility::{OWED, Seat, recipient_record, seats};
+    use crate::joiner_save::{IncompleteCause, JoinerSave};
+    let (mut hs, mut host) = start_lent("handover-obligations");
+    let (_c, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x66; 32]);
+    let seat = Seat { slot, generation, key };
+    assert_eq!(seats(&hs.server, seat), Ok(()));
+    let proven = JoinerSave::capture(&hs.server.players[slot], hs.server.run_id);
+    assert_eq!(recipient_record(Some(&proven)), Ok(()));
+    assert_eq!(recipient_record(None), Ok(()), "no record is proven");
+    hs.server.players[slot].obligations.mark(IncompleteCause::LegacyV1);
+    assert!(hs.server.players[slot].window_events.is_quiescent(), "the window itself is settled");
+    assert_eq!(seats(&hs.server, seat), Err(OWED), "an owed/unproven joiner was included");
+    let unproven = JoinerSave::capture(&hs.server.players[slot], hs.server.run_id);
+    assert_eq!(recipient_record(Some(&unproven)), Err(OWED), "an unproven recipient record became seat 0");
+}
+
 mod session {
     use super::*;
     use crate::handover::{
