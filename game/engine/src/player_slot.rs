@@ -347,6 +347,64 @@ pub struct PlayerSlot {
 }
 
 impl PlayerSlot {
+    /// World handover (CP2 review M-A): a per-screen HUD dialog is open, any
+    /// surface whose clicks change the world, this seat's items or its
+    /// progression (containers, signs, trades, bounties, crafting, Plans,
+    /// the inventory explorer, villager and guide dialogue).
+    pub fn hud_dialog_open(&self) -> bool {
+        self.crafting_ui.open
+            || self.dialogue_villager.is_some()
+            || self.dialogue_satoshi.is_some()
+            || self.pending_build_choice.is_some()
+            || self.open_commission_villager.is_some()
+            || self.open_vendor.is_some()
+            || self.shared_container.is_some()
+            || self.open_furnace.is_some()
+            || self.open_dispenser.is_some()
+            || self.open_pack.is_some()
+            || self.open_chest.is_some()
+            || self.open_sign.is_some()
+            || self.open_bounty_board.is_some()
+            || self.open_tip_jar.is_some()
+            || self.open_repair_bench.is_some()
+            || self.open_market_hub.is_some()
+            || self.open_auction.is_some()
+            || self.open_bazaar.is_some()
+            || self.pending_plaque.is_some()
+            || self.pending_bell.is_some()
+            || self.pending_inspect.is_some()
+            || self.pending_capture.is_some()
+            || self.explorer_state.is_some()
+    }
+
+    /// World handover (M-A): close every HUD dialog that holds only a
+    /// pointer at the world, as a source freezes (before its capture). The
+    /// crafting screen stays open but gated (its grid and cursor items are
+    /// part of the captured window; closing it would move them).
+    pub fn close_hud_dialogs_for_freeze(&mut self) {
+        self.dialogue_villager = None;
+        self.dialogue_satoshi = None;
+        self.pending_build_choice = None;
+        self.open_commission_villager = None;
+        self.open_vendor = None;
+        self.open_furnace = None;
+        self.open_dispenser = None;
+        self.open_pack = None;
+        self.open_chest = None;
+        self.open_sign = None;
+        self.open_bounty_board = None;
+        self.open_tip_jar = None;
+        self.open_repair_bench = None;
+        self.open_market_hub = None;
+        self.open_auction = None;
+        self.open_bazaar = None;
+        self.pending_plaque = None;
+        self.pending_bell = None;
+        self.pending_inspect = None;
+        self.pending_capture = None;
+        self.explorer_state = None;
+    }
+
     /// On a mount or cart: one in this client's own sim ([`Self::riding`])
     /// or, joined, the server's ([`Self::mirror_mount`]).
     pub fn seated(&self) -> bool {

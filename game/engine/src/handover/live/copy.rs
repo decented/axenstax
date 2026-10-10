@@ -60,6 +60,13 @@ pub const DECLINED: &str = "You declined the handover.";
 pub const LEFT: &str = "Leaving the world cancelled the handover.";
 /// Shown as "Couldn't save: <this>. Your last save is safe."
 pub const SAVE_PAUSED: &str = "play is paused for a handover; cancel it first";
+/// In place of a HUD dialog (chest, crafting, bounty board, …) while play is
+/// paused for a handover: nothing in it can be used until play resumes.
+pub const DIALOGS_PAUSED: &str =
+    "Play is paused for a world handover. This can't be used until play resumes.";
+/// A pause-menu world setting (difficulty, creative, Stash, Try again)
+/// pressed while play is paused for a handover.
+pub const SETTINGS_PAUSED: &str = "World settings wait while play is paused for a handover.";
 pub const COMMAND_PAUSED: &str = "Commands wait while play is paused for a handover.";
 pub const NEEDS_ONLINE: &str =
     "Handing a world over needs it hosted online, so there is an invitation to carry over. Use Host online first.";

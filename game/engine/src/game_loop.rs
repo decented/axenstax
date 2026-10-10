@@ -10008,7 +10008,14 @@ impl super::GameState {
                     .scenario
                     .as_ref()
                     .is_some_and(|s| s.def().kind == crate::scenario::ScenarioKind::Challenge);
-            let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut self.difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial, kept_autosave.as_deref());
+            let mut difficulty = self.difficulty.clone();
+            let clicked = crate::menu::draw_pause_menu(&self.renderer.egui.ctx, &display_name, confirm_quit, confirm_creative, &mut difficulty, self.is_creative, lock_creative, self.players.len(), &mut cloud_save, is_trial, kept_autosave.as_deref());
+            // World handover (M-A): world settings wait while play is held.
+            #[cfg(not(target_arch = "wasm32"))]
+            let clicked = self.handover_gate_pause_click(clicked);
+            if clicked != -1 || !self.handover_holds_play() {
+                self.difficulty = difficulty;
+            }
             // T2-10: while this machine hosts a LAN game, show where friends connect.
             #[cfg(not(target_arch = "wasm32"))]
             if let (Some(access), Some(hs)) = (self.lan_host.as_ref(), self.hosted_server.as_ref()) {
@@ -17310,6 +17317,14 @@ impl super::GameState {
             let dialogue_satoshi_target = self.players[pidx].dialogue_satoshi;
             let pending_build = self.players[pidx].pending_build_choice.clone();
             let painter_open = pidx == 0 && self.workshop_painter.open;
+            // World handover (M-A): the ONE gate for every HUD dialog while
+            // play is held (a frozen source, a paused or parked joiner): the
+            // dialog draws as a disabled pause notice and none of its
+            // actions run, so no chest move, craft, sign edit, trade, bounty
+            // claim or payout lands, and no request is sent into a parked
+            // connection. Lifted when play resumes (a pre-Retired abort).
+            let hud_frozen =
+                self.handover_holds_play() && (painter_open || self.players[pidx].hud_dialog_open());
 
             let critical = is_dead || self.controls_card_open || (pidx == 0 && self.trial_outcome.is_some())
                 || self.scenario.as_ref().is_some_and(|s| s.shows_blocking_end_card());
@@ -17428,6 +17443,17 @@ impl super::GameState {
                     // Next tick's death loop respawns the player.
                     self.players[pidx].combat.request_respawn();
                 }
+            } else if hud_frozen {
+                #[cfg(not(target_arch = "wasm32"))]
+                egui::Window::new("World handover")
+                    .id(egui::Id::new(("handover-dialogs-paused", pidx)))
+                    .collapsible(false)
+                    .resizable(false)
+                    .interactable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(&self.renderer.egui.ctx, |ui| {
+                        ui.label(crate::handover::live::copy::DIALOGS_PAUSED);
+                    });
             } else if painter_open {
                 // Spec 40 — the 16×16 paint-grid panel. Painting mutates the
                 // painter buffer in-place; only Pin/Cancel surface here.
@@ -18937,12 +18963,17 @@ impl super::GameState {
                 // commit it back through the world accessor.
                 let chest_data = self.world.chest_at(chest_pos).cloned();
                 if let Some(data) = chest_data {
-                    let result = crate::chest_ui::show_chest_dialog(
+                    #[allow(unused_mut)]
+                    let mut result = crate::chest_ui::show_chest_dialog(
                         &self.renderer.egui.ctx,
                         &data,
                         &self.players[pidx].inventory,
                         chest_pos,
                     );
+                    #[cfg(test)]
+                    if let Some(crate::handover_game::TestHudClick::Chest(c)) = self.test_hud_click.take() {
+                        result.clicks.push(c);
+                    }
                     // C3b-1 — each click through the one container rule.
                     let ctx = self.container_ctx(pidx, false);
                     for click in &result.clicks {
@@ -19014,6 +19045,16 @@ impl super::GameState {
                         bitcoin_enabled,
                         charter,
                     );
+                    #[cfg(test)]
+                    let outcome = match self.test_hud_click.take() {
+                        Some(crate::handover_game::TestHudClick::Bounty(bounty_id)) => {
+                            crate::bounty_ui::BountyUiOutcome::Claim { bounty_id }
+                        }
+                        other => {
+                            self.test_hud_click = other;
+                            outcome
+                        }
+                    };
                     match outcome {
                         crate::bounty_ui::BountyUiOutcome::InProgress => {}
                         crate::bounty_ui::BountyUiOutcome::Closed => {
@@ -23175,7 +23216,9 @@ impl super::GameState {
     /// claim released: nothing will ever answer it (C3b-fix-e L7:
     /// `JoinerActions::settle`).
     fn send_request(&mut self, request: crate::remote_client::Request) {
-        if !self.remote_client.as_ref().is_some_and(|c| c.is_connected()) {
+        // A parked connection (a handover session holds it) is not a
+        // connection for requests: settled as unsent, never written into it.
+        if !self.remote_client.as_ref().is_some_and(|c| c.is_connected() && !c.is_parked()) {
             self.joiner_actions.settle(request.seq(), crate::joiner_actions::RequestFate::NoConnection);
             return;
         }

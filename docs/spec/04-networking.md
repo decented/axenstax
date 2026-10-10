@@ -4873,6 +4873,16 @@ QUIC is a UDP-based protocol. Firewalls that allow TCP by default (e.g., `ufw` o
 
 Quinn's default idle timeout is ~30 seconds. If neither side sends data after the TLS handshake (e.g., during development before game data sync is implemented), the connection silently times out. Solutions: (a) send application-layer keepalive packets, (b) configure `idle_timeout` in `quinn::TransportConfig` to a longer value, or (c) ensure game data (chunk sync, player state) flows continuously once the connection is established.
 
+**As built (2026-10-10, handover CP2 review H1):** both endpoint configs carry one
+explicit `quinn::TransportConfig` from one constructor (`network::transport_config`,
+`network::Liveness::DEFAULT`): `max_idle_timeout` 30 s and `keep_alive_interval`
+5 s (well inside a third of the idle timeout, pinned by a unit test). quinn's
+default (30 s idle, no keep-alive) closed every connection after 30 s of game
+silence, and a world frozen for a handover, a paused joiner and a recipient
+parked after Ready are all silent by design. A real-QUIC loopback test with a
+shortened idle timeout holds a silent freeze past it, then cancels, and the guest
+and the recipient both resume.
+
 **4. Network connection handles must be stored in long-lived state.**
 
 The `RemoteClient` struct (holding the QUIC connection) was initially created as a local variable inside the Join menu handler's `match` arm. When the match arm ended, the variable was dropped, and QUIC's Drop impl closed the connection instantly. Connection handles must be stored in `GameState` (e.g., `remote_client: Option<RemoteClient>`) so they live as long as the game session.
@@ -5393,9 +5403,26 @@ has paused play (`Notice{paused}`), or a session holds the client's
 connection (`handover_holds_play`): `GameState::tick` returns at once (no
 simulation, local edits, grants, decay, raid credit or autosave), the frame
 path produces no gameplay intents, `network_send_input` sends nothing, chat
-commands are refused, `save_live_world` (every Save, Save & Quit, pause Save
-and close-save) refuses with "play is paused for a handover; cancel it
-first", and `poll_online` answers no online call (no admission). The lent
+commands are refused, `save_live_world` (every pause Save) refuses with "play
+is paused for a handover; cancel it first" (Save & Quit and close-save leave the
+world, which cancels the handover first and then saves), and `poll_online`
+answers no online call (no admission). HUD dialogs and world settings (review
+M-A): as a source freezes, before its capture, every HUD dialog that only points
+at the world closes (`PlayerSlot::close_hud_dialogs_for_freeze`: chests,
+furnaces, dispensers, packs, signs, vendors, bounty board, tip jar, repair bench,
+market hub, auction, bazaar, plaque, bell, inspect, Plan capture, the inventory
+explorer, villager and guide dialogue; the crafting screen stays open but gated,
+since its grid and cursor items are part of the captured window). One central
+gate in the per-screen HUD loop then holds every dialog still open while
+`handover_holds_play` (a frozen source, a paused or parked joiner): it draws a
+disabled pause notice in the dialog's place and runs none of its actions — no
+container move, craft, sign edit, trade, bounty claim or payout, Plan mint or
+creative give. The pause menu's world settings (Stash toggle, difficulty,
+creative switch, Try again, a split-screen player's leave) pass through
+`handover_gate_pause_click` and are dropped with a notice while play is held.
+A parked connection is not a connection for requests (`send_request` settles
+them as unsent, never writing into the parked transport). A pre-Retired cancel
+lifts the gate. The lent
 tick's tripwire expects zero runs of every shared system while frozen. The
 render keeps running and the handover window shows the status, Cancel, and
 for joiners the paused banner. Releasing the freeze resets the tick timing so

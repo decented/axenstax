@@ -62,6 +62,15 @@ pub(crate) struct Fixture {
     pub recipient: Option<Box<dyn Fn() -> Result<RecipientEnv, String>>>,
 }
 
+/// A HUD click a test injects in place of an egui click (the harness has no
+/// pointer): consumed only by the branch that would draw that dialog.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) enum TestHudClick {
+    Chest(crate::container_window::ContainerClick),
+    Bounty(u32),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiAction {
     Accept,
@@ -167,6 +176,22 @@ impl crate::GameState {
         self.handover_freezes_world()
             || self.host_paused
             || self.remote_client.as_ref().is_some_and(|rc| rc.is_parked())
+    }
+
+    /// M-A: the one gate for pause-menu world settings while play is held
+    /// for a handover. A world-changing click is dropped (with a notice)
+    /// and `-1` (no click) returned; anything else passes unchanged.
+    pub(crate) fn handover_gate_pause_click(&mut self, clicked: i32) -> i32 {
+        use crate::menu::*;
+        let world_setting = matches!(
+            clicked,
+            PAUSE_STASH_TOGGLED | PAUSE_DIFFICULTY_CHANGED | PAUSE_SWITCH_CREATIVE | PAUSE_TRY_AGAIN
+        ) || clicked >= PAUSE_PLAYER_LEAVE_BASE;
+        if world_setting && self.handover_holds_play() {
+            self.handover_toast(copy::SETTINGS_PAUSED);
+            return -1;
+        }
+        clicked
     }
 
     /// The identity signed in now (re-read at every boundary).
@@ -360,6 +385,12 @@ impl crate::GameState {
         };
         let mut result = session.pump(hs, live, now);
         if result.is_ok() && session.wants_capture() {
+            // M-A: the freeze closes every HUD dialog before the capture, so
+            // nothing a dialog does can land after the cut (the central gate
+            // in the HUD loop holds any surface still open).
+            for p in self.players.iter_mut() {
+                p.close_hud_dialogs_for_freeze();
+            }
             result = capture_and_offer(
                 session.as_mut(),
                 hs,

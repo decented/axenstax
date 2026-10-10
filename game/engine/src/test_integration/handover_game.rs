@@ -158,7 +158,14 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
 /// The far end reads the Propose the ordinary way and consents; the host
 /// game's own pump then freezes it.
 fn frozen(tag: &str, dir: &Tmp) -> (HeadlessGame, Far) {
+    frozen_after(tag, dir, |_| {})
+}
+
+/// [`frozen`], with `prep` run on the host game just before the far end
+/// consents (dialogs it opens are open at the freeze).
+fn frozen_after(tag: &str, dir: &Tmp, prep: impl FnOnce(&mut HeadlessGame)) -> (HeadlessGame, Far) {
     let (mut hg, mut far, _) = proposed(tag, dir);
+    prep(&mut hg);
     round(&mut hg);
     far.rc.poll();
     let propose = far.rc.take_handover_frames().into_iter().find(|b| matches!(Frame::decode(b), Ok(Frame::Propose { .. })));
@@ -582,4 +589,64 @@ fn game_harness_handover_consent_window_frees_the_cursor_mid_play() {
     j.hg.state.handover_click = Some(UiAction::Decline);
     j.hg.frames(1);
     assert!(!j.hg.state.cursor_must_be_free(), "the cursor stayed free after Decline");
+}
+
+/// CP2 review M-A: the freeze closes the host's HUD dialogs before its
+/// capture, and the ONE central gate holds any dialog still open: a chest
+/// move and a bounty claim during the freeze leave the world, the seat's
+/// items and its progression unchanged. A pre-Retired cancel lifts the gate
+/// (the same injected chest click then lands: the injection is real).
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_freeze_closes_and_gates_hud_dialogs() {
+    use crate::container_window::ContainerClick;
+    use crate::handover_game::TestHudClick;
+    let dir = Tmp::new("hud");
+    let body = std::cell::Cell::new((0, 0, 0));
+    let (mut hg, _far) = frozen_after("hud", &dir, |hg| {
+        let p = hg.state.players[0].player.pos;
+        let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        body.set((x, y, z));
+        hg.state.world.set_block(x + 2, y, z, crate::block::CHEST);
+        let mut chest = crate::chest::ChestData::new();
+        chest.slots[2] = Some(crate::item::ItemStack::new_block(crate::block::STONE, 6));
+        hg.state.world.insert_chest((x + 2, y, z), chest);
+        hg.state.world.set_block(x, y, z + 2, crate::block::BOUNTY_BOARD);
+        hg.state.world.bounties = vec![crate::bounty::ActiveBounty { id: 77, template_idx: 0, issued_tick: 0 }];
+        let t = crate::bounty::ActiveBounty { id: 77, template_idx: 0, issued_tick: 0 }.template().unwrap();
+        hg.state.players[0].kill_counter.insert(t.mob_kind, t.required_count);
+        hg.state.players[0].open_chest = Some((x + 2, y, z));
+    });
+    let (x, y, z) = body.get();
+    let (chest, board) = ((x + 2, y, z), (x, y, z + 2));
+    assert_eq!(hg.state.players[0].open_chest, None, "the freeze left the chest dialog open");
+    let chest_before = hg.state.world.chest_at(chest).cloned().unwrap().slots;
+    let inv_before: Vec<_> = (0..36).map(|i| hg.state.players[0].inventory.slot(i).cloned()).collect();
+    let (kills_before, claimed_before) =
+        (hg.state.players[0].kill_counter.clone(), hg.state.players[0].bounties_claimed.clone());
+    // A chest dialog open during the freeze anyway: its move doesn't land.
+    hg.state.players[0].open_chest = Some(chest);
+    hg.state.test_hud_click = Some(TestHudClick::Chest(ContainerClick::Withdraw { slot: 2, all: true }));
+    hg.frames(2);
+    assert_eq!(hg.state.world.chest_at(chest).unwrap().slots, chest_before, "a chest move landed while frozen");
+    let inv_now: Vec<_> = (0..36).map(|i| hg.state.players[0].inventory.slot(i).cloned()).collect();
+    assert_eq!(inv_now, inv_before, "the seat's items changed while frozen");
+    // A bounty claim while frozen: no claim, no drained kills, no payout.
+    hg.state.test_hud_click = None;
+    hg.state.players[0].open_chest = None;
+    hg.state.players[0].open_bounty_board = Some(board);
+    hg.state.test_hud_click = Some(TestHudClick::Bounty(77));
+    hg.frames(2);
+    assert_eq!(hg.state.players[0].kill_counter, kills_before, "a bounty claim drained kills while frozen");
+    assert_eq!(hg.state.players[0].bounties_claimed, claimed_before, "a bounty was claimed while frozen");
+    // Pre-Retired cancel: the surfaces work again.
+    hg.state.test_hud_click = None;
+    hg.state.players[0].open_bounty_board = None;
+    hg.state.handover_click = Some(UiAction::Cancel);
+    hg.frames(1);
+    assert!(!hg.state.handover_holds_play());
+    hg.state.players[0].open_chest = Some(chest);
+    hg.state.test_hud_click = Some(TestHudClick::Chest(ContainerClick::Withdraw { slot: 2, all: true }));
+    hg.frames(1);
+    assert_eq!(hg.state.world.chest_at(chest).unwrap().slots[2], None, "the released chest dialog didn't work");
 }

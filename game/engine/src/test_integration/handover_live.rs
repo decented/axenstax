@@ -226,6 +226,101 @@ fn handover_refuses_while_the_recipients_inventory_is_still_settling() {
     );
 }
 
+/// A signed join over a REAL QUIC client transport, ticking the lent server
+/// until the challenge and the acceptance arrive.
+fn signed_join_quic(
+    hs: &mut HostedServer,
+    host: &mut OwnedSimParts,
+    client: &dyn ClientTransport,
+    seckey: [u8; 32],
+) -> (usize, u32, [u8; 32]) {
+    use protocol::PacketType;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut wait_for = |hs: &mut HostedServer, want: PacketType| loop {
+        host.lend_tick(hs);
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((t, payload)) = protocol::deserialize_header(&pkt)
+                && t == want
+            {
+                return payload.to_vec();
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "no {want:?} over QUIC");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let chal: protocol::ChallengePacket = protocol::safe_deserialize(&wait_for(hs, PacketType::Challenge)).unwrap();
+    let origin = crate::signet::join_origin(client.channel_binding());
+    let ev = crate::hosted_server::tests::signed_auth_event(seckey, &chal.nonce_hex, &origin, now_secs());
+    let req = crate::hosted_server::tests::join_with_auth(ev, None);
+    client.send_to_server(&protocol::serialize_packet(PacketType::JoinRequest, &req));
+    let acc: protocol::JoinAcceptPacket = protocol::safe_deserialize(&wait_for(hs, PacketType::JoinAccept)).unwrap();
+    let slot = acc.player_index as usize;
+    let (generation, key) = hs.handover_seat(slot).expect("authenticated live seat");
+    (slot, generation, key)
+}
+
+/// H1 (CP2 review): over REAL QUIC with a test-shortened idle timeout, a
+/// silent freeze longer than that timeout (the frozen server broadcasts
+/// nothing, the guest and the recipient send nothing) keeps both connections
+/// and the control link; the cancel then resumes both.
+#[test]
+fn handover_silent_freeze_past_the_quic_idle_timeout_keeps_guest_and_recipient() {
+    use crate::network::{Liveness, bridge_server_connection, connect_to_server_with, create_server_endpoint_with};
+    use std::time::{Duration, Instant};
+    let live = Liveness { idle: Duration::from_millis(1200), keep_alive: Some(Duration::from_millis(300)) };
+    let (mut hs, mut host) = start_lent("handover-quic-idle");
+    let accept = hs.test_accept_channel();
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async move {
+            let ep = create_server_endpoint_with("127.0.0.1:0".parse().unwrap(), live).unwrap();
+            addr_tx.send(ep.local_addr().unwrap()).unwrap();
+            for _ in 0..2 {
+                let Some(incoming) = ep.accept().await else { return };
+                let Ok(conn) = incoming.await else { return };
+                let _ = accept.send(Box::new(bridge_server_connection(conn)));
+            }
+            let _ = stop_rx.await; // keep the endpoint driven until the test ends
+        });
+    });
+    let addr = addr_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let recipient = connect_to_server_with(addr, live).unwrap();
+    let (slot, generation, key) = signed_join_quic(&mut hs, &mut host, &recipient, [0x71; 32]);
+    let guest = connect_to_server_with(addr, live).unwrap();
+    let (guest_slot, ..) = signed_join_quic(&mut hs, &mut host, &guest, [0x72; 32]);
+    let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
+    hs.handover_freeze().unwrap();
+    // Silence for twice the idle timeout: frozen ticks, nothing sent.
+    let until = Instant::now() + live.idle * 2;
+    while Instant::now() < until {
+        host.lend_tick(&mut hs);
+        while guest.try_recv_from_server().is_some() || recipient.try_recv_from_server().is_some() {}
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!guest.is_closed(), "the guest's connection idled out during the freeze");
+    assert!(!recipient.is_closed(), "the recipient's link idled out during the freeze");
+    assert!(hs.handover_take_frames().is_ok(), "the source lost its control link");
+    // Cancel (pre-retirement): both seats resume and hear the world again.
+    hs.handover_release();
+    for (who, c, s) in [("guest", &guest, guest_slot), ("recipient", &recipient, slot)] {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut heard = false;
+        while !heard && Instant::now() < deadline {
+            host.lend_tick(&mut hs);
+            while let Some(p) = c.try_recv_from_server() {
+                heard |= matches!(protocol::deserialize_header(&p), Some((protocol::PacketType::StateUpdate, _)));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(heard, "the {who} didn't resume after the cancel");
+        assert!(hs.handover_seat(s).is_some(), "the {who}'s seat was lost");
+    }
+    let _ = stop_tx.send(());
+    let _ = server.join();
+}
+
 /// OC (D4): a connected recipient whose session history isn't `Complete`
 /// (here: it began from a v1 record) refuses even with a settled window, and
 /// a recipient record with owed units or an incomplete history refuses at

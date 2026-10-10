@@ -1241,6 +1241,9 @@ pub(crate) struct GameState {
     /// `poll_handover`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) handover_click: Option<crate::handover_game::UiAction>,
+    /// Tests: one HUD dialog click, in place of the egui pointer.
+    #[cfg(test)]
+    pub(crate) test_hud_click: Option<crate::handover_game::TestHudClick>,
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) handover_fixture: Option<crate::handover_game::Fixture>,
     /// The socket/router/attestation preparation running on a worker thread.
@@ -1916,6 +1919,8 @@ impl GameState {
             host_paused: false,
             #[cfg(not(target_arch = "wasm32"))]
             handover_click: None,
+            #[cfg(test)]
+            test_hud_click: None,
             #[cfg(all(test, not(target_arch = "wasm32")))]
             handover_fixture: None,
             #[cfg(not(target_arch = "wasm32"))]
