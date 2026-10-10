@@ -556,7 +556,7 @@ mod tests {
         ab: &Event,
         core: &Core,
         root: &crate::handover::context::RootContext,
-    ) -> (VerifiedPrepared, VerifiedCommit, Event) {
+    ) -> (VerifiedPrepared, VerifiedCommit, Event, Event) {
         let keys = crypto::recipient(
             root,
             &[1; 16],
@@ -589,6 +589,7 @@ mod tests {
         else {
             panic!("Prepared")
         };
+        let prepared_event = event;
         let event = crypto::seal(
             Seal {
                 source: a,
@@ -616,7 +617,27 @@ mod tests {
         .unwrap() else {
             panic!("Commit")
         };
-        (p, c, event)
+        (p, c, event, prepared_event)
+    }
+
+    /// CP6 ruling 3: tests mint a `StoredProof` only the way production
+    /// does, through the loopback relay's publish, OK and fresh readback.
+    async fn witness(
+        relay: &crate::handover::relay_fixture::Relay,
+        root: &crate::handover::context::RootContext,
+        event: &Event,
+        verified: Verified,
+        permit: Option<&PublicationPermit>,
+    ) -> StoredProof {
+        use crate::handover::stored::{Budget, Publication, Route, publish_readback};
+        let tag = event.tags.iter().next().unwrap().as_slice()[1].clone();
+        let mut recipient = [0u8; 32];
+        hex::decode_to_slice(&tag, &mut recipient).unwrap();
+        let route = Route { author: event.pubkey.to_bytes(), recipient, until: root.expiry() };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        publish_readback(&relay.url(), root, Publication { event, verified: &verified, permit, route }, &mut Budget::new(), &cancel)
+            .await
+            .unwrap()
     }
 
     /// P1: the whole stored path through the in-process loopback relay: the
@@ -738,8 +759,131 @@ mod tests {
         });
     }
 
+    /// The recipient's readback fixture: a root naming `relay`, the
+    /// verified Prepared/Committed pair and their route.
+    async fn readback_chain(
+        relay: &crate::handover::relay_fixture::Relay,
+    ) -> (crate::handover::context::RootContext, VerifiedPrepared, VerifiedCommit, Event, Event, crate::handover::stored::Route) {
+        use nostr::{Timestamp, ToBech32};
+        let a = Keys::generate();
+        let b = Keys::generate();
+        let root = crate::handover::context::RootContext::new(
+            a.public_key().to_bytes(),
+            &a.public_key().to_bech32().unwrap(),
+            900,
+            &[relay.url()],
+            100,
+        )
+        .unwrap();
+        let (_, mut c) = crate::handover::certificate::tests::fixture();
+        c.context = root.digest();
+        c.root_runtime = root.runtime();
+        c.root_persona = root.persona();
+        c.source_runtime = root.runtime();
+        c.source_persona = root.persona();
+        c.successor_runtime = b.public_key().to_bytes();
+        c.successor_persona = b.public_key().to_bytes();
+        let aa = crate::runtime_identity::mint_player_attestation(&a, &a.public_key(), Timestamp::from(100), 1).await.unwrap();
+        let ab = crate::runtime_identity::mint_player_attestation(&b, &b.public_key(), Timestamp::from(100), 1).await.unwrap();
+        let (p, cv, ce, pe) = pair(&a, &b, &aa, &ab, &c, &root).await;
+        let keys = crypto::recipient(&root, &[1; 16], None).unwrap();
+        let route = crate::handover::stored::Route { author: root.runtime(), recipient: keys.public_key().to_bytes(), until: root.expiry() };
+        (root, p, cv, ce, pe, route)
+    }
+
+    /// CP6 rulings 1 and 4a: `readback` witnesses only a verified Committed,
+    /// by exact event id; a Prepared (even stored) and a different stored
+    /// event from the same author on the same route are never a witness.
+    #[test]
+    fn handover_readback_refuses_a_prepared_and_a_different_event_from_the_same_author() {
+        use crate::handover::stored::{Budget, readback};
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (root, p, cv, ce, pe, route) = readback_chain(&relay).await;
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let (vp, vc) = (Verified::Prepared(p), Verified::Committed(cv));
+            // The relay holds only the Prepared: the same author and route.
+            relay.insert(pe.clone());
+            assert_eq!(pe.pubkey, ce.pubkey);
+            assert!(route.matches(&pe) && route.matches(&ce));
+            assert!(
+                readback(&relay.url(), &root, &pe, &vp, route, &mut Budget::new(), &cancel).await.is_err(),
+                "readback witnessed a Prepared"
+            );
+            assert!(
+                readback(&relay.url(), &root, &pe, &vc, route, &mut Budget::new(), &cancel).await.is_err(),
+                "readback accepted bytes that aren't the verified Committed"
+            );
+            assert!(
+                readback(&relay.url(), &root, &ce, &vc, route, &mut Budget::new(), &cancel).await.is_err(),
+                "readback accepted a different event with the same author"
+            );
+        });
+    }
+
+    /// CP6 rulings 2 and 4b: a witness is a NEW subscription on a relay the
+    /// root names, charged to the caller's budget; a relay the root doesn't
+    /// name is never contacted; and an event the same budget already saw is
+    /// no witness when the relay no longer returns it (no relay EVENT, no
+    /// proof; never a cached copy).
+    #[test]
+    fn handover_readback_is_a_fresh_charged_subscription_and_needs_a_relay_event() {
+        use crate::handover::stored::{Budget, lookup, readback};
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let other = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (root, _, cv, ce, _, route) = readback_chain(&relay).await;
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let vc = Verified::Committed(cv.clone());
+            relay.insert(ce.clone());
+            other.insert(ce.clone());
+            let mut budget = Budget::new();
+            let (queries, bytes) = (relay.queries(), budget.bytes_received());
+            let witnessed = readback(&relay.url(), &root, &ce, &vc, route, &mut budget, &cancel).await.unwrap();
+            assert_eq!(witnessed.event_hash(), cv.event_hash());
+            assert_eq!(relay.queries(), queries + 1, "the readback opened no fresh subscription");
+            assert!(budget.bytes_received() > bytes, "the readback wasn't charged to the operation's budget");
+            assert!(readback(&other.url(), &root, &ce, &vc, route, &mut Budget::new(), &cancel).await.is_err());
+            assert_eq!(other.queries(), 0, "a relay the invitation doesn't name was asked");
+            // The same budget has now seen the Committed; the relay stops returning it.
+            assert_eq!(lookup(&relay.url(), &root, route, &mut budget, &cancel).await.unwrap().len(), 0, "dedup");
+            relay.withhold(true);
+            let queries = relay.queries();
+            assert!(
+                readback(&relay.url(), &root, &ce, &vc, route, &mut budget, &cancel).await.is_err(),
+                "a readback without a relay EVENT counted as stored"
+            );
+            assert_eq!(relay.queries(), queries + 1);
+        });
+    }
+
+    /// CP5 review MEDIUM-1: a Committed verified under ANOTHER root context
+    /// (stored on a relay this root also names) is no witness for this root.
+    #[test]
+    fn handover_readback_refuses_a_verified_commit_of_another_root() {
+        use crate::handover::stored::{Budget, readback};
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (root, ..) = readback_chain(&relay).await;
+            let (other, _, cv, ce, _, route) = readback_chain(&relay).await;
+            assert_ne!(other.digest(), root.digest());
+            relay.insert(ce.clone());
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let vc = Verified::Committed(cv);
+            assert!(readback(&relay.url(), &other, &ce, &vc, route, &mut Budget::new(), &cancel).await.is_ok());
+            assert!(
+                readback(&relay.url(), &root, &ce, &vc, route, &mut Budget::new(), &cancel).await.is_err(),
+                "readback witnessed another root's Committed"
+            );
+        });
+    }
+
     #[test]
     fn handover_phase_durable_cut_restart_activation_and_late_abort() {
+        let relay = crate::handover::relay_fixture::Relay::start();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -753,7 +897,7 @@ mod tests {
                 a.public_key().to_bytes(),
                 &a.public_key().to_bech32().unwrap(),
                 900,
-                &["wss://relay.example".into()],
+                &[relay.url()],
                 100,
             )
             .unwrap();
@@ -839,14 +983,8 @@ mod tests {
                 )
                 .is_err()
             );
-            source
-                .prepared(
-                    &p,
-                    &StoredProof {
-                        hash: p.event_hash(),
-                    },
-                )
-                .unwrap();
+            let prepared_witness = witness(&relay, &root, &p_event, Verified::Prepared(p.clone()), None).await;
+            source.prepared(&p, &prepared_witness).unwrap();
             let mut receiver =
                 Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100)
                     .unwrap();
@@ -915,13 +1053,11 @@ mod tests {
             );
             assert!(
                 receiver
-                    .activate(&receiver_store, &proof, &StoredProof { hash: [0; 32] })
+                    .activate(&receiver_store, &proof, &prepared_witness)
                     .is_err()
             );
             assert!(!receiver.gameplay_admitted());
-            let stored = StoredProof {
-                hash: proof.event_hash(),
-            };
+            let stored = witness(&relay, &root, &event, Verified::Committed(proof.clone()), Some(&permit)).await;
             source.published(&stored).unwrap();
             assert!(receiver.activate(&receiver_store, &proof, &stored).unwrap());
             assert!(!receiver.activate(&receiver_store, &proof, &stored).unwrap());
@@ -938,6 +1074,7 @@ mod tests {
     }
     #[test]
     fn handover_retirement_matches_source_epoch_and_authenticated_handback() {
+        let relay = crate::handover::relay_fixture::Relay::start();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -951,7 +1088,7 @@ mod tests {
                 a.public_key().to_bytes(),
                 &a.public_key().to_bech32().unwrap(),
                 900,
-                &["wss://relay.example".into()],
+                &[relay.url()],
                 100,
             )
             .unwrap();
@@ -982,15 +1119,10 @@ mod tests {
             let (store, dir) = crate::handover::durable::tests::store("handback");
             let capability = crypto::root_capability(&root, &[1; 16]).unwrap();
             let old = Authority::root(&root, c.lineage).unwrap();
-            let (p1, proof1, event1) = pair(&a, &b, &aa, &ab, &c, &root).await;
+            let (p1, proof1, event1, pe1) = pair(&a, &b, &aa, &ab, &c, &root).await;
             let mut source = Source::frozen(c.clone(), &old).unwrap();
             source
-                .prepared(
-                    &p1,
-                    &StoredProof {
-                        hash: p1.event_hash(),
-                    },
-                )
+                .prepared(&p1, &witness(&relay, &root, &pe1, crypto::Verified::Prepared(p1.clone()), None).await)
                 .unwrap();
             source
                 .retire(
@@ -1023,7 +1155,7 @@ mod tests {
             second.source_persona = second.source_runtime;
             second.successor_runtime = a.public_key().to_bytes();
             second.successor_persona = second.successor_runtime;
-            let (_, proof2, _) = pair(&b, &a, &ab, &aa, &second, &root).await;
+            let (_, proof2, _, _) = pair(&b, &a, &ab, &aa, &second, &root).await;
             prefix.accept(&proof2, &root, 100).unwrap();
             let handback = Authority::successor(&proof2, &prefix).unwrap();
             let cached =
@@ -1038,15 +1170,10 @@ mod tests {
             third.predecessor = proof2.event_hash();
             third.transfer = [6; 16];
             third.snapshot_world = [6; 16];
-            let (p3, proof3, event3) = pair(&a, &b, &aa, &ab, &third, &root).await;
+            let (p3, proof3, event3, pe3) = pair(&a, &b, &aa, &ab, &third, &root).await;
             let mut source = Source::frozen(third, &handback).unwrap();
             source
-                .prepared(
-                    &p3,
-                    &StoredProof {
-                        hash: p3.event_hash(),
-                    },
-                )
+                .prepared(&p3, &witness(&relay, &root, &pe3, crypto::Verified::Prepared(p3.clone()), None).await)
                 .unwrap();
             source
                 .retire(
@@ -1077,6 +1204,7 @@ mod tests {
     }
     #[test]
     fn handover_persisted_lineage_mutation_cannot_reopen_source() {
+        let relay = crate::handover::relay_fixture::Relay::start();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1089,7 +1217,7 @@ mod tests {
                 a.public_key().to_bytes(),
                 &a.public_key().to_bech32().unwrap(),
                 900,
-                &["wss://relay.example".into()],
+                &[relay.url()],
                 100,
             )
             .unwrap();
@@ -1117,17 +1245,12 @@ mod tests {
             )
             .await
             .unwrap();
-            let (p, proof, event) = pair(&a, &b, &aa, &ab, &c, &root).await;
+            let (p, proof, event, pe) = pair(&a, &b, &aa, &ab, &c, &root).await;
             let (store, dir) = crate::handover::durable::tests::store("mutated-lineage");
             let authority = Authority::root(&root, c.lineage).unwrap();
             let mut source = Source::frozen(c.clone(), &authority).unwrap();
             source
-                .prepared(
-                    &p,
-                    &StoredProof {
-                        hash: p.event_hash(),
-                    },
-                )
+                .prepared(&p, &witness(&relay, &root, &pe, crypto::Verified::Prepared(p.clone()), None).await)
                 .unwrap();
             let capability = crypto::root_capability(&root, &[1; 16]).unwrap();
             source

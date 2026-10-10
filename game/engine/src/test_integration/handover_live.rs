@@ -175,6 +175,14 @@ fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
     assert!(hs.handover_seat(guest_slot).is_none(), "an overflowed guest is still offered as a seat");
     hs.handover_release();
     assert!(hs.handover_seat(guest_slot).is_none(), "an overflowed guest stayed at release");
+    // Review LOW-2: this release ran outside the lend (a cancel from the
+    // frame's pump), so the kick waits for the next lent tick, where the
+    // guest's leave settles on the authoritative world.
+    assert!(!hs.handover_test_slot_released(guest_slot), "the overflow kick ran outside the lend (no leave settlement)");
+    assert_eq!(hs.handover_test_deferred_overflow(), 1);
+    host.lend_tick(&mut hs);
+    assert!(hs.handover_test_slot_released(guest_slot), "the deferred overflow kick never ran");
+    assert_eq!(hs.handover_test_deferred_overflow(), 0);
 }
 
 #[test]
@@ -1183,6 +1191,100 @@ mod session {
         assert!(dst.return_link().is_some(), "the joined connection comes back");
         drop(release);
         p.src.join_pack_worker();
+    }
+
+    /// Review LOW-3: while streaming, a repeated Ack is not progress: a
+    /// recipient that re-sends its last Ack just inside the stall deadline
+    /// no longer holds the source (and every guest) frozen.
+    #[test]
+    fn handover_repeated_acks_dont_hold_a_streaming_source() {
+        use crate::handover::live::source::STALL_SECS;
+        let mut p = pair("dupack");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        assert_eq!(p.src.stage(), SourceStage::Streaming);
+        let t0 = now();
+        let dup = Frame::Ack { transfer: p.src.transfer(), through: 0 };
+        p.dst.as_ref().unwrap().test_send(&dup);
+        p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS / 2).expect("inside the stall deadline");
+        p.dst.as_ref().unwrap().test_send(&dup);
+        assert!(p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS + 5).is_err(), "repeated Acks held the source frozen");
+        assert!(!p.hs.handover_frozen(), "the source resumed");
+    }
+
+    /// CP5 review LOW-5: before the final Ack the recipient has no reason
+    /// to send a heartbeat; a Notice then doesn't feed the stall clock.
+    #[test]
+    fn handover_heartbeat_before_the_final_ack_doesnt_hold_a_streaming_source() {
+        use crate::handover::live::source::STALL_SECS;
+        let mut p = pair("earlynotice");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        assert_eq!(p.src.stage(), SourceStage::Streaming);
+        let t0 = now();
+        let beat = Frame::Notice { transfer: p.src.transfer(), paused: true };
+        p.dst.as_ref().unwrap().test_send(&beat);
+        p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS / 2).expect("inside the stall deadline");
+        p.dst.as_ref().unwrap().test_send(&beat);
+        assert!(p.src.pump(&mut p.hs, p.live, t0 + STALL_SECS + 5).is_err(), "early heartbeats held the source frozen");
+        assert!(!p.hs.handover_frozen(), "the source resumed");
+    }
+
+    /// Review LOW-6: the source keeps its pointer (mouselook, fighting)
+    /// while the recipient decides; only a frozen world frees it.
+    #[test]
+    fn handover_source_pointer_is_freed_only_once_frozen() {
+        use crate::handover_game::source_wants_pointer;
+        assert!(!source_wants_pointer(SourceStage::Proposed), "the host lost mouselook while its world still ran");
+        assert!(!source_wants_pointer(SourceStage::Aborted("x")));
+        for s in [SourceStage::Frozen, SourceStage::Packing, SourceStage::Streaming, SourceStage::ReadyVerified] {
+            assert!(source_wants_pointer(s), "{s:?}");
+        }
+    }
+
+    /// Review LOW-7: a source session dropped without `abort` cancels its
+    /// pack; orphaned pack scratch is swept (only `.handover-pack-*`); a
+    /// recipient's held router lease goes back within a bound at exit.
+    #[test]
+    fn handover_drop_cancels_the_pack_sweep_removes_orphans_and_exit_releases_the_lease_bounded() {
+        let mut p = pair("drop");
+        consent(&mut p);
+        let (_reached, release) = p.src.hold_pack();
+        start_offer(&mut p, &seat0());
+        let cancel = p.src.pack_cancel_flag();
+        let Pair { src, hs, dir, .. } = p;
+        drop(src);
+        assert!(cancel.load(std::sync::atomic::Ordering::SeqCst), "a dropped session left its pack running");
+        drop(release);
+        drop(hs);
+        let scratch = dir.0.join("scratch-sweep");
+        std::fs::create_dir_all(scratch.join(".handover-pack-0011")).unwrap();
+        std::fs::create_dir_all(scratch.join("keep")).unwrap();
+        std::fs::write(scratch.join(".handover-pack-file"), b"x").unwrap();
+        assert_eq!(crate::handover::live::inert::sweep_pack_scratch(&scratch).unwrap(), 1);
+        assert!(!scratch.join(".handover-pack-0011").exists(), "an orphaned pack folder was left");
+        assert!(scratch.join("keep").exists() && scratch.join(".handover-pack-file").exists());
+        struct Lease(Arc<Mutex<Vec<&'static str>>>);
+        impl crate::handover::live::recipient::HeldLease for Lease {
+            fn renew(&mut self) {}
+            fn give_back(self: Box<Self>) {
+                self.0.lock().unwrap().push("detached");
+            }
+            fn give_back_within(self: Box<Self>, _: std::time::Duration) {
+                self.0.lock().unwrap().push("bounded");
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+                self
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut q = pair("drop-lease");
+        consent(&mut q);
+        let mut dst = q.dst.take().unwrap();
+        dst.hold_lease(Box::new(Lease(log.clone())));
+        dst.release_lease_within(std::time::Duration::from_millis(1500));
+        drop(dst);
+        assert_eq!(*log.lock().unwrap(), vec!["bounded"], "the lease went back detached at exit");
     }
 
     #[test]

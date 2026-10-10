@@ -113,9 +113,14 @@ impl Budget {
     }
 }
 
+/// Witness that a relay authorised by the root context returned exactly
+/// this event on a fresh subscription. Coordinator ruling (CP6) 3: the field
+/// and the constructor are private to this file, and the only producers are
+/// `publish_readback` and `readback` (both end in `readback_inner`). Pinned
+/// by `handover_stored_proof_has_exactly_two_producers`.
 #[derive(Clone, Copy, Debug)]
 pub struct StoredProof {
-    pub(crate) hash: Hash,
+    hash: Hash,
 }
 impl StoredProof {
     pub fn event_hash(&self) -> Hash {
@@ -446,12 +451,15 @@ async fn publish_inner(
     readback_inner(url, event, route, budget, cancel).await
 }
 
-/// Independent exact readback of an already crypto-verified event (no
-/// publication): a NEW stored subscription on one of the root's relays must
-/// return exactly these bytes. With `publish_readback` (which ends in the
-/// same readback) the only way a `StoredProof` exists. The recipient uses it
-/// to witness the Committed the source published before it activates
-/// (protocol core: "Receiver may independently read back valid Committed").
+/// Independent exact readback of an already crypto-verified Committed (no
+/// publication): the recipient's `StoredProof` producer (coordinator ruling,
+/// CP6), because it holds no publication permit. Constraints, each pinned by
+/// a test: (1) only a `Verified::Committed` of the verified chain, by exact
+/// event id/hash equality (the core asks the receiver for no Prepared
+/// witness); (2) a NEW subscription on a relay the root context authorises,
+/// charged to the caller's `Budget`, after the event is known, never a
+/// cached/local copy or a publish connection's OK; (4) a different event
+/// from the same author, or no relay EVENT at all, is never stored.
 pub async fn readback(
     url: &str,
     root: &RootContext,
@@ -461,13 +469,22 @@ pub async fn readback(
     budget: &mut Budget,
     cancel: &AtomicBool,
 ) -> Result<StoredProof> {
+    let Verified::Committed(c) = verified else {
+        return Err(Error::State("readback witnesses only a verified Committed"));
+    };
     super::context::validate_relay(url)?;
     budget.authorise_relay(url, root)?;
-    let hash = match verified {
-        Verified::Prepared(p) => p.event_hash(),
-        Verified::Committed(c) => c.event_hash(),
-    };
-    if event.id.to_bytes() != hash
+    // CP5 review MEDIUM-1: the verified Committed must belong to the root
+    // context whose relays are being asked.
+    let core = c.core();
+    if core.context != root.digest()
+        || core.root_runtime != root.runtime()
+        || core.root_persona != root.persona()
+        || core.root_expiry != root.expiry()
+    {
+        return Err(Error::Invalid("readback of another root's certificate"));
+    }
+    if event.id.to_bytes() != c.event_hash()
         || !route.matches(event)
         || event.verify().is_err()
         || event.as_json().len() > super::EVENT_LIMIT
@@ -503,6 +520,60 @@ async fn readback_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Coordinator ruling (CP6) 3: `StoredProof`'s field and constructor are
+    /// private to this file; the one struct literal is `readback_inner`'s, and
+    /// only `publish_inner` (via `publish_readback`) and `readback` reach it.
+    /// No other source file builds one.
+    /// Every `StoredProof { hash ...` struct literal (any whitespace).
+    fn literals(text: &str) -> Vec<usize> {
+        text.match_indices("StoredProof")
+            .filter(|(i, m)| {
+                if text[..*i].ends_with("struct ") {
+                    return false;
+                }
+                let rest = text[i + m.len()..].trim_start();
+                rest.strip_prefix('{').is_some_and(|r| r.trim_start().starts_with("hash"))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+    #[test]
+    fn handover_stored_proof_has_exactly_two_producers() {
+        let me = include_str!("stored.rs");
+        let production = me.split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("pub struct StoredProof {\n    hash: Hash,\n}"), "the field is not private");
+        let imp = production.find("impl StoredProof {").unwrap();
+        let imp = &production[imp..imp + production[imp..].find("\n}\n").unwrap()];
+        assert!(!imp.contains("Self {") && !imp.contains("Self(") && !imp.contains("-> Self"), "StoredProof gained a constructor");
+        let found = literals(production);
+        assert_eq!(found.len(), 1, "a second StoredProof constructor");
+        let inner = production.find("async fn readback_inner(").unwrap();
+        assert!(found[0] > inner, "the constructor isn't readback_inner's");
+        let callers: Vec<_> = production.match_indices("readback_inner(url").map(|(i, _)| i).collect();
+        let publish = production.find("async fn publish_inner(").unwrap();
+        let readback = production.find("pub async fn readback(").unwrap();
+        assert_eq!(callers.len(), 2, "readback_inner has another caller");
+        assert!(publish < readback && readback < inner);
+        assert!(callers[0] > publish && callers[0] < readback, "publish_inner doesn't end in the readback");
+        assert!(callers[1] > readback && callers[1] < inner, "readback doesn't use the one readback");
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out)
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p)
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() > 50);
+        for f in files.iter().filter(|f| !f.ends_with("handover/stored.rs")) {
+            let text = std::fs::read_to_string(f).unwrap();
+            assert!(literals(&text).is_empty(), "{} builds a StoredProof", f.display());
+        }
+    }
     #[test]
     fn handover_stored_budget_counts_invalid_and_preserves_whole_operation() {
         let mut b = Budget::new();

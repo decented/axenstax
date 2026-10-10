@@ -66,6 +66,9 @@ impl crate::handover::live::recipient::HeldLease for crate::online_prep::LeaseKe
     fn give_back(self: Box<Self>) {
         self.release();
     }
+    fn give_back_within(self: Box<Self>, grace: std::time::Duration) {
+        self.release_within(grace);
+    }
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
     }
@@ -129,6 +132,18 @@ pub(crate) fn sweep_inert_imports(live: Option<Id>) {
         Ok(0) => {}
         Ok(n) => log::info!("handover: discarded {n} inert import(s)"),
         Err(e) => log::warn!("handover: inert import sweep: {e}"),
+    }
+    // Review LOW-7: at start-up no source session runs either.
+    if live.is_none() {
+        sweep_pack_scratch();
+    }
+}
+
+/// Review LOW-7: orphaned `.handover-pack-*` scratch (no source session).
+fn sweep_pack_scratch() {
+    let Ok(scratch) = handover_dir("scratch") else { return };
+    if let Ok(n @ 1..) = crate::handover::live::inert::sweep_pack_scratch(&scratch) {
+        log::info!("handover: removed {n} orphaned pack folder(s)");
     }
 }
 
@@ -340,6 +355,7 @@ impl crate::GameState {
             world_dir: Some(crate::save::world_dir(&self.world_name)),
         };
         let action = HostAction { seat: Seat { slot, generation, key }, source_key, world_name: world.clone() };
+        let _ = crate::handover::live::inert::sweep_pack_scratch(&cfg.scratch);
         let session = SourceSession::begin(hs, action, cfg, live, now).map_err(|r| r.0.to_string())?;
         self.handover = Some(Handover::Source { session: Box::new(session), world });
         Ok(())
@@ -601,8 +617,16 @@ impl crate::GameState {
     pub(crate) fn handover_wants_pointer(&self) -> bool {
         match &self.handover {
             Some(Handover::Recipient(s)) => !matches!(s.stage(), RecipientStage::Aborted(_)),
-            Some(Handover::Source { session, .. }) => !matches!(session.stage(), SourceStage::Aborted(_)),
+            Some(Handover::Source { session, .. }) => source_wants_pointer(session.stage()),
             None => false,
+        }
+    }
+
+    /// Review LOW-7: at exit a recipient session's router lease goes back
+    /// within the same bound as the online host's own.
+    pub(crate) fn handover_release_lease_on_exit(&mut self, grace: std::time::Duration) {
+        if let Some(Handover::Recipient(s)) = self.handover.as_mut() {
+            s.release_lease_within(grace);
         }
     }
 
@@ -616,6 +640,14 @@ impl crate::GameState {
 /// L4: the transfer copy of the world's settings carries the LIVE world's
 /// Proof-of-Play total and clock (the saved meta can be an autosave behind),
 /// then is sanitised.
+/// Review LOW-6: the source host keeps mouselook, break/place and attack
+/// while the recipient decides (its world still runs); only a frozen world
+/// frees the pointer for the handover window. In `Proposed` the window's
+/// Cancel is reached through the pause menu (Esc), where it is drawn too.
+pub(crate) fn source_wants_pointer(stage: SourceStage) -> bool {
+    !matches!(stage, SourceStage::Proposed | SourceStage::Aborted(_))
+}
+
 pub(crate) fn live_transfer_metadata(
     mut saved: crate::save::WorldMeta,
     world: &crate::world::World,

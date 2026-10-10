@@ -5474,8 +5474,13 @@ last byte arrives the session hands its `Import` to a `handover-import`
 worker (stream finish, extract, tree sync, receipt verify, no-replace rename,
 parent sync) and enters `Importing`; the frame, Cancel and the pump keep
 running, and every `HEARTBEAT_SECS` the recipient sends `Notice{paused}`,
-which the source accepts while `Streaming` (its stall clock hears it; the
-total deadline still bounds it). The worker's result carries a generation
+which the source accepts while `Streaming`. While streaming the source's
+stall clock advances only on progress (CP3+4 review LOW-3, CP5 review
+LOW-5): a new-data `Ack` (not a repeated one), `Ready`, and a `Notice` only
+once every chunk is acknowledged (the recipient is importing); a repeated
+Ack or an early Notice is no evidence the transfer moves, so a recipient
+that sends only those times out at `STALL_SECS`. The total deadline still
+bounds the import heartbeat. The worker's result carries a generation
 and transfer id and is used only while `Importing` (the generation fence).
 Cancelling stops the import at its next file boundary (its observer refuses);
 the worker and the session decide under one lock who discards the inert
@@ -5495,6 +5500,22 @@ the pause key) go through `handover_blocks_world_action`: while play is held
 they are dropped with the paused notice (crafting stays open; its grid and
 cursor items move nowhere).
 
+Housekeeping (CP3+4 review LOW-2/6/7): an overflowed guest whose release
+comes outside the lend (a cancel from the frame's control pump) is kicked
+inside the next lent tick (`deferred_overflow`, drained beside the deferred
+operator kicks), so its leave settles grants, window and death on the
+authoritative world before its record is saved. The source host keeps its
+pointer (mouselook, break, place, attack) while the recipient decides, since
+its world still runs; only from the freeze does the handover window free the
+pointer (`handover_game::source_wants_pointer`), and in `Proposed` its
+Cancel is reached through the pause menu. A source session dropped without
+`abort` sets its pack's cancel flag. Orphaned `.handover-pack-*` scratch
+(a crash while packing) is swept at native start-up and before every new
+source session (`live::inert::sweep_pack_scratch`, at most 256 entries, only
+that prefix, never a symlink). At process exit a recipient session's router
+lease is given back within the same 1.5 s bound as the online host's own
+(`HeldLease::give_back_within`), not on a detached thread.
+
 Whole-operation deadline (P4): heartbeats keep the per-phase stall timers fed,
 so both sides also hold one total deadline, `OPERATION_SECS` = 15 minutes,
 from the recipient's consent (the source: the verified Accept that froze it)
@@ -5506,7 +5527,9 @@ Stored setup certificates (P1): `stored::publish_readback` (EVENT, a
 matching OK, then a fresh subscription that must return the exact bytes) and
 `stored::readback` (the same fresh-subscription readback, for an already
 verified event the caller did not publish: the recipient witnessing the
-Committed before Activated) are the only producers of `StoredProof`; both talk
+Committed before Activated) are the only producers of `StoredProof` (its
+field and constructor are private to `stored.rs`, pinned by a source scan,
+`handover_stored_proof_has_exactly_two_producers`); both talk
 to a relay in the invitation's own `r` list (the players' "Your relays"),
 never an AxeNStax relay, and carry encrypted setup certificates only.
 Production accepts only `wss://` relays (`context::validate_relay_strict`,
@@ -5514,6 +5537,21 @@ compiled into every build and pinned by a unit test refusing `ws://`
 loopback and plaintext); a test build additionally accepts the in-process
 loopback relay fixture (`handover::relay_fixture`, `ws://127.0.0.1:<port>`),
 which every stored-publication test uses. No test reaches a real relay.
+
+Recipient readback constraints (coordinator ruling, CP6; CP5 review
+MEDIUM-1): `readback` witnesses only a `Verified::Committed` (the core asks
+the receiver for no Prepared witness: `Receiver::prepared` takes none), whose
+core belongs to the root context being asked (context digest, root runtime,
+persona and expiry), by exact event id equality; it opens a NEW subscription
+on a relay that root names, charged to the caller's operation `Budget`,
+after the event is known; never a cached or locally held copy, never a
+publish connection's OK. A different stored event from the same author on
+the same route, or no relay EVENT at all, is never a witness.
+`VerifiedPrepared` and `VerifiedCommit` (both now defined in `crypto.rs`)
+have private fields: only `crypto::open`/`open_candidates` construct them in
+a production build (test builds have `VerifiedCommit::for_test` for the
+certificate-prefix tests' synthetic commits). Phase tests mint every
+`StoredProof` through the loopback relay, as production does.
 
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,

@@ -94,6 +94,24 @@ fn remove_dir(path: &Path) -> Result<()> {
     }
 }
 
+/// Review LOW-7: a crash while packing leaves `.handover-pack-*` under the
+/// source's scratch folder. Called only when no source session runs (at
+/// start-up and before a new one), so every such directory is an orphan.
+/// Bounded scan; anything else (and a symlink) is left alone.
+pub fn sweep_pack_scratch(scratch: &Path) -> Result<usize> {
+    let mut removed = 0;
+    for (seen, entry) in fs::read_dir(scratch).map_err(|_| Error::Io)?.enumerate() {
+        if seen >= SCAN_LIMIT {
+            break;
+        }
+        let entry = entry.map_err(|_| Error::Io)?;
+        if entry.file_name().to_str().is_some_and(|n| n.starts_with(".handover-pack-")) && remove_dir(&entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Remove `transfer`'s marked inert import, its Ready marker, then the inert
 /// marker. Unmarked: nothing is touched. A Prepared/Activated marker for the
 /// transfer refuses (that import is no longer inert).

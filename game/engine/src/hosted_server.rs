@@ -438,6 +438,11 @@ pub struct HostedServer {
     lent_ids_reset: bool,
     #[cfg(not(target_arch = "wasm32"))]
     deferred_kicks: Vec<[u8; 32]>,
+    /// Review LOW-2: guests that overflowed during a handover freeze whose
+    /// release came outside the lend; kicked inside the next lent tick so
+    /// their leave settles on the authoritative world.
+    #[cfg(not(target_arch = "wasm32"))]
+    deferred_overflow: Vec<usize>,
     /// World handover: the control link to ONE selected joiner, and while
     /// frozen, the source freeze (`hosted_server/handover.rs`).
     #[cfg(not(target_arch = "wasm32"))]
@@ -928,6 +933,8 @@ impl HostedServer {
             lent_ids_reset: false,
             #[cfg(not(target_arch = "wasm32"))]
             deferred_kicks: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            deferred_overflow: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             handover: None,
             attachments_started: false,
@@ -3707,6 +3714,10 @@ impl HostedServer {
         );
         #[cfg(not(target_arch = "wasm32"))]
         { let kicks = std::mem::take(&mut self.deferred_kicks); self.kick_pubkeys(&kicks); }
+        #[cfg(not(target_arch = "wasm32"))]
+        for j in std::mem::take(&mut self.deferred_overflow) {
+            self.handover_overflow_kick(j);
+        }
         self.accept_new_remote_connections();
         let closed_before_fill = self.process_inbound_packets();
         self.reap_slots(&closed_before_fill);

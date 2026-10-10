@@ -120,6 +120,14 @@ impl Relay {
     pub(crate) fn url(&self) -> String {
         self.url.clone()
     }
+    /// Store a signed event as if some client had published it (tests that
+    /// need a relay to already hold a certificate).
+    pub(crate) fn insert(&self, ev: Event) {
+        let mut s = self.state.lock().unwrap();
+        if !s.events.iter().any(|e| e.id == ev.id) {
+            s.events.push(ev);
+        }
+    }
     pub(crate) fn withhold(&self, on: bool) {
         self.state.lock().unwrap().withhold = on;
     }

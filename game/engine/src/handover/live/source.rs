@@ -276,7 +276,15 @@ impl SourceSession {
                 Ok(f) if f.transfer() == self.transfer => f,
                 _ => return Err(self.fail(hs, Refusal("The recipient sent a malformed handover message."))),
             };
-            self.last_heard = now;
+            // Review LOW-3: while streaming a repeated Ack is not progress and
+            // doesn't feed the stall clock (a new Ack does, in `on_frame`).
+            // CP5 review LOW-5: a Notice feeds it only once every chunk is
+            // acknowledged (the recipient is importing).
+            let complete = self.sender.as_ref().is_some_and(|s| s.complete());
+            let no_progress = matches!(frame, Frame::Ack { .. }) || (matches!(frame, Frame::Notice { .. }) && !complete);
+            if !(self.stage == SourceStage::Streaming && no_progress) {
+                self.last_heard = now;
+            }
             if let Err(r) = self.on_frame(hs, live, frame, now) {
                 return Err(self.fail(hs, r));
             }
@@ -372,6 +380,11 @@ impl SourceSession {
         self.pack_hold = Some((reached_tx, release_rx));
         (reached_rx, release_tx)
     }
+    /// Test hook: the pack worker's cancel flag.
+    #[cfg(test)]
+    pub fn pack_cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.pack_cancel.clone()
+    }
     /// Test hook: wait for the pack worker thread to end.
     #[cfg(test)]
     pub fn join_pack_worker(&mut self) {
@@ -417,9 +430,12 @@ impl SourceSession {
             (SourceStage::Streaming, Frame::Notice { .. }) => Ok(()),
             (SourceStage::Streaming, Frame::Ack { transfer, through }) => {
                 let sender = self.sender.as_mut().ok_or(Refusal("No transfer is running."))?;
-                sender
+                if sender
                     .acknowledge(transfer, through)
-                    .map_err(|_| Refusal("The recipient acknowledged data it was never sent."))?;
+                    .map_err(|_| Refusal("The recipient acknowledged data it was never sent."))?
+                {
+                    self.last_heard = now;
+                }
                 Ok(())
             }
             (SourceStage::Streaming, Frame::Ready { event, .. }) => {
@@ -641,6 +657,14 @@ impl SourceSession {
             self.send(hs, &f)?;
         }
         Ok(())
+    }
+}
+
+/// Review LOW-7: a session dropped without `abort` still stops its pack
+/// worker at the next member (its result is dropped with the receiver).
+impl Drop for SourceSession {
+    fn drop(&mut self) {
+        self.pack_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

@@ -150,6 +150,9 @@ pub struct RecipientSession {
 pub trait HeldLease {
     fn renew(&mut self);
     fn give_back(self: Box<Self>);
+    /// Review LOW-7: at process exit a detached release would not outlive
+    /// `main`; give it back within `grace` on this thread instead.
+    fn give_back_within(self: Box<Self>, grace: std::time::Duration);
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }
 
@@ -327,6 +330,17 @@ impl RecipientSession {
     }
     pub fn holds_lease(&self) -> bool {
         self.lease.is_some()
+    }
+    /// Review LOW-7: at exit, give the held lease back within `grace`.
+    pub fn release_lease_within(&mut self, grace: std::time::Duration) {
+        if let Some(lease) = self.lease.take() {
+            lease.give_back_within(grace);
+        }
+    }
+    /// Test hook: send a control frame over the held link.
+    #[cfg(test)]
+    pub fn test_send(&self, f: &Frame) {
+        self.send(f);
     }
     /// The lease back, for a joined session that gets its link back.
     pub fn take_lease(&mut self) -> Option<Box<dyn HeldLease>> {

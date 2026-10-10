@@ -140,24 +140,9 @@ impl Core {
     }
 }
 
-/// Only crypto-verified Committed envelopes produce this value.
-#[derive(Clone, Debug)]
-pub struct VerifiedCommit {
-    pub(crate) core: Core,
-    pub(crate) event_hash: Hash,
-    pub(crate) prepared_hash: Hash,
-}
-impl VerifiedCommit {
-    pub fn core(&self) -> &Core {
-        &self.core
-    }
-    pub fn event_hash(&self) -> Hash {
-        self.event_hash
-    }
-    pub fn prepared_hash(&self) -> Hash {
-        self.prepared_hash
-    }
-}
+/// Only crypto-verified Committed envelopes produce this value; defined
+/// in `crypto` (fields private there, CP5 review MEDIUM-1).
+pub use super::crypto::VerifiedCommit;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prefix {
@@ -197,13 +182,13 @@ impl Prefix {
         if self.conflict {
             return Err(Error::State("conflicting committed prefix"));
         }
-        proof.core.validate(root, now)?;
+        proof.core().validate(root, now)?;
         if let Some((hash, old)) = self
             .entries
             .iter()
-            .find(|(_, c)| c.epoch == proof.core.epoch)
+            .find(|(_, c)| c.epoch == proof.core().epoch)
         {
-            if hash == &proof.event_hash && old == &proof.core {
+            if *hash == proof.event_hash() && old == proof.core() {
                 return Ok(false);
             }
             self.conflict = true;
@@ -212,7 +197,7 @@ impl Prefix {
         if self.entries.len() >= 4 {
             return Err(Error::Limit("committed depth"));
         }
-        let c = &proof.core;
+        let c = proof.core();
         if let Some((prev_hash, prev)) = self.entries.last() {
             if c.epoch != prev.epoch + 1
                 || c.predecessor != *prev_hash
@@ -221,7 +206,7 @@ impl Prefix {
                 || c.lineage != prev.lineage
                 || c.expires_at > prev.expires_at
                 || c.generation <= prev.generation
-                || self.entries.iter().any(|(h, _)| *h == proof.event_hash)
+                || self.entries.iter().any(|(h, _)| *h == proof.event_hash())
             {
                 return Err(Error::Invalid("committed predecessor"));
             }
@@ -232,7 +217,7 @@ impl Prefix {
         {
             return Err(Error::Invalid("root successor"));
         }
-        self.entries.push((proof.event_hash, c.clone()));
+        self.entries.push((proof.event_hash(), c.clone()));
         Ok(true)
     }
     pub(crate) fn can_advance_to(&self, next: &Self) -> bool {
@@ -365,11 +350,7 @@ pub(crate) mod tests {
         let (root, c) = fixture();
         let mut p = Prefix::default();
         p.accept(
-            &VerifiedCommit {
-                core: c.clone(),
-                event_hash: [11; 32],
-                prepared_hash: [9; 32],
-            },
+            &VerifiedCommit::for_test(c.clone(), [11; 32], [9; 32]),
             &root,
             100,
         )
@@ -385,11 +366,7 @@ pub(crate) mod tests {
         next.source_runtime = next.successor_runtime;
         next.source_persona = next.successor_persona;
         p.accept(
-            &VerifiedCommit {
-                core: next,
-                event_hash: [12; 32],
-                prepared_hash: [10; 32],
-            },
+            &VerifiedCommit::for_test(next, [12; 32], [10; 32]),
             &root,
             100,
         )
@@ -429,17 +406,13 @@ pub(crate) mod tests {
     fn handover_prefix_conflict_rollback_handback_and_depth() {
         let (root, c) = fixture();
         let mut p = Prefix::default();
-        let first = VerifiedCommit {
-            core: c.clone(),
-            event_hash: [11; 32],
-            prepared_hash: [10; 32],
-        };
+        let first = VerifiedCommit::for_test(c.clone(), [11; 32], [10; 32]);
         assert!(p.accept(&first, &root, 100).unwrap());
         assert!(!p.accept(&first, &root, 100).unwrap());
         let mut next = c.clone();
         next.epoch = 2;
         next.remaining_hops = 2;
-        next.predecessor = first.event_hash;
+        next.predecessor = first.event_hash();
         next.source_runtime = c.successor_runtime;
         next.source_persona = c.successor_persona;
         next.successor_runtime = c.source_runtime;
@@ -447,11 +420,7 @@ pub(crate) mod tests {
         next.generation = 2;
         assert!(
             p.accept(
-                &VerifiedCommit {
-                    core: next,
-                    event_hash: [12; 32],
-                    prepared_hash: [10; 32]
-                },
+                &VerifiedCommit::for_test(next, [12; 32], [10; 32]),
                 &root,
                 100
             )
@@ -461,8 +430,7 @@ pub(crate) mod tests {
             Prefix::restore(&p.checkpoint()).unwrap().checkpoint(),
             p.checkpoint()
         );
-        let mut evil = first;
-        evil.event_hash = [13; 32];
+        let evil = VerifiedCommit::for_test(first.core().clone(), [13; 32], first.prepared_hash());
         assert!(p.accept(&evil, &root, 100).is_err());
         assert!(p.is_conflicted());
         let mut deep = c;

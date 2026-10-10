@@ -1,7 +1,7 @@
 //! Standard HKDF/NIP-44 around the canonical application certificate.
 use super::{
     Error, Hash, Id, Result,
-    certificate::{Core, VerifiedCommit},
+    certificate::Core,
     codec::frame,
     context::RootContext,
 };
@@ -70,10 +70,12 @@ struct Envelope {
     successor_attestation: String,
     prepared: Option<String>,
 }
+/// Only `open` produces this value: its fields are private to this file
+/// (CP5 review MEDIUM-1), so no caller can assert a verification.
 #[derive(Clone, Debug)]
 pub struct VerifiedPrepared {
-    pub(crate) core: Core,
-    pub(crate) event_hash: Hash,
+    core: Core,
+    event_hash: Hash,
 }
 impl VerifiedPrepared {
     pub fn core(&self) -> &Core {
@@ -81,6 +83,31 @@ impl VerifiedPrepared {
     }
     pub fn event_hash(&self) -> Hash {
         self.event_hash
+    }
+}
+/// Only `open`/`open_candidates` produce this value (fields private to
+/// this file, CP5 review MEDIUM-1).
+#[derive(Clone, Debug)]
+pub struct VerifiedCommit {
+    core: Core,
+    event_hash: Hash,
+    prepared_hash: Hash,
+}
+impl VerifiedCommit {
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+    pub fn event_hash(&self) -> Hash {
+        self.event_hash
+    }
+    pub fn prepared_hash(&self) -> Hash {
+        self.prepared_hash
+    }
+    /// Test builds only: the certificate prefix tests' synthetic commits.
+    /// No production code can construct one.
+    #[cfg(test)]
+    pub(crate) fn for_test(core: Core, event_hash: Hash, prepared_hash: Hash) -> Self {
+        Self { core, event_hash, prepared_hash }
     }
 }
 #[derive(Clone, Debug)]

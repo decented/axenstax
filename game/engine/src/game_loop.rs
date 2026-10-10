@@ -1097,6 +1097,7 @@ impl super::GameState {
         if let Some(lease) = self.upnp_lease.take() {
             lease.release_within(std::time::Duration::from_millis(1500));
         }
+        self.handover_release_lease_on_exit(std::time::Duration::from_millis(1500));
     }
 
     /// The Online panel: this world's invite link, how reachable it is, how many

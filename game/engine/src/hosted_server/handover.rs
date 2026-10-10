@@ -282,14 +282,40 @@ impl HostedServer {
             self.handover_notice_all(l.transfer, false);
         }
         for j in l.overflowed {
-            log::warn!("Player {j} overflowed its inbound bound during a handover freeze — disconnecting it");
-            if let Some(left) = self.release_slot(j, Some(super::INBOUND_OVERFLOW_REASON)) {
-                for k in 0..self.transports.len() {
-                    if k != j && self.handshake_done[k] && !self.disconnected[k] {
-                        self.transports[k].send_to_client(&left);
-                    }
+            // Review LOW-2: a release outside the lend (a cancel from the
+            // frame's control pump) defers the kick to the next lent tick,
+            // so the guest's leave settles (grants, window, death) first.
+            if self.lends_host_world() && !self.server.lent {
+                if !self.deferred_overflow.contains(&j) {
+                    self.deferred_overflow.push(j);
+                }
+                continue;
+            }
+            self.handover_overflow_kick(j);
+        }
+    }
+
+    /// The ordinary overflow kick for a guest that overflowed while frozen.
+    pub(super) fn handover_overflow_kick(&mut self, j: usize) {
+        log::warn!("Player {j} overflowed its inbound bound during a handover freeze — disconnecting it");
+        if let Some(left) = self.release_slot(j, Some(super::INBOUND_OVERFLOW_REASON)) {
+            for k in 0..self.transports.len() {
+                if k != j && self.handshake_done[k] && !self.disconnected[k] {
+                    self.transports[k].send_to_client(&left);
                 }
             }
         }
+    }
+
+    /// `slot` has been released (tests; review LOW-2).
+    #[cfg(test)]
+    pub fn handover_test_slot_released(&self, slot: usize) -> bool {
+        self.disconnected[slot]
+    }
+
+    /// Kicks waiting for the next lent tick (tests; review LOW-2).
+    #[cfg(test)]
+    pub fn handover_test_deferred_overflow(&self) -> usize {
+        self.deferred_overflow.len()
     }
 }
