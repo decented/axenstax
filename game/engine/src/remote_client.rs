@@ -2949,6 +2949,57 @@ mod tests {
     /// connection: the action is reserved in the journal BEFORE the grid and
     /// cursor return to the bag, the server receives exactly one typed
     /// `Action` (a Close click), and no legacy `WindowOp` is logged or sent.
+    /// C3d shared containers — a Strict client's window configuration
+    /// (auto-refill first), opens, container open, container click and
+    /// container close each reserve ONE typed action, in the order made, and
+    /// no legacy `WindowOp` is logged or sent.
+    #[test]
+    fn c3d_strict_window_entry_and_shared_container_send_only_reserved_actions() {
+        use crate::protocol::WireWindowOp as Op;
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let registry = crate::block::BlockRegistry::new();
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let mut inv = crate::inventory::Inventory::new();
+        inv.auto_refill = true;
+        inv.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
+        let mut armour = [None; 4];
+        ui.open_joined(&mut rc, None, &inv, &armour).unwrap();
+        assert!(ui.open);
+        ui.close_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
+        ui.open_container_joined(&mut rc, [1, 2, 3], &inv, &armour).unwrap();
+        let mut chest = crate::container_window::ContainerData::Chest(crate::chest::ChestData { slots: vec![None; 27], tier: Default::default() });
+        let ctx = crate::window::ClickCtx::new(false, crate::window::Station::Player, glam::Vec3::ZERO, |_| crate::block::AIR).with_shared(true);
+        let click = crate::container_window::ContainerClick::Deposit { slot: 0, all: true };
+        let applied = ui.apply_container_click_joined(&mut rc, &mut inv, &mut armour, chest.as_mut(), [1, 2, 3], &click, &ctx, &registry).unwrap();
+        assert!(applied.result.ok() && inv.slot(0).is_none(), "the deposit was predicted");
+        ui.close_container_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
+        assert!(ui.ops.first_stamp().is_none(), "nothing logged for the legacy path");
+        let mut seen = Vec::new();
+        while let Some(pkt) = srv.try_recv_from_client() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::Action, payload)) => {
+                    let packet = crate::action_wire::ActionPacket::decode(payload).unwrap();
+                    let crate::action_wire::ActionIntent::Window(op) = packet.intent else { panic!("a window action") };
+                    seen.push((packet.action.seq, op.op));
+                }
+                Some((PacketType::WindowOp, _)) => panic!("a Strict client sent a legacy WindowOp"),
+                _ => {}
+            }
+        }
+        let ops: Vec<_> = seen.iter().map(|(_, op)| op.clone()).collect();
+        assert_eq!(seen.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(), (1..=6).collect::<Vec<u64>>(), "one order, no gaps");
+        assert!(matches!(&ops[..], [
+            Op::SetAutoRefill { on: true }, Op::OpenPlayer, Op::Click(crate::window::WindowClick::Close),
+            Op::OpenContainer { cell: [1, 2, 3] }, Op::Container(crate::container_window::ContainerClick::Deposit { slot: 0, all: true }),
+            Op::Click(crate::window::WindowClick::Close),
+        ]), "{ops:?}");
+    }
+
     #[test]
     fn c3d_strict_crafting_close_reserves_an_action_and_sends_no_legacy_window_op() {
         let (srv, client) = channel_pair();

@@ -37,6 +37,42 @@ impl StrictJoinRefusal {
     }
 }
 
+/// Why a joined Strict session was closed while recovery and replay are not
+/// wired yet (C3d). Every Strict teardown goes through ONE function
+/// (`HostedServer::strict_bridge_teardown`), which sends [`Self::reason`] as
+/// the `JoinReject` reason the player reads (UK English, no internal terms).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrictTeardown {
+    /// The world couldn't confirm the player's last change: a definitive
+    /// refusal, a contested shared container, a stale world. The fate row
+    /// says which; the correction is this teardown until recovery lands.
+    Unconfirmed,
+    /// A cap or an uncertain source/fit: the world fell behind checking the
+    /// player's changes. No fate row.
+    FellBehind,
+    /// The game sent a change in a form a Strict world doesn't take (an
+    /// untyped legacy packet, an edit on a movement packet).
+    Untyped,
+    /// The strict check found an obligation it can't account for
+    /// (Decision 10 invariant breach).
+    Obligation,
+    /// Something unreadable, foreign or conflicting arrived.
+    Unreadable,
+}
+
+impl StrictTeardown {
+    /// The sentence the disconnected player reads (UK English).
+    pub fn reason(self) -> &'static str {
+        match self {
+            StrictTeardown::Unconfirmed => "This world checks inventories strictly and couldn't confirm your last change, so you've been disconnected. Rejoin to carry on with your inventory as the world has it.",
+            StrictTeardown::FellBehind => "This world checks inventories strictly and fell behind checking your changes, so you've been disconnected. Rejoin to carry on with your inventory as the world has it.",
+            StrictTeardown::Untyped => "This world checks inventories strictly, and your game sent a change in a form it doesn't accept, so you've been disconnected. Rejoin to carry on; if it keeps happening, update your game.",
+            StrictTeardown::Obligation => "This world's strict inventory check found an obligation it can't account for, so you've been disconnected. Ask whoever runs this world about your save.",
+            StrictTeardown::Unreadable => "Your game sent this world something it couldn't read, so you've been disconnected. Rejoin to carry on.",
+        }
+    }
+}
+
 /// Admit a Strict join? `saved` is the record `GameServer::load_joiner` just
 /// read (none for a guest, a first visit or an unreadable file); `session` is
 /// the joining session's history as `load_joiner` left it (it marks an
@@ -56,5 +92,23 @@ pub fn check(saved: Option<&JoinerSave>, session: ObligationHistory) -> Result<(
         ObligationHistory::Complete => Err(StrictJoinRefusal::Owed {
             entries: saved.debt().map_or(1, |d| d.entries().len().max(1)),
         }),
+    }
+}
+
+#[cfg(test)]
+mod teardown_copy_tests {
+    use super::StrictTeardown;
+    /// Every teardown sentence is plain UK English with no money word and no
+    /// internal term (action, frontier, epoch, receipt, rejoin required).
+    #[test]
+    fn c3d_strict_teardown_copy_is_plain_and_clean() {
+        for cause in [StrictTeardown::Unconfirmed, StrictTeardown::FellBehind, StrictTeardown::Untyped, StrictTeardown::Obligation, StrictTeardown::Unreadable] {
+            let text = cause.reason();
+            assert!(crate::copy_lint::banned_in(text, crate::copy_lint::BANNED_MONEY_WORDS).is_empty(), "{cause:?}: {text}");
+            for jargon in ["action", "frontier", "epoch", "receipt", "rejoin required", "authoritative"] {
+                assert!(!text.to_lowercase().contains(jargon), "{cause:?} reads {jargon:?}: {text}");
+            }
+            assert!(text.ends_with('.'), "{cause:?}");
+        }
     }
 }

@@ -118,13 +118,13 @@ fn places(
     out
 }
 
-fn server_places(sp: &crate::server::ServerPlayer) -> Vec<protocol::WireSlot> {
+pub(super) fn server_places(sp: &crate::server::ServerPlayer) -> Vec<protocol::WireSlot> {
     places(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid)
 }
 
 /// Units held, by exact identity (kind, id, full item: durability, Plan
 /// marker and developed state), across every place given.
-fn holdings<'a>(slots: impl IntoIterator<Item = &'a protocol::WireSlot>) -> BTreeMap<String, u32> {
+pub(super) fn holdings<'a>(slots: impl IntoIterator<Item = &'a protocol::WireSlot>) -> BTreeMap<String, u32> {
     let mut out = BTreeMap::new();
     for stack in slots.into_iter().flatten() {
         *out.entry(format!("{}/{}/{:?}", stack.item_kind, stack.item_id, stack.full_item)).or_insert(0) += u32::from(stack.count);
@@ -138,7 +138,7 @@ fn worn_pickaxe() -> Item {
     Item::Tool(tool)
 }
 
-fn bow(durability: u16) -> crate::crafting::Tool {
+pub(super) fn bow(durability: u16) -> crate::crafting::Tool {
     let mut tool = crate::crafting::Tool::new(crate::crafting::ToolType::Bow, crate::crafting::ToolMaterial::Wood);
     tool.durability = durability;
     tool
@@ -237,7 +237,7 @@ fn c3d_strict_refused_click_has_zero_effect_and_its_typed_fate() {
     assert_eq!(r.through(), action.seq, "the refusal is terminal at its seq");
     assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "its typed fate");
     assert!(heard.receipts.is_empty(), "no Accepted receipt reaches the client");
-    assert!(heard.rejects.iter().any(|m| m.contains("refused at an authoritative frontier")), "teardown reason: {:?}", heard.rejects);
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Unconfirmed.reason()), "teardown reason: {:?}", heard.rejects);
     assert!(r.hs.slot_is_free(r.i));
     assert!(r.hs.server.load_joiner(r.i).expect("departure saved").obligations_proven_zero());
 }
@@ -257,7 +257,7 @@ fn c3d_strict_click_at_full_result_history_commits_nothing() {
     assert_eq!(r.through(), action.seq - 1, "the action is not terminal");
     assert_eq!(r.row(action), None, "no row was invented for it");
     assert!(heard.receipts.is_empty());
-    assert!(heard.rejects.iter().any(|m| m.contains("result history is full")), "teardown reason: {:?}", heard.rejects);
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "teardown reason: {:?}", heard.rejects);
 }
 
 fn shoot(r: &mut Rig, tool: crate::crafting::Tool) -> ActionHeader {
@@ -274,7 +274,7 @@ fn shoot(r: &mut Rig, tool: crate::crafting::Tool) -> ActionHeader {
     action
 }
 
-fn arm(sp: &mut crate::server::ServerPlayer) -> crate::crafting::Tool {
+pub(super) fn arm(sp: &mut crate::server::ServerPlayer) -> crate::crafting::Tool {
     let tool = bow(30);
     sp.inventory.set_slot(0, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
     sp.inventory.set_slot(1, Some(ItemStack { item: Item::Material(crate::item::MaterialId::Arrow), count: 5 }));
@@ -372,7 +372,7 @@ fn assert_zero_effect_shot(mut r: Rig, why: &str) {
     assert_eq!(snapshot(&r), before, "{why}: zero external effect");
     assert!(outcome.is_empty() && heard.receipts.is_empty(), "{why}: nothing answered");
     assert_eq!(r.row(action), None, "{why}: no result row");
-    assert!(heard.rejects.iter().any(|m| m.contains("rejoin required")), "{why}: teardown reason {:?}", heard.rejects);
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "{why}: teardown reason {:?}", heard.rejects);
 }
 
 /// The 1023/1024 event cap with a two-event shot: at 1022 pending the
@@ -502,4 +502,76 @@ fn c3d_strict_honest_craft_at_the_table_reach_edge_is_accepted() {
     assert_eq!(heard.receipts.first().map(|x| (x.action, x.fate)), Some((action, ActionFate::Accepted)));
     assert_eq!(server_places(r.sp()), cw.places(), "the server crafted exactly what the client did");
     assert!(r.sp().obligations_proven_zero());
+}
+
+/// Run-2 review LOW-1 — "Strict leaves no unpaid obligation" is ONE
+/// predicate for staging and the post-commit guard, and it covers a pending
+/// Take the window can't pay (not only correction debt). At staging: nothing
+/// committed, torn down with the reason. After a commit (fault seam): the
+/// guard notices and tears down.
+#[test]
+fn c3d_strict_unpayable_pending_take_is_an_obligation_at_staging_and_after_commit() {
+    let mut r = strict_rig("short-take-staging");
+    stock(&mut r.hs.server.players[r.i]);
+    crate::window_events::queue(&mut r.hs.server.players[r.i], crate::window_events::WindowEvent::Take { slot: 35, item: Item::Block(crate::block::BEDROCK), n: 1, how: "test" }, 0);
+    assert!(r.sp().obligations_proven_zero(), "the correction-debt fold alone misses it");
+    let mut cw = ClientWindow::of(r.sp());
+    let before = server_places(r.sp());
+    let action = click_packet(&mut r, &mut cw, WindowClick::Slot { slot: 0, right: false }, false);
+    let heard = hear(&r.client);
+    assert_eq!(server_places(r.sp()), before, "staging: nothing committed");
+    assert_eq!(r.row(action), None, "staging: no row");
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Obligation.reason()), "staging: {:?}", heard.rejects);
+
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) { super::actions::commit_fault::SHORT_TAKE_AFTER_COMMIT.with(|f| f.set(false)); }
+    }
+    let mut r = strict_rig("short-take-commit");
+    stock(&mut r.hs.server.players[r.i]);
+    let mut cw = ClientWindow::of(r.sp());
+    super::actions::commit_fault::SHORT_TAKE_AFTER_COMMIT.with(|f| f.set(true));
+    let _off = Off;
+    let action = click_packet(&mut r, &mut cw, WindowClick::Slot { slot: 1, right: false }, false);
+    let heard = hear(&r.client);
+    assert_eq!(r.through(), action.seq, "the commit happened once");
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Obligation.reason()), "post-commit guard noticed the unpaid Take: {:?}", heard.rejects);
+    assert!(r.hs.slot_is_free(r.i));
+}
+
+/// Run-2 review LOW-2 — an honest Autofill its client refused for reach
+/// (`NeedsTable`: its eye 6.6 blocks from the table) while the server's
+/// half-block slack still sees the table is Accepted with no change, not
+/// torn down; its grid stays where it was.
+#[test]
+fn c3d_strict_refused_autofill_inside_the_slack_is_accepted_unchanged() {
+    let mut r = strict_rig("autofill-slack");
+    let cell = [3, 90, 3];
+    let centre = glam::Vec3::new(3.5, 90.5, 3.5);
+    r.hs.server.world.set_block(cell[0], cell[1], cell[2], crate::block::CRAFTING_TABLE);
+    let eye = centre + glam::Vec3::new(0.0, 0.0, 6.6);
+    let sp = &mut r.hs.server.players[r.i];
+    sp.player.pos = eye - (sp.player.eye_pos() - sp.player.pos);
+    sp.station = crate::window::Station::Table { cell };
+    sp.table_gone_ticks = None;
+    sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::OAK_LOG, 5)));
+    sp.craft_grid[1][1] = Some(ItemStack::new_block(crate::block::OAK_LOG, 1));
+    let mut example = [[crate::crafting::CraftSlot::Empty; 3]; 3];
+    example[0][0] = crate::crafting::CraftSlot::Block(crate::block::OAK_LOG);
+    let click = WindowClick::Autofill { example };
+    let mut cw = ClientWindow::of(r.sp());
+    let action = r.next();
+    let (digest, ok) = cw.click(&r.hs, eye, &click);
+    assert!(!ok, "the client's exact rule refused it (NeedsTable)");
+    let slack = crate::window::ClickCtx::new(false, crate::window::Station::Table { cell }, eye, |_| crate::block::CRAFTING_TABLE).with_server_slack(false);
+    assert!(slack.table_present(), "the server's half-block slack still sees the table");
+    let op = protocol::WindowOpPacket {
+        op_seq: action.seq as u32, op: protocol::WireWindowOp::Click(click), digest,
+        events_applied: action.events_applied, touched: Vec::new(), claims: Vec::new(), client_ok: ok,
+    };
+    r.send(action, ActionIntent::Window(op));
+    let heard = hear(&r.client);
+    assert!(heard.rejects.is_empty(), "no teardown: {:?}", heard.rejects);
+    assert_eq!(heard.receipts.first().map(|x| (x.action, x.fate)), Some((action, ActionFate::Accepted)));
+    assert_eq!(server_places(r.sp()), cw.places(), "exactly the client's (unchanged) window");
 }

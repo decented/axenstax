@@ -248,7 +248,7 @@ fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_re
     let heard = hear(&client);
     assert!(heard.receipts.is_empty(), "no receipt overtakes the lost world prefix");
     assert!(
-        heard.rejects.iter().any(|r| r.contains("could not be delivered")),
+        heard.rejects.iter().any(|r| r == crate::strict_admission::StrictTeardown::FellBehind.reason()),
         "the connection is torn down with a reason: {:?}",
         heard.rejects
     );
@@ -288,7 +288,7 @@ fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
     hs.outboxes[i].push_tick(0, &[], &[], &flood, &[]);
     hs.tick();
     let heard = hear(&client);
-    assert!(heard.rejects.iter().any(|r| r.contains("could not be delivered")), "torn down: {:?}", heard.rejects);
+    assert!(heard.rejects.iter().any(|r| r == crate::strict_admission::StrictTeardown::FellBehind.reason()), "torn down: {:?}", heard.rejects);
     let saved = hs.server.load_joiner(i).expect("the departure saved");
     assert!(saved.obligations_proven_zero(), "nothing owed");
     let window = saved.window().expect("a readable window");

@@ -25,10 +25,13 @@
 mod death;
 mod sidecar;
 mod actions;
+mod strict_container;
 #[cfg(test)]
 mod c3d_tests;
 #[cfg(test)]
 mod c3d_strict_tests;
+#[cfg(test)]
+mod c3d_container_tests;
 
 use std::collections::VecDeque;
 
@@ -3229,6 +3232,29 @@ impl HostedServer {
         }
     }
 
+    /// Whether joiner `i` may open the container at `cell` (shared by the
+    /// Mirror open and the Strict typed open): in the world and alive, a
+    /// container block, within the server body's reach with its slack, and
+    /// a cell the play mode and plot rules let it touch.
+    pub(super) fn container_open_verdict(&self, i: usize, cell: [i32; 3]) -> Result<crate::container_window::ContainerKind, protocol::OpenRefusal> {
+        use crate::container_window::{self as cw, ContainerKind};
+        let Some(sp) = self.server.players.get(i) else { return Err(protocol::OpenRefusal::NotInWorld) };
+        let block_at = self.server.world.get_block(cell[0], cell[1], cell[2]);
+        if !sp.server_simulated || !sp.is_present_and_alive() {
+            Err(protocol::OpenRefusal::NotInWorld)
+        } else if let Some(kind) = ContainerKind::of_block(block_at) {
+            if !cw::container_in_server_reach(sp.player.eye_pos(), cell) {
+                Err(protocol::OpenRefusal::OutOfReach)
+            } else if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
+                Err(protocol::OpenRefusal::Protected)
+            } else {
+                Ok(kind)
+            }
+        } else {
+            Err(protocol::OpenRefusal::NotAContainer)
+        }
+    }
+
     /// C3b-1 — joiner `i` asks to open the container at `cell`. It opens
     /// when the joiner is in the world and alive, the cell holds a chest of
     /// any tier, a dispenser or dropper, or a furnace lit or not
@@ -3245,19 +3271,7 @@ impl HostedServer {
         use crate::container_window::{self as cw, ContainerKind};
         let Some(sp) = self.server.players.get(i) else { return };
         let block_at = self.server.world.get_block(cell[0], cell[1], cell[2]);
-        let verdict = if !sp.server_simulated || !sp.is_present_and_alive() {
-            Err(protocol::OpenRefusal::NotInWorld)
-        } else if let Some(kind) = ContainerKind::of_block(block_at) {
-            if !cw::container_in_server_reach(sp.player.eye_pos(), cell) {
-                Err(protocol::OpenRefusal::OutOfReach)
-            } else if self.remote_may_touch(sp, cell[0], cell[2]).is_err() {
-                Err(protocol::OpenRefusal::Protected)
-            } else {
-                Ok(kind)
-            }
-        } else {
-            Err(protocol::OpenRefusal::NotAContainer)
-        };
+        let verdict = self.container_open_verdict(i, cell);
         let pkt = match verdict {
             Ok(kind) => {
                 cw::ensure_container(&mut self.server.world, cell, kind);
@@ -3301,6 +3315,12 @@ impl HostedServer {
             let server = &mut self.server;
             let sp = &mut server.players[i];
             if !sp.server_simulated {
+                continue;
+            }
+            if sp.inventory_mode == crate::action_identity::InventoryMode::Strict {
+                // C3d — a Strict joiner's push reserves its numbered view
+                // (count and owned bytes) before it is sent.
+                self.push_strict_container(i);
                 continue;
             }
             let Some(pkt) = crate::window_ops::container_push(sp, &server.world, now) else { continue };
@@ -4539,6 +4559,17 @@ impl HostedServer {
                         // undo a newer one; taken from EVERY input — one refused
                         // below (non-finite, stale, from a dead joiner) included.
                         self.take_chunk_feedback(i, &input);
+                        // C3d review L2 — a Strict movement packet carries no
+                        // mutation authority. Edits on one are never dropped
+                        // silently (the client's predicted cells would stay as
+                        // ghosts, uncounted): the session fails closed with a
+                        // reason, like every other untyped inventory arm.
+                        if sp_inventory_is_strict(&self.server.players, i)
+                            && (!input.block_changes.is_empty() || !input.mined.is_empty() || !input.use_tags.is_empty() || !input.edit_hands.is_empty())
+                        {
+                            self.reject_legacy_inventory(i);
+                            break;
+                        }
                         if !input.x.is_finite()
                             || !input.y.is_finite()
                             || !input.z.is_finite()
@@ -4649,11 +4680,9 @@ impl HostedServer {
                         // Every edit — from every packet this tick — goes
                         // through the one validator; the budget is per tick,
                         // and what is past it waits (FU3).
-                        // A Strict movement packet never carries mutation authority.
-                        // New edits use Action; the old bridge is isolated to Mirror.
-                        if sp_inventory_is_strict(&self.server.players, i) {
-                            input.block_changes.clear(); input.mined.clear(); input.use_tags.clear(); input.edit_hands.clear();
-                        }
+                        // A Strict movement packet never carries mutation
+                        // authority: one with edits failed closed above (L2).
+                        debug_assert!(!sp_inventory_is_strict(&self.server.players, i) || input.block_changes.is_empty());
                         let edits = std::mem::take(&mut input.block_changes);
                         // C3c-1 — and its use tags, each paired with the last
                         // edit of its cell, within the same per-input limit.
@@ -6108,9 +6137,7 @@ impl HostedServer {
             // the real transport; the client's old session keeps its journal.
             let lost_boundary = outbox.take_failed_receipt().is_some() | outbox.take_failed_recovery().is_some();
             if lost_boundary {
-                if let Some(left) = self.release_slot(i, Some("Authoritative action history could not be delivered; rejoin required")) {
-                    self.send_to_joined_except(i, &left);
-                }
+                self.strict_bridge_teardown(i, crate::strict_admission::StrictTeardown::FellBehind, "authoritative action history could not be delivered");
                 continue;
             }
             for pkt in outbox.drain_packets(&template) {

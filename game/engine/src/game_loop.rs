@@ -10730,8 +10730,8 @@ impl super::GameState {
                             Instant::now() + Duration::from_secs(3),
                         ));
                     } else {
-                        let p = &mut self.players[pidx];
-                        p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots);
+                        // C3d — the reserving entry point (a Strict action).
+                        self.open_crafting(pidx, None);
                         if pidx == 0 { self.release_cursor(); }
                         // Trials: auto-show the target recipe in the right-side
                         // placement card (no recipe book needed) — but never
@@ -13835,9 +13835,9 @@ impl super::GameState {
                         // the rule its screen closes by (`window::table_in_reach`):
                         // a Reach Claw's longer ray would open one the screen
                         // (and a joiner's server) holds out of reach.
-                        let p = &mut self.players[pidx];
-                        if crate::window::table_in_reach(target_blk, pos, p.player.eye_pos()) {
-                            p.crafting_ui.open_table_crafting(pos, &p.inventory, &p.armour_slots);
+                        if crate::window::table_in_reach(target_blk, pos, self.players[pidx].player.eye_pos()) {
+                            // C3d — the reserving entry point (a Strict action).
+                            self.open_crafting(pidx, Some(pos));
                             if pidx == 0 { self.release_cursor(); }
                         }
                     } else if crate::block_shape::is_toggleable(target_blk) {
@@ -22995,9 +22995,24 @@ impl super::GameState {
                     let fate = crate::joiner_actions::RequestFate::Sent { next_input_seq: client.next_input_seq() };
                     self.joiner_actions.settle(seq, fate);
                 }
-                let ops = match client.first_carried_stamp() {
-                    Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
-                    None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
+                let ops = if client.inventory_mode == crate::action_identity::InventoryMode::Strict {
+                    // C3d — a Strict client sends no legacy window op: its
+                    // settings go as reserved actions, every other op
+                    // through the reserving entry points (nothing is logged).
+                    if let Err(error) = p.crafting_ui.sync_auto_refill_joined(client, &p.inventory, &p.armour_slots) {
+                        log::warn!("Strict auto-refill setting could not be reserved: {error}");
+                    }
+                    let stray = p.crafting_ui.ops.take_before(None);
+                    debug_assert!(stray.is_empty(), "a Strict client logged a legacy window op");
+                    if !stray.is_empty() {
+                        log::error!("Strict client logged {} legacy window op(s); not sent (the server would refuse them)", stray.len());
+                    }
+                    Vec::new()
+                } else {
+                    match client.first_carried_stamp() {
+                        Some(cut) => p.crafting_ui.ops.take_before(Some(cut)),
+                        None => p.crafting_ui.take_ops(&p.inventory, &p.armour_slots),
+                    }
                 };
                 for logged in ops {
                     client.send_window_op(logged);

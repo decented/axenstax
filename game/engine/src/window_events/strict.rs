@@ -74,11 +74,46 @@ fn apply_marker_event(window: &mut MarkerWindow, event: &WindowEvent) -> Result<
 /// `ctx` and `client_ok` are the server's EXISTING transition
 /// (`window_ops::server_click_ctx` / `server_click`, C3d review M2).
 pub fn stage_strict_click(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, click: &crate::window::WindowClick, ctx: &crate::window::ClickCtx, client_ok: bool) -> Result<StrictWindowStage, StrictStageError> {
-    if !sp.window_events.debt.is_empty() { return Err(StrictStageError::Debt); }
-    let raw = raw_marker(sp, registry)?;
+    let raw = strict_raw_marker(sp, registry)?;
     let staged = crate::staged_window::stage_with(&raw, click, ctx.station, |view| crate::window_ops::server_click(view, click, ctx, client_ok));
+    admit_staged(sp, registry, &raw, &staged)?;
+    Ok(StrictWindowStage { raw: staged })
+}
+
+/// Raw R at the action's boundary as marker-only scratch holdings, refused
+/// (`Unrepresentable`) when a place can't round-trip exactly (review L1).
+pub fn strict_raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
+    strict_obligations(sp, registry)?;
+    raw_marker(sp, registry)
+}
+
+/// Run-2 review LOW-2 — a Strict Autofill the client REFUSED creates
+/// nothing: its client either moved nothing (`NeedsTable`: out of its exact
+/// reach, where the server's half-block slack may still see the table) or
+/// only returned the grid and cursor to the bag (`Refused`: step 1). Strict
+/// stages exactly the safe subset whose digest is the client's; `None` when
+/// neither is (a deterministic refusal).
+pub fn stage_strict_refused_autofill(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, click: &crate::window::WindowClick, digest: u32) -> Result<Option<StrictWindowStage>, StrictStageError> {
+    let raw = strict_raw_marker(sp, registry)?;
+    for returned in [false, true] {
+        let staged = crate::staged_window::stage_with(&raw, click, sp.station, |view| {
+            if returned { crate::window::autofill_return(view); crate::window::ClickResult::Refused } else { crate::window::ClickResult::NeedsTable }
+        });
+        let station = crate::window::station_after(sp.station, click, &staged.result);
+        if staged.after.digest_with(station, None) == digest {
+            admit_staged(sp, registry, &raw, &staged)?;
+            return Ok(Some(StrictWindowStage { raw: staged }));
+        }
+    }
+    Ok(None)
+}
+
+/// Admit a staged raw transition (a window click or a shared container
+/// click): every initial source survives each existing pending prefix, and
+/// each pending event folds onto the candidate exactly as onto raw R.
+pub fn admit_staged(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, raw: &MarkerWindow, staged: &StagedClick) -> Result<(), StrictStageError> {
     let mut backing = SourceBacking::new(raw.slots());
-    let mut prefix = raw;
+    let mut prefix = raw.clone();
     let mut candidate = staged.after.clone();
     for waiting in &sp.window_events.waiting {
         let Some(event) = marker_event(&waiting.event, registry)? else { continue };
@@ -92,25 +127,41 @@ pub fn stage_strict_click(sp: &ServerPlayer, registry: &crate::block::BlockRegis
         if apply_marker_event(&mut candidate, &event)? != expected { return Err(StrictStageError::Fit); }
     }
     if !backing.backs(&staged.sources) { return Err(StrictStageError::Source); }
-    Ok(StrictWindowStage { raw: staged })
+    Ok(())
 }
 
 /// Existing pending events are folded by the real owed rule. Callers use the
 /// surviving piece for capability, while the historical slot supplies heldness.
 pub fn strict_effective_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
-    if !sp.window_events.debt.is_empty() { return Err(StrictStageError::Debt); }
+    strict_obligations(sp, registry)
+}
+
+/// Decision 10 (run-2 review LOW-1) — the ONE predicate "Strict leaves no
+/// unpaid obligation", used both at staging and by the post-commit guard:
+/// the effective fold proves zero (correction debt, pending corrections,
+/// session history: `ServerPlayer::obligations_proven_zero`) AND every
+/// waiting event folds payably onto raw R (a pending Take the window can't
+/// pay is an unpaid obligation, `Debt`). Returns the effective window.
+pub fn strict_obligations(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
+    if !sp.window_events.debt.is_empty() || !sp.obligations_proven_zero() { return Err(StrictStageError::Debt); }
     let mut prefix = raw_marker(sp, registry)?;
     for waiting in &sp.window_events.waiting {
-        if let Some(event) = marker_event(&waiting.event, registry)? { apply_marker_event(&mut prefix, &event)?; }
+        if let Some(event) = marker_event(&waiting.event, registry)? {
+            apply_marker_event(&mut prefix, &event).map_err(|e| if e == StrictStageError::MissingPayment { StrictStageError::Debt } else { e })?;
+        }
     }
     Ok(prefix)
+}
+
+/// [`strict_obligations`] as the post-commit guard reads it.
+pub fn strict_leaves_no_unpaid_obligation(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> bool {
+    strict_obligations(sp, registry).is_ok()
 }
 
 /// All immediate takes/wear/grants are staged together. No external effect or
 /// raw mutation is permitted merely because an earlier effect was affordable.
 pub fn stage_strict_effects(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, all: &[WindowEvent]) -> Result<(), StrictStageError> {
-    if !sp.window_events.debt.is_empty() { return Err(StrictStageError::Debt); }
-    let raw = raw_marker(sp, registry)?;
+    let raw = strict_raw_marker(sp, registry)?;
     let before = raw.slots();
     let mut candidate = raw.clone();
     let mut sources: MarkerSlots = std::array::from_fn(|_| None);
@@ -190,8 +241,34 @@ fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
         // treat unknown correction/view allocations as a zero-byte event.
         WindowEvent::Replace { .. } => Err(StrictStageError::Replacement),
         WindowEvent::Correction(_) => Err(StrictStageError::Debt),
-        WindowEvent::ContainerView(_) => Err(StrictStageError::Fit),
+        // C3d — a waiting view's real owned bytes count against the budget
+        // (it never makes an unrelated reservation refuse).
+        WindowEvent::ContainerView(view) => view_heap_bytes(view, &item_bytes),
     }
+}
+
+/// The heap a container view owns: its slot storage and any Plan body in it.
+fn view_heap_bytes(view: &crate::window_ops::ViewEvent, item_bytes: &dyn Fn(&Item) -> Result<usize, StrictStageError>) -> Result<usize, StrictStageError> {
+    use crate::container_window::ContainerData;
+    let mut total = 0usize;
+    let mut add = |n: usize| -> Result<(), StrictStageError> { total = total.checked_add(n).ok_or(StrictStageError::Fit)?; Ok(()) };
+    match view {
+        crate::window_ops::ViewEvent::Opened(mirror) => {
+            match &mirror.contents {
+                ContainerData::Chest(chest) => add(chest.slots.capacity().checked_mul(std::mem::size_of::<Option<ItemStack>>()).ok_or(StrictStageError::Fit)?)?,
+                ContainerData::Furnace(_) => add(std::mem::size_of::<crate::furnace::FurnaceData>())?,
+            }
+            let contents = mirror.contents.as_ref();
+            for i in 0..contents.len() {
+                if let Some(stack) = contents.get(i) { add(item_bytes(&stack.item)?)?; }
+            }
+        }
+        crate::window_ops::ViewEvent::Sets { sets, .. } => {
+            add(sets.capacity().checked_mul(std::mem::size_of::<(usize, Option<ItemStack>)>()).ok_or(StrictStageError::Fit)?)?;
+            for stack in sets.iter().filter_map(|(_, s)| s.as_ref()) { add(item_bytes(&stack.item)?)?; }
+        }
+    }
+    Ok(total)
 }
 
 pub fn prepare_strict_events(sp: &mut ServerPlayer, events: Box<[WindowEvent]>) -> Result<PreparedEvents, StrictStageError> {

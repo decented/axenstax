@@ -59,6 +59,16 @@ impl MarkerWindow {
         WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.cursor, grid: &mut self.grid, container: None }
     }
 
+    /// The window digest (`window::digest_with`) at `station`, with the
+    /// container `container` as the screen shows it (a Strict container op's
+    /// digest covers the mirror, C3d shared containers).
+    pub fn digest_with(&self, station: window::Station, container: Option<crate::container_window::ContainerRef>) -> u32 {
+        window::digest_with(&self.inv, &self.armour, &self.cursor, &self.grid, station, container)
+    }
+
+    /// A Strict `SetAutoRefill` stages the setting on the scratch copy.
+    pub fn set_auto_refill(&mut self, on: bool) { self.inv.auto_refill = on; }
+
     pub fn slots(&self) -> MarkerSlots {
         std::array::from_fn(|at| match at {
             0..36 => self.inv.slot(at).map(crate::inventory::stack_to_wire),
@@ -130,6 +140,24 @@ pub fn stage_with(raw: &MarkerWindow, click: &WindowClick, station: window::Stat
     }
     for i in 0..PLAYER_PLACES { if need[i] { sources[i] = before[i].clone(); } }
     StagedClick { after, result, sources }
+}
+
+/// C3d shared containers — the shared container rule
+/// (`container_window::apply_container`) over marker-only scratch holdings
+/// and `container` (a scratch copy: the client's predicted view or the REAL
+/// container's contents). Sources are conservative: every personal place
+/// the click changed, at its whole initial value (a merge target included),
+/// so a pending Take of any of them refuses backing.
+pub fn stage_container(raw: &MarkerWindow, container: &mut crate::container_window::ContainerData, click: &crate::container_window::ContainerClick, ctx: &ClickCtx) -> StagedClick {
+    let mut after = raw.clone();
+    let applied = {
+        let mut view = WindowMut { inv: &mut after.inv, armour: &mut after.armour, cursor: &mut after.cursor, grid: &mut after.grid, container: Some(container.as_mut()) };
+        crate::container_window::apply_container(&mut view, click, ctx)
+    };
+    let before = raw.slots();
+    let now = after.slots();
+    let sources = std::array::from_fn(|i| if before[i] != now[i] { before[i].clone() } else { None });
+    StagedClick { after, result: applied.result, sources }
 }
 
 /// Query the exact existing pending-event fold after EACH prefix. Eligibility

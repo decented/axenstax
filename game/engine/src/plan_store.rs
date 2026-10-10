@@ -48,13 +48,16 @@ pub(crate) fn remember(body: &PlanData) {
 pub(crate) fn remember_checked(body: &PlanData, resident_bytes: usize) -> Result<(), String> {
     if resident_bytes > crate::action_capacity::MAX_RESIDENT_BODY_BYTES { return Err("Local Plan residency exceeds its limit".into()); }
     if body.marker.is_some() { return Ok(()); }
-    if crate::body_residency::allocated_body_bytes(body).map_err(|e| format!("Plan allocation cannot be bounded: {e:?}"))? > crate::action_capacity::MAX_PRIVATE_BODY_BYTES {
-        return Err("Local Plan body exceeds the store limit".into());
-    }
     let marker = crate::plan::marker(body);
     let key = cache_key(marker);
     if REMEMBERED.with(|set| set.borrow().contains(&key)) { return Ok(()); }
     let encoded = usize::try_from(bincode::serialized_size(body).map_err(|e| e.to_string())?).map_err(|_| "Local Plan encoding cannot be bounded")?;
+    // C3d review L3 (coordinator decision): the 16 MiB store limit counts the
+    // ENCODED size, as before C3d (`decode` limits at 16 MiB), never the
+    // allocated capacity: a body that encodes within it is stored.
+    if encoded > crate::action_capacity::MAX_PRIVATE_BODY_BYTES {
+        return Err("Local Plan body exceeds the store limit".into());
+    }
     let scratch = encoded.checked_add(std::mem::size_of::<Box<[u8]>>()).ok_or("Local Plan encoding cannot be bounded")?;
     crate::action_capacity::reserve_body(resident_bytes, scratch).map_err(|e| format!("Local Plan encoding reservation failed: {e:?}"))?;
     // Fixed output cannot grow during serialisation. No owned Plan clone and no
@@ -183,6 +186,23 @@ mod tests {
         crate::window_prediction::retain_private_window(&inv, &None, &Default::default()).unwrap();
         assert!(REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))));
         assert_eq!(resolve(marker).unwrap().cells, held.cells);
+    }
+
+    /// C3d review L3 — the 16 MiB store limit counts the ENCODED size, as
+    /// before C3d: a body whose allocation is over 16 MiB but whose
+    /// encoding is small is stored (its marker resolves after a rejoin).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn c3d_store_limit_counts_encoded_size_not_allocated_capacity() {
+        let _g = crate::save::WorldsRootGuard::new("c3d-plans-encoded-limit");
+        let mut body = PlanData::debug_3x3_stone();
+        body.name = "Large allocation, small encoding".into();
+        let element = std::mem::size_of_val(&body.cells[0]);
+        body.cells.reserve_exact(crate::action_capacity::MAX_PRIVATE_BODY_BYTES / element + 1);
+        assert!(crate::body_residency::allocated_body_bytes(&body).unwrap() > crate::action_capacity::MAX_PRIVATE_BODY_BYTES);
+        let marker = crate::plan::marker(&body);
+        remember_checked(&body, crate::body_residency::allocated_body_bytes(&body).unwrap()).expect("an encoding within 16 MiB is stored");
+        assert_eq!(resolve(marker).unwrap().cells, body.cells);
     }
 
     #[test]

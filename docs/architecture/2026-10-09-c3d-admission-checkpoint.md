@@ -301,3 +301,45 @@ refusing it, `container_push` views reserved); typed window configuration
 (`OpenPlayer`/`OpenTable`/`SetAutoRefill`), which an honest Strict client still
 sends as legacy ops; every other typed class; recovery/replay.
 
+
+## Shared containers, configuration and review lows (run 3, 2026-10-10)
+
+Module `hosted_server/strict_container.rs` (server) and the reserving entry
+points in `window_actions.rs` / `craft_ui.rs` (client).
+
+- **Configuration.** `OpenPlayer`, `OpenTable` (`window_ops::open_table_grace`,
+  shared with `serve_op`) and `SetAutoRefill` are typed actions staged on the
+  raw marker window. A Strict client sends `SetAutoRefill` before any window
+  action whose digest covers it, and at session start (the flush), never as a
+  legacy op (the Mirror op log is bypassed; a stray logged op is not sent).
+- **Open.** The verdict is `HostedServer::container_open_verdict` (shared with
+  Mirror). The opened view and the result row are reserved before the
+  container opens. A refused open is Accepted with no effect and answered
+  `OpenRefusal` (the client predicted none).
+- **Container click.** `staged_window::stage_container` runs the shared rule
+  on marker scratch twice: on `ContainerViews::seen` at the action's boundary
+  (the client's predicted view; digest check, `Refused` on mismatch) and on
+  the real container. Equal effect on every moved slot and the personal
+  window → sources admitted across the pending prefix (`admit_staged`, the
+  same check a window click uses) → result row → the real container and the
+  raw window commit once. Otherwise `NormalisedAcceptedNoop`, zero effect.
+  **Departure from the brief's wording:** a PARTIAL contest (fewer units than
+  predicted) is treated as a contest too (whole-or-nothing), because without
+  replay the client could not reconcile a partly-applied prediction.
+- **Pushes** to Strict joiners reserve their view (`push_strict_container`).
+  `event_heap_bytes` counts a waiting view's real bytes (slot storage plus any
+  Plan body) instead of refusing every reservation behind it.
+- **One teardown.** `HostedServer::strict_bridge_teardown` (BRIDGE: recover
+  instead of teardown) is the only Strict close; the player reads
+  `strict_admission::StrictTeardown::reason`.
+- **Run-2 review LOW-1.** `window_events::strict_obligations` is the one
+  predicate for staging and the post-commit guard: no correction debt, a
+  `Complete` history, every waiting Take payable.
+- **Run-2 review LOW-2.** A refused Autofill stages only the subset its client
+  did (`stage_strict_refused_autofill`).
+- **Review L2** (movement-packet edits fail closed), **L3** (encoded-size store
+  limit; durability-before-cache kept for Mirror too, recorded in Specs 04/05),
+  **L4** (forced-close retry paced on a reservation error). L4's identity
+  cache for Plan markers is NOT built: `Item::Plan` holds `PlanData` inline, so
+  an address-keyed cache is unsound under allocator reuse without a drop or
+  mutation hook; needs a design call.

@@ -167,6 +167,17 @@ impl OpLog {
         }
     }
 
+    /// C3d — the auto-refill setting last sent this session (a Strict
+    /// client sends it as a reserved `SetAutoRefill` action, never logged).
+    pub fn auto_refill_sent(&self) -> Option<bool> {
+        self.auto_refill
+    }
+
+    /// C3d — a Strict `SetAutoRefill` action for `on` was reserved and sent.
+    pub fn note_auto_refill_sent(&mut self, on: bool) {
+        self.auto_refill = Some(on);
+    }
+
     /// Log an op just applied, with the window's digest after it and the
     /// client's own verdict on it (`ClickResult::ok()`; `true` for an op
     /// that isn't a click).
@@ -526,7 +537,7 @@ impl Correction {
 }
 
 /// Container slots on the wire.
-fn wire_sets(sets: &[(usize, Option<ItemStack>)]) -> Vec<(WireWindowSlot, WireSlot)> {
+pub fn wire_sets(sets: &[(usize, Option<ItemStack>)]) -> Vec<(WireWindowSlot, WireSlot)> {
     sets.iter()
         .filter_map(|(i, s)| u8::try_from(*i).ok().map(|at| (WireWindowSlot::Container(at), s.as_ref().map(crate::inventory::stack_to_wire))))
         .collect()
@@ -716,17 +727,7 @@ pub fn serve_op(
         }
         WireWindowOp::OpenTable { cell } => {
             station = Station::Table { cell: *cell };
-            // C3b-fix-b (A-L1) — the grace is for a table that WAS there: an
-            // open at a cell that isn't a crafting table gets none (counted
-            // past it from the start; `watch_table` only counts up).
-            // C3b-fix-d (A-L5) — a table the server saw go within the grace
-            // was there: the open gets what is left of it.
-            sp.table_gone_ticks = if world.get_block(cell[0], cell[1], cell[2]) == crate::block::CRAFTING_TABLE {
-                None
-            } else {
-                tables_gone.note(world, now);
-                Some(tables_gone.gone_for(*cell, now).unwrap_or(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1)))
-            };
+            sp.table_gone_ticks = open_table_grace(world, *cell, now, tables_gone);
             None
         }
         WireWindowOp::SetAutoRefill { on } => {
@@ -742,6 +743,21 @@ pub fn serve_op(
     sp.station = station;
     sp.last_window_op_seq = pkt.op_seq;
     Some(Served::plain(result, digest))
+}
+
+/// The table grace an `OpenTable` at `cell` starts with (shared by
+/// [`serve_op`] and Strict configuration). C3b-fix-b (A-L1) — the grace is
+/// for a table that WAS there: an open at a cell that isn't a crafting table
+/// gets none (counted past it from the start; `watch_table` only counts up).
+/// C3b-fix-d (A-L5) — a table the server saw go within the grace was there:
+/// the open gets what is left of it.
+pub fn open_table_grace(world: &mut World, cell: [i32; 3], now: u64, tables_gone: &mut TablesGone) -> Option<u8> {
+    if world.get_block(cell[0], cell[1], cell[2]) == crate::block::CRAFTING_TABLE {
+        None
+    } else {
+        tables_gone.note(world, now);
+        Some(tables_gone.gone_for(cell, now).unwrap_or(window::SERVER_TABLE_GRACE_TICKS.saturating_add(1)))
+    }
 }
 
 /// The server's context for joiner `sp`'s window click — shared by the
@@ -1189,6 +1205,20 @@ fn refused_container_op(
 /// server (the client closes its screen by the same rule, seeing the block
 /// go). `now`: the server tick.
 pub fn container_push(sp: &mut ServerPlayer, world: &World, now: u64) -> Option<WindowSlotSetPacket> {
+    let (sets, furnace) = container_push_sets(sp, world)?;
+    let wire = wire_sets(&sets);
+    let event = crate::window_events::queue(
+        sp,
+        crate::window_events::WindowEvent::ContainerView(ViewEvent::Sets { sets, furnace }),
+        now,
+    );
+    Some(push_packet(sp, wire, furnace, event))
+}
+
+/// [`container_push`]'s diff without queueing it: the container slots (and
+/// furnace progress) the joiner's mirror will not show. A Strict joiner's
+/// push reserves its numbered view before it is sent (C3d).
+pub fn container_push_sets(sp: &mut ServerPlayer, world: &World) -> Option<(Vec<(usize, Option<ItemStack>)>, Option<FurnaceView>)> {
     let cell = sp.open_container?;
     let kind = sp.container_sent.open_kind?;
     let Some(c) = container_window::container_at(world, cell, kind) else {
@@ -1206,21 +1236,20 @@ pub fn container_push(sp: &mut ServerPlayer, world: &World, now: u64) -> Option<
     if sets.is_empty() && furnace.is_none() {
         return None;
     }
-    let wire = wire_sets(&sets);
-    let event = crate::window_events::queue(
-        sp,
-        crate::window_events::WindowEvent::ContainerView(ViewEvent::Sets { sets, furnace }),
-        now,
-    );
-    Some(WindowSlotSetPacket {
+    Some((sets, furnace))
+}
+
+/// The `WindowSlotSet { Changed }` a push goes out as, numbered `event`.
+pub fn push_packet(sp: &ServerPlayer, sets: Vec<(WireWindowSlot, WireSlot)>, furnace: Option<FurnaceView>, event: u32) -> WindowSlotSetPacket {
+    WindowSlotSetPacket {
         op_seq_applied: sp.last_window_op_seq,
         reason: crate::protocol::slot_set_reason::CHANGED,
-        sets: wire,
+        sets,
         furnace,
         window_event: event,
         take: Vec::new(),
         give: Vec::new(),
-    })
+    }
 }
 
 /// C3b-fix-d (A-L5) — most cells a server's [`TablesGone`] remembers; past

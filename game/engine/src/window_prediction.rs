@@ -36,3 +36,15 @@ pub fn reserve_click(remote: &mut crate::remote_client::RemoteClient, inv: &Inve
     let cells = match ctx.station { crate::window::Station::Table { cell } => vec![cell].into_boxed_slice(), _ => Box::new([]) };
     remote.reserve_action(intent, bytes, cells)
 }
+
+/// C3d — reserve a Strict window op that isn't a personal-window click
+/// (configuration, container entry, a shared container click) BEFORE the
+/// screen or any holding changes. The op itself is the recipe; the
+/// container's cell, if any, is the action's footprint.
+pub fn reserve_op(remote: &mut crate::remote_client::RemoteClient, op: crate::protocol::WireWindowOp, digest: u32, client_ok: bool, cells: Box<[[i32; 3]]>) -> Result<crate::action_identity::ActionHeader, String> {
+    let recipe = bincode::serialize(&op).map_err(|e| e.to_string())?.into_boxed_slice();
+    let intent = crate::action_wire::ActionIntent::Window(crate::protocol::WindowOpPacket {
+        op_seq: 0, op, digest, events_applied: remote.applied_window_boundary(), touched: Vec::new(), claims: Vec::new(), client_ok,
+    });
+    remote.reserve_action(intent, recipe, cells)
+}
