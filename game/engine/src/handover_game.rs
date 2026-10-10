@@ -48,6 +48,10 @@ pub(crate) struct SourceEnv {
     pub runtime: nostr::Keys,
     pub root: RootContext,
     pub scratch: PathBuf,
+    /// H1: the live invitation's bearer (`OnlineHost::live_bearer`).
+    pub bearer: crate::handover::live::bearer::Bearer,
+    /// This runtime's player attestation (the one online play uses).
+    pub attestation: nostr::Event,
 }
 
 /// What a recipient needs: its runtime key and that key's player
@@ -164,7 +168,8 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
                 RecipientStage::Ready => {
                     ("World handover", vec![copy::recipient_stored(&p.world_name)], &[(copy::CANCEL, UiAction::Cancel)])
                 }
-                RecipientStage::Aborted(_) => return None,
+                RecipientStage::Prepared => ("World handover", vec![copy::recipient_finishing(&p.world_name)], &[]),
+                RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) => return None,
                 _ => (
                     "World handover",
                     vec![copy::recipient_copying(&p.world_name, &p.source_npub)],
@@ -174,13 +179,18 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
         }
         Some(Handover::Source { session, world }) => {
             let who = session.recipient_npub();
-            let line = match session.stage() {
-                SourceStage::Proposed => copy::source_asking(world, &who),
-                SourceStage::ReadyVerified => copy::source_stored(world, &who),
+            let cancel: &[(&str, UiAction)] = &[(copy::CANCEL, UiAction::Cancel)];
+            let (line, buttons) = match session.stage() {
+                SourceStage::Proposed => (copy::source_asking(world, &who), cancel),
+                SourceStage::ReadyVerified => (copy::source_stored(world, &who), cancel),
+                SourceStage::Publishing | SourceStage::Prepared => (copy::source_finishing(world, &who), cancel),
+                // Past retirement nothing resumes: no Cancel.
+                SourceStage::Retired => (copy::source_retired(world, &who), &[][..]),
+                SourceStage::RetirementUncertain => (copy::RETIREMENT_UNCERTAIN.to_string(), &[][..]),
                 SourceStage::Aborted(_) => return None,
-                _ => copy::source_copying(world, &who),
+                _ => (copy::source_copying(world, &who), cancel),
             };
-            ("World handover", vec![line], &[(copy::CANCEL, UiAction::Cancel)])
+            ("World handover", vec![line], buttons)
         }
         None if host_paused => ("World handover", vec![copy::PAUSED_BANNER.to_string()], &[]),
         None => return None,
@@ -299,11 +309,22 @@ impl crate::GameState {
     /// has an invitation to bind the handover to.
     pub(crate) fn begin_handover(&mut self, drawn: (usize, u32, [u8; 32])) {
         let now = crate::game_loop::wardrobe_now();
-        let env = self.online_host.as_ref().and_then(|host| {
-            let root = host.root_context(now).ok()?;
-            Some((host.runtime_keys().clone(), root))
-        });
-        let Some((runtime, root)) = env else {
+        let env = self.online_host.as_ref().map(|host| (host.runtime_keys().clone(), host.root_context(now).ok(), host.live_bearer(now)));
+        let Some((runtime, root, bearer)) = env else {
+            self.handover_toast(copy::NEEDS_ONLINE);
+            return;
+        };
+        // H1: the live invitation capability, or a typed refusal.
+        let (Some(root), Some(bearer)) = (root, bearer) else {
+            self.handover_toast(copy::NO_LIVE_INVITE);
+            return;
+        };
+        let attestation = crate::runtime_identity::RuntimeIdentity::load()
+            .ok()
+            .flatten()
+            .filter(|id| id.keys().public_key() == runtime.public_key())
+            .and_then(|id| id.attestation().cloned());
+        let Some(attestation) = attestation else {
             self.handover_toast(copy::NEEDS_ONLINE);
             return;
         };
@@ -314,7 +335,8 @@ impl crate::GameState {
                 return;
             }
         };
-        if let Err(e) = self.begin_handover_with(drawn, SourceEnv { runtime, root, scratch }, now) {
+        let bearer = crate::handover::live::bearer::Bearer::new(bearer);
+        if let Err(e) = self.begin_handover_with(drawn, SourceEnv { runtime, root, scratch, bearer, attestation }, now) {
             self.handover_toast(e);
         }
     }
@@ -353,6 +375,8 @@ impl crate::GameState {
             scratch: env.scratch,
             validity: CERTIFICATE_SECS,
             world_dir: Some(crate::save::world_dir(&self.world_name)),
+            bearer: env.bearer,
+            attestation: env.attestation,
         };
         let action = HostAction { seat: Seat { slot, generation, key }, source_key, world_name: world.clone() };
         let _ = crate::handover::live::inert::sweep_pack_scratch(&cfg.scratch);
@@ -488,8 +512,18 @@ impl crate::GameState {
                 Err(Refusal(r)) => r,
                 Ok(()) => why,
             };
+            // P2: the bearer left this machine before the abort: the old
+            // invitation stops admitting, and the host is told.
+            let rotate = session.needs_invite_rotation();
             self.handover = None;
-            self.handover_toast(msg);
+            if rotate {
+                if let Some(host) = self.online_host.as_mut() {
+                    host.mint_fresh_invite(now);
+                }
+                self.handover_toast(format!("{msg} {}", copy::INVITE_REISSUED));
+            } else {
+                self.handover_toast(msg);
+            }
         }
     }
 
@@ -502,6 +536,8 @@ impl crate::GameState {
                 Ok(()) => why,
             };
             self.end_recipient(msg);
+        } else if let RecipientStage::Quarantined(_) = s.stage() {
+            self.end_recipient(copy::QUARANTINED);
         }
     }
 
@@ -600,7 +636,10 @@ impl crate::GameState {
                 if let Some(hs) = self.hosted_server.as_mut() {
                     session.abort(hs, "left");
                 }
-                notice = Some(copy::LEFT);
+                // Past retirement leaving cancels nothing (the world is retired).
+                if !session.past_retirement() {
+                    notice = Some(copy::LEFT);
+                }
             }
             Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent => {
                 self.decline_over_joined(s.proposal().transfer, DeclineReason::Player);
@@ -616,7 +655,7 @@ impl crate::GameState {
     /// cursor must be free for it, mid-play too.
     pub(crate) fn handover_wants_pointer(&self) -> bool {
         match &self.handover {
-            Some(Handover::Recipient(s)) => !matches!(s.stage(), RecipientStage::Aborted(_)),
+            Some(Handover::Recipient(s)) => !matches!(s.stage(), RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)),
             Some(Handover::Source { session, .. }) => source_wants_pointer(session.stage()),
             None => false,
         }

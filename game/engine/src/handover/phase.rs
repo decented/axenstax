@@ -713,6 +713,27 @@ mod tests {
             relay.withhold(false);
             assert!(publish(other.url(), &pe, &vp, None).await.is_err());
             assert_eq!(other.received(), 0, "a relay outside the invitation was contacted");
+            // CP6 review LOW-2: a certificate is never published under
+            // another root (checked before any socket), and one operation's
+            // Budget, once bound to a root, refuses a second root.
+            let root2 = crate::handover::context::RootContext::new(
+                b.public_key().to_bytes(),
+                &b.public_key().to_bech32().unwrap(),
+                900,
+                &[relay.url(), other.url()],
+                100,
+            )
+            .unwrap();
+            let p2 = Publication { event: &pe, verified: &vp, permit: None, route };
+            let e = publish_readback(&other.url(), &root2, p2, &mut Budget::new(), &cancel).await.err();
+            assert!(matches!(e, Some(crate::handover::Error::Invalid("publication of another root's certificate"))), "{e:?}");
+            assert_eq!(other.received(), 0, "a certificate was published under another root");
+            let mut one = Budget::new();
+            let p1 = Publication { event: &pe, verified: &vp, permit: None, route };
+            publish_readback(&relay.url(), &root, p1, &mut one, &cancel).await.unwrap();
+            let p2 = Publication { event: &pe, verified: &vp, permit: None, route };
+            let e = publish_readback(&relay.url(), &root2, p2, &mut one, &cancel).await.err();
+            assert!(matches!(e, Some(crate::handover::Error::Invalid("relay context"))), "the operation Budget took a second root: {e:?}");
             let queries = relay.queries();
             let stored = publish(relay.url(), &pe, &vp, None).await.unwrap();
             assert_eq!(stored.event_hash(), p.event_hash());

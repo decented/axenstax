@@ -49,9 +49,23 @@ fn now() -> u64 {
 fn npub(b: u8) -> String {
     keys(b).public_key().to_bech32().unwrap()
 }
+/// H5: the loopback fixture relay, never a real one.
 fn root() -> RootContext {
-    RootContext::new(key(SOURCE_RUNTIME), &npub(SOURCE_PERSONA), now() + 3600, &["wss://relay.example".into()], now())
-        .unwrap()
+    static RELAY: std::sync::OnceLock<crate::handover::relay_fixture::Relay> = std::sync::OnceLock::new();
+    let url = RELAY.get_or_init(crate::handover::relay_fixture::Relay::start).url();
+    RootContext::new(key(SOURCE_RUNTIME), &npub(SOURCE_PERSONA), now() + 3600, &[url], now()).unwrap()
+}
+fn bearer() -> crate::handover::live::bearer::Bearer {
+    crate::handover::live::bearer::Bearer::new([0x5A; 16])
+}
+fn source_attestation() -> nostr::Event {
+    pollster::block_on(crate::runtime_identity::mint_player_attestation(
+        &keys(SOURCE_PERSONA),
+        &keys(SOURCE_RUNTIME).public_key(),
+        nostr::Timestamp::from(now()),
+        1,
+    ))
+    .unwrap()
 }
 fn joined_host() -> JoinedHost {
     JoinedHost { persona: key(SOURCE_PERSONA), runtime: key(SOURCE_RUNTIME) }
@@ -150,7 +164,13 @@ fn proposed(tag: &str, dir: &Tmp) -> (HeadlessGame, Far, usize) {
     let generation = hg.state.hosted_server.as_ref().unwrap().handover_seat(slot).unwrap().0;
     let drawn = (slot, generation, key(RECIPIENT_PERSONA));
     assert_eq!(hg.state.handover_candidates(), vec![drawn], "the present signed joiner");
-    let env = || SourceEnv { runtime: keys(SOURCE_RUNTIME), root: root(), scratch: dir.0.join("scratch") };
+    let env = || SourceEnv {
+        runtime: keys(SOURCE_RUNTIME),
+        root: root(),
+        scratch: dir.0.join("scratch"),
+        bearer: bearer(),
+        attestation: source_attestation(),
+    };
     assert!(hg.state.begin_handover_with((0, 0, key(SOURCE_PERSONA)), env(), now()).is_err(), "the host's own seat");
     // L6: a row drawn for an earlier attach of that seat starts nothing.
     assert_eq!(
@@ -368,6 +388,8 @@ fn source(j: &mut Joined) -> SourceSession {
         scratch: j._dir.0.join("scratch"),
         validity: 600,
         world_dir: None,
+        bearer: bearer(),
+        attestation: source_attestation(),
     };
     let action = HostAction { seat: Seat { slot: j.slot, generation, key: k }, source_key: key(SOURCE_PERSONA), world_name: "Far".into() };
     SourceSession::begin(&mut j.hs, action, cfg, live(), now()).expect("eligible")

@@ -417,6 +417,13 @@ impl OnlineHost {
         &self.book
     }
 
+    /// H1: the live invitation's bearer (the one `admit` checks as
+    /// `Accept(ByInvite)`), or `None` once it has expired: a world handover
+    /// needs a live invitation capability and never mints its own kind.
+    pub fn live_bearer(&self, now: u64) -> Option<[u8; crate::invite::BEARER_LEN]> {
+        (self.active_bearer.expires_at >= now).then_some(self.active_bearer.bearer)
+    }
+
     /// Mint a new invite, retiring the previous bearer.
     pub fn mint_fresh_invite(&mut self, now: u64) -> &Invite {
         let bearer = mint_bearer();

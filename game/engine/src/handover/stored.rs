@@ -373,6 +373,15 @@ pub async fn publish_readback(
     } = publication;
     super::context::validate_relay(url)?;
     budget.authorise_relay(url, root)?;
+    // CP6 review LOW-2: the same root binding as `readback`: a certificate
+    // is only ever published on the relays of the root it belongs to.
+    let core = match verified {
+        Verified::Prepared(p) => p.core(),
+        Verified::Committed(c) => c.core(),
+    };
+    if !same_root(core, root) {
+        return Err(Error::Invalid("publication of another root's certificate"));
+    }
     let hash = publication_allowed(event, verified, permit)?;
     if event.id.to_bytes() != hash
         || !route.matches(event)
@@ -451,6 +460,15 @@ async fn publish_inner(
     readback_inner(url, event, route, budget, cancel).await
 }
 
+/// The certificate belongs to this root context (context digest, root
+/// runtime, persona and expiry).
+fn same_root(core: &super::certificate::Core, root: &RootContext) -> bool {
+    core.context == root.digest()
+        && core.root_runtime == root.runtime()
+        && core.root_persona == root.persona()
+        && core.root_expiry == root.expiry()
+}
+
 /// Independent exact readback of an already crypto-verified Committed (no
 /// publication): the recipient's `StoredProof` producer (coordinator ruling,
 /// CP6), because it holds no publication permit. Constraints, each pinned by
@@ -476,12 +494,7 @@ pub async fn readback(
     budget.authorise_relay(url, root)?;
     // CP5 review MEDIUM-1: the verified Committed must belong to the root
     // context whose relays are being asked.
-    let core = c.core();
-    if core.context != root.digest()
-        || core.root_runtime != root.runtime()
-        || core.root_persona != root.persona()
-        || core.root_expiry != root.expiry()
-    {
+    if !same_root(c.core(), root) {
         return Err(Error::Invalid("readback of another root's certificate"));
     }
     if event.id.to_bytes() != c.event_hash()

@@ -5560,13 +5560,62 @@ source's `retired-<transfer>.dat` is `phase::Retirement` (certificate core
 with lineage, epoch and root context, the Prepared binding, the exact signed
 Commit bytes, the retired root capabilities), written by
 `phase::Source::retire`. No `WorldSave` field is added. The open guard
-(`live::authority::open_guard`) refuses on ANY retirement record there,
-decodable or not, and on an unreadable directory (fail closed), never
-filtering by lineage (a new host session re-mints its invitation). It is
-wired into `save_live_world` (so a late save cannot rewrite retired
-authority); wiring it into world load/open/autosave start, writing the
-retirement from the live session, the retained copy, the bearer frame and
-the recipient's Activated record are the next slices (not yet built).
+(`live::authority::open_guard`) refuses on ANY retirement record there
+(`RETIRED` if it decodes, `AUTHORITY_UNREADABLE` if not) and on an
+unreadable directory (fail closed), never filtering by lineage (a new host
+session re-mints its invitation). It is read-only (CP6 review LOW-5:
+`symlink_metadata`, `read_dir` of at most 256 entries, a bounded read and a
+decode; it never creates, writes or syncs). CP6 review M-1: it sits at the one
+choke point `save::save_refusal_in` (`WorldSaveError::Retired`), which every
+opener and writer passes through: `world_open_refusal` (lobby/open, online
+host start, dedicated-server start), `refuse_write_over_newer_save`
+(`save_world`, `write_world_folder`, the five-minute `autosave_world`,
+`GameServer::try_save`) and `save_world_meta`; `load_world`, `load_autosave`,
+`GameServer::save_joiner` and `save_live_world` also check it directly. A
+late save job therefore can't rewrite retired authority. Windows: the marker
+and inert stores skip the directory fsync (a directory can't be opened as a
+file there; the rename is NTFS-journaled, as for ordinary saves). Those lines
+are not compiled or tested on this Linux-only build.
+
+Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
+bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the
+one `online_admission`'s `Accept(ByInvite)` checks; `live::bearer::Bearer`:
+zeroed on drop, `Debug` redacted, no `Display`, serialised only inside
+`Frame::Bearer`) and the source runtime's player attestation. No live
+invitation (expired) refuses with `NO_LIVE_INVITE`; a world never saved
+stops before disclosure (`NEVER_SAVED`). `verify_accept` returns the
+recipient attestation it verified (H2); Prepared and Commit seal it as the
+successor's. On the pump after Ready verified, the source seals the inert
+Prepared to `crypto::recipient(root, bearer, None)`, sends `Frame::Bearer`
+inside the authenticated direct session (the point of no return for the
+bearer), then publishes Prepared and reads it back on a fenced
+`handover-publish` worker (its own reactor; relays in the invitation's
+order until one stores it; one `stored::Budget` for the operation, moved
+back to the session after each publication). `publish_readback` refuses a
+certificate of another root before any socket (CP6 review LOW-2). On the
+stored witness the source sends the exact Prepared event (`Frame::Prepared`).
+The recipient derives the key from the disclosed bearer and refuses
+(`WRONG_BEARER`, import still inert and discarded) unless the event's `p`
+route, decryption and core all match; it then persists Prepared, clears the
+inert marker and only then sends `Frame::PreparedAck`: an event signed by
+its runtime over `prepared_ack_content` (transfer, Prepared event hash, the
+root capability the bearer derives). The source verifies it (signer =
+recipient runtime, exact content), seals the Commit locally, opens it under
+the bearer's key, and durably retires (`phase::Source::retire` into
+`<world>/handover/`) with the exact Commit bytes and the retained copy's
+fresh id, before any final bytes escape. A retirement write error leaves
+`RetirementUncertain` (frozen, quarantined). Heartbeats (`Notice`) go out in
+Packing, ReadyVerified, Publishing, Prepared and Retired; the source's
+stall clock restarts when it sends Prepared and on entering Streaming (CP6
+review LOW-4). From Retired nothing resumes the source: Cancel, a late
+Abort and every deadline (stall and the 15-minute cap) are ignored. After
+Prepared the recipient never deletes the import: any failure ends its
+session `Quarantined` (import, markers and received world kept). An abort
+after the bearer was disclosed but before Retired resumes play and makes
+the caller mint a fresh invitation (`needs_invite_rotation` →
+`OnlineHost::mint_fresh_invite`; the toast says old invite links no longer
+let anyone in). Committed publication, the recipient's Activated record and
+host start, and the retained copy are the next slices.
 
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,

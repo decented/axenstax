@@ -2,6 +2,7 @@
 //! direct control session between the source host and ONE selected joiner,
 //! and the recipient's inactive import, latched listener and Ready.
 pub mod authority;
+pub mod bearer;
 pub mod capture;
 pub mod eligibility;
 pub mod inert;

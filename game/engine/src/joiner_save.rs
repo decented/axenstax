@@ -448,6 +448,8 @@ impl crate::server::GameServer {
                 self.joiner_path(pk).display()
             ));
         }
+        // M-1: never written into a retired world (or a refused one).
+        crate::save::refuse_write_over_newer_save(&crate::save::world_dir(&self.world_name))?;
         let path = self.joiner_path(pk);
         let bytes = JoinerSave::capture(sp, self.run_id).encode()?;
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -491,6 +493,55 @@ mod tests {
         sp.verified_pubkey = Some([1; 32]);
         sp.enter_world();
         s
+    }
+    /// CP6 review M-1: one retirement record beside a world refuses every
+    /// opener and writer through the `save_refusal_in` choke point (and the
+    /// direct load guards), and nothing in the folder changes.
+    #[test]
+    fn handover_retired_world_is_refused_by_every_open_and_save_path() {
+        let _g = crate::save::WorldsRootGuard::new("retired-paths");
+        let s = server();
+        let dir = crate::save::world_dir("sidecar");
+        let meta = crate::save::WorldMeta::new("sidecar");
+        crate::save::save_world_meta("sidecar", &meta).unwrap();
+        let store = crate::handover::live::authority::store(&dir).unwrap();
+        store.persist(crate::handover::durable::MarkerKind::Retired, [4; 16], b"a retirement record").unwrap();
+        let snapshot = |d: &std::path::Path| {
+            let mut v: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
+            let mut stack = vec![d.to_path_buf()];
+            while let Some(p) = stack.pop() {
+                for e in std::fs::read_dir(&p).unwrap() {
+                    let e = e.unwrap().path();
+                    if e.is_dir() {
+                        stack.push(e);
+                    } else {
+                        v.push((e.clone(), std::fs::read(&e).unwrap()));
+                    }
+                }
+            }
+            v.sort();
+            v
+        };
+        let before = snapshot(&dir);
+        let slot = crate::player_slot::PlayerSlot::new(0, glam::Vec3::new(0.0, 70.0, 0.0), 1.0);
+        let w = crate::world::World::new();
+        let save = crate::save::minimal_world_save_for_tests(1);
+        let paths: Vec<(&str, Result<(), String>)> = vec![
+            ("lobby/open, online host, dedicated server", crate::save::world_open_refusal("sidecar").map_or(Ok(()), Err)),
+            ("load", crate::save::load_world("sidecar", &mut crate::world::World::new()).map(|_| ())),
+            ("load autosave", crate::save::load_autosave("sidecar", &mut crate::world::World::new()).map(|_| ())),
+            ("meta", crate::save::save_world_meta("sidecar", &meta)),
+            ("world folder", crate::save::write_world_folder("sidecar", &meta, &save, &w)),
+            ("save", crate::save::save_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[])),
+            ("autosave", crate::save::autosave_world("sidecar", &w, std::slice::from_ref(&slot), 1, &[], &[])),
+            ("server save", s.try_save()),
+            ("joiner save", s.save_joiner(0)),
+        ];
+        for (path, r) in paths {
+            let e = r.err().unwrap_or_else(|| panic!("{path}: a retired world was not refused"));
+            assert!(e.contains(crate::handover::live::copy::AUTHORITY_UNREADABLE) || e.contains(crate::handover::live::copy::RETIRED), "{path}: {e}");
+        }
+        assert_eq!(snapshot(&dir), before, "a refused path wrote into the retired world");
     }
     #[test]
     fn sidecar_round_trips_whole_effective_window_and_run_scoped_night() {

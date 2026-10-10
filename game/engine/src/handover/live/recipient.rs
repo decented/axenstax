@@ -9,12 +9,15 @@
 //! latched listener, and only then persists and sends Ready. Before Ready an
 //! abort hands the connection (with any gameplay that arrived meanwhile)
 //! back, so play continues. No gameplay admission or advertisement here.
+use super::bearer::Bearer;
 use super::eligibility::Refusal;
 use super::listener::LatchedListener;
-use super::wire::{Frame, acceptance_content, root_lineage, source_agreement_content};
+use super::wire::{Frame, acceptance_content, prepared_ack_content, root_lineage, source_agreement_content};
 use crate::handover::{
     Id,
     certificate::Core,
+    crypto::{self, Verified, VerifiedPrepared},
+    stored::Route,
     checkpoint::{AdmittedManifest, DurableCheckpoint, Import, ImportBoundary, ImportObserver, OfferContext},
     context::RootContext,
     durable::MarkerStore,
@@ -96,7 +99,14 @@ pub enum RecipientStage {
     Importing,
     /// Durable checkpoint, latched listener and persisted Ready: inert.
     Ready,
+    /// The disclosed bearer verified against the source's Prepared, which
+    /// is now durable here (inert marker cleared) and acknowledged. From
+    /// here the import is never deleted.
+    Prepared,
     Aborted(&'static str),
+    /// Ended after Prepared: the import, its markers and the received
+    /// world are kept untouched (M-2), never deleted, never opened.
+    Quarantined(&'static str),
 }
 
 /// Gameplay packets parked while the session holds the connection, handed
@@ -142,6 +152,11 @@ pub struct RecipientSession {
     /// L5: the joined session's router lease (UPnP), moved in at consent so
     /// leaving the joined world can't release a mapping this link may use.
     lease: Option<Box<dyn HeldLease>>,
+    /// P2: the bearer the source disclosed after Ready (held only here and,
+    /// once activated, in the world's Activated record).
+    bearer: Option<Bearer>,
+    /// The verified Prepared (exact event) this machine persisted.
+    prepared: Option<(Event, VerifiedPrepared)>,
 }
 
 /// L5: a router mapping the joined session asked for (native: the UPnP
@@ -252,6 +267,8 @@ impl RecipientSession {
             import_hold: None,
             consented_at: now,
             lease: None,
+            bearer: None,
+            prepared: None,
         })
     }
 
@@ -288,7 +305,7 @@ impl RecipientSession {
     /// deleted (quarantine); Activated is never touched. The connection
     /// stays with the session for `return_link`.
     pub fn abort(&mut self, why: &'static str) {
-        if matches!(self.stage, RecipientStage::Aborted(_)) {
+        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)) {
             return;
         }
         self.send(&Frame::Abort { transfer: self.transfer() });
@@ -312,7 +329,8 @@ impl RecipientSession {
             // for the next sweep (the marker still names it).
             let _ = super::inert::discard(&self.imports, &self.markers, self.transfer());
         }
-        self.stage = RecipientStage::Aborted(why);
+        // M-2: after Prepared nothing is deleted: the session ends quarantined.
+        self.stage = if inert { RecipientStage::Aborted(why) } else { RecipientStage::Quarantined(why) };
     }
     fn fail(&mut self, r: Refusal) -> Refusal {
         self.abort(r.0);
@@ -348,7 +366,7 @@ impl RecipientSession {
     }
 
     pub fn return_link(&mut self) -> Option<(Box<dyn ClientTransport>, VecDeque<Vec<u8>>)> {
-        if !matches!(self.stage, RecipientStage::Aborted(_)) {
+        if !matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)) {
             return None;
         }
         let link = self.link.take()?;
@@ -415,7 +433,7 @@ impl RecipientSession {
     }
 
     pub fn pump(&mut self, now: u64) -> Result<(), Refusal> {
-        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::AwaitingConsent) {
+        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::AwaitingConsent) {
             return Ok(());
         }
         if let Some(lease) = self.lease.as_mut() {
@@ -435,7 +453,7 @@ impl RecipientSession {
             return Err(self.fail(Refusal("The connection to the host closed.")));
         }
         self.read_link(now)?;
-        if matches!(self.stage, RecipientStage::Aborted(_)) {
+        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)) {
             return Ok(());
         }
         // L2: mirrors the source's `STALL_SECS` in every stage that waits on
@@ -477,7 +495,7 @@ impl RecipientSession {
             if let Err(r) = r {
                 return Err(self.fail(r));
             }
-            if matches!(self.stage, RecipientStage::Aborted(_)) {
+            if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)) {
                 break;
             }
         }
@@ -519,8 +537,58 @@ impl RecipientSession {
                 }
                 Ok(())
             }
+            (RecipientStage::Ready, Frame::Bearer { bearer, .. }) if self.bearer.is_none() => {
+                self.bearer = Some(bearer);
+                Ok(())
+            }
+            (RecipientStage::Ready, Frame::Prepared { event, .. }) => self.on_prepared(&event, now),
             _ => Err(Refusal("The host sent a handover message out of order.")),
         }
+    }
+
+    /// P2 + M-2: the disclosed bearer must derive the key the source's
+    /// Prepared is sealed to (its `p` route, then decryption and the exact
+    /// core). Then Prepared is persisted, the inert marker cleared, and only
+    /// then the signed acknowledgement goes back. A wrong bearer stops here
+    /// with a typed reason, while the import is still inert.
+    fn on_prepared(&mut self, event: &str, now: u64) -> Result<(), Refusal> {
+        let wrong = Refusal(super::copy::WRONG_BEARER);
+        let p = &self.proposal;
+        let core = self.core.as_ref().ok_or(Refusal("No certificate."))?;
+        let bearer = self.bearer.as_ref().ok_or(Refusal("The host sent its handover record before its invitation."))?;
+        let keys = crypto::recipient(&p.root, bearer.expose(), None).map_err(|_| wrong.clone())?;
+        let ev = Event::from_json(event).map_err(|_| Refusal("The host's handover record was malformed."))?;
+        let route = Route { author: core.source_runtime, recipient: keys.public_key().to_bytes(), until: p.root.expiry() };
+        if !route.matches(&ev) {
+            return Err(wrong);
+        }
+        let Ok(Verified::Prepared(vp)) = crypto::open(&ev, &keys, core.source_runtime, &p.root, now, None) else {
+            return Err(wrong);
+        };
+        if vp.core() != core {
+            return Err(Refusal("The host's handover record names a different checkpoint."));
+        }
+        let capability = crypto::root_capability(&p.root, bearer.expose()).map_err(|_| wrong)?;
+        let (transfer, runtime) = (p.transfer, &self.identity.runtime);
+        let content = prepared_ack_content(transfer, vp.event_hash(), capability);
+        let ack = pollster::block_on(
+            EventBuilder::new(Kind::Custom(crate::handover::STORED_KIND), content)
+                .custom_created_at(Timestamp::from(now))
+                .sign(runtime),
+        )
+        .map_err(|_| Refusal("Your acknowledgement couldn't be signed."))?
+        .as_json();
+        let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;
+        receiver
+            .prepared(&self.markers, &vp)
+            .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
+        // From here the import is never deleted (a Prepared marker refuses
+        // every inert discard); a failed clear quarantines it.
+        super::inert::clear(&self.imports, transfer).map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
+        self.prepared = Some((ev, vp));
+        self.stage = RecipientStage::Prepared;
+        self.send(&Frame::PreparedAck { transfer, event: ack });
+        Ok(())
     }
 
     fn on_offer(&mut self, core: &[u8], offer: &[u8], agreement: &str, now: u64) -> Result<(), Refusal> {

@@ -2,12 +2,20 @@
 //! consent, the frozen capture/pack, the bounded direct transfer and the
 //! verified Ready. Everything before retirement is recoverable: `abort`
 //! releases the freeze and the original world is exactly as it was.
-//! Prepared/Commit/retirement are later boundaries, not reachable here.
+//! After Ready (Slice A, CP7): the bearer is disclosed, the inert Prepared
+//! is published and read back on a fenced worker, the recipient's signed
+//! acknowledgement of its durable Prepared is verified, and only then is
+//! the source retired with the exact signed Commit bytes. From Retired on
+//! nothing (no deadline, no Abort, no Cancel) resumes the original world.
+use super::bearer::Bearer;
 use super::eligibility::{self, Refusal, Seat};
-use super::wire::{Frame, PART_LIMIT, acceptance_content, source_agreement_content};
+use super::wire::{Frame, PART_LIMIT, acceptance_content, prepared_ack_content, source_agreement_content};
 use crate::handover::{
-    Id,
+    Hash, Id,
     certificate::Core,
+    crypto::{self, Seal, Verified, VerifiedPrepared},
+    phase::{PublicationPermit, RetiredRoot, Retirement},
+    stored::{Budget, Publication, Route, StoredProof},
     checkpoint::{self, PackBinding, PackedCheckpoint, ParticipantMember},
     context::RootContext,
     manifest::{Agreement, MemberKind},
@@ -38,8 +46,17 @@ pub struct SourceConfig {
     /// Certificate lifetime, clipped to the invitation's expiry.
     pub validity: u64,
     /// The world's own folder, whose `joiners/` the session reads itself at
-    /// every boundary (`None`: a world never saved holds no records).
+    /// every boundary (`None`: a world never saved holds no records, and
+    /// can't be retired: the handover stops before the bearer is disclosed).
     pub world_dir: Option<PathBuf>,
+    /// H1: the bearer of the online host's LIVE invitation (the one
+    /// `online_admission`'s `Accept(ByInvite)` checks), never a new kind.
+    /// Disclosed to the recipient after Ready; Prepared and Commit are
+    /// sealed to the key it derives (`crypto::recipient`).
+    pub bearer: Bearer,
+    /// This runtime's player attestation for the source persona, sealed
+    /// into Prepared and Commit.
+    pub attestation: Event,
 }
 
 /// What the caller re-reads from the live game at EVERY boundary (host
@@ -69,6 +86,10 @@ pub const OPERATION_SECS: u64 = 15 * 60;
 /// What a pack worker hands back: its generation, the transfer it packed
 /// for, and the packed copy (whose scratch is removed when it is dropped).
 type PackResult = (u64, Id, crate::handover::Result<PackedCheckpoint>);
+/// What a publish worker hands back: its generation, the transfer, the one
+/// operation `Budget` (moved back for the next publication) and the stored
+/// witness (or why not).
+type PublishResult = (u64, Id, Budget, crate::handover::Result<StoredProof>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceStage {
@@ -81,6 +102,18 @@ pub enum SourceStage {
     Streaming,
     /// Recipient durably holds the checkpoint; inert until Prepared/Commit.
     ReadyVerified,
+    /// The bearer is disclosed; the inert Prepared is being published and
+    /// read back on a worker. An abort from here rotates the invitation.
+    Publishing,
+    /// Prepared is stored and sent; waiting for the recipient's signed
+    /// acknowledgement that it persisted it.
+    Prepared,
+    /// Durably retired with the exact signed Commit bytes. Terminal for
+    /// this world: no abort, no deadline, no resume.
+    Retired,
+    /// The retirement write failed in a way that may have reached the disk:
+    /// quarantined (frozen, never resumed, never published).
+    RetirementUncertain,
     Aborted(&'static str),
 }
 
@@ -124,6 +157,29 @@ pub struct SourceSession {
     pack_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pack_worker: Option<std::thread::JoinHandle<()>>,
     source_agreement: Option<String>,
+    /// H2: the recipient attestation `verify_accept` verified (sealed into
+    /// Prepared/Commit as the successor's).
+    recipient_attestation: Option<Event>,
+    /// The core phase model, from the bearer's disclosure on.
+    phase: Option<crate::handover::phase::Source>,
+    /// The sealed Prepared and its verification under the bearer's key.
+    prepared: Option<(Event, VerifiedPrepared)>,
+    /// P2: the bearer has left this machine (abort now rotates it).
+    disclosed: bool,
+    rotate_invite: bool,
+    /// The one operation `Budget` for every stored publication (Prepared,
+    /// then Committed), moved to and back from the publish worker.
+    budget: Option<Budget>,
+    publish_generation: u64,
+    publish_rx: Option<std::sync::mpsc::Receiver<PublishResult>>,
+    publish_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    publish_worker: Option<std::thread::JoinHandle<()>>,
+    /// The retained copy's fresh world id, fixed before any final bytes
+    /// escape (it is in the retirement record).
+    retained_copy: Id,
+    /// After Retired: the exact signed Commit and the permit to publish it.
+    commit: Option<Event>,
+    permit: Option<PublicationPermit>,
     #[cfg(test)]
     pack_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
@@ -141,6 +197,10 @@ impl SourceSession {
     /// The host action: refusals first, then bind the exact seat and propose.
     pub fn begin(hs: &mut HostedServer, action: HostAction, cfg: SourceConfig, live: Live, now: u64) -> Result<Self, Refusal> {
         check(hs, &action, &cfg, live)?;
+        // H1: no live invitation capability, no handover.
+        if *cfg.bearer.expose() == [0; 16] {
+            return Err(Refusal(super::copy::NO_LIVE_INVITE));
+        }
         let transfer = random_id();
         let s = action.seat;
         let lease = hs.handover_bind(s.slot, s.generation, s.key, transfer).map_err(Refusal)?;
@@ -165,6 +225,19 @@ impl SourceSession {
             pack_cancel: Default::default(),
             pack_worker: None,
             source_agreement: None,
+            recipient_attestation: None,
+            phase: None,
+            prepared: None,
+            disclosed: false,
+            rotate_invite: false,
+            budget: None,
+            publish_generation: 0,
+            publish_rx: None,
+            publish_cancel: Default::default(),
+            publish_worker: None,
+            retained_copy: random_id(),
+            commit: None,
+            permit: None,
             #[cfg(test)]
             pack_hold: None,
             action,
@@ -220,6 +293,27 @@ impl SourceSession {
     pub fn ready(&self) -> Option<&Event> {
         self.ready.as_ref()
     }
+    /// P2: the bearer has been sent to the recipient.
+    pub fn bearer_disclosed(&self) -> bool {
+        self.disclosed
+    }
+    /// P2: this session aborted after disclosing the bearer, so the caller
+    /// must mint a fresh invitation (old invite strings stop admitting).
+    pub fn needs_invite_rotation(&self) -> bool {
+        self.rotate_invite
+    }
+    /// The retained copy's world id (in the retirement record).
+    pub fn retained_copy(&self) -> Id {
+        self.retained_copy
+    }
+    /// After Retired: the exact signed Commit bytes this source persisted.
+    pub fn commit_event(&self) -> Option<&Event> {
+        self.commit.as_ref()
+    }
+    /// Retired or quarantined: the original world never resumes.
+    pub fn past_retirement(&self) -> bool {
+        matches!(self.stage, SourceStage::Retired | SourceStage::RetirementUncertain)
+    }
 
     fn send(&mut self, hs: &mut HostedServer, f: &Frame) -> Result<(), Refusal> {
         let bytes = f.encode().map_err(|_| Refusal("A handover message was too large."))?;
@@ -228,8 +322,10 @@ impl SourceSession {
 
     /// Pre-retirement abort: tell the recipient, release the freeze, delete
     /// the scratch archive. The original world was never changed.
+    /// From Retired on this does nothing: no deadline, Cancel or late Abort
+    /// resumes a retired world (only exact retry or quarantine).
     pub fn abort(&mut self, hs: &mut HostedServer, why: &'static str) {
-        if matches!(self.stage, SourceStage::Aborted(_)) {
+        if matches!(self.stage, SourceStage::Aborted(_)) || self.past_retirement() {
             return;
         }
         let _ = self.send(hs, &Frame::Abort { transfer: self.transfer });
@@ -241,6 +337,15 @@ impl SourceSession {
         self.sender = None;
         self.file = None;
         self.packed = None;
+        // A running publication is cancelled and fenced off the same way.
+        self.publish_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.publish_generation += 1;
+        self.publish_rx = None;
+        if let Some(p) = self.phase.as_mut() {
+            let _ = p.abort();
+        }
+        // P2: the old bearer has left this machine.
+        self.rotate_invite = self.disclosed;
         self.stage = SourceStage::Aborted(why);
     }
 
@@ -254,10 +359,24 @@ impl SourceSession {
     /// After Ready the source is still frozen and still listening: a
     /// recipient Abort releases it.
     pub fn pump(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
+        // Disclosure waits for the pump after the one that verified Ready (a
+        // recipient Abort or a stall already waiting is heard first).
+        let was_ready = self.stage == SourceStage::ReadyVerified;
         // A finished pack is drained first, even after an abort: a cancelled
         // or superseded result is dropped here, never sent.
         let r = match self.take_pack(false) {
             Ok(Some(msg)) => self.on_pack(hs, live, msg, now),
+            Ok(None) => Ok(()),
+            Err(r) => Err(r),
+        };
+        if let Err(r) = r {
+            return Err(self.fail(hs, r));
+        }
+        if matches!(self.stage, SourceStage::Aborted(_) | SourceStage::RetirementUncertain) {
+            return Ok(());
+        }
+        let r = match self.take_publish() {
+            Ok(Some(stored)) => self.on_stored(hs, stored, now),
             Ok(None) => Ok(()),
             Err(r) => Err(r),
         };
@@ -292,18 +411,26 @@ impl SourceSession {
         let quiet = now.saturating_sub(self.last_heard);
         // L2: a silent recipient times out while streaming and after Ready
         // (until Prepared advances it); the pack is this machine's own work.
+        // The publish worker is this machine's own work (its Budget bounds
+        // it); after Retired no deadline fires (CP5 LOW-7).
         let stalled = match self.stage {
             SourceStage::Proposed => quiet > CONSENT_SECS,
-            SourceStage::Streaming | SourceStage::ReadyVerified => quiet > STALL_SECS,
+            SourceStage::Streaming | SourceStage::ReadyVerified | SourceStage::Prepared => quiet > STALL_SECS,
             _ => false,
         };
         if stalled {
             return Err(self.fail(hs, Refusal("The other player stopped responding. Play has resumed.")));
         }
-        if self.consented_at.is_some_and(|t| now.saturating_sub(t) > OPERATION_SECS) {
+        if !self.past_retirement() && self.consented_at.is_some_and(|t| now.saturating_sub(t) > OPERATION_SECS) {
             return Err(self.fail(hs, Refusal(super::copy::TOO_LONG_SOURCE)));
         }
-        if self.stage == SourceStage::Packing && now.saturating_sub(self.last_beat) >= HEARTBEAT_SECS {
+        // M-2: heartbeats while packing and from Ready until the recipient
+        // has heard the end (its own stall clock waits on the source).
+        let beats = matches!(
+            self.stage,
+            SourceStage::Packing | SourceStage::ReadyVerified | SourceStage::Publishing | SourceStage::Prepared | SourceStage::Retired
+        );
+        if beats && now.saturating_sub(self.last_beat) >= HEARTBEAT_SECS {
             self.last_beat = now;
             if let Err(r) = self.send(hs, &Frame::Notice { transfer: self.transfer, paused: true }) {
                 return Err(self.fail(hs, r));
@@ -314,7 +441,212 @@ impl SourceSession {
         {
             return Err(self.fail(hs, r));
         }
+        // Ready verified on an earlier pump: disclose and publish Prepared.
+        if was_ready
+            && self.stage == SourceStage::ReadyVerified
+            && let Err(r) = self.disclose(hs, now)
+        {
+            return Err(self.fail(hs, r));
+        }
         Ok(())
+    }
+
+    /// P2 + M-2: seal the inert Prepared to the key the bearer derives,
+    /// disclose the bearer (the point of no return for it), then publish and
+    /// read Prepared back on a fenced worker.
+    fn disclose(&mut self, hs: &mut HostedServer, now: u64) -> Result<(), Refusal> {
+        hs.handover_check().map_err(Refusal)?;
+        if self.cfg.world_dir.is_none() {
+            return Err(Refusal(super::copy::NEVER_SAVED));
+        }
+        let unsealed = Refusal("The handover record couldn't be sealed. Play has resumed.");
+        let core = self.core.clone().ok_or(Refusal("No certificate."))?;
+        let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;
+        let successor = self.recipient_attestation.clone().ok_or(Refusal("No recipient attestation."))?;
+        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).map_err(|_| unsealed.clone())?;
+        let seal = Seal {
+            source: &self.cfg.runtime,
+            recipient: &keys,
+            core: &core,
+            ready: &ready,
+            challenge: self.challenge,
+            source_attestation: &self.cfg.attestation,
+            successor_attestation: &successor,
+            prepared: None,
+        };
+        let event = pollster::block_on(crypto::seal(seal, &self.cfg.root, now)).map_err(|_| unsealed.clone())?;
+        let Ok(Verified::Prepared(vp)) = crypto::open(&event, &keys, core.source_runtime, &self.cfg.root, now, None) else {
+            return Err(unsealed);
+        };
+        let phase = crate::handover::phase::Source::frozen(core, &self.cfg.authority).map_err(|_| unsealed)?;
+        // Set before the send: a partly written frame may have left.
+        self.disclosed = true;
+        self.send(hs, &Frame::Bearer { transfer: self.transfer, bearer: self.cfg.bearer.clone() })?;
+        self.phase = Some(phase);
+        self.spawn_publish(event.clone(), Verified::Prepared(vp.clone()), None, keys.public_key().to_bytes())?;
+        self.prepared = Some((event, vp));
+        self.stage = SourceStage::Publishing;
+        Ok(())
+    }
+
+    /// One stored publication (publish, matching OK, fresh readback) on a
+    /// worker with its own reactor, charged to the operation's one Budget.
+    /// Relays are tried in the invitation's order until one stores it.
+    fn spawn_publish(&mut self, event: Event, verified: Verified, permit: Option<PublicationPermit>, recipient: Hash) -> Result<(), Refusal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (generation, transfer) = (self.publish_generation, self.transfer);
+        let root = self.cfg.root.clone();
+        let author = self.cfg.runtime.public_key().to_bytes();
+        let mut budget = self.budget.take().unwrap_or_default();
+        let cancel = self.publish_cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("handover-publish".into())
+            .spawn(move || {
+                let route = Route { author, recipient, until: root.expiry() };
+                let r = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Err(_) => Err(crate::handover::Error::Io),
+                    Ok(rt) => rt.block_on(async {
+                        let mut last = Err(crate::handover::Error::Invalid("no relay"));
+                        for url in root.relays() {
+                            let p = Publication { event: &event, verified: &verified, permit: permit.as_ref(), route };
+                            match crate::handover::stored::publish_readback(url, &root, p, &mut budget, &cancel).await {
+                                Ok(stored) => return Ok(stored),
+                                Err(e) => last = Err(e),
+                            }
+                        }
+                        last
+                    }),
+                };
+                let _ = tx.send((generation, transfer, budget, r));
+            })
+            .map_err(|_| Refusal("The handover record couldn't be published. Play has resumed."))?;
+        self.publish_rx = Some(rx);
+        self.publish_worker = Some(worker);
+        Ok(())
+    }
+
+    /// The publish worker's result for this generation, if it has arrived.
+    /// A worker that ended without one refuses while it is awaited.
+    fn take_publish(&mut self) -> Result<Option<crate::handover::Result<StoredProof>>, Refusal> {
+        use std::sync::mpsc::TryRecvError;
+        let Some(rx) = self.publish_rx.as_ref() else { return Ok(None) };
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(TryRecvError::Empty) => return Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                self.publish_rx = None;
+                return if self.stage == SourceStage::Publishing {
+                    Err(Refusal(super::copy::PREPARED_UNSTORED))
+                } else {
+                    Ok(None)
+                };
+            }
+        };
+        self.publish_rx = None;
+        let (generation, transfer, budget, r) = msg;
+        if generation != self.publish_generation || transfer != self.transfer {
+            return Ok(None);
+        }
+        self.budget = Some(budget);
+        Ok(Some(r))
+    }
+
+    /// Test builds: wait for the publish worker to finish.
+    #[cfg(test)]
+    pub fn join_publish_worker(&mut self) {
+        if let Some(w) = self.publish_worker.take() {
+            w.join().expect("publish worker");
+        }
+    }
+
+    /// Prepared is stored (witnessed by the readback): the phase model moves
+    /// to Prepared and the recipient gets the exact event.
+    fn on_stored(&mut self, hs: &mut HostedServer, stored: crate::handover::Result<StoredProof>, now: u64) -> Result<(), Refusal> {
+        if self.stage != SourceStage::Publishing {
+            return Ok(());
+        }
+        let stored = stored.map_err(|_| Refusal(super::copy::PREPARED_UNSTORED))?;
+        let (event, vp) = self.prepared.as_ref().ok_or(Refusal("No Prepared."))?;
+        let event = event.as_json();
+        self.phase
+            .as_mut()
+            .ok_or(Refusal("No Prepared."))?
+            .prepared(vp, &stored)
+            .map_err(|_| Refusal(super::copy::PREPARED_UNSTORED))?;
+        self.send(hs, &Frame::Prepared { transfer: self.transfer, event })?;
+        // The recipient's clock for persisting it and answering starts now.
+        self.last_heard = now;
+        self.stage = SourceStage::Prepared;
+        Ok(())
+    }
+
+    /// M-2: the recipient's signed acknowledgement of its durable Prepared,
+    /// bound to this transfer, the Prepared event hash and the capability
+    /// the disclosed bearer derives. Only then: seal the Commit locally and
+    /// durably retire with its exact bytes, BEFORE any of them escape.
+    fn on_prepared_ack(&mut self, ack: &str, now: u64) -> Result<(), Refusal> {
+        let bad = Refusal("The recipient's acknowledgement didn't verify. Play has resumed.");
+        let (_, vp) = self.prepared.clone().ok_or(Refusal("No Prepared."))?;
+        let capability = crypto::root_capability(&self.cfg.root, self.cfg.bearer.expose()).map_err(|_| bad.clone())?;
+        let rt = self.recipient_runtime.ok_or(bad.clone())?;
+        let ev = Event::from_json(ack).map_err(|_| bad.clone())?;
+        if ev.pubkey.to_bytes() != rt
+            || ev.verify().is_err()
+            || ev.kind != Kind::Custom(crate::handover::STORED_KIND)
+            || ev.content != prepared_ack_content(self.transfer, vp.event_hash(), capability)
+            || !ev.tags.is_empty()
+        {
+            return Err(bad);
+        }
+        self.retire(&vp, capability, now)
+    }
+
+    fn retire(&mut self, vp: &VerifiedPrepared, capability: Hash, now: u64) -> Result<(), Refusal> {
+        let unsealed = Refusal("The final handover record couldn't be sealed. Play has resumed.");
+        let core = self.core.clone().ok_or(Refusal("No certificate."))?;
+        let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;
+        let successor = self.recipient_attestation.clone().ok_or(Refusal("No recipient attestation."))?;
+        let keys = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).map_err(|_| unsealed.clone())?;
+        let seal = Seal {
+            source: &self.cfg.runtime,
+            recipient: &keys,
+            core: &core,
+            ready: &ready,
+            challenge: self.challenge,
+            source_attestation: &self.cfg.attestation,
+            successor_attestation: &successor,
+            prepared: Some(vp),
+        };
+        let commit = pollster::block_on(crypto::seal(seal, &self.cfg.root, now)).map_err(|_| unsealed.clone())?;
+        let Ok(Verified::Committed(vc)) = crypto::open(&commit, &keys, core.source_runtime, &self.cfg.root, now, Some(vp)) else {
+            return Err(unsealed);
+        };
+        let world_dir = self.cfg.world_dir.as_ref().ok_or(Refusal(super::copy::NEVER_SAVED))?;
+        let store = super::authority::store(world_dir).map_err(|_| Refusal(super::copy::AUTHORITY_UNREADABLE))?;
+        let record = Retirement::new(
+            &vc,
+            vp,
+            commit.as_json().into_bytes(),
+            self.retained_copy,
+            capability,
+            vec![RetiredRoot { capability, expiry: self.cfg.root.expiry() }],
+        )
+        .map_err(|_| unsealed)?;
+        let phase = self.phase.as_mut().ok_or(Refusal("No Prepared."))?;
+        match phase.retire(&store, record) {
+            Ok(permit) => {
+                self.permit = Some(permit);
+                self.commit = Some(commit);
+                self.stage = SourceStage::Retired;
+                Ok(())
+            }
+            // A write that may have reached the disk: quarantined, frozen.
+            Err(_) if phase.stage() == crate::handover::phase::SourceStage::RetirementUncertain => {
+                self.stage = SourceStage::RetirementUncertain;
+                Err(Refusal(super::copy::RETIREMENT_UNCERTAIN))
+            }
+            Err(_) => Err(Refusal("This world couldn't be retired safely. Play has resumed.")),
+        }
     }
 
     /// The worker's message, if it has sent one. A worker that ended without
@@ -411,10 +743,13 @@ impl SourceSession {
 
     fn on_frame(&mut self, hs: &mut HostedServer, live: Live, frame: Frame, now: u64) -> Result<(), Refusal> {
         match (self.stage, frame) {
+            // Nothing the recipient sends resumes a retired world (a late
+            // Abort included); only exact retry or quarantine remain.
+            (SourceStage::Retired | SourceStage::RetirementUncertain, _) => Ok(()),
             (_, Frame::Abort { .. }) => Err(Refusal("The other player cancelled the handover.")),
             (SourceStage::Proposed, Frame::Decline { reason, .. }) => Err(Refusal(super::copy::host_declined(reason))),
             (SourceStage::Proposed, Frame::Accept { runtime, attestation, acceptance, challenge, .. }) => {
-                self.verify_accept(runtime, &attestation, &acceptance, challenge, now)?;
+                let attestation = self.verify_accept(runtime, &attestation, &acceptance, challenge, now)?;
                 // Re-authenticated: the same identity, seat and records,
                 // still eligible, then freeze.
                 self.check(hs, live)?;
@@ -422,6 +757,7 @@ impl SourceSession {
                 self.recipient_runtime = Some(runtime);
                 self.recipient_challenge = challenge;
                 self.acceptance = Some(acceptance);
+                self.recipient_attestation = Some(attestation);
                 self.consented_at = Some(now);
                 self.stage = SourceStage::Frozen;
                 Ok(())
@@ -451,11 +787,14 @@ impl SourceSession {
                 self.stage = SourceStage::ReadyVerified;
                 Ok(())
             }
+            (SourceStage::Prepared, Frame::PreparedAck { event, .. }) => self.on_prepared_ack(&event, now),
             _ => Err(Refusal("The recipient sent a handover message out of order.")),
         }
     }
 
-    fn verify_accept(&self, runtime: [u8; 32], attestation: &str, acceptance: &str, challenge: Id, now: u64) -> Result<(), Refusal> {
+    /// H2: returns the recipient attestation it verified (Prepared and
+    /// Commit seal it as the successor's).
+    fn verify_accept(&self, runtime: [u8; 32], attestation: &str, acceptance: &str, challenge: Id, now: u64) -> Result<Event, Refusal> {
         let bad = Refusal("The other player's consent couldn't be verified.");
         if challenge == [0; 16] {
             return Err(bad);
@@ -477,7 +816,7 @@ impl SourceSession {
         {
             return Err(bad);
         }
-        Ok(())
+        Ok(att)
     }
 
     /// The frozen capture: re-check, pack the sanitised copies with both
@@ -635,6 +974,9 @@ impl SourceSession {
         self.packed = Some(packed);
         self.core = Some(core);
         self.stage = SourceStage::Streaming;
+        // CP6 review LOW-4: the recipient's silence counts from here, not
+        // from consent (the pack was this machine's own time).
+        self.last_heard = now;
         self.fill(hs)
     }
 
@@ -665,6 +1007,7 @@ impl SourceSession {
 impl Drop for SourceSession {
     fn drop(&mut self) {
         self.pack_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.publish_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

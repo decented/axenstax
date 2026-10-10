@@ -101,3 +101,27 @@ pub const TOO_LONG_SOURCE: &str = "The handover took longer than 15 minutes, so 
 /// D7 open guard (PROPOSED copy, not owner-reviewed).
 pub const RETIRED: &str = "This world was handed over to another player, so it can't be opened or saved here. Its retained copy is a separate world.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
+
+// Slice A (CP7): bearer, Prepared, retirement.
+pub const NO_LIVE_INVITE: &str =
+    "This world has no live online invitation, so it can't be handed over. Host it online again for a fresh invitation.";
+pub const NEVER_SAVED: &str = "Save this world once before handing it over. Play has resumed.";
+pub const PREPARED_UNSTORED: &str =
+    "The handover record couldn't be stored on the invitation's relays, so the handover was cancelled. Play has resumed.";
+pub const RETIREMENT_UNCERTAIN: &str = "This world's handover record may only be partly saved, so the world stays paused and \
+     won't reopen here. Its handover record will be checked again.";
+pub const WRONG_BEARER: &str =
+    "The host's invitation didn't match its handover record, so the handover was stopped. Nothing was activated.";
+pub const INVITE_REISSUED: &str =
+    "The handover had already shared this world's invitation, so a new one has been made: old invite links no longer let anyone in.";
+pub const QUARANTINED: &str = "The handover stopped before it finished. The copy is kept on this machine, untouched, and \
+     won't open as a world unless the handover completes.";
+pub fn source_finishing(world: &str, npub: &str) -> String {
+    format!("Handing \u{201c}{world}\u{201d} to {npub}\u{2026} Keep the game open.")
+}
+pub fn source_retired(world: &str, npub: &str) -> String {
+    format!("\u{201c}{world}\u{201d} now belongs to {npub}. Sending them the final record\u{2026}")
+}
+pub fn recipient_finishing(world: &str) -> String {
+    format!("Finishing the handover of \u{201c}{world}\u{201d}\u{2026} Keep the game open.")
+}

@@ -2594,8 +2594,17 @@ pub fn read_world_save_reporting(data: &[u8]) -> Result<(WorldSave, bool), World
 /// newer build ([`WorldSaveError::NewerVersion`]), or is there but can't be read
 /// ([`WorldSaveError::Unreadable`]: its version is unknown). Spec 02 §8.4. Reads
 /// only each file's 12-byte footer.
+///
+/// CP6 review M-1: this is also the one retirement choke point. A world whose
+/// authority was handed over (any `handover/retired-*.dat`), or whose handover
+/// record can't be read, is refused here first, so every opener and writer
+/// that passes through it (lobby/open, online host, dedicated server, save,
+/// autosave, meta, `GameServer::try_save`, joiner saves) refuses it too.
 #[cfg(not(target_arch = "wasm32"))]
-fn save_refusal_in(dir: &std::path::Path) -> Option<WorldSaveError> {
+pub(crate) fn save_refusal_in(dir: &std::path::Path) -> Option<WorldSaveError> {
+    if let Err(r) = crate::handover::live::authority::open_guard(dir) {
+        return Some(WorldSaveError::Retired(r.0));
+    }
     ["world.dat", "autosave/world.dat"].iter().find_map(|rel| {
         match crate::save_format::file_footer_version(&dir.join(rel)) {
             Ok(version) => crate::save_format::check_version(version).err(),
@@ -2696,6 +2705,9 @@ pub fn load_world(
     world: &mut World,
 ) -> Result<(WorldSave, u32), String> {
     let dir = world_dir(name);
+    // M-1: a retired world (or an unreadable handover record) is never loaded.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::handover::live::authority::open_guard(&dir).map_err(|r| r.0.to_string())?;
 
     // Refuse a world whose info is damaged beyond recovery rather than load it
     // under default meta (seed 42, survival) — audit 2026-09-27. Read-only: a
@@ -4363,6 +4375,9 @@ pub fn load_autosave(
     name: &str,
     world: &mut World,
 ) -> Result<(WorldSave, u32), String> {
+    // M-1: a retired world's autosave is never loaded either.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::handover::live::authority::open_guard(&world_dir(name)).map_err(|r| r.0.to_string())?;
     let dir = world_dir(name).join("autosave");
     let dat_path = dir.join("world.dat");
     let data =

@@ -27,6 +27,13 @@ fn record(transfer: Id, world: Id) -> Vec<u8> {
     v
 }
 fn sync(dir: &Path) -> Result<()> {
+    // Windows: no directory fsync (see `durable::sync_directory`). Not compiled here.
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        Ok(())
+    }
+    #[cfg(not(windows))]
     fs::File::open(dir).and_then(|f| f.sync_all()).map_err(|_| Error::Io)
 }
 

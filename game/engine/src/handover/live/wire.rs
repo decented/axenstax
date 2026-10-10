@@ -51,6 +51,18 @@ pub enum Frame {
     /// Source → every joined player: play is paused for a handover (or
     /// resumes). Joiners stop sending input while paused.
     Notice { transfer: Id, paused: bool },
+    /// Source → recipient, after its Ready verified and immediately before
+    /// Prepared is published (P2): the live invitation's bearer, the point
+    /// of no return for it. Inside the authenticated, encrypted direct
+    /// session only; Prepared is sealed to the key derived from it.
+    Bearer { transfer: Id, bearer: super::bearer::Bearer },
+    /// Source → recipient: the exact Prepared event the source published
+    /// and read back.
+    Prepared { transfer: Id, event: String },
+    /// Recipient → source, after Prepared is durable here (M-2): its runtime
+    /// signs `prepared_ack_content`, binding the transfer, the Prepared
+    /// event hash and the capability the disclosed bearer derives.
+    PreparedAck { transfer: Id, event: String },
 }
 
 /// Why a recipient declined a proposal. Every decline is typed: the source
@@ -89,7 +101,10 @@ impl Frame {
             | Frame::Ack { transfer, .. }
             | Frame::Ready { transfer, .. }
             | Frame::Abort { transfer }
-            | Frame::Notice { transfer, .. } => *transfer,
+            | Frame::Notice { transfer, .. }
+            | Frame::Bearer { transfer, .. }
+            | Frame::Prepared { transfer, .. }
+            | Frame::PreparedAck { transfer, .. } => *transfer,
         }
     }
     fn validate(&self) -> Result<()> {
@@ -103,7 +118,8 @@ impl Frame {
             Frame::Offer { core, offer, agreement, .. } => {
                 core.len() > crate::handover::certificate::CORE_LIMIT || long(offer) || long(agreement)
             }
-            Frame::Ready { event, .. } => long(event),
+            Frame::Ready { event, .. } | Frame::PreparedAck { event, .. } => long(event),
+            Frame::Prepared { event, .. } => event.len() > crate::handover::EVENT_LIMIT,
             _ => false,
         };
         if bad {
@@ -147,6 +163,20 @@ pub fn source_agreement_content(transfer: Id, challenge: Id, world_name: &str, r
     v.extend_from_slice(&challenge);
     crate::handover::codec::frame(&mut v, world_name.as_bytes());
     crate::handover::codec::frame(&mut v, recipient_npub.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(v)
+}
+
+/// The recipient's Prepared acknowledgement (M-2), signed by its runtime
+/// key: the transfer, the exact Prepared event hash it persisted, and the
+/// root capability it derived from the disclosed bearer (so the source
+/// knows the recipient holds the bearer its Prepared was sealed to).
+pub fn prepared_ack_content(transfer: Id, prepared: crate::handover::Hash, capability: crate::handover::Hash) -> String {
+    use base64::Engine;
+    let mut v = Vec::new();
+    crate::handover::codec::frame(&mut v, b"AxeNStax/handover/prepared-ack/v1");
+    v.extend_from_slice(&transfer);
+    v.extend_from_slice(&prepared);
+    v.extend_from_slice(&capability);
     base64::engine::general_purpose::STANDARD.encode(v)
 }
 

@@ -84,6 +84,10 @@ pub enum WorldSaveError {
     /// found" — e.g. permissions after a restore). Its version is unknown, so the
     /// world is neither opened nor written (Spec 02 §8.4).
     Unreadable(String),
+    /// The world's authority was handed over (a retirement record beside it)
+    /// or its handover record can't be read: never opened or written again
+    /// (Spec 04 "World handover", D7; CP6 review M-1).
+    Retired(&'static str),
 }
 
 impl WorldSaveError {
@@ -101,6 +105,7 @@ impl fmt::Display for WorldSaveError {
             Self::Undecodable(why) => f.write_str(why),
             // Player-facing too: it reaches the lobby through `world_open_refusal`.
             Self::Unreadable(why) => f.write_str(&unopenable_message(why)),
+            Self::Retired(why) => f.write_str(why),
         }
     }
 }

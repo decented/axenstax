@@ -437,19 +437,40 @@ mod session {
     struct Tap {
         inner: Box<dyn ClientTransport>,
         forged_ready: Arc<Mutex<Option<Vec<u8>>>>,
+        forged_bearer: Arc<Mutex<Option<[u8; 16]>>>,
+        /// Re-signs the recipient's PreparedAck with a stranger's key.
+        forge_ack: Arc<std::sync::atomic::AtomicBool>,
     }
     impl ClientTransport for Tap {
         fn send_to_server(&self, data: &[u8]) {
-            let ready = crate::handover::live::recipient::handover_payload(data)
-                .and_then(|b| Frame::decode(b).ok())
-                .is_some_and(|f| matches!(f, Frame::Ready { .. }));
+            let frame = crate::handover::live::recipient::handover_payload(data).and_then(|b| Frame::decode(b).ok());
+            if let Some(Frame::PreparedAck { transfer, event }) = &frame
+                && self.forge_ack.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let real = nostr::Event::from_json(event).unwrap();
+                let forged = pollster::block_on(
+                    nostr::EventBuilder::new(real.kind, real.content.clone()).custom_created_at(real.created_at).sign(&keys(0x33)),
+                )
+                .unwrap();
+                let f = Frame::PreparedAck { transfer: *transfer, event: forged.as_json() };
+                return self.inner.send_to_server(&handover_frame(&f.encode().unwrap()));
+            }
+            let ready = frame.is_some_and(|f| matches!(f, Frame::Ready { .. }));
             match (ready, self.forged_ready.lock().unwrap().clone()) {
                 (true, Some(forged)) => self.inner.send_to_server(&forged),
                 _ => self.inner.send_to_server(data),
             }
         }
         fn try_recv_from_server(&self) -> Option<crate::transport::Packet> {
-            self.inner.try_recv_from_server()
+            let pkt = self.inner.try_recv_from_server()?;
+            let forged = *self.forged_bearer.lock().unwrap();
+            match (crate::handover::live::recipient::handover_payload(&pkt).and_then(|b| Frame::decode(b).ok()), forged) {
+                (Some(Frame::Bearer { transfer, .. }), Some(wrong)) => {
+                    let f = Frame::Bearer { transfer, bearer: crate::handover::live::bearer::Bearer::new(wrong) };
+                    Some(handover_frame(&f.encode().unwrap()))
+                }
+                _ => Some(pkt),
+            }
         }
         fn is_closed(&self) -> bool {
             self.inner.is_closed()
@@ -474,17 +495,35 @@ mod session {
         live: Live,
         root: RootContext,
         forged_ready: Arc<Mutex<Option<Vec<u8>>>>,
+        /// Replaces the bearer in the source's `Frame::Bearer` (a wrong one).
+        forged_bearer: Arc<Mutex<Option<[u8; 16]>>>,
+        forge_ack: Arc<std::sync::atomic::AtomicBool>,
+        relay: crate::handover::relay_fixture::Relay,
         dir: Dir,
     }
 
+    /// H5: the invitation names the loopback fixture relay (never a real one).
+    fn root_at(relay: &str) -> RootContext {
+        RootContext::new(keys(SOURCE_RUNTIME).public_key().to_bytes(), &npub(&keys(SOURCE_PERSONA)), now() + 3600, &[relay.into()], now())
+            .unwrap()
+    }
+    /// Tests that never publish share one fixture relay.
     fn root() -> RootContext {
-        RootContext::new(
-            keys(SOURCE_RUNTIME).public_key().to_bytes(),
-            &npub(&keys(SOURCE_PERSONA)),
-            now() + 3600,
-            &["wss://relay.example".into()],
-            now(),
-        )
+        static RELAY: std::sync::OnceLock<crate::handover::relay_fixture::Relay> = std::sync::OnceLock::new();
+        root_at(&RELAY.get_or_init(crate::handover::relay_fixture::Relay::start).url())
+    }
+    const TEST_BEARER: [u8; 16] = [0x5A; 16];
+    fn bearer() -> crate::handover::live::bearer::Bearer {
+        crate::handover::live::bearer::Bearer::new(TEST_BEARER)
+    }
+    /// The source runtime's player attestation for the source persona.
+    fn source_attestation() -> nostr::Event {
+        pollster::block_on(crate::runtime_identity::mint_player_attestation(
+            &keys(SOURCE_PERSONA),
+            &keys(SOURCE_RUNTIME).public_key(),
+            Timestamp::from(now()),
+            1,
+        ))
         .unwrap()
     }
     fn joined_host() -> JoinedHost {
@@ -518,9 +557,17 @@ mod session {
         let (mut hs, mut host) = start_lent(&format!("handover-{tag}"));
         let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [RECIPIENT_PERSONA; 32]);
         let forged_ready = Arc::new(Mutex::new(None));
-        let tap = Tap { inner: Box::new(client), forged_ready: forged_ready.clone() };
+        let forged_bearer = Arc::new(Mutex::new(None));
+        let forge_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tap = Tap {
+            inner: Box::new(client),
+            forged_ready: forged_ready.clone(),
+            forged_bearer: forged_bearer.clone(),
+            forge_ack: forge_ack.clone(),
+        };
         let rc = RemoteClient::from_transport(Box::new(tap), crate::remote_client::build_join_request_guest("dup", 0), None);
-        let root = root();
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let root = root_at(&relay.url());
         let lineage = root_lineage(&root);
         let cfg = SourceConfig {
             runtime: keys(SOURCE_RUNTIME),
@@ -532,13 +579,15 @@ mod session {
             scratch: dir.0.join("scratch"),
             validity: 600,
             world_dir: Some(dir.0.join("world")),
+            bearer: bearer(),
+            attestation: source_attestation(),
         };
         let seat = Seat { slot, generation, key };
         let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
         let action = HostAction { seat, source_key, world_name: "Loop".into() };
         let live = Live { signed_in: Some(source_key), local_seats: 1 };
         let src = SourceSession::begin(&mut hs, action, cfg, live, now()).expect("eligible");
-        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, dir }
+        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, relay, dir }
     }
 
     /// The joined client reads the proposal through its ordinary poll, the
@@ -1001,6 +1050,8 @@ mod session {
             scratch: std::env::temp_dir(),
             validity: 600,
             world_dir: None,
+            bearer: bearer(),
+            attestation: source_attestation(),
         };
         let stranger = keys(0x99).public_key().to_bytes();
         let action = HostAction { seat: Seat { slot, generation, key }, source_key: stranger, world_name: "Loop".into() };
@@ -1020,6 +1071,7 @@ mod session {
         p.dst.as_mut().unwrap().abort("changed my mind");
         assert!(p.src.pump(&mut p.hs, p.live, now()).is_err(), "the source hears the Abort after Ready");
         assert!(matches!(p.src.stage(), SourceStage::Aborted(_)));
+        assert!(!p.src.bearer_disclosed() && !p.src.needs_invite_rotation(), "an abort before disclosure rotated the invite");
         assert!(!p.hs.handover_frozen(), "and resumes play");
         // P3: Ready is still before Prepared: the inert import is discarded
         // (directory, Ready marker, inert marker), nothing else is touched.
@@ -1324,5 +1376,144 @@ mod session {
         .unwrap();
         let foreign = session(&propose(npub(&keys(0x57)), &other_root), joined_host());
         assert_eq!(foreign.err().map(|e| e.0), Some("This handover doesn't come from the host you joined."));
+    }
+
+    /// After Ready: pump both sides (joining the publish worker as later
+    /// frames would wait for it) until the source reaches `want` or stops.
+    /// Invariant checked on every round: the source never retires before the
+    /// recipient has durably persisted Prepared (M-2).
+    fn drive(p: &mut Pair, want: SourceStage) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let t = p.src.transfer();
+        while p.src.stage() != want && std::time::Instant::now() < deadline {
+            p.host.lend_tick(&mut p.hs);
+            let _ = p.dst.as_mut().unwrap().pump(now());
+            if p.src.stage() == SourceStage::Publishing {
+                p.src.join_publish_worker();
+            }
+            let r = p.src.pump(&mut p.hs, p.live, now());
+            if p.src.past_retirement() {
+                assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_some(), "retired before the recipient persisted Prepared");
+            }
+            if r.is_err() || matches!(p.src.stage(), SourceStage::Aborted(_)) {
+                break;
+            }
+        }
+    }
+    fn ready_pair(tag: &str) -> Pair {
+        let mut p = pair(tag);
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 10_000);
+        assert_eq!(p.src.stage(), SourceStage::ReadyVerified);
+        p
+    }
+
+    /// CP7 Slice A: after Ready the bearer is disclosed, Prepared is
+    /// published and read back through the loopback relay, the recipient
+    /// verifies the bearer against it, persists Prepared (inert marker
+    /// cleared) and acknowledges; the source verifies that and retires with
+    /// the exact signed Commit bytes (0600, open guard refuses). Nothing
+    /// final escaped. After Retired no Abort, Cancel or deadline resumes the
+    /// source, and the recipient's late failure quarantines, never deletes.
+    #[test]
+    fn handover_source_retires_only_after_a_verified_prepared_ack() {
+        let mut p = ready_pair("retire");
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        assert!(p.src.bearer_disclosed());
+        let dst = p.dst.as_ref().unwrap();
+        assert_eq!(dst.stage(), RecipientStage::Prepared);
+        assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_some(), "Prepared not persisted");
+        assert!(crate::handover::live::inert::marked(&p.dir.0.join("imports"), t).unwrap().is_none(), "the inert marker stayed");
+        assert_eq!(p.relay.stored().len(), 1, "only Prepared may be stored before Committed is published");
+        // The durable retirement holds the exact signed Commit bytes.
+        let world = p.dir.0.join("world");
+        let store = crate::handover::live::authority::store(&world).unwrap();
+        let bytes = store.read(MarkerKind::Retired, t).unwrap().expect("no retirement record");
+        let record = crate::handover::phase::Retirement::decode(&bytes).unwrap();
+        let commit = p.src.commit_event().expect("no Commit").clone();
+        assert_eq!(record.committed_hash(), commit.id.to_bytes());
+        assert_eq!(record.retained_copy(), p.src.retained_copy());
+        assert!(bytes.windows(commit.as_json().len()).any(|w| w == commit.as_json().as_bytes()), "not the exact Commit bytes");
+        assert!(!p.relay.stored().iter().any(|e| e.id == commit.id), "the Commit escaped before retirement was published");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = crate::handover::live::authority::dir(&world).join(format!("retired-{}.dat", hex::encode(t)));
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert_eq!(
+            crate::handover::live::authority::open_guard(&world).unwrap_err().0,
+            crate::handover::live::copy::RETIRED,
+            "the retired world still opens"
+        );
+        // No abort after Retired: Cancel, a late Abort and every deadline.
+        p.src.abort(&mut p.hs, "cancel");
+        let dst = p.dst.as_mut().unwrap();
+        dst.abort("late");
+        assert!(matches!(dst.stage(), RecipientStage::Quarantined(_)), "the recipient's late failure isn't a quarantine");
+        p.host.lend_tick(&mut p.hs);
+        let late = now() + crate::handover::live::source::OPERATION_SECS + crate::handover::live::source::STALL_SECS + 1;
+        let _ = p.src.pump(&mut p.hs, p.live, late);
+        assert_eq!(p.src.stage(), SourceStage::Retired, "a cap or a late Abort aborted after Retired");
+        assert!(p.hs.handover_frozen(), "a retired source resumed play");
+        assert!(!p.src.needs_invite_rotation());
+        // M-2: after Prepared the recipient deletes nothing.
+        assert!(!import_dirs(&p).is_empty(), "the recipient deleted an import after Prepared");
+        assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_some());
+        assert!(markers(&p.dir).read(MarkerKind::Ready, t).unwrap().is_some());
+    }
+
+    /// P2: a bearer that doesn't derive the key Prepared is sealed to stops
+    /// the recipient with a typed reason while the import is still inert
+    /// (discarded, no Prepared); the source, which disclosed its bearer,
+    /// resumes and must rotate its invitation.
+    #[test]
+    fn handover_wrong_bearer_is_refused_and_a_disclosed_abort_rotates_the_invite() {
+        let mut p = ready_pair("wrong-bearer");
+        *p.forged_bearer.lock().unwrap() = Some([0x11; 16]);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        let dst = p.dst.as_ref().unwrap();
+        assert_eq!(dst.stage(), RecipientStage::Aborted(crate::handover::live::copy::WRONG_BEARER), "a wrong bearer was accepted");
+        assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_none(), "a wrong bearer reached Prepared");
+        assert_eq!(import_dirs(&p), Vec::<String>::new(), "the inert import was kept");
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "the source didn't hear the abort");
+        assert!(!p.hs.handover_frozen(), "the source didn't resume");
+        assert!(p.src.bearer_disclosed());
+        assert!(p.src.needs_invite_rotation(), "an abort after disclosure kept the old bearer");
+        assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "a pre-retirement abort retired the world");
+    }
+
+    /// M-2: an acknowledgement the recipient's runtime didn't sign is never
+    /// enough to retire: the source aborts (and rotates), nothing retired.
+    #[test]
+    fn handover_forged_prepared_ack_never_retires() {
+        let mut p = ready_pair("forged-ack");
+        p.forge_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        drive(&mut p, SourceStage::Retired);
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "a forged acknowledgement retired the source");
+        assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "retired without a verified ack");
+        assert!(p.src.needs_invite_rotation());
+        assert!(!p.hs.handover_frozen());
+    }
+
+    /// CP6 review LOW-4: a pack that took longer than the stall deadline
+    /// doesn't count against the recipient: its clock starts at Streaming.
+    #[test]
+    fn handover_streaming_stall_clock_starts_when_streaming_starts() {
+        let mut p = pair("stream-clock");
+        consent(&mut p);
+        let (reached, release) = p.src.hold_pack();
+        start_offer(&mut p, &seat0());
+        reached.recv().unwrap();
+        release.send(()).unwrap();
+        let later = now() + crate::handover::live::source::STALL_SECS + 5;
+        p.src.settle_pack(&mut p.hs, p.live, later).unwrap();
+        assert_eq!(p.src.stage(), SourceStage::Streaming);
+        assert!(p.src.pump(&mut p.hs, p.live, later).is_ok(), "a long pack counted against the recipient");
+        assert_eq!(p.src.stage(), SourceStage::Streaming, "the source stalled on its own packing time");
     }
 }

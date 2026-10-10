@@ -236,6 +236,11 @@ impl MarkerStore {
         Ok(out)
     }
 }
+/// Read-only open guard (CP6 review LOW-5): the payload of a retirement
+/// marker's bytes, read by the caller without a `MarkerStore`.
+pub fn retirement_payload(bytes: &[u8], id: Id) -> Result<Vec<u8>> {
+    decode_marker(bytes, MarkerKind::Retired, id)
+}
 const MARKER_DOMAIN: &str = "AxeNStax/handover/marker/v1";
 const MARKER_OVERHEAD: usize = 4 + MARKER_DOMAIN.len() + 4 + 1 + 16 + 4 + 32;
 /// Unkeyed accidental-corruption checksum, not a machineowner authentication
@@ -276,6 +281,14 @@ fn decode_marker(bytes: &[u8], kind: MarkerKind, id: Id) -> Result<Vec<u8>> {
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
+    // Windows can't open a directory to fsync it; the rename before this is
+    // NTFS-journaled, as main's saves rely on (C3d). Not compiled here.
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
     fs::File::open(path)
         .and_then(|f| f.sync_all())
         .map_err(|_| Error::Io)
