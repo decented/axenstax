@@ -4384,8 +4384,12 @@ mod tests {
         }
         assert_eq!(PacketType::WindowOp as u8, 64);
         assert_eq!(deserialize_header(&[64, 0]).map(|(p, _)| p), Some(PacketType::WindowOp));
-        // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync).
-        assert_eq!(deserialize_header(&[68, 0]), None, "nothing past 67 yet");
+        // C3b-1 takes 65/66; server-owned death takes 67 (InventorySync);
+        // C3d (v89) takes 68..=71 (Action, ActionReceipt, Recovery,
+        // AppliedActionAck).
+        assert_eq!(deserialize_header(&[68, 0]).map(|(p, _)| p), Some(PacketType::Action));
+        assert_eq!(deserialize_header(&[71, 0]).map(|(p, _)| p), Some(PacketType::AppliedActionAck));
+        assert_eq!(deserialize_header(&[72, 0]), None, "nothing past 71 yet");
     }
 
     /// C3b-1 (v77) — shared containers on the wire: `OpenContainer` (= 4)
