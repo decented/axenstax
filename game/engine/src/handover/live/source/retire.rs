@@ -4,10 +4,10 @@ use super::*;
 
 impl SourceSession {
     /// M-2: the recipient's signed acknowledgement of its durable Prepared,
-    /// bound to this transfer, the Prepared event hash and the capability
-    /// the disclosed bearer derives. Only then: seal the Commit locally and
+    /// bound to this transfer, the Prepared event hash and a bearer
+    /// possession proof (CP7 review LOW-2). Only then: seal the Commit locally and
     /// durably retire with its exact bytes, BEFORE any of them escape.
-    pub(super) fn on_prepared_ack(&mut self, ack: &str, now: u64) -> Result<(), Refusal> {
+    pub(super) fn on_prepared_ack(&mut self, hs: &mut HostedServer, live: Live, ack: &str, now: u64) -> Result<(), Refusal> {
         let bad = Refusal("The recipient's acknowledgement didn't verify. Play has resumed.");
         let (_, vp) = self.prepared.clone().ok_or(Refusal("No Prepared."))?;
         let capability = crypto::root_capability(&self.cfg.root, self.cfg.bearer.expose()).map_err(|_| bad.clone())?;
@@ -16,12 +16,25 @@ impl SourceSession {
         if ev.pubkey.to_bytes() != rt
             || ev.verify().is_err()
             || ev.kind != Kind::Custom(crate::handover::STORED_KIND)
-            || ev.content != prepared_ack_content(self.transfer, vp.event_hash(), capability)
+            || ev.content
+                != prepared_ack_content(
+                    self.transfer,
+                    vp.event_hash(),
+                    prepared_ack_proof(&self.cfg.root, self.cfg.bearer.expose(), vp.event_hash()),
+                )
             || !ev.tags.is_empty()
         {
             return Err(bad);
         }
-        self.retire(&vp, capability, now)
+        // CP7 review LOW-3: retirement re-runs every boundary check first.
+        self.check(hs, live)?;
+        let r = self.retire(&vp, capability, now);
+        // CP7 review HIGH-1: from here the link itself refuses to unfreeze
+        // (release and reap do nothing), whatever happens to this session.
+        if self.past_retirement() {
+            hs.handover_mark_retired();
+        }
+        r
     }
 
     pub(super) fn retire(&mut self, vp: &VerifiedPrepared, capability: Hash, now: u64) -> Result<(), Refusal> {

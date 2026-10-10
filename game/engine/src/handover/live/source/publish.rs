@@ -6,8 +6,11 @@ impl SourceSession {
     /// P2 + M-2: seal the inert Prepared to the key the bearer derives,
     /// disclose the bearer (the point of no return for it), then publish and
     /// read Prepared back on a fenced worker.
-    pub(super) fn disclose(&mut self, hs: &mut HostedServer, now: u64) -> Result<(), Refusal> {
+    pub(super) fn disclose(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
         hs.handover_check().map_err(Refusal)?;
+        // CP7 review LOW-3: the bearer's point of no return re-runs every
+        // boundary check (identity, seats, authority persona, records).
+        self.check(hs, live)?;
         if self.cfg.world_dir.is_none() {
             return Err(Refusal(crate::handover::live::copy::NEVER_SAVED));
         }

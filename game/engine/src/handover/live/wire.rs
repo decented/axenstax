@@ -61,7 +61,7 @@ pub enum Frame {
     Prepared { transfer: Id, event: String },
     /// Recipient → source, after Prepared is durable here (M-2): its runtime
     /// signs `prepared_ack_content`, binding the transfer, the Prepared
-    /// event hash and the capability the disclosed bearer derives.
+    /// event hash and `prepared_ack_proof` (only a bearer holder computes it).
     PreparedAck { transfer: Id, event: String },
 }
 
@@ -168,16 +168,34 @@ pub fn source_agreement_content(transfer: Id, challenge: Id, world_name: &str, r
 
 /// The recipient's Prepared acknowledgement (M-2), signed by its runtime
 /// key: the transfer, the exact Prepared event hash it persisted, and the
-/// root capability it derived from the disclosed bearer (so the source
-/// knows the recipient holds the bearer its Prepared was sealed to).
-pub fn prepared_ack_content(transfer: Id, prepared: crate::handover::Hash, capability: crate::handover::Hash) -> String {
+/// bearer possession proof (`prepared_ack_proof`).
+pub fn prepared_ack_content(transfer: Id, prepared: crate::handover::Hash, proof: crate::handover::Hash) -> String {
     use base64::Engine;
     let mut v = Vec::new();
-    crate::handover::codec::frame(&mut v, b"AxeNStax/handover/prepared-ack/v1");
+    crate::handover::codec::frame(&mut v, b"AxeNStax/handover/prepared-ack/v2");
     v.extend_from_slice(&transfer);
     v.extend_from_slice(&prepared);
-    v.extend_from_slice(&capability);
+    v.extend_from_slice(&proof);
     base64::engine::general_purpose::STANDARD.encode(v)
+}
+
+/// CP7 review LOW-2: a real possession proof of the disclosed bearer,
+/// HKDF(bearer, C, "prepared-ack", Prepared hash). The root capability is
+/// not one (it is computable from Prepared's public `p` tag and C); this is,
+/// because only a holder of the bearer can compute it.
+pub fn prepared_ack_proof(root: &crate::handover::context::RootContext, bearer: &Id, prepared: crate::handover::Hash) -> crate::handover::Hash {
+    use nostr::hashes::Hash as _;
+    let mut salt = Vec::new();
+    crate::handover::codec::frame(&mut salt, b"AxeNStax/handover/prepared-ack-proof/v1");
+    salt.extend_from_slice(&root.digest());
+    let prk = nostr::util::hkdf::extract(&salt, bearer);
+    let mut info = Vec::new();
+    crate::handover::codec::frame(&mut info, b"prepared-ack");
+    info.extend_from_slice(&prepared);
+    let okm = nostr::util::hkdf::expand(prk.as_byte_array(), &info, 32);
+    let mut out = [0; 32];
+    out.copy_from_slice(&okm);
+    out
 }
 
 /// The lineage of a root invitation: derived from its context digest, so

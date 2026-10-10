@@ -5598,9 +5598,13 @@ The recipient derives the key from the disclosed bearer and refuses
 (`WRONG_BEARER`, import still inert and discarded) unless the event's `p`
 route, decryption and core all match; it then persists Prepared, clears the
 inert marker and only then sends `Frame::PreparedAck`: an event signed by
-its runtime over `prepared_ack_content` (transfer, Prepared event hash, the
-root capability the bearer derives). The source verifies it (signer =
-recipient runtime, exact content), seals the Commit locally, opens it under
+its runtime over `prepared_ack_content` (transfer, Prepared event hash and
+a bearer possession proof, `wire::prepared_ack_proof` =
+HKDF(bearer, C, "prepared-ack", Prepared hash); CP7 review LOW-2: the root
+capability is computable from Prepared's public `p` tag and C, so it proves
+nothing). The source verifies it (signer = recipient runtime, exact
+content), re-runs every boundary check (identity, seats, authority persona,
+saved records; also at disclosure, CP7 review LOW-3), seals the Commit locally, opens it under
 the bearer's key, and durably retires (`phase::Source::retire` into
 `<world>/handover/`) with the exact Commit bytes and the retained copy's
 fresh id, before any final bytes escape. A retirement write error leaves
@@ -5608,13 +5612,33 @@ fresh id, before any final bytes escape. A retirement write error leaves
 Packing, ReadyVerified, Publishing, Prepared and Retired; the source's
 stall clock restarts when it sends Prepared and on entering Streaming (CP6
 review LOW-4). From Retired nothing resumes the source: Cancel, a late
-Abort and every deadline (stall and the 15-minute cap) are ignored. After
+Abort and every deadline (stall and the 15-minute cap) are ignored. At
+Retired (or `RetirementUncertain`) the session marks the server's link
+retired (`HostedServer::handover_mark_retired`, CP7 review HIGH-1): from
+then on `handover_release` and `handover_reap` do nothing, so dropping the
+session sends no Abort and lifts no freeze; only tearing the HostedServer
+down ends it. Leaving the world or closing the window past retirement saves
+nothing and touches nothing on disk (`SaveChoice::Abandon`, forced by
+`leave_world`) and tears down the world, its HostedServer and the online
+host; the Cancel arm ignores a click past retirement. Not built yet: handing
+the Committed publication to a background resumer on that leave (slice B),
+and the recipient's durable bearer before its ack (CP7 review HIGH-2). After
 Prepared the recipient never deletes the import: any failure ends its
 session `Quarantined` (import, markers and received world kept). An abort
-after the bearer was disclosed but before Retired resumes play and makes
-the caller mint a fresh invitation (`needs_invite_rotation` →
-`OnlineHost::mint_fresh_invite`; the toast says old invite links no longer
-let anyone in). Committed publication, the recipient's Activated record and
+after the bearer was disclosed but before Retired resumes play and rotates
+the invitation: every caller that ends a source handover (Cancel, leaving,
+the pump) goes through `GameState::end_source_handover`, which reads
+`needs_invite_rotation` and calls `OnlineHost::rotate_bearer`. Only the
+bearer changes: the expiry, relays and host fields stay, so the root
+context and lineage are unchanged (CP7 review MEDIUM-1 + LOW-7); old invite
+links stop admitting at once (no grace), and the toast says so. Personas
+the old bearer already admitted stay contacts. `mint_fresh_invite` (new
+expiry) stays the UI's "new invite". The bearer is wiped with `zeroize` on
+drop, and the buffers this code owns that held it (the source's encode
+buffer, the recipient's received packet) are zeroed after use (CP7 review
+LOW-1). Residual copies outside our control are not wiped: the transport's
+send queue and socket buffers, the QUIC/TLS stack's plaintext, and the
+serialiser's internal buffers. Committed publication, the recipient's Activated record and
 host start, and the retained copy are the next slices.
 
 Inert imports (P3): before writing any of the import the recipient durably

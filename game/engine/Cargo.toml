@@ -52,6 +52,7 @@ egui-winit = { version = "0.34", default-features = false, features = ["links"] 
 # canonical_id runs on native too; `hex` is a tiny ubiquitous crate.
 sha2 = "0.11"
 hex = "0.4"
+zeroize = "1.8"  # the handover bearer is wiped on drop (already locked via the crypto crates)
 # HMAC-SHA256 for the Proof-of-Play hash (Spec 6 §2.2 / §2.2c). RustCrypto
 # canonical implementation; ~0 cost on top of `sha2` which we already pull in.
 hmac = "0.13"

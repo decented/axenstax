@@ -529,6 +529,13 @@ impl crate::GameState {
     /// silence). Callers that hop somewhere after leaving must not hop on
     /// `false`.
     pub(crate) fn leave_world(&mut self, save: SaveChoice, to: ExitTo) -> bool {
+        // CP7 review HIGH-1: a world this machine's handover retired is no
+        // longer its to save: the leave writes nothing and touches nothing on
+        // disk (`Abandon`, stricter than `Discard`, which deletes the
+        // autosave), and tears the world, its HostedServer and the online
+        // host down. Nothing on the way out unfreezes it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let save = if self.source_handover_retired() { SaveChoice::Abandon } else { save };
         // World handover first: a source handover is cancelled while its world
         // and link still exist (pre-retirement, so play would resume), which
         // also lifts the freeze before the save below.

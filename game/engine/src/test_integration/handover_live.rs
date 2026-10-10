@@ -1487,6 +1487,32 @@ mod session {
         assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "a pre-retirement abort retired the world");
     }
 
+    /// CP7 review HIGH-1: once retired, nothing on the source's side
+    /// unfreezes the world. The session is dropped (as leaving the world
+    /// drops it); after several server ticks the world is still frozen, the
+    /// recipient heard no Abort, and the open guard still says retired.
+    #[test]
+    fn handover_retired_world_stays_frozen_after_its_session_is_dropped() {
+        let mut p = ready_pair("retired-drop");
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let Pair { mut hs, mut host, src, mut dst, dir, .. } = p;
+        drop(src);
+        for _ in 0..5 {
+            host.lend_tick(&mut hs);
+        }
+        let dst = dst.as_mut().unwrap();
+        let _ = dst.pump(now());
+        assert!(hs.handover_frozen(), "a dropped retired session unfroze the world");
+        hs.handover_release();
+        assert!(hs.handover_frozen(), "a release unfroze a retired world");
+        assert_eq!(dst.stage(), RecipientStage::Prepared, "the recipient heard an Abort after Retired");
+        assert_eq!(
+            crate::handover::live::authority::open_guard(&dir.0.join("world")).unwrap_err().0,
+            crate::handover::live::copy::RETIRED
+        );
+    }
+
     /// M-2: an acknowledgement the recipient's runtime didn't sign is never
     /// enough to retire: the source aborts (and rotates), nothing retired.
     #[test]

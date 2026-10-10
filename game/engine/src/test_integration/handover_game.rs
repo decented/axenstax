@@ -760,3 +760,41 @@ fn game_harness_handover_frozen_try_again_and_crafting_close_change_nothing() {
     assert!(hg.state.close_topmost_ui_panel());
     assert!(!hg.state.players[0].crafting_ui.open, "crafting didn't close once play resumed");
 }
+
+/// CP8 step 1: the rotation the game runs after a disclosed abort
+/// (`GameState::rotate_handover_invite`, called by the source pump) changes
+/// only the bearer: the old invite string stops admitting, the new one
+/// admits, and the invitation's root context is unchanged.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_disclosed_abort_rotation_keeps_the_root_and_retires_the_old_link() {
+    use crate::online_admission::Admission;
+    use crate::runtime_identity::{RuntimeIdentity, mint_player_attestation};
+    let mut hg = HeadlessGame::boot_into_world("harness-handover-rotate");
+    let hub = crate::rendezvous::relay_client::FakeRelayHub::new();
+    let runtime = keys(SOURCE_RUNTIME);
+    let att = pollster::block_on(mint_player_attestation(&keys(SOURCE_PERSONA), &runtime.public_key(), Timestamp::from(now() - 10), 90))
+        .unwrap();
+    let host = crate::online_host::OnlineHost::start(
+        RuntimeIdentity::from_parts(runtime, Some(att)),
+        key(SOURCE_PERSONA),
+        Box::new(hub.client()),
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+        Vec::new(),
+        "Loop".into(),
+        vec!["wss://relay.example".into()],
+        Vec::new(),
+        now(),
+    )
+    .map_err(|(e, _)| e)
+    .unwrap();
+    let (old_link, root) = (host.invite_link(), host.root_context(now()).unwrap().digest());
+    hg.state.online_host = Some(host);
+    hg.state.rotate_handover_invite();
+    let host = hg.state.online_host.as_ref().unwrap();
+    let stranger = [0x44; 32];
+    assert_ne!(host.invite_link(), old_link, "the invitation wasn't rotated");
+    assert!(matches!(host.admission_for_link(&stranger, &old_link, now()), Admission::Refuse(_)), "the old invite still admits");
+    assert!(matches!(host.admission_for_link(&stranger, &host.invite_link(), now()), Admission::Accept(_)), "the new invite doesn't admit");
+    assert_eq!(host.root_context(now()).unwrap().digest(), root, "rotation changed the root");
+}

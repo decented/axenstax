@@ -9,7 +9,7 @@
 //! nothing (no deadline, no Abort, no Cancel) resumes the original world.
 use super::bearer::Bearer;
 use super::eligibility::{self, Refusal, Seat};
-use super::wire::{Frame, PART_LIMIT, acceptance_content, prepared_ack_content, source_agreement_content};
+use super::wire::{Frame, PART_LIMIT, acceptance_content, prepared_ack_content, prepared_ack_proof, source_agreement_content};
 use crate::handover::{
     Hash, Id,
     certificate::Core,
@@ -320,8 +320,14 @@ impl SourceSession {
     }
 
     fn send(&mut self, hs: &mut HostedServer, f: &Frame) -> Result<(), Refusal> {
-        let bytes = f.encode().map_err(|_| Refusal("A handover message was too large."))?;
-        hs.handover_send(&bytes).map_err(Refusal)
+        let mut bytes = f.encode().map_err(|_| Refusal("A handover message was too large."))?;
+        let r = hs.handover_send(&bytes).map_err(Refusal);
+        // CP7 review LOW-1: the encode buffer we own is wiped (the bearer
+        // frame's copy; transport-owned copies are documented in Spec 04).
+        if matches!(f, Frame::Bearer { .. }) {
+            zeroize::Zeroize::zeroize(&mut bytes);
+        }
+        r
     }
 
     /// Pre-retirement abort: tell the recipient, release the freeze, delete
@@ -448,7 +454,7 @@ impl SourceSession {
         // Ready verified on an earlier pump: disclose and publish Prepared.
         if was_ready
             && self.stage == SourceStage::ReadyVerified
-            && let Err(r) = self.disclose(hs, now)
+            && let Err(r) = self.disclose(hs, live, now)
         {
             return Err(self.fail(hs, r));
         }
@@ -507,7 +513,7 @@ impl SourceSession {
                 self.stage = SourceStage::ReadyVerified;
                 Ok(())
             }
-            (SourceStage::Prepared, Frame::PreparedAck { event, .. }) => self.on_prepared_ack(&event, now),
+            (SourceStage::Prepared, Frame::PreparedAck { event, .. }) => self.on_prepared_ack(hs, live, &event, now),
             _ => Err(Refusal("The recipient sent a handover message out of order.")),
         }
     }

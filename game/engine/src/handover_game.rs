@@ -512,18 +512,37 @@ impl crate::GameState {
                 Err(Refusal(r)) => r,
                 Ok(()) => why,
             };
-            // P2: the bearer left this machine before the abort: the old
-            // invitation stops admitting, and the host is told.
-            let rotate = session.needs_invite_rotation();
-            self.handover = None;
-            if rotate {
-                if let Some(host) = self.online_host.as_mut() {
-                    host.mint_fresh_invite(now);
-                }
-                self.handover_toast(format!("{msg} {}", copy::INVITE_REISSUED));
-            } else {
-                self.handover_toast(msg);
-            }
+            let line = self.end_source_handover(msg);
+            self.handover_toast(line);
+        }
+    }
+
+    /// P2: the disclosed bearer is retired: only the bearer changes, so the
+    /// invitation's root context (expiry, relays, lineage) stays as it was.
+    pub(crate) fn rotate_handover_invite(&mut self) {
+        if let Some(host) = self.online_host.as_mut() {
+            host.rotate_bearer();
+        }
+    }
+
+    /// CP7 review HIGH-1: this machine's source session retired the world
+    /// (or may have): leaving skips the save and tears the world down.
+    pub(crate) fn source_handover_retired(&self) -> bool {
+        matches!(&self.handover, Some(Handover::Source { session, .. }) if session.past_retirement())
+    }
+
+    /// CP7 review MEDIUM-1 + LOW-7: the ONLY way any caller (Cancel, leave,
+    /// the pump) clears a Source handover. A session that aborted after its
+    /// bearer left this machine rotates the invitation (`rotate_bearer`:
+    /// only the bearer changes, the root stays) and the line says so.
+    pub(crate) fn end_source_handover(&mut self, msg: &str) -> String {
+        let rotate = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.needs_invite_rotation());
+        self.handover = None;
+        if rotate {
+            self.rotate_handover_invite();
+            format!("{msg} {}", copy::INVITE_REISSUED)
+        } else {
+            msg.to_string()
         }
     }
 
@@ -612,11 +631,16 @@ impl crate::GameState {
                 self.end_recipient(copy::CANCELLED);
             }
             (UiAction::Cancel, Some(Handover::Source { session, .. })) => {
+                // CP7 review HIGH-1: Cancel is not drawn past retirement, and
+                // a click that slipped through cancels nothing.
+                if session.past_retirement() {
+                    return;
+                }
                 if let Some(hs) = self.hosted_server.as_mut() {
                     session.abort(hs, "cancelled");
                 }
-                self.handover = None;
-                self.handover_toast(copy::CANCELLED);
+                let line = self.end_source_handover(copy::CANCELLED);
+                self.handover_toast(line);
             }
             _ => {}
         }
@@ -631,8 +655,8 @@ impl crate::GameState {
     /// `menu.notice` after the leave, where it is actually drawn.
     pub(crate) fn handover_on_leave(&mut self) -> Option<&'static str> {
         let mut notice = None;
-        match self.handover.take() {
-            Some(Handover::Source { mut session, .. }) => {
+        match self.handover.as_mut() {
+            Some(Handover::Source { session, .. }) => {
                 if let Some(hs) = self.hosted_server.as_mut() {
                     session.abort(hs, "left");
                 }
@@ -640,11 +664,15 @@ impl crate::GameState {
                 if !session.past_retirement() {
                     notice = Some(copy::LEFT);
                 }
+                // MEDIUM-1: rotates the invitation if the bearer had left.
+                let _ = self.end_source_handover(copy::LEFT);
             }
             Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent => {
-                self.decline_over_joined(s.proposal().transfer, DeclineReason::Player);
+                let transfer = s.proposal().transfer;
+                self.handover = None;
+                self.decline_over_joined(transfer, DeclineReason::Player);
             }
-            other => self.handover = other,
+            _ => {}
         }
         self.host_paused = false;
         self.joined_host = None;

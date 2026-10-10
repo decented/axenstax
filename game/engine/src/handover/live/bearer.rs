@@ -28,11 +28,7 @@ impl std::fmt::Debug for Bearer {
 
 impl Drop for Bearer {
     fn drop(&mut self) {
-        for b in self.0.iter_mut() {
-            // SAFETY: `b` is a valid, aligned, exclusive reference.
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
-        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 

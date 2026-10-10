@@ -504,6 +504,7 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
+ "zeroize",
 ]
 
 [[package]]

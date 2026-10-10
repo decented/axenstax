@@ -39,6 +39,10 @@ pub struct HandoverLink {
     /// L1: other seats whose bounded inbound queue overflowed while frozen.
     /// They are read no further and disconnected at release.
     overflowed: Vec<usize>,
+    /// CP7 review HIGH-1: the session reached Retired (or an uncertain
+    /// retirement). Nothing unfreezes this world any more: release and reap
+    /// do nothing; only tearing the HostedServer down ends the freeze.
+    retired: bool,
 }
 
 /// Why a link refused or broke. Short reasons, no keys or frame text.
@@ -94,6 +98,7 @@ impl HostedServer {
             transfer,
             lease: std::sync::Arc::downgrade(&lease),
             overflowed: Vec::new(),
+            retired: false,
         });
         Ok(lease)
     }
@@ -146,7 +151,9 @@ impl HostedServer {
     /// recipient and release. Called at the top of every tick (frozen or not).
     pub(super) fn handover_reap(&mut self) {
         let Some(l) = &self.handover else { return };
-        if l.lease.strong_count() > 0 {
+        // HIGH-1: a retired world stays frozen (no Abort, no release) until
+        // it is torn down, even once its session is gone.
+        if l.retired || l.lease.strong_count() > 0 {
             return;
         }
         let (slot, transfer) = (l.slot, l.transfer);
@@ -156,6 +163,14 @@ impl HostedServer {
             self.send_to_joined_slot(slot, &pkt);
         }
         self.handover_release();
+    }
+
+    /// HIGH-1: the bound session retired this world (or may have): from now
+    /// on neither `handover_release` nor `handover_reap` unfreezes it.
+    pub fn handover_mark_retired(&mut self) {
+        if let Some(l) = self.handover.as_mut() {
+            l.retired = true;
+        }
     }
 
     pub fn handover_frozen(&self) -> bool {
@@ -274,6 +289,10 @@ impl HostedServer {
     /// sees the world); a departed, reused or closed seat's queue is
     /// discarded. Joined players are told play resumes.
     pub fn handover_release(&mut self) {
+        // HIGH-1: past retirement nothing resumes this world.
+        if self.handover.as_ref().is_some_and(|l| l.retired) {
+            return;
+        }
         let Some(l) = self.handover.take() else { return };
         if !self.handover_seat_live(l.slot, l.generation, l.key) {
             self.inbound[l.slot] = Default::default();

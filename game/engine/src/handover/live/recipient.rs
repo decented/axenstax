@@ -12,7 +12,7 @@
 use super::bearer::Bearer;
 use super::eligibility::Refusal;
 use super::listener::LatchedListener;
-use super::wire::{Frame, acceptance_content, prepared_ack_content, root_lineage, source_agreement_content};
+use super::wire::{Frame, acceptance_content, prepared_ack_content, prepared_ack_proof, root_lineage, source_agreement_content};
 use crate::handover::{
     Id,
     certificate::Core,
@@ -489,7 +489,14 @@ impl RecipientSession {
                 }
                 continue;
             };
-            let r = Frame::decode(bytes)
+            let decoded = Frame::decode(bytes);
+            // CP7 review LOW-1: the packet buffer we own that carried the
+            // bearer is wiped (the decoded `Bearer` wipes itself on drop).
+            let mut pkt = pkt;
+            if matches!(decoded, Ok(Frame::Bearer { .. })) {
+                zeroize::Zeroize::zeroize(&mut pkt);
+            }
+            let r = decoded
                 .map_err(|_| Refusal("The host sent a malformed handover message."))
                 .and_then(|f| self.on_frame(f, now));
             if let Err(r) = r {
@@ -568,9 +575,8 @@ impl RecipientSession {
         if vp.core() != core {
             return Err(Refusal("The host's handover record names a different checkpoint."));
         }
-        let capability = crypto::root_capability(&p.root, bearer.expose()).map_err(|_| wrong)?;
         let (transfer, runtime) = (p.transfer, &self.identity.runtime);
-        let content = prepared_ack_content(transfer, vp.event_hash(), capability);
+        let content = prepared_ack_content(transfer, vp.event_hash(), prepared_ack_proof(&p.root, bearer.expose(), vp.event_hash()));
         let ack = pollster::block_on(
             EventBuilder::new(Kind::Custom(crate::handover::STORED_KIND), content)
                 .custom_created_at(Timestamp::from(now))
