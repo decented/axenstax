@@ -5457,7 +5457,10 @@ Abort sets the worker's cancel flag (checked before every member) and bumps
 the generation, so a cancelled or superseded pack's result is dropped and its
 `PackedCheckpoint` removes its scratch; it can never be offered or sent (the
 link is also released). A dropped session drops the receiver, so the worker's
-result is dropped where it finishes. While frozen, every other seat's packets
+result is dropped where it finishes. A worker that ends without a result (a
+panic) is a refusal while the session still waits for it (`Packing` has no
+stall deadline, so it must not wait forever): the source aborts and play
+resumes. While frozen, every other seat's packets
 move into its own bounded inbound queue without being processed; a seat that
 overflows the bound is read no further and is disconnected at release by the
 ordinary overflow kick (review L1). Stall deadlines (review L2): the source

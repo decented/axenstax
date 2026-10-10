@@ -248,9 +248,12 @@ impl SourceSession {
     pub fn pump(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
         // A finished pack is drained first, even after an abort: a cancelled
         // or superseded result is dropped here, never sent.
-        if let Some(msg) = self.take_pack(false)
-            && let Err(r) = self.on_pack(hs, live, msg, now)
-        {
+        let r = match self.take_pack(false) {
+            Ok(Some(msg)) => self.on_pack(hs, live, msg, now),
+            Ok(None) => Ok(()),
+            Err(r) => Err(r),
+        };
+        if let Err(r) = r {
             return Err(self.fail(hs, r));
         }
         if matches!(self.stage, SourceStage::Aborted(_)) {
@@ -295,17 +298,44 @@ impl SourceSession {
         Ok(())
     }
 
-    fn take_pack(&mut self, block: bool) -> Option<PackResult> {
-        let rx = self.pack_rx.as_ref()?;
+    /// The worker's message, if it has sent one. A worker that ended without
+    /// sending (it panicked) refuses while the session still waits for it,
+    /// so the source never sits frozen in `Packing` (it has no stall deadline).
+    fn take_pack(&mut self, block: bool) -> Result<Option<PackResult>, Refusal> {
+        use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+        let Some(rx) = self.pack_rx.as_ref() else { return Ok(None) };
+        let died = Refusal("The world couldn't be packed for the handover. Play has resumed.");
         let msg = if block {
-            rx.recv_timeout(std::time::Duration::from_secs(120)).ok()
+            match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                Ok(m) => Some(m),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.pack_rx = None;
+                    return if self.stage == SourceStage::Packing { Err(died) } else { Ok(None) };
+                }
+            }
         } else {
-            rx.try_recv().ok()
+            match rx.try_recv() {
+                Ok(m) => Some(m),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    self.pack_rx = None;
+                    return if self.stage == SourceStage::Packing { Err(died) } else { Ok(None) };
+                }
+            }
         };
         if msg.is_some() {
             self.pack_rx = None;
         }
-        msg
+        Ok(msg)
+    }
+
+    /// Test hook: the pack worker ended without a result (as a panic would).
+    #[cfg(test)]
+    pub fn test_lose_pack_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel::<PackResult>();
+        drop(tx);
+        self.pack_rx = Some(rx);
     }
 
     /// The generation fence. Anything but this session's live pack, still
@@ -341,10 +371,12 @@ impl SourceSession {
     /// Test hook: wait for the pack and use it, as a later pump would.
     #[cfg(test)]
     pub fn settle_pack(&mut self, hs: &mut HostedServer, live: Live, now: u64) -> Result<(), Refusal> {
-        match self.take_pack(true) {
-            Some(msg) => self.on_pack(hs, live, msg, now).map_err(|r| self.fail(hs, r)),
-            None => Ok(()),
-        }
+        let r = match self.take_pack(true) {
+            Ok(Some(msg)) => self.on_pack(hs, live, msg, now),
+            Ok(None) => Ok(()),
+            Err(r) => Err(r),
+        };
+        r.map_err(|r| self.fail(hs, r))
     }
 
     /// Every boundary re-reads identity, seats, live seat state and the

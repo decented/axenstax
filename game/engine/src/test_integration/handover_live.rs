@@ -672,6 +672,23 @@ mod session {
         }
     }
 
+    /// A pack worker that dies without a result refuses (the source would
+    /// otherwise sit frozen in `Packing`, which has no stall deadline).
+    #[test]
+    fn handover_pack_worker_lost_refuses_and_resumes() {
+        let mut p = pair("lostpack");
+        consent(&mut p);
+        let (_reached, release) = p.src.hold_pack();
+        start_offer(&mut p, &seat0());
+        p.src.test_lose_pack_worker();
+        let r = p.src.pump(&mut p.hs, p.live, now()).unwrap_err();
+        assert_eq!(r.0, "The world couldn't be packed for the handover. Play has resumed.");
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)));
+        assert!(!p.hs.handover_frozen(), "the source stayed frozen after its pack worker died");
+        drop(release);
+        p.src.join_pack_worker();
+    }
+
     /// While the pack runs the source keeps the recipient's stall deadline
     /// fed (heartbeat); a finished pack is then offered as before.
     #[test]
