@@ -358,3 +358,20 @@ fn c3d_strict_cannot_be_selected_on_a_no_lend_host() {
     assert!(dedicated.select_inventory_mode(InventoryMode::Strict).is_ok());
     assert_eq!(dedicated.inventory_mode(), InventoryMode::Strict);
 }
+
+/// Run 5 (run-4 review LOW-4) — an owning server that selected Strict with
+/// no local player and gained one later (a `--no-lend` host) refuses a
+/// Strict join at admission, with a reason, before JoinAccept.
+#[test]
+fn c3d_strict_join_is_refused_once_an_owning_server_gains_a_local_player() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-admit-no-lend");
+    let mut hs = start_room_test_server("c3d-admit-no-lend", 0);
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
+    hs.add_local_slot(glam::Vec3::new(0.5, 80.0, 0.5));
+    let client = hs.attach_test_remote_with_binding(Some([17; 32]));
+    send_signed_join(&client, KEY, Some([17; 32]));
+    hs.tick();
+    let heard = hear(&client);
+    assert!(heard.accepts.is_empty(), "no JoinAccept");
+    assert_eq!(heard.rejects, vec![crate::strict_admission::StrictJoinRefusal::NoLendHost.reason()]);
+}

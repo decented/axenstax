@@ -32,6 +32,8 @@ mod c3d_tests;
 mod c3d_strict_tests;
 #[cfg(test)]
 mod c3d_container_tests;
+#[cfg(test)]
+mod c3d_superseded_tests;
 
 use std::collections::VecDeque;
 
@@ -113,6 +115,7 @@ const MAX_DEVICE_INTERACTS_PER_TICK: usize = 2;
 pub const JOINER_MIN_FACING_DOT: f32 = 0.0;
 
 /// C3d (run 4) — why Strict inventory admission can't be selected here.
+#[cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrictSelectError {
     /// A `--no-lend` host: its server mirrors the host's copy of the world.
@@ -1086,15 +1089,25 @@ impl HostedServer {
     /// every tick (`mirror_host_world_state`), so a committed Strict
     /// withdrawal would be put back into the "real" chest — a duplicate. A
     /// dedicated server (no local players) and a lending host may select it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))]
     pub fn select_inventory_mode(&mut self, mode: crate::action_identity::InventoryMode) -> Result<(), StrictSelectError> {
-        if mode == crate::action_identity::InventoryMode::Strict && self.host_world == HostWorld::Owned && self.num_local_players > 0 {
+        if mode == crate::action_identity::InventoryMode::Strict && self.strict_unsupported_here() {
             return Err(StrictSelectError::NoLendHost);
         }
         self.inventory_mode = mode;
         Ok(())
     }
 
+    /// C3d (run-3 review L3, run-4 review LOW-4) — an owning server with
+    /// local players (a `--no-lend` host) mirrors the host's copy of the
+    /// world over every commit: Strict can't run on it. Checked at selection
+    /// AND at every Strict admission (a local slot can be added later).
+    fn strict_unsupported_here(&self) -> bool {
+        self.host_world == HostWorld::Owned && self.num_local_players > 0
+    }
+
     /// The inventory mode new connections are admitted with.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))]
     pub fn inventory_mode(&self) -> crate::action_identity::InventoryMode { self.inventory_mode }
 
     /// D1 — does this server simulate the host client's lent world (rather
@@ -4373,10 +4386,11 @@ impl HostedServer {
                         // `release_slot` neither settles nor saves, and the
                         // record's bytes stay as they are.
                         if self.inventory_mode == crate::action_identity::InventoryMode::Strict
-                            && let Err(refusal) = crate::strict_admission::check(
-                                saved_joiner.as_ref(),
-                                self.server.players[i].obligations.get(),
-                            )
+                            && let Err(refusal) = if self.strict_unsupported_here() {
+                                Err(crate::strict_admission::StrictJoinRefusal::NoLendHost)
+                            } else {
+                                crate::strict_admission::check(saved_joiner.as_ref(), self.server.players[i].obligations.get())
+                            }
                         {
                             log::warn!("Refusing Strict join on slot {i}: {refusal:?}");
                             let _ = self.release_slot(i, Some(&refusal.reason()));

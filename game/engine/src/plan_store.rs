@@ -97,8 +97,12 @@ fn root() -> std::path::PathBuf {
 fn persist(marker: [u8; 32], bytes: &[u8]) -> Result<(), String> {
     let dir = root();
     ensure_checked_dir(&dir)?;
+    // Run 5 — Windows (UNCOMPILED on the development host, which can't
+    // build a Windows target): the file is fsynced and renamed, with no
+    // directory sync (a directory handle can't be flushed without
+    // `GENERIC_WRITE`; NTFS journals the rename).
     #[cfg(windows)]
-    { write_through_atomic(&dir.join(hex::encode(marker)), bytes) }
+    { crate::save::write_atomic(&dir.join(hex::encode(marker)), bytes) }
     #[cfg(not(windows))]
     {
         crate::save::write_atomic(&dir.join(hex::encode(marker)), bytes)?;
@@ -106,40 +110,6 @@ fn persist(marker: [u8; 32], bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Run 4 (run-3 review L2) — Windows has no directory fsync a normal handle
-/// can reach (`FlushFileBuffers` on a directory needs `GENERIC_WRITE`, so the
-/// Unix-style parent sync would always fail and durability-before-cache would
-/// never cache a Plan, in Mirror too). The platform's own durable rename is
-/// `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`: it returns only once the
-/// rename is flushed to disk. The file's bytes are fsynced before it.
-/// (Unix, Android included, keeps the parent-directory sync.)
-#[cfg(windows)]
-fn write_through_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write as _;
-    use std::os::windows::ffi::OsStrExt as _;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
-        file.write_all(bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        file.sync_all().map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
-    }
-    let wide = |p: &std::path::Path| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
-    let (from, to) = (wide(&tmp), wide(path));
-    // SAFETY: both are NUL-terminated UTF-16 paths that outlive the call.
-    let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
-    if moved == 0 {
-        return Err(format!("Plan-store write-through rename failed: {}", std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_checked_dir(dir: &std::path::Path) -> Result<(), String> {
     if dir.is_dir() { return Ok(()); }
@@ -161,13 +131,13 @@ fn ensure_checked_dir(dir: &std::path::Path) -> Result<(), String> {
 /// joined history keeps its owned body and pauses instead of claiming success.
 #[cfg(all(not(target_arch = "wasm32"), not(windows)))]
 fn sync_checked_dir(dir: &std::path::Path) -> Result<(), String> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if FAIL_DIRECTORY_SYNC.with(|failure| failure.get()) { return Err("Injected Plan-store directory sync failure".into()); }
     let file = std::fs::File::open(dir);
     file.and_then(|file| file.sync_all()).map_err(|e| format!("Plan-store directory was not durably synced: {e}"))
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, unix))]
 thread_local! { static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -202,7 +172,8 @@ fn load(marker: [u8; 32]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(target_arch = "wasm32"))]
+    // Unix (Android included) only: Windows has no directory sync to fail.
+    #[cfg(unix)]
     #[test]
     fn c3d_post_rename_sync_failure_keeps_actual_held_body_and_remains_retryable() {
         let _g = crate::save::WorldsRootGuard::new("c3d-plans-sync-failure");

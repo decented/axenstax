@@ -24,6 +24,12 @@ pub enum ActionFate {
     Refused,
     NormalisedAcceptedNoop,
     CancelledNoop,
+    /// C3d run 5 (coordinator decision) — a stale-base or dead-body action:
+    /// from a dead body, or made on a window base older than a whole-window
+    /// `Replace` (join or death sync) its client hadn't applied. Terminal,
+    /// zero external effect, never a teardown: the `Replace` is the
+    /// correction of whatever the client predicted.
+    Superseded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

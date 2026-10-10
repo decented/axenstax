@@ -1398,6 +1398,9 @@ pub enum OpenRefusal {
     NotAContainer,
     /// The joiner isn't in the world, or is dead.
     NotInWorld,
+    /// C3d Strict (v89, run 5): the opened view doesn't fit the joiner's
+    /// window-event budget right now. Nothing opened.
+    TooLarge,
 }
 
 /// Server → Client (C3b-1, `PacketType::ContainerOpened`): the answer to
@@ -4553,6 +4556,7 @@ mod tests {
             (OpenRefusal::Protected, 1),
             (OpenRefusal::NotAContainer, 2),
             (OpenRefusal::NotInWorld, 3),
+            (OpenRefusal::TooLarge, 4),
         ] {
             let pkt = ContainerOpenedPacket {
                 cell: [0, 0, 0],

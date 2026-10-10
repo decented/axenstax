@@ -11,6 +11,8 @@
 //!   window event whose count and owned bytes are reserved before anything is
 //!   opened or sent. A refused open is the request's answer (`OpenRefusal`),
 //!   not a refused action: the client predicted no change and none happens.
+//!   A view that doesn't fit the event budget is one too (`TooLarge`,
+//!   run 5); a container's Plans count as their placeholders.
 //! - **Container click**: run twice on raw R — once on EXACTLY the view the
 //!   client predicted on (`ContainerViews::seen` at its boundary) to check its
 //!   digest, once on the REAL container to commit. No claims, no believed
@@ -112,7 +114,25 @@ impl HostedServer {
         self.strict_fold_holds(i, "window configuration")
     }
 
+    /// A refused open: the request's answer (`OpenRefusal`) on an Accepted
+    /// row with no effect — the client predicted no change and none happens.
+    fn answer_refused_open(&mut self, i: usize, action: ActionHeader, op_seq: u32, cell: [i32; 3], why: protocol::OpenRefusal) -> bool {
+        let included = self.server.players[i].window_events.last_number();
+        let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "container open result history is full");
+            return false;
+        };
+        self.server.players[i].last_window_op_seq = op_seq;
+        self.complete_typed_result(i, action, ActionFate::Accepted, result);
+        let kind = cw::ContainerKind::of_block(self.server.world.get_block(cell[0], cell[1], cell[2])).unwrap_or(cw::ContainerKind::Dispenser);
+        let pkt = protocol::ContainerOpenedPacket { cell, kind, slots: Vec::new(), furnace: None, refused: Some(why), window_event: 0 };
+        self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::ContainerOpened, &pkt));
+        self.strict_fold_holds(i, "container open")
+    }
+
     fn serve_strict_open(&mut self, i: usize, action: ActionHeader, op: &protocol::WindowOpPacket, cell: [i32; 3]) -> bool {
+        // (An open while dead or on a base before a waiting `Replace` never
+        // gets here: it is `Superseded`, `actions.rs`.)
         let Some(raw) = self.strict_raw_or_stop(i, action, "container open") else { return false };
         // Nothing opens until the server answers: the client's digest is
         // its window unchanged.
@@ -123,32 +143,25 @@ impl HostedServer {
         let now = self.server.tick_counter;
         let kind = match self.container_open_verdict(i, cell) {
             Ok(kind) => kind,
-            Err(why) => {
-                let included = self.server.players[i].window_events.last_number();
-                let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
-                    self.pause_typed_action(i, StrictTeardown::FellBehind, "container open result history is full");
-                    return false;
-                };
-                self.server.players[i].last_window_op_seq = op.op_seq;
-                self.complete_typed_result(i, action, ActionFate::Accepted, result);
-                let kind = cw::ContainerKind::of_block(self.server.world.get_block(cell[0], cell[1], cell[2])).unwrap_or(cw::ContainerKind::Dispenser);
-                let pkt = protocol::ContainerOpenedPacket { cell, kind, slots: Vec::new(), furnace: None, refused: Some(why), window_event: 0 };
-                self.send_to_joined_slot(i, &protocol::serialize_packet(protocol::PacketType::ContainerOpened, &pkt));
-                return self.strict_fold_holds(i, "container open");
-            }
+            Err(why) => return self.answer_refused_open(i, action, op.op_seq, cell, why),
         };
         cw::ensure_container(&mut self.server.world, cell, kind);
         let Some(view) = cw::container_at(&self.server.world, cell, kind) else {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "the container vanished while opening");
             return false;
         };
-        let (slots, furnace, contents) = (view.wire_slots(), view.furnace_view(), ContainerData::of(view));
+        // Run 5 (run-4 review LOW-2) — the view models what the client's
+        // mirror holds: a Plan as the body-less placeholder (Plans stay in
+        // a shared container and digest content-free), so a host's Plan
+        // costs the view its placeholder's bytes, not its body's.
+        let (slots, furnace, contents) = (view.wire_slots(), view.furnace_view(), ContainerData::of(view).without_plan_bodies());
         let opened = ViewEvent::Opened(MirrorView { cell, kind, contents });
         // The numbered view (count AND owned bytes) and the result row are
-        // reserved before the container opens or anything is sent.
+        // reserved before the container opens or anything is sent. A view
+        // that doesn't fit the budget is the open's typed refusal, never a
+        // teardown: nothing opened.
         let Ok(prepared) = crate::window_events::prepare_strict_events(&mut self.server.players[i], vec![WindowEvent::ContainerView(opened)].into_boxed_slice()) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "container view reservation is unavailable");
-            return false;
+            return self.answer_refused_open(i, action, op.op_seq, cell, protocol::OpenRefusal::TooLarge);
         };
         let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, prepared.last_number()) else {
             prepared.abandon(&mut self.server.players[i]);
@@ -236,8 +249,10 @@ impl HostedServer {
         let now = self.server.tick_counter;
         let server = &mut self.server;
         let sp = &mut server.players[i];
-        let Some((sets, furnace)) = crate::window_ops::container_push_sets(sp, &server.world) else { return };
+        let Some((mut sets, furnace)) = crate::window_ops::container_push_sets(sp, &server.world) else { return };
         let wire = crate::window_ops::wire_sets(&sets);
+        // Run 5 (LOW-2) — the view holds what the client's mirror does.
+        for (_, stack) in &mut sets { cw::strip_plan_body(stack); }
         let event = WindowEvent::ContainerView(ViewEvent::Sets { sets, furnace });
         let Ok(prepared) = crate::window_events::prepare_strict_events(sp, vec![event].into_boxed_slice()) else {
             self.strict_bridge_teardown(i, StrictTeardown::FellBehind, "container push reservation is unavailable");

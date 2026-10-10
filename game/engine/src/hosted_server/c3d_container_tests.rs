@@ -11,7 +11,7 @@ use super::tests::{send_signed_join, start_room_test_server};
 use super::*;
 use crate::action_identity::{ActionFate, ActionHeader, InventoryMode};
 use crate::action_wire::{ActionIntent, ActionPacket};
-use crate::container_window::{ContainerClick, ContainerData, ContainerKind};
+use crate::container_window::{ContainerClick, ContainerKind};
 use crate::item::{Item, ItemStack};
 use crate::strict_admission::StrictTeardown;
 use crate::transport::ClientTransport as _;
@@ -21,53 +21,65 @@ const KEY_B: [u8; 32] = [67; 32];
 
 /// One joined Strict client: its connection, the action identity the
 /// server issued, its next sequence and the window events it applied.
-struct Joiner {
-    i: usize,
-    client: ChannelClientTransport,
-    accept: protocol::JoinAcceptPacket,
-    seq: u64,
-    applied: u32,
+pub(super) struct Joiner {
+    pub(super) i: usize,
+    pub(super) client: ChannelClientTransport,
+    pub(super) accept: protocol::JoinAcceptPacket,
+    pub(super) seq: u64,
+    pub(super) applied: u32,
 }
 
-fn join_as(hs: &mut HostedServer, key: [u8; 32], b: u8) -> Joiner {
+pub(super) fn join_as(hs: &mut HostedServer, key: [u8; 32], b: u8) -> Joiner {
+    let mut j = join_unsynced(hs, key, b);
+    j.apply_all(hs);
+    j
+}
+
+/// Run 5 — a joined Strict client that has applied NO window event yet (its
+/// join sync, when there is one, still waits).
+pub(super) fn join_unsynced(hs: &mut HostedServer, key: [u8; 32], b: u8) -> Joiner {
     let client = hs.attach_test_remote_with_binding(Some([b; 32]));
     send_signed_join(&client, key, Some([b; 32]));
     hs.tick();
     let i = hs.server.players.len() - 1;
     let accept = hear(&client).accepts.into_iter().next().expect("Strict admits a first visit");
     assert_eq!(accept.inventory_mode, InventoryMode::Strict);
-    let mut j = Joiner { i, client, accept, seq: 0, applied: 0 };
-    j.apply_all(hs);
-    j
+    Joiner { i, client, accept, seq: 0, applied: 0 }
 }
 
 impl Joiner {
     /// The client applies every window event sent so far.
-    fn apply_all(&mut self, hs: &mut HostedServer) {
+    pub(super) fn apply_all(&mut self, hs: &mut HostedServer) {
         let sp = &mut hs.server.players[self.i];
         let sent = sp.window_events.last_number();
         crate::window_events::apply_through(sp, sent, hs.server.tick_counter);
         self.applied = sent;
     }
-    fn next(&mut self) -> ActionHeader {
+    pub(super) fn next(&mut self) -> ActionHeader {
         self.seq += 1;
         ActionHeader { session: self.accept.action_session, epoch: 0, seq: self.seq, life: self.accept.action_life, events_applied: self.applied }
     }
-    fn op(&mut self, hs: &mut HostedServer, op: protocol::WireWindowOp, digest: u32, client_ok: bool) -> ActionHeader {
-        let action = self.next();
-        let pkt = protocol::WindowOpPacket { op_seq: 0, op, digest, events_applied: self.applied, touched: Vec::new(), claims: Vec::new(), client_ok };
-        self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent: ActionIntent::Window(pkt) }));
+    pub(super) fn op(&mut self, hs: &mut HostedServer, op: protocol::WireWindowOp, digest: u32, client_ok: bool) -> ActionHeader {
+        let action = self.send_op(op, digest, client_ok);
         hs.tick();
         action
     }
+    /// Send one typed window op without ticking (run 5: several clients'
+    /// actions land in ONE tick).
+    pub(super) fn send_op(&mut self, op: protocol::WireWindowOp, digest: u32, client_ok: bool) -> ActionHeader {
+        let action = self.next();
+        let pkt = protocol::WindowOpPacket { op_seq: 0, op, digest, events_applied: self.applied, touched: Vec::new(), claims: Vec::new(), client_ok };
+        self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent: ActionIntent::Window(pkt) }));
+        action
+    }
     /// The window's digest now, as the client (in lockstep) holds it.
-    fn digest(hs: &HostedServer, i: usize) -> u32 {
+    pub(super) fn digest(hs: &HostedServer, i: usize) -> u32 {
         let sp = &hs.server.players[i];
         crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station)
     }
     /// The client predicts `click` on its mirror (the view it applied) and
     /// its window: the digest it sends, and its own verdict.
-    fn predict(hs: &HostedServer, i: usize, click: &ContainerClick) -> (u32, bool) {
+    pub(super) fn predict(hs: &HostedServer, i: usize, click: &ContainerClick) -> (u32, bool) {
         let sp = &hs.server.players[i];
         let mut mirror = sp.container_sent.seen.clone().expect("a mirror is open").contents;
         let (mut inv, mut armour, mut cursor, mut grid) = (sp.inventory.clone(), sp.armour, sp.cursor.clone(), sp.craft_grid.clone());
@@ -78,17 +90,17 @@ impl Joiner {
     }
     /// The exact retained result row for `action` (a torn-down session's
     /// client never hears its fate; the server retains it).
-    fn row(&self, hs: &mut HostedServer, action: ActionHeader) -> Option<(ActionHeader, ActionFate)> {
+    pub(super) fn row(&self, hs: &mut HostedServer, action: ActionHeader) -> Option<(ActionHeader, ActionFate)> {
         hs.server.players[self.i].action_results.as_mut().and_then(|r| r.repeat(action)).map(|r| (r.action, r.fate))
     }
-    fn click(&mut self, hs: &mut HostedServer, click: ContainerClick) -> ActionHeader {
+    pub(super) fn click(&mut self, hs: &mut HostedServer, click: ContainerClick) -> ActionHeader {
         let (digest, ok) = Self::predict(hs, self.i, &click);
         self.op(hs, protocol::WireWindowOp::Container(click), digest, ok)
     }
 }
 
 /// What the client heard, with the ContainerOpened answers.
-fn heard_with_opens(client: &ChannelClientTransport) -> (Heard, Vec<protocol::ContainerOpenedPacket>) {
+pub(super) fn heard_with_opens(client: &ChannelClientTransport) -> (Heard, Vec<protocol::ContainerOpenedPacket>) {
     let mut heard = Heard::default();
     let mut opens = Vec::new();
     while let Some(pkt) = client.try_recv_from_server() {
@@ -102,14 +114,14 @@ fn heard_with_opens(client: &ChannelClientTransport) -> (Heard, Vec<protocol::Co
     (heard, opens)
 }
 
-fn worn_pickaxe() -> ItemStack {
+pub(super) fn worn_pickaxe() -> ItemStack {
     let mut tool = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron);
     tool.durability = 5;
     ItemStack { item: Item::Tool(tool), count: 1 }
 }
 
 /// A chest one block beside the shared spawn, in reach of every joiner.
-fn place_chest(hs: &mut HostedServer, i: usize, contents: &[(usize, ItemStack)]) -> [i32; 3] {
+pub(super) fn place_chest(hs: &mut HostedServer, i: usize, contents: &[(usize, ItemStack)]) -> [i32; 3] {
     let eye = hs.server.players[i].player.eye_pos();
     let cell = [eye.x.floor() as i32 + 1, eye.y.floor() as i32 - 1, eye.z.floor() as i32];
     hs.server.world.set_block(cell[0], cell[1], cell[2], crate::block::CHEST);
@@ -121,14 +133,46 @@ fn place_chest(hs: &mut HostedServer, i: usize, contents: &[(usize, ItemStack)])
     cell
 }
 
-fn chest_slots(hs: &HostedServer, cell: [i32; 3]) -> Vec<protocol::WireSlot> {
+pub(super) fn chest_slots(hs: &HostedServer, cell: [i32; 3]) -> Vec<protocol::WireSlot> {
     let kind = ContainerKind::of_block(crate::block::CHEST).unwrap();
     let c = crate::container_window::container_at(&hs.server.world, cell, kind).expect("the chest");
     (0..c.len()).map(|s| c.get(s).map(crate::inventory::stack_to_wire)).collect()
 }
 
-fn ground(hs: &HostedServer) -> usize {
+pub(super) fn ground(hs: &HostedServer) -> usize {
     hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().count()
+}
+
+/// Run 5 — every unit by exact identity over the joiners' 50 places (their
+/// EFFECTIVE windows: every waiting event folded, a death or join sync
+/// included), the chest at `cell` if it still stands, every grave and the
+/// world's ground items.
+pub(super) fn all_holdings(hs: &HostedServer, joiners: &[usize], cell: [i32; 3]) -> BTreeMap<String, u32> {
+    let mut all: Vec<protocol::WireSlot> = joiners.iter().flat_map(|&i| {
+        let w = crate::window_events::effective_window(&hs.server.players[i]);
+        super::c3d_strict_tests::places(&w.inv, &w.armour, &w.cursor, &w.grid)
+    }).collect();
+    for entity in hs.server.world.block_entities.values() {
+        if let Some(grave) = entity.as_grave() { all.extend(grave.slots.iter().map(|s| s.as_ref().map(crate::inventory::stack_to_wire))); }
+    }
+    let kind = ContainerKind::of_block(crate::block::CHEST).unwrap();
+    if let Some(c) = crate::container_window::container_at(&hs.server.world, cell, kind) {
+        all.extend((0..c.len()).map(|s| c.get(s).map(crate::inventory::stack_to_wire)));
+    }
+    all.extend(hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_, e)| Some(crate::inventory::stack_to_wire(&e.stack))));
+    holdings(all.iter())
+}
+
+/// Both joiners open `cell` and apply their views.
+pub(super) fn open_both(hs: &mut HostedServer, joiners: [&mut Joiner; 2], cell: [i32; 3]) {
+    for j in joiners {
+        let digest = Joiner::digest(hs, j.i);
+        let open = j.op(hs, protocol::WireWindowOp::OpenContainer { cell }, digest, true);
+        let (heard, opens) = heard_with_opens(&j.client);
+        assert!(heard.rejects.is_empty() && opens.len() == 1 && opens[0].refused.is_none(), "open: {:?} {opens:?}", heard.rejects);
+        assert_eq!(heard.receipts.last().map(|r| (r.action, r.fate)), Some((open, ActionFate::Accepted)));
+        j.apply_all(hs);
+    }
 }
 
 /// Every unit by exact identity over both joiners' 50 places and the chest.
@@ -335,4 +379,99 @@ fn c3d_strict_movement_packet_edit_fails_closed_with_a_reason() {
     assert!(heard.rejects.iter().any(|m| m == StrictTeardown::Untyped.reason()), "fails closed with a reason: {:?}", heard.rejects);
     assert_eq!(hs.server.world.get_block(x, y, z), block, "the world keeps its block");
     assert!(hs.slot_is_free(j.i));
+}
+
+/// Run 5 (run-3 review L4) — both joiners' withdrawals land in ONE tick:
+/// exactly one is Accepted, the other `NormalisedAcceptedNoop` with zero
+/// effect; every unit conserved over both windows, the chest and the ground.
+#[test]
+fn c3d_strict_same_tick_contest_conserves_every_unit() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-contest-same-tick");
+    let mut hs = start_room_test_server("c3d-contest-same-tick", 0);
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
+    let mut a = join_as(&mut hs, KEY, 17);
+    let mut b = join_as(&mut hs, KEY_B, 18);
+    let cell = place_chest(&mut hs, a.i, &[(0, ItemStack::new_block(crate::block::STONE, 10))]);
+    open_both(&mut hs, [&mut a, &mut b], cell);
+    let before = all_holdings(&hs, &[a.i, b.i], cell);
+    let windows = [server_places(&hs.server.players[a.i]), server_places(&hs.server.players[b.i])];
+    let click = ContainerClick::Withdraw { slot: 0, all: true };
+    let (da, oka) = Joiner::predict(&hs, a.i, &click);
+    let (db, okb) = Joiner::predict(&hs, b.i, &click);
+    let ta = a.send_op(protocol::WireWindowOp::Container(click.clone()), da, oka);
+    let tb = b.send_op(protocol::WireWindowOp::Container(click), db, okb);
+    hs.tick();
+    let fates = [a.row(&mut hs, ta).map(|r| r.1), b.row(&mut hs, tb).map(|r| r.1)];
+    let won = fates.iter().position(|f| *f == Some(ActionFate::Accepted)).expect("one withdrawal wins");
+    assert_eq!(fates[1 - won], Some(ActionFate::NormalisedAcceptedNoop), "the other is the contest's typed fate: {fates:?}");
+    let loser = [a.i, b.i][1 - won];
+    assert_eq!(server_places(&hs.server.players[loser]), windows[1 - won], "the loser's window: zero effect");
+    assert!(chest_slots(&hs, cell)[0].is_none(), "the chest gave its stone up once");
+    assert_eq!(all_holdings(&hs, &[a.i, b.i], cell), before, "the same-tick contest conserves every unit");
+}
+
+/// Run 5 (run-3 review L4) — a deposit contest with the winner's push in
+/// flight: B deposits into the slot it saw empty, which A's deposit filled
+/// a tick earlier (B hasn't applied A's push). Zero effect for B; every
+/// unit, durability included, conserved.
+#[test]
+fn c3d_strict_deposit_contest_with_the_push_in_flight_conserves_every_unit() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-contest-deposit");
+    let mut hs = start_room_test_server("c3d-contest-deposit", 0);
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
+    let mut a = join_as(&mut hs, KEY, 17);
+    let mut b = join_as(&mut hs, KEY_B, 18);
+    hs.server.players[a.i].inventory.set_slot(9, Some(ItemStack::new_block(crate::block::OAK_LOG, 7)));
+    hs.server.players[b.i].inventory.set_slot(9, Some(worn_pickaxe()));
+    // Every chest slot full but the last.
+    let empty = place_chest(&mut hs, a.i, &[]);
+    let slots = chest_slots(&hs, empty).len();
+    let full: Vec<(usize, ItemStack)> = (0..slots - 1).map(|s| (s, ItemStack::new_block(crate::block::DIRT, 64))).collect();
+    let cell = place_chest(&mut hs, a.i, &full);
+    open_both(&mut hs, [&mut a, &mut b], cell);
+    let before = all_holdings(&hs, &[a.i, b.i], cell);
+    let deposit = a.click(&mut hs, ContainerClick::Deposit { slot: 9, all: true });
+    assert_eq!(a.row(&mut hs, deposit).map(|r| r.1), Some(ActionFate::Accepted));
+    assert!(matches!(hs.server.players[b.i].window_events.waiting_events().last(), Some(crate::window_events::WindowEvent::ContainerView(_))), "A's push to B is in flight");
+    let b_window = server_places(&hs.server.players[b.i]);
+    let chest = chest_slots(&hs, cell);
+    let contested = b.click(&mut hs, ContainerClick::Deposit { slot: 9, all: false });
+    let (heard, _) = heard_with_opens(&b.client);
+    assert_eq!(b.row(&mut hs, contested), Some((contested, ActionFate::NormalisedAcceptedNoop)), "the deposit contest's typed fate");
+    assert!(heard.rejects.iter().any(|m| m == StrictTeardown::Unconfirmed.reason()), "the correction follows: {:?}", heard.rejects);
+    assert_eq!(server_places(&hs.server.players[b.i]), b_window, "B keeps its pickaxe: zero effect");
+    assert_eq!(chest_slots(&hs, cell), chest, "the chest holds only A's deposit");
+    assert_eq!(all_holdings(&hs, &[a.i, b.i], cell), before, "the deposit contest conserves every unit and durability");
+}
+
+/// Run 5 (run-3 review L4) — the chest is broken between A's commit and
+/// B's click: B's click finds no container (`Refused`, nothing committed);
+/// what the chest held spilled once; every unit conserved over both
+/// windows and the ground.
+#[test]
+fn c3d_strict_container_broken_mid_contest_commits_nothing_and_conserves() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-contest-broken");
+    let mut hs = start_room_test_server("c3d-contest-broken", 0);
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
+    let mut a = join_as(&mut hs, KEY, 17);
+    let mut b = join_as(&mut hs, KEY_B, 18);
+    let cell = place_chest(&mut hs, a.i, &[(0, ItemStack::new_block(crate::block::STONE, 10)), (1, worn_pickaxe())]);
+    open_both(&mut hs, [&mut a, &mut b], cell);
+    let before = all_holdings(&hs, &[a.i, b.i], cell);
+    let take = a.click(&mut hs, ContainerClick::Withdraw { slot: 0, all: true });
+    assert_eq!(a.row(&mut hs, take).map(|r| r.1), Some(ActionFate::Accepted));
+    assert_eq!(all_holdings(&hs, &[a.i, b.i], cell), before, "A's take conserves");
+    // Broken the way the server breaks one: what it held spills once.
+    let ground_before = ground(&hs);
+    hs.spill_container_on_change((cell[0], cell[1], cell[2]), crate::block::CHEST, crate::block::AIR, true);
+    hs.server.world.set_block(cell[0], cell[1], cell[2], crate::block::AIR);
+    assert_eq!(ground(&hs), ground_before + 1, "the pickaxe spilled once");
+    let b_window = server_places(&hs.server.players[b.i]);
+    let click = ContainerClick::Withdraw { slot: 1, all: true };
+    let (digest, ok) = Joiner::predict(&hs, b.i, &click);
+    let refused = b.op(&mut hs, protocol::WireWindowOp::Container(click), digest, ok);
+    assert_eq!(b.row(&mut hs, refused), Some((refused, ActionFate::Refused)), "no container: Refused");
+    assert_eq!(server_places(&hs.server.players[b.i]), b_window, "B: zero effect");
+    assert_eq!(ground(&hs), ground_before + 1, "nothing spilled twice");
+    assert_eq!(all_holdings(&hs, &[a.i, b.i], cell), before, "every unit and durability conserved over both windows and the ground");
 }

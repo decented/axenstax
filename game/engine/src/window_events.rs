@@ -227,6 +227,11 @@ impl WindowEvents {
     /// A whole-window replacement (join or death sync) is sent and not yet
     /// applied: the window at any earlier boundary is about to be replaced.
     pub fn replace_waiting(&self) -> bool { self.last_replace > self.last_applied }
+    /// C3d run 5 — was a window base `base` (a client's `events_applied`)
+    /// made before the latest whole-window `Replace` (join or death sync)?
+    /// Then what the client predicted on it is overwritten when it applies
+    /// that `Replace`.
+    pub fn predates_replace(&self, base: u32) -> bool { base < self.last_replace }
     /// C3d (run 4) — take the number of a Take a Strict copy applied short
     /// (`apply_front`), if one was; the caller tears the session down.
     pub fn take_strict_short_take(&mut self) -> Option<u32> { self.strict_short_take.take() }

@@ -396,3 +396,41 @@ Coordinator decisions on run 3's departures, as built:
   refuses Strict on a `--no-lend` host (`StrictSelectError::NoLendHost`).
 - **L4 contest interleavings: NOT done this run** (same-tick, push in flight,
   container broken mid-contest) — next run.
+
+## Run 5 (2026-10-10): superseded actions, contest interleavings, review folds
+
+- **Stale-base and dead-body actions are superseded, not breaches**
+  (coordinator decision; run-4 review M1 and LOW-1). In
+  `HostedServer::process_typed_actions`, a non-configuration action from a
+  dead body, or whose base predates the latest whole-window `Replace`
+  (`WindowEvents::predates_replace`: `events_applied < last_replace`, the
+  join or death sync), is completed with the terminal
+  `ActionFate::Superseded` (wire tag 4) and zero external effect, never torn
+  down. It replaces run 4's `SetAutoRefill`-only exemption; configuration
+  (`SetAutoRefill`, `OpenPlayer`, `OpenTable`) stays served while dead or
+  across a waiting `Replace`. A stale base below a `Replace` the overdue
+  valve already applied is superseded too; any other unavailable base is
+  still `FellBehind`. Residual (declared): a client that applied the death
+  sync and then predicts a click while still dead is superseded with no
+  `Replace` left to overwrite its prediction; the honest case is the
+  death-driven container Close (`container_client::tick_shared_container`),
+  whose client half (drop the mirror without a Close in Strict) is pending.
+- **Contest interleavings (run-3 review L4).** Same-tick withdrawals, a
+  deposit contest with the winner's push in flight, and a chest broken
+  between one joiner's commit and the other's click, each with conservation
+  by identity over effective windows, the chest, graves and ground items.
+- **LOW-2.** The server's model of a Strict mirror (opened view, pushes,
+  `seen`) holds a Plan as `PlanData::placeholder()`
+  (`container_window::strip_plan_body`, `ContainerData::without_plan_bodies`);
+  the real container keeps the body. A view that still can't be reserved is
+  `OpenRefusal::TooLarge` (wire tag 4), never a teardown.
+- **LOW-4.** `strict_unsupported_here()` (owning server with local players)
+  is checked at selection and at every Strict admission
+  (`StrictJoinRefusal::NoLendHost`).
+- **Windows (coordinator decision; LOW-3).** The `cfg(windows)` Plan-store
+  write is `save::write_atomic` (file fsync + rename, no directory sync);
+  run 4's `MoveFileExW` FFI is gone. The branch is uncompiled on this host;
+  the directory-sync failure test and its seam are `cfg(unix)`.
+- **Selector.** `select_inventory_mode`, `inventory_mode()` and
+  `StrictSelectError` carry
+  `cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))`.

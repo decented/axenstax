@@ -20,6 +20,10 @@ pub enum StrictJoinRefusal {
     /// The record (or, for an unreadable one, this join's session) cannot
     /// prove what it owes.
     Incomplete(IncompleteCause),
+    /// C3d run 5 (run-4 review LOW-4) — a `--no-lend` host's owning server
+    /// gained a local player after Strict was selected: it mirrors the
+    /// host's copy of the world over every commit, so it can't admit one.
+    NoLendHost,
 }
 
 impl StrictJoinRefusal {
@@ -33,6 +37,7 @@ impl StrictJoinRefusal {
             StrictJoinRefusal::Incomplete(IncompleteCause::LegacyV1) => "This world checks inventories strictly, and your save here is from an older version that didn't record owed items. Ask whoever runs this world about your save.".to_string(),
             StrictJoinRefusal::Incomplete(IncompleteCause::Overflow) => "This world checks inventories strictly, and your save here lost track of some owed items. Ask whoever runs this world about your save.".to_string(),
             StrictJoinRefusal::Incomplete(IncompleteCause::Unreadable) => "This world checks inventories strictly, and your save here couldn't be read. Ask whoever runs this world about your save.".to_string(),
+            StrictJoinRefusal::NoLendHost => "This world checks inventories strictly, but the way it is being hosted can't support that, so it can't let you in. Ask whoever runs this world.".to_string(),
         }
     }
 }
@@ -110,6 +115,10 @@ mod teardown_copy_tests {
             }
             assert!(text.ends_with('.'), "{cause:?}");
         }
+        // C3d run 5 — and the join refusal for a host that can't run Strict.
+        let text = super::StrictJoinRefusal::NoLendHost.reason();
+        assert!(crate::copy_lint::banned_in(&text, crate::copy_lint::BANNED_MONEY_WORDS).is_empty(), "{text}");
+        assert!(!text.contains("lend") && text.ends_with('.'), "{text}");
         // C3d run 4 — the client's own Strict leave reads the same way.
         let text = crate::remote_client::STRICT_STRAY_CHANGE_REASON;
         assert!(crate::copy_lint::banned_in(text, crate::copy_lint::BANNED_MONEY_WORDS).is_empty(), "{text}");

@@ -975,7 +975,27 @@ pub struct DebtApplied {
     pub saturated: bool,
 }
 
+/// C3d run 5 (run-4 review LOW-2) — a Plan in `stack` becomes the body-less
+/// placeholder a joiner's mirror holds (`plan::PlanData::placeholder`; a
+/// Plan digests content-free, so every digest and slot print is unchanged).
+/// For the server's MODEL of that mirror only — never the real container.
+pub fn strip_plan_body(stack: &mut Option<ItemStack>) {
+    if let Some(ItemStack { item: Item::Plan(body), .. }) = stack {
+        *body = crate::plan::PlanData::placeholder();
+    }
+}
+
 impl ContainerData {
+    /// C3d run 5 (LOW-2) — this copy as a joiner's mirror holds it: every
+    /// Plan as its placeholder ([`strip_plan_body`]).
+    pub fn without_plan_bodies(mut self) -> Self {
+        match &mut self {
+            ContainerData::Chest(chest) => chest.slots.iter_mut().for_each(strip_plan_body),
+            ContainerData::Furnace(f) => [&mut f.input, &mut f.fuel, &mut f.output].into_iter().for_each(strip_plan_body),
+        }
+        self
+    }
+
     /// A copy of a container's contents (a chest's, dispenser's or
     /// dropper's slots, or a furnace).
     pub fn of(c: ContainerRef) -> Self {

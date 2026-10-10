@@ -14,7 +14,10 @@ use crate::transport::ClientTransport;
 
 #[path = "remote_client_actions.rs"]
 mod actions;
-pub use actions::{flush_strict_window_ops, STRICT_STRAY_CHANGE_REASON};
+pub use actions::flush_strict_window_ops;
+// Read by the copy lint and the stray-op test only.
+#[cfg(test)]
+pub use actions::STRICT_STRAY_CHANGE_REASON;
 
 /// A present remote player's verified identity, for the inspect view. Built from
 /// the server's `Joined` events. `npub` is the full NIP-19 npub (copyable, lets a

@@ -105,7 +105,7 @@ impl ClientWindow {
 }
 
 /// All 50 places at full fidelity (a Plan by marker, a tool by durability).
-fn places(
+pub(super) fn places(
     inv: &crate::inventory::Inventory,
     armour: &[Option<crate::armour::ArmourItem>; 4],
     cursor: &Option<ItemStack>,

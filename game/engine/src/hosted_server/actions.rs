@@ -70,18 +70,30 @@ impl HostedServer {
             if is_window { *windows += 1; } else { *items += 1; }
             let now = self.server.tick_counter;
             let sp = &mut self.server.players[i];
-            if !sp.window_events.accepts_boundary(packet.action.events_applied) {
+            let base = packet.action.events_applied;
+            // Configuration (`SetAutoRefill`, `OpenPlayer`, `OpenTable`)
+            // touches no contents, and a `Replace` keeps the refill setting
+            // and station on both copies: it stays independent of a waiting
+            // `Replace` and of death (`serve_strict_config`).
+            let config = matches!(&packet.intent, ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. } | protocol::WireWindowOp::OpenPlayer | protocol::WireWindowOp::OpenTable { .. }));
+            // Run 5 (coordinator decision) — a stale base is superseded, not
+            // a breach: one made before a whole-window `Replace` (join or
+            // death sync) its client hadn't applied. Never a future base
+            // (`last_replace <= last_sent`).
+            let stale_base = !config && sp.window_events.predates_replace(base);
+            let boundary_ok = sp.window_events.accepts_boundary(base);
+            if !boundary_ok && !stale_base {
                 return self.pause_typed_action(i, StrictTeardown::FellBehind, "Action names an unavailable window boundary");
             }
-            crate::window_events::apply_through(sp, packet.action.events_applied, now);
+            if boundary_ok { crate::window_events::apply_through(sp, base, now); }
             if !self.strict_events_hold(i) { return; }
-            let sp = &mut self.server.players[i];
-            // Run 4 (run-3 review M1) — the auto-refill setting touches no
-            // contents: accepted as configuration while dead (an honest
-            // toggle is never torn down).
-            let config_only = matches!(&packet.intent, ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. }));
-            if !config_only && (!sp.is_present_and_alive() || sp.window_events.death_replace.is_some()) {
-                return self.refuse_typed_action(i, packet.action);
+            let sp = &self.server.players[i];
+            // ...and so is any non-configuration action from a dead body.
+            // `Superseded`: terminal, zero external effect (no window,
+            // container, projectile, payment or event), never torn down.
+            if !config && (stale_base || !sp.is_present_and_alive()) {
+                if !self.complete_typed_noop(i, packet.action, ActionFate::Superseded) { return; }
+                continue;
             }
             match packet.intent {
                 ActionIntent::CancelledNoop => {

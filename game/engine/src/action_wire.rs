@@ -165,6 +165,22 @@ mod tests {
         assert_ne!(receipt.included_events, receipt.action.events_applied);
     }
 
+    /// C3d run 5 — the fate tags are append-only: `Superseded` is 4, after
+    /// the four the wire already had.
+    #[test]
+    fn c3d_wire_fate_tags_append_superseded_last() {
+        use protocol::{deserialize_header, serialize_packet, PacketType};
+        let action = ActionHeader { session: [7; 16], epoch: 0, life: 0, seq: 1, events_applied: 0 };
+        let fates = [ActionFate::Accepted, ActionFate::Refused, ActionFate::NormalisedAcceptedNoop, ActionFate::CancelledNoop, ActionFate::Superseded];
+        for (tag, fate) in fates.into_iter().enumerate() {
+            let bytes = serialize_packet(PacketType::ActionReceipt, &ActionReceipt { action, fate, included_events: 0 });
+            let (_, payload) = deserialize_header(&bytes).unwrap();
+            // session 16 + epoch 4 + seq 8 + life 4 + events_applied 4, then the fate.
+            assert_eq!(&payload[36..40], &(tag as u32).to_le_bytes(), "{fate:?}");
+            assert_eq!(protocol::safe_deserialize::<ActionReceipt>(payload).unwrap().fate, fate);
+        }
+    }
+
     /// v89 (provisional): the four C3d tags follow OC's v88 layout, which
     /// added no tag (it extended `InventorySync`, 67). Append-only, no
     /// collision, and nothing past 71 decodes.
