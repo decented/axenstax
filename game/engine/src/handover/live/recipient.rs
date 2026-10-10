@@ -100,6 +100,9 @@ pub struct RecipientSession {
     receiver: Option<Receiver>,
     /// L2: when the host was last heard from (consent onwards).
     last_heard: u64,
+    /// P4: when this player consented; the whole operation must reach
+    /// Activated within `source::OPERATION_SECS` of it.
+    consented_at: u64,
     /// L5: the joined session's router lease (UPnP), moved in at consent so
     /// leaving the joined world can't release a mapping this link may use.
     lease: Option<Box<dyn HeldLease>>,
@@ -201,6 +204,7 @@ impl RecipientSession {
             listener: None,
             receiver: None,
             last_heard: now,
+            consented_at: now,
             lease: None,
         })
     }
@@ -231,10 +235,12 @@ impl RecipientSession {
         self.proposal.transfer
     }
 
-    /// Before Ready: drop the import (its Drop removes pre-rename scratch)
-    /// and remove this session's own renamed but inactive checkpoint. After
-    /// Ready the checkpoint is kept (quarantined) for an explicit decision.
-    /// The connection stays with the session for `return_link`.
+    /// P3: before Prepared the import is inert and this session's own: an
+    /// abort drops the import (its Drop removes pre-rename scratch) and
+    /// discards exactly this transfer's marked import, its Ready marker and
+    /// the inert marker (`inert::discard`). From Prepared on nothing is
+    /// deleted (quarantine); Activated is never touched. The connection
+    /// stays with the session for `return_link`.
     pub fn abort(&mut self, why: &'static str) {
         if matches!(self.stage, RecipientStage::Aborted(_)) {
             return;
@@ -243,10 +249,13 @@ impl RecipientSession {
         self.import = None;
         self.listener = None;
         self.socket = None;
-        if self.stage != RecipientStage::Ready
-            && let Some(c) = self.checkpoint.take()
-        {
-            let _ = std::fs::remove_dir_all(c.directory());
+        let inert = self.receiver.as_ref().is_none_or(|r| r.stage() == crate::handover::phase::ReceiverStage::Ready);
+        if inert {
+            self.checkpoint = None;
+            self.receiver = None;
+            // An unmarked import is never touched; a failed discard is left
+            // for the next sweep (the marker still names it).
+            let _ = super::inert::discard(&self.imports, &self.markers, self.transfer());
         }
         self.stage = RecipientStage::Aborted(why);
     }
@@ -319,6 +328,7 @@ impl RecipientSession {
         };
         self.acceptance = acceptance;
         self.last_heard = now;
+        self.consented_at = now;
         self.socket = Some(listen);
         self.link = Some(link);
         self.send(&accept);
@@ -353,6 +363,11 @@ impl RecipientSession {
         // the host (it sends a heartbeat while it packs).
         if now.saturating_sub(self.last_heard) > super::source::STALL_SECS {
             return Err(self.fail(Refusal("The host stopped responding, so the handover was cancelled.")));
+        }
+        // P4: heartbeats keep the stall deadlines fed, so one total deadline
+        // from consent to Activated bounds the whole operation.
+        if !self.gameplay_admitted() && now.saturating_sub(self.consented_at) > super::source::OPERATION_SECS {
+            return Err(self.fail(Refusal(super::copy::TOO_LONG)));
         }
         while let Some(pkt) = self.link.as_ref().and_then(|l| l.try_recv_from_server()) {
             self.last_heard = now;
@@ -467,6 +482,9 @@ impl RecipientSession {
             return Err(Refusal("The world's agreements don't match what you and the host agreed."));
         }
         self.expected = admitted.manifest().stream_length;
+        // P3: marked inert BEFORE any of the import is written.
+        super::inert::mark(&self.imports, p.transfer, admitted.manifest().world)
+            .map_err(|_| Refusal("The world couldn't be stored on this device."))?;
         self.import = Some(Import::new(admitted, &self.imports, now).map_err(|_| Refusal("The world couldn't be stored on this device."))?);
         self.core = Some(core);
         self.manifest = Vec::new();

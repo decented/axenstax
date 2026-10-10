@@ -992,8 +992,92 @@ mod session {
         assert!(p.src.pump(&mut p.hs, p.live, now()).is_err(), "the source hears the Abort after Ready");
         assert!(matches!(p.src.stage(), SourceStage::Aborted(_)));
         assert!(!p.hs.handover_frozen(), "and resumes play");
-        // The recipient keeps its quarantined checkpoint after Ready.
-        assert!(p.dst.as_ref().unwrap().checkpoint().is_some());
+        // P3: Ready is still before Prepared: the inert import is discarded
+        // (directory, Ready marker, inert marker), nothing else is touched.
+        let t = p.src.transfer();
+        let dst = p.dst.as_ref().unwrap();
+        assert!(dst.checkpoint().is_none(), "an aborted inert import was kept");
+        assert_eq!(import_dirs(&p), Vec::<String>::new(), "the import folder was left behind");
+        assert!(markers(&p.dir).read(MarkerKind::Ready, t).unwrap().is_none(), "the Ready marker was left behind");
+        assert!(crate::handover::live::inert::marked(&p.dir.0.join("imports"), t).unwrap().is_none());
+    }
+
+    /// Everything under the recipient's imports folder but inert markers.
+    fn import_dirs(p: &Pair) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(p.dir.0.join("imports"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with("inert-"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// P3: the import is marked inert before its data is written; a session
+    /// that ends without cleaning up (a crash) leaves a marked import that a
+    /// sweep with no live session discards, while a live session's import
+    /// and an unmarked (Prepared/Activated) import are never touched.
+    #[test]
+    fn handover_inert_import_is_marked_and_the_sweep_discards_only_marked_ones() {
+        use crate::handover::live::inert;
+        let mut p = pair("inert");
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 10_000);
+        assert_eq!(p.dst.as_ref().unwrap().stage(), RecipientStage::Ready);
+        let t = p.src.transfer();
+        let imports = p.dir.0.join("imports");
+        assert!(inert::marked(&imports, t).unwrap().is_some(), "the import wasn't marked inert");
+        let kept = imports.join("handover-00-unmarked");
+        std::fs::create_dir_all(kept.join("working")).unwrap();
+        let store = markers(&p.dir);
+        assert_eq!(inert::sweep(&imports, &store, Some(t)).unwrap(), 0, "the live session's import was swept");
+        assert_eq!(import_dirs(&p).len(), 2);
+        // The process "crashes": the session is gone without an abort.
+        drop(p.dst.take());
+        assert_eq!(inert::sweep(&imports, &store, None).unwrap(), 1);
+        assert_eq!(import_dirs(&p), vec!["handover-00-unmarked".to_string()], "only the marked import goes");
+        assert!(store.read(MarkerKind::Ready, t).unwrap().is_none(), "its Ready marker went with it");
+        assert!(inert::marked(&imports, t).unwrap().is_none());
+        // A Prepared marker makes a transfer no longer inert: refused.
+        inert::mark(&imports, [0x33; 16], [0x44; 16]).unwrap();
+        store.persist(MarkerKind::Prepared, [0x33; 16], b"prepared").unwrap();
+        assert!(inert::discard(&imports, &store, [0x33; 16]).is_err(), "a Prepared import was discarded");
+    }
+
+    /// P4: the heartbeat keeps both stall deadlines fed while the pack is
+    /// slow, so only the whole-operation deadline ends it: before Retired
+    /// that is an abort, play resumes on both sides and the recipient's
+    /// connection comes back.
+    #[test]
+    fn handover_whole_operation_deadline_ends_a_heartbeat_fed_handover() {
+        use crate::handover::live::source::OPERATION_SECS;
+        let mut p = pair("total");
+        consent(&mut p);
+        let (_reached, release) = p.src.hold_pack();
+        start_offer(&mut p, &seat0());
+        let t0 = now();
+        let mut t = t0;
+        while t + 30 <= t0 + OPERATION_SECS {
+            t += 30;
+            p.src.pump(&mut p.hs, p.live, t).expect("the source gave up before the total deadline");
+            p.dst.as_mut().unwrap().pump(t).expect("the recipient gave up before the total deadline");
+        }
+        assert_eq!(p.src.stage(), SourceStage::Packing, "still held by the slow pack");
+        let late = t0 + OPERATION_SECS + 2;
+        let r = p.src.pump(&mut p.hs, p.live, late).unwrap_err();
+        assert_eq!(r.0, crate::handover::live::copy::TOO_LONG_SOURCE);
+        assert!(!p.hs.handover_frozen(), "the source stayed frozen past the total deadline");
+        let dst = p.dst.as_mut().unwrap();
+        let r = dst.pump(late).unwrap_err();
+        assert!(
+            r.0 == crate::handover::live::copy::TOO_LONG || r.0 == "The host cancelled the handover.",
+            "unexpected: {}",
+            r.0
+        );
+        assert!(dst.return_link().is_some(), "the joined connection comes back");
+        drop(release);
+        p.src.join_pack_worker();
     }
 
     #[test]

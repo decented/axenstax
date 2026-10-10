@@ -163,6 +163,22 @@ impl MarkerStore {
             .map_err(|_| Error::UncertainDurability)?;
         Ok(())
     }
+    /// P3: an inert import's Ready marker goes with the import it describes
+    /// (pre-Prepared abort, timeout or sweep). Refused once a Prepared or
+    /// Activated marker exists for the same transfer: those are never
+    /// discarded. Missing is fine (idempotent).
+    pub fn discard_inert_ready(&self, id: Id) -> Result<()> {
+        if read_bounded(&self.path(MarkerKind::Prepared, id))?.is_some()
+            || read_bounded(&self.path(MarkerKind::Activated, id))?.is_some()
+        {
+            return Err(Error::State("marker is no longer inert"));
+        }
+        match fs::remove_file(self.path(MarkerKind::Ready, id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(Error::Io),
+        }
+    }
     fn check_capacity(&self, kind: MarkerKind) -> Result<()> {
         let mut total = 0usize;
         let mut same = 0usize;

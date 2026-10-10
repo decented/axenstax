@@ -5468,3 +5468,23 @@ times out a silent recipient at `STALL_SECS` (60 s) while streaming and after
 Ready (`ReadyVerified`, until Prepared advances it); the recipient times out a
 silent host at the same `STALL_SECS` in Accepted, Receiving and Ready. Before
 Retired a timeout is an abort: play resumes on both sides.
+
+Whole-operation deadline (P4): heartbeats keep the per-phase stall timers fed,
+so both sides also hold one total deadline, `OPERATION_SECS` = 15 minutes,
+from the recipient's consent (the source: the verified Accept that froze it)
+to the recipient's Activated. Hitting it before Retired is an abort that
+restores play on both sides (`copy::TOO_LONG*`); after Retired only exact
+retry of the same Committed bytes or quarantine.
+
+Inert imports (P3): before writing any of the import the recipient durably
+writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,
+rename, directory sync) binding the transfer and snapshot world; Prepared
+clears it. An abort or timeout before Prepared (including at Ready) removes
+exactly that transfer's import: its `handover-<world>-<transfer>` directory,
+any `.handover-receive-<transfer>-*` scratch, its Ready marker
+(`MarkerStore::discard_inert_ready`, refused once a Prepared or Activated
+marker exists), then the inert marker. After Prepared a failure quarantines
+and deletes nothing; nothing Activated is ever deleted. A bounded sweep
+(`live::inert::sweep`, at most 256 entries) discards marked imports with no
+live session, at native start-up and before a new recipient session; an
+unmarked directory is never touched.

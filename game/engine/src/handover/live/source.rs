@@ -60,6 +60,11 @@ pub const STALL_SECS: u64 = 60;
 /// While the pack runs on its worker the source tells the recipient it is
 /// still there (the recipient's own stall deadline is `STALL_SECS`).
 pub const HEARTBEAT_SECS: u64 = 5;
+/// P4: the whole operation, from the recipient's consent to its Activated,
+/// on both sides. Per-phase stall timers plus heartbeats could otherwise
+/// hold a player parked indefinitely. Before Retired hitting it is an
+/// abort that restores play; after Retired only exact retry or quarantine.
+pub const OPERATION_SECS: u64 = 15 * 60;
 
 /// What a pack worker hands back: its generation, the transfer it packed
 /// for, and the packed copy (whose scratch is removed when it is dropped).
@@ -110,6 +115,8 @@ pub struct SourceSession {
     _lease: std::sync::Arc<()>,
     last_heard: u64,
     last_beat: u64,
+    /// P4: when the recipient's verified consent froze this world.
+    consented_at: Option<u64>,
     /// The pack worker's generation fence: only a result carrying this
     /// generation and transfer, arriving while `Packing`, is ever used.
     pack_generation: u64,
@@ -152,6 +159,7 @@ impl SourceSession {
             _lease: lease,
             last_heard: now,
             last_beat: now,
+            consented_at: None,
             pack_generation: 0,
             pack_rx: None,
             pack_cancel: Default::default(),
@@ -284,6 +292,9 @@ impl SourceSession {
         if stalled {
             return Err(self.fail(hs, Refusal("The other player stopped responding. Play has resumed.")));
         }
+        if self.consented_at.is_some_and(|t| now.saturating_sub(t) > OPERATION_SECS) {
+            return Err(self.fail(hs, Refusal(super::copy::TOO_LONG_SOURCE)));
+        }
         if self.stage == SourceStage::Packing && now.saturating_sub(self.last_beat) >= HEARTBEAT_SECS {
             self.last_beat = now;
             if let Err(r) = self.send(hs, &Frame::Notice { transfer: self.transfer, paused: true }) {
@@ -398,6 +409,7 @@ impl SourceSession {
                 self.recipient_runtime = Some(runtime);
                 self.recipient_challenge = challenge;
                 self.acceptance = Some(acceptance);
+                self.consented_at = Some(now);
                 self.stage = SourceStage::Frozen;
                 Ok(())
             }

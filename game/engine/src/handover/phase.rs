@@ -446,6 +446,9 @@ impl Receiver {
     pub fn gameplay_admitted(&self) -> bool {
         self.stage == ReceiverStage::Activated
     }
+    pub fn stage(&self) -> ReceiverStage {
+        self.stage
+    }
     pub fn abort(&mut self) -> Result<bool> {
         if self.stage == ReceiverStage::Activated {
             return Ok(false);

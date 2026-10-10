@@ -94,3 +94,7 @@ pub fn host_declined(reason: super::wire::DeclineReason) -> &'static str {
     }
 }
 pub const RESUME_FAILED: &str = "The handover was cancelled, but the connection couldn't carry on. Join the world again.";
+
+/// P4: the whole handover ran past its 15-minute limit.
+pub const TOO_LONG: &str = "The handover took longer than 15 minutes, so it was cancelled.";
+pub const TOO_LONG_SOURCE: &str = "The handover took longer than 15 minutes, so it was cancelled. Play has resumed.";

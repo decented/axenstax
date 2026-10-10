@@ -45,8 +45,10 @@ impl LatchedListener {
                         tokio::select! {
                             incoming = ep.accept() => match incoming {
                                 Some(i) => {
-                                    i.refuse();
+                                    // Counted before the refusal is sent, so a
+                                    // client that sees it also sees the count.
                                     count.fetch_add(1, Ordering::Relaxed);
+                                    i.refuse();
                                 }
                                 None => break,
                             },

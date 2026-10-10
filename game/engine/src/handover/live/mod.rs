@@ -3,6 +3,7 @@
 //! and the recipient's inactive import, latched listener and Ready.
 pub mod capture;
 pub mod eligibility;
+pub mod inert;
 pub mod listener;
 pub mod recipient;
 pub mod source;

@@ -120,6 +120,18 @@ fn recipient_env() -> Result<RecipientEnv, String> {
     })
 }
 
+/// P3: discard every marked inert import under `<data>/handover/imports`
+/// except `live`'s (bounded; at startup and before a new recipient session).
+pub(crate) fn sweep_inert_imports(live: Option<Id>) {
+    let (Ok(imports), Ok(markers)) = (handover_dir("imports"), handover_dir("markers")) else { return };
+    let Ok(markers) = MarkerStore::new(markers) else { return };
+    match crate::handover::live::inert::sweep(&imports, &markers, live) {
+        Ok(0) => {}
+        Ok(n) => log::info!("handover: discarded {n} inert import(s)"),
+        Err(e) => log::warn!("handover: inert import sweep: {e}"),
+    }
+}
+
 /// The handover window: the consent screen, the status of a running
 /// handover with its Cancel, or the paused banner. Returns the click.
 pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused: bool, interactable: bool, armed: bool) -> Option<UiAction> {
@@ -396,6 +408,8 @@ impl crate::GameState {
             self.handover_toast(copy::NOT_READY_HERE);
             return;
         };
+        // P3: no session is live here (a running one answers Busy above).
+        let _ = crate::handover::live::inert::sweep(&env.imports, &env.markers, None);
         match RecipientSession::propose(payload, host, env.identity, env.imports, env.markers, now) {
             Ok(s) => {
                 self.handover = Some(Handover::Recipient(Box::new(s)));

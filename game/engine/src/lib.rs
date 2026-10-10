@@ -2967,6 +2967,10 @@ pub fn run() {
 /// `data_dir::init_at`). One function so desktop and Android cannot drift.
 #[cfg(not(target_arch = "wasm32"))]
 fn native_boot_services() {
+    // P3: the bounded startup sweep of inert handover imports (no handover
+    // session exists yet in this process).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_game::sweep_inert_imports(None);
     let identity = signet::native_signer::init_identity();
     match identity.npub() {
         Some(npub) => log::info!("Signed in as {npub} (cached identity, offline)"),

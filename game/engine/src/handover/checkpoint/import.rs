@@ -113,7 +113,12 @@ impl Import {
         }
         let final_path = destination(parent, &admitted);
         collision(&final_path)?;
-        let directory = files::owned_dir(parent, "handover-receive")?;
+        // Named by transfer so the inert-import sweep (live::inert) can find a
+        // crash-left scratch of exactly that transfer and nothing else.
+        let directory = files::owned_dir(
+            parent,
+            &format!("handover-receive-{}", hex::encode(admitted.manifest().transfer)),
+        )?;
         let file = match files::new_file(&directory.join("archive.tar.gz")) {
             Ok(f) => f,
             Err(e) => {
