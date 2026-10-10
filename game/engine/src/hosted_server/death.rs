@@ -121,9 +121,10 @@ impl HostedServer {
         let dropped = over + unsafe_on_wire;
         if dropped > 0 {
             // A validated save holds at most the bound, and a death or a
-            // fresh joiner none; only an item no window holds (a piece at
-            // durability 0) fails the wire. Either way the session can no
-            // longer prove its debt.
+            // fresh joiner none; what can fail the wire is an owed item it
+            // can't carry (a record's tool or armour piece at durability 0 or
+            // above its maximum, or an unregistered block). Either way the
+            // session can no longer prove its debt (`Overflow`).
             log::warn!(
                 "Inventory sync for {}: {dropped} correction-debt entries left out (past the carried bound, \
                  or not decodable by the client)",

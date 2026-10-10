@@ -2728,7 +2728,7 @@ pub struct ServerAnnouncePacket {
 /// - v88 (2026-10-09, OC): [`InventorySyncPacket`] appends `owed` (after
 ///   `slots`): the correction debt the whole-window replacement carries, so a
 ///   joiner's unpaid correction debt survives a reconnect on both copies
-///   (empty after a death). Provisional until merged.
+///   (empty after a death).
 pub const PROTOCOL_VERSION: u32 = 88;
 
 /// The `protocol_version` of a JoinRequest payload that doesn't decode as this

@@ -8637,6 +8637,60 @@ mod tests {
         assert!(client_debt.is_empty(), "and the client's");
     }
 
+    /// OC review M1 — a record can owe an item the wire can't carry (a tool
+    /// at durability 0; the save format holds it exactly, no window clamps
+    /// it on restore). The real join leaves it out of BOTH copies (the
+    /// server's `Replace` and the `InventorySync`) while keeping the entry the
+    /// wire does carry, and marks the session `Incomplete(Overflow)`
+    /// (`send_inventory_sync`), which every later save then records.
+    #[test]
+    fn oc_wire_unsafe_owed_item_is_left_out_of_both_copies_and_marks_overflow() {
+        let _g = crate::save::WorldsRootGuard::new("oc-wire-unsafe");
+        let mut hs = start_room_test_server("oc-wire-unsafe", 0);
+        let first = hs.attach_test_remote_with_binding(Some([17; 32]));
+        send_signed_join(&first, [66; 32], Some([17; 32]));
+        hs.tick();
+        let i = hs.server.players.len() - 1;
+        let stone = crate::item::Item::Block(crate::block::STONE);
+        let mut broken = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Iron);
+        broken.durability = 0;
+        let broken = crate::item::Item::Tool(broken);
+        // The first session owes both (the debt as a capture would write it).
+        hs.server.players[i].window_events.debt =
+            crate::container_window::CorrectionDebt::from_entries(vec![(broken.clone(), 3), (stone.clone(), 2)]).unwrap();
+        assert_eq!(hs.server.players[i].obligations.get(), crate::joiner_save::ObligationHistory::Complete);
+        while first.try_recv_from_server().is_some() {}
+        // Reconnect: the record holds both; the join's sync can send one.
+        let second = hs.attach_test_remote_with_binding(Some([34; 32]));
+        send_signed_join(&second, [66; 32], Some([34; 32]));
+        hs.tick();
+        let j = hs.server.players.len() - 1;
+        let syncs: Vec<protocol::InventorySyncPacket> = oc_received(&second, protocol::PacketType::InventorySync);
+        assert_eq!(syncs.len(), 1, "the join sync");
+        let registry = crate::block::BlockRegistry::new();
+        let sent = crate::container_window::CorrectionDebt::from_wire(&syncs[0].owed, &registry).unwrap();
+        assert_eq!(sent.entries(), &[(stone.clone(), 2)][..], "the packet carries only the entry the wire can");
+        crate::window_events::apply_through(&mut hs.server.players[j], syncs[0].window_event, hs.server.tick_counter);
+        assert_eq!(
+            hs.server.players[j].window_events.debt.entries(),
+            &[(stone, 2)][..],
+            "the server copy dropped the same entry (both copies agree)"
+        );
+        assert_eq!(hs.server.players[j].window_events.debt.owed(&broken), 0);
+        assert_eq!(
+            hs.server.players[j].obligations.get(),
+            crate::joiner_save::ObligationHistory::Incomplete(crate::joiner_save::IncompleteCause::Overflow),
+            "an owed item that cannot be carried was dropped: the session can no longer prove its debt"
+        );
+        assert!(!hs.server.players[j].obligations_proven_zero());
+        // And the record the session writes next says so.
+        let saved = crate::joiner_save::JoinerSave::capture(&hs.server.players[j], hs.server.run_id);
+        assert_eq!(
+            saved.history(),
+            crate::joiner_save::ObligationHistory::Incomplete(crate::joiner_save::IncompleteCause::Overflow)
+        );
+    }
+
     #[test]
     fn sidecar_saved_empty_testlab_window_syncs_without_a_second_kit() {
         use crate::transport::ClientTransport as _;

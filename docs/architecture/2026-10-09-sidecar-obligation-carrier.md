@@ -1,6 +1,6 @@
 # Sidecar obligation carrier (OC) — as built
 
-Status: BUILT 2026-10-09, protocol v88 (provisional until merged), joiner save v2.
+Status: BUILT 2026-10-09, protocol v88, joiner save v2.
 Lane: OC (C3d Decision 10's stop). Spec: Spec 04 §4.2i "Obligation carrier",
 the `InventorySync` row of the packet table, and the v88 version-history entry.
 
@@ -73,8 +73,11 @@ as a free item. OC carries the debt across the reconnect.
      A1). Its saves stay refused, as before.
    - **`Overflow`:** the server copy's live debt passes 256 entries, or its
      units saturate. This is checked after each real apply: `apply_front`'s
-     correction arm and `apply_own_now` (A2, A4). A capture also writes
-     `Overflow` whenever its own fold passes 256 entries or saturates.
+     correction arm and `apply_own_now` (A2, A4). It also covers "an owed item
+     that cannot be carried was dropped": the join's sync leaves out an entry
+     the wire can't carry (see item 7), and marks the session. A capture marks
+     only its own record: it writes `Overflow` into that record whenever its
+     own fold passes 256 entries or saturates, and never marks the session.
 
    Every capture writes the session's history, so a session that began
    `Incomplete` writes `Incomplete` at every capture.
@@ -115,10 +118,18 @@ as a free item. OC carries the debt across the reconnect.
      every item a window holds: every registered block, every material, and
      every tool and armour kind at durability 1 to its maximum.
 
-   A tool or armour piece at durability 0, or above its maximum, does not
-   round-trip the wire. No window holds one, because wear removes a broken
-   piece. The server leaves such an entry out (`wire_safe`) and marks the
-   session `Overflow`.
+   A tool or armour piece at durability 0, or above its maximum, and a block
+   id the registry doesn't know, do not round-trip the wire. A saved record
+   can hold one: capture never runs `wire_safe`, and
+   `save::restore_inventory` sets a saved durability raw (no clamp on the
+   load path), so a durability retune or a hand-edited record can produce
+   one. Wear removes a piece at durability 0, and the wire decode clamps to
+   the maximum on its way in, but neither stops a record from holding one.
+   At join the server leaves such an entry out of both copies (`wire_safe`)
+   and marks the session `Overflow`. This is flagged erasure, not desync:
+   both copies agree, and every later record and predicate reads
+   `Incomplete`. The path is pinned by
+   `oc_wire_unsafe_owed_item_is_left_out_of_both_copies_and_marks_overflow`.
 
    The client refuses the whole Sync as a protocol error (amendment A6) if
    it can't read the owed list whole. It applies neither the window nor the
@@ -179,8 +190,9 @@ The 256 cap stands.
 
 - **Two item encodings (item 6).** The save uses `SavedSlot` and the wire uses
   `WireStack`. Each is an existing encoding and each is exact for what it
-  carries. The wire is not exact at durability 0 or above maximum, which no
-  window holds.
+  carries. The wire is not exact at durability 0 or above maximum, or for an
+  unregistered block; a record can hold such an item, and the join leaves it
+  out and marks `Overflow` (item 7).
 - **A fifth, canonical-form rule.** On top of the four bounds, an owed item must
   be exactly one unit, on disk and on the wire. This keeps wire equality the
   same as item equality, and keeps units out of the `u8` count.

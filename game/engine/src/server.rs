@@ -255,7 +255,11 @@ pub struct ServerPlayer {
     /// OC — whether this session's correction debt is fully known
     /// (`joiner_save::ObligationHistory`): set at join from the joiner's
     /// save (`Complete` with none, and for a guest), sticky once
-    /// `Incomplete` (a v1 save, an overflowing capture). Fresh per attach.
+    /// `Incomplete`: marked at join (a v1 save: `LegacyV1`; an unreadable
+    /// save: `Unreadable`; a join sync that left an owed entry out:
+    /// `Overflow`) and at the live server-copy apply sites (a debt past the
+    /// carried bound: `Overflow`). A capture marks only its own record, never
+    /// the session. Fresh per attach.
     pub obligations: crate::joiner_save::SessionObligations,
     /// C3b-1 — the cell of the real container (chest, dispenser, dropper,
     /// furnace) this joiner has open, set when the server opens it on

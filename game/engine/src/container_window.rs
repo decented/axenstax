@@ -875,8 +875,9 @@ impl CorrectionDebt {
     /// OC — the entries an `InventorySync` can carry: each item that
     /// round-trips exactly through [`Self::to_wire`] and the client's
     /// [`Self::from_wire`] on `registry` (a tool or armour piece at durability
-    /// 0 or above its maximum, which no window holds, doesn't), and how many
-    /// it leaves out.
+    /// 0 or above its maximum, or an unregistered block, doesn't: a saved
+    /// record can hold one, because `save::restore_inventory` sets a saved
+    /// durability raw and nothing clamps it), and how many it leaves out.
     pub fn wire_safe(&self, registry: &crate::block::BlockRegistry) -> (CorrectionDebt, usize) {
         let mut owed = Vec::with_capacity(self.owed.len());
         let mut dropped = 0;
