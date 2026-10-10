@@ -51,6 +51,8 @@ impl RemoteClient {
     }
 
     pub fn applied_window_boundary(&self) -> u32 { self.events_applied }
+    /// C3d run 6 — a Respawn this client sent that the server hasn't answered.
+    pub fn respawn_unanswered(&self) -> bool { self.respawn_resend_from.is_some() }
     /// Must succeed BEFORE the caller changes holdings, world or local ECS.
     /// Retains the complete packet; sender/resubmission never allocates an id.
     pub fn reserve_action(&mut self, intent: crate::action_wire::ActionIntent, recipe: Box<[u8]>, cells: Box<[[i32; 3]]>) -> Result<crate::action_identity::ActionHeader, String> {

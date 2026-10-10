@@ -92,8 +92,10 @@ impl HostedServer {
         // is staged independently of a waiting join/death replacement: the
         // client's window at this boundary is about to be replaced wholesale,
         // so its contents digest is not compared (no Replacement uncertainty).
-        let replace_waiting = self.server.players[i].window_events.replace_waiting();
-        if !replace_waiting && raw.digest_with(station, None) != op.digest {
+        // Run 6 (run-5 review LOW-2): skipped exactly for an op made before
+        // the latest `Replace`, not whenever one waits.
+        let stale = self.server.players[i].window_events.predates_replace(action.events_applied);
+        if !stale && raw.digest_with(station, None) != op.digest {
             self.refuse_typed_action(i, action);
             return false;
         }

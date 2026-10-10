@@ -88,19 +88,31 @@ impl HostedServer {
             // a breach: one made before a whole-window `Replace` (join or
             // death sync) its client hadn't applied. Never a future base
             // (`last_replace <= last_sent`).
-            let stale_base = !config && sp.window_events.predates_replace(base);
+            // Run 6 (run-5 review LOW-2) — configuration too: a config op
+            // made before the `Replace` is served on the server's current
+            // copy without applying through its base, and without the
+            // contents digest (`serve_strict_config`).
+            let stale_base = sp.window_events.predates_replace(base);
             let boundary_ok = sp.window_events.accepts_boundary(base);
             if !boundary_ok && !stale_base {
                 return self.pause_typed_action(i, StrictTeardown::FellBehind, "Action names an unavailable window boundary");
             }
-            if boundary_ok { crate::window_events::apply_through(sp, base, now); }
+            if boundary_ok && !(config && stale_base) { crate::window_events::apply_through(sp, base, now); }
             if !self.strict_events_hold(i) { return; }
             let sp = &self.server.players[i];
             // ...and so is any non-configuration action from a dead body.
             // `Superseded`: terminal, zero external effect (no window,
             // container, projectile, payment or event), never torn down.
+            //
+            // Run 6 (coordinator rule, run-5 review M1): every `Superseded`
+            // comes with an authoritative correction. A stale base's is the
+            // `Replace` it predates; a dead body's on a current base (after
+            // the death sync) gets one fresh whole-window correction
+            // `Replace`, at most one outstanding: actions based before it
+            // are stale and supersede without another.
             if !config && (stale_base || !sp.is_present_and_alive()) {
                 if !self.complete_typed_noop(i, packet.action, ActionFate::Superseded) { return; }
+                if !stale_base { self.queue_correction_replace(i); }
                 continue;
             }
             match packet.intent {
@@ -124,6 +136,16 @@ impl HostedServer {
                 _ => return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed mutation handler is awaiting authoritative integration"),
             }
         }
+    }
+    /// Run 6 — one whole-window correction `Replace` (window, station, lock
+    /// mask, debt), re-arming the death/join `Replace` path; none while one
+    /// is still unacknowledged.
+    pub(super) fn queue_correction_replace(&mut self, i: usize) {
+        let sp = &self.server.players[i];
+        if sp.window_events.replace_waiting() { return; }
+        let fold = crate::window_events::effective_window_and_debt(sp);
+        let n = self.send_inventory_sync(i, fold.window, fold.debt);
+        self.server.players[i].window_events.death_replace = Some(n);
     }
     pub(super) fn prepare_typed_result(&mut self, i: usize, action: ActionHeader, fate: ActionFate, included_events: u32) -> Option<crate::action_results::PreparedResult> {
         let receipt = ActionReceipt { action, fate, included_events };

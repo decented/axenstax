@@ -22,6 +22,24 @@ pub fn packet(
         window_event,
         slots: ats.map(|at| (at, slots.wire(at).unwrap())).collect(),
         owed: debt.to_wire(),
+        station: None,
+        locks: w.inv.locked_indices().iter().fold(0u64, |m, &i| m | (1u64 << i)),
+    }
+}
+
+/// C3d run 6 — the station a replacement carries, as the window sees it.
+pub fn station(pkt: &InventorySyncPacket) -> crate::window::Station {
+    match pkt.station {
+        Some(cell) => crate::window::Station::Table { cell },
+        None => crate::window::Station::Player,
+    }
+}
+
+/// C3d run 6 — the station's wire form ([`InventorySyncPacket::station`]).
+pub fn station_wire(station: crate::window::Station) -> Option<[i32; 3]> {
+    match station {
+        crate::window::Station::Table { cell } => Some(cell),
+        crate::window::Station::Player => None,
     }
 }
 /// Apply a whole-window replacement to the client's window `w`, and install
@@ -38,6 +56,7 @@ pub fn apply(
     debt: &mut crate::container_window::CorrectionDebt,
 ) -> Result<(), String> {
     let carried = crate::container_window::CorrectionDebt::from_wire(&pkt.owed, reg)?;
+    if pkt.locks >> 36 != 0 { return Err("Inventory sync locks a slot that doesn't exist".into()); }
     let predicted_plans = uses.retire_for_replace();
     let old = crate::container_window::PlayerSlots::of(w.inv, w.armour, w.cursor, w.grid);
     let plans: Vec<_> = (0..36)
@@ -107,6 +126,9 @@ pub fn apply(
         }
     }
     *debt = carried;
+    // C3d run 6 — the lock mask is the replacement's (the digest covers it).
+    let locked: Vec<u32> = (0..36u32).filter(|i| pkt.locks & (1u64 << i) != 0).collect();
+    w.inv.set_locked_from(&locked);
     Ok(())
 }
 
@@ -123,6 +145,7 @@ mod tests {
             grid: Default::default(),
         };
         crate::starter_kit::grant_fresh_kit(&mut w.inv, "testlab", false, false);
+        w.inv.toggle_lock(5);
         let packet = packet(&w, &Default::default(), 1);
         assert_eq!(packet.slots.len(), 50);
         let mut inv = Inventory::new();
@@ -155,8 +178,8 @@ mod tests {
             &mut crate::use_edits::SentUses::default(),
             &mut Default::default(),
         ).unwrap();
-        assert!(!inv.auto_refill);
-        assert!(inv.is_locked(3));
+        assert!(!inv.auto_refill, "auto-refill stays the client's own");
+        assert!(!inv.is_locked(3) && inv.is_locked(5), "C3d run 6: the lock mask is the replacement's");
         let original = (0..36)
             .find_map(|at| {
                 w.inv.slot(at).and_then(|s| {

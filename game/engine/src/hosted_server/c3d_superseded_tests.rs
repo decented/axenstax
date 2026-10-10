@@ -114,6 +114,10 @@ fn c3d_strict_death_with_a_chest_open_supersedes_the_close_in_flight() {
     assert_superseded(&mut hs, &j, close, "Close from a dead body");
     assert_eq!(server_places(&hs.server.players[j.i]), after_sync, "no window change");
     assert_eq!(all_holdings(&hs, &[j.i], cell), before, "still conserved");
+    // Run 6 (coordinator rule): a dead body's action on a current base gets
+    // one correction `Replace`; the client applies it.
+    assert!(hs.server.players[j.i].window_events.replace_waiting(), "a correction Replace follows");
+    j.apply_all(&mut hs);
 
     // Respawn; the next action is served normally.
     hs.server.players[j.i].dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;

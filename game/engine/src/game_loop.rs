@@ -21321,6 +21321,7 @@ impl super::GameState {
         // the body's eye). The grid goes back as on any close.
         for pidx in 0..self.players.len() {
             if self.players[pidx].crafting_ui.open
+                && !(pidx == 0 && self.strict_window_frozen())
                 && let Some(cell) = self.players[pidx].crafting_ui.table
                 && !crate::window::table_in_reach(
                     self.world.get_block(cell[0], cell[1], cell[2]),
@@ -23171,6 +23172,7 @@ impl super::GameState {
                         armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item,
                         grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses,
                         &mut self.window_inbox.debt);
+                    if applied.is_ok() { p.crafting_ui.adopt_station(crate::inventory_sync::station(&pkt)); }
                     p.crafting_ui.update_result();
                     // An owed list this client can't decode whole is a
                     // protocol error (A6): nothing was applied; leave.

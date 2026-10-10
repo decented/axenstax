@@ -901,6 +901,8 @@ mod tests {
                 item_kind: crate::protocol::item_kind::BLOCK, item_id: u16::MAX, count: 1,
                 full_item: crate::protocol::WireItem::None,
             }, 1)],
+            station: None,
+            locks: 0,
         };
         hg.state.window_inbox.add(vec![crate::remote_client::RequestOutcome::Sync(bad)], Vec::new(), Vec::new());
         hg.state.apply_window_inbox();

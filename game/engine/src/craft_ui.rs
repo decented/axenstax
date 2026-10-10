@@ -406,6 +406,17 @@ impl CraftingUi {
         all_placed
     }
 
+    /// C3d run 6 — adopt the station a whole-window replacement carries: a
+    /// table screen the replaced window no longer has closes locally (its
+    /// grid and cursor were already replaced), and no `Close` is sent.
+    pub fn adopt_station(&mut self, station: Station) {
+        match station {
+            Station::Table { cell } => self.table = Some(cell),
+            Station::Player if self.table.is_some() && self.open => self.finish_close(),
+            Station::Player => self.table = None,
+        }
+    }
+
     fn finish_close(&mut self) {
             self.open = false;
             // The station goes with the screen, as the server's does

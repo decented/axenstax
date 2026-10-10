@@ -410,11 +410,13 @@ Coordinator decisions on run 3's departures, as built:
   (`SetAutoRefill`, `OpenPlayer`, `OpenTable`) stays served while dead or
   across a waiting `Replace`. A stale base below a `Replace` the overdue
   valve already applied is superseded too; any other unavailable base is
-  still `FellBehind`. Residual (declared): a client that applied the death
-  sync and then predicts a click while still dead is superseded with no
-  `Replace` left to overwrite its prediction; the honest case is the
-  death-driven container Close (`container_client::tick_shared_container`),
-  whose client half (drop the mirror without a Close in Strict) is pending.
+  still `FellBehind`. Residual (declared in run 5, corrected by the run-5
+  review and closed in run 6): a client that applied the death sync and then
+  predicts while still dead was superseded with no `Replace` left to
+  overwrite its prediction. The death-driven container Close named here is
+  harmless (container clicks never touch cursor, grid or station); the real
+  cases were Esc on the death screen with a crafting screen open and an
+  early Respawn with a table screen open (the force-close). See run 6.
 - **Contest interleavings (run-3 review L4).** Same-tick withdrawals, a
   deposit contest with the winner's push in flight, and a chest broken
   between one joiner's commit and the other's click, each with conservation
@@ -477,3 +479,28 @@ Coordinator decisions on run 3's departures, as built:
   a Strict client's edits still ride its movement packet and fail closed. The
   client half reserves an Edit before predicting, as a click does; its receipt
   retires at the current boundary (a predicted edit numbers no event).
+
+## Run 6 — every `Superseded` is corrected (coordinator rule after the run-5 review)
+
+- **Rule.** A superseded action whose base predates the latest `Replace` is
+  corrected by that `Replace`. A dead body's action on a current base gets
+  one fresh whole-window correction `Replace` (`queue_correction_replace`,
+  re-arming the death/join path); at most one is outstanding, so actions
+  based before it are stale and supersede without another.
+- **Every `Replace` carries the station and the lock mask** (`InventorySync`
+  `station`, `locks`, v89). The server's copy installs the lock mask when it
+  applies the `Replace`; the obligation fold takes the `Replace`'s locks and
+  the raw copy's auto-refill (one source each, run-4 Nit). The client installs
+  the lock mask and adopts the station (`CraftingUi::adopt_station`): a table
+  screen the window no longer has closes locally, with no `Close` sent.
+- **Client gate (flicker only).** In Strict, while the body is dead or a
+  Respawn is unanswered (`GameState::strict_window_frozen`), Esc's
+  `CloseCraft` and the table force-close send nothing. Not covered by an
+  automated test (the GPU harness could drive it); the server rule is the
+  guarantee and is tested.
+- **Configuration at a stale base (run-5 LOW-2).** `stale_base` is computed
+  for configuration ops too: one made before the latest `Replace` is served on
+  the current copy without `apply_through`, and its digest is skipped exactly
+  when its base predates the latest `Replace`.
+- **Tests** (`hosted_server/c3d_correction_tests.rs`) model the client's window
+  separately (shared click rule, `inventory_sync::apply`, `adopt_station`).

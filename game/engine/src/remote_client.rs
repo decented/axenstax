@@ -3885,7 +3885,7 @@ mod tests {
         let sync = |owed: Vec<(protocol::WireStack, u32)>| {
             protocol::serialize_packet(
                 PacketType::InventorySync,
-                &protocol::InventorySyncPacket { window_event: 1, slots: Vec::new(), owed },
+                &protocol::InventorySyncPacket { window_event: 1, slots: Vec::new(), owed, station: None, locks: 0 },
             )
         };
         let (srv, client) = channel_pair();

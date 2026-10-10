@@ -5,6 +5,14 @@ impl GameState {
     fn strict_window_connection(&self) -> bool {
         self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict)
     }
+    /// C3d run 6 — a Strict joiner whose body is dead, or whose Respawn is
+    /// still unanswered: Esc's `CloseCraft` and the table force-close send
+    /// nothing; the screen stays logically open until the body lives (the
+    /// server's correction `Replace` is the guarantee; this avoids flicker).
+    pub(crate) fn strict_window_frozen(&self) -> bool {
+        self.strict_window_connection()
+            && (self.players[0].is_dead() || self.remote_client.as_ref().is_some_and(|r| r.respawn_unanswered()))
+    }
     fn window_action_failed(&mut self, error: String) {
         log::warn!("Joined window action could not be retained: {error}");
         self.toast = Some(("Inventory action is waiting; try again.".into(), web_time::Instant::now() + web_time::Duration::from_secs(2)));

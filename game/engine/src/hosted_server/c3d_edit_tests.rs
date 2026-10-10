@@ -16,7 +16,7 @@ const ABOVE: (i32, i32, i32) = (41, 80, 40);
 
 /// A Strict rig whose joiner stands on a stone floor at (40.5, 80, 40.5),
 /// its column loaded, with no terrain streaming and no mobs.
-fn edit_rig(tag: &str) -> Rig {
+pub(super) fn edit_rig(tag: &str) -> Rig {
     let mut r = strict_rig(&format!("edit-{tag}"));
     let hs = &mut r.hs;
     hs.server.column_streamer = None;

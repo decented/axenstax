@@ -1346,6 +1346,15 @@ pub struct InventorySyncPacket {
     /// (more, or any other, doesn't decode).
     #[serde(deserialize_with = "bounded_owed")]
     pub owed: Vec<(WireStack, u32)>,
+    /// v89 (C3d run 6) — the station the replaced window is at (`None`: the
+    /// player's own 2×2; `Some(cell)`: a crafting table), which the digest
+    /// covers. The client adopts it; a screen its window no longer has is
+    /// closed locally, with no `Close` sent.
+    pub station: Option<[i32; 3]>,
+    /// v89 (C3d run 6) — the replaced window's lock mask (bit `i` = slot `i`
+    /// locked, slots 0–35). The client installs exactly it; a bit past 35
+    /// doesn't apply. Auto-refill stays each copy's own.
+    pub locks: u64,
 }
 
 /// v88 (OC) — the most owed entries an [`InventorySyncPacket`] carries (and
@@ -4945,7 +4954,7 @@ mod tests {
 #[cfg(test)] mod death_wire_tests {
     use super::*;
     #[test] fn death_wire_tags_and_bounds_are_append_only() {
-        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)], owed: vec![] };
+        let sync = InventorySyncPacket { window_event: 9, slots:vec![(WireWindowSlot::Inv(0),None)], owed: vec![], station: None, locks: 0 };
         let bytes = serialize_packet(PacketType::InventorySync,&sync);
         assert_eq!(bytes[0],67);
         let (_,payload) = deserialize_header(&bytes).unwrap();
@@ -4991,6 +5000,8 @@ mod oc_wire_tests {
             window_event: 9,
             slots: vec![(WireWindowSlot::Inv(0), None)],
             owed: vec![(stone, 70_000)],
+            station: Some([1, -2, 3]),
+            locks: 1 << 35,
         };
         let mut expect = vec![67];
         expect.extend(9u32.to_le_bytes());
@@ -5006,13 +5017,17 @@ mod oc_wire_tests {
         expect.push(1);
         expect.extend(0u32.to_le_bytes());
         expect.extend(70_000u32.to_le_bytes());
+        // v89 (C3d run 6): station `Some` (1) and its cell, then the lock mask.
+        expect.push(1);
+        for v in [1i32, -2, 3] { expect.extend(v.to_le_bytes()); }
+        expect.extend((1u64 << 35).to_le_bytes());
         assert_eq!(serialize_packet(PacketType::InventorySync, &sync), expect);
         assert_eq!(round_trip(&sync).unwrap(), sync);
     }
 
     #[test]
     fn inventory_sync_owed_bounds_refuse_the_whole_packet() {
-        let base = InventorySyncPacket { window_event: 1, slots: vec![], owed: vec![] };
+        let base = InventorySyncPacket { window_event: 1, slots: vec![], owed: vec![], station: None, locks: 0 };
         let at_cap: Vec<(WireStack, u32)> = (1..=MAX_SYNC_OWED as u16).map(|d| (tool(d), 1)).collect();
         assert_eq!(MAX_SYNC_OWED, 256);
         assert!(round_trip(&InventorySyncPacket { owed: at_cap.clone(), ..base.clone() }).is_ok(), "256 is allowed");

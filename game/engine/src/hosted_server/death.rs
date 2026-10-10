@@ -137,7 +137,8 @@ impl HostedServer {
             crate::window_events::WindowEvent::Replace { window: Box::new(window.clone()), debt: debt.clone() },
             self.server.tick_counter,
         );
-        let pkt = crate::inventory_sync::packet(&window, &debt, n);
+        let mut pkt = crate::inventory_sync::packet(&window, &debt, n);
+        pkt.station = crate::inventory_sync::station_wire(self.server.players[i].station);
         self.send_to_joined_slot(
             i,
             &protocol::serialize_packet(protocol::PacketType::InventorySync, &pkt),

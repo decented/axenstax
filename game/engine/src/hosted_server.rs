@@ -37,6 +37,8 @@ mod c3d_container_tests;
 mod c3d_superseded_tests;
 #[cfg(test)]
 mod c3d_edit_tests;
+#[cfg(test)]
+mod c3d_correction_tests;
 
 use std::collections::VecDeque;
 

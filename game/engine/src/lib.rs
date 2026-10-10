@@ -2510,7 +2510,7 @@ impl ApplicationHandler for App {
                                         // Esc closes the book back to the grid, a second
                                         // Esc then closes the inventory.
                                         EscAction::CloseBook
-                                    } else if state.players[0].crafting_ui.open {
+                                    } else if state.players[0].crafting_ui.open && !state.strict_window_frozen() {
                                         EscAction::CloseCraft
                                     } else if state.players[0].dialogue_villager.is_some() {
                                         EscAction::CloseVillager

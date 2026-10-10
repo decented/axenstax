@@ -322,6 +322,9 @@ fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDeb
     match event {
         WindowEvent::Replace { window: w, debt: carried } => {
             for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
+            // C3d run 6 — the lock mask travels with the replacement (the
+            // client installs the same); auto-refill stays the copy's own.
+            parts.inv.set_locked_from(&w.inv.locked_indices());
             *parts.armour = w.armour;
             *parts.cursor = w.cursor.clone();
             *parts.grid = w.grid.clone();
