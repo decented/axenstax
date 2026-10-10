@@ -67,4 +67,18 @@ pub const BUSY: &str = "A handover is already in progress.";
 pub const UNVERIFIED_HOST: &str =
     "This world's host offered to hand it over, but this connection didn't verify who the host is, so it was declined.";
 pub const NOT_READY_HERE: &str = "This machine isn't signed in for online play, so the handover was declined.";
+/// What the host is shown when the selected player says no, by reason.
+pub fn host_declined(reason: super::wire::DeclineReason) -> &'static str {
+    use super::wire::DeclineReason as R;
+    match reason {
+        R::Player => "The other player declined the handover. Play has resumed.",
+        R::Busy => "The other player is already in another handover. Play has resumed.",
+        R::UnverifiedHost => {
+            "The other player can't check who is hosting \u{2014} they need to join through the online invite to \
+             receive this world. Play has resumed."
+        }
+        R::NotReady => "The other player isn't signed in for online play, so they can't receive this world.",
+        R::Invalid => "The other player couldn't verify this offer against the host they joined, so they declined it.",
+    }
+}
 pub const RESUME_FAILED: &str = "The handover was cancelled, but the connection couldn't carry on. Join the world again.";

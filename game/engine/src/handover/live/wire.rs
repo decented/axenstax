@@ -38,7 +38,8 @@ pub enum Frame {
         acceptance: String,
         challenge: Id,
     },
-    Decline { transfer: Id },
+    /// Recipient → source: no, with the typed reason the source shows.
+    Decline { transfer: Id, reason: DeclineReason },
     ManifestPart { transfer: Id, total: u32, offset: u32, bytes: Vec<u8> },
     /// The signed checkpoint offer plus the source's own runtime-signed
     /// agreement (`source_agreement_content`), whose hash the manifest binds.
@@ -50,6 +51,23 @@ pub enum Frame {
     /// Source → every joined player: play is paused for a handover (or
     /// resumes). Joiners stop sending input while paused.
     Notice { transfer: Id, paused: bool },
+}
+
+/// Why a recipient declined a proposal. Every decline is typed: the source
+/// shows the reason (`copy::host_declined`), never a silent "no".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeclineReason {
+    /// The player chose Decline (or left the world before answering).
+    Player,
+    /// The recipient is already in another handover.
+    Busy,
+    /// The recipient's join verified no host (a LAN join): it can't check
+    /// that the proposal comes from the invitation's host.
+    UnverifiedHost,
+    /// The recipient isn't signed in for online play on this machine.
+    NotReady,
+    /// The proposal didn't match the host the recipient verified.
+    Invalid,
 }
 
 fn options() -> impl Options {
@@ -64,7 +82,7 @@ impl Frame {
         match self {
             Frame::Propose { transfer, .. }
             | Frame::Accept { transfer, .. }
-            | Frame::Decline { transfer }
+            | Frame::Decline { transfer, .. }
             | Frame::ManifestPart { transfer, .. }
             | Frame::Offer { transfer, .. }
             | Frame::Chunk { transfer, .. }

@@ -22,7 +22,7 @@ use crate::handover::{
         eligibility::{Refusal, Seat},
         recipient::{JoinedHost, RecipientConsent, RecipientIdentity, RecipientSession, RecipientStage},
         source::{Capture, HostAction, Live, SourceConfig, SourceSession, SourceStage},
-        wire::{Frame, root_lineage},
+        wire::{DeclineReason, Frame, root_lineage},
     },
     phase::Authority,
 };
@@ -97,7 +97,7 @@ fn recipient_env() -> Result<RecipientEnv, String> {
 
 /// The handover window: the consent screen, the status of a running
 /// handover with its Cancel, or the paused banner. Returns the click.
-pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused: bool) -> Option<UiAction> {
+pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused: bool, interactable: bool) -> Option<UiAction> {
     let mut action = None;
     let (title, lines, buttons): (&str, Vec<String>, &[(&str, UiAction)]) = match handover {
         Some(Handover::Recipient(s)) => {
@@ -137,6 +137,7 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
+        .interactable(interactable)
         .show(ctx, |ui| {
             ui.set_max_width(420.0);
             for l in &lines {
@@ -310,8 +311,8 @@ impl crate::GameState {
         }
     }
 
-    fn decline_over_joined(&self, transfer: Id) {
-        if let (Some(rc), Ok(bytes)) = (self.remote_client.as_ref(), (Frame::Decline { transfer }).encode()) {
+    fn decline_over_joined(&self, transfer: Id, reason: DeclineReason) {
+        if let (Some(rc), Ok(bytes)) = (self.remote_client.as_ref(), (Frame::Decline { transfer, reason }).encode()) {
             let mut pkt = vec![crate::protocol::PacketType::Handover as u8];
             pkt.extend_from_slice(&bytes);
             rc.send_raw(&pkt);
@@ -320,11 +321,11 @@ impl crate::GameState {
 
     fn on_handover_proposal(&mut self, payload: &[u8], transfer: Id, now: u64) {
         if self.handover.is_some() {
-            self.decline_over_joined(transfer);
+            self.decline_over_joined(transfer, DeclineReason::Busy);
             return;
         }
         let Some(host) = self.joined_host else {
-            self.decline_over_joined(transfer);
+            self.decline_over_joined(transfer, DeclineReason::UnverifiedHost);
             self.handover_toast(copy::UNVERIFIED_HOST);
             return;
         };
@@ -336,14 +337,14 @@ impl crate::GameState {
         #[cfg(not(test))]
         let env = recipient_env();
         let Ok(env) = env else {
-            self.decline_over_joined(transfer);
+            self.decline_over_joined(transfer, DeclineReason::NotReady);
             self.handover_toast(copy::NOT_READY_HERE);
             return;
         };
         match RecipientSession::propose(payload, host, env.identity, env.imports, env.markers, now) {
             Ok(s) => self.handover = Some(Handover::Recipient(Box::new(s))),
             Err(Refusal(why)) => {
-                self.decline_over_joined(transfer);
+                self.decline_over_joined(transfer, DeclineReason::Invalid);
                 self.handover_toast(why);
             }
         }
@@ -423,7 +424,7 @@ impl crate::GameState {
                     return;
                 };
                 let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-                    self.decline_over_joined(p.transfer);
+                    self.decline_over_joined(p.transfer, DeclineReason::NotReady);
                     self.handover = None;
                     self.handover_toast("This machine couldn't open a port for the handover, so it was declined.");
                     return;
@@ -464,21 +465,36 @@ impl crate::GameState {
     /// link still exist (before any save, which the freeze refuses); an
     /// unanswered proposal is declined. A recipient past consent holds its
     /// own connection and carries on.
-    pub(crate) fn handover_on_leave(&mut self) {
+    /// Returns the line the lobby shows once the player is there (a source
+    /// handover was cancelled by leaving): the caller puts it in the lobby's
+    /// `menu.notice` after the leave, where it is actually drawn.
+    pub(crate) fn handover_on_leave(&mut self) -> Option<&'static str> {
+        let mut notice = None;
         match self.handover.take() {
             Some(Handover::Source { mut session, .. }) => {
                 if let Some(hs) = self.hosted_server.as_mut() {
                     session.abort(hs, "left");
                 }
-                self.toast = Some((copy::LEFT.into(), Instant::now() + Duration::from_secs(8)));
+                notice = Some(copy::LEFT);
             }
             Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent => {
-                self.decline_over_joined(s.proposal().transfer);
+                self.decline_over_joined(s.proposal().transfer, DeclineReason::Player);
             }
             other => self.handover = other,
         }
         self.host_paused = false;
         self.joined_host = None;
+        notice
+    }
+
+    /// The handover window has something to click (consent, Cancel): the
+    /// cursor must be free for it, mid-play too.
+    pub(crate) fn handover_wants_pointer(&self) -> bool {
+        match &self.handover {
+            Some(Handover::Recipient(s)) => !matches!(s.stage(), RecipientStage::Aborted(_)),
+            Some(Handover::Source { session, .. }) => !matches!(session.stage(), SourceStage::Aborted(_)),
+            None => false,
+        }
     }
 
     /// A joined session that verified its host: online play's verified

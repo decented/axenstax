@@ -528,7 +528,9 @@ impl crate::GameState {
         // and link still exist (pre-retirement, so play would resume), which
         // also lifts the freeze before the save below.
         #[cfg(not(target_arch = "wasm32"))]
-        self.handover_on_leave();
+        let handover_notice = self.handover_on_leave();
+        #[cfg(target_arch = "wasm32")]
+        let handover_notice: Option<&'static str> = None;
         let live = self.live_world.take();
         let joined = self.remote_client.is_some();
         // Reaching the line after this means any save it asked for landed
@@ -609,7 +611,11 @@ impl crate::GameState {
             // screen, never back to the lobby (spec §10).
             self.showcase_exited = true;
         } else {
-            self.mode = crate::GameMode::Menu(Box::new(crate::menu::MenuState::new()));
+            let mut menu = crate::menu::MenuState::new();
+            // A handover this leave cancelled is said in the lobby, where it
+            // is drawn (a toast set in the world never reaches it).
+            menu.notice = handover_notice.map(str::to_string);
+            self.mode = crate::GameMode::Menu(Box::new(menu));
         }
         true
     }

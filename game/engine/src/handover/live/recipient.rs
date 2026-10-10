@@ -297,7 +297,7 @@ impl RecipientSession {
             return None;
         }
         self.stage = RecipientStage::Aborted("declined");
-        packet(&Frame::Decline { transfer: self.transfer() })
+        packet(&Frame::Decline { transfer: self.transfer(), reason: super::wire::DeclineReason::Player })
     }
 
     pub fn pump(&mut self, now: u64) -> Result<(), Refusal> {

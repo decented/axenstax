@@ -256,9 +256,8 @@ impl SourceSession {
 
     fn on_frame(&mut self, hs: &mut HostedServer, live: Live, frame: Frame, now: u64) -> Result<(), Refusal> {
         match (self.stage, frame) {
-            (_, Frame::Abort { .. }) | (SourceStage::Proposed, Frame::Decline { .. }) => {
-                Err(Refusal("The other player cancelled the handover."))
-            }
+            (_, Frame::Abort { .. }) => Err(Refusal("The other player cancelled the handover.")),
+            (SourceStage::Proposed, Frame::Decline { reason, .. }) => Err(Refusal(super::copy::host_declined(reason))),
             (SourceStage::Proposed, Frame::Accept { runtime, attestation, acceptance, challenge, .. }) => {
                 self.verify_accept(runtime, &attestation, &acceptance, challenge, now)?;
                 // Re-authenticated: the same identity, seat and records,

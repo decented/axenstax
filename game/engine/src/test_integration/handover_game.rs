@@ -250,6 +250,9 @@ fn game_harness_handover_frozen_host_refuses_saves_and_leaving_cancels_first() {
         heard |= far.dst.as_mut().unwrap().pump(now()).is_err();
     }
     assert!(heard, "the far end heard the cancel");
+    // D6: the cancel is said in the lobby, where it is drawn.
+    let crate::GameMode::Menu(menu) = &hg.state.mode else { panic!("not in the lobby") };
+    assert_eq!(menu.notice.as_deref(), Some(copy::LEFT), "the lobby doesn't say leaving cancelled the handover");
 }
 
 // ── Recipient: the game is joined; the source is driven by hand ─────────────
@@ -532,4 +535,51 @@ fn game_harness_handover_frozen_host_answers_no_online_call_until_released() {
         answered |= join.poll(now(), wait) != JoinStep::Waiting;
     }
     assert!(answered, "the released host never answered the call");
+}
+
+/// D5: a joined game whose join verified no host declines with a typed
+/// reason, and the source shows that reason (no silent decline).
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_unverified_join_declines_with_a_reason_the_host_shows() {
+    let mut j = joined("dst-unverified");
+    j.hg.state.joined_host = None;
+    let mut src = source(&mut j);
+    let mut refused = None;
+    for _ in 0..10 {
+        step(&mut j);
+        if let Err(r) = src.pump(&mut j.hs, live(), now()) {
+            refused = Some(r);
+            break;
+        }
+    }
+    assert_eq!(
+        refused,
+        Some(crate::handover::live::eligibility::Refusal(copy::host_declined(
+            crate::handover::live::wire::DeclineReason::UnverifiedHost
+        ))),
+        "the host wasn't told why the player declined"
+    );
+    assert!(j.hg.state.handover.is_none(), "an unverified join kept a handover");
+}
+
+/// D6: the consent window frees the cursor mid-play (it joins the cursor
+/// predicate), and Decline gives it back.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_consent_window_frees_the_cursor_mid_play() {
+    let mut j = joined("dst-cursor");
+    assert!(!j.hg.state.cursor_must_be_free(), "the cursor was free before any proposal");
+    let _src = source(&mut j);
+    for _ in 0..10 {
+        step(&mut j);
+        if recipient_stage(&j.hg) == Some(RecipientStage::AwaitingConsent) {
+            break;
+        }
+    }
+    assert_eq!(recipient_stage(&j.hg), Some(RecipientStage::AwaitingConsent));
+    assert!(j.hg.state.cursor_must_be_free(), "the consent window left the cursor grabbed");
+    j.hg.state.handover_click = Some(UiAction::Decline);
+    j.hg.frames(1);
+    assert!(!j.hg.state.cursor_must_be_free(), "the cursor stayed free after Decline");
 }

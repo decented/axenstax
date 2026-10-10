@@ -5364,7 +5364,18 @@ screen (copy in `handover::live::copy`, proposed and awaiting owner review:
 world name, source npub, what comes across and what may not — loose drops,
 things in flight, wild animals and monsters — that the copy is stored on this
 machine, and that this version can't open it as their world yet); a refused
-or unverifiable proposal is answered with a Decline. Accept parks the
+or unverifiable proposal is answered with a Decline. Every Decline is typed
+(`wire::DeclineReason`: `Player`, `Busy`, `UnverifiedHost`, `NotReady`,
+`Invalid`) and the source shows the reason (`copy::host_declined`), never a
+silent no. Handing over is online-hosted only in this feature version (a LAN
+host gets `NEEDS_ONLINE`); a recipient whose join verified no host declines
+`UnverifiedHost`, which the host shows as "can't check who is hosting — they
+need to join through the online invite to receive this world". The handover
+window, whenever it has something to click (consent or Cancel), joins the
+cursor-release predicate (`GameState::cursor_must_be_free`, beside
+`p0_ui_modal_open`, the death screen and the end card), so a recipient can
+answer mid-play; in Playing it is interactable exactly when the cursor is free.
+Accept parks the
 `RemoteClient` connection into the session and binds the latched listener on
 a fresh ephemeral UDP socket. The control pump (`poll_handover`) runs every
 frame in every mode next to `poll_online`, never from the game tick. The
@@ -5372,7 +5383,8 @@ handover session is not cleared by leaving the world: a recipient past
 consent keeps its connection and continues to Ready after its joined world,
 `RemoteClient` and HUD are gone (an unanswered proposal is declined on
 leave). A source handover is cancelled when the host leaves, before any save
-and while the world and link still exist. On a pre-Ready abort the
+and while the world and link still exist; the lobby then says so in its
+`menu.notice` (a toast set in the world would never be drawn there). On a pre-Ready abort the
 recipient's connection and waiting gameplay go back to the parked
 `RemoteClient` (if it can't be resumed, the player leaves with a notice).
 

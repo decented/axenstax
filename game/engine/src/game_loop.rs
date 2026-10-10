@@ -7621,6 +7621,20 @@ impl super::GameState {
     /// over the viewport mid-play, and the player never has to "click to
     /// re-grab" after an alt-tab / focus blip. Web keeps the click-to-capture
     /// path because pointer lock can only be acquired from a user gesture.
+    /// The playing cursor must stay free: inventory/menus/chat/dialogue
+    /// (p0_ui_modal_open), the death screen, the scenario end-card and a
+    /// world-handover window with something to click (consent, Cancel).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn cursor_must_be_free(&self) -> bool {
+        self.p0_ui_modal_open()
+            || self.players.first().is_some_and(|p| p.is_dead())
+            || self
+                .scenario
+                .as_ref()
+                .is_some_and(|s| s.shows_blocking_end_card())
+            || self.handover_wants_pointer()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn reconcile_native_cursor(&mut self) {
         if !matches!(self.mode, GameMode::Playing) {
@@ -7630,13 +7644,7 @@ impl super::GameState {
         // free: inventory/menus/chat/dialogue (p0_ui_modal_open), the death
         // screen, and the scenario end-card (these last two leave mode == Playing
         // but aren't modals, so they must be named explicitly).
-        let blocking = self.p0_ui_modal_open()
-            || self.players.first().is_some_and(|p| p.is_dead())
-            || self
-                .scenario
-                .as_ref()
-                .is_some_and(|s| s.shows_blocking_end_card());
-        let want_grab = self.window.has_focus() && !blocking;
+        let want_grab = self.window.has_focus() && !self.cursor_must_be_free();
         if want_grab && !self.input.cursor_captured {
             self.capture_cursor();
         } else if !want_grab && self.input.cursor_captured {
@@ -8712,7 +8720,7 @@ impl super::GameState {
             // A recipient's handover outlives the joined world it began in.
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), false);
+                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), false, true);
                 self.handover_click = click.or(self.handover_click);
             }
 
@@ -10213,7 +10221,7 @@ impl super::GameState {
             // Over the pause menu too: a failed Save says why where it was asked.
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused);
+                let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused, true);
                 self.handover_click = click.or(self.handover_click);
             }
             self.draw_toast();
@@ -21680,7 +21688,7 @@ impl super::GameState {
         // ── World handover window (consent / status / paused banner) ─────────
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused);
+            let click = crate::handover_game::draw(&self.renderer.egui.ctx, self.handover.as_ref(), self.host_paused, !self.input.cursor_captured);
             self.handover_click = click.or(self.handover_click);
         }
 
