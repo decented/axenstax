@@ -78,6 +78,12 @@ fn assert_strict_refuses(tag: &str, prepare: impl FnOnce(&mut HostedServer, usiz
     assert!(heard.accepts.is_empty(), "{tag}: no JoinAccept for an unproven record");
     assert_eq!(heard.rejects.len(), 1, "{tag}: one typed refusal");
     assert!(heard.rejects[0].contains(expect), "{tag}: reason {:?} names {expect:?}", heard.rejects[0]);
+    // No settlement exists: the refusal points at the operator, never "until settled".
+    assert!(
+        heard.rejects[0].ends_with(" Ask whoever runs this world about your save."),
+        "{tag}: reason {:?} ends with the operator sentence",
+        heard.rejects[0]
+    );
     assert!(hs.slot_is_free(j), "{tag}: the refused seat is released");
     assert_eq!(std::fs::read(&path).unwrap(), before, "{tag}: the record's bytes are untouched");
 }

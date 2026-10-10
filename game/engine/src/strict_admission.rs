@@ -27,12 +27,12 @@ impl StrictJoinRefusal {
     pub fn reason(&self) -> String {
         match self {
             StrictJoinRefusal::Owed { entries } => format!(
-                "This world checks inventories strictly, and your save here still owes items from an earlier correction ({entries} kind{}). You can't join it until that is settled.",
+                "This world checks inventories strictly, and your save here still owes items from an earlier correction ({entries} kind{}). Ask whoever runs this world about your save.",
                 if *entries == 1 { "" } else { "s" }
             ),
-            StrictJoinRefusal::Incomplete(IncompleteCause::LegacyV1) => "This world checks inventories strictly, and your save here is from an older version that didn't record owed items. You can't join it until that is settled.".to_string(),
-            StrictJoinRefusal::Incomplete(IncompleteCause::Overflow) => "This world checks inventories strictly, and your save here lost track of some owed items. You can't join it until that is settled.".to_string(),
-            StrictJoinRefusal::Incomplete(IncompleteCause::Unreadable) => "This world checks inventories strictly, and your save here couldn't be read. You can't join it until that is settled.".to_string(),
+            StrictJoinRefusal::Incomplete(IncompleteCause::LegacyV1) => "This world checks inventories strictly, and your save here is from an older version that didn't record owed items. Ask whoever runs this world about your save.".to_string(),
+            StrictJoinRefusal::Incomplete(IncompleteCause::Overflow) => "This world checks inventories strictly, and your save here lost track of some owed items. Ask whoever runs this world about your save.".to_string(),
+            StrictJoinRefusal::Incomplete(IncompleteCause::Unreadable) => "This world checks inventories strictly, and your save here couldn't be read. Ask whoever runs this world about your save.".to_string(),
         }
     }
 }
