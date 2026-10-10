@@ -212,3 +212,40 @@ fn c3d_actual_hosted_fifo_repeats_the_original_receipt_without_mutation_or_debt(
     assert!(sp.obligations_proven_zero());
     assert!(JoinerSave::capture(sp, hs.server.run_id).obligations_proven_zero());
 }
+
+/// Outbox-failure teardown on the real broadcast path: a terminal receipt
+/// waiting behind a world backlog is dropped with that prefix when the queue
+/// overflows; the server never sends it ahead of the repair, tears the
+/// connection down with a reason, and the departure settles and saves a
+/// record that proves zero.
+#[test]
+fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_record() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt");
+    let mut hs = start_room_test_server("c3d-lost-receipt", 0);
+    hs.inventory_mode = InventoryMode::Strict;
+    let (i, client, heard) = join(&mut hs, 17);
+    let accept = heard.accepts.first().expect("Strict admits a first visit");
+    let cell = |n: i32| protocol::BlockChange::with_meta(n % 1000, 200, n / 1000, crate::block::STONE, 0);
+    // A backlog past one tick's budget: the receipt queues behind it.
+    let backlog: Vec<_> = (0..8_000).map(cell).collect();
+    hs.outboxes[i].push_tick(0, &[], &[], &backlog, &[]);
+    let action = ActionHeader { session: accept.action_session, epoch: 0, seq: 1, life: accept.action_life, events_applied: 0 };
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent: ActionIntent::CancelledNoop }));
+    hs.tick();
+    assert!(hear(&client).receipts.is_empty(), "the receipt waits behind the backlog");
+    assert!(!hs.disconnected[i]);
+    // Past the queue cap: the overflow drops the queued blocks and the
+    // receipt behind them (their chunks need a later repair).
+    let flood: Vec<_> = (8_000..200_000).map(cell).collect();
+    hs.outboxes[i].push_tick(0, &[], &[], &flood, &[]);
+    hs.tick();
+    let heard = hear(&client);
+    assert!(heard.receipts.is_empty(), "no receipt overtakes the lost world prefix");
+    assert!(
+        heard.rejects.iter().any(|r| r.contains("could not be delivered")),
+        "the connection is torn down with a reason: {:?}",
+        heard.rejects
+    );
+    assert!(hs.slot_is_free(i));
+    assert!(hs.server.load_joiner(i).expect("the departure saved").obligations_proven_zero());
+}
