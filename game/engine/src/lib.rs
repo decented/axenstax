@@ -906,6 +906,34 @@ impl GameState {
     pub(crate) fn handover_holds_play(&self) -> bool {
         false
     }
+    pub(crate) fn handover_blocks_world_action(&mut self) -> bool {
+        false
+    }
+}
+
+/// Every platform: the end-card "Try again" actions, through the handover
+/// gate (native: `handover_game`; the browser never holds play).
+impl GameState {
+    /// The trial-complete "Try again" (gated, review LOW-5).
+    pub(crate) fn trial_try_again(&mut self, trial_id: &str) {
+        if self.handover_blocks_world_action() {
+            return;
+        }
+        self.trial_outcome = None;
+        self.start_trial(trial_id);
+        self.capture_cursor();
+    }
+
+    /// The scenario end-card "Try again": re-run the same challenge in place
+    /// with fresh progress (gated, review LOW-5).
+    pub(crate) fn scenario_try_again(&mut self) {
+        if self.handover_blocks_world_action() {
+            return;
+        }
+        let Some(def) = self.scenario.as_ref().map(|s| s.def().clone()) else { return };
+        self.start_scenario(def);
+        self.capture_cursor();
+    }
 }
 
 pub(crate) struct GameState {

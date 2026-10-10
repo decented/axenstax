@@ -237,26 +237,6 @@ impl crate::GameState {
         false
     }
 
-    /// The trial-complete "Try again" (gated, review LOW-5).
-    pub(crate) fn trial_try_again(&mut self, trial_id: &str) {
-        if self.handover_blocks_world_action() {
-            return;
-        }
-        self.trial_outcome = None;
-        self.start_trial(trial_id);
-        self.capture_cursor();
-    }
-
-    /// The scenario end-card "Try again": re-run the same challenge in place
-    /// with fresh progress (gated, review LOW-5).
-    pub(crate) fn scenario_try_again(&mut self) {
-        if self.handover_blocks_world_action() {
-            return;
-        }
-        let Some(def) = self.scenario.as_ref().map(|s| s.def().clone()) else { return };
-        self.start_scenario(def);
-        self.capture_cursor();
-    }
 
     /// The identity signed in now (re-read at every boundary).
     fn handover_signed_in(&self) -> Option<[u8; 32]> {
