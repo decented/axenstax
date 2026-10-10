@@ -111,13 +111,22 @@ impl HostedServer {
             self.pause_typed_action(i, "Typed window configuration is awaiting integration; rejoin required"); return false;
         };
         let sp = &self.server.players[i];
-        let ctx = crate::window::ClickCtx::new(self.server.play_mode.is_creative(), sp.station, sp.player.eye_pos(), |cell| self.server.world.get_block(cell[0], cell[1], cell[2]));
-        let Ok(mut staged) = crate::window_events::stage_strict_click(sp, &self.server.registry, click, &ctx) else {
-            self.pause_typed_action(i, "Window source or pending fit is uncertain; rejoin required"); return false;
+        // The server's EXISTING transition (review M2): `serve_op`'s context
+        // (table reach slack and grace) and rule (the client's verdict on a
+        // Result or Autofill), shared, never a second copy.
+        let ctx = crate::window_ops::server_click_ctx(sp, &self.server.world, self.server.play_mode.is_creative());
+        let mut staged = match crate::window_events::stage_strict_click(sp, &self.server.registry, click, &ctx, op.client_ok) {
+            Ok(staged) => staged,
+            Err(crate::window_events::StrictStageError::Debt) => return self.strict_debt_at_staging(i, "window click"),
+            Err(crate::window_events::StrictStageError::Unrepresentable) => {
+                // Review L1: never commit a window that would drop or clamp a stack.
+                self.refuse_typed_action(i, action); return false;
+            }
+            Err(_) => { self.pause_typed_action(i, "Window source or pending fit is uncertain; rejoin required"); return false; }
         };
         let station = crate::window::station_after(sp.station, click, &staged.raw.result);
         let digest = crate::window::digest(&staged.raw.after.view(), station);
-        if (matches!(click, crate::window::WindowClick::Result | crate::window::WindowClick::Autofill { .. }) && staged.raw.result.ok() != op.client_ok) || digest != op.digest {
+        if digest != op.digest {
             self.refuse_typed_action(i, action); return false;
         }
         let included = sp.window_events.last_number();
@@ -127,8 +136,16 @@ impl HostedServer {
         let (inv, armour, cursor, grid) = staged.raw.after.into_parts();
         let sp = &mut self.server.players[i];
         sp.inventory = inv; sp.armour = armour; sp.cursor = cursor; sp.craft_grid = grid; sp.station = station;
+        sp.last_window_op_seq = op.op_seq;
+        // Mirror parity (`window_ops::serve_op`): the client's own close
+        // closes its container view, in its order.
+        if crate::window_ops::op_closes_container_view(&op.op) {
+            crate::window_ops::close_container_view(sp);
+        }
+        #[cfg(test)]
+        commit_fault::after_commit(sp);
         self.complete_typed_result(i, action, ActionFate::Accepted, result);
-        true
+        self.strict_fold_holds(i, "window click")
     }
     fn serve_strict_shot(&mut self, i: usize, action: ActionHeader, request_seq: u32, weapon: protocol::ShotWeapon, slot: u8, claim: (u8, u16, protocol::WireItem), aim: Aim) -> bool {
         use crate::item::{Item, ItemStack};
@@ -148,8 +165,11 @@ impl HostedServer {
         if now.saturating_add(crate::shot::SHOT_JITTER_TICKS) < sp.next_shot_tick {
             self.refuse_typed_action(i, action); return false;
         }
-        let Ok(mut effective) = crate::window_events::strict_effective_marker(sp, &self.server.registry) else {
-            self.pause_typed_action(i, "Shot source lineage is uncertain; rejoin required"); return false;
+        let mut effective = match crate::window_events::strict_effective_marker(sp, &self.server.registry) {
+            Ok(effective) => effective,
+            Err(crate::window_events::StrictStageError::Debt) => return self.strict_debt_at_staging(i, "shot"),
+            Err(crate::window_events::StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
+            Err(_) => { self.pause_typed_action(i, "Shot source lineage is uncertain; rejoin required"); return false; }
         };
         let effective_view = effective.view();
         let Some(ItemStack { item: Item::Tool(surviving), count: 1 }) = effective_view.inv.slot(slot as usize) else {
@@ -162,21 +182,32 @@ impl HostedServer {
             crate::window_events::WindowEvent::Take { slot: slot as usize, item: Item::Material(crate::shot::ammo_for(weapon)), n: 1, how: "on a shot" },
             crate::window_events::WindowEvent::WearWeapon { slot: slot as usize, tool: historical },
         ].into_boxed_slice();
-        if crate::window_events::stage_strict_effects(sp, &self.server.registry, &events).is_err() {
-            self.pause_typed_action(i, "Shot payment or pending fit is uncertain; rejoin required"); return false;
+        match crate::window_events::stage_strict_effects(sp, &self.server.registry, &events) {
+            Ok(()) => {}
+            Err(crate::window_events::StrictStageError::Debt) => return self.strict_debt_at_staging(i, "shot"),
+            Err(crate::window_events::StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
+            Err(_) => { self.pause_typed_action(i, "Shot payment or pending fit is uncertain; rejoin required"); return false; }
         }
-        let Ok(prepared_events) = crate::window_events::prepare_strict_events(&mut self.server.players[i], events) else {
-            self.pause_typed_action(i, "Whole shot event reservation is unavailable; rejoin required"); return false;
-        };
-        let included = prepared_events.last_number();
-        let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
-            self.pause_typed_action(i, "Shot result history is full; rejoin required"); return false;
+        // The outcome's number is the second event's: known before anything
+        // is reserved, so no reservation waits on a fallible serialisation.
+        let included = sp.window_events.last_number().checked_add(2);
+        let Some(included) = included else {
+            self.pause_typed_action(i, "Window event numbers are exhausted; rejoin required"); return false;
         };
         let outcome = protocol::ItemActionOutcomePacket { seq: request_seq, accepted: true, consume_held: 1, note: 0, window_event: included, wear_held: true, bite_after: 0 };
         let packet = protocol::serialize_packet(protocol::PacketType::ItemActionOutcome, &outcome);
         if packet.len() > crate::action_journal::MAX_PAGE_BYTES {
             self.pause_typed_action(i, "Shot outcome exceeds its reservation; rejoin required"); return false;
         }
+        let Ok(prepared_events) = crate::window_events::prepare_strict_events(&mut self.server.players[i], events) else {
+            self.pause_typed_action(i, "Whole shot event reservation is unavailable; rejoin required"); return false;
+        };
+        debug_assert_eq!(prepared_events.last_number(), included);
+        let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
+            // The events' reservation is released exactly: no capacity leaks.
+            prepared_events.abandon(&mut self.server.players[i]);
+            self.pause_typed_action(i, "Shot result history is full; rejoin required"); return false;
+        };
         let sp = &self.server.players[i];
         let shooter = crate::entity::Shooter { who: crate::combat::Attacker::Remote { slot: i, generation: sp.attach_gen }, owner_key: sp.pet_owner_key().unwrap_or_default() };
         let launch = crate::shot::launch(weapon, sp.player.eye_pos(), crate::camera::forward_from(aim.yaw, aim.pitch), aim.charge);
@@ -186,8 +217,68 @@ impl HostedServer {
         let sp = &mut self.server.players[i];
         sp.next_shot_tick = sp.next_shot_tick.max(now).saturating_add(crate::shot::SHOT_COOLDOWN_TICKS);
         prepared_events.commit(sp, now);
+        #[cfg(test)]
+        commit_fault::after_commit(sp);
         self.complete_typed_result(i, action, ActionFate::Accepted, result);
         self.send_to_joined_slot(i, &packet);
-        true
+        self.strict_fold_holds(i, "shot")
+    }
+
+    /// Decision 10 — staging found an obligation in a Strict session's fold.
+    /// Strict never creates one, so this is an invariant breach detected
+    /// before any effect: logged, nothing committed, the action paused at
+    /// its frontier (fail-closed teardown until recovery is wired).
+    fn strict_debt_at_staging(&mut self, i: usize, path: &str) -> bool {
+        log::error!(
+            "Strict inventory invariant breached: slot {i} carries an obligation at a Strict {path}'s staging; nothing committed"
+        );
+        self.pause_typed_action(i, "This world's strict inventory check found an obligation it can't account for; rejoin required");
+        false
+    }
+
+    /// Decision 10 — Strict never creates debt. After every Strict commit the
+    /// effective fold (live debt, pending corrections, session history,
+    /// `ServerPlayer::obligations_proven_zero`) must prove zero. A breach
+    /// seen after a commit is logged and the session torn down with a
+    /// reason. Never a panic, never a write-off: the departure save carries
+    /// whatever the fold holds.
+    fn strict_fold_holds(&mut self, i: usize, path: &str) -> bool {
+        let Some(sp) = self.server.players.get(i) else { return false };
+        if sp.obligations_proven_zero() { return true; }
+        log::error!(
+            "Strict inventory invariant breached: {} carries an obligation after a Strict {path} commit; tearing the session down",
+            sp.display_name
+        );
+        self.fail_action_history(i, "This world's strict inventory check found an obligation it can't account for; rejoin required");
+        false
+    }
+
+    /// Decision 10 — a Strict seat's departure (after `settle_leaving_life`):
+    /// a non-empty fold is an invariant breach, logged. The save that
+    /// follows records it as it stands; nothing is written off.
+    pub(super) fn note_strict_departure(&self, i: usize) {
+        if self.strict_slot(i) && !self.server.players[i].obligations_proven_zero() {
+            log::error!(
+                "Strict inventory invariant breached: {} departs carrying an obligation; saved as it stands, never written off",
+                self.server.players[i].display_name
+            );
+        }
+    }
+}
+
+/// Test-only fault seam: make a Strict commit leave an obligation in the
+/// fold, so the post-commit guard ([`HostedServer::strict_fold_holds`]) can
+/// be pinned through the real dispatch.
+#[cfg(test)]
+pub(super) mod commit_fault {
+    thread_local! {
+        pub static OWE_AFTER_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    pub fn after_commit(sp: &mut crate::server::ServerPlayer) {
+        if OWE_AFTER_COMMIT.with(|f| f.get()) {
+            let stone = crate::item::ItemStack { item: crate::item::Item::Block(crate::block::STONE), count: 1 };
+            let take = crate::container_window::ItemDelta { take: vec![(0, stone)], give: vec![] };
+            sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid, &mut sp.cursor, &mut sp.armour, &take);
+        }
     }
 }

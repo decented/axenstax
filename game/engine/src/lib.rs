@@ -2586,8 +2586,10 @@ impl ApplicationHandler for App {
                                     state.players[0].crafting_ui.book_open = false;
                                 }
                                 EscAction::CloseCraft => {
-                                    let p = &mut state.players[0];
-                                    p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+                                    // C3d review M1 — the reserving entry point: in
+                                    // Strict it allocates the action before the
+                                    // prediction and sends no legacy WindowOp.
+                                    state.close_crafting(0);
                                     state.capture_cursor();
                                 }
                                 EscAction::CloseVillager => {

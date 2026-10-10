@@ -689,12 +689,8 @@ pub fn serve_op(
         return None;
     }
     let op = &pkt.op;
-    let eye = sp.player.eye_pos();
     let mut station = sp.station;
-    // B-L2: the server's table verdict is kinder than the client's, so it is
-    // a superset of an honest client's.
-    let lately = sp.table_gone_ticks.is_none_or(|n| n <= window::SERVER_TABLE_GRACE_TICKS);
-    let ctx = ClickCtx::new(creative, station, eye, |c| world.get_block(c[0], c[1], c[2])).with_server_slack(lately);
+    let ctx = server_click_ctx(sp, world, creative);
     if let WireWindowOp::Container(click) = op {
         let served = serve_container(sp, world, registry, &ctx.with_shared(true), click, pkt, now, creative);
         sp.last_window_op_seq = pkt.op_seq;
@@ -709,14 +705,7 @@ pub fn serve_op(
     };
     let result = match op {
         WireWindowOp::Click(click) => {
-            let result = match click {
-                WindowClick::Result if !pkt.client_ok => ClickResult::Refused,
-                // C3b-fix-c (B-M4) — a refused Autofill already moved the
-                // grid and cursor back: the rule runs without the table
-                // grace, so it moves what the client's did.
-                WindowClick::Autofill { .. } if !pkt.client_ok => window::apply(&mut view, click, &ctx.clone().with_server_slack(false)),
-                _ => window::apply(&mut view, click, &ctx),
-            };
+            let result = server_click(&mut view, click, &ctx, pkt.client_ok);
             station = window::station_after(station, click, &result);
             Some(result)
         }
@@ -747,18 +736,48 @@ pub fn serve_op(
         WireWindowOp::OpenContainer { .. } | WireWindowOp::Container(_) => None,
     };
     let digest = window::digest(&view, station);
-    let closes = matches!(
-        op,
-        WireWindowOp::Click(WindowClick::Close) | WireWindowOp::OpenPlayer | WireWindowOp::OpenTable { .. }
-    );
-    if closes {
-        sp.open_container = None;
-        sp.container_sent.open_kind = None;
-        sp.container_sent.seen = None;
+    if op_closes_container_view(op) {
+        close_container_view(sp);
     }
     sp.station = station;
     sp.last_window_op_seq = pkt.op_seq;
     Some(Served::plain(result, digest))
+}
+
+/// The server's context for joiner `sp`'s window click — shared by the
+/// Mirror bridge ([`serve_op`]) and Strict staging (C3d review M2), so both
+/// judge by the same transition. B-L2: the server's table verdict is kinder
+/// than the client's (reach slack, and a grace for a table that just went),
+/// so it is a superset of an honest client's.
+pub fn server_click_ctx(sp: &ServerPlayer, world: &World, creative: bool) -> ClickCtx {
+    let lately = sp.table_gone_ticks.is_none_or(|n| n <= window::SERVER_TABLE_GRACE_TICKS);
+    ClickCtx::new(creative, sp.station, sp.player.eye_pos(), |c| world.get_block(c[0], c[1], c[2])).with_server_slack(lately)
+}
+
+/// The server's rule for one window click, honouring the client's own
+/// verdict (`WindowOpPacket::client_ok`) — shared by [`serve_op`] and Strict
+/// staging. A-L2: never craft a Result the client refused. B-M4: a refused
+/// Autofill already moved the grid and cursor back, so the rule runs
+/// without the table grace and moves what the client's did.
+pub fn server_click(view: &mut WindowMut, click: &WindowClick, ctx: &ClickCtx, client_ok: bool) -> ClickResult {
+    match click {
+        WindowClick::Result if !client_ok => ClickResult::Refused,
+        WindowClick::Autofill { .. } if !client_ok => window::apply(view, click, &ctx.clone().with_server_slack(false)),
+        _ => window::apply(view, click, ctx),
+    }
+}
+
+/// Whether window op `op` closes the client's container view (its own
+/// close, in its order): a Close click, or opening the 2×2 grid or a table.
+pub fn op_closes_container_view(op: &WireWindowOp) -> bool {
+    matches!(op, WireWindowOp::Click(WindowClick::Close) | WireWindowOp::OpenPlayer | WireWindowOp::OpenTable { .. })
+}
+
+/// Forget joiner `sp`'s open container and the model of its view.
+pub fn close_container_view(sp: &mut ServerPlayer) {
+    sp.open_container = None;
+    sp.container_sent.open_kind = None;
+    sp.container_sent.seen = None;
 }
 
 /// Why a container op is refused before its rule runs.

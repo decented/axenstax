@@ -27,6 +27,8 @@ mod sidecar;
 mod actions;
 #[cfg(test)]
 mod c3d_tests;
+#[cfg(test)]
+mod c3d_strict_tests;
 
 use std::collections::VecDeque;
 
@@ -1773,6 +1775,7 @@ impl HostedServer {
             return None;
         }
         if self.handshake_done[i] && (!self.lends_host_world() || self.server.lent) { self.settle_leaving_life(i); }
+        if self.handshake_done[i] { self.note_strict_departure(i); }
         if self.handshake_done[i] && let Err(e) = self.server.save_joiner(i) { log::error!("Joiner leave save failed: {e}"); }
         let was_joined = self.handshake_done[i];
         self.disconnected[i] = true;

@@ -35,6 +35,21 @@ impl MarkerWindow {
             grid: std::array::from_fn(|r| std::array::from_fn(|c| grid[r][c].as_ref().and_then(marker))) }
     }
 
+    /// C3d review L1 — [`Self::capture_parts`] for a window the server will
+    /// COMMIT from: every place must round-trip the marker projection
+    /// exactly (a Plan may become its marker placeholder, keeping its
+    /// marker and developed state). A stack that doesn't (a broken tool or
+    /// armour piece, an unregistered block, a clamped durability) is
+    /// `None`: the caller refuses with a typed fate before any commit,
+    /// never dropping or clamping it silently.
+    pub fn try_capture_parts(inv: &Inventory, armour: &[Option<ArmourItem>; 4], cursor: &Option<ItemStack>, grid: &CraftGrid, registry: &crate::block::BlockRegistry) -> Option<Self> {
+        let exact = |s: &ItemStack| exact_marker(s, registry).is_some();
+        let armour_ok = armour.iter().flatten().all(|a| exact(&ItemStack { item: Item::Armour(*a), count: 1 }));
+        let all = (0..36).filter_map(|i| inv.slot(i)).chain(cursor.as_ref()).chain(grid.iter().flatten().flatten());
+        let places_ok = all.into_iter().all(exact);
+        (armour_ok && places_ok).then(|| Self::capture_parts(inv, armour, cursor, grid, registry))
+    }
+
     /// Moves marker-only holdings into the server's raw window after admission.
     pub(crate) fn into_parts(self) -> (Inventory, [Option<ArmourItem>; 4], Option<ItemStack>, CraftGrid) {
         (self.inv, self.armour, self.cursor, self.grid)
@@ -54,6 +69,17 @@ impl MarkerWindow {
     }
 }
 
+/// `stack`'s marker projection when it round-trips exactly (a Plan by its
+/// marker and developed state), else `None` (C3d review L1).
+pub fn exact_marker(stack: &ItemStack, registry: &crate::block::BlockRegistry) -> Option<ItemStack> {
+    let back = crate::inventory::stack_from_wire(&crate::inventory::stack_to_wire(stack), registry, crate::inventory::PlanDecode::Marker)?;
+    let same = match (&stack.item, &back.item) {
+        (Item::Plan(a), Item::Plan(b)) => stack.count == back.count && crate::plan::marker(a) == crate::plan::marker(b) && a.develop_state.is_developed() == b.develop_state.is_developed(),
+        _ => *stack == back,
+    };
+    same.then_some(back)
+}
+
 pub struct StagedClick {
     pub after: MarkerWindow,
     pub result: ClickResult,
@@ -64,14 +90,21 @@ pub struct StagedClick {
 /// Conservative complete initial sources are deliberate for sort/close/
 /// autofill. They include intermediate returned-and-reused grid/cursor units.
 pub fn stage(raw: &MarkerWindow, click: &WindowClick, ctx: &ClickCtx) -> StagedClick {
+    stage_with(raw, click, ctx.station, |view| window::apply(view, click, ctx))
+}
+
+/// [`stage`] by a caller-supplied rule over the same click at `station`:
+/// the server stages its EXISTING transition (`window_ops::server_click`,
+/// with its slack and the client's verdict), never a second rule.
+pub fn stage_with(raw: &MarkerWindow, click: &WindowClick, station: window::Station, apply: impl FnOnce(&mut WindowMut) -> ClickResult) -> StagedClick {
     let mut after = raw.clone();
-    let result = window::apply(&mut after.view(), click, ctx);
+    let result = apply(&mut after.view());
     let before = raw.slots();
     let mut sources: MarkerSlots = std::array::from_fn(|_| None);
     let mut need = [false; PLAYER_PLACES];
     let at = |slot: WindowSlot| match slot {
         WindowSlot::Inv(i) if i < 36 => Some(i),
-        WindowSlot::Grid(r, c) if r < ctx.station.grid_size() && c < ctx.station.grid_size() => Some(41 + r * 3 + c),
+        WindowSlot::Grid(r, c) if r < station.grid_size() && c < station.grid_size() => Some(41 + r * 3 + c),
         _ => None,
     };
     match click {

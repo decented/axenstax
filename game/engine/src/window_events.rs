@@ -43,7 +43,7 @@
 //! the count the input reports (`GameState::apply_window_inbox`).
 
 mod strict;
-pub use strict::{stage_strict_click, stage_strict_effects, strict_effective_marker, prepare_strict_events};
+pub use strict::{stage_strict_click, stage_strict_effects, strict_effective_marker, prepare_strict_events, StrictStageError};
 
 use std::collections::VecDeque;
 
@@ -201,6 +201,19 @@ impl WindowEvents {
     #[cfg(test)]
     pub fn waiting(&self) -> usize {
         self.waiting.len()
+    }
+
+    /// C3d tests — the waiting events, oldest first.
+    #[cfg(test)]
+    pub fn waiting_events(&self) -> impl Iterator<Item = &WindowEvent> {
+        self.waiting.iter().map(|w| &w.event)
+    }
+
+    /// C3d tests — the waiting deque's allocated capacity (a reservation
+    /// that is given back must leave it as it was).
+    #[cfg(test)]
+    pub fn waiting_capacity(&self) -> usize {
+        self.waiting.capacity()
     }
 
     pub fn last_number(&self) -> u32 { self.last_sent }

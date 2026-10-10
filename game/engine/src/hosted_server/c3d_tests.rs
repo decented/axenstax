@@ -10,17 +10,17 @@ use crate::action_wire::{ActionIntent, ActionPacket, ActionReceipt};
 use crate::joiner_save::JoinerSave;
 use crate::transport::ClientTransport as _;
 
-const KEY: [u8; 32] = [66; 32];
+pub(super) const KEY: [u8; 32] = [66; 32];
 
 /// What a client has been sent, of the packets these tests read.
 #[derive(Default)]
-struct Heard {
-    accepts: Vec<protocol::JoinAcceptPacket>,
-    rejects: Vec<String>,
-    receipts: Vec<ActionReceipt>,
+pub(super) struct Heard {
+    pub(super) accepts: Vec<protocol::JoinAcceptPacket>,
+    pub(super) rejects: Vec<String>,
+    pub(super) receipts: Vec<ActionReceipt>,
 }
 
-fn hear(client: &ChannelClientTransport) -> Heard {
+pub(super) fn hear(client: &ChannelClientTransport) -> Heard {
     let mut out = Heard::default();
     while let Some(pkt) = client.try_recv_from_server() {
         match protocol::deserialize_header(&pkt) {
@@ -37,7 +37,7 @@ fn hear(client: &ChannelClientTransport) -> Heard {
 
 /// Join `KEY` on a fresh connection (binding `b`), tick, and return the slot
 /// and what the client heard.
-fn join(hs: &mut HostedServer, b: u8) -> (usize, ChannelClientTransport, Heard) {
+pub(super) fn join(hs: &mut HostedServer, b: u8) -> (usize, ChannelClientTransport, Heard) {
     let client = hs.attach_test_remote_with_binding(Some([b; 32]));
     send_signed_join(&client, KEY, Some([b; 32]));
     hs.tick();
@@ -46,7 +46,7 @@ fn join(hs: &mut HostedServer, b: u8) -> (usize, ChannelClientTransport, Heard) 
     (i, client, heard)
 }
 
-fn record_path(hs: &HostedServer, i: usize) -> std::path::PathBuf {
+pub(super) fn record_path(hs: &HostedServer, i: usize) -> std::path::PathBuf {
     let pk = hs.server.players[i].verified_pubkey.expect("a signed join");
     crate::save::world_dir(&hs.server.world_name).join("joiners").join(format!("{}.dat", pubkey_to_npub(&pk)))
 }
@@ -254,4 +254,47 @@ fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_re
     );
     assert!(hs.slot_is_free(i));
     assert!(hs.server.load_joiner(i).expect("the departure saved").obligations_proven_zero());
+}
+
+/// Review L5 — the same real lost-receipt teardown with a numbered Grant
+/// and a Take still waiting when it happens: the departure settles them
+/// and the saved window conserves both exactly (stone 5 − 2, dirt + 3),
+/// with nothing owed. A teardown that skipped settlement or lost a pending
+/// event would save a different window.
+#[test]
+fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt-pending");
+    let mut hs = start_room_test_server("c3d-lost-receipt-pending", 0);
+    hs.inventory_mode = InventoryMode::Strict;
+    let (i, client, heard) = join(&mut hs, 17);
+    let accept = heard.accepts.first().expect("Strict admits a first visit");
+    let sp = &mut hs.server.players[i];
+    let synced = sp.window_events.last_number();
+    crate::window_events::apply_through(sp, synced, 0);
+    sp.inventory.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
+    let stone = crate::item::Item::Block(crate::block::STONE);
+    crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(crate::item::ItemStack::new_block(crate::block::DIRT, 3)), 0);
+    crate::window_events::queue(sp, crate::window_events::WindowEvent::Take { slot: 0, item: stone, n: 2, how: "test" }, 0);
+    assert_eq!(sp.window_events.waiting(), 2, "a Grant and a Take wait at teardown");
+    let cell = |n: i32| protocol::BlockChange::with_meta(n % 1000, 200, n / 1000, crate::block::STONE, 0);
+    let backlog: Vec<_> = (0..8_000).map(cell).collect();
+    hs.outboxes[i].push_tick(0, &[], &[], &backlog, &[]);
+    // The action reports only the join's events applied: both still wait.
+    let action = ActionHeader { session: accept.action_session, epoch: 0, seq: 1, life: accept.action_life, events_applied: synced };
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent: ActionIntent::CancelledNoop }));
+    hs.tick();
+    assert_eq!(hs.server.players[i].window_events.waiting(), 2, "still waiting before the teardown");
+    let flood: Vec<_> = (8_000..200_000).map(cell).collect();
+    hs.outboxes[i].push_tick(0, &[], &[], &flood, &[]);
+    hs.tick();
+    let heard = hear(&client);
+    assert!(heard.rejects.iter().any(|r| r.contains("could not be delivered")), "torn down: {:?}", heard.rejects);
+    let saved = hs.server.load_joiner(i).expect("the departure saved");
+    assert!(saved.obligations_proven_zero(), "nothing owed");
+    let window = saved.window().expect("a readable window");
+    let count = |item: crate::item::Item| -> u32 {
+        (0..36).filter_map(|s| window.inv.slot(s)).filter(|s| s.item == item).map(|s| u32::from(s.count)).sum()
+    };
+    assert_eq!(count(crate::item::Item::Block(crate::block::STONE)), 3, "the pending Take is paid once");
+    assert_eq!(count(crate::item::Item::Block(crate::block::DIRT)), 3, "the pending Grant is kept once");
 }

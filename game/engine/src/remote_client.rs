@@ -2944,6 +2944,48 @@ mod tests {
         }
     }
 
+    /// C3d review M1 — the crafting close the Esc chain now routes through
+    /// (`GameState::close_crafting` → `close_joined`), on a Strict
+    /// connection: the action is reserved in the journal BEFORE the grid and
+    /// cursor return to the bag, the server receives exactly one typed
+    /// `Action` (a Close click), and no legacy `WindowOp` is logged or sent.
+    #[test]
+    fn c3d_strict_crafting_close_reserves_an_action_and_sends_no_legacy_window_op() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let mut inv = crate::inventory::Inventory::new();
+        let mut armour = [None; 4];
+        ui.open_player_crafting(&inv, &armour);
+        // Opening logs its own config op (typed window configuration is a
+        // later C3d milestone); this test is about the close.
+        let _ = ui.take_ops(&inv, &armour);
+        ui.grid[0][0] = Some(crate::item::ItemStack::new_block(crate::block::STONE, 3));
+        let closed = ui.close_joined(&mut rc, &mut inv, &mut armour, &crate::block::BlockRegistry::new()).unwrap();
+        assert!(closed, "the close happened");
+        assert_eq!(inv.slot(0).map(|s| s.count), Some(3), "the grid returned to the bag");
+        assert_eq!(rc.action_journal.as_ref().unwrap().len(), 1, "one action reserved for the close");
+        assert!(ui.take_ops(&inv, &armour).is_empty(), "no legacy window op is logged");
+        let mut actions = 0;
+        while let Some(pkt) = srv.try_recv_from_client() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::Action, payload)) => {
+                    let packet = crate::action_wire::ActionPacket::decode(payload).unwrap();
+                    assert!(matches!(packet.intent, crate::action_wire::ActionIntent::Window(protocol::WindowOpPacket { op: protocol::WireWindowOp::Click(crate::window::WindowClick::Close), .. })));
+                    assert_eq!(packet.action.seq, 1);
+                    actions += 1;
+                }
+                Some((PacketType::WindowOp, _)) => panic!("a Strict close sent a legacy WindowOp"),
+                _ => {}
+            }
+        }
+        assert_eq!(actions, 1, "exactly one typed action reached the server");
+    }
+
     #[test]
     fn c3d_actual_receipt_poll_and_movement_ack_cannot_retire_before_world_and_events() {
         let (srv, client) = channel_pair();

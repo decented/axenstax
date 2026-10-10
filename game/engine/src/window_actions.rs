@@ -38,3 +38,30 @@ impl GameState {
         match result { Ok(closed) => closed, Err(error) => { self.window_action_failed(error); false } }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// C3d review M1 — a crafting window mutation on the playing screen
+    /// (click, close, Esc close, forced close) enters ONLY through the
+    /// reserving entry points above, which allocate the Strict action
+    /// before predicting and send no legacy `WindowOp` in Strict. The Esc
+    /// chain used to call `crafting_ui.close` directly. Containers are a
+    /// later C3d milestone (`close_container`), not covered here.
+    #[test]
+    fn c3d_crafting_window_mutations_enter_only_through_reserving_entry_points() {
+        let direct = [".crafting_ui.close(", ".crafting_ui.force_close(", ".crafting_ui.apply_click("];
+        for (file, source) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("game_loop.rs", include_str!("game_loop.rs")),
+            ("container_client.rs", include_str!("container_client.rs")),
+            ("player_slot.rs", include_str!("player_slot.rs")),
+        ] {
+            for call in direct {
+                assert!(!source.contains(call), "{file} mutates the crafting window directly ({call}); use GameState::apply_window_click / close_crafting / force_close_crafting");
+            }
+        }
+        let entry = include_str!("window_actions.rs");
+        let production = &entry[..entry.find("#[cfg(test)]").expect("this test module")];
+        assert!(production.contains("crafting_ui.close_joined(") && production.contains("crafting_ui.force_close_joined(") && production.contains("crafting_ui.apply_joined_click("), "the Strict arms reserve through the joined entry points");
+    }
+}

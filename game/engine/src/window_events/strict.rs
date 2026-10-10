@@ -3,7 +3,10 @@ use super::*;
 use crate::staged_window::{MarkerSlots, MarkerWindow, SourceBacking, StagedClick, PLAYER_PLACES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StrictStageError { Debt, Replacement, AmbiguousWear, MissingPayment, Source, Fit }
+pub enum StrictStageError { Debt, Replacement, AmbiguousWear, MissingPayment, Source, Fit,
+    /// A place or pending stack the marker projection can't carry exactly
+    /// (C3d review L1): refused with a typed fate, never dropped or clamped.
+    Unrepresentable }
 
 /// Staged raw result, admitted only while every original source survives each
 /// existing pending prefix. The future fold is evidence, not committed state.
@@ -19,16 +22,19 @@ fn marker_item(item: &Item) -> Item {
     }
 }
 
-fn marker_stack(stack: &ItemStack, registry: &crate::block::BlockRegistry) -> ItemStack {
-    crate::inventory::stack_from_wire(&crate::inventory::stack_to_wire(stack), registry, crate::inventory::PlanDecode::Marker)
-        .expect("an existing stack has a valid marker representation")
+fn marker_stack(stack: &ItemStack, registry: &crate::block::BlockRegistry) -> Result<ItemStack, StrictStageError> {
+    crate::staged_window::exact_marker(stack, registry).ok_or(StrictStageError::Unrepresentable)
+}
+
+fn raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
+    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry).ok_or(StrictStageError::Unrepresentable)
 }
 
 /// Views do not change personal holdings. Replace/correction cannot establish
 /// initial-source lineage for this attempt and must cross an applied rebase.
 fn marker_event(event: &WindowEvent, registry: &crate::block::BlockRegistry) -> Result<Option<WindowEvent>, StrictStageError> {
     Ok(Some(match event {
-        WindowEvent::Grant(stack) => WindowEvent::Grant(marker_stack(stack, registry)),
+        WindowEvent::Grant(stack) => WindowEvent::Grant(marker_stack(stack, registry)?),
         WindowEvent::Take { slot, item, n, how } => WindowEvent::Take {
             slot: *slot, item: marker_item(item), n: *n, how,
         },
@@ -65,10 +71,12 @@ fn apply_marker_event(window: &mut MarkerWindow, event: &WindowEvent) -> Result<
     }
 }
 
-pub fn stage_strict_click(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, click: &crate::window::WindowClick, ctx: &crate::window::ClickCtx) -> Result<StrictWindowStage, StrictStageError> {
+/// `ctx` and `client_ok` are the server's EXISTING transition
+/// (`window_ops::server_click_ctx` / `server_click`, C3d review M2).
+pub fn stage_strict_click(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, click: &crate::window::WindowClick, ctx: &crate::window::ClickCtx, client_ok: bool) -> Result<StrictWindowStage, StrictStageError> {
     if !sp.window_events.debt.is_empty() { return Err(StrictStageError::Debt); }
-    let raw = MarkerWindow::capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry);
-    let staged = crate::staged_window::stage(&raw, click, ctx);
+    let raw = raw_marker(sp, registry)?;
+    let staged = crate::staged_window::stage_with(&raw, click, ctx.station, |view| crate::window_ops::server_click(view, click, ctx, client_ok));
     let mut backing = SourceBacking::new(raw.slots());
     let mut prefix = raw;
     let mut candidate = staged.after.clone();
@@ -91,7 +99,7 @@ pub fn stage_strict_click(sp: &ServerPlayer, registry: &crate::block::BlockRegis
 /// surviving piece for capability, while the historical slot supplies heldness.
 pub fn strict_effective_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
     if !sp.window_events.debt.is_empty() { return Err(StrictStageError::Debt); }
-    let mut prefix = MarkerWindow::capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry);
+    let mut prefix = raw_marker(sp, registry)?;
     for waiting in &sp.window_events.waiting {
         if let Some(event) = marker_event(&waiting.event, registry)? { apply_marker_event(&mut prefix, &event)?; }
     }
@@ -102,7 +110,7 @@ pub fn strict_effective_marker(sp: &ServerPlayer, registry: &crate::block::Block
 /// raw mutation is permitted merely because an earlier effect was affordable.
 pub fn stage_strict_effects(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, all: &[WindowEvent]) -> Result<(), StrictStageError> {
     if !sp.window_events.debt.is_empty() { return Err(StrictStageError::Debt); }
-    let raw = MarkerWindow::capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry);
+    let raw = raw_marker(sp, registry)?;
     let before = raw.slots();
     let mut candidate = raw.clone();
     let mut sources: MarkerSlots = std::array::from_fn(|_| None);
@@ -160,6 +168,9 @@ pub fn stage_strict_effects(sp: &ServerPlayer, registry: &crate::block::BlockReg
 pub struct PreparedEvents {
     expected_last: u32,
     expected_waiting: usize,
+    /// The deque's capacity before this reservation: an abandoned
+    /// reservation gives back exactly what it took.
+    capacity_before: usize,
     events: Box<[WindowEvent]>,
     last: u32,
 }
@@ -196,13 +207,24 @@ pub fn prepare_strict_events(sp: &mut ServerPlayer, events: Box<[WindowEvent]>) 
     let staged = events.len().checked_mul(std::mem::size_of::<WindowEvent>()).ok_or(StrictStageError::Fit)?;
     let fits = |capacity: usize| capacity.checked_mul(std::mem::size_of::<Waiting>()).and_then(|n| n.checked_add(heap)).and_then(|n| n.checked_add(staged)).is_some_and(|n| n <= crate::action_journal::MAX_RETAINED_BYTES);
     if !fits(estimated_capacity) { return Err(StrictStageError::Fit); }
+    let capacity_before = waiting.waiting.capacity();
     waiting.waiting.try_reserve_exact(events.len()).map_err(|_| StrictStageError::Fit)?;
-    if !fits(waiting.waiting.capacity()) { return Err(StrictStageError::Fit); }
-    Ok(PreparedEvents { expected_last: waiting.last_sent, expected_waiting: waiting.waiting.len(), events, last })
+    if !fits(waiting.waiting.capacity()) {
+        waiting.waiting.shrink_to(capacity_before);
+        return Err(StrictStageError::Fit);
+    }
+    Ok(PreparedEvents { expected_last: waiting.last_sent, expected_waiting: waiting.waiting.len(), capacity_before, events, last })
 }
 
 impl PreparedEvents {
     pub fn last_number(&self) -> u32 { self.last }
+    /// A later reservation of the same action failed: nothing is numbered,
+    /// queued or kept, and the deque returns to its capacity before.
+    pub fn abandon(self, sp: &mut ServerPlayer) {
+        let waiting = &mut sp.window_events;
+        assert_eq!(waiting.last_sent, self.expected_last, "prepared events were invalidated before abandonment");
+        waiting.waiting.shrink_to(self.capacity_before);
+    }
     pub fn commit(self, sp: &mut ServerPlayer, now: u64) -> u32 {
         let waiting = &mut sp.window_events;
         assert_eq!(waiting.last_sent, self.expected_last, "prepared events were invalidated before external commit");
@@ -231,7 +253,7 @@ mod tests {
         queue(&mut sp, WindowEvent::Take { slot: 0, item: Item::Block(crate::block::STONE), n: 1, how: "test owed take" }, 0);
         queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::STONE, 1)), 0);
         let registry = crate::block::BlockRegistry::new();
-        assert!(matches!(stage_strict_click(&sp, &registry, &crate::window::WindowClick::Slot { slot: 0, right: false }, &ctx()), Err(StrictStageError::Source)));
+        assert!(matches!(stage_strict_click(&sp, &registry, &crate::window::WindowClick::Slot { slot: 0, right: false }, &ctx(), true), Err(StrictStageError::Source)));
         assert_eq!(sp.inventory.slot(0).unwrap().count, 1);
         assert!(sp.cursor.is_none());
         assert_eq!(sp.window_events.waiting.len(), 2);
@@ -241,7 +263,7 @@ mod tests {
         let mut sp = player();
         sp.cursor = Some(ItemStack::new_block(crate::block::DIRT, 1));
         queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::STONE, 1)), 0);
-        let mut staged = stage_strict_click(&sp, &crate::block::BlockRegistry::new(), &crate::window::WindowClick::Slot { slot: 0, right: false }, &ctx()).unwrap();
+        let mut staged = stage_strict_click(&sp, &crate::block::BlockRegistry::new(), &crate::window::WindowClick::Slot { slot: 0, right: false }, &ctx(), true).unwrap();
         assert!(staged.raw.after.view().cursor.is_none());
         assert_eq!(staged.raw.after.view().inv.slot(0).unwrap().item, Item::Block(crate::block::DIRT));
         assert!(sp.inventory.slot(0).is_none(), "proof must not materialise the pending grant into raw R");
@@ -270,7 +292,7 @@ mod tests {
         for slot in 1..36 { sp.inventory.set_slot(slot, Some(ItemStack::new_block(crate::block::STONE, 64))); }
         sp.cursor = Some(ItemStack::new_block(crate::block::OAK_LOG, 1));
         queue(&mut sp, WindowEvent::Grant(ItemStack::new_block(crate::block::DIRT, 1)), 0);
-        assert!(matches!(stage_strict_click(&sp, &crate::block::BlockRegistry::new(), &crate::window::WindowClick::Close, &ctx()), Err(StrictStageError::Fit)));
+        assert!(matches!(stage_strict_click(&sp, &crate::block::BlockRegistry::new(), &crate::window::WindowClick::Close, &ctx(), true), Err(StrictStageError::Fit)));
         assert!(sp.inventory.slot(0).is_none());
         assert_eq!(sp.cursor.as_ref().unwrap().item, Item::Block(crate::block::OAK_LOG));
         assert!(sp.window_events.debt.is_empty());

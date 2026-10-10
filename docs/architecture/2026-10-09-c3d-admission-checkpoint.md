@@ -263,3 +263,41 @@ controls and full stable-tree acceptance. No intermediate merge/default flip.
 Automated acceptance cannot replace the owner's actual near-zero honest-play
 session. Prepare a test sheet separating lockstep, container convergence, stale
 world refusal, skipped baseline/Creative, frontier/replay failure counters.
+
+## Wired through real dispatch (2026-10-10, second run, v89 provisional)
+
+Strict stays internally selected (no operator flag), Mirror the default bridge.
+
+- **Click.** `serve_strict_window` stages the server's EXISTING transition, shared
+  with Mirror's `window_ops::serve_op` (`server_click_ctx`: table reach slack and
+  grace; `server_click`: no Result the client refused, a refused Autofill reruns
+  without the grace; `close_container_view` on the ops that close a view). Order:
+  marker raw stage with prefix source backing and pending fit → digest → result
+  row reserved → raw commit → post-commit fold guard. A digest the raw transition
+  doesn't reproduce is `Refused` at its seq with zero effect (fail-closed
+  teardown until recovery is wired). A window the marker projection can't carry
+  exactly (a broken tool, an unregistered block, a clamped durability) is refused
+  with a typed fate before commit; nothing is dropped or clamped; the projection
+  is fallible (`MarkerWindow::try_capture_parts`, `staged_window::exact_marker`),
+  so a pending `Grant` of such a stack no longer panics. A Plan becomes its
+  marker placeholder (marker and developed state kept).
+- **Shoot.** `serve_strict_shot`: the outcome is serialised first; the Take and
+  Wear are reserved together (`prepare_strict_events`), then the result row; a
+  result-row failure gives the event reservation back exactly
+  (`PreparedEvents::abandon`, deque capacity restored). Only then the one
+  projectile, the two numbered events, the row and the outcome.
+- **Strict never creates debt.** Staging refuses a fold that owes before any
+  effect (logged, distinct reason); every Strict commit (click, shot) is followed
+  by `strict_fold_holds` over `ServerPlayer::obligations_proven_zero`: a breach is
+  logged and the session torn down with a reason, never a panic or a write-off;
+  a Strict departure with a non-empty fold is logged and saved as it stands.
+- **Client Esc close.** `EscAction::CloseCraft` goes through
+  `GameState::close_crafting` (reserve before predict, no legacy `WindowOp`).
+
+Still open: shared containers in Strict (typed `OpenContainer` with a reserved
+`ContainerView`, container click staged on the REAL container, contested take →
+`NormalisedAcceptedNoop`, `event_heap_bytes` sizing a `ContainerView` instead of
+refusing it, `container_push` views reserved); typed window configuration
+(`OpenPlayer`/`OpenTable`/`SetAutoRefill`), which an honest Strict client still
+sends as legacy ops; every other typed class; recovery/replay.
+

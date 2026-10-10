@@ -37,8 +37,13 @@ impl ActionResults {
         if self.rows.len() == MAX_ACTIONS { return Err(ResultError::Capacity); }
         let estimated = self.rows.capacity().max(self.rows.len() + 1).checked_mul(std::mem::size_of::<ResultRow>()).and_then(|n| n.checked_add(std::mem::size_of::<Self>())).ok_or(ResultError::Capacity)?;
         if estimated.checked_add(cell_count * std::mem::size_of::<[i32; 3]>()).is_none_or(|n| n > MAX_RETAINED_BYTES) { return Err(ResultError::Capacity); }
+        let capacity_before = self.rows.capacity();
         self.rows.try_reserve_exact(1).map_err(|_| ResultError::Capacity)?;
-        if self.retained_bytes().checked_add(cells.len() * std::mem::size_of::<[i32; 3]>()).is_none_or(|n| n > MAX_RETAINED_BYTES) { return Err(ResultError::Capacity); }
+        if self.retained_bytes().checked_add(cells.len() * std::mem::size_of::<[i32; 3]>()).is_none_or(|n| n > MAX_RETAINED_BYTES) {
+            // Give back exactly what the reservation took: no capacity leaks.
+            self.rows.shrink_to(capacity_before);
+            return Err(ResultError::Capacity);
+        }
         Ok(PreparedResult { receipt, cells, expected_terminal: self.terminal })
     }
     pub fn commit(&mut self, prepared: PreparedResult) {
