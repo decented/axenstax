@@ -7,7 +7,7 @@ impl GameState {
     }
     fn window_action_failed(&mut self, error: String) {
         log::warn!("Joined window action could not be retained: {error}");
-        self.toast = Some(("Inventory action is waiting; try again.".into(), std::time::Instant::now() + std::time::Duration::from_secs(2)));
+        self.toast = Some(("Inventory action is waiting; try again.".into(), web_time::Instant::now() + web_time::Duration::from_secs(2)));
     }
     pub(crate) fn apply_window_click(&mut self, pidx: usize, click: &WindowClick) -> ClickResult {
         if !self.strict_window_connection() {
