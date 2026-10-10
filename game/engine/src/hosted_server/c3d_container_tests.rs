@@ -143,7 +143,7 @@ fn world_holdings(hs: &HostedServer, joiners: &[usize], cell: [i32; 3]) -> BTree
 fn c3d_strict_two_joiners_contest_one_chest_exactly_one_wins_each_unit() {
     let _g = crate::save::WorldsRootGuard::new("c3d-container-contest");
     let mut hs = start_room_test_server("c3d-container-contest", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let mut a = join_as(&mut hs, KEY, 17);
     let mut b = join_as(&mut hs, KEY_B, 18);
     hs.server.players[a.i].inventory.set_slot(9, Some(worn_pickaxe()));
@@ -206,7 +206,7 @@ fn c3d_strict_two_joiners_contest_one_chest_exactly_one_wins_each_unit() {
 fn c3d_strict_config_open_shoot_close_and_fabricated_deposit() {
     let _g = crate::save::WorldsRootGuard::new("c3d-container-life");
     let mut hs = start_room_test_server("c3d-container-life", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let mut j = join_as(&mut hs, KEY, 17);
     let tool = arm(&mut hs.server.players[j.i]);
     let cell = place_chest(&mut hs, j.i, &[]);
@@ -291,7 +291,7 @@ fn c3d_strict_config_open_shoot_close_and_fabricated_deposit() {
 fn c3d_strict_container_deposit_of_a_source_a_pending_take_owns_commits_nothing() {
     let _g = crate::save::WorldsRootGuard::new("c3d-container-source");
     let mut hs = start_room_test_server("c3d-container-source", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let mut j = join_as(&mut hs, KEY, 17);
     hs.server.players[j.i].inventory.set_slot(9, Some(worn_pickaxe()));
     let cell = place_chest(&mut hs, j.i, &[]);
@@ -322,7 +322,7 @@ fn c3d_strict_container_deposit_of_a_source_a_pending_take_owns_commits_nothing(
 fn c3d_strict_movement_packet_edit_fails_closed_with_a_reason() {
     let _g = crate::save::WorldsRootGuard::new("c3d-movement-edit");
     let mut hs = start_room_test_server("c3d-movement-edit", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let j = join_as(&mut hs, KEY, 17);
     let eye = hs.server.players[j.i].player.eye_pos();
     let (x, y, z) = (eye.x.floor() as i32 + 1, eye.y.floor() as i32, eye.z.floor() as i32);

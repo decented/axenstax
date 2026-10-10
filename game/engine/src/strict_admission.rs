@@ -64,11 +64,11 @@ impl StrictTeardown {
     /// The sentence the disconnected player reads (UK English).
     pub fn reason(self) -> &'static str {
         match self {
-            StrictTeardown::Unconfirmed => "This world checks inventories strictly and couldn't confirm your last change, so you've been disconnected. Rejoin to carry on with your inventory as the world has it.",
-            StrictTeardown::FellBehind => "This world checks inventories strictly and fell behind checking your changes, so you've been disconnected. Rejoin to carry on with your inventory as the world has it.",
-            StrictTeardown::Untyped => "This world checks inventories strictly, and your game sent a change in a form it doesn't accept, so you've been disconnected. Rejoin to carry on; if it keeps happening, update your game.",
+            StrictTeardown::Unconfirmed => "This world checks inventories strictly and couldn't confirm your last change, so you've been disconnected. Anything this world saved for you is kept.",
+            StrictTeardown::FellBehind => "This world checks inventories strictly and fell behind checking your changes, so you've been disconnected. Anything this world saved for you is kept.",
+            StrictTeardown::Untyped => "This world checks inventories strictly, and your game sent a change this world can't take yet, so you've been disconnected. Anything this world saved for you is kept.",
             StrictTeardown::Obligation => "This world's strict inventory check found an obligation it can't account for, so you've been disconnected. Ask whoever runs this world about your save.",
-            StrictTeardown::Unreadable => "Your game sent this world something it couldn't read, so you've been disconnected. Rejoin to carry on.",
+            StrictTeardown::Unreadable => "Your game sent this world something it couldn't read, so you've been disconnected. Anything this world saved for you is kept.",
         }
     }
 }
@@ -105,7 +105,7 @@ mod teardown_copy_tests {
         for cause in [StrictTeardown::Unconfirmed, StrictTeardown::FellBehind, StrictTeardown::Untyped, StrictTeardown::Obligation, StrictTeardown::Unreadable] {
             let text = cause.reason();
             assert!(crate::copy_lint::banned_in(text, crate::copy_lint::BANNED_MONEY_WORDS).is_empty(), "{cause:?}: {text}");
-            for jargon in ["action", "frontier", "epoch", "receipt", "rejoin required", "authoritative"] {
+            for jargon in ["action", "frontier", "epoch", "receipt", "rejoin required", "authoritative", "update your game", "carry on with your inventory"] {
                 assert!(!text.to_lowercase().contains(jargon), "{cause:?} reads {jargon:?}: {text}");
             }
             assert!(text.ends_with('.'), "{cause:?}");

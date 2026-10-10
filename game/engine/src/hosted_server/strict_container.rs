@@ -86,7 +86,12 @@ impl HostedServer {
             _ => unreachable!("only configuration ops reach here"),
         }
         raw.set_auto_refill(refill);
-        if raw.digest_with(station, None) != op.digest {
+        // Run 4 (run-3 review M1) — configuration touches no contents, so it
+        // is staged independently of a waiting join/death replacement: the
+        // client's window at this boundary is about to be replaced wholesale,
+        // so its contents digest is not compared (no Replacement uncertainty).
+        let replace_waiting = self.server.players[i].window_events.replace_waiting();
+        if !replace_waiting && raw.digest_with(station, None) != op.digest {
             self.refuse_typed_action(i, action);
             return false;
         }

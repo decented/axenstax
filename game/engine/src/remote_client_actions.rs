@@ -7,7 +7,7 @@ use crate::protocol::{self, PacketType};
 /// can't send to the world (C3d run 4): it leaves rather than keep a
 /// window the world never saw.
 pub const STRICT_STRAY_CHANGE_REASON: &str =
-    "This game made an inventory change it couldn't send to this world, so we left to keep your inventory right. Rejoin to carry on.";
+    "This game made an inventory change it couldn't send to this world, so we left. Anything this world saved for you is kept.";
 
 /// C3d (run 4) — player 0's window flush on a Strict connection: its
 /// auto-refill setting goes as a reserved action, and every other window
@@ -23,8 +23,12 @@ pub fn flush_strict_window_ops(
     inv: &crate::inventory::Inventory,
     armour: &[Option<crate::armour::ArmourItem>; 4],
 ) -> bool {
-    if let Err(error) = ui.sync_auto_refill_joined(client, inv, armour) {
-        log::warn!("Strict auto-refill setting could not be reserved: {error}");
+    // Run 4 (run-3 review M1) — the session-start setting goes only once
+    // the join's window sync (always event 1 when there is one) is applied;
+    // before that, the first window action carries it (entry points).
+    if client.applied_window_boundary() >= 1
+        && let Err(error) = ui.sync_auto_refill_joined(client, inv, armour) {
+        log::debug!("Strict auto-refill setting could not be reserved: {error}");
     }
     let stray = ui.ops.take_before(None);
     if stray.is_empty() { return false; }

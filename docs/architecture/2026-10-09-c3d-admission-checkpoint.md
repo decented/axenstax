@@ -374,3 +374,25 @@ Coordinator decisions on run 3's departures, as built:
   proven-zero save). Red controls were run for the shot post-commit check,
   `abandon` (the result-cap rig shrinks the deque first so the reservation
   must grow it), the L5 settlement, the Esc close and the table edge.
+
+## Run 4 (2026-10-10): run-3 review folds
+
+- **M1 (liveness).** `window_events::strict_obligations` folds a waiting
+  `Replace` (join or death sync) from the window it carries (its carried debt
+  must be empty) instead of failing; source lineage across it still can't be
+  established (`admit_staged` keeps `Replacement`). Configuration ops skip the
+  contents digest while a replacement waits (`WindowEvents::replace_waiting`).
+  `SetAutoRefill` bypasses the dead / death-sync refusal. The client's flush
+  sends the session-start auto-refill only once event 1 (the join sync, when
+  there is one) is applied; the entry points carry it otherwise.
+- **L1 copy.** Every teardown sentence states what happened and ends
+  "Anything this world saved for you is kept." (true for a guest and for an
+  unreadable record too); no "update your game", no inventory promise.
+- **L2 Plan store.** Encoded-size limit exactly main's (no 16-byte box in the
+  reservation); Mirror's `remember` passes no residency (no 64 MiB cap);
+  Windows uses a write-through rename and no directory sync. The
+  `cfg(windows)` path is NOT compiled on this Linux host.
+- **L3.** `HostedServer::select_inventory_mode` (the field is private)
+  refuses Strict on a `--no-lend` host (`StrictSelectError::NoLendHost`).
+- **L4 contest interleavings: NOT done this run** (same-tick, push in flight,
+  container broken mid-contest) — next run.

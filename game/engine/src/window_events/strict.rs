@@ -146,6 +146,16 @@ pub fn strict_obligations(sp: &ServerPlayer, registry: &crate::block::BlockRegis
     if !sp.window_events.debt.is_empty() || !sp.obligations_proven_zero() { return Err(StrictStageError::Debt); }
     let mut prefix = raw_marker(sp, registry)?;
     for waiting in &sp.window_events.waiting {
+        // Run 4 (run-3 review M1) — a waiting whole-window replacement (the
+        // join or death sync) is no obligation: the fold continues from the
+        // window it carries, whose carried debt must be empty (Strict
+        // admission proved the record; a death's is empty). Source lineage
+        // across it still can't be established (`admit_staged`).
+        if let WindowEvent::Replace { window, debt } = &waiting.event {
+            if !debt.is_empty() { return Err(StrictStageError::Debt); }
+            prefix = MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.cursor, &window.grid, registry).ok_or(StrictStageError::Unrepresentable)?;
+            continue;
+        }
         if let Some(event) = marker_event(&waiting.event, registry)? {
             apply_marker_event(&mut prefix, &event).map_err(|e| if e == StrictStageError::MissingPayment { StrictStageError::Debt } else { e })?;
         }

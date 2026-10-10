@@ -76,7 +76,11 @@ impl HostedServer {
             crate::window_events::apply_through(sp, packet.action.events_applied, now);
             if !self.strict_events_hold(i) { return; }
             let sp = &mut self.server.players[i];
-            if !sp.is_present_and_alive() || sp.window_events.death_replace.is_some() {
+            // Run 4 (run-3 review M1) — the auto-refill setting touches no
+            // contents: accepted as configuration while dead (an honest
+            // toggle is never torn down).
+            let config_only = matches!(&packet.intent, ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. }));
+            if !config_only && (!sp.is_present_and_alive() || sp.window_events.death_replace.is_some()) {
                 return self.refuse_typed_action(i, packet.action);
             }
             match packet.intent {

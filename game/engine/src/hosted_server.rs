@@ -112,6 +112,13 @@ const MAX_DEVICE_INTERACTS_PER_TICK: usize = 2;
 /// turn by a round trip.
 pub const JOINER_MIN_FACING_DOT: f32 = 0.0;
 
+/// C3d (run 4) — why Strict inventory admission can't be selected here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrictSelectError {
+    /// A `--no-lend` host: its server mirrors the host's copy of the world.
+    NoLendHost,
+}
+
 /// D1 — where a hosted server's world lives (`crate::sim_lend`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostWorld {
@@ -506,8 +513,9 @@ pub struct HostedServer {
     #[cfg_attr(not(test), allow(dead_code))]
     pub port: u16,
     pub server_name: String,
-    /// Chosen before admission; each accepted connection stores its own mode.
-    pub inventory_mode: crate::action_identity::InventoryMode,
+    /// Chosen before admission (only through [`Self::select_inventory_mode`]);
+    /// each accepted connection stores its own mode.
+    inventory_mode: crate::action_identity::InventoryMode,
     difficulty: String,
 
     /// Per-client challenge nonces. The server issues one (with its origin) to
@@ -1071,6 +1079,23 @@ impl HostedServer {
             host_world,
         )
     }
+
+    /// C3d (run 4, run-3 review L3) — the internal inventory-mode selector
+    /// (no operator flag yet). Strict is refused on a `--no-lend` host: its
+    /// owning server's block entities are overwritten from the host's copy
+    /// every tick (`mirror_host_world_state`), so a committed Strict
+    /// withdrawal would be put back into the "real" chest — a duplicate. A
+    /// dedicated server (no local players) and a lending host may select it.
+    pub fn select_inventory_mode(&mut self, mode: crate::action_identity::InventoryMode) -> Result<(), StrictSelectError> {
+        if mode == crate::action_identity::InventoryMode::Strict && self.host_world == HostWorld::Owned && self.num_local_players > 0 {
+            return Err(StrictSelectError::NoLendHost);
+        }
+        self.inventory_mode = mode;
+        Ok(())
+    }
+
+    /// The inventory mode new connections are admitted with.
+    pub fn inventory_mode(&self) -> crate::action_identity::InventoryMode { self.inventory_mode }
 
     /// D1 — does this server simulate the host client's lent world (rather
     /// than a copy of its own)?

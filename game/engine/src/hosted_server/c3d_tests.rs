@@ -73,7 +73,7 @@ fn assert_strict_refuses(tag: &str, prepare: impl FnOnce(&mut HostedServer, usiz
     prepare(&mut hs, i);
     let path = record_path(&hs, i);
     let before = std::fs::read(&path).expect("the Mirror session left a record");
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (j, _second, heard) = join(&mut hs, 34);
     assert!(heard.accepts.is_empty(), "{tag}: no JoinAccept for an unproven record");
     assert_eq!(heard.rejects.len(), 1, "{tag}: one typed refusal");
@@ -161,7 +161,7 @@ fn c3d_strict_admission_admits_proven_records_and_mirror_admission_is_unchanged(
     let _g = crate::save::WorldsRootGuard::new("c3d-admit-proven");
     // No record: proven. Strict is advertised on the accept.
     let mut hs = start_room_test_server("c3d-admit-proven", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, _a, heard) = join(&mut hs, 17);
     assert_eq!(heard.accepts.len(), 1, "no record is proven zero");
     assert_eq!(heard.accepts[0].inventory_mode, InventoryMode::Strict);
@@ -175,7 +175,7 @@ fn c3d_strict_admission_admits_proven_records_and_mirror_admission_is_unchanged(
     // Mirror admits a record that owes, as before (its debt is carried).
     owe(&mut hs.server.players[j], crate::item::Item::Block(crate::block::STONE), 1);
     hs.release_slot(j, None);
-    hs.inventory_mode = InventoryMode::Mirror;
+    hs.select_inventory_mode(InventoryMode::Mirror).expect("a dedicated server selects any mode");
     let (k, _c, heard) = join(&mut hs, 51);
     assert_eq!(heard.accepts.len(), 1, "Mirror admission is unchanged");
     assert_eq!(heard.accepts[0].inventory_mode, InventoryMode::Mirror);
@@ -189,7 +189,7 @@ fn c3d_strict_admission_admits_proven_records_and_mirror_admission_is_unchanged(
 fn c3d_actual_hosted_fifo_repeats_the_original_receipt_without_mutation_or_debt() {
     let _g = crate::save::WorldsRootGuard::new("c3d-fifo");
     let mut hs = start_room_test_server("c3d-fifo", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, client, heard) = join(&mut hs, 17);
     let accept = heard.accepts.first().expect("Strict admits a first visit");
     let action = ActionHeader { session: accept.action_session, epoch: 0, seq: 1, life: accept.action_life, events_applied: 0 };
@@ -228,7 +228,7 @@ fn c3d_actual_hosted_fifo_repeats_the_original_receipt_without_mutation_or_debt(
 fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_record() {
     let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt");
     let mut hs = start_room_test_server("c3d-lost-receipt", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, client, heard) = join(&mut hs, 17);
     let accept = heard.accepts.first().expect("Strict admits a first visit");
     let cell = |n: i32| protocol::BlockChange::with_meta(n % 1000, 200, n / 1000, crate::block::STONE, 0);
@@ -267,7 +267,7 @@ fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_re
 fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
     let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt-pending");
     let mut hs = start_room_test_server("c3d-lost-receipt-pending", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, client, heard) = join(&mut hs, 17);
     let accept = heard.accepts.first().expect("Strict admits a first visit");
     let sp = &mut hs.server.players[i];
@@ -311,7 +311,7 @@ fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
 fn c3d_actual_hosted_lost_receipt_teardown_settles_an_unfit_grant_once() {
     let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt-unfit");
     let mut hs = start_room_test_server("c3d-lost-receipt-unfit", 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, client, heard) = join(&mut hs, 17);
     let accept = heard.accepts.first().expect("Strict admits a first visit");
     let sp = &mut hs.server.players[i];
@@ -341,4 +341,20 @@ fn c3d_actual_hosted_lost_receipt_teardown_settles_an_unfit_grant_once() {
     assert!(saved.obligations_proven_zero(), "nothing owed");
     let window = saved.window().expect("a readable window");
     assert!((0..36).all(|s| window.inv.slot(s).is_some_and(|st| st.item == crate::item::Item::Block(crate::block::STONE) && st.count == 64)), "the full bag is saved as it was");
+}
+
+/// Run 4 (run-3 review L3) — Strict can't be selected on a `--no-lend` host
+/// (an owning server with local players mirrors the host's copy of the
+/// world every tick, which would put a committed Strict withdrawal back in
+/// the chest); a dedicated server selects it.
+#[test]
+fn c3d_strict_cannot_be_selected_on_a_no_lend_host() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-select");
+    let mut host = start_room_test_server("c3d-select-host", 1);
+    assert_eq!(host.select_inventory_mode(InventoryMode::Strict), Err(StrictSelectError::NoLendHost));
+    assert_eq!(host.inventory_mode(), InventoryMode::Mirror, "the refusal changes nothing");
+    assert!(host.select_inventory_mode(InventoryMode::Mirror).is_ok());
+    let mut dedicated = start_room_test_server("c3d-select-dedicated", 0);
+    assert!(dedicated.select_inventory_mode(InventoryMode::Strict).is_ok());
+    assert_eq!(dedicated.inventory_mode(), InventoryMode::Strict);
 }

@@ -31,7 +31,7 @@ struct Rig {
 fn strict_rig(tag: &str) -> Rig {
     let g = crate::save::WorldsRootGuard::new(&format!("c3d-strict-{tag}"));
     let mut hs = start_room_test_server(&format!("c3d-strict-{tag}"), 0);
-    hs.inventory_mode = InventoryMode::Strict;
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
     let (i, client, heard) = join(&mut hs, 17);
     let accept = heard.accepts.into_iter().next().expect("Strict admits a first visit");
     assert_eq!(accept.inventory_mode, InventoryMode::Strict);
@@ -604,4 +604,39 @@ fn c3d_strict_short_take_applied_at_the_boundary_is_torn_down_with_a_reason() {
     assert_eq!(r.through(), action.seq - 1, "the action is not terminal");
     assert_eq!(server_places(r.sp()), before, "nothing committed");
     assert!(r.hs.slot_is_free(r.i));
+}
+
+/// Run 4 (run-3 review M1) — the session-start auto-refill setting can reach
+/// the server before its client applied the join's window sync (the Sync
+/// landed a poll late), and a toggle can arrive while the death sync waits.
+/// Configuration touches no contents: both are Accepted, the setting
+/// applied, nothing else changed, never torn down.
+#[test]
+fn c3d_strict_auto_refill_before_the_join_sync_or_during_death_is_accepted() {
+    for death in [false, true] {
+        let tag = if death { "refill-death" } else { "refill-late-sync" };
+        let mut r = strict_rig(tag);
+        stock(&mut r.hs.server.players[r.i]);
+        let sp = &mut r.hs.server.players[r.i];
+        let window = crate::window_events::EffectiveWindow { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone() };
+        let n = crate::window_events::queue(sp, crate::window_events::WindowEvent::Replace { window: Box::new(window), debt: Default::default() }, 0);
+        if death { sp.window_events.death_replace = Some(n); }
+        let on = !r.sp().inventory.auto_refill;
+        let before = server_places(r.sp());
+        // The client's boundary is before the sync: its digest is of the
+        // window the sync is about to replace (here: nothing like it).
+        let action = r.next();
+        let op = protocol::WindowOpPacket {
+            op_seq: action.seq as u32, op: protocol::WireWindowOp::SetAutoRefill { on }, digest: 0,
+            events_applied: action.events_applied, touched: Vec::new(), claims: Vec::new(), client_ok: true,
+        };
+        r.send(action, ActionIntent::Window(op));
+        let heard = hear(&r.client);
+        assert!(heard.rejects.is_empty(), "{tag}: an honest setting is never torn down: {:?}", heard.rejects);
+        assert_eq!(heard.receipts.first().map(|x| (x.action, x.fate)), Some((action, ActionFate::Accepted)), "{tag}");
+        assert_eq!(r.sp().inventory.auto_refill, on, "{tag}: the setting is applied");
+        assert_eq!(server_places(r.sp()), before, "{tag}: no contents change");
+        assert_eq!(r.sp().window_events.waiting(), 1, "{tag}: the sync still waits for its client");
+        assert!(r.sp().obligations_proven_zero(), "{tag}");
+    }
 }

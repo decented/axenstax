@@ -40,7 +40,10 @@ pub(crate) fn remember_item(item: &crate::item::Item) {
     }
 }
 pub(crate) fn remember(body: &PlanData) {
-    if let Err(error) = crate::body_residency::allocated_body_bytes(body).map_err(|e| format!("Plan allocation cannot be bounded: {e:?}")).and_then(|resident| remember_checked(body, resident)) { log::warn!("Could not remember local Plan: {error}"); }
+    // Run 4 (run-3 review L2) — Mirror's single-body store is main's: the
+    // 16 MiB ENCODED limit only, no 64 MiB residency cap (that bounds Strict
+    // journal residency, `remember_checked` with a real resident count).
+    if let Err(error) = remember_checked(body, 0) { log::warn!("Could not remember local Plan: {error}"); }
 }
 
 /// Native joined history may release ownership only after this returns success.
@@ -58,8 +61,9 @@ pub(crate) fn remember_checked(body: &PlanData, resident_bytes: usize) -> Result
     if encoded > crate::action_capacity::MAX_PRIVATE_BODY_BYTES {
         return Err("Local Plan body exceeds the store limit".into());
     }
-    let scratch = encoded.checked_add(std::mem::size_of::<Box<[u8]>>()).ok_or("Local Plan encoding cannot be bounded")?;
-    crate::action_capacity::reserve_body(resident_bytes, scratch).map_err(|e| format!("Local Plan encoding reservation failed: {e:?}"))?;
+    // Run 4 (run-3 review L2) — the reservation is the encoded bytes alone,
+    // so exactly main's limit holds: `encoded <= 16 MiB` is stored.
+    crate::action_capacity::reserve_body(resident_bytes, encoded).map_err(|e| format!("Local Plan encoding reservation failed: {e:?}"))?;
     // Fixed output cannot grow during serialisation. No owned Plan clone and no
     // second body-sized hashing buffer enters the reservation.
     let mut bytes = vec![0; encoded].into_boxed_slice();
@@ -93,8 +97,48 @@ fn root() -> std::path::PathBuf {
 fn persist(marker: [u8; 32], bytes: &[u8]) -> Result<(), String> {
     let dir = root();
     ensure_checked_dir(&dir)?;
-    crate::save::write_atomic(&dir.join(hex::encode(marker)), bytes)?;
-    sync_checked_dir(&dir)
+    #[cfg(windows)]
+    { write_through_atomic(&dir.join(hex::encode(marker)), bytes) }
+    #[cfg(not(windows))]
+    {
+        crate::save::write_atomic(&dir.join(hex::encode(marker)), bytes)?;
+        sync_checked_dir(&dir)
+    }
+}
+
+/// Run 4 (run-3 review L2) — Windows has no directory fsync a normal handle
+/// can reach (`FlushFileBuffers` on a directory needs `GENERIC_WRITE`, so the
+/// Unix-style parent sync would always fail and durability-before-cache would
+/// never cache a Plan, in Mirror too). The platform's own durable rename is
+/// `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`: it returns only once the
+/// rename is flushed to disk. The file's bytes are fsynced before it.
+/// (Unix, Android included, keeps the parent-directory sync.)
+#[cfg(windows)]
+fn write_through_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::windows::ffi::OsStrExt as _;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        file.write_all(bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all().map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
+    }
+    let wide = |p: &std::path::Path| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (from, to) = (wide(&tmp), wide(path));
+    // SAFETY: both are NUL-terminated UTF-16 paths that outlive the call.
+    let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+    if moved == 0 {
+        return Err(format!("Plan-store write-through rename failed: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_checked_dir(dir: &std::path::Path) -> Result<(), String> {
@@ -106,22 +150,19 @@ fn ensure_checked_dir(dir: &std::path::Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {},
         Err(error) => return Err(error.to_string()),
     }
+    #[cfg(windows)]
+    { let _ = parent; Ok(()) }
+    #[cfg(not(windows))]
     sync_checked_dir(parent)
 }
 
 /// Checked directory durability is deliberately narrower than shared save's
 /// best-effort sync. Unsupported native filesystems/platforms return failure;
 /// joined history keeps its owned body and pauses instead of claiming success.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(windows)))]
 fn sync_checked_dir(dir: &std::path::Path) -> Result<(), String> {
     #[cfg(test)]
     if FAIL_DIRECTORY_SYNC.with(|failure| failure.get()) { return Err("Injected Plan-store directory sync failure".into()); }
-    #[cfg(windows)]
-    let file = {
-        use std::os::windows::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().read(true).custom_flags(0x02000000).open(dir)
-    };
-    #[cfg(not(windows))]
     let file = std::fs::File::open(dir);
     file.and_then(|file| file.sync_all()).map_err(|e| format!("Plan-store directory was not durably synced: {e}"))
 }
@@ -203,6 +244,27 @@ mod tests {
         let marker = crate::plan::marker(&body);
         remember_checked(&body, crate::body_residency::allocated_body_bytes(&body).unwrap()).expect("an encoding within 16 MiB is stored");
         assert_eq!(resolve(marker).unwrap().cells, body.cells);
+    }
+
+    /// Run 4 (run-3 review L2) — Mirror's store is main's exactly: a body
+    /// whose ENCODING is exactly 16 MiB is stored and resolves (no 16-byte
+    /// box in the reservation, no residency cap on the single-body store).
+    #[test]
+    fn c3d_mirror_store_accepts_a_body_encoded_at_exactly_the_limit() {
+        let _g = crate::save::WorldsRootGuard::new("c3d-plans-exact-limit");
+        let mut body = PlanData::debug_3x3_stone();
+        body.name = String::new();
+        let base = usize::try_from(bincode::serialized_size(&body).unwrap()).unwrap();
+        body.name = "x".repeat(crate::action_capacity::MAX_PRIVATE_BODY_BYTES - base);
+        assert_eq!(usize::try_from(bincode::serialized_size(&body).unwrap()).unwrap(), crate::action_capacity::MAX_PRIVATE_BODY_BYTES);
+        let marker = crate::plan::marker(&body);
+        remember(&body);
+        assert!(REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))), "stored and cached");
+        assert_eq!(resolve(marker).map(|b| b.name.len()), Some(body.name.len()), "and it resolves");
+        body.name.push('x');
+        let over = crate::plan::marker(&body);
+        remember(&body);
+        assert!(resolve(over).is_none(), "one byte over is not stored");
     }
 
     #[test]

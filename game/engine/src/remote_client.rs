@@ -3041,6 +3041,40 @@ mod tests {
         assert_eq!(actions, 1, "exactly one typed action reached the server");
     }
 
+    /// Run 4 (run-3 review M1) — `JoinAccept` in one poll, the join's
+    /// window sync in a later one: the flush sends no action (the
+    /// session-start auto-refill setting waits) until the sync (event 1) is
+    /// applied; then the setting goes, at that boundary.
+    #[test]
+    fn c3d_strict_session_start_auto_refill_waits_for_the_join_sync() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let inv = crate::inventory::Inventory::new();
+        let armour = [None; 4];
+        let actions = |srv: &crate::transport::ChannelServerTransport| {
+            let mut out = Vec::new();
+            while let Some(pkt) = srv.try_recv_from_client() {
+                if let Some((PacketType::Action, payload)) = protocol::deserialize_header(&pkt) {
+                    out.push(crate::action_wire::ActionPacket::decode(payload).unwrap());
+                }
+            }
+            out
+        };
+        for _ in 0..3 { assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour)); }
+        assert!(actions(&srv).is_empty(), "nothing leaves before the join sync applies");
+        rc.note_window_event(1);
+        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour));
+        let sent = actions(&srv);
+        assert_eq!(sent.len(), 1, "the setting goes once the sync is applied");
+        assert_eq!(sent[0].action.events_applied, 1, "at the sync's boundary");
+        assert!(matches!(&sent[0].intent, crate::action_wire::ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })));
+    }
+
     /// C3d run 4 — a Strict client that finds a legacy window op in its
     /// flush (here: the config op a non-joined open logs) never discards it
     /// silently: there is no whole-window resync request, so it leaves the
