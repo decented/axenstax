@@ -443,6 +443,46 @@ async fn publish_inner(
     )
     .await;
     result?;
+    readback_inner(url, event, route, budget, cancel).await
+}
+
+/// Independent exact readback of an already crypto-verified event (no
+/// publication): a NEW stored subscription on one of the root's relays must
+/// return exactly these bytes. With `publish_readback` (which ends in the
+/// same readback) the only way a `StoredProof` exists. The recipient uses it
+/// to witness the Committed the source published before it activates
+/// (protocol core: "Receiver may independently read back valid Committed").
+pub async fn readback(
+    url: &str,
+    root: &RootContext,
+    event: &Event,
+    verified: &Verified,
+    route: Route,
+    budget: &mut Budget,
+    cancel: &AtomicBool,
+) -> Result<StoredProof> {
+    super::context::validate_relay(url)?;
+    budget.authorise_relay(url, root)?;
+    let hash = match verified {
+        Verified::Prepared(p) => p.event_hash(),
+        Verified::Committed(c) => c.event_hash(),
+    };
+    if event.id.to_bytes() != hash
+        || !route.matches(event)
+        || event.verify().is_err()
+        || event.as_json().len() > super::EVENT_LIMIT
+    {
+        return Err(Error::Invalid("readback proof"));
+    }
+    readback_inner(url, event, route, budget, cancel).await
+}
+async fn readback_inner(
+    url: &str,
+    event: &Event,
+    route: Route,
+    budget: &mut Budget,
+    cancel: &AtomicBool,
+) -> Result<StoredProof> {
     // Dedupe must not suppress this independent exact readback because it was
     // seen in an earlier lookup. Restore seen set after this scoped query.
     let seen = std::mem::take(&mut budget.seen);

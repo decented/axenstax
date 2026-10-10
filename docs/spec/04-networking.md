@@ -5476,6 +5476,19 @@ to the recipient's Activated. Hitting it before Retired is an abort that
 restores play on both sides (`copy::TOO_LONG*`); after Retired only exact
 retry of the same Committed bytes or quarantine.
 
+Stored setup certificates (P1): `stored::publish_readback` (EVENT, a
+matching OK, then a fresh subscription that must return the exact bytes) and
+`stored::readback` (the same fresh-subscription readback, for an already
+verified event the caller did not publish: the recipient witnessing the
+Committed before Activated) are the only producers of `StoredProof`; both talk
+to a relay in the invitation's own `r` list (the players' "Your relays"),
+never an AxeNStax relay, and carry encrypted setup certificates only.
+Production accepts only `wss://` relays (`context::validate_relay_strict`,
+compiled into every build and pinned by a unit test refusing `ws://`
+loopback and plaintext); a test build additionally accepts the in-process
+loopback relay fixture (`handover::relay_fixture`, `ws://127.0.0.1:<port>`),
+which every stored-publication test uses. No test reaches a real relay.
+
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,
 rename, directory sync) binding the transfer and snapshot world; Prepared

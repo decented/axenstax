@@ -619,6 +619,125 @@ mod tests {
         (p, c, event)
     }
 
+    /// P1: the whole stored path through the in-process loopback relay: the
+    /// real publish, matching OK and fresh-subscription readback mint the
+    /// only `StoredProof`s; a withheld readback, a relay outside the
+    /// invitation and a Commit before retirement never count as stored; the
+    /// receiver witnesses the Committed by its own readback before Activated.
+    #[test]
+    fn handover_stored_phases_run_through_the_loopback_relay() {
+        use crate::handover::{
+            relay_fixture::Relay,
+            stored::{Budget, Publication, Route, publish_readback, readback},
+        };
+        use std::sync::atomic::AtomicBool;
+        let relay = Relay::start();
+        let other = Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use nostr::{Timestamp, ToBech32};
+            let a = Keys::generate();
+            let b = Keys::generate();
+            let root = crate::handover::context::RootContext::new(
+                a.public_key().to_bytes(),
+                &a.public_key().to_bech32().unwrap(),
+                900,
+                &[relay.url()],
+                100,
+            )
+            .unwrap();
+            let (_, mut c) = crate::handover::certificate::tests::fixture();
+            c.context = root.digest();
+            c.root_runtime = root.runtime();
+            c.root_persona = root.persona();
+            c.source_runtime = root.runtime();
+            c.source_persona = root.persona();
+            c.successor_runtime = b.public_key().to_bytes();
+            c.successor_persona = b.public_key().to_bytes();
+            let aa = crate::runtime_identity::mint_player_attestation(&a, &a.public_key(), Timestamp::from(100), 1)
+                .await
+                .unwrap();
+            let ab = crate::runtime_identity::mint_player_attestation(&b, &b.public_key(), Timestamp::from(100), 1)
+                .await
+                .unwrap();
+            let keys = crypto::recipient(&root, &[1; 16], None).unwrap();
+            let ready = crypto::sign_ready(&b, &c, [8; 16]).await.unwrap();
+            let seal = |prepared| Seal {
+                source: &a,
+                recipient: &keys,
+                core: &c,
+                ready: &ready,
+                challenge: [8; 16],
+                source_attestation: &aa,
+                successor_attestation: &ab,
+                prepared,
+            };
+            let pe = crypto::seal(seal(None), &root, 100).await.unwrap();
+            let Verified::Prepared(p) = crypto::open(&pe, &keys, root.runtime(), &root, 100, None).unwrap() else {
+                panic!("Prepared")
+            };
+            let route = Route { author: root.runtime(), recipient: keys.public_key().to_bytes(), until: root.expiry() };
+            let cancel = AtomicBool::new(false);
+            let vp = Verified::Prepared(p.clone());
+            let (root_ref, cancel_ref) = (&root, &cancel);
+            let publish = move |url: String, event, verified, permit| async move {
+                publish_readback(&url, root_ref, Publication { event, verified, permit, route }, &mut Budget::new(), cancel_ref)
+                    .await
+            };
+            relay.withhold(true);
+            assert!(publish(relay.url(), &pe, &vp, None).await.is_err(), "an OK without readback counted as stored");
+            relay.withhold(false);
+            assert!(publish(other.url(), &pe, &vp, None).await.is_err());
+            assert_eq!(other.received(), 0, "a relay outside the invitation was contacted");
+            let queries = relay.queries();
+            let stored = publish(relay.url(), &pe, &vp, None).await.unwrap();
+            assert_eq!(stored.event_hash(), p.event_hash());
+            assert_eq!(relay.queries(), queries + 1, "no independent readback subscription");
+            let (store, dir) = crate::handover::durable::tests::store("fixture-source");
+            let (receiver_store, receiver_dir) = crate::handover::durable::tests::store("fixture-receiver");
+            let mut source = Source::frozen(c.clone(), &Authority::root(&root, c.lineage).unwrap()).unwrap();
+            source.prepared(&p, &stored).unwrap();
+            let mut receiver = Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100).unwrap();
+            receiver.prepared(&receiver_store, &p).unwrap();
+            let ce = crypto::seal(seal(Some(&p)), &root, 100).await.unwrap();
+            let Verified::Committed(cv) = crypto::open(&ce, &keys, root.runtime(), &root, 100, Some(&p)).unwrap() else {
+                panic!("Commit")
+            };
+            let vc = Verified::Committed(cv.clone());
+            let before = relay.received();
+            assert!(publish(relay.url(), &ce, &vc, None).await.is_err());
+            assert_eq!(relay.received(), before, "a Commit reached the relay before retirement");
+            assert!(
+                readback(&relay.url(), &root, &ce, &vc, route, &mut Budget::new(), &cancel).await.is_err(),
+                "an unpublished Commit read back"
+            );
+            let capability = crypto::root_capability(&root, &[1; 16]).unwrap();
+            let retirement = Retirement::new(
+                &cv,
+                &p,
+                ce.as_json().into_bytes(),
+                [9; 16],
+                capability,
+                vec![RetiredRoot { capability, expiry: root.expiry() }],
+            )
+            .unwrap();
+            let permit = source.retire(&store, retirement).unwrap();
+            let committed = publish(relay.url(), &ce, &vc, Some(&permit)).await.unwrap();
+            source.published(&committed).unwrap();
+            assert_eq!(source.stage(), SourceStage::Published);
+            // The receiver's own fresh readback witnesses the Committed.
+            let witnessed = readback(&relay.url(), &root, &ce, &vc, route, &mut Budget::new(), &cancel).await.unwrap();
+            assert!(receiver.activate(&receiver_store, &cv, &witnessed).unwrap());
+            assert!(receiver.gameplay_admitted());
+            assert_eq!(relay.stored().len(), 2, "exactly Prepared and Committed are stored");
+            std::fs::remove_dir_all(dir).unwrap();
+            std::fs::remove_dir_all(receiver_dir).unwrap();
+        });
+    }
+
     #[test]
     fn handover_phase_durable_cut_restart_activation_and_late_abort() {
         let rt = tokio::runtime::Builder::new_current_thread()

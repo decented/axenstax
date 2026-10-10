@@ -1056,9 +1056,10 @@ mod session {
         consent(&mut p);
         let (_reached, release) = p.src.hold_pack();
         start_offer(&mut p, &seat0());
+        // The consent's own clock read may be a second earlier than t0.
         let t0 = now();
         let mut t = t0;
-        while t + 30 <= t0 + OPERATION_SECS {
+        while t + 30 <= t0 + OPERATION_SECS - 2 {
             t += 30;
             p.src.pump(&mut p.hs, p.live, t).expect("the source gave up before the total deadline");
             p.dst.as_mut().unwrap().pump(t).expect("the recipient gave up before the total deadline");

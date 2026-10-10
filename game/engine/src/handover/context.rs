@@ -100,7 +100,35 @@ pub fn canonical_npub(value: &str) -> Result<Hash> {
     Ok(key.to_bytes())
 }
 
+/// The relay rule every stored operation applies. Production builds accept
+/// only the strict `wss://` rule (`validate_relay_strict`); a test build
+/// additionally accepts the in-process loopback relay fixture,
+/// `ws://127.0.0.1:<port>`, and nothing else.
 pub fn validate_relay(value: &str) -> Result<()> {
+    #[cfg(test)]
+    if test_loopback(value) {
+        return Ok(());
+    }
+    validate_relay_strict(value)
+}
+
+#[cfg(test)]
+fn test_loopback(value: &str) -> bool {
+    Url::parse(value).is_ok_and(|u| {
+        u.scheme() == "ws"
+            && u.host_str() == Some("127.0.0.1")
+            && u.port().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.fragment().is_none()
+            && value.starts_with("ws://127.0.0.1:")
+            && value.trim() == value
+    })
+}
+
+/// The production relay rule, compiled into every build: `wss://` with a
+/// host, no credentials, no fragment, no surrounding whitespace, unrewritten.
+pub fn validate_relay_strict(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 2048 {
         return Err(Error::Limit("relay URL"));
     }
@@ -121,6 +149,20 @@ pub fn validate_relay(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// P1: the loopback allowance is test-only. The production validator
+    /// still refuses plaintext and non-loopback `ws://` (and the loopback
+    /// fixture URL itself); the test wrapper admits only the fixture shape.
+    #[test]
+    fn handover_production_relay_validator_refuses_plaintext_and_loopback() {
+        for url in ["ws://127.0.0.1:4000", "ws://relay.example", "ws://localhost:4000", "http://relay.example"] {
+            assert!(validate_relay_strict(url).is_err(), "production accepted {url}");
+        }
+        assert!(validate_relay_strict("wss://relay.example").is_ok());
+        assert!(validate_relay("ws://127.0.0.1:4000").is_ok(), "the test fixture shape");
+        for url in ["ws://relay.example", "ws://localhost:4000", "ws://127.0.0.1", "ws://user@127.0.0.1:4000", "ws://10.0.0.1:4000"] {
+            assert!(validate_relay(url).is_err(), "the test wrapper accepted {url}");
+        }
+    }
     #[test]
     fn handover_context_order_is_canonical_but_path_is_not_rewritten() {
         let k = nostr::Keys::generate();
