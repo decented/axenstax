@@ -445,6 +445,11 @@ impl crate::GameState {
         if self.handover_freezes_world() {
             return Err(crate::handover::live::copy::SAVE_PAUSED.to_string());
         }
+        // D7: a world whose authority was handed over (any retirement record
+        // beside it, or one that can't be read) is never written again, so a
+        // late save can't rewrite retired authority.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::handover::live::authority::open_guard(&crate::save::world_dir(&self.world_name)).map_err(|r| r.0.to_string())?;
         let result = crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,

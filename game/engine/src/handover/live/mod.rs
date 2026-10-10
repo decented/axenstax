@@ -1,6 +1,7 @@
 //! Live world-handover integration: eligibility, the source capture, the
 //! direct control session between the source host and ONE selected joiner,
 //! and the recipient's inactive import, latched listener and Ready.
+pub mod authority;
 pub mod capture;
 pub mod eligibility;
 pub mod inert;

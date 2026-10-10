@@ -5553,6 +5553,21 @@ a production build (test builds have `VerifiedCommit::for_test` for the
 certificate-prefix tests' synthetic commits). Phase tests mint every
 `StoredProof` through the loopback relay, as production does.
 
+Authority sidecar (D7, first slice; CP6). A world's handover authority state
+lives in its own folder's `handover/` directory, a `MarkerStore` (temp file
+0600, sync, rename, directory sync, injectable boundary failures): the
+source's `retired-<transfer>.dat` is `phase::Retirement` (certificate core
+with lineage, epoch and root context, the Prepared binding, the exact signed
+Commit bytes, the retired root capabilities), written by
+`phase::Source::retire`. No `WorldSave` field is added. The open guard
+(`live::authority::open_guard`) refuses on ANY retirement record there,
+decodable or not, and on an unreadable directory (fail closed), never
+filtering by lineage (a new host session re-mints its invitation). It is
+wired into `save_live_world` (so a late save cannot rewrite retired
+authority); wiring it into world load/open/autosave start, writing the
+retirement from the live session, the retained copy, the bearer frame and
+the recipient's Activated record are the next slices (not yet built).
+
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,
 rename, directory sync) binding the transfer and snapshot world; Prepared

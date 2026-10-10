@@ -98,3 +98,6 @@ pub const RESUME_FAILED: &str = "The handover was cancelled, but the connection 
 /// P4: the whole handover ran past its 15-minute limit.
 pub const TOO_LONG: &str = "The handover took longer than 15 minutes, so it was cancelled.";
 pub const TOO_LONG_SOURCE: &str = "The handover took longer than 15 minutes, so it was cancelled. Play has resumed.";
+/// D7 open guard (PROPOSED copy, not owner-reviewed).
+pub const RETIRED: &str = "This world was handed over to another player, so it can't be opened or saved here. Its retained copy is a separate world.";
+pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
