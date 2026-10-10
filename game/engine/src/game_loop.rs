@@ -23167,12 +23167,15 @@ impl super::GameState {
                 // OC (v88) — the replacement installs the correction debt it
                 // carries (the server's copy owes the same), never a reset.
                 crate::window_events::InboxItem::Outcome(crate::remote_client::RequestOutcome::Sync(pkt)) => {
+                    // C3d run 7 — only a Strict session takes the packet's
+                    // lock mask and station; Mirror keeps its own.
+                    let mode = self.remote_client.as_ref().map_or(crate::action_identity::InventoryMode::Mirror, |c| c.inventory_mode);
                     let p = &mut self.players[0];
                     let applied = crate::inventory_sync::apply(&mut crate::window::WindowMut { inv: &mut p.inventory,
                         armour: &mut p.armour_slots, cursor: &mut p.crafting_ui.cursor_item,
                         grid: &mut p.crafting_ui.grid, container: None }, &pkt, &self.registry, &mut self.sent_uses,
-                        &mut self.window_inbox.debt);
-                    if applied.is_ok() { p.crafting_ui.adopt_station(crate::inventory_sync::station(&pkt)); }
+                        &mut self.window_inbox.debt, mode);
+                    if let Ok(Some(station)) = applied { p.crafting_ui.adopt_station(station); }
                     p.crafting_ui.update_result();
                     // An owed list this client can't decode whole is a
                     // protocol error (A6): nothing was applied; leave.

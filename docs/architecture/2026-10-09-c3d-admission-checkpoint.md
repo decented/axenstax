@@ -504,3 +504,18 @@ Coordinator decisions on run 3's departures, as built:
   when its base predates the latest `Replace`.
 - **Tests** (`hosted_server/c3d_correction_tests.rs`) model the client's window
   separately (shared click rule, `inventory_sync::apply`, `adopt_station`).
+
+## Run 7 — Mirror sync unchanged (coordinator rule)
+
+- **Only a Strict session applies the lock mask and station.** Run 6 made
+  `inventory_sync::apply` install the `InventorySync` lock mask, and the game
+  loop adopt its station, on every sync, Mirror included. Now
+  `inventory_sync::apply` takes the session's `InventoryMode`: Strict installs
+  the lock mask and returns the station to adopt; Mirror returns `None` and
+  keeps its own locks and station exactly as on `bdd4fe87`. The packet still
+  carries both in either mode.
+- **Strict joiner saves don't keep locks** (accepted for now): persisting locks
+  and auto-refill goes to SIDECar v3 with the fishing cooldown.
+- **Test** `c3d_mirror_join_and_death_syncs_keep_client_locks_and_station`
+  (real Mirror `HostedServer` join and death syncs; the same packets applied
+  in Strict install both).

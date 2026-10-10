@@ -48,13 +48,20 @@ pub fn station_wire(station: crate::window::Station) -> Option<[i32; 3]> {
 /// client can't decode whole (`CorrectionDebt::from_wire`) is a protocol
 /// error: nothing is applied, neither the window nor the debt, and the
 /// caller leaves the world.
+///
+/// C3d run 7 — the lock mask and station the packet carries are applied
+/// only by a Strict session (`mode`): it installs the lock mask, and the
+/// returned station is the one the caller adopts
+/// (`CraftingUi::adopt_station`). A Mirror session keeps its own locks and
+/// station exactly as before C3d (`None`: adopt nothing).
 pub fn apply(
     w: &mut crate::window::WindowMut,
     pkt: &InventorySyncPacket,
     reg: &crate::block::BlockRegistry,
     uses: &mut crate::use_edits::SentUses,
     debt: &mut crate::container_window::CorrectionDebt,
-) -> Result<(), String> {
+    mode: crate::action_identity::InventoryMode,
+) -> Result<Option<crate::window::Station>, String> {
     let carried = crate::container_window::CorrectionDebt::from_wire(&pkt.owed, reg)?;
     if pkt.locks >> 36 != 0 { return Err("Inventory sync locks a slot that doesn't exist".into()); }
     let predicted_plans = uses.retire_for_replace();
@@ -126,10 +133,12 @@ pub fn apply(
         }
     }
     *debt = carried;
-    // C3d run 6 — the lock mask is the replacement's (the digest covers it).
+    if mode != crate::action_identity::InventoryMode::Strict { return Ok(None); }
+    // C3d run 6 — a Strict session's lock mask is the replacement's (the
+    // digest covers it); run 7 — Mirror's stays its own.
     let locked: Vec<u32> = (0..36u32).filter(|i| pkt.locks & (1u64 << i) != 0).collect();
     w.inv.set_locked_from(&locked);
-    Ok(())
+    Ok(Some(station(pkt)))
 }
 
 #[cfg(test)]
@@ -177,9 +186,10 @@ mod tests {
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
             &mut Default::default(),
+            crate::action_identity::InventoryMode::Mirror,
         ).unwrap();
         assert!(!inv.auto_refill, "auto-refill stays the client's own");
-        assert!(!inv.is_locked(3) && inv.is_locked(5), "C3d run 6: the lock mask is the replacement's");
+        assert!(inv.is_locked(3) && !inv.is_locked(5), "C3d run 7: a Mirror client keeps its own locks");
         let original = (0..36)
             .find_map(|at| {
                 w.inv.slot(at).and_then(|s| {
@@ -245,6 +255,7 @@ mod tests {
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
             &mut Default::default(),
+            crate::action_identity::InventoryMode::Mirror,
         ).unwrap();
         assert!(inv.slot(1).is_none());
         if let Item::Plan(p) = &inv.slot(2).unwrap().item {
@@ -297,6 +308,7 @@ mod prediction_tests {
             &crate::block::BlockRegistry::new(),
             &mut uses,
             &mut Default::default(),
+            crate::action_identity::InventoryMode::Mirror,
         ).unwrap();
         // A later poll delivers the refusal, after the replacement was applied.
         let out = crate::use_edits::undo_refused(
@@ -386,6 +398,7 @@ mod prediction_tests {
                 &crate::block::BlockRegistry::new(),
                 &mut uses,
                 &mut Default::default(),
+                crate::action_identity::InventoryMode::Mirror,
             ).unwrap();
             let Item::Plan(recovered) = &inv.slot(2).unwrap().item else {
                 panic!("Plan missing");
@@ -428,7 +441,7 @@ mod oc_tests {
 
     /// Apply `pkt` to a client window holding Stone 3 in slot 0, whose debt
     /// owes Dirt 5: what the window and the debt are after.
-    fn apply_to_client(pkt: &InventorySyncPacket) -> (Result<(), String>, Inventory, CorrectionDebt) {
+    fn apply_to_client(pkt: &InventorySyncPacket) -> (Result<Option<crate::window::Station>, String>, Inventory, CorrectionDebt) {
         let mut inv = Inventory::new();
         inv.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 3)));
         let mut debt = CorrectionDebt::from_entries(vec![(Item::Block(crate::block::DIRT), 5)]).unwrap();
@@ -439,6 +452,7 @@ mod oc_tests {
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
             &mut debt,
+            crate::action_identity::InventoryMode::Mirror,
         );
         (out, inv, debt)
     }

@@ -1332,7 +1332,9 @@ pub struct WireStack {
 pub type WireSlot = Option<WireStack>;
 
 /// A whole player window: all 36 inventory, 4 armour, cursor and 9 grid slots.
-/// Client-owned locks, auto-refill and hotbar selection are not replaced.
+/// Auto-refill and hotbar selection are never replaced. The lock mask and
+/// station it carries (v89) are applied only by a Strict session; a Mirror
+/// client keeps its own locks and station (C3d run 7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InventorySyncPacket {
     pub window_event: u32,
@@ -1348,12 +1350,13 @@ pub struct InventorySyncPacket {
     pub owed: Vec<(WireStack, u32)>,
     /// v89 (C3d run 6) — the station the replaced window is at (`None`: the
     /// player's own 2×2; `Some(cell)`: a crafting table), which the digest
-    /// covers. The client adopts it; a screen its window no longer has is
-    /// closed locally, with no `Close` sent.
+    /// covers. A Strict client adopts it; a screen its window no longer has
+    /// is closed locally, with no `Close` sent. A Mirror client ignores it.
     pub station: Option<[i32; 3]>,
     /// v89 (C3d run 6) — the replaced window's lock mask (bit `i` = slot `i`
-    /// locked, slots 0–35). The client installs exactly it; a bit past 35
-    /// doesn't apply. Auto-refill stays each copy's own.
+    /// locked, slots 0–35). A Strict client installs exactly it; a Mirror
+    /// client keeps its own locks. A bit past 35 doesn't apply. Auto-refill
+    /// stays each copy's own.
     pub locks: u64,
 }
 

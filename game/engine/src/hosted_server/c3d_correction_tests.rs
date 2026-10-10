@@ -56,9 +56,9 @@ impl Client {
                 Some((protocol::PacketType::InventorySync, p)) => {
                     let sync: protocol::InventorySyncPacket = protocol::safe_deserialize(p).unwrap();
                     let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.cursor, grid: &mut self.grid, container: None };
-                    crate::inventory_sync::apply(&mut w, &sync, &reg, &mut crate::use_edits::SentUses::default(), &mut self.debt).unwrap();
+                    let station = crate::inventory_sync::apply(&mut w, &sync, &reg, &mut crate::use_edits::SentUses::default(), &mut self.debt, crate::action_identity::InventoryMode::Strict).unwrap();
                     self.ui.open = true; // a screen stays logically open
-                    self.ui.adopt_station(crate::inventory_sync::station(&sync));
+                    self.ui.adopt_station(station.expect("a Strict session adopts the station"));
                     self.applied = self.applied.max(sync.window_event);
                     self.syncs += 1;
                 }
@@ -262,4 +262,69 @@ fn c3d_strict_auto_refill_across_a_waiting_replace_agrees_in_fold_and_copy() {
     assert_eq!(fold_refill, on, "the fold has the served setting");
     assert_eq!(sp.inventory.auto_refill, fold_refill, "the applied Replace keeps the same setting");
     assert_eq!(sp.inventory.locked_indices(), fold_locks, "and the same lock mask");
+}
+
+/// C3d run 7 (coordinator rule: Mirror must not change) — a Mirror join sync
+/// and a Mirror death sync, applied by the client's real
+/// `inventory_sync::apply` in its session's mode, leave the locks the player
+/// set and its open table screen exactly as before C3d. The same packets in
+/// a Strict session install them (the run-6 behaviour, Strict only).
+#[test]
+fn c3d_mirror_join_and_death_syncs_keep_client_locks_and_station() {
+    use super::c3d_tests::KEY;
+    use super::tests::send_signed_join;
+    let _g = crate::save::WorldsRootGuard::new("c3d-mirror-sync");
+    // A first visit leaves a record, so the rejoin's JoinAccept carries a
+    // join sync (a fresh first visit has none).
+    {
+        let mut first = super::tests::start_room_test_server("c3d-mirror-sync", 0);
+        let (i, _client, heard) = super::c3d_tests::join(&mut first, 17);
+        assert_eq!(heard.accepts.len(), 1, "the first visit is admitted");
+        first.server.save_joiner(i).expect("the record is saved");
+    }
+    let mut hs = super::tests::start_room_test_server("c3d-mirror-sync", 0);
+    assert_eq!(hs.inventory_mode(), crate::action_identity::InventoryMode::Mirror, "Mirror is the default");
+    let client = hs.attach_test_remote_with_binding(Some([17; 32]));
+    send_signed_join(&client, KEY, Some([17; 32]));
+    hs.tick();
+    let i = hs.server.players.len() - 1;
+    let syncs = |client: &crate::transport::ChannelClientTransport| -> Vec<protocol::InventorySyncPacket> {
+        let mut out = Vec::new();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((protocol::PacketType::InventorySync, p)) = protocol::deserialize_header(&pkt) {
+                out.push(protocol::safe_deserialize(p).unwrap());
+            }
+        }
+        out
+    };
+    let mut seen = syncs(&client);
+    assert_eq!(seen.len(), 1, "the join sync");
+    let sp = &mut hs.server.players[i];
+    sp.combat.health = 0.0;
+    sp.combat.dead = true;
+    hs.tick();
+    seen.extend(syncs(&client));
+    assert_eq!(seen.len(), 2, "and the death sync");
+    let reg = crate::block::BlockRegistry::new();
+    for (what, sync) in ["join", "death"].into_iter().zip(&seen) {
+        assert!(sync.locks & (1 << 3) == 0 && sync.station.is_none(), "{what}: the packet carries other locks and no table");
+        for mode in [crate::action_identity::InventoryMode::Mirror, crate::action_identity::InventoryMode::Strict] {
+            let mut inv = crate::inventory::Inventory::new_client();
+            inv.toggle_lock(3);
+            let (mut armour, mut cursor, mut grid) = ([None; 4], None, crate::window::CraftGrid::default());
+            let mut ui = crate::craft_ui::CraftingUi::new();
+            ui.open = true;
+            ui.table = Some(TABLE);
+            let mut w = crate::window::WindowMut { inv: &mut inv, armour: &mut armour, cursor: &mut cursor, grid: &mut grid, container: None };
+            let station = crate::inventory_sync::apply(&mut w, sync, &reg, &mut crate::use_edits::SentUses::default(), &mut Default::default(), mode).unwrap();
+            if let Some(station) = station { ui.adopt_station(station); }
+            if mode == crate::action_identity::InventoryMode::Mirror {
+                assert!(inv.is_locked(3), "{what}: a Mirror client keeps its own locks");
+                assert!(ui.open && ui.station() == Station::Table { cell: TABLE }, "{what}: and its open table screen");
+            } else {
+                assert!(!inv.is_locked(3), "{what}: a Strict client takes the server's lock mask");
+                assert!(!ui.open && ui.station() == Station::Player, "{what}: and its station");
+            }
+        }
+    }
 }

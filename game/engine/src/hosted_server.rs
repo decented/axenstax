@@ -8762,6 +8762,7 @@ mod tests {
             &registry,
             &mut crate::use_edits::SentUses::default(),
             &mut client_debt,
+            crate::action_identity::InventoryMode::Mirror,
         )
         .unwrap();
         assert_eq!(client_debt.owed(&stone), 1, "the client's Sync apply installs it");
@@ -8814,6 +8815,7 @@ mod tests {
             &crate::block::BlockRegistry::new(),
             &mut crate::use_edits::SentUses::default(),
             &mut client_debt,
+            crate::action_identity::InventoryMode::Mirror,
         )
         .unwrap();
         assert!(client_debt.is_empty(), "and the client's");
