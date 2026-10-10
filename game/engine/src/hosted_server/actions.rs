@@ -59,15 +59,23 @@ impl HostedServer {
             Err(_) => self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Conflicting, foreign or exhausted action history"),
         }
     }
-    pub(super) fn process_typed_actions(&mut self, i: usize, windows: &mut usize, items: &mut usize) {
+    pub(super) fn process_typed_actions(&mut self, i: usize, windows: &mut usize, items: &mut usize, budget: &mut EditTickBudget) {
         loop {
             if self.disconnected[i] { return; }
             let Some(sp) = self.server.players.get(i) else { return };
             let Some(queued) = sp.action_queue.as_ref().and_then(|q| q.front()) else { return };
             let Ok(packet) = ActionPacket::decode(&queued.payload) else { return self.strict_bridge_teardown(i, StrictTeardown::Unreadable, "Retained action could not decode") };
             let is_window = matches!(packet.intent, ActionIntent::Window(_));
-            if (is_window && *windows >= MAX_WINDOW_OPS_PER_TICK) || (!is_window && *items >= MAX_ITEM_ACTIONS_PER_TICK) { return; }
-            if is_window { *windows += 1; } else { *items += 1; }
+            // C3d run 6 — a typed edit counts against the tick's edit budget
+            // (the same `MAX_BLOCK_CHANGES_PER_TICK` legacy edits share), not
+            // the item counter; past it the head waits for the next tick.
+            if matches!(packet.intent, ActionIntent::Edit { .. }) {
+                if budget.edits >= MAX_BLOCK_CHANGES_PER_TICK { return; }
+                budget.edits += 1;
+            } else {
+                if (is_window && *windows >= MAX_WINDOW_OPS_PER_TICK) || (!is_window && *items >= MAX_ITEM_ACTIONS_PER_TICK) { return; }
+                if is_window { *windows += 1; } else { *items += 1; }
+            }
             let now = self.server.tick_counter;
             let sp = &mut self.server.players[i];
             let base = packet.action.events_applied;
@@ -101,6 +109,12 @@ impl HostedServer {
                 }
                 ActionIntent::Window(op) if self.strict_slot(i) => {
                     if !self.serve_strict_window(i, packet.action, &op) { return; }
+                }
+                // C3d run 6 — a plain placement or a mined break
+                // (`strict_edit.rs`); a use-tagged edit still waits for its
+                // typed class.
+                ActionIntent::Edit { change, hand, mined, use_tag: None, .. } if self.strict_slot(i) => {
+                    if !self.serve_strict_edit(i, packet.action, &change, hand, mined.as_ref(), budget) { return; }
                 }
                 ActionIntent::Item(req) if self.strict_slot(i) => {
                     if let protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } = req.action {

@@ -26,6 +26,7 @@ mod death;
 mod sidecar;
 mod actions;
 mod strict_container;
+mod strict_edit;
 #[cfg(test)]
 mod c3d_tests;
 #[cfg(test)]
@@ -34,6 +35,8 @@ mod c3d_strict_tests;
 mod c3d_container_tests;
 #[cfg(test)]
 mod c3d_superseded_tests;
+#[cfg(test)]
+mod c3d_edit_tests;
 
 use std::collections::VecDeque;
 
@@ -4058,7 +4061,7 @@ impl HostedServer {
             let mut budget = EditTickBudget::default();
             // FU3 — the edits that waited past last tick's budget go first.
             self.process_waiting_edits(i, &mut budget);
-            self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick);
+            self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut budget);
             if self.disconnected[i] { continue; }
             // C2b verify M4 — whether this client is replaying a backlog
             // (more than one ordinary tick's reading waiting after the fill):
@@ -4159,7 +4162,7 @@ impl HostedServer {
                     protocol::PacketType::Action => {
                         if !self.handshake_done[i] || self.disconnected[i] { continue; }
                         self.receive_typed_action(i, payload);
-                        self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick);
+                        self.process_typed_actions(i, &mut window_ops_this_tick, &mut item_actions_this_tick, &mut budget);
                     }
                     protocol::PacketType::AppliedActionAck => {
                         if self.handshake_done[i] && !self.disconnected[i] { self.receive_applied_action_ack(i, payload); }
@@ -5088,6 +5091,23 @@ impl HostedServer {
             }
             _ => None,
         };
+        self.apply_edit_world(bc, old_block, remote, break_yield.is_some());
+        if let Some(edit) = joiner_edit {
+            self.settle_joiner_edit(i, bc, slot, edit, break_yield);
+        }
+        if let Some(judged) = joiner_use {
+            self.settle_joiner_use(i, bc, judged);
+        }
+        self.finish_edit_world(bc, old_block, old_meta, remote, as_use);
+    }
+
+    /// C3d run 6 — the world half of an accepted edit that precedes its
+    /// inventory settlement: a broken container spills, an orphaned economy
+    /// entity and a released plot go, the block lands and (for a joiner) its
+    /// placed flag is set — every fill player-placed, a yielded break natural
+    /// again. Shared by the Mirror path (`process_one_edit`) and Strict
+    /// (`strict_edit`), never a second copy.
+    pub(super) fn apply_edit_world(&mut self, bc: &protocol::BlockChange, old_block: crate::block::BlockId, remote: bool, yielded: bool) {
         self.spill_container_on_change(
             (bc.x, bc.y, bc.z),
             old_block,
@@ -5129,15 +5149,16 @@ impl HostedServer {
             // the server yielded leaves the cell natural
             // again (AIR, or a harvested crop's tilled
             // soil), as single-player's break arm does.
-            let placed = bc.new_block != crate::block::AIR && break_yield.is_none();
+            let placed = bc.new_block != crate::block::AIR && !yielded;
             self.server.world.set_placed(bc.x, bc.y, bc.z, placed);
         }
-        if let Some(edit) = joiner_edit {
-            self.settle_joiner_edit(i, bc, slot, edit, break_yield);
-        }
-        if let Some(judged) = joiner_use {
-            self.settle_joiner_use(i, bc, judged);
-        }
+    }
+
+    /// C3d run 6 — the rest of an accepted edit's world half, after its
+    /// inventory settled: leaf decay, fluids, meta, power, neighbours, the
+    /// broadcast, a door's pair, a campfire, a used block's spill and
+    /// attachments. Shared by Mirror and Strict.
+    pub(super) fn finish_edit_world(&mut self, bc: &protocol::BlockChange, old_block: crate::block::BlockId, old_meta: u8, remote: bool, as_use: bool) {
         // T1-3 — a log broken by a REMOTE player queues its
         // leaves for the server's leaf-decay pass (the
         // client break arms' `on_log_broken`, server side),

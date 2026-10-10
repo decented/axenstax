@@ -17,18 +17,18 @@ use std::collections::BTreeMap;
 
 /// A Strict world with one admitted real joiner whose client has applied
 /// every window event so far (the join's sync among them).
-struct Rig {
+pub(super) struct Rig {
     _g: crate::save::WorldsRootGuard,
-    hs: HostedServer,
-    i: usize,
-    client: ChannelClientTransport,
-    accept: protocol::JoinAcceptPacket,
-    seq: u64,
+    pub(super) hs: HostedServer,
+    pub(super) i: usize,
+    pub(super) client: ChannelClientTransport,
+    pub(super) accept: protocol::JoinAcceptPacket,
+    pub(super) seq: u64,
     /// The highest window event the client has applied (what it reports).
-    applied: u32,
+    pub(super) applied: u32,
 }
 
-fn strict_rig(tag: &str) -> Rig {
+pub(super) fn strict_rig(tag: &str) -> Rig {
     let g = crate::save::WorldsRootGuard::new(&format!("c3d-strict-{tag}"));
     let mut hs = start_room_test_server(&format!("c3d-strict-{tag}"), 0);
     hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
@@ -43,18 +43,18 @@ fn strict_rig(tag: &str) -> Rig {
 }
 
 impl Rig {
-    fn sp(&self) -> &crate::server::ServerPlayer { &self.hs.server.players[self.i] }
-    fn next(&mut self) -> ActionHeader {
+    pub(super) fn sp(&self) -> &crate::server::ServerPlayer { &self.hs.server.players[self.i] }
+    pub(super) fn next(&mut self) -> ActionHeader {
         self.seq += 1;
         ActionHeader { session: self.accept.action_session, epoch: 0, seq: self.seq, life: self.accept.action_life, events_applied: self.applied }
     }
-    fn send(&mut self, action: ActionHeader, intent: ActionIntent) {
+    pub(super) fn send(&mut self, action: ActionHeader, intent: ActionIntent) {
         self.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent }));
         self.hs.tick();
     }
-    fn through(&self) -> u64 { self.sp().action_frontier.as_ref().unwrap().through() }
+    pub(super) fn through(&self) -> u64 { self.sp().action_frontier.as_ref().unwrap().through() }
     /// The exact retained result row for `action`, if any.
-    fn row(&mut self, action: ActionHeader) -> Option<ActionReceipt> {
+    pub(super) fn row(&mut self, action: ActionHeader) -> Option<ActionReceipt> {
         self.hs.server.players[self.i].action_results.as_mut().unwrap().repeat(action)
     }
     fn projectiles(&self) -> usize {

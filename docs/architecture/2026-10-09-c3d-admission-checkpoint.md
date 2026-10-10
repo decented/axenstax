@@ -434,3 +434,46 @@ Coordinator decisions on run 3's departures, as built:
 - **Selector.** `select_inventory_mode`, `inventory_mode()` and
   `StrictSelectError` carry
   `cfg_attr(not(test), expect(dead_code, reason = "Strict operator flag — exposed at C3d acceptance"))`.
+
+## Run 6 — typed block edits (2026-10-10)
+
+- **Dispatch.** `ActionIntent::Edit` with no use tag, on a Strict slot, goes
+  to `hosted_server/strict_edit.rs`. It counts against the tick's edit budget
+  (`MAX_BLOCK_CHANGES_PER_TICK`), not the item counter.
+- **Classification from raw R, never the claim.** The item in the action's
+  historical hotbar slot (an invalid slot refuses; no latest-slot fallback)
+  decides: a fill of AIR/water is a `Place` only when that item places exactly
+  the block, otherwise `Refused` with zero effect; a mined break of a block
+  that yields is a `Break` whose drop tier is the tool in that slot (none = a
+  bare hand). `MinedBlock.tool` and the input's held pair are never read for
+  the yield. Untagged emptying or in-place edits are `Refused`. Creative,
+  same-block, door, non-yielding manual and use-tagged edits are paused as
+  untyped (their typed classes come later).
+- **Departure from the run-4 plan (recorded for the coordinator).** The plan
+  said "numbered Take / WearWeapon". The client PREDICTS a placement and a
+  break's wear at its boundary, through `take_placeable_from_hotbar` (which
+  auto-refills the hotbar slot from the bag on the last unit) and
+  `use_tool_at`. A numbered `Take` applies through `take_owed_window`, which
+  never refills, and lands after the pending prefix the client predicted
+  before. So the edit's window half is staged as a window click is
+  (Decision 6, `stage_strict_click`): `window_events::stage_strict_edit` runs
+  the shared transition on raw R, every changed place is a source at its
+  whole initial value, every waiting event must fold onto the candidate as
+  onto raw R (`admit_staged`), and the candidate commits as raw R. Only the
+  break's yield (not predicted) is numbered: `Grant` events staged after the
+  pending prefix on the candidate (`stage_strict_effects_on`), reserved with
+  their packets and the result row before any effect.
+- **Commit order.** Validation (`validate_block_edit`), judgement, staging,
+  grant packets, event and result reservations; then the shared world half
+  (`apply_edit_world` / `finish_edit_world`, split out of `process_one_edit`
+  so Mirror runs the same code), raw R, the numbered grants, the terminal row
+  and the grant packets; then the debt-zero guard.
+- **Refusal.** The predicted cell is put back by the existing block-correction
+  path (`send_back_refused_edit`), the `Refused` row is retained, and the
+  bridge teardown follows (no client recipe undo yet). A stale world (the
+  server's cell doesn't break that way, reach, protection) therefore still
+  tears down an honest Strict player until recovery is wired.
+- **Client half not built.** No honest client sends `ActionIntent::Edit` yet:
+  a Strict client's edits still ride its movement packet and fail closed. The
+  client half reserves an Edit before predicting, as a click does; its receipt
+  retires at the current boundary (a predicted edit numbers no event).

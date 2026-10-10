@@ -171,7 +171,12 @@ pub fn strict_leaves_no_unpaid_obligation(sp: &ServerPlayer, registry: &crate::b
 /// All immediate takes/wear/grants are staged together. No external effect or
 /// raw mutation is permitted merely because an earlier effect was affordable.
 pub fn stage_strict_effects(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, all: &[WindowEvent]) -> Result<(), StrictStageError> {
-    let raw = strict_raw_marker(sp, registry)?;
+    stage_strict_effects_on(sp, registry, strict_raw_marker(sp, registry)?, all)
+}
+
+/// [`stage_strict_effects`] over `raw`: raw R itself, or (a typed edit) raw R
+/// with the edit's own predicted change already staged on it.
+fn stage_strict_effects_on(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, raw: MarkerWindow, all: &[WindowEvent]) -> Result<(), StrictStageError> {
     let before = raw.slots();
     let mut candidate = raw.clone();
     let mut sources: MarkerSlots = std::array::from_fn(|_| None);
@@ -222,6 +227,30 @@ pub fn stage_strict_effects(sp: &ServerPlayer, registry: &crate::block::BlockReg
         if apply_marker_event(&mut prefix, &event)? != expected { return Err(StrictStageError::Fit); }
     }
     Ok(())
+}
+
+/// C3d run 6 — a typed block edit's window half. The client PREDICTS its
+/// edit at its boundary (a placement's `take_placeable_from_hotbar`, auto-
+/// refill included; a break's `use_tool_at`), so the server stages that
+/// EXISTING shared transition on raw R exactly as a window click does
+/// (Decision 6; `stage_strict_click`): every place it changed is a source at
+/// its whole initial value, and every waiting event must fold onto the
+/// candidate as onto raw R (`admit_staged`). A numbered `Take` would not do:
+/// `take_owed_window` never refills, and it would land after the pending
+/// prefix the client predicted before. The break's yield (`grants`) is not
+/// predicted: numbered grants, staged after the pending prefix on the
+/// candidate. Returns the candidate the caller commits as raw R.
+pub fn stage_strict_edit(sp: &ServerPlayer, registry: &crate::block::BlockRegistry, direct: impl FnOnce(&mut crate::window::WindowMut), grants: &[WindowEvent]) -> Result<MarkerWindow, StrictStageError> {
+    let raw = strict_raw_marker(sp, registry)?;
+    let mut after = raw.clone();
+    direct(&mut after.view());
+    let (before, now) = (raw.slots(), after.slots());
+    let mut sources: MarkerSlots = std::array::from_fn(|_| None);
+    for i in 0..PLAYER_PLACES { if before[i] != now[i] { sources[i] = before[i].clone(); } }
+    let staged = StagedClick { after, result: crate::window::ClickResult::Done, sources };
+    admit_staged(sp, registry, &raw, &staged)?;
+    stage_strict_effects_on(sp, registry, staged.after.clone(), grants)?;
+    Ok(staged.after)
 }
 
 /// The complete numbered list owns its allocations before the caller commits
