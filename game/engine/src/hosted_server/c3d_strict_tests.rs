@@ -418,6 +418,9 @@ fn c3d_strict_shot_at_the_byte_and_receipt_caps_has_zero_external_effect() {
     let mut r = strict_rig("shot-receipts");
     arm(&mut r.hs.server.players[r.i]);
     r.fill_results();
+    // Run-2 review LOW-4 — an empty deque at its own size, so the shot's
+    // two-event reservation must grow it and `abandon` must give it back.
+    r.hs.server.players[r.i].window_events.shrink_waiting_to_fit();
     assert_zero_effect_shot(r, "result cap");
 }
 
@@ -574,4 +577,31 @@ fn c3d_strict_refused_autofill_inside_the_slack_is_accepted_unchanged() {
     assert!(heard.rejects.is_empty(), "no teardown: {:?}", heard.rejects);
     assert_eq!(heard.receipts.first().map(|x| (x.action, x.fate)), Some((action, ActionFate::Accepted)));
     assert_eq!(server_places(r.sp()), cw.places(), "exactly the client's (unchanged) window");
+}
+
+/// Run 4 — a Strict short Take applied by `window_events::apply_front` is an
+/// invariant breach, never log-only. Here the action's own boundary applies
+/// it (its `events_applied` covers the Take) before staging can see it:
+/// torn down with the obligation reason through the one BRIDGE, no row, the
+/// action not terminal, nothing committed.
+#[test]
+fn c3d_strict_short_take_applied_at_the_boundary_is_torn_down_with_a_reason() {
+    let mut r = strict_rig("short-take");
+    stock(&mut r.hs.server.players[r.i]);
+    let mut cw = ClientWindow::of(r.sp());
+    let sp = &mut r.hs.server.players[r.i];
+    let take = crate::window_events::WindowEvent::Take { slot: 35, item: Item::Block(crate::block::BEDROCK), n: 1, how: "test short take" };
+    r.applied = crate::window_events::queue(sp, take, 0);
+    let before = server_places(r.sp());
+    let action = click_packet(&mut r, &mut cw, WindowClick::Slot { slot: 1, right: false }, false);
+    let heard = hear(&r.client);
+    assert!(
+        heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Obligation.reason()),
+        "a short Take is torn down with a reason: {:?}", heard.rejects
+    );
+    assert!(heard.receipts.is_empty(), "nothing answered");
+    assert_eq!(r.row(action), None, "no result row");
+    assert_eq!(r.through(), action.seq - 1, "the action is not terminal");
+    assert_eq!(server_places(r.sp()), before, "nothing committed");
+    assert!(r.hs.slot_is_free(r.i));
 }

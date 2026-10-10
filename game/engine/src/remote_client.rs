@@ -14,6 +14,7 @@ use crate::transport::ClientTransport;
 
 #[path = "remote_client_actions.rs"]
 mod actions;
+pub use actions::{flush_strict_window_ops, STRICT_STRAY_CHANGE_REASON};
 
 /// A present remote player's verified identity, for the inspect view. Built from
 /// the server's `Joined` events. `npub` is the full NIP-19 npub (copyable, lets a
@@ -2944,11 +2945,6 @@ mod tests {
         }
     }
 
-    /// C3d review M1 — the crafting close the Esc chain now routes through
-    /// (`GameState::close_crafting` → `close_joined`), on a Strict
-    /// connection: the action is reserved in the journal BEFORE the grid and
-    /// cursor return to the bag, the server receives exactly one typed
-    /// `Action` (a Close click), and no legacy `WindowOp` is logged or sent.
     /// C3d shared containers — a Strict client's window configuration
     /// (auto-refill first), opens, container open, container click and
     /// container close each reserve ONE typed action, in the order made, and
@@ -3000,6 +2996,14 @@ mod tests {
         ]), "{ops:?}");
     }
 
+    /// C3d review M1 — the crafting close the Esc chain routes through
+    /// (`GameState::close_crafting` → `close_joined`), on a Strict
+    /// connection: after it, exactly one action is reserved in the journal,
+    /// the grid has returned to the bag, the server receives exactly one
+    /// typed `Action` (a Close click), and no legacy `WindowOp` is logged or
+    /// sent. (It asserts the end state; that the reservation comes first is
+    /// the code order in `CraftingUi::apply_joined_click` — run-2 review
+    /// LOW-4.)
     #[test]
     fn c3d_strict_crafting_close_reserves_an_action_and_sends_no_legacy_window_op() {
         let (srv, client) = channel_pair();
@@ -3035,6 +3039,48 @@ mod tests {
             }
         }
         assert_eq!(actions, 1, "exactly one typed action reached the server");
+    }
+
+    /// C3d run 4 — a Strict client that finds a legacy window op in its
+    /// flush (here: the config op a non-joined open logs) never discards it
+    /// silently: there is no whole-window resync request, so it leaves the
+    /// world with a plain reason — a graceful `Disconnect`, the session
+    /// ended with [`STRICT_STRAY_CHANGE_REASON`] — and sends no `WindowOp`.
+    #[test]
+    fn c3d_strict_client_leaves_with_a_reason_on_a_stray_legacy_window_op() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        while srv.try_recv_from_client().is_some() {}
+        let mut ui = crate::craft_ui::CraftingUi::new();
+        let inv = crate::inventory::Inventory::new();
+        let armour = [None; 4];
+        // Nothing stray: the flush stays.
+        assert!(!flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour), "a clean flush stays");
+        assert!(rc.is_connected());
+        ui.open_player_crafting(&inv, &armour);
+        assert!(ui.ops.first_stamp().is_some(), "a legacy op is logged (the breach)");
+        assert!(flush_strict_window_ops(&mut rc, &mut ui, &inv, &armour), "the breach leaves");
+        assert!(
+            matches!(&rc.state, ConnectionState::Failed(reason) if reason == STRICT_STRAY_CHANGE_REASON),
+            "the session ends with the plain reason"
+        );
+        assert_eq!(
+            crate::world_exit::remote_session_end_reason(&rc).as_deref(),
+            Some(STRICT_STRAY_CHANGE_REASON),
+            "the world exit shows it"
+        );
+        let mut disconnects = 0;
+        while let Some(pkt) = srv.try_recv_from_client() {
+            match protocol::deserialize_header(&pkt) {
+                Some((PacketType::Disconnect, _)) => disconnects += 1,
+                Some((PacketType::WindowOp, _)) => panic!("a Strict client sent a legacy WindowOp"),
+                _ => {}
+            }
+        }
+        assert_eq!(disconnects, 1, "a graceful disconnect reached the server");
     }
 
     #[test]

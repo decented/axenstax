@@ -194,6 +194,13 @@ pub struct WindowEvents {
     /// [`MAX_PENDING_EVENTS`] (the oldest go first).
     forced_corrections: VecDeque<(u32, crate::container_window::ItemDelta)>,
     pub tally: EventTally,
+    /// C3d (run 4) — the first numbered Take a Strict joiner's copy applied
+    /// short (its number): Strict never queues a Take its window can't pay,
+    /// so this is an invariant breach. `apply_front` can't close a session;
+    /// it records the number and the hosting server tears the session down
+    /// through its one BRIDGE (`HostedServer::strict_events_hold`). Never
+    /// set for a Mirror joiner, whose short Take stays log-only.
+    strict_short_take: Option<u32>,
 }
 
 impl WindowEvents {
@@ -217,6 +224,14 @@ impl WindowEvents {
     }
 
     pub fn last_number(&self) -> u32 { self.last_sent }
+    /// C3d (run 4) — take the number of a Take a Strict copy applied short
+    /// (`apply_front`), if one was; the caller tears the session down.
+    pub fn take_strict_short_take(&mut self) -> Option<u32> { self.strict_short_take.take() }
+
+    /// C3d tests — shrink the waiting deque to what it holds, so a
+    /// reservation that grows it is visible (and one given back is too).
+    #[cfg(test)]
+    pub fn shrink_waiting_to_fit(&mut self) { self.waiting.shrink_to_fit(); }
     pub fn accepts_boundary(&self, reported: u32) -> bool { reported >= self.last_applied && reported <= self.last_sent }
 
     /// The number of the last event sent (0 before the first).
@@ -441,6 +456,18 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             remember_grant(&mut sp.window_events, AppliedGrant { seq: w.seq, stack, landed, returned: false });
         }
         (Effect::Took { taken }, WindowEvent::Take { item, n, how, .. }) if taken < n => {
+            // C3d (run 4) — Strict queues only Takes its window can pay
+            // (`strict::strict_obligations`): a short one is an invariant
+            // breach, never log-only. Recorded for the hosting server's
+            // reasoned teardown; the first one's number is kept.
+            if sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict {
+                log::error!(
+                    "Strict inventory invariant breached: {}'s window event {} took {taken} of {n} × {item:?} {how}",
+                    sp.display_name, w.seq,
+                );
+                sp.window_events.strict_short_take.get_or_insert(w.seq);
+                return;
+            }
             let due = sp.possession.note_mismatch(now);
             log::log!(
                 crate::joiner_inventory::mismatch_log_level(due),

@@ -22999,14 +22999,9 @@ impl super::GameState {
                     // C3d — a Strict client sends no legacy window op: its
                     // settings go as reserved actions, every other op
                     // through the reserving entry points (nothing is logged).
-                    if let Err(error) = p.crafting_ui.sync_auto_refill_joined(client, &p.inventory, &p.armour_slots) {
-                        log::warn!("Strict auto-refill setting could not be reserved: {error}");
-                    }
-                    let stray = p.crafting_ui.ops.take_before(None);
-                    debug_assert!(stray.is_empty(), "a Strict client logged a legacy window op");
-                    if !stray.is_empty() {
-                        log::error!("Strict client logged {} legacy window op(s); not sent (the server would refuse them)", stray.len());
-                    }
+                    // A logged one is a breach: it leaves the world with a
+                    // plain reason (run 4), never a silent discard.
+                    crate::remote_client::flush_strict_window_ops(client, &mut p.crafting_ui, &p.inventory, &p.armour_slots);
                     Vec::new()
                 } else {
                     match client.first_carried_stamp() {

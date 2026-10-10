@@ -343,3 +343,34 @@ points in `window_actions.rs` / `craft_ui.rs` (client).
   cache for Plan markers is NOT built: `Item::Plan` holds `PlanData` inline, so
   an address-keyed cache is unsound under allocator reuse without a drop or
   mutation hook; needs a design call.
+
+## Run 4 (2026-10-10): leftovers
+
+Coordinator decisions on run 3's departures, as built:
+
+- **Partial contest is whole-or-nothing** — accepted (Spec 04 records it).
+- **Refused open** = an Accepted row with no effect plus `OpenRefusal` — accepted.
+- **Short Take in `apply_front`.** A numbered Take a Strict copy applies short
+  is an invariant breach. `window_events::apply_front` records its number
+  (`WindowEvents::take_strict_short_take`; Mirror stays log-only) and
+  `HostedServer::strict_events_hold` tears the session down through the one
+  BRIDGE with the obligation sentence. Checked where a Strict action applies
+  its boundary (before anything executes on top of it) and after every tick's
+  overdue valve, which covers every other application point by the end of
+  the tick.
+- **Stray legacy op on a Strict client.** No whole-window resync request
+  exists, so `remote_client::flush_strict_window_ops` makes the client leave:
+  a graceful `Disconnect`, the session `Failed` with
+  `STRICT_STRAY_CHANGE_REASON`, and the world exit discards the joined copy.
+  Never a silent discard; nothing is sent as a `WindowOp`.
+- **L4 Plan marker cache — deferred** to a final performance pass (with the
+  2–3× fold repetition). Bounded cost meanwhile: each Strict click re-hashes
+  every Plan body in the window (at most 50 places × that body's bytes, each
+  body ≤ 16 MiB encoded), under the per-tick window-op head budget
+  (`MAX_WINDOW_OPS_PER_TICK`). No address-keyed cache is built.
+- **Run-2 review LOW-3/LOW-4.** The L5 test's doc now claims only what it
+  proves; `c3d_actual_hosted_lost_receipt_teardown_settles_an_unfit_grant_once`
+  proves settlement (one ground spill of a full bag's unfit Grant, a
+  proven-zero save). Red controls were run for the shot post-commit check,
+  `abandon` (the result-cap rig shrinks the deque first so the reservation
+  must grow it), the L5 settlement, the Esc close and the table edge.

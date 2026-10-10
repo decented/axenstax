@@ -110,5 +110,12 @@ mod teardown_copy_tests {
             }
             assert!(text.ends_with('.'), "{cause:?}");
         }
+        // C3d run 4 — the client's own Strict leave reads the same way.
+        let text = crate::remote_client::STRICT_STRAY_CHANGE_REASON;
+        assert!(crate::copy_lint::banned_in(text, crate::copy_lint::BANNED_MONEY_WORDS).is_empty(), "{text}");
+        for jargon in ["action", "frontier", "epoch", "receipt", "rejoin required", "authoritative", "legacy", "window op"] {
+            assert!(!text.to_lowercase().contains(jargon), "client leave reads {jargon:?}: {text}");
+        }
+        assert!(text.ends_with('.'));
     }
 }

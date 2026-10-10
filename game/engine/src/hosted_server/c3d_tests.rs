@@ -257,10 +257,12 @@ fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_re
 }
 
 /// Review L5 — the same real lost-receipt teardown with a numbered Grant
-/// and a Take still waiting when it happens: the departure settles them
-/// and the saved window conserves both exactly (stone 5 − 2, dirt + 3),
-/// with nothing owed. A teardown that skipped settlement or lost a pending
-/// event would save a different window.
+/// and a Take still waiting when it happens: the saved window conserves
+/// both exactly (stone 5 − 2, dirt + 3), with nothing owed. A teardown
+/// that DROPPED a pending event would save a different window. (It does not
+/// prove settlement ran: the save folds waiting events either way — run-2
+/// review LOW-3. [`c3d_actual_hosted_lost_receipt_teardown_settles_an_unfit_grant_once`]
+/// does.)
 #[test]
 fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
     let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt-pending");
@@ -297,4 +299,46 @@ fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
     };
     assert_eq!(count(crate::item::Item::Block(crate::block::STONE)), 3, "the pending Take is paid once");
     assert_eq!(count(crate::item::Item::Block(crate::block::DIRT)), 3, "the pending Grant is kept once");
+}
+
+/// Run-2 review LOW-3 — settlement at the lost-receipt teardown, proven by
+/// its only observable difference: a full bag's pending Grant that can't
+/// fit is genuine authoritative overflow, so the departure's settlement
+/// spills it exactly once as a real ground item; the save is the full bag,
+/// nothing owed. A teardown that skipped `settle_leaving_life` would spill
+/// nothing (the save alone folds the Grant without its overflow).
+#[test]
+fn c3d_actual_hosted_lost_receipt_teardown_settles_an_unfit_grant_once() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-lost-receipt-unfit");
+    let mut hs = start_room_test_server("c3d-lost-receipt-unfit", 0);
+    hs.inventory_mode = InventoryMode::Strict;
+    let (i, client, heard) = join(&mut hs, 17);
+    let accept = heard.accepts.first().expect("Strict admits a first visit");
+    let sp = &mut hs.server.players[i];
+    let synced = sp.window_events.last_number();
+    crate::window_events::apply_through(sp, synced, 0);
+    for slot in 0..36 { sp.inventory.set_slot(slot, Some(crate::item::ItemStack::new_block(crate::block::STONE, 64))); }
+    crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(crate::item::ItemStack::new_block(crate::block::DIRT, 3)), 0);
+    let ground = |hs: &HostedServer| -> Vec<crate::item::ItemStack> {
+        hs.server.ecs.query::<&crate::entity::ItemEntity>().iter().map(|(_, e)| e.stack.clone()).collect()
+    };
+    assert!(ground(&hs).is_empty(), "nothing on the ground before");
+    let cell = |n: i32| protocol::BlockChange::with_meta(n % 1000, 200, n / 1000, crate::block::STONE, 0);
+    let backlog: Vec<_> = (0..8_000).map(cell).collect();
+    hs.outboxes[i].push_tick(0, &[], &[], &backlog, &[]);
+    let action = ActionHeader { session: accept.action_session, epoch: 0, seq: 1, life: accept.action_life, events_applied: synced };
+    client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &ActionPacket { action, intent: ActionIntent::CancelledNoop }));
+    hs.tick();
+    let flood: Vec<_> = (8_000..200_000).map(cell).collect();
+    hs.outboxes[i].push_tick(0, &[], &[], &flood, &[]);
+    hs.tick();
+    let heard = hear(&client);
+    assert!(heard.rejects.iter().any(|r| r == crate::strict_admission::StrictTeardown::FellBehind.reason()), "torn down: {:?}", heard.rejects);
+    let spilled = ground(&hs);
+    assert_eq!(spilled.len(), 1, "settlement spills the unfit Grant exactly once: {spilled:?}");
+    assert_eq!((spilled[0].item.clone(), spilled[0].count), (crate::item::Item::Block(crate::block::DIRT), 3));
+    let saved = hs.server.load_joiner(i).expect("the departure saved");
+    assert!(saved.obligations_proven_zero(), "nothing owed");
+    let window = saved.window().expect("a readable window");
+    assert!((0..36).all(|s| window.inv.slot(s).is_some_and(|st| st.item == crate::item::Item::Block(crate::block::STONE) && st.count == 64)), "the full bag is saved as it was");
 }

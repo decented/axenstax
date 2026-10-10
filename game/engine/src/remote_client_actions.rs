@@ -3,7 +3,49 @@
 use super::{ConnectionState, RemoteClient};
 use crate::protocol::{self, PacketType};
 
+/// Shown when a Strict client finds an inventory change of its own that it
+/// can't send to the world (C3d run 4): it leaves rather than keep a
+/// window the world never saw.
+pub const STRICT_STRAY_CHANGE_REASON: &str =
+    "This game made an inventory change it couldn't send to this world, so we left to keep your inventory right. Rejoin to carry on.";
+
+/// C3d (run 4) — player 0's window flush on a Strict connection: its
+/// auto-refill setting goes as a reserved action, and every other window
+/// change already went through a reserving entry point, so nothing is
+/// logged for the legacy path. A logged legacy op here is a client
+/// invariant breach — the window may already show its prediction — so it is
+/// never silently discarded: with no whole-window resync request to ask
+/// for, the client leaves the world with a plain reason
+/// ([`RemoteClient::leave_for_strict_stray_ops`]). Returns whether it left.
+pub fn flush_strict_window_ops(
+    client: &mut RemoteClient,
+    ui: &mut crate::craft_ui::CraftingUi,
+    inv: &crate::inventory::Inventory,
+    armour: &[Option<crate::armour::ArmourItem>; 4],
+) -> bool {
+    if let Err(error) = ui.sync_auto_refill_joined(client, inv, armour) {
+        log::warn!("Strict auto-refill setting could not be reserved: {error}");
+    }
+    let stray = ui.ops.take_before(None);
+    if stray.is_empty() { return false; }
+    client.leave_for_strict_stray_ops(stray.len());
+    true
+}
+
 impl RemoteClient {
+    /// C3d (run 4) — a Strict client found `count` legacy window ops in its
+    /// flush (see [`flush_strict_window_ops`]): logged, a graceful
+    /// `Disconnect` sent, and the session ended with
+    /// [`STRICT_STRAY_CHANGE_REASON`]; the world exit then discards the
+    /// joined copy. Nothing is sent as a `WindowOp`.
+    pub fn leave_for_strict_stray_ops(&mut self, count: usize) {
+        log::error!("Strict client invariant breached: {count} legacy window op(s) in its flush; leaving the world");
+        let packet = protocol::serialize_packet(PacketType::Disconnect, &());
+        self.transport.send_to_server(&packet);
+        self.respawn_resend_from = None;
+        self.state = ConnectionState::Failed(STRICT_STRAY_CHANGE_REASON.to_string());
+    }
+
     pub fn applied_window_boundary(&self) -> u32 { self.events_applied }
     /// Must succeed BEFORE the caller changes holdings, world or local ECS.
     /// Retains the complete packet; sender/resubmission never allocates an id.

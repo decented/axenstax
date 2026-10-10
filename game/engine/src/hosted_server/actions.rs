@@ -74,6 +74,8 @@ impl HostedServer {
                 return self.pause_typed_action(i, StrictTeardown::FellBehind, "Action names an unavailable window boundary");
             }
             crate::window_events::apply_through(sp, packet.action.events_applied, now);
+            if !self.strict_events_hold(i) { return; }
+            let sp = &mut self.server.players[i];
             if !sp.is_present_and_alive() || sp.window_events.death_replace.is_some() {
                 return self.refuse_typed_action(i, packet.action);
             }
@@ -281,6 +283,21 @@ impl HostedServer {
             sp.display_name
         );
         self.strict_bridge_teardown(i, StrictTeardown::Obligation, "This world's strict inventory check found an obligation it can't account for");
+        false
+    }
+
+    /// C3d (run 4) — a Strict copy applied a numbered Take short
+    /// (`window_events::apply_front`): Strict never queues one its window
+    /// can't pay, so this is an invariant breach, never log-only. Torn down
+    /// with the reason through the one BRIDGE; `false` when it was. Checked
+    /// where a Strict action applies its boundary (before anything executes
+    /// on top of it) and after every tick's overdue valve, which covers any
+    /// other application point by the end of that tick.
+    pub(super) fn strict_events_hold(&mut self, i: usize) -> bool {
+        let Some(sp) = self.server.players.get_mut(i) else { return true };
+        let Some(event) = sp.window_events.take_strict_short_take() else { return true };
+        if self.disconnected.get(i).copied().unwrap_or(true) { return false; }
+        self.strict_bridge_teardown(i, StrictTeardown::Obligation, &format!("window event {event} took short of what Strict admitted"));
         false
     }
 

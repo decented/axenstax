@@ -3747,6 +3747,9 @@ impl HostedServer {
         for i in 0..self.server.players.len() {
             if self.server.players[i].server_simulated {
                 crate::window_events::apply_overdue(&mut self.server.players[i], now);
+                // C3d (run 4) — a Strict short Take from any application
+                // point this tick is torn down here at the latest.
+                if !self.strict_events_hold(i) { continue; }
                 self.flush_retired_overflow(i);
             }
         }
