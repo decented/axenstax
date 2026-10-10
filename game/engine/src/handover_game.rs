@@ -481,8 +481,12 @@ impl crate::GameState {
         let live = self.handover_live();
         let Some(Handover::Source { session, .. }) = self.handover.as_mut() else { return };
         let Some(hs) = self.hosted_server.as_mut() else {
-            // The world (and the link with it) went: nothing was retired.
-            self.handover = None;
+            // The server (and the link with it) went: the session ends the
+            // one way every source handover ends (rotating a disclosed
+            // bearer). A retired session's publication was already handed
+            // to the resumer at Retired, so nothing is lost by dropping it.
+            let line = self.end_source_handover(copy::LEFT);
+            log::info!("handover: {line}");
             return;
         };
         let mut result = session.pump(hs, live, now);
@@ -570,6 +574,10 @@ impl crate::GameState {
     /// the gameplay that waited go back to the joined client if it is still
     /// here; otherwise the connection closes with the session.
     fn end_recipient(&mut self, msg: &str) {
+        // CP8 review LOW-1: never take (and drop) a Source handover here.
+        if !matches!(self.handover, Some(Handover::Recipient(_))) {
+            return;
+        }
         let Some(Handover::Recipient(mut s)) = self.handover.take() else { return };
         let back = s.return_link();
         let parked = self.remote_client.as_ref().is_some_and(|rc| rc.is_parked());

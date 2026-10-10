@@ -5588,8 +5588,9 @@ are not compiled or tested on this Linux-only build.
 Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
 bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the
 one `online_admission`'s `Accept(ByInvite)` checks; `live::bearer::Bearer`:
-zeroed on drop, `Debug` redacted, no `Display`, serialised only inside
-`Frame::Bearer`) and the source runtime's player attestation. No live
+zeroed on drop, `Debug` redacted, no `Display`, no `Serialize` of its own:
+serialised only inside `Frame::Bearer`, through `wire`'s private
+`bearer_field` module, CP8 review LOW-4) and the source runtime's player attestation. No live
 invitation (expired) refuses with `NO_LIVE_INVITE`; a world never saved
 stops before disclosure (`NEVER_SAVED`). `verify_accept` returns the
 recipient attestation it verified (H2); Prepared and Commit seal it as the
@@ -5610,7 +5611,9 @@ its runtime over `prepared_ack_content` (transfer, Prepared event hash and
 a bearer possession proof, `wire::prepared_ack_proof` =
 HKDF(bearer, C, "prepared-ack", Prepared hash); CP7 review LOW-2: the root
 capability is computable from Prepared's public `p` tag and C, so it proves
-nothing). The source verifies it (signer = recipient runtime, exact
+nothing; CP8 review LOW-2: an ack the recipient's runtime signed with the
+v1 capability, another bearer's proof or a proof over another Prepared hash
+aborts, rotates and leaves the world unretired, each pinned by a test). The source verifies it (signer = recipient runtime, exact
 content), re-runs every boundary check (identity, seats, authority persona,
 saved records; also at disclosure, CP7 review LOW-3), seals the Commit locally, opens it under
 the bearer's key, and durably retires (`phase::Source::retire` into
@@ -5636,18 +5639,26 @@ Prepared the recipient never deletes the import: any failure ends its
 session `Quarantined` (import, markers and received world kept). An abort
 after the bearer was disclosed but before Retired resumes play and rotates
 the invitation: every caller that ends a source handover (Cancel, leaving,
-the pump) goes through `GameState::end_source_handover`, which reads
+the pump, including a pump that finds the HostedServer gone, CP8 review
+LOW-1) goes through `GameState::end_source_handover`, which reads
 `needs_invite_rotation` and calls `OnlineHost::rotate_bearer`. Only the
 bearer changes: the expiry, relays and host fields stay, so the root
 context and lineage are unchanged (CP7 review MEDIUM-1 + LOW-7); old invite
 links stop admitting at once (no grace), and the toast says so. Personas
 the old bearer already admitted stay contacts. `mint_fresh_invite` (new
-expiry) stays the UI's "new invite". The bearer is wiped with `zeroize` on
-drop, and the buffers this code owns that held it (the source's encode
-buffer, the recipient's received packet) are zeroed after use (CP7 review
-LOW-1). Residual copies outside our control are not wiped: the transport's
-send queue and socket buffers, the QUIC/TLS stack's plaintext, and the
-serialiser's internal buffers. The recipient's Activated record and host
+expiry) stays the UI's "new invite". The handover session's own copies are
+zeroed: the bearer is wiped with `zeroize` on drop, and the buffers this
+code owns that held it (the source's encode buffer, the host's packet
+buffer in `HostedServer::handover_send`, CP8 review MEDIUM-A, and the
+recipient's received packet) are zeroed after use (CP7 review LOW-1).
+Copies that remain in this process and are not wiped: the transport's
+channel copy of each packet (`data.to_vec()`), its send queue and socket
+buffers, the QUIC/TLS stack's plaintext and the serialiser's internal
+buffers; the live invitation itself, held in memory by the online host
+while it hosts (its bearer, and every invite link string made from it: the
+Online panel, the clipboard, `/online` chat lines); and the HKDF state (the
+extracted keys in `crypto::recipient` and `prepared_ack_proof`, and the
+derived recipient keys). The recipient's Activated record and host
 start, and the retained copy, are the next slices.
 
 Committed publication (CP9). One background resumer per process

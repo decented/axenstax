@@ -55,7 +55,11 @@ pub enum Frame {
     /// Prepared is published (P2): the live invitation's bearer, the point
     /// of no return for it. Inside the authenticated, encrypted direct
     /// session only; Prepared is sealed to the key derived from it.
-    Bearer { transfer: Id, bearer: super::bearer::Bearer },
+    Bearer {
+        transfer: Id,
+        #[serde(with = "bearer_field")]
+        bearer: super::bearer::Bearer,
+    },
     /// Source → recipient: the exact Prepared event the source published
     /// and read back.
     Prepared { transfer: Id, event: String },
@@ -208,4 +212,20 @@ pub fn root_lineage(root: &crate::handover::context::RootContext) -> Id {
     let mut id = [0; 16];
     id.copy_from_slice(&h[..16]);
     id
+}
+
+/// CP8 review LOW-4: the one place a `Bearer` is (de)serialised, the field of
+/// `Frame::Bearer` (same bytes as the derive it replaces: a newtype over
+/// the 16 bytes).
+mod bearer_field {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub(super) fn serialize<S: Serializer>(b: &super::super::bearer::Bearer, s: S) -> Result<S::Ok, S::Error> {
+        b.expose().serialize(s)
+    }
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<super::super::bearer::Bearer, D::Error> {
+        let mut bytes = <crate::handover::Id>::deserialize(d)?;
+        let b = super::super::bearer::Bearer::new(bytes);
+        zeroize::Zeroize::zeroize(&mut bytes);
+        Ok(b)
+    }
 }

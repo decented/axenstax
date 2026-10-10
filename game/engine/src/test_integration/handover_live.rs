@@ -440,10 +440,48 @@ mod session {
         forged_bearer: Arc<Mutex<Option<[u8; 16]>>>,
         /// Re-signs the recipient's PreparedAck with a stranger's key.
         forge_ack: Arc<std::sync::atomic::AtomicBool>,
+        /// Replaces the ack's possession proof (signed by the recipient's
+        /// own runtime, so only the proof is wrong).
+        ack_forge: Arc<Mutex<Option<(AckForge, RootContext)>>>,
+    }
+    /// CP8 review LOW-2: what a correctly signed ack carries in place of the
+    /// real possession proof.
+    #[derive(Clone, Copy, Debug)]
+    enum AckForge {
+        /// The v1 "proof": the root capability, computable from public data.
+        V1Capability,
+        /// A proof derived from another bearer.
+        OtherBearer,
+        /// A proof over another Prepared hash.
+        OtherPrepared,
     }
     impl ClientTransport for Tap {
         fn send_to_server(&self, data: &[u8]) {
             let frame = crate::handover::live::recipient::handover_payload(data).and_then(|b| Frame::decode(b).ok());
+            if let Some(Frame::PreparedAck { transfer, event }) = &frame
+                && let Some((forge, root)) = self.ack_forge.lock().unwrap().clone()
+            {
+                use base64::Engine;
+                use crate::handover::live::wire::{prepared_ack_content, prepared_ack_proof};
+                let real = nostr::Event::from_json(event).unwrap();
+                let raw = base64::engine::general_purpose::STANDARD.decode(&real.content).unwrap();
+                let at = 4 + "AxeNStax/handover/prepared-ack/v2".len() + 16;
+                let prepared: crate::handover::Hash = raw[at..at + 32].try_into().unwrap();
+                let proof = match forge {
+                    AckForge::V1Capability => crate::handover::crypto::root_capability(&root, &TEST_BEARER).unwrap(),
+                    AckForge::OtherBearer => prepared_ack_proof(&root, &[0x11; 16], prepared),
+                    AckForge::OtherPrepared => prepared_ack_proof(&root, &TEST_BEARER, [0x77; 32]),
+                };
+                assert_eq!(real.content, prepared_ack_content(*transfer, prepared, prepared_ack_proof(&root, &TEST_BEARER, prepared)), "the real ack");
+                let forged = pollster::block_on(
+                    nostr::EventBuilder::new(real.kind, prepared_ack_content(*transfer, prepared, proof))
+                        .custom_created_at(real.created_at)
+                        .sign(&keys(RECIPIENT_RUNTIME)),
+                )
+                .unwrap();
+                let f = Frame::PreparedAck { transfer: *transfer, event: forged.as_json() };
+                return self.inner.send_to_server(&handover_frame(&f.encode().unwrap()));
+            }
             if let Some(Frame::PreparedAck { transfer, event }) = &frame
                 && self.forge_ack.load(std::sync::atomic::Ordering::SeqCst)
             {
@@ -498,6 +536,7 @@ mod session {
         /// Replaces the bearer in the source's `Frame::Bearer` (a wrong one).
         forged_bearer: Arc<Mutex<Option<[u8; 16]>>>,
         forge_ack: Arc<std::sync::atomic::AtomicBool>,
+        ack_forge: Arc<Mutex<Option<(AckForge, RootContext)>>>,
         relay: crate::handover::relay_fixture::Relay,
         dir: Dir,
     }
@@ -559,11 +598,13 @@ mod session {
         let forged_ready = Arc::new(Mutex::new(None));
         let forged_bearer = Arc::new(Mutex::new(None));
         let forge_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ack_forge = Arc::new(Mutex::new(None));
         let tap = Tap {
             inner: Box::new(client),
             forged_ready: forged_ready.clone(),
             forged_bearer: forged_bearer.clone(),
             forge_ack: forge_ack.clone(),
+            ack_forge: ack_forge.clone(),
         };
         let rc = RemoteClient::from_transport(Box::new(tap), crate::remote_client::build_join_request_guest("dup", 0), None);
         let relay = crate::handover::relay_fixture::Relay::start();
@@ -587,7 +628,7 @@ mod session {
         let action = HostAction { seat, source_key, world_name: "Loop".into() };
         let live = Live { signed_in: Some(source_key), local_seats: 1 };
         let src = SourceSession::begin(&mut hs, action, cfg, live, now()).expect("eligible");
-        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, relay, dir }
+        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, relay, dir }
     }
 
     /// The joined client reads the proposal through its ordinary poll, the
@@ -1524,6 +1565,32 @@ mod session {
         assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "retired without a verified ack");
         assert!(p.src.needs_invite_rotation());
         assert!(!p.hs.handover_frozen());
+    }
+
+    /// CP8 review LOW-2: an ack the recipient's own runtime signed, whose
+    /// possession proof is wrong, never retires: the source aborts, rotates
+    /// the invitation and resumes play, and the world is not retired.
+    fn wrong_proof_never_retires(tag: &str, forge: AckForge) {
+        let mut p = ready_pair(tag);
+        *p.ack_forge.lock().unwrap() = Some((forge, p.root.clone()));
+        drive(&mut p, SourceStage::Retired);
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "{forge:?}: a wrong possession proof was accepted ({:?})", p.src.stage());
+        assert!(p.src.bearer_disclosed() && p.src.needs_invite_rotation(), "{forge:?}: the invitation wasn't rotated");
+        assert!(!p.hs.handover_frozen(), "{forge:?}: the source didn't resume");
+        assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "{forge:?}: the world was retired");
+        assert!(p.src.commit_event().is_none(), "{forge:?}: a Commit was sealed");
+    }
+    #[test]
+    fn handover_prepared_ack_with_the_v1_capability_never_retires() {
+        wrong_proof_never_retires("ack-v1", AckForge::V1Capability);
+    }
+    #[test]
+    fn handover_prepared_ack_with_another_bearers_proof_never_retires() {
+        wrong_proof_never_retires("ack-bearer", AckForge::OtherBearer);
+    }
+    #[test]
+    fn handover_prepared_ack_with_a_proof_over_another_prepared_never_retires() {
+        wrong_proof_never_retires("ack-prepared", AckForge::OtherPrepared);
     }
 
     /// CP6 review LOW-4: a pack that took longer than the stall deadline

@@ -190,6 +190,10 @@ impl HostedServer {
         pkt.push(PacketType::Handover as u8);
         pkt.extend_from_slice(frame);
         self.send_to_joined_slot(slot, &pkt);
+        // CP8 review MEDIUM-A: this buffer may carry the bearer frame; it is
+        // ours, so it is wiped (unconditionally: frames are small and this
+        // never sees the frame type).
+        zeroize::Zeroize::zeroize(&mut pkt);
         Ok(())
     }
 

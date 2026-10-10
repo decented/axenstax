@@ -13,6 +13,10 @@ impl SourceSession {
         let capability = crypto::root_capability(&self.cfg.root, self.cfg.bearer.expose()).map_err(|_| bad.clone())?;
         let rt = self.recipient_runtime.ok_or(bad.clone())?;
         let ev = Event::from_json(ack).map_err(|_| bad.clone())?;
+        // CP8 review LOW-2: a plain (not constant-time) String comparison is
+        // not an oracle here: only the consenting recipient, which already
+        // holds the bearer, reaches it, after its runtime's signature
+        // verified, and the first mismatch aborts the session for good.
         if ev.pubkey.to_bytes() != rt
             || ev.verify().is_err()
             || ev.kind != Kind::Custom(crate::handover::STORED_KIND)

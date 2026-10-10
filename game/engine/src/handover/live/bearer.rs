@@ -5,9 +5,11 @@
 //! Never logged: `Debug` prints nothing of it and there is no `Display`.
 //! Each copy is overwritten with zeros when it is dropped.
 use crate::handover::Id;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// CP8 review LOW-4: no `Serialize`/`Deserialize` of its own: the only
+/// serialisation is `wire`'s private `bearer_field` module, used by
+/// `Frame::Bearer` alone, so nothing else can serialise it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Bearer(Id);
 
 impl Bearer {
