@@ -252,7 +252,10 @@ fn protocol_version_is_the_pinned_value() {
     // v87 (sidecar): CreativeGive.
     // v88 (OC): `InventorySyncPacket.owed` — the join's replacement carries
     //   the joiner's correction debt to both copies.
-    assert_eq!(protocol::PROTOCOL_VERSION, 88);
+    // v89 (provisional, C3d): typed `Action` (68), `ActionReceipt` (69),
+    //   `Recovery` (70), `AppliedActionAck` (71); JoinAccept appends the
+    //   fixed inventory mode, action namespace and life.
+    assert_eq!(protocol::PROTOCOL_VERSION, 89);
 }
 
 #[test]

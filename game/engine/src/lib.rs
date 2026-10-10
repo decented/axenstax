@@ -42,6 +42,7 @@ mod action_wire;
 mod recovery_bundle;
 mod rebase_assembly;
 mod staged_window;
+mod strict_admission;
 mod audio;
 mod controls;
 mod biome;

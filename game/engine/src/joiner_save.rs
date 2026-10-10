@@ -356,7 +356,8 @@ impl JoinerSave {
         CorrectionDebt::from_entries(entries)
     }
 
-    #[cfg(test)]
+    /// OC — the record's obligation history (C3d's Strict admission names
+    /// the cause it refuses for, `strict_admission::check`).
     pub fn history(&self) -> ObligationHistory {
         self.obligation_history
     }
@@ -365,7 +366,6 @@ impl JoinerSave {
     /// `Complete` and it carries no debt. (An unreadable save has no
     /// `JoinerSave`: [`crate::server::ServerPlayer::obligations_proven_zero`]
     /// covers it.) For C3d's Strict admission and the handover's eligibility.
-    #[allow(dead_code)] // consumed by C3d (Strict admission) and the handover (eligibility)
     pub fn obligations_proven_zero(&self) -> bool {
         self.obligation_history == ObligationHistory::Complete && self.owed.is_empty()
     }
@@ -492,44 +492,6 @@ mod tests {
         sp.enter_world();
         s
     }
-    /// Decision 10 counterexample, not Strict acceptance: v1 cannot carry an
-    /// unpaid correction. Keep Strict unavailable until a versioned obligation
-    /// design closes this case; never infer zero debt from restored slots.
-    #[test]
-    fn sidecar_v1_cannot_prove_zero_unpaid_correction_after_reconnect() {
-        let mut s = server();
-        let sp = &mut s.players[0];
-        let stone = ItemStack::new_block(crate::block::STONE, 1);
-        let take = crate::container_window::ItemDelta {
-            take: vec![(0, stone.clone())], give: vec![],
-        };
-        let correction = crate::window_ops::Correction {
-            client: take.clone(), own: Some(take),
-            view: crate::window_ops::ViewEvent::Sets { sets: Vec::new(), furnace: None },
-        };
-        let seq = crate::window_events::queue(sp,
-            crate::window_events::WindowEvent::Correction(Box::new(correction)), 0);
-        crate::window_events::apply_through(sp, seq, 0);
-        assert_eq!(sp.window_events.debt.owed(&stone.item), 1);
-        let saved = JoinerSave::capture(sp, s.run_id);
-        let bytes = bincode::serialize(&saved).unwrap();
-        let saved: JoinerSave = bincode::deserialize(&bytes).unwrap();
-        let mut restored = server();
-        let next = &mut restored.players[0];
-        let seq = crate::window_events::queue(next,
-            crate::window_events::WindowEvent::Replace(Box::new(saved.window().unwrap())), 0);
-        crate::window_events::apply_through(next, seq, 0);
-        assert!(next.window_events.debt.is_empty(), "the v1 replacement lost the obligation");
-        let give = crate::container_window::ItemDelta { take: vec![], give: vec![stone] };
-        sp.window_events.debt.apply(&mut sp.inventory, &mut sp.craft_grid,
-            &mut sp.cursor, &mut sp.armour, &give);
-        next.window_events.debt.apply(&mut next.inventory, &mut next.craft_grid,
-            &mut next.cursor, &mut next.armour, &give);
-        assert!(sp.inventory.slot(0).is_none(), "the original correction consumes this give");
-        assert_eq!(next.inventory.slot(0), Some(&ItemStack::new_block(crate::block::STONE, 1)),
-            "the same give becomes freely usable after v1 reconnect");
-    }
-
     #[test]
     fn sidecar_round_trips_whole_effective_window_and_run_scoped_night() {
         let _g = crate::save::WorldsRootGuard::new("sidecar-full");

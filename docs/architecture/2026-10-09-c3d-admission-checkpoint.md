@@ -1,13 +1,13 @@
 # C3d source checkpoint: authoritative admission and exact replay
 
-Source base: accepted smallfix `1dc5725e`, protocol 87. This is the first source
+Source base: accepted smallfix `1dc5725e`, protocol 87; rebased 2026-10-10 onto local main `bdd4fe87` (OC obligation carrier, protocol 88 delivered). This is the first source
 and model checkpoint for an implementation in progress. The new modules are
 not connected to gameplay dispatch yet. The initial compile and 21 model tests
 pass. Six deliberately broken invariants produced eight assertion failures;
 two later journal regressions also failed before their fixes. These are model
 results, not actual Strict dispatch or applied world-intake acceptance. Strict
 is not shipped or enabled by this checkpoint.
-The approved delivery proposes protocol 88 and operator-local
+The approved delivery proposes protocol 89 (provisional; OC took 88) and operator-local
 `--strict-inventory`, default false, fixed and advertised at join. Trusted local
 host slots keep their existing policy. No discovery, service, identity collection,
 monetary feature or public capability claim changes.
@@ -80,7 +80,7 @@ No saved prediction block may overwrite a newer canonical value.
 
 ### Carrier integration checkpoint (source, not acceptance)
 
-The evolving protocol88 carriers use Action=68, ActionReceipt=69 and Recovery=70.
+The evolving protocol 89 (provisional) carriers use Action=68, ActionReceipt=69, Recovery=70 and AppliedActionAck=71, appended after OC v88, which added no tag (it extended tag 67).
 JoinAccept now appends fixed inventory mode, a fresh random128-bit action
 namespace and life. Randomness failure refuses admission; an extra JoinAccept
 cannot replace an existing journal or hot-switch mode. Mirror remains the
@@ -227,11 +227,28 @@ is terminal NormalisedAcceptedNoop through K followed by correction, not a
 retry. Numbered strict grants/takes/wear are actual admitted effects, not debt.
 Existing owed event application is reused; if its trace cannot assign a source,
 recover before K. Assert zero bridge debt at every strict commit, recovery,
-death/settlement/save boundary. A concrete nonzero case stops at a clean
-checkpoint for coordinator's versioned obligation-carrier decision; v1 SIDECar
-must not silently discard an obligation. Planned v2 extension is only verified
-npub fishing remaining cooldown (clamped100), v1 migration0; guests session-only.
-Active line on death/disconnect/world-leave imposes100ticks before SIDECar capture.
+death/settlement/save boundary.
+
+Decision 10 stop RESOLVED by the obligation carrier (OC, local main `bdd4fe87`,
+protocol 88): SIDECar v2 carries the effective correction debt and a sticky
+`obligation_history`; the join's Replace/InventorySync give it to both copies.
+Strict admission (`strict_admission::check`, called in the real join path right
+after `GameServer::load_joiner` and before `JoinAccept`) requires the record to
+prove no carried obligation: no record is proven; a v2 record must be
+`Complete` with no owed entry (`JoinerSave::obligations_proven_zero`); an
+unreadable record (session `Incomplete(Unreadable)`), a v1 record
+(`Incomplete(LegacyV1)`), an overflowed one (`Incomplete(Overflow)`) or any owed
+entry is refused with a typed `StrictJoinRefusal` whose sentence is the
+`JoinReject` reason. The handshake is not done, so `release_slot` neither
+settles nor saves: the record's bytes are untouched. No settlement from held
+stock, no write-off, no inference from slots. Mirror admission is unchanged.
+Strict never creates debt: real `HostedServer` tests assert the live fold stays
+empty and the capture proves zero (`hosted_server/c3d_tests.rs`). The old
+source-only v1 counterexample test is removed; OC's real tests cover the case.
+Decision 23 as amended: the verified-npub fishing remaining cooldown (clamped
+100) goes in SIDECar v3 (v2 is the obligation carrier); v1 and v2 migrate to 0;
+guests session-only. Active line on death/disconnect/world-leave imposes 100
+ticks before SIDECar capture.
 
 Next: typed protocol/advertisement and complete identity ingress; staged pending
 projection/wear/product/container admission; server capture/outbox and client

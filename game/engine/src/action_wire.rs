@@ -165,6 +165,28 @@ mod tests {
         assert_ne!(receipt.included_events, receipt.action.events_applied);
     }
 
+    /// v89 (provisional): the four C3d tags follow OC's v88 layout, which
+    /// added no tag (it extended `InventorySync`, 67). Append-only, no
+    /// collision, and nothing past 71 decodes.
+    #[test]
+    fn c3d_wire_tags_append_after_oc_v88_without_collision() {
+        use protocol::{deserialize_header, serialize_packet, PacketType};
+        assert_eq!(protocol::PROTOCOL_VERSION, 89);
+        let action = ActionHeader { session: [7; 16], epoch: 0, life: 0, seq: 1, events_applied: 0 };
+        let tagged = [
+            (serialize_packet(PacketType::Action, &ActionPacket { action, intent: ActionIntent::CancelledNoop }), PacketType::Action, 68),
+            (serialize_packet(PacketType::ActionReceipt, &ActionReceipt { action, fate: ActionFate::Refused, included_events: 0 }), PacketType::ActionReceipt, 69),
+            (serialize_packet(PacketType::Recovery, &RecoveryPacket::Ack(RecoveryCut { session: [7; 16], id: 1, epoch: 1, life: 0, through: 0 })), PacketType::Recovery, 70),
+            (serialize_packet(PacketType::AppliedActionAck, &AppliedActionAck { session: [7; 16], epoch: 0, life: 0, through: 1, included_events: 0 }), PacketType::AppliedActionAck, 71),
+        ];
+        for (bytes, tag, byte) in tagged {
+            assert_eq!(bytes[0], byte);
+            assert_eq!(deserialize_header(&bytes).map(|(t, _)| t), Some(tag));
+        }
+        assert_eq!(deserialize_header(&[67]).map(|(t, _)| t), Some(PacketType::InventorySync), "OC's v88 tag 67 is unchanged");
+        assert!(deserialize_header(&[72]).is_none(), "no tag past 71");
+    }
+
     #[test]
     fn c3d_wire_recovery_count_rejects_a_hostile_length_before_allocation() {
         use bincode::Options;

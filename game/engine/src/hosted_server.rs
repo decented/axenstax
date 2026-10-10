@@ -25,6 +25,8 @@
 mod death;
 mod sidecar;
 mod actions;
+#[cfg(test)]
+mod c3d_tests;
 
 use std::collections::VecDeque;
 
@@ -4314,6 +4316,21 @@ impl HostedServer {
                         }
 
                         let saved_joiner = self.server.load_joiner(i);
+                        // C3d (Decision 10, OC) — a Strict world admits only a
+                        // record that proves no carried obligation. Refused
+                        // before JoinAccept: the handshake isn't done, so
+                        // `release_slot` neither settles nor saves, and the
+                        // record's bytes stay as they are.
+                        if self.inventory_mode == crate::action_identity::InventoryMode::Strict
+                            && let Err(refusal) = crate::strict_admission::check(
+                                saved_joiner.as_ref(),
+                                self.server.players[i].obligations.get(),
+                            )
+                        {
+                            log::warn!("Refusing Strict join on slot {i}: {refusal:?}");
+                            let _ = self.release_slot(i, Some(&refusal.reason()));
+                            break;
+                        }
                         if let Some(saved) = &saved_joiner {
                             let sp = &mut self.server.players[i];
                             sp.spawn_pos = glam::Vec3::from_array(saved.spawn);
@@ -8321,7 +8338,7 @@ mod tests {
     /// disk, matching `test_integration/late_join.rs`'s "must not exist on
     /// disk" requirement. `WebSocket { port: 0 }` + 0 remote players spawns no
     /// accept thread and no socket at all.
-    fn start_room_test_server(tag: &str, num_local: usize) -> HostedServer {
+    pub(super) fn start_room_test_server(tag: &str, num_local: usize) -> HostedServer {
         let world = format!("test-room-wiring-{}-{tag}", std::process::id());
         HostedServer::start(num_local, world, 42, 0, RemoteTransport::WebSocket { port: 0 })
             .expect("hosted server starts")
@@ -8526,7 +8543,7 @@ mod tests {
     }
 
     /// Sign and send a join for `seckey` over a transport with `binding`.
-    fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
+    pub(super) fn send_signed_join(client: &ChannelClientTransport, seckey: [u8; 32], binding: Option<[u8; 32]>) {
         use crate::transport::ClientTransport as _;
         let chal = loop {
             let pkt = client.try_recv_from_server().expect("challenge issued on attach");

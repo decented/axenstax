@@ -2743,7 +2743,8 @@ pub struct ServerAnnouncePacket {
 ///   joiner's unpaid correction debt survives a reconnect on both copies
 ///   (empty after a death).
 /// - v89 (provisional, C3d source; not delivered): typed Action (68),
-///   ActionReceipt (69) and Recovery (70). JoinAccept appends fixed inventory
+///   ActionReceipt (69), Recovery (70) and AppliedActionAck (71) metadata.
+///   JoinAccept appends fixed inventory
 ///   mode, random128-bit action namespace and life. Recovery Describe is
 ///   paginated; world-stream receipt/fence application is distinct from
 ///   socket reception.
@@ -3677,7 +3678,8 @@ mod tests {
         // v87 (2026-10-09, Sidecar): CreativeGive (= 14).
         // v88 (2026-10-09, OC): `InventorySyncPacket.owed` (after `slots`).
         // v89 (provisional, C3d): Action (68), ActionReceipt (69),
-        //   Recovery (70); JoinAccept mode/namespace/life.
+        //   Recovery (70), AppliedActionAck (71); JoinAccept
+        //   mode/namespace/life.
         assert_eq!(PROTOCOL_VERSION, 89);
     }
 
