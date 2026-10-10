@@ -281,10 +281,15 @@ pub struct OnlinePanelView<'a> {
     /// [`connected_label`] — names or npubs, never hex, and never a list of
     /// anybody who is not actually here.
     pub connected: &'a [String],
+    /// World handover: the present, authenticated players this host may hand
+    /// the world to, by seat, already labelled like `connected`.
+    pub handover: &'a [(usize, String)],
 }
 
 /// QR + copy button + reachability + relay count + who is here + any warning.
-pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) {
+/// Returns the seat whose `Hand this world to …` was clicked.
+pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) -> Option<usize> {
+    let mut hand_to = None;
     ui.label(egui::RichText::new("Playing online").size(16.0).strong());
     ui.add_space(4.0);
     crate::menu::draw_qr(ui, view.invite_link, 148.0);
@@ -336,6 +341,15 @@ pub fn draw_online_panel(ui: &mut egui::Ui, view: &OnlinePanelView) {
                 .color(egui::Color32::from_rgb(230, 190, 120)),
         );
     }
+    if !view.handover.is_empty() {
+        ui.add_space(6.0);
+        for (slot, label) in view.handover {
+            if ui.small_button(crate::handover::live::copy::hand_to(label)).clicked() {
+                hand_to = Some(*slot);
+            }
+        }
+    }
+    hand_to
 }
 
 /// The "Friends & servers" column: your address, the people you know, the paste

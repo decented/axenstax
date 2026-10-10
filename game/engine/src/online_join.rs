@@ -239,6 +239,12 @@ impl OnlineJoin {
     /// The host, as a contact to fold into the mirror. `Some` once an accepted
     /// answer has been verified — the join is mutual, so calling somebody and
     /// being let in makes them a contact both ways.
+    /// The runtime key the host's answer was verified against (the invite's
+    /// `k=` or the contact's attested runtime).
+    pub fn host_runtime(&self) -> [u8; 32] {
+        self.host_runtime.to_bytes()
+    }
+
     pub fn host_contact(&self) -> Option<Contact> {
         self.host_contact.clone()
     }

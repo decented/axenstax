@@ -174,6 +174,9 @@ mod online_prep;
 // separately and these utilities neither publish nor start a host on their own.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod handover;
+// World handover — the GameState callers (host action, consent, pump, freeze).
+#[cfg(not(target_arch = "wasm32"))]
+mod handover_game;
 mod world_room;
 #[cfg(not(target_arch = "wasm32"))]
 mod kithmoot_keeper;
@@ -897,6 +900,14 @@ mod skin_paint_session_tests {
     }
 }
 
+/// The browser takes no part in a world handover: play is never held.
+#[cfg(target_arch = "wasm32")]
+impl GameState {
+    pub(crate) fn handover_holds_play(&self) -> bool {
+        false
+    }
+}
+
 pub(crate) struct GameState {
     /// Name of the currently loaded world.
     pub(crate) world_name: String,
@@ -1213,6 +1224,25 @@ pub(crate) struct GameState {
     /// measured from there, not from a wall clock).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) online_join: Option<(crate::online_join::OnlineJoin, Instant)>,
+    /// World handover: the one session this machine is part of. Not cleared
+    /// by leaving the world — a recipient past consent holds its own
+    /// connection; a source session is aborted before its world goes
+    /// (`handover_on_leave`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) handover: Option<crate::handover_game::Handover>,
+    /// The host this joined client verified at join (online play's verified
+    /// answer and its runtime). `None` for a join that verified no host.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) joined_host: Option<crate::handover::live::recipient::JoinedHost>,
+    /// The host this client joined has paused play for a handover.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) host_paused: bool,
+    /// A handover window button clicked this frame, acted on by the next
+    /// `poll_handover`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) handover_click: Option<crate::handover_game::UiAction>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) handover_fixture: Option<crate::handover_game::Fixture>,
     /// The socket/router/attestation preparation running on a worker thread.
     /// Nothing about playing online blocks a frame; this is where the waiting
     /// happens.
@@ -1878,6 +1908,16 @@ impl GameState {
             online_host: None,
             #[cfg(not(target_arch = "wasm32"))]
             online_join: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            joined_host: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            host_paused: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_click: None,
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            handover_fixture: None,
             #[cfg(not(target_arch = "wasm32"))]
             online_prep: None,
             #[cfg(not(target_arch = "wasm32"))]

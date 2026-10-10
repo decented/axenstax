@@ -5328,3 +5328,52 @@ refusal, Decline or Abort before retirement releases the freeze; the recipient
 removes its own inactive checkpoint if it aborts before Ready and keeps it
 after; a pre-Ready abort hands the connection and the parked gameplay back to
 the joined client, which resumes in order (past the bound, the player rejoins).
+
+**Game callers (`handover_game`, native).** The host action is the Online
+panel's `Hand this world to …`, one row per present, authenticated seat
+(`HostedServer::handover_seat`: connected, handshake done, server-simulated,
+verified key, live attach generation); the click carries the seat, which
+`begin_handover_with` re-reads, never a label or a remembered npub. Only an
+online-hosted world can offer a handover: its root context is the live
+invitation's `k`/`h`/`x`/`r` (`OnlineHost::root_context`, bearer excluded), the
+runtime key is the one the host answers with, the lineage is
+`root_lineage(root)` and the authority is the root's (epoch 0, so the first
+checkpoint generation is 1). The snapshot world id is fresh per checkpoint
+(worlds carry no UUID at this base). The signed-in identity is re-read at
+every boundary. At the frozen capture the game supplies the RAW save built
+exactly as a save would (`build_world_save` over the real lent `World`, ECS
+carts and kept mobs, and the actual `PlayerSlot`s), the world's own `chunks/`
+and `exhibits/` folders when present, and seat 0's sidecar and record from
+the real seat 0 and the hosted server's run id. A joined client remembers the
+host it verified (`GameState.joined_host`, set from online play's verified
+answer persona and the runtime its answer was verified against; a LAN join
+verifies none, so a proposal there is declined). Its game loop drains the
+`RemoteClient` handover inbox every frame: a Propose becomes the consent
+screen (copy in `handover::live::copy`, proposed and awaiting owner review:
+world name, source npub, what comes across and what may not — loose drops,
+things in flight, wild animals and monsters — that the copy is stored on this
+machine, and that this version can't open it as their world yet); a refused
+or unverifiable proposal is answered with a Decline. Accept parks the
+`RemoteClient` connection into the session and binds the latched listener on
+a fresh ephemeral UDP socket. The control pump (`poll_handover`) runs every
+frame in every mode next to `poll_online`, never from the game tick. The
+handover session is not cleared by leaving the world: a recipient past
+consent keeps its connection and continues to Ready after its joined world,
+`RemoteClient` and HUD are gone (an unanswered proposal is declined on
+leave). A source handover is cancelled when the host leaves, before any save
+and while the world and link still exist. On a pre-Ready abort the
+recipient's connection and waiting gameplay go back to the parked
+`RemoteClient` (if it can't be resumed, the player leaves with a notice).
+
+While a handover freezes this machine's world, or the host a client joined
+has paused play (`Notice{paused}`), or a session holds the client's
+connection (`handover_holds_play`): `GameState::tick` returns at once (no
+simulation, local edits, grants, decay, raid credit or autosave), the frame
+path produces no gameplay intents, `network_send_input` sends nothing, chat
+commands are refused, `save_live_world` (every Save, Save & Quit, pause Save
+and close-save) refuses with "play is paused for a handover; cancel it
+first", and `poll_online` answers no online call (no admission). The lent
+tick's tripwire expects zero runs of every shared system while frozen. The
+render keeps running and the handover window shows the status, Cancel, and
+for joiners the paused banner. Releasing the freeze resets the tick timing so
+no catch-up burst follows.

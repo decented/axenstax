@@ -152,6 +152,21 @@ impl SourceSession {
         Ok(session)
     }
 
+    /// The persona handing the world over (the host action's source key).
+    pub fn source_key(&self) -> [u8; 32] {
+        self.action.source_key
+    }
+
+    /// The context a participant record of this transfer is bound to.
+    pub fn record_context(&self, participant: [u8; 32]) -> RecordContext {
+        RecordContext {
+            participant,
+            lineage: self.cfg.lineage,
+            generation: self.cfg.generation,
+            transfer: self.transfer,
+        }
+    }
+
     /// The recipient's npub, for the host's status line.
     pub fn recipient_npub(&self) -> String {
         npub(self.action.seat.key)

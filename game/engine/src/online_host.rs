@@ -324,6 +324,27 @@ impl OnlineHost {
         self.invite.to_link()
     }
 
+    /// The live invitation's root fields (its `k`, `h`, `x` and `r`), the
+    /// context a world handover from this host is bound to (Spec 04 "World
+    /// handover"). The bearer is not part of it.
+    pub fn root_context(
+        &self,
+        now: u64,
+    ) -> crate::handover::Result<crate::handover::context::RootContext> {
+        crate::handover::context::RootContext::new(
+            self.invite.host_runtime,
+            &self.invite.host_persona,
+            self.invite.expires_at,
+            &self.invite.relays,
+            now,
+        )
+    }
+
+    /// The runtime key this host answers and signs with.
+    pub fn runtime_keys(&self) -> &nostr::Keys {
+        self.identity.keys()
+    }
+
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }

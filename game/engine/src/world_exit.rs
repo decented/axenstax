@@ -439,6 +439,12 @@ impl crate::GameState {
     /// (`save::save_world_superseding_autosave`); the outcome is recorded in
     /// [`SessionSaves`].
     pub(crate) fn save_live_world(&mut self) -> Result<(), String> {
+        // World handover: a frozen world is never written (the copy being
+        // handed over was taken from it; nothing may land after the cut).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.handover_freezes_world() {
+            return Err(crate::handover::live::copy::SAVE_PAUSED.to_string());
+        }
         let result = crate::save::save_world_superseding_autosave(
             &self.world_name,
             &self.world,
@@ -518,6 +524,11 @@ impl crate::GameState {
     /// silence). Callers that hop somewhere after leaving must not hop on
     /// `false`.
     pub(crate) fn leave_world(&mut self, save: SaveChoice, to: ExitTo) -> bool {
+        // World handover first: a source handover is cancelled while its world
+        // and link still exist (pre-retirement, so play would resume), which
+        // also lifts the freeze before the save below.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handover_on_leave();
         let live = self.live_world.take();
         let joined = self.remote_client.is_some();
         // Reaching the line after this means any save it asked for landed

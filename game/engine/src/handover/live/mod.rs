@@ -7,3 +7,4 @@ pub mod listener;
 pub mod recipient;
 pub mod source;
 pub mod wire;
+pub mod copy;
