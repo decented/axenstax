@@ -85,8 +85,11 @@ pub enum WindowEvent {
     /// Whole truth after join or death (`InventorySync`): the window, and
     /// the correction debt the copy owes from here (OC, v88): a join's is
     /// the restored record's (or a fresh joiner's effective debt), a death's
-    /// is empty.
-    Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt },
+    /// is empty. C3d run 8 (review LOW-2) — and the station the packet
+    /// carries, the same send-time snapshot: a Strict copy's apply sets
+    /// `sp.station` to it (a stale config op served before it is overwritten
+    /// on both copies, as the client adopts the packet's).
+    Replace { window: Box<EffectiveWindow>, debt: crate::container_window::CorrectionDebt, station: crate::window::Station },
     /// An accepted request's owed take (`joiner_actions::take_owed_window`):
     /// `n` of `item`, from `slot` first. `how` ends the shortfall's log line.
     Take { slot: usize, item: Item, n: u8, how: &'static str },
@@ -320,7 +323,7 @@ enum Effect {
 /// client's own rule.
 fn apply_to(parts: &mut Parts, debt: &mut crate::container_window::CorrectionDebt, event: &WindowEvent) -> Effect {
     match event {
-        WindowEvent::Replace { window: w, debt: carried } => {
+        WindowEvent::Replace { window: w, debt: carried, .. } => {
             for i in 0..36 { parts.inv.set_slot(i, w.inv.slot(i).cloned()); }
             // C3d run 6 — the lock mask travels with the replacement (the
             // client installs the same); auto-refill stays the copy's own.
@@ -488,7 +491,12 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
                 crate::hosted_server::held_back_note(due),
             );
         }
-        (Effect::Viewed, WindowEvent::Replace { .. }) => { sp.window_events.forced_corrections.clear(); }
+        (Effect::Viewed, WindowEvent::Replace { station, .. }) => {
+            sp.window_events.forced_corrections.clear();
+            // C3d run 8 (review LOW-2) — Strict only: a Mirror client keeps its
+            // own station (run 7), so its server copy does too.
+            if sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict { sp.station = station; }
+        }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
         (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
         (Effect::Corrected(applied), WindowEvent::Correction(c)) => {
@@ -1250,7 +1258,7 @@ mod tests {
         let g = queue(&mut sp,WindowEvent::Grant(stone),0);
         let mut w = effective_window(&sp); w.inv.set_slot(0,None);
         // A death's replacement carries no debt (OC: death clears it).
-        let n = queue(&mut sp,WindowEvent::Replace { window: Box::new(w), debt: Default::default() },0);
+        let n = queue(&mut sp,WindowEvent::Replace { window: Box::new(w), debt: Default::default(), station: crate::window::Station::Player },0);
         sp.window_events.death_replace = Some(n);
         apply_overdue(&mut sp,EVENT_ACK_TIMEOUT_TICKS);
         assert_eq!(sp.window_events.death_replace,Some(n),"timeout does not acknowledge a client replacement");

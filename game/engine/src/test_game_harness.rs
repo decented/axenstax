@@ -834,6 +834,94 @@ mod tests {
         assert_eq!(server.server.world.grave_at(cell).unwrap().slots[0].as_ref().unwrap().count, 3);
     }
 
+    /// C3d run 8 (run-6 review H1, LOW-1) — a Strict joiner dies with stone
+    /// in its 2×2 grid, screen open. Through the real `GameState`: Esc on the
+    /// frozen screen pauses (never the generic panel close), E reaches the
+    /// same one gate, and nothing reaches the server (no correction is
+    /// queued); a Respawn the server hasn't answered yet still lets Esc
+    /// pause. Once the body lives, E closes and the grid ends in the bag on
+    /// both copies, never torn down.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_strict_frozen_crafting_esc_pauses_and_e_returns_the_grid() {
+        use crate::window_actions::CraftClose;
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-frozen-esc");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-frozen-esc-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Frozen", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let stone = crate::item::ItemStack::new_block(crate::block::STONE, 8);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+            inv.set_slot(0, Some(stone.clone()));
+        }
+        hg.state.open_crafting(0, None);
+        hg.state.apply_window_click(0, &crate::window::WindowClick::Slot { slot: 0, right: false });
+        hg.state.apply_window_click(0, &crate::window::WindowClick::Grid { row: 0, col: 0, right: false });
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.players[slot].craft_grid[0][0].as_ref().map(|s| s.count), Some(8), "the server's copy has the grid");
+        let sp = &mut server.server.players[slot];
+        sp.combat.health = 0.0;
+        sp.combat.dead = true;
+        for _ in 0..8 {
+            harness_step(&mut server, &mut hg);
+            if hg.state.players[0].is_dead() { break; }
+        }
+        assert!(hg.state.players[0].is_dead(), "the client heard of its death");
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        let events = server.server.players[slot].window_events.last_number();
+        assert!(hg.state.players[0].crafting_ui.open, "the screen is open at death");
+        hg.state.esc_crafting();
+        assert!(matches!(hg.state.mode, crate::GameMode::Paused { .. }), "Esc on a frozen crafting screen pauses");
+        assert!(hg.state.players[0].crafting_ui.open && hg.state.players[0].crafting_ui.grid_holds_items(), "the screen and its grid stay");
+        assert_eq!(hg.state.close_crafting(0), CraftClose::Frozen, "E reaches the same gate");
+        hg.state.mode = crate::GameMode::Playing;
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.players[slot].window_events.last_number(), events, "no Close reached the server: no correction queued");
+        // The Respawn, unanswered: the client asks, the server hasn't run.
+        for _ in 0..crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN { harness_step(&mut server, &mut hg); }
+        assert!(hg.state.players[0].combat.request_respawn());
+        for _ in 0..3 {
+            hg.frames(1);
+            hg.ticks(1);
+            if hg.state.remote_client.as_ref().unwrap().respawn_unanswered() { break; }
+        }
+        assert!(hg.state.remote_client.as_ref().unwrap().respawn_unanswered(), "a Respawn waits for its answer");
+        hg.state.esc_crafting();
+        assert!(matches!(hg.state.mode, crate::GameMode::Paused { .. }), "an unanswered Respawn never traps the player: Esc pauses");
+        hg.state.mode = crate::GameMode::Playing;
+        for _ in 0..40 {
+            harness_step(&mut server, &mut hg);
+            if !server.server.players[slot].combat.dead && !hg.state.players[0].is_dead()
+                && !hg.state.remote_client.as_ref().unwrap().respawn_unanswered() { break; }
+        }
+        assert!(!hg.state.players[0].is_dead() && !hg.state.remote_client.as_ref().unwrap().respawn_unanswered(), "respawned");
+        assert_eq!(hg.state.close_crafting(0), CraftClose::Closed, "E closes once the body lives");
+        for _ in 0..3 { harness_step(&mut server, &mut hg); }
+        assert!(matches!(hg.state.remote_client.as_ref().unwrap().state, crate::remote_client::ConnectionState::Connected { .. }), "never torn down");
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        let sp = &mut server.server.players[slot];
+        crate::window_events::apply_through(sp, applied, 0);
+        assert!(sp.craft_grid.iter().flatten().all(Option::is_none), "the server copy's grid went back");
+        assert_eq!(sp.inventory.slot(0).map(|s| s.count), Some(8), "into the server copy's bag");
+        assert!(!hg.state.players[0].crafting_ui.grid_holds_items(), "the client's grid went back");
+        assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(8), "into the client's bag");
+    }
+
     /// OC (v88) — the full client path: a saved joiner owing Stone 1 joins
     /// by its real signed join; the client's own `apply_window_inbox` (the
     /// `Sync` arm) installs the debt the `InventorySync` carries, the server's

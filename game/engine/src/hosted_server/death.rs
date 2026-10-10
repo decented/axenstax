@@ -132,13 +132,16 @@ impl HostedServer {
             );
             self.server.players[i].obligations.mark(crate::joiner_save::IncompleteCause::Overflow);
         }
+        // C3d run 8 (review LOW-2) — ONE snapshot of the station, for the
+        // packet the client adopts and the event the server's copy applies.
+        let station = self.server.players[i].station;
         let n = crate::window_events::queue(
             &mut self.server.players[i],
-            crate::window_events::WindowEvent::Replace { window: Box::new(window.clone()), debt: debt.clone() },
+            crate::window_events::WindowEvent::Replace { window: Box::new(window.clone()), debt: debt.clone(), station },
             self.server.tick_counter,
         );
         let mut pkt = crate::inventory_sync::packet(&window, &debt, n);
-        pkt.station = crate::inventory_sync::station_wire(self.server.players[i].station);
+        pkt.station = crate::inventory_sync::station_wire(station);
         self.send_to_joined_slot(
             i,
             &protocol::serialize_packet(protocol::PacketType::InventorySync, &pkt),

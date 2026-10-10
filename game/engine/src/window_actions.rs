@@ -1,16 +1,35 @@
 //! Actual playing-screen window entry points with pre-prediction reservation.
 use crate::{GameState, window::{ClickCtx, ClickResult, WindowClick}, action_identity::InventoryMode};
 
+/// What a crafting-screen close did ([`GameState::close_crafting`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CraftClose {
+    /// The grid and cursor went back; the screen closed.
+    Closed,
+    /// A full bag kept some of them; the screen stays open.
+    Refused,
+    /// C3d run 8 — a frozen Strict window (dead body, unanswered Respawn):
+    /// nothing was sent and nothing changed.
+    Frozen,
+}
+
 impl GameState {
     fn strict_window_connection(&self) -> bool {
         self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict)
     }
     /// C3d run 6 — a Strict joiner whose body is dead, or whose Respawn is
-    /// still unanswered: Esc's `CloseCraft` and the table force-close send
-    /// nothing; the screen stays logically open until the body lives (the
-    /// server's correction `Replace` is the guarantee; this avoids flicker).
-    pub(crate) fn strict_window_frozen(&self) -> bool {
-        self.strict_window_connection()
+    /// still unanswered: its crafting screen sends no `Close` (the server's
+    /// correction `Replace` is the guarantee; this avoids flicker).
+    ///
+    /// C3d run 8 (review LOW-1) — THE one gate: read only by
+    /// [`Self::close_crafting`], [`Self::force_close_crafting`] and the
+    /// return-the-grid `Close` an open sends first ([`Self::open_crafting`]),
+    /// so Esc, E, the touch/gamepad pause and the table force-close all reach
+    /// it. Esc while frozen pauses ([`Self::esc_crafting`]): a never-answered
+    /// Respawn can't trap the player in a modal with no pause menu.
+    fn strict_window_frozen(&self, pidx: usize) -> bool {
+        pidx == 0
+            && self.strict_window_connection()
             && (self.players[0].is_dead() || self.remote_client.as_ref().is_some_and(|r| r.respawn_unanswered()))
     }
     fn window_action_failed(&mut self, error: String) {
@@ -27,16 +46,37 @@ impl GameState {
         let result = p.crafting_ui.apply_joined_click(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, click, &ctx, &self.registry);
         match result { Ok(result) => result, Err(error) => { self.window_action_failed(error); ClickResult::Refused } }
     }
-    pub(crate) fn close_crafting(&mut self, pidx: usize) -> bool {
-        if !self.strict_window_connection() {
+    /// Close player `pidx`'s crafting screen (Esc, E, a pause): the grid and
+    /// cursor go back to the bag. In Strict a reserved action, and nothing
+    /// at all while the window is frozen (the one gate).
+    pub(crate) fn close_crafting(&mut self, pidx: usize) -> CraftClose {
+        if self.strict_window_frozen(pidx) { return CraftClose::Frozen; }
+        let closed = if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
-            return p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots);
+            p.crafting_ui.close(&mut p.inventory, &mut p.armour_slots)
+        } else {
+            let p = &mut self.players[pidx];
+            let result = p.crafting_ui.close_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &self.registry);
+            match result { Ok(closed) => closed, Err(error) => { self.window_action_failed(error); false } }
+        };
+        if closed { CraftClose::Closed } else { CraftClose::Refused }
+    }
+    /// Esc on an open crafting screen: it closes (a full bag leaves it open),
+    /// or, while the window is frozen, the game pauses instead — never the
+    /// generic panel close, which would reach the same `Close`.
+    pub(crate) fn esc_crafting(&mut self) {
+        match self.close_crafting(0) {
+            CraftClose::Closed | CraftClose::Refused => self.capture_cursor(),
+            CraftClose::Frozen => {
+                self.release_cursor();
+                self.skin_panel.open = false;
+                self.mode = crate::GameMode::Paused { confirm_quit: false, confirm_creative: false };
+            }
         }
-        let p = &mut self.players[pidx];
-        let result = p.crafting_ui.close_joined(self.remote_client.as_mut().expect("strict connection"), &mut p.inventory, &mut p.armour_slots, &self.registry);
-        match result { Ok(closed) => closed, Err(error) => { self.window_action_failed(error); false } }
     }
     pub(crate) fn force_close_crafting(&mut self, pidx: usize, new_tick: bool) -> bool {
+        // The one gate, before the pacing: a frozen window's tries are not refusals.
+        if self.strict_window_frozen(pidx) { return false; }
         if !self.strict_window_connection() {
             let p = &mut self.players[pidx];
             return p.crafting_ui.force_close(&mut p.inventory, &mut p.armour_slots, new_tick);
@@ -47,16 +87,19 @@ impl GameState {
     }
     /// Open player `pidx`'s 2×2 grid (E) or the crafting table at `table`:
     /// in Strict the open is a reserved action before the screen changes.
+    ///
+    /// C3d run 8 (review H1) — a grid holding items goes back to the bag
+    /// first, by a real `Close` over the real grid (`CraftingUi::open_crafting`
+    /// / `open_joined`); that `Close` passes the one gate, so a frozen window
+    /// opens nothing.
     pub(crate) fn open_crafting(&mut self, pidx: usize, table: Option<[i32; 3]>) {
+        if self.players[pidx].crafting_ui.grid_holds_items() && self.strict_window_frozen(pidx) { return; }
         let p = &mut self.players[pidx];
         if !self.remote_client.as_ref().is_some_and(|r| r.inventory_mode == InventoryMode::Strict) {
-            match table {
-                Some(cell) => p.crafting_ui.open_table_crafting(cell, &p.inventory, &p.armour_slots),
-                None => p.crafting_ui.open_player_crafting(&p.inventory, &p.armour_slots),
-            }
+            p.crafting_ui.open_crafting(table, &mut p.inventory, &mut p.armour_slots);
             return;
         }
-        let result = p.crafting_ui.open_joined(self.remote_client.as_mut().expect("strict connection"), table, &p.inventory, &p.armour_slots);
+        let result = p.crafting_ui.open_joined(self.remote_client.as_mut().expect("strict connection"), table, &mut p.inventory, &mut p.armour_slots, &self.registry);
         if let Err(error) = result { self.window_action_failed(error); }
     }
     /// A joiner asks to open the shared container at `cell` (logged in

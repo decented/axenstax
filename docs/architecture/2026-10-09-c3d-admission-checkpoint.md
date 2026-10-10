@@ -519,3 +519,31 @@ Coordinator decisions on run 3's departures, as built:
 - **Test** `c3d_mirror_join_and_death_syncs_keep_client_locks_and_station`
   (real Mirror `HostedServer` join and death syncs; the same packets applied
   in Strict install both).
+
+## Run 8 — the grid is never discarded, one client gate, the Replace station
+
+- **H1 (run-6 review).** A `Replace` (join from a saved record, death,
+  correction) can leave grid items behind a closed screen. Opening a crafting
+  screen over a non-empty grid first sends a real `Close` at the current
+  station, digested over the real grid (both copies return the grid), then
+  opens; `reset_screen` no longer empties the grid; `open_joined` digests the
+  real grid. A full bag that refuses the `Close` opens nothing new (the screen
+  shows the leftovers at its own station). **Both modes:** in Mirror this
+  deliberately fixes the pre-existing `bdd4fe87` bug (the open wiped a
+  restored grid locally while the server's copy and the save kept it).
+- **LOW-2.** `WindowEvent::Replace` carries the station (one send-time
+  snapshot shared with `InventorySync.station`); a Strict copy's apply sets
+  `sp.station`, so a configuration op served on a base before the `Replace`
+  is overwritten on both copies. Mirror's server copy keeps its station.
+- **LOW-1.** One gate, `GameState::strict_window_frozen`, read only inside
+  `close_crafting` (which returns `CraftClose::{Closed, Refused, Frozen}`),
+  `force_close_crafting` and an open's return-the-grid `Close`. The ad-hoc
+  checks in the Esc chain and the table force-close are gone. Esc always takes
+  the crafting arm when the screen is open (`GameState::esc_crafting`): frozen,
+  it pauses, never the generic panel close. E's "Inventory full" toast shows
+  for `Refused` only.
+- **Accepted from run 7:** the server copy's `Replace` installs its own fold's
+  locks in both modes (equivalent to the old behaviour in Mirror).
+- **Tests** `hosted_server/c3d_grid_tests.rs` (a real `RemoteClient`, the real
+  `CraftingUi` entry points; nothing forces the screen open) and the GPU
+  harness `game_harness_strict_frozen_crafting_esc_pauses_and_e_returns_the_grid`.

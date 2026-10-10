@@ -2510,7 +2510,11 @@ impl ApplicationHandler for App {
                                         // Esc closes the book back to the grid, a second
                                         // Esc then closes the inventory.
                                         EscAction::CloseBook
-                                    } else if state.players[0].crafting_ui.open && !state.strict_window_frozen() {
+                                    } else if state.players[0].crafting_ui.open {
+                                        // C3d run 8 (review LOW-1) — always the
+                                        // crafting arm, never the generic panel
+                                        // close: its one gate pauses instead
+                                        // while a Strict window is frozen.
                                         EscAction::CloseCraft
                                     } else if state.players[0].dialogue_villager.is_some() {
                                         EscAction::CloseVillager
@@ -2589,8 +2593,8 @@ impl ApplicationHandler for App {
                                     // C3d review M1 — the reserving entry point: in
                                     // Strict it allocates the action before the
                                     // prediction and sends no legacy WindowOp.
-                                    state.close_crafting(0);
-                                    state.capture_cursor();
+                                    // C3d run 8 — a frozen window pauses instead.
+                                    state.esc_crafting();
                                 }
                                 EscAction::CloseVillager => {
                                     state.players[0].dialogue_villager = None;

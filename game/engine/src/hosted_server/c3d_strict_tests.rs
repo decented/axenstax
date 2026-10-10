@@ -619,7 +619,7 @@ fn c3d_strict_auto_refill_before_the_join_sync_or_during_death_is_accepted() {
         stock(&mut r.hs.server.players[r.i]);
         let sp = &mut r.hs.server.players[r.i];
         let window = crate::window_events::EffectiveWindow { inv: sp.inventory.clone(), armour: sp.armour, cursor: sp.cursor.clone(), grid: sp.craft_grid.clone() };
-        let n = crate::window_events::queue(sp, crate::window_events::WindowEvent::Replace { window: Box::new(window), debt: Default::default() }, 0);
+        let n = crate::window_events::queue(sp, crate::window_events::WindowEvent::Replace { window: Box::new(window), debt: Default::default(), station: crate::window::Station::Player }, 0);
         if death { sp.window_events.death_replace = Some(n); }
         let on = !r.sp().inventory.auto_refill;
         let before = server_places(r.sp());

@@ -151,7 +151,7 @@ pub fn strict_obligations(sp: &ServerPlayer, registry: &crate::block::BlockRegis
         // window it carries, whose carried debt must be empty (Strict
         // admission proved the record; a death's is empty). Source lineage
         // across it still can't be established (`admit_staged`).
-        if let WindowEvent::Replace { window, debt } = &waiting.event {
+        if let WindowEvent::Replace { window, debt, .. } = &waiting.event {
             if !debt.is_empty() { return Err(StrictStageError::Debt); }
             prefix = MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.cursor, &window.grid, registry).ok_or(StrictStageError::Unrepresentable)?;
             // Run 6 (run-4 review Nit) — one source with the applied

@@ -7527,7 +7527,7 @@ impl super::GameState {
         }
         let Some(p) = self.players.first_mut() else { return false };
         if p.crafting_ui.open {
-            self.close_crafting(0);
+            let _ = self.close_crafting(0);
             return true;
         }
         if p.dialogue_villager.is_some() {
@@ -8172,7 +8172,8 @@ impl super::GameState {
                     GameMode::Playing => {
                         // Close crafting UI for all players that have it open
                         for pidx in 0..self.players.len() {
-                            if self.players[pidx].crafting_ui.open { self.close_crafting(pidx); }
+                            // C3d run 8 — through the one gate (a frozen window stays open).
+                            if self.players[pidx].crafting_ui.open { let _ = self.close_crafting(pidx); }
                         }
                         self.release_cursor();
                         self.skin_panel.open = false;
@@ -10706,14 +10707,16 @@ impl super::GameState {
                     // No-op; the workstation UI's own 'E' handler
                     // already closed it this frame.
                 } else if self.players[pidx].crafting_ui.open {
-                    let closed = self.close_crafting(pidx);
-                    if !closed {
+                    // C3d run 8 (review LOW-1) — E reaches the one gate: a
+                    // frozen Strict window sends nothing and stays open.
+                    let outcome = self.close_crafting(pidx);
+                    if outcome == crate::window_actions::CraftClose::Refused {
                         self.toast = Some((
                             "Inventory full — make room to close crafting".to_string(),
                             Instant::now() + Duration::from_secs(2),
                         ));
                     }
-                    if pidx == 0 { self.capture_cursor(); }
+                    if pidx == 0 && outcome != crate::window_actions::CraftClose::Frozen { self.capture_cursor(); }
                 } else {
                     let viewport_w = self
                         .screens
@@ -21321,7 +21324,6 @@ impl super::GameState {
         // the body's eye). The grid goes back as on any close.
         for pidx in 0..self.players.len() {
             if self.players[pidx].crafting_ui.open
-                && !(pidx == 0 && self.strict_window_frozen())
                 && let Some(cell) = self.players[pidx].crafting_ui.table
                 && !crate::window::table_in_reach(
                     self.world.get_block(cell[0], cell[1], cell[2]),

@@ -2967,7 +2967,7 @@ mod tests {
         inv.auto_refill = true;
         inv.set_slot(0, Some(crate::item::ItemStack::new_block(crate::block::STONE, 5)));
         let mut armour = [None; 4];
-        ui.open_joined(&mut rc, None, &inv, &armour).unwrap();
+        ui.open_joined(&mut rc, None, &mut inv, &mut armour, &registry).unwrap();
         assert!(ui.open);
         ui.close_joined(&mut rc, &mut inv, &mut armour, &registry).unwrap();
         ui.open_container_joined(&mut rc, [1, 2, 3], &inv, &armour).unwrap();
