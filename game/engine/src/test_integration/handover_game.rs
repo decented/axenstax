@@ -455,12 +455,13 @@ fn game_harness_handover_joiners_pause_on_the_hosts_notice_and_send_nothing() {
         j.hg.frames(1);
     }
     assert!(j.hg.state.host_paused && j.hg.state.handover_holds_play(), "the joined game didn't pause");
-    let sent = j.sent.load(Ordering::Relaxed);
+    let (sent, ticks) = (j.sent.load(Ordering::Relaxed), j.hg.state.tick_counter);
     for _ in 0..5 {
         j.hg.frames(1);
         j.hg.ticks(1);
         j.hg.state.network_send_input();
     }
+    assert_eq!(j.hg.state.tick_counter, ticks, "a paused joined game ticked");
     assert_eq!(j.sent.load(Ordering::Relaxed), sent, "a paused joiner kept sending");
     j.hs.handover_release();
     for _ in 0..3 {
