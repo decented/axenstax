@@ -107,6 +107,9 @@ enum Flavour {
 
 struct Shared {
     backoff: Backoff,
+    /// CP11 (CP10 review HIGH-1): the injectable clock (Unix seconds). It
+    /// is never a validity bound for an awaiting import's Committed.
+    clock: fn() -> u64,
     /// Transfers this resumer is publishing (source) or awaiting (import)
     /// now, one thread each.
     jobs: Mutex<BTreeSet<(Flavour, Id)>>,
@@ -128,8 +131,13 @@ const WORLDS_SCAN_LIMIT: usize = 4096;
 
 impl Resumer {
     pub fn new(backoff: Backoff) -> Self {
+        Self::with_clock(backoff, unix_now)
+    }
+    /// A resumer reading `clock` for today (tests: a day past every expiry).
+    pub fn with_clock(backoff: Backoff, clock: fn() -> u64) -> Self {
         Self(Arc::new(Shared {
             backoff,
+            clock,
             jobs: Mutex::new(BTreeSet::new()),
             wake: (Mutex::new(0), Condvar::new()),
             #[cfg(test)]
@@ -256,39 +264,7 @@ impl Resumer {
     /// it took over.
     pub fn resume_imports(&self, imports: &Path, install: Option<[u8; 32]>) -> usize {
         let Some(install) = install else { return 0 };
-        let Ok(entries) = std::fs::read_dir(imports) else { return 0 };
-        let mut adopted = 0;
-        for (seen, entry) in entries.enumerate() {
-            if seen >= super::inert::SCAN_LIMIT {
-                log::warn!("handover: the imports scan stopped at {} entries", super::inert::SCAN_LIMIT);
-                break;
-            }
-            let Ok(entry) = entry else { continue };
-            if !entry.file_name().to_str().is_some_and(|n| n.starts_with("handover-")) {
-                continue;
-            }
-            let working = entry.path().join("working");
-            let records = super::authority::dir(&working);
-            if !is_real_dir(&entry.path()) || !is_real_dir(&working) || !is_real_dir(&records) {
-                continue;
-            }
-            let Ok(names) = std::fs::read_dir(&records) else { continue };
-            for name in names.take(256).flatten() {
-                let name = name.file_name();
-                let Some(t) = name
-                    .to_str()
-                    .and_then(|n| n.strip_prefix("prepared-")?.strip_suffix(".dat"))
-                    .and_then(|v| hex::decode(v).ok())
-                    .and_then(|v| Id::try_from(v).ok())
-                else {
-                    continue;
-                };
-                if self.adopt_import(&working, t, install) {
-                    adopted += 1;
-                }
-            }
-        }
-        adopted
+        import_receipts(imports).into_iter().filter(|(working, t)| self.adopt_import(working, *t, install)).count()
     }
 
     /// Start-up: every world under `worlds_root` whose `handover/` holds a
@@ -360,6 +336,59 @@ fn pause(shared: &Shared, wait: Duration) {
 }
 
 /// One publication, until proven and recorded. Never aborts.
+/// Every (working world, transfer) under `imports` (`handover-*`) whose
+/// working world's real `handover/` holds a `prepared-<transfer>.dat`.
+/// Bounded (the inert scan limit, 256 records a world); creates nothing and
+/// follows no symlinked folder.
+fn import_receipts(imports: &Path) -> Vec<(PathBuf, Id)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(imports) else { return out };
+    for (seen, entry) in entries.enumerate() {
+        if seen >= super::inert::SCAN_LIMIT {
+            log::warn!("handover: the imports scan stopped at {} entries", super::inert::SCAN_LIMIT);
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        if !entry.file_name().to_str().is_some_and(|n| n.starts_with("handover-")) {
+            continue;
+        }
+        let working = entry.path().join("working");
+        let records = super::authority::dir(&working);
+        if !is_real_dir(&entry.path()) || !is_real_dir(&working) || !is_real_dir(&records) {
+            continue;
+        }
+        let Ok(names) = std::fs::read_dir(&records) else { continue };
+        for name in names.take(256).flatten() {
+            let name = name.file_name();
+            if let Some(t) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix("prepared-")?.strip_suffix(".dat"))
+                .and_then(|v| hex::decode(v).ok())
+                .and_then(|v| Id::try_from(v).ok())
+            {
+                out.push((working.clone(), t));
+            }
+        }
+    }
+    out
+}
+
+/// CP11 (coordinator): the world list's plain status line for every import
+/// still awaiting its Committed (a Prepared receipt with no Activated or
+/// quarantine record): "Waiting for <npub> to finish handing this world
+/// over". Read-only and bounded like the start-up scan; there is no "take
+/// over anyway" (it risks two live copies).
+pub fn awaiting_statuses(imports: &Path) -> Vec<String> {
+    import_receipts(imports)
+        .into_iter()
+        .filter_map(|(working, t)| {
+            let store = existing_store(&working).ok()?;
+            let npub = AwaitingCommit::read(&store, t).ok()??.source_npub()?;
+            Some(super::copy::awaiting_handover(&npub))
+        })
+        .collect()
+}
+
 fn run(shared: Arc<Shared>, world: PathBuf, retired: RetiredCommit) {
     let transfer = retired.transfer();
     let _job = JobGuard(shared.clone(), (Flavour::Source, transfer));
@@ -455,8 +484,6 @@ fn attempt_import(
     let mut budget = Budget::new();
     #[cfg(test)]
     let (started, budget_deadline, budget_bytes_at_start) = (Instant::now(), budget.deadline(), budget.bytes_received());
-    #[cfg(not(test))]
-    let _ = shared;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -476,7 +503,7 @@ fn attempt_import(
                     continue;
                 }
             };
-            let Some((event, commit)) = awaiting.committed(&events, unix_now()) else {
+            let Some((event, commit)) = awaiting.committed(&events, (shared.clock)()) else {
                 last = Err(crate::handover::Error::Invalid("no Committed yet"));
                 continue;
             };

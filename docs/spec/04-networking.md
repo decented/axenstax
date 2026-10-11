@@ -5712,10 +5712,15 @@ stays deterministic). Between attempts the resumer waits 5 s, doubling to a
 `published-<transfer>.dat` durably (0600; temp, fsync, rename, directory
 fsync) and drops that world. One rule reads it (CP9 review LOW-2): only a
 record of this exact Commit counts; unreadable or mismatched reads as not
-published and is rewritten (re-publishing identical bytes is safe). A
-stale temporary file of any marker kind (partial, empty or other bytes:
-it was never renamed, so nothing durable claims it) is replaced, never
-jamming a write; a temp path that isn't a regular file still refuses
+published and is rewritten (re-publishing identical bytes is safe),
+including one that can't even be compared (empty, or over the 64 KiB
+record limit): by exactly ONE fresh write per attempt, never a retry or
+recursion inside the write, so the attempt backoff paces any next one
+(CP11). A stale temporary file of any marker kind (partial, empty or
+other bytes: it was never renamed, so nothing durable claims it) is
+replaced, never jamming a write; it is compared only when its length is
+exactly the record's, and that read is bounded by the record limit
+(CP11); a temp path that isn't a regular file still refuses
 (CP9 review LOW-3); a world whose `handover/` has been deleted
 meanwhile has nowhere to record it and is dropped after the proof. The open
 guard still refuses the world after publication: retired is forever. The
@@ -5776,10 +5781,28 @@ source (5 s doubling to 300 s), never giving up; leaving the world,
 closing the window and restarting never end it. Only the source's
 authenticated pre-retirement Abort (over the verified joined link) ends
 it: the session ends `Quarantined` and writes the durable quarantine
-record, which the resumer and the start-up scan skip. Open question: the
-Committed is opened with the wall clock, so a recipient resumed after the
-invitation root or the attestations expire can't verify it and keeps
-waiting. The open guard refuses the import until it is Activated,
+record, which the resumer and the start-up scan skip. Expiry (CP11,
+coordinator): the recipient verifies the Committed against the root and
+attestations its Prepared receipt captured, never today's clock (the
+source authorised the transfer before expiry and the recipient already
+acked; CP10 review HIGH-1): `AwaitingCommit::committed` opens the
+stored Prepared and every candidate at `core.issued_at`, the time the
+receipt captured, where every time check passes exactly as at receipt
+(`not_before == issued_at`; both events' `created_at` is `issued_at`;
+`issued_at <= expires_at <= root expiry`; each attestation's
+`valid_from <= issued_at <= expires_at <= valid_until`). The resumer's
+clock is injectable (`Resumer::with_clock`) and is never a validity
+bound there (it only feeds a log line). The receipt v2 already holds the
+core, so there is no v3. A recipient resumed days after the
+certificate, the root and both attestations expired activates when the
+Committed arrives. While an
+import awaits its Committed, the native world list shows a plain line
+above the cards, "Waiting for <npub> to finish handing this world over"
+(the source persona's npub; `resumer::awaiting_statuses`, the same
+bounded, read-only scan as the start-up step). It is not a world card:
+the import isn't under the worlds folder and can't be opened. There is
+no "take over anyway" (it risks two live copies; an owner question). The
+open guard refuses the import until it is Activated,
 whatever the inert marker says: any `ready-*`, `prepared-*` or
 `quarantined-*` record of a transfer with no `activated-<same>.dat`
 refuses (`NOT_ACTIVATED`), and an Activated record that doesn't decode
@@ -5792,7 +5815,11 @@ Tests: a recipient restarted between the ack and the proof (everything
 dropped; the source's and the recipient's start-up scans) ends Activated,
 with the bearer in both records (0600) and the import refused until then;
 the bearer reaches no archive or copy; the source's Abort after the ack
-quarantines and nothing resumes it.
+quarantines and nothing resumes it; a recipient resumed after the root
+and attestations expired activates (records minted at t = 100 against
+today's clock, and the restart test with a clock two days on); an `.axeworld` import never brings
+`handover/` (the archive is an allowlist, and one crafted with
+`handover/` entries lands without it).
 
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,

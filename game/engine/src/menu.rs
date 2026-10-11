@@ -321,6 +321,12 @@ pub struct MenuState {
     /// operation result — success or error). Cleared on the next export/import.
     #[cfg(not(target_arch = "wasm32"))]
     pub transfer_status: Option<String>,
+    /// Native (CP11): one plain line per handover import still awaiting its
+    /// Committed ("Waiting for <npub> to finish handing this world over").
+    /// Not a world card: the import isn't under the worlds folder and can't
+    /// be opened until Activated.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub awaiting_imports: Vec<String>,
     /// Native: in-flight OS file-dialog channel. `Some` while the worker thread
     /// is running (or has a result waiting); cleared by `poll_dialog` once the
     /// result has been consumed or the channel disconnects.
@@ -444,6 +450,8 @@ impl MenuState {
             #[cfg(not(target_arch = "wasm32"))]
             transfer_status: None,
             #[cfg(not(target_arch = "wasm32"))]
+            awaiting_imports: crate::handover_game::awaiting_import_statuses(),
+            #[cfg(not(target_arch = "wasm32"))]
             pending_dialog: None,
             world_page: 0,
             stash_input: String::new(),
@@ -484,6 +492,7 @@ impl MenuState {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.worlds = save::list_world_entries();
+            self.awaiting_imports = crate::handover_game::awaiting_import_statuses();
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -3139,13 +3148,23 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(status).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
             }
+            // CP11: a handover import still awaiting its Committed.
+            #[cfg(not(target_arch = "wasm32"))]
+            for line in &state.awaiting_imports {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(line).size(13.0).color(egui::Color32::from_rgb(170, 190, 150)));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            let nothing_awaiting = state.awaiting_imports.is_empty();
+            #[cfg(target_arch = "wasm32")]
+            let nothing_awaiting = true;
 
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(8.0);
 
             // --- Worlds: responsive multi-column grid in a scroll area ---
-            if state.worlds.is_empty() {
+            if state.worlds.is_empty() && nothing_awaiting {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
                     ui.label(egui::RichText::new("No worlds yet").size(18.0).color(SUBTITLE_COLOR));

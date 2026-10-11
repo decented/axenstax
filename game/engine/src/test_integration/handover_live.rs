@@ -1857,7 +1857,10 @@ mod session {
         let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
         drop((src, dst, rc, hs, host));
         assert!(Resumer::new(FAST).resume_all(&dir.0, src_install()) == 1, "the source's Committed wasn't resumed");
-        let recipient = Resumer::new(FAST);
+        // CP11 (CP10 review HIGH-1): the recipient restarts two days later,
+        // past the certificate (<= 1 h), the root (1 h) and both
+        // attestations (1 day): it still activates.
+        let recipient = Resumer::with_clock(FAST, || now() + 2 * 86_400);
         assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the start-up scan didn't resume the wait for Committed");
         let store = authority::store(&working).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);

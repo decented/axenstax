@@ -101,6 +101,10 @@ pub const TOO_LONG_SOURCE: &str = "The handover took longer than 15 minutes, so 
 /// D7 open guard (PROPOSED copy, not owner-reviewed).
 pub const RETIRED: &str = "This world was handed over to another player, so it can't be opened or saved here. Its retained copy is a separate world.";
 /// CP10: an imported world whose handover hasn't reached Activated.
+/// CP11: the world list's line for an import still awaiting its Committed.
+pub fn awaiting_handover(npub: &str) -> String {
+    format!("Waiting for {npub} to finish handing this world over")
+}
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
 

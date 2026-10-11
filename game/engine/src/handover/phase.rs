@@ -882,13 +882,32 @@ impl AwaitingCommit {
     pub fn route(&self) -> Result<super::stored::Route> {
         bearer_route(&self.receiver.core, self.root(), &self.held().bearer).map(|(_, r)| r)
     }
+    /// The source persona this import is arriving from, as an npub (never
+    /// hex): the world list's "Waiting for <npub> ..." line.
+    pub fn source_npub(&self) -> Option<String> {
+        use nostr::ToBech32;
+        nostr::PublicKey::from_slice(&self.receiver.core.source_persona).ok()?.to_bech32().ok()
+    }
     /// This transfer's Committed among `events` (a root relay's answers):
     /// the stored Prepared is re-opened under the bearer's key, then each
     /// candidate must open as the Committed bound to it and to the core.
-    pub fn committed(&self, events: &[Event], now: u64) -> Option<(Event, VerifiedCommit)> {
+    ///
+    /// CP11 (CP10 review HIGH-1, coordinator): both open at `core.issued_at`,
+    /// the time the receipt captured, NEVER `today` (the caller's injectable
+    /// clock). The source authorised the transfer before expiry and this
+    /// recipient already acked, so a recipient resumed days after the
+    /// certificate, the root or the attestations expired still activates.
+    /// At `issued_at` every time check passes exactly as at receipt:
+    /// `not_before == issued_at` (offer), both events' `created_at` is
+    /// `issued_at`, `issued_at <= expires_at <= root expiry`, and each
+    /// attestation holds `valid_from <= issued_at <= expires_at <=
+    /// valid_until`. The receipt (v2) already holds the core, so there is no
+    /// v3. `today` only feeds a log line.
+    pub fn committed(&self, events: &[Event], today: u64) -> Option<(Event, VerifiedCommit)> {
         let held = self.held();
         let (keys, _) = bearer_route(&self.receiver.core, &held.root, &held.bearer).ok()?;
         let source = self.receiver.core.source_runtime;
+        let now = self.receiver.core.issued_at;
         let Ok(super::crypto::Verified::Prepared(vp)) = super::crypto::open(&held.event, &keys, source, &held.root, now, None) else {
             return None;
         };
@@ -899,6 +918,9 @@ impl AwaitingCommit {
             Ok(super::crypto::Verified::Committed(c))
                 if c.core() == &self.receiver.core && c.prepared_hash() == self.receiver.prepared =>
             {
+                if today > self.receiver.core.expires_at {
+                    log::info!("handover: the Committed arrived after the certificate expired; it is checked as of the receipt");
+                }
                 Some((ev.clone(), c))
             }
             _ => None,
@@ -1146,6 +1168,78 @@ mod tests {
             std::fs::remove_dir_all(dir).unwrap();
             std::fs::remove_dir_all(receiver_dir).unwrap();
         });
+    }
+
+    /// CP11 (coordinator, expiry): a recipient resumed after the root and
+    /// both attestations expired still activates. Everything here was minted
+    /// at t = 100 (root expiry 900, attestations valid one day), so today's
+    /// clock is decades past every expiry: the recipient verifies the
+    /// Committed against what its Prepared receipt captured, never today's
+    /// clock. Its import shows the world list's awaiting line until then.
+    #[test]
+    fn handover_recipient_resumed_after_the_root_and_attestations_expire_still_activates() {
+        use crate::handover::live::resumer::{Backoff, Resumer, awaiting_statuses};
+        use nostr::{Timestamp, ToBech32};
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (root, c, b, ready, pe, ce, p, source_npub) = rt.block_on(async {
+            let a = Keys::generate();
+            let b = Keys::generate();
+            let root = crate::handover::context::RootContext::new(
+                a.public_key().to_bytes(),
+                &a.public_key().to_bech32().unwrap(),
+                900,
+                &[relay.url()],
+                100,
+            )
+            .unwrap();
+            let (_, mut c) = crate::handover::certificate::tests::fixture();
+            c.context = root.digest();
+            c.root_runtime = root.runtime();
+            c.root_persona = root.persona();
+            c.source_runtime = root.runtime();
+            c.source_persona = root.persona();
+            c.successor_runtime = b.public_key().to_bytes();
+            c.successor_persona = b.public_key().to_bytes();
+            let aa = crate::runtime_identity::mint_player_attestation(&a, &a.public_key(), Timestamp::from(100), 1).await.unwrap();
+            let ab = crate::runtime_identity::mint_player_attestation(&b, &b.public_key(), Timestamp::from(100), 1).await.unwrap();
+            let ready = crypto::sign_ready(&b, &c, [8; 16]).await.unwrap();
+            let (p, _, ce, pe) = pair(&a, &b, &aa, &ab, &c, &root).await;
+            (root, c, b, ready, pe, ce, p, a.public_key().to_bech32().unwrap())
+        });
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).unwrap();
+        let base = std::env::temp_dir().join(format!("axe_handover_expired_{}", hex::encode(random)));
+        let imports = base.join("imports");
+        let working = imports.join(format!("handover-w-{}", hex::encode(c.transfer))).join("working");
+        std::fs::create_dir_all(&working).unwrap();
+        let store = crate::handover::live::authority::store(&working).unwrap();
+        let mut receiver = Receiver::checkpoint_ready(&store, &c, &ready, [8; 16], &root, 100).unwrap();
+        let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
+        receiver.prepared(&store, &p, PreparedReceipt { event: &pe, root: &root, bearer: &bearer }).unwrap();
+        relay.insert(ce.clone());
+        let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(today > root.expiry() && today > 100 + 86_400, "the fixture's root and attestations haven't expired");
+        let awaiting = AwaitingCommit::read(&store, c.transfer).unwrap().expect("awaiting Committed");
+        assert!(
+            awaiting.committed(std::slice::from_ref(&ce), today + 86_400).is_some(),
+            "a recipient resumed after the root and attestations expired refused its Committed"
+        );
+        assert_eq!(
+            awaiting_statuses(&imports),
+            vec![format!("Waiting for {source_npub} to finish handing this world over")],
+            "the world list doesn't show the awaiting import"
+        );
+        let resumer = Resumer::new(Backoff { first: std::time::Duration::from_millis(50), ceiling: std::time::Duration::from_millis(200) });
+        assert_eq!(resumer.resume_imports(&imports, Some(b.public_key().to_bytes())), 1, "the expired import wasn't resumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while store.read(MarkerKind::Activated, c.transfer).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the resumed recipient never activated after the root and attestations expired");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(Receiver::restart(&store, c.transfer).unwrap().unwrap().gameplay_admitted());
+        assert!(awaiting_statuses(&imports).is_empty(), "an activated import still shows as awaiting");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// The recipient's readback fixture: a root naming `relay`, the

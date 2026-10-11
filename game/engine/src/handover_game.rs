@@ -125,6 +125,12 @@ fn recipient_env() -> Result<RecipientEnv, String> {
     })
 }
 
+/// CP11: the world list's status lines for imports still awaiting their
+/// Committed (read-only: never creates `<data>/handover/imports`).
+pub(crate) fn awaiting_import_statuses() -> Vec<String> {
+    crate::handover::live::resumer::awaiting_statuses(&crate::data_dir::data_root().join("handover").join("imports"))
+}
+
 /// P3: discard every marked inert import under `<data>/handover/imports`
 /// except `live`'s (bounded; at startup and before a new recipient session).
 pub(crate) fn sweep_inert_imports(live: Option<Id>) {

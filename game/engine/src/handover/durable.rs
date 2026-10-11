@@ -112,7 +112,17 @@ impl MarkerStore {
         let encoded = encode_marker(kind, id, payload)?;
         let bytes = encoded.as_slice();
         let path = self.path(kind, id);
-        if let Some(old) = read_bounded(&path)? {
+        let existing = match read_bounded(&path) {
+            // CP11: an undecodable "Committed published" record (empty or
+            // over the size limit, so it can't even be compared) is replaced
+            // like a mismatched one, by the one write below.
+            Err(Error::Invalid("marker size") | Error::Limit("marker file")) if kind == MarkerKind::Published => {
+                fs::remove_file(&path).map_err(|_| Error::Io)?;
+                None
+            }
+            r => r?,
+        };
+        if let Some(old) = existing {
             if old == bytes {
                 fs::File::open(&path)
                     .and_then(|f| f.sync_all())
@@ -125,19 +135,21 @@ impl MarkerStore {
             }
             // CP9 review LOW-2: "Committed published" is a derived fact, not
             // authority: a record that doesn't match (or doesn't decode) is
-            // rewritten with the exact deterministic bytes.
+            // rewritten with the exact deterministic bytes. CP11: by ONE
+            // fresh write in this call (no retry or recursion here); a failed
+            // write returns, and the caller's attempt backoff paces the next.
             if kind == MarkerKind::Published {
                 fs::remove_file(&path).map_err(|_| Error::Io)?;
-                return self.persist_observed(kind, id, payload, observer);
-            }
-            if kind != MarkerKind::Prefix {
+                self.check_capacity(kind)?;
+            } else if kind != MarkerKind::Prefix {
                 return Err(Error::State("immutable marker conflict"));
-            }
-            let old_payload = decode_marker(&old, kind, id)?;
-            let old = super::certificate::Prefix::restore(&old_payload)?;
-            let next = super::certificate::Prefix::restore(payload)?;
-            if !old.can_advance_to(&next) {
-                return Err(Error::State("prefix rollback/conflict"));
+            } else {
+                let old_payload = decode_marker(&old, kind, id)?;
+                let old = super::certificate::Prefix::restore(&old_payload)?;
+                let next = super::certificate::Prefix::restore(payload)?;
+                if !old.can_advance_to(&next) {
+                    return Err(Error::State("prefix rollback/conflict"));
+                }
             }
         } else {
             self.check_capacity(kind)?;
@@ -154,13 +166,16 @@ impl MarkerStore {
         // bytes never jams a write; it was never renamed, so nothing durable
         // claims it, and it is replaced. A temp path that isn't a regular file
         // still refuses.
+        // CP11: the comparison read is bounded by the record size limit, and
+        // only a temp of exactly this record's length is read at all.
         let stale = match fs::symlink_metadata(&temp) {
-            Ok(m) if m.is_file() => true,
+            Ok(m) if m.is_file() => Some(m.len()),
             Ok(_) => return Err(Error::Invalid("marker file type")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(Error::Io),
         };
-        let reuse = stale && fs::read(&temp).is_ok_and(|old| old == bytes);
+        let reuse = stale == Some(bytes.len() as u64) && read_stale_temp(&temp).is_some_and(|old| old == bytes);
+        let stale = stale.is_some();
         if stale && !reuse {
             fs::remove_file(&temp).map_err(|_| Error::Io)?;
         }
@@ -326,6 +341,13 @@ fn sync_directory(path: &Path) -> Result<()> {
         .and_then(|f| f.sync_all())
         .map_err(|_| Error::Io)
 }
+/// A stale temp's bytes, never more than `MARKER_LIMIT` (+1 to tell an
+/// over-long one apart), or `None` if it can't be read.
+fn read_stale_temp(path: &Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path).ok()?.take(MARKER_LIMIT as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= MARKER_LIMIT).then_some(bytes)
+}
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -482,6 +504,52 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(s.retirements().is_err());
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    /// CP11: an undecodable "Committed published" record (garbage, empty or
+    /// over the size limit) is replaced by exactly ONE fresh write per call
+    /// (the caller's attempt backoff paces any next one); a directory at its
+    /// path still refuses.
+    #[test]
+    fn handover_undecodable_published_record_is_replaced_by_one_write() {
+        struct Count(usize);
+        impl BoundaryObserver for Count {
+            fn reached(&mut self, b: WriteBoundary) -> std::io::Result<()> {
+                if b == WriteBoundary::TempSynced {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+        let (s, p) = store("published-replace");
+        let id = [7; 16];
+        let payload = b"committed published".to_vec();
+        for planted in [b"garbage".to_vec(), Vec::new(), vec![0xAB; MARKER_LIMIT + 1]] {
+            fs::write(s.path(MarkerKind::Published, id), &planted).unwrap();
+            let mut count = Count(0);
+            s.persist_observed(MarkerKind::Published, id, &payload, &mut count)
+                .unwrap_or_else(|e| panic!("a {}-byte undecodable published record wasn't replaced: {e:?}", planted.len()));
+            assert_eq!(count.0, 1, "a {}-byte undecodable published record took {} writes", planted.len(), count.0);
+            assert_eq!(s.read(MarkerKind::Published, id).unwrap().unwrap(), payload);
+        }
+        fs::remove_file(s.path(MarkerKind::Published, id)).unwrap();
+        fs::create_dir(s.path(MarkerKind::Published, id)).unwrap();
+        assert!(s.persist(MarkerKind::Published, id, &payload).is_err(), "a directory at the record's path was replaced");
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    /// CP11: a stale temp larger than any record is never compared (its
+    /// length differs) and is replaced; the record lands.
+    #[test]
+    fn handover_oversized_stale_temp_is_replaced_and_the_record_lands() {
+        let (s, p) = store("stale-oversized");
+        let id = [8; 16];
+        let temp = s.directory.join(format!("{}.tmp-{}", MarkerKind::Ready.label(), hex::encode(id)));
+        fs::write(&temp, vec![0xCD; MARKER_LIMIT * 4]).unwrap();
+        s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
+        assert_eq!(s.read(MarkerKind::Ready, id).unwrap().unwrap(), b"ready record");
+        assert!(!temp.exists(), "the stale temp outlived the write");
         fs::remove_dir_all(p).unwrap();
     }
 }
