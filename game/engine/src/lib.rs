@@ -347,6 +347,7 @@ mod local_join;
 mod save;
 mod save_fence;
 // CP15 (CP14 review HIGH-1): re-syncs of existing files and directories.
+#[cfg(not(target_arch = "wasm32"))]
 mod fsync;
 mod save_format;
 mod world_open;
