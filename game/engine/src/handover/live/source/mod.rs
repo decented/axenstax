@@ -530,7 +530,7 @@ impl SourceSession {
         self.abort_inner(None, why);
     }
 
-    fn abort_inner(&mut self, mut hs: Option<&mut HostedServer>, why: &'static str) {
+    fn abort_inner(&mut self, hs: Option<&mut HostedServer>, why: &'static str) {
         if matches!(self.stage, SourceStage::Aborted(_)) || self.past_retirement() {
             return;
         }
@@ -552,7 +552,7 @@ impl SourceSession {
             AbortRecorded::Recorded(ev) | AbortRecorded::Unrecorded(Some(ev)) => Some(ev.as_json()),
             AbortRecorded::Unrecorded(None) | AbortRecorded::Nothing => None,
         };
-        match hs.as_deref_mut() {
+        match hs {
             Some(hs) => {
                 let _ = self.send(hs, &Frame::Abort { transfer: self.transfer, aborted });
                 hs.handover_release();
