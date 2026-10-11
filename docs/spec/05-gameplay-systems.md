@@ -389,7 +389,11 @@ test asserts the hit cell is **identical** in `FirstPerson`, `OverShoulder`, and
 for the same yaw/pitch/position, and re-runs on every build so the split can't silently
 regress. See §1.1.2 and `docs/foundations/2026-06-09-third-person-camera.md`.
 
-**Reach cap and multiplayer anti-cheat (hardened 2026-07-07).** Base block place/break
+**Reach cap and multiplayer anti-cheat (hardened 2026-07-07).** *Superseded for block
+edits by the C3d run-10 reach rule below (2026-10-11): a remote player's Reach Claw now
+counts from the server's own copy of the edit's slot, so the "flat cap for remote players"
+in this paragraph no longer holds for block place/break. It still describes reach checks
+that read only a claim (a device interact). Kept as history.* Base block place/break
 reach is `5.0` blocks (server gate: `(5.0 + 0.5)^2` squared-distance, the 0.5 a
 tolerance margin). The **Reach Claw** tool (§9.7) adds `REACH_CLAW_BONUS = 2.0` blocks
 while held. On a hosted session, this bonus is honoured **only for the position-trusted

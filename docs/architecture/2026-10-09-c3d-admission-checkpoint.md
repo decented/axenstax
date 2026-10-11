@@ -575,8 +575,24 @@ Coordinator decisions on run 3's departures, as built:
 - **Still paused in Strict (reach the movement packet, close the session):**
   creative edits, same-block edits, door place/break (the door top is a
   use-tagged edit), non-yielding manual breaks and every use-tagged edit.
-  (The place arm only places into AIR or WATER, so `judge`'s untagged
-  non-emptying refusal is not reachable from it.)
+  (The place arm only places into AIR or WATER, so the CLIENT never routes
+  an edit to `judge`'s untagged non-emptying refusal. On the server it is
+  reachable when the server's world is stale against the client's: another
+  block now stands in the cell, so the received placement is refused and
+  sent back. Run 11, run-9b review LOW-5.)
+- **Left to recovery (recorded run 11, run-9b review LOW-2).** A Refused or
+  Superseded placement's send-back restores the cell's block id and meta
+  only. Nothing undoes what the client's place arm also wrote locally for
+  the placement that never happened: `plots` (a Plot Marker's claim),
+  `village_bells`, `salt_licks`; the Vendor, Tip Jar and Auction entity
+  inserts; an opened sign editor. Mirror's refused path leaves the same.
+  And `send_back_authoritative_block` returns silently for a column the
+  server hasn't loaded, so a Superseded or Refused `Edit` there gets no
+  world correction (narrow: the client still holds a column the server
+  dropped). Both are recovery's job.
+- **`Edit.source_tick` is reserved and unread.** The client stamps it (its
+  next input sequence); the server never reads it. Nothing may depend on it
+  until a decision gives it a meaning.
 - **Tests** `hosted_server/c3d_client_edit_tests.rs` (a real `RemoteClient`,
   the client's window its own, routing through the production
   `route_place`/`route_break`) and the GPU harness

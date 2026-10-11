@@ -181,6 +181,7 @@ fn reserve(
     let (kind_id, item_id) = inv.slot(slot).map_or((protocol::item_kind::EMPTY, 0), |s| crate::inventory::item_to_ref(&s.item).to_wire());
     let cell = [change.x, change.y, change.z];
     let intent = crate::action_wire::ActionIntent::Edit {
+        // Reserved and unread by the server (`ActionIntent::Edit`).
         source_tick: remote.next_input_seq(),
         change,
         hand: (slot_u8, kind_id, item_id),

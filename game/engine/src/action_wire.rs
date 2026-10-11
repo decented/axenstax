@@ -11,6 +11,9 @@ use crate::rebase_assembly::RebaseManifest;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ActionIntent {
     Edit {
+        /// RESERVED, unread (run 11, run-9b review LOW-5): the client stamps
+        /// its next input sequence here; the server never reads it, and
+        /// nothing may depend on it until a decision gives it a meaning.
         source_tick: u64,
         change: protocol::BlockChange,
         hand: protocol::EditHand,
