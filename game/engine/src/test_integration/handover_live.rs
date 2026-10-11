@@ -2374,6 +2374,83 @@ mod session {
         assert!(p.src.abort_unrecorded() && !p.src.abort_recorded(), "the failed abort record isn't reported");
         let world = crate::handover::live::authority::dir(&p.dir.0.join("world"));
         assert!(!world.join(format!("aborted-{}.dat", hex::encode(t))).exists());
-        assert!(!crate::handover::live::copy::ABORT_UNRECORDED.is_empty());
+        // CP14b (CP13b review LOW-5): the line the session ends with (the
+        // one `end_source_handover` returns, the leave path's notice
+        // included) says the cancellation wasn't saved.
+        let line = p.src.end_line(crate::handover::live::copy::LEFT);
+        assert!(
+            line.contains(crate::handover::live::copy::ABORT_UNRECORDED),
+            "the end line doesn't say the cancellation couldn't be saved: {line}"
+        );
+    }
+
+    /// CP14b (CP13b review LOW-3): a certain failure writing the retirement
+    /// record (before its rename) is no retirement: the source goes back to
+    /// Prepared and aborts with its abort record, unfreezes, the world
+    /// opens, and the Aborted is published.
+    #[test]
+    fn handover_a_certain_failure_at_retire_aborts_and_the_world_opens() {
+        use crate::handover::durable::{MarkerKind, WriteBoundary, fault};
+        use crate::handover::live::{authority, resumer::Resumer};
+        let mut p = ready_pair("retire-io");
+        let t = p.src.transfer();
+        fault::arm(MarkerKind::Retired, WriteBoundary::TempSynced);
+        drive(&mut p, SourceStage::Retired);
+        assert!(
+            matches!(p.src.stage(), SourceStage::Aborted(_)),
+            "a certain failure at retire didn't abort ({:?})",
+            p.src.stage()
+        );
+        assert!(p.src.abort_recorded(), "no abort record after the failed retire");
+        assert!(!p.hs.handover_frozen(), "the source stayed frozen");
+        let world = p.dir.0.join("world");
+        assert!(!authority::dir(&world).join(format!("retired-{}.dat", hex::encode(t))).exists());
+        assert!(authority::open_guard(&world).is_ok(), "the world doesn't open after a failed retire");
+        assert!(!crate::save_fence::is_up(&world), "the late-save fence stayed up");
+        let resumer = Resumer::new(FAST);
+        assert!(p.src.hand_publication(&resumer), "the Aborted wasn't handed over");
+        let store = authority::store(&world).unwrap();
+        let aborted = crate::handover::phase::RetiredCommit::read_aborted(&store, t).unwrap().expect("no abort record");
+        wait_published(&store, &aborted);
+    }
+
+    /// CP14b (CP13b review LOW-1): a disclosed session dropped without
+    /// `abort` hands its abort record to the process's resumer: the Aborted
+    /// is published in this process (no restart, no scan), and the
+    /// recipient, past its (lost) ack, quarantines on it.
+    #[test]
+    fn handover_a_dropped_disclosed_session_publishes_its_aborted_in_process() {
+        use crate::handover::live::{authority, resumer::Resumer};
+        let mut p = ready_pair("dropped-disclosed");
+        p.drop_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Prepared);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !has_record(&p.dir, "prepared", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never persisted its receipt");
+            p.host.lend_tick(&mut p.hs);
+            let _ = p.dst.as_mut().unwrap().pump(now());
+        }
+        assert_eq!(p.src.stage(), SourceStage::Prepared);
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        drop(src);
+        let world = dir.0.join("world");
+        let store = authority::store(&world).unwrap();
+        let aborted = crate::handover::phase::RetiredCommit::read_aborted(&store, t)
+            .unwrap()
+            .expect("the dropped session wrote no abort record");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !aborted.is_published(&store) {
+            assert!(std::time::Instant::now() < deadline, "the dropped session's Aborted wasn't published in this process");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the recipient's wait wasn't resumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !has_record(&dir, "quarantined", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never quarantined on the published Aborted");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop((rc, hs, host, dst, relay));
     }
 }

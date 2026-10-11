@@ -498,6 +498,10 @@ impl crate::GameState {
             // one way every source handover ends (rotating a disclosed
             // bearer). A retired session's publication was already handed
             // to the resumer at Retired, so nothing is lost by dropping it.
+            // CP14b (CP13b review LOW-1): before Retired it aborts as every
+            // other end does (the abort record first, handed over below, and
+            // the world's late-save fence lifted), with no link to tell.
+            session.abort_without_server(copy::LEFT);
             let line = self.end_source_handover(copy::LEFT);
             log::info!("handover: {line}");
             return;
@@ -568,16 +572,13 @@ impl crate::GameState {
         {
             session.hand_publication(crate::handover::live::resumer::Resumer::global());
         }
-        let rotate = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.needs_invite_rotation());
-        let unrecorded = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.abort_unrecorded());
+        let (rotate, line) = match &self.handover {
+            Some(Handover::Source { session, .. }) => (session.needs_invite_rotation(), session.end_line(msg)),
+            _ => (false, msg.to_string()),
+        };
         self.handover = None;
-        let mut line = msg.to_string();
         if rotate {
             self.rotate_handover_invite();
-            line = format!("{line} {}", copy::INVITE_REISSUED);
-        }
-        if unrecorded {
-            line = format!("{line} {}", copy::ABORT_UNRECORDED);
         }
         line
     }
@@ -609,7 +610,10 @@ impl crate::GameState {
             };
             self.end_recipient(msg);
         } else if let RecipientStage::Quarantined(_) = s.stage() {
-            self.end_recipient(copy::QUARANTINED);
+            // CP14b (CP13b review LOW-2): past the ack the wait goes on in
+            // the background unless a verified Aborted ended it.
+            let line = if s.wait_continues() { copy::waiting_after_ack(&s.proposal().source_npub) } else { copy::QUARANTINED.to_owned() };
+            self.end_recipient(&line);
         }
     }
 
@@ -617,6 +621,9 @@ impl crate::GameState {
     /// the gameplay that waited go back to the joined client if it is still
     /// here; otherwise the connection closes with the session.
     fn end_recipient(&mut self, msg: &str) {
+        self.end_recipient_inner(msg, false);
+    }
+    fn end_recipient_inner(&mut self, msg: &str, leaving: bool) {
         // CP8 review LOW-1: never take (and drop) a Source handover here.
         if !matches!(self.handover, Some(Handover::Recipient(_))) {
             return;
@@ -626,13 +633,20 @@ impl crate::GameState {
         // hands its wait for Committed to the resumer first (once: the pump
         // or `abort` may have already).
         s.hand_off_wait();
-        if s.stage() == RecipientStage::Prepared {
-            // Leaving the joined world (`handover_on_leave`): the resumer owns
-            // the wait, so the session ends here. Its router lease goes back
-            // (`Drop`) and its link closes with it; no Abort is sent (the ack
-            // has left).
+        if s.stage() == RecipientStage::Prepared || s.ack_started() {
+            // Leaving the joined world (`handover_on_leave`), or a Cancel or
+            // failure past the ack (CP14b, CP13b review LOW-2): the resumer
+            // owns the wait, so the session ends here. Its router lease goes
+            // back (`Drop`) and its link closes with it; no Abort is sent
+            // (the ack has left). The link never goes back to the joined
+            // world: its host is frozen (or retired), so the player leaves
+            // it, with the line in the lobby.
             drop(s);
-            self.handover_toast(msg);
+            if !leaving && self.remote_client.as_ref().is_some_and(|rc| rc.is_parked()) {
+                self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, msg.to_owned());
+            } else {
+                self.handover_toast(msg);
+            }
             return;
         }
         let back = s.return_link();
@@ -727,7 +741,7 @@ impl crate::GameState {
     /// Returns the line the lobby shows once the player is there (a source
     /// handover was cancelled by leaving): the caller puts it in the lobby's
     /// `menu.notice` after the leave, where it is actually drawn.
-    pub(crate) fn handover_on_leave(&mut self) -> Option<&'static str> {
+    pub(crate) fn handover_on_leave(&mut self) -> Option<String> {
         let mut notice = None;
         match self.handover.as_mut() {
             Some(Handover::Source { session, .. }) => {
@@ -735,11 +749,14 @@ impl crate::GameState {
                     session.abort(hs, "left");
                 }
                 // Past retirement leaving cancels nothing (the world is retired).
-                if !session.past_retirement() {
-                    notice = Some(copy::LEFT);
-                }
+                let cancelled = !session.past_retirement();
                 // MEDIUM-1: rotates the invitation if the bearer had left.
-                let _ = self.end_source_handover(copy::LEFT);
+                // CP14b (CP13b review LOW-5): the composed line (with the
+                // re-issued invite and an unsaved cancellation) is the notice.
+                let line = self.end_source_handover(copy::LEFT);
+                if cancelled {
+                    notice = Some(line);
+                }
             }
             Some(Handover::Recipient(s)) if s.stage() == RecipientStage::AwaitingConsent => {
                 let transfer = s.proposal().transfer;
@@ -750,7 +767,7 @@ impl crate::GameState {
             // gives the lease back and closes the link.
             Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Prepared => {
                 let line = copy::awaiting_handover(&s.proposal().source_npub);
-                self.end_recipient(&line);
+                self.end_recipient_inner(&line, true);
             }
             _ => {}
         }

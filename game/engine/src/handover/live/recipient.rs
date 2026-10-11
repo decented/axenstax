@@ -632,6 +632,17 @@ impl RecipientSession {
     pub fn ack_started(&self) -> bool {
         self.ack_started
     }
+    /// CP14b (CP13b review LOW-2): past the ack with no quarantine record,
+    /// the wait for Committed goes on (in the resumer) after this session
+    /// ends. A verified Aborted wrote the record and ended it.
+    pub fn wait_continues(&self) -> bool {
+        let t = self.transfer();
+        self.ack_started
+            && !self
+                .markers
+                .as_ref()
+                .is_some_and(|m| m.exists(crate::handover::durable::MarkerKind::Quarantined, t).unwrap_or(true))
+    }
     pub fn activation_handed(&self) -> bool {
         self.activation_handed
     }

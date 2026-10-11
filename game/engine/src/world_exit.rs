@@ -547,7 +547,7 @@ impl crate::GameState {
         #[cfg(not(target_arch = "wasm32"))]
         let handover_notice = self.handover_on_leave();
         #[cfg(target_arch = "wasm32")]
-        let handover_notice: Option<&'static str> = None;
+        let handover_notice: Option<String> = None;
         let live = self.live_world.take();
         let joined = self.remote_client.is_some();
         // Reaching the line after this means any save it asked for landed
@@ -631,7 +631,7 @@ impl crate::GameState {
             let mut menu = crate::menu::MenuState::new();
             // A handover this leave cancelled is said in the lobby, where it
             // is drawn (a toast set in the world never reaches it).
-            menu.notice = handover_notice.map(str::to_string);
+            menu.notice = handover_notice;
             self.mode = crate::GameMode::Menu(Box::new(menu));
         }
         true

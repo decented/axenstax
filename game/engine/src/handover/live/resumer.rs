@@ -422,7 +422,9 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
     // CP13 (D2): a quarantined import is never opened.
     lines.extend(import_records(imports, "quarantined-").into_iter().map(|_| super::copy::HANDOVER_UNFINISHED.to_owned()));
     for (world, retired) in retired_worlds(worlds_root) {
-        if !ledger.lists(&retired.ledger_entry()) {
+        if !ledger.lists(&retired.ledger_entry()) && retired.is_abort() {
+            lines.push(super::copy::UNLISTED_ABORT.to_owned());
+        } else if !ledger.lists(&retired.ledger_entry()) {
             lines.push(super::copy::unlisted_world(&world.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
         }
     }

@@ -111,6 +111,9 @@ pub fn awaiting_handover(npub: &str) -> String {
 pub fn unlisted_world(name: &str) -> String {
     format!("\"{name}\" holds a handover record this computer didn't make. It is ignored, and the world stays closed.")
 }
+/// CP14b (CP13b review LOW-5): an unlisted ABORT record: the open guard
+/// ignores abort records, so the world isn't closed by it.
+pub const UNLISTED_ABORT: &str = "A handover note on this computer can't be checked. It is ignored; the world is unaffected.";
 /// CP13: the same for an incoming world's receipt.
 pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record this computer didn't make. It is ignored, and the world stays closed.";
 /// CP13 (D2): the world list's line for a quarantined import: it is never
@@ -119,7 +122,9 @@ pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record thi
 /// Aborted for one handover; Committed won, so the sender may still hold it.
 pub const WORLD_IN_TWO_PLACES: &str = "This world may now exist in two places.";
 /// CP13b (D2): the source's abort record couldn't be saved; play resumed.
-pub const ABORT_UNRECORDED: &str = "The cancellation couldn't be saved, so the other player may keep waiting until they cancel.";
+/// CP14b (CP13b review LOW-3): a recipient past its ack can't cancel, so the
+/// line says what is true.
+pub const ABORT_UNRECORDED: &str = "The cancellation couldn't be saved. The other player's game will keep waiting for this handover.";
 /// CP13b (CP13 review MEDIUM-1): the ledger can't take this handover.
 pub const LEDGER_FULL: &str = "This device's handover record is full or can't be read, so the handover stopped. Nothing was handed over.";
 /// CP13b (CP13 review LOW-1): a recipient's Cancel after its ack.

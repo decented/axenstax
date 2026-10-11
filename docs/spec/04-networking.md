@@ -5605,7 +5605,9 @@ error. Writers also refuse early (`refuse_write_over_newer_save`,
 `handover_release` before retirement (an abort that unfreezes); a retired
 link marks it retired and it never lifts in that process; the retirement
 record keeps the world refused after a restart. A HostedServer torn down while
-frozen before retirement leaves the fence up for the process (fail closed).
+frozen before retirement leaves the fence up for the process (fail closed)
+until the session aborts: the game's server-gone path calls
+`abort_without_server`, which lifts it after the abort record (CP14b).
 No save writes under a world's `handover/`: the save's commit refuses a path
 there (a world folder being a fenced folder, a child of the worlds root, or a
 folder holding `world.dat` or `world_meta.json`). Tested: a save held at its
@@ -5783,7 +5785,10 @@ to the source runtime its receipt names. Any record the ledger doesn't list
 import never brings `handover/`) is logged, never contacts a relay, and the
 world stays refused by the open guard; the world list shows one line for it
 ("\"<world>\" holds a handover record this computer didn't make. It is
-ignored, and the world stays closed.", or the incoming-world form). This
+ignored, and the world stays closed.", or the incoming-world form; an
+unlisted ABORT record, which the open guard ignores, says "A handover note
+on this computer can't be checked. It is ignored; the world is unaffected.",
+CP14b, CP13b review LOW-5). This
 covers LOW-1's plant, which a decode check alone could not: this install's
 own real signed Commit with `core.context` recomputed for an attacker's
 relays decodes, and is still never published (tested, against a second
@@ -5941,8 +5946,11 @@ retirement record v2) is written, its ledger entry (`abt`) appended and
 fsynced first, BEFORE the source unfreezes. It never refuses the source's
 own world (the open guard reads only `retired-*`). If it can't be written
 the source unfreezes anyway (the world is the source's), logs it, and its
-line adds "The cancellation couldn't be saved, so the other player may keep
-waiting until they cancel." (`copy::ABORT_UNRECORDED`); the live Abort still
+line adds "The cancellation couldn't be saved. The other player's game
+will keep waiting for this handover." (`copy::ABORT_UNRECORDED`; CP14b, CP13b
+review LOW-3: a recipient past its ack can't cancel, so it doesn't say it
+can; the leave path's lobby notice is this composed line too,
+`SourceSession::end_line`, CP13b review LOW-5); the live Abort still
 carries the sealed Aborted. **Exclusivity:** one function
 (`phase::write_terminal`, under one process-wide lock) writes either the
 retirement record or the abort record of a transfer, and refuses when the
@@ -5954,8 +5962,15 @@ concurrent ack and abort can never both write. The abort record reads back
 as the same publication permit as a retirement (`RetiredCommit::read_aborted`,
 ledger kind `Abort`), and the same resumer publishes it with the same
 rotation, backoff, readback proof and "published" record (payload label
-`AxeNStax/handover/aborted-published/v1`); the session hands it over when it
-ends, and `resume_all` scans both kinds at start-up, ledger-listed only. The
+`AxeNStax/handover/aborted-published/v1`); a session that aborts hands it
+over when it ends (`end_source_handover`); CP14b (CP13b review LOW-1): a
+session dropped without `abort` writes the record in `Drop` and hands it to
+`Resumer::global()` in the same process (tested: the Aborted is published
+with no restart and the recipient quarantines), and when the hosted server
+has gone the game calls `SourceSession::abort_without_server` (the abort
+record, no link to tell, and the world's late-save fence lifted) before
+ending the session; `resume_all` scans both kinds at start-up,
+ledger-listed only. The
 live `Frame::Abort` carries the sealed Aborted after disclosure (`aborted`,
 bounded by the event limit; `None` before). The recipient checks the live
 one and the published one with ONE verification
@@ -5988,9 +6003,21 @@ or the handover stops with "This device's handover record is full or can't
 be read, so the handover stopped. Nothing was handed over." A ledger write
 error at retire means the record certainly wasn't written: the source goes
 back to Prepared and aborts (the live Abort and the abort-record rule), never
-the `RetirementUncertain` freeze. CP13b (CP13 review LOW-1): a recipient's
+the `RetirementUncertain` freeze. CP14b (CP13b review LOW-3): so does every
+persist error before the rename (`Io`: temp create, write or fsync, a full
+disk the likely one; `Limit`) and a failed read of the abort record; only
+`UncertainDurability` (after the rename) and an existing or unreadable
+retirement record freeze as uncertain (tested: a fault before the rename
+aborts, unfreezes, publishes the Aborted, and the world opens). CP13b (CP13 review LOW-1): a recipient's
 Cancel after its ack says "Waiting for <npub> to finish. You can leave; the
-game will keep checking.", never "cancelled".
+game will keep checking.", never "cancelled". CP14b (CP13b review LOW-2): a
+Cancel or failure past the ack ends the session the way leaving does
+(`end_recipient` takes that branch on `Prepared` or `ack_started`): the
+wait is the resumer's, the link is never handed back to the frozen host,
+and the player leaves the joined world with the line in the lobby (tested).
+The pump's quarantine arm shows the same waiting line while the wait goes
+on, and the quarantine line only when a verified Aborted ended it (a
+waiting line there would be false).
 
 And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,

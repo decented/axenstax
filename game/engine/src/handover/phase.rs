@@ -692,6 +692,20 @@ impl Source {
                 }
                 return Err(Error::State(LEDGER_UNWRITTEN));
             }
+            // CP14b (CP13b review LOW-3): `persist` returns `Io` or `Limit`
+            // only BEFORE its rename (temp create, write or fsync; a full
+            // disk is the likely one), and `write_terminal`'s read of the
+            // abort record fails before anything is written: the record
+            // certainly isn't on disk. Treated as LEDGER_UNWRITTEN: back to
+            // Prepared, and the caller aborts (the live Abort and the
+            // abort-record rule). Only `UncertainDurability` (after the
+            // rename) and an existing or unreadable record (`State`,
+            // `Invalid`: fail closed) freeze as uncertain.
+            Err(e @ (Error::Io | Error::Limit(_))) if was == SourceStage::Prepared => {
+                self.stage = was;
+                self.retirement = None;
+                return Err(e);
+            }
             r => r?,
         }
         self.stage = SourceStage::Retired;

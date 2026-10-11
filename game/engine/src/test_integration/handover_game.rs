@@ -1145,3 +1145,43 @@ fn game_harness_handover_cancel_in_publishing_rotates_the_invite_and_keeps_the_r
 fn game_harness_handover_cancel_in_prepared_rotates_the_invite_and_keeps_the_root() {
     cancel_after_disclosure_rotates_the_invite("cancel-prepared", SourceStage::Prepared);
 }
+
+/// CP14b (CP13b review LOW-2): a recipient's Cancel past its ack says the
+/// wait goes on and leaves the joined world: the link is never handed back
+/// to the frozen host.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_recipient_cancel_after_the_ack_leaves_with_the_waiting_line() {
+    let mut j = joined("dst-cancel-after-ack");
+    let mut src = consented(&mut j);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "the recipient never reached Prepared (source {:?})", src.stage());
+        j.host.lend_tick(&mut j.hs);
+        if let Some(Handover::Recipient(s)) = j.hg.state.handover.as_mut() {
+            let _ = s.pump(now());
+        }
+        if recipient_stage(&j.hg) == Some(RecipientStage::Prepared) {
+            break;
+        }
+        if src.stage() == SourceStage::Publishing {
+            src.join_publish_worker();
+        }
+        if src.pump(&mut j.hs, live(), now()).is_err() {
+            break;
+        }
+    }
+    let Some(Handover::Recipient(s)) = &j.hg.state.handover else { panic!("no recipient session") };
+    assert!(s.ack_started(), "the ack wasn't sent at Prepared");
+    let npub = s.proposal().source_npub.clone();
+    j.hg.state.handover_click = Some(UiAction::Cancel);
+    j.hg.frames(1);
+    assert!(j.hg.state.handover.is_none(), "the session outlived the Cancel");
+    assert!(
+        matches!(j.hg.state.mode, crate::GameMode::Menu(_)),
+        "a Cancel after the ack put the player back into the frozen world"
+    );
+    let crate::GameMode::Menu(menu) = &j.hg.state.mode else { unreachable!() };
+    assert_eq!(menu.notice.as_deref(), Some(copy::waiting_after_ack(&npub).as_str()), "the Cancel after the ack has the wrong line");
+    drop(src);
+}

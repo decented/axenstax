@@ -407,6 +407,20 @@ impl SourceSession {
     pub fn publication_handed(&self) -> bool {
         self.handed
     }
+    /// CP14b (CP13b review LOW-5): the line `end_source_handover` shows when
+    /// this session ends with `msg`: plus the re-issued invitation when the
+    /// bearer had left, plus `copy::ABORT_UNRECORDED` when the abort record
+    /// couldn't be written.
+    pub fn end_line(&self, msg: &str) -> String {
+        let mut line = msg.to_string();
+        if self.needs_invite_rotation() {
+            line = format!("{line} {}", super::copy::INVITE_REISSUED);
+        }
+        if self.abort_unrecorded {
+            line = format!("{line} {}", super::copy::ABORT_UNRECORDED);
+        }
+        line
+    }
     /// CP13b (D2): the abort record (the Aborted to publish) is durable.
     pub fn abort_recorded(&self) -> bool {
         self.abort_recorded
@@ -504,6 +518,19 @@ impl SourceSession {
     /// From Retired on this does nothing: no deadline, Cancel or late Abort
     /// resumes a retired world (only exact retry or quarantine).
     pub fn abort(&mut self, hs: &mut HostedServer, why: &'static str) {
+        self.abort_inner(Some(hs), why);
+    }
+
+    /// CP14b (CP13b review LOW-1): the same abort when the hosted server
+    /// (and the link with it) has gone: the abort record is written first
+    /// (a retirement record that won keeps the world retired and its fence
+    /// up), nothing can be sent, and the world's late-save fence lifts as
+    /// `handover_release` would have lifted it.
+    pub fn abort_without_server(&mut self, why: &'static str) {
+        self.abort_inner(None, why);
+    }
+
+    fn abort_inner(&mut self, mut hs: Option<&mut HostedServer>, why: &'static str) {
         if matches!(self.stage, SourceStage::Aborted(_)) || self.past_retirement() {
             return;
         }
@@ -512,14 +539,30 @@ impl SourceSession {
         let aborted = match self.record_abort() {
             AbortRecorded::Retired => {
                 self.stage = SourceStage::RetirementUncertain;
-                hs.handover_mark_retired();
+                match hs {
+                    Some(hs) => hs.handover_mark_retired(),
+                    None => {
+                        if let Some(dir) = self.cfg.world_dir.as_ref() {
+                            crate::save_fence::retire(dir);
+                        }
+                    }
+                }
                 return;
             }
             AbortRecorded::Recorded(ev) | AbortRecorded::Unrecorded(Some(ev)) => Some(ev.as_json()),
             AbortRecorded::Unrecorded(None) | AbortRecorded::Nothing => None,
         };
-        let _ = self.send(hs, &Frame::Abort { transfer: self.transfer, aborted });
-        hs.handover_release();
+        match hs.as_deref_mut() {
+            Some(hs) => {
+                let _ = self.send(hs, &Frame::Abort { transfer: self.transfer, aborted });
+                hs.handover_release();
+            }
+            None => {
+                if let Some(dir) = self.cfg.world_dir.as_ref() {
+                    crate::save_fence::lift(dir);
+                }
+            }
+        }
         // M-B: a running pack is cancelled and fenced off; its result, if it
         // still arrives, is dropped (and its scratch with it), never sent.
         self.pack_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -707,7 +750,16 @@ impl Drop for SourceSession {
         // CP13b (D2): dropped after disclosure without `abort` (the link's
         // reap then releases the world): the abort record still comes first.
         if !matches!(self.stage, SourceStage::Aborted(_)) && !self.past_retirement() {
-            let _ = self.record_abort();
+            // CP14b (CP13b review LOW-1): a durable abort record is handed
+            // to the process's resumer at once, so the Aborted is published
+            // in this process (not only by the next start-up scan) and a
+            // recipient past its ack stops waiting.
+            if let AbortRecorded::Recorded(_) = self.record_abort() {
+                self.stage = SourceStage::Aborted("The handover ended.");
+                if !self.hand_publication(super::resumer::Resumer::global()) {
+                    log::warn!("handover: a dropped session's Aborted wasn't handed over; it is published at the next start");
+                }
+            }
         }
         self.pack_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         self.publish_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
