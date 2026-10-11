@@ -511,7 +511,7 @@ impl crate::GameState {
         // CP9: at Retired the Committed publication goes to the one
         // background resumer, which outlives this world: leaving, closing
         // the window or dropping GameState never stops it.
-        if session.stage() == SourceStage::Retired && !session.publication_handed() {
+        if matches!(session.stage(), SourceStage::Retired | SourceStage::RetirementUncertain) && !session.publication_handed() {
             session.hand_publication(crate::handover::live::resumer::Resumer::global());
         }
         if let SourceStage::Aborted(why) = session.stage() {
@@ -543,6 +543,14 @@ impl crate::GameState {
     /// bearer left this machine rotates the invitation (`rotate_bearer`:
     /// only the bearer changes, the root stays) and the line says so.
     pub(crate) fn end_source_handover(&mut self, msg: &str) -> String {
+        // CP9 review LOW-1: a last chance to hand a retired publication over
+        // before the session goes (the start-up scan stays the backstop).
+        if let Some(Handover::Source { session, .. }) = self.handover.as_mut()
+            && session.past_retirement()
+            && !session.publication_handed()
+        {
+            session.hand_publication(crate::handover::live::resumer::Resumer::global());
+        }
         let rotate = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.needs_invite_rotation());
         self.handover = None;
         if rotate {
@@ -560,7 +568,7 @@ impl crate::GameState {
         // background resumer, which outlives this session, the joined world
         // and the window (and resumes at start-up from the durable receipt).
         if s.stage() == RecipientStage::Prepared && !s.activation_handed() {
-            s.hand_activation(crate::handover::live::resumer::Resumer::global());
+            s.hand_activation(crate::handover::live::resumer::Resumer::global(), now);
         }
         if s.stage() == RecipientStage::Activated {
             // The source retired its copy: the joined world is gone for good.

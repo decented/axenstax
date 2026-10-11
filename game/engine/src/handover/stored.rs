@@ -48,6 +48,12 @@ impl Budget {
     pub fn deadline(&self) -> tokio::time::Instant {
         self.deadline
     }
+    /// CP9 review MEDIUM-1: one relay's own share of an attempt: the
+    /// deadline becomes `share` from now (the resumer gives each relay of the
+    /// root `relay_share(n)`, so one stalled relay can't eat the attempt).
+    pub fn share_deadline(&mut self, share: Duration) {
+        self.deadline = tokio::time::Instant::now() + share;
+    }
     pub fn hop(&mut self) -> Result<()> {
         self.check()?;
         if self.hops >= 4 {

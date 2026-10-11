@@ -538,6 +538,8 @@ mod session {
         forge_ack: Arc<std::sync::atomic::AtomicBool>,
         ack_forge: Arc<Mutex<Option<(AckForge, RootContext)>>>,
         relay: crate::handover::relay_fixture::Relay,
+        /// More fixture relays the invitation names (`pair_n`).
+        extra: Vec<crate::handover::relay_fixture::Relay>,
         dir: Dir,
     }
 
@@ -552,6 +554,13 @@ mod session {
         root_at(&RELAY.get_or_init(crate::handover::relay_fixture::Relay::start).url())
     }
     const TEST_BEARER: [u8; 16] = [0x5A; 16];
+    /// CP9 review LOW-6: the start-up scans take only this install's records.
+    fn src_install() -> Option<[u8; 32]> {
+        Some(keys(SOURCE_RUNTIME).public_key().to_bytes())
+    }
+    fn dst_install() -> Option<[u8; 32]> {
+        Some(keys(RECIPIENT_RUNTIME).public_key().to_bytes())
+    }
     fn bearer() -> crate::handover::live::bearer::Bearer {
         crate::handover::live::bearer::Bearer::new(TEST_BEARER)
     }
@@ -601,6 +610,10 @@ mod session {
     /// A lent source with one signed joiner that keeps PLAYING through its
     /// RemoteClient: the Propose reaches it the ordinary way.
     fn pair(tag: &str) -> Pair {
+        pair_n(tag, 1)
+    }
+    /// A pair whose invitation names `n` loopback fixture relays.
+    fn pair_n(tag: &str, n: usize) -> Pair {
         let dir = Dir::new(tag);
         for d in ["imports", "markers", "scratch", "world"] {
             std::fs::create_dir_all(dir.0.join(d)).unwrap();
@@ -620,7 +633,10 @@ mod session {
         };
         let rc = RemoteClient::from_transport(Box::new(tap), crate::remote_client::build_join_request_guest("dup", 0), None);
         let relay = crate::handover::relay_fixture::Relay::start();
-        let root = root_at(&relay.url());
+        let extra: Vec<_> = (1..n).map(|_| crate::handover::relay_fixture::Relay::start()).collect();
+        let urls: Vec<String> = std::iter::once(relay.url()).chain(extra.iter().map(|r| r.url())).collect();
+        let root =
+            RootContext::new(keys(SOURCE_RUNTIME).public_key().to_bytes(), &npub(&keys(SOURCE_PERSONA)), now() + 3600, &urls, now()).unwrap();
         let lineage = root_lineage(&root);
         let cfg = SourceConfig {
             runtime: keys(SOURCE_RUNTIME),
@@ -640,7 +656,7 @@ mod session {
         let action = HostAction { seat, source_key, world_name: "Loop".into() };
         let live = Live { signed_in: Some(source_key), local_seats: 1 };
         let src = SourceSession::begin(&mut hs, action, cfg, live, now()).expect("eligible");
-        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, relay, dir }
+        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, relay, extra, dir }
     }
 
     /// The joined client reads the proposal through its ordinary poll, the
@@ -1588,7 +1604,7 @@ mod session {
         assert!(has_record(&p.dir, "quarantined", t), "no quarantine record after the source's Abort");
         assert!(has_record(&p.dir, "prepared", t), "a quarantined import lost its receipt");
         assert_eq!(
-            crate::handover::live::resumer::Resumer::new(FAST).resume_imports(&p.dir.0.join("imports")),
+            crate::handover::live::resumer::Resumer::new(FAST).resume_imports(&p.dir.0.join("imports"), dst_install()),
             0,
             "a quarantined import went back to waiting for Committed"
         );
@@ -1654,7 +1670,7 @@ mod session {
     }
     fn wait_published(store: &MarkerStore, retired: &crate::handover::phase::RetiredCommit) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while !retired.is_published(store).unwrap() {
+        while !retired.is_published(store) {
             assert!(std::time::Instant::now() < deadline, "the Committed published record never landed");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -1677,9 +1693,9 @@ mod session {
         let store = crate::handover::live::authority::store(&world).unwrap();
         let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().expect("no retirement record");
         assert_eq!(retired.exact_bytes(), commit.as_bytes(), "the record doesn't hold the exact Commit bytes");
-        assert!(!retired.is_published(&store).unwrap());
+        assert!(!retired.is_published(&store));
         let resumer = Resumer::new(FAST);
-        assert_eq!(resumer.resume_all(&dir.0), 1, "the start-up scan didn't resume the Committed publication");
+        assert_eq!(resumer.resume_all(&dir.0, src_install()), 1, "the start-up scan didn't resume the Committed publication");
         wait_published(&store, &retired);
         let stored: Vec<_> = relay.stored().into_iter().filter(|e| e.id.to_bytes() == retired.event_hash()).collect();
         assert_eq!(stored.len(), 1);
@@ -1700,7 +1716,7 @@ mod session {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!resumer.holds(t), "the resumer kept a proven world");
-        assert_eq!(Resumer::new(FAST).resume_all(&dir.0), 0, "a published world was resumed again");
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 0, "a published world was resumed again");
     }
 
     /// Bounded backoff that never gives up: while the relay withholds what
@@ -1716,13 +1732,13 @@ mod session {
         let store = crate::handover::live::authority::store(&world).unwrap();
         let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().unwrap();
         let resumer = Resumer::new(FAST);
-        assert_eq!(resumer.resume_all(&dir.0), 1);
+        assert_eq!(resumer.resume_all(&dir.0, src_install()), 1);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while resumer.attempts().len() < 2 {
             assert!(std::time::Instant::now() < deadline, "no retries");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(!retired.is_published(&store).unwrap(), "published without a witness");
+        assert!(!retired.is_published(&store), "published without a witness");
         assert!(resumer.holds(t), "the resumer gave up");
         relay.withhold(false);
         wait_published(&store, &retired);
@@ -1755,7 +1771,9 @@ mod session {
         // refuses after the phase model entered RetirementUncertain.
         let world = p.dir.0.join("world");
         crate::handover::live::authority::store(&world).unwrap();
-        std::fs::write(crate::handover::live::authority::dir(&world).join(format!("retired.tmp-{}", hex::encode(t))), b"other bytes").unwrap();
+        // CP9 review LOW-3: a stale temp FILE no longer jams a write; a temp
+        // path that isn't a regular file still refuses.
+        std::fs::create_dir_all(crate::handover::live::authority::dir(&world).join(format!("retired.tmp-{}", hex::encode(t)))).unwrap();
         drive(&mut p, SourceStage::RetirementUncertain);
         assert_eq!(p.src.stage(), SourceStage::RetirementUncertain, "the failed retirement wasn't uncertain");
         assert!(p.src.past_retirement());
@@ -1780,7 +1798,7 @@ mod session {
         let mut p = ready_pair("ack-durable");
         let t = p.src.transfer();
         let records = crate::handover::live::authority::dir(&p.dst.as_ref().unwrap().checkpoint().unwrap().working_world());
-        std::fs::write(records.join(format!("prepared.tmp-{}", hex::encode(t))), b"other bytes").unwrap();
+        std::fs::create_dir_all(records.join(format!("prepared.tmp-{}", hex::encode(t)))).unwrap();
         drive(&mut p, SourceStage::Retired);
         assert!(!p.src.past_retirement(), "the source retired without a durable bearer on the recipient");
         assert!(p.src.commit_event().is_none(), "a Commit was sealed without a durable bearer on the recipient");
@@ -1838,9 +1856,9 @@ mod session {
         assert!(crate::save::save_refusal_in(&working).is_some(), "a save path accepts the import before Activated");
         let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
         drop((src, dst, rc, hs, host));
-        assert!(Resumer::new(FAST).resume_all(&dir.0) == 1, "the source's Committed wasn't resumed");
+        assert!(Resumer::new(FAST).resume_all(&dir.0, src_install()) == 1, "the source's Committed wasn't resumed");
         let recipient = Resumer::new(FAST);
-        assert_eq!(recipient.resume_imports(&dir.0.join("imports")), 1, "the start-up scan didn't resume the wait for Committed");
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the start-up scan didn't resume the wait for Committed");
         let store = authority::store(&working).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while store.read(MarkerKind::Activated, t).unwrap().is_none() {
@@ -1867,7 +1885,7 @@ mod session {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!recipient.holds_import(t), "the resumer kept an activated import");
-        assert_eq!(Resumer::new(FAST).resume_imports(&dir.0.join("imports")), 0, "an activated import was resumed again");
+        assert_eq!(Resumer::new(FAST).resume_imports(&dir.0.join("imports"), dst_install()), 0, "an activated import was resumed again");
     }
 
     /// CP10 (HIGH-2 + H3): the bearer is stored only in the imported world's
@@ -1911,5 +1929,111 @@ mod session {
             checked += 1;
         }
         assert!(checked >= 4, "only {checked} files checked");
+    }
+    /// CP9 review MEDIUM-1: a relay that never answers (no OK, no EOSE) in
+    /// the root's first place can't hold the Committed: with its own share
+    /// of the attempt and the start rotating, the healthy second relay
+    /// proves it within two attempts.
+    #[test]
+    fn handover_black_holed_first_relay_cant_hold_the_committed() {
+        use crate::handover::live::resumer::Resumer;
+        let mut p = pair_n("black-hole", 2);
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 10_000);
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let t = p.src.transfer();
+        let first = p.root.relays()[0].clone();
+        let Pair { hs, host, src, rc, dst, relay, extra, dir, .. } = p;
+        drop((src, dst, rc, hs, host));
+        let all: Vec<_> = std::iter::once(&relay).chain(extra.iter()).collect();
+        let hole = all.iter().find(|r| r.url() == first).expect("the first relay");
+        hole.black_hole(true);
+        let world = dir.0.join("world");
+        let store = crate::handover::live::authority::store(&world).unwrap();
+        let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().unwrap();
+        let resumer = Resumer::new(FAST);
+        assert_eq!(resumer.resume_all(&dir.0, src_install()), 1);
+        wait_published(&store, &retired);
+        let a: Vec<_> = resumer.attempts().into_iter().filter(|a| !a.import).collect();
+        assert!(a.len() <= 2, "Committed took {} attempts: {a:?}", a.len());
+        assert!(a.last().unwrap().proven);
+        assert!(all.iter().any(|r| r.url() != first && r.stored().iter().any(|e| e.id.to_bytes() == retired.event_hash())));
+    }
+
+    /// CP9 review MEDIUM-2: the exit grace wakes a publication sleeping out
+    /// its backoff so it attempts at once, and never blocks past the grace;
+    /// once the relay serves, the grace returns as soon as it is done.
+    #[test]
+    fn handover_exit_grace_attempts_at_once_and_never_blocks_longer() {
+        use crate::handover::live::resumer::{Backoff, Resumer};
+        let (t, _, relay, dir) = retired_and_dropped("exit-grace");
+        relay.withhold(true);
+        let slow = Backoff { first: std::time::Duration::from_secs(600), ceiling: std::time::Duration::from_secs(600) };
+        let resumer = Resumer::new(slow);
+        assert_eq!(resumer.resume_all(&dir.0, src_install()), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while resumer.attempts().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "no first attempt");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let start = std::time::Instant::now();
+        assert!(!resumer.finish_within(std::time::Duration::from_secs(2)), "a withheld Committed finished");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3), "the grace blocked past its bound");
+        assert!(resumer.attempts().len() >= 2, "the grace didn't wake the sleeping publication");
+        relay.withhold(false);
+        let start = std::time::Instant::now();
+        assert!(resumer.finish_within(std::time::Duration::from_secs(10)), "the grace didn't let it finish");
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!resumer.holds(t));
+    }
+
+    /// CP9 review LOW-6 + LOW-5 + LOW-7: the real boot step takes only this
+    /// install's records. A record signed by another runtime, and a v1 or
+    /// tampered-relay record, never contact a relay and stay refused; this
+    /// install's record is resumed by the same call `native_boot_services`
+    /// makes.
+    #[test]
+    fn handover_boot_resumes_only_this_installs_decodable_records() {
+        use crate::handover::live::{authority, copy, resumer::Resumer};
+        let (t, _, relay, dir) = retired_and_dropped("boot-planted");
+        let bytes = authority::store(&dir.0.join("world")).unwrap().read(MarkerKind::Retired, t).unwrap().unwrap();
+        assert!(crate::handover::phase::Retirement::decode(&bytes).is_ok());
+        let mut v1 = bytes.clone();
+        let at = v1.windows(13).position(|w| w == b"retirement/v2").unwrap();
+        v1[at + 12] = b'1';
+        let url = relay.url();
+        let port = url.rsplit(':').next().unwrap().to_owned();
+        let tampered = {
+            let mut b = bytes.clone();
+            let at = b.windows(port.len()).position(|w| w == port.as_bytes()).unwrap();
+            b[at] = if b[at] == b'1' { b'2' } else { b'1' };
+            b
+        };
+        let planted = dir.0.join("planted");
+        for (name, record) in [("v1", &v1), ("tampered", &tampered)] {
+            assert!(crate::handover::phase::Retirement::decode(record).is_err(), "a {name} record decoded");
+            let w = planted.join(name);
+            authority::store(&w).unwrap().persist(MarkerKind::Retired, t, record).unwrap();
+            assert_eq!(authority::open_guard(&w).unwrap_err().0, copy::AUTHORITY_UNREADABLE, "a {name} record isn't refused");
+        }
+        let received = relay.received();
+        // Another install: nothing is published, nothing contacts a relay.
+        let other = Resumer::new(FAST);
+        assert_eq!(other.boot(&dir.0, &dir.0.join("imports"), Some([0x44; 32])), (0, 0), "another install's record was resumed");
+        assert_eq!(other.boot(&planted, &dir.0.join("imports"), src_install()), (0, 0), "an undecodable record was resumed");
+        assert_eq!(other.boot(&dir.0, &dir.0.join("imports"), None), (0, 0), "resumed with no install key");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(relay.received(), received, "a planted record contacted a relay");
+        // This install: the boot step publishes it.
+        let mine = Resumer::new(FAST);
+        assert_eq!(mine.boot(&dir.0, &dir.0.join("imports"), src_install()), (1, 0));
+        let store = authority::store(&dir.0.join("world")).unwrap();
+        wait_published(&store, &crate::handover::phase::RetiredCommit::read(&store, t).unwrap().unwrap());
+        // The boot call is the one native_boot_services makes.
+        let lib = include_str!("../lib.rs");
+        let boot = lib.find("fn native_boot_services").unwrap();
+        assert!(lib[boot..boot + 2500].contains("Resumer::global().boot("), "native_boot_services doesn't run the handover boot step");
     }
 }

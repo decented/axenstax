@@ -3004,12 +3004,15 @@ fn native_boot_services() {
     handover_game::sweep_inert_imports(None);
     // CP9: every retired world whose Committed isn't proven published yet
     // gets its exact retry from the record (the world itself stays refused).
+    // CP10: and every import past its PreparedAck that isn't Activated yet
+    // goes back to waiting for its Committed (from its durable receipt).
+    // Both only for records bound to this install's runtime key.
     #[cfg(not(target_arch = "wasm32"))]
-    handover::live::resumer::Resumer::global().resume_all(&save::worlds_root());
-    // CP10: every import past its PreparedAck that isn't Activated yet goes
-    // back to waiting for its Committed (from its durable receipt).
-    #[cfg(not(target_arch = "wasm32"))]
-    handover::live::resumer::Resumer::global().resume_imports(&crate::data_dir::data_root().join("handover").join("imports"));
+    handover::live::resumer::Resumer::global().boot(
+        &save::worlds_root(),
+        &crate::data_dir::data_root().join("handover").join("imports"),
+        handover::live::resumer::install_runtime(),
+    );
     let identity = signet::native_signer::init_identity();
     match identity.npub() {
         Some(npub) => log::info!("Signed in as {npub} (cached identity, offline)"),

@@ -1098,6 +1098,11 @@ impl super::GameState {
             lease.release_within(std::time::Duration::from_millis(1500));
         }
         self.handover_release_lease_on_exit(std::time::Duration::from_millis(1500));
+        // CP9 review MEDIUM-2: a Committed (or a recipient's wait) still in
+        // flight gets at most 10 s to finish before the process quits; what
+        // isn't done resumes at the next launch.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::handover::live::resumer::Resumer::global().finish_within(std::time::Duration::from_secs(10));
     }
 
     /// The Online panel: this world's invite link, how reachable it is, how many

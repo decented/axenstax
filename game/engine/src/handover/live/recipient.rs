@@ -170,8 +170,10 @@ pub struct RecipientSession {
     prepared: Option<(Event, VerifiedPrepared)>,
     /// CP10: the awaiting-Committed wait was handed to a resumer.
     activation_handed: bool,
-    /// CP10: the last second the Activated record was looked for.
+    /// CP10: the last second the Activated record was looked for, and the
+    /// last second a hand-off was tried.
     activation_checked: u64,
+    hand_tried: u64,
 }
 
 /// L5: a router mapping the joined session asked for (native: the UPnP
@@ -285,6 +287,7 @@ impl RecipientSession {
             prepared: None,
             activation_handed: false,
             activation_checked: 0,
+            hand_tried: 0,
         })
     }
 
@@ -519,13 +522,17 @@ impl RecipientSession {
     /// CP10: hand the awaiting-Committed wait to `resumer` (once), which
     /// outlives this session, the joined world and the window. It reads the
     /// durable receipt itself (`phase::AwaitingCommit`), never this memory.
-    pub fn hand_activation(&mut self, resumer: &super::resumer::Resumer) {
-        if self.stage != RecipientStage::Prepared || self.activation_handed {
+    pub fn hand_activation(&mut self, resumer: &super::resumer::Resumer, now: u64) {
+        if self.stage != RecipientStage::Prepared || self.activation_handed || self.hand_tried == now {
             return;
         }
+        self.hand_tried = now;
         if let Some(c) = &self.checkpoint {
-            resumer.adopt_import(&c.working_world(), self.transfer());
-            self.activation_handed = true;
+            let (t, install) = (self.transfer(), self.identity.runtime.public_key().to_bytes());
+            self.activation_handed = resumer.adopt_import(&c.working_world(), t, install) || resumer.holds_import(t);
+            if !self.activation_handed {
+                log::error!("handover: the resumer couldn't take the wait for Committed; retrying");
+            }
         }
     }
     pub fn activation_handed(&self) -> bool {

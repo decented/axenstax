@@ -315,11 +315,22 @@ impl RetiredCommit {
     }
     /// Whether the "Committed published" record of this Commit exists. A
     /// record that names another Commit is an error (fail closed).
-    pub fn is_published(&self, store: &MarkerStore) -> Result<bool> {
-        match store.read(MarkerKind::Published, self.core.transfer)? {
-            None => Ok(false),
-            Some(b) if b == self.published_payload() => Ok(true),
-            Some(_) => Err(Error::Invalid("published record binding")),
+    /// CP9 review LOW-2, one rule: only a record that reads back as this
+    /// exact Commit's counts. Unreadable, missing or naming another Commit
+    /// reads as not published (logged): re-publishing identical bytes is
+    /// safe, and the record write replaces a mismatched one.
+    pub fn is_published(&self, store: &MarkerStore) -> bool {
+        match store.read(MarkerKind::Published, self.core.transfer) {
+            Ok(Some(b)) if b == self.published_payload() => true,
+            Ok(None) => false,
+            Ok(Some(_)) => {
+                log::warn!("handover: a Committed published record names another Commit; publishing again");
+                false
+            }
+            Err(e) => {
+                log::warn!("handover: the Committed published record can't be read ({e}); publishing again");
+                false
+            }
         }
     }
     fn published_payload(&self) -> Vec<u8> {
@@ -856,6 +867,10 @@ impl AwaitingCommit {
     }
     pub fn transfer(&self) -> Id {
         self.receiver.core.transfer
+    }
+    /// The runtime that signed this recipient's Ready (the successor).
+    pub fn recipient_runtime(&self) -> Hash {
+        self.receiver.core.successor_runtime
     }
     fn held(&self) -> &Held {
         self.receiver.held.as_ref().expect("an AwaitingCommit always holds its receipt")

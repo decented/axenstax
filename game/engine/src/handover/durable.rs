@@ -123,6 +123,13 @@ impl MarkerStore {
                     .map_err(|_| Error::UncertainDurability)?;
                 return Ok(());
             }
+            // CP9 review LOW-2: "Committed published" is a derived fact, not
+            // authority: a record that doesn't match (or doesn't decode) is
+            // rewritten with the exact deterministic bytes.
+            if kind == MarkerKind::Published {
+                fs::remove_file(&path).map_err(|_| Error::Io)?;
+                return self.persist_observed(kind, id, payload, observer);
+            }
             if kind != MarkerKind::Prefix {
                 return Err(Error::State("immutable marker conflict"));
             }
@@ -141,12 +148,23 @@ impl MarkerStore {
         let temp = self
             .directory
             .join(format!("{}.tmp-{}", kind.label(), hex::encode(id)));
-        // Stale temporary contents are reused only if identical, never followed
-        // through a symlink or rewritten to another commit under the same id.
-        if let Some(old) = read_bounded(&temp)? {
-            if old != bytes {
-                return Err(Error::State("temporary marker conflict"));
-            }
+        // Stale temporary contents are reused only if identical and never
+        // followed through a symlink. CP9 review LOW-3 (coordinator: any
+        // kind): a stale regular temp file with other (or partial, or empty)
+        // bytes never jams a write; it was never renamed, so nothing durable
+        // claims it, and it is replaced. A temp path that isn't a regular file
+        // still refuses.
+        let stale = match fs::symlink_metadata(&temp) {
+            Ok(m) if m.is_file() => true,
+            Ok(_) => return Err(Error::Invalid("marker file type")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err(Error::Io),
+        };
+        let reuse = stale && fs::read(&temp).is_ok_and(|old| old == bytes);
+        if stale && !reuse {
+            fs::remove_file(&temp).map_err(|_| Error::Io)?;
+        }
+        if reuse {
             fs::File::open(&temp)
                 .and_then(|f| f.sync_all())
                 .map_err(|_| Error::Io)?;

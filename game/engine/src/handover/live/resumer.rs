@@ -42,7 +42,7 @@ use crate::handover::{
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
@@ -62,6 +62,24 @@ impl Backoff {
     }
 }
 
+/// CP9 review MEDIUM-1: attempt `attempt` (0-based) tries the root's relays
+/// starting at index `attempt mod n`, so a relay that stalls in first place
+/// can't hold every attempt.
+pub fn relay_order(n: usize, attempt: u32) -> Vec<usize> {
+    (0..n).map(|i| (attempt as usize % n.max(1) + i) % n.max(1)).collect()
+}
+/// Each relay's own share of an attempt's 25 s: 25 s / n, at least 5 s.
+pub fn relay_share(n: usize) -> Duration {
+    (Duration::from_secs(25) / n.max(1) as u32).max(Duration::from_secs(5))
+}
+
+/// CP9 review LOW-6: this install's runtime key (the one its handovers sign
+/// with), `None` when it has none. The start-up scans publish or await only
+/// records bound to it; a planted record never contacts a relay.
+pub fn install_runtime() -> Option<[u8; 32]> {
+    crate::runtime_identity::RuntimeIdentity::load().ok().flatten().map(|i| i.keys().public_key().to_bytes())
+}
+
 /// What a test sees of one attempt.
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -76,6 +94,8 @@ pub struct Attempt {
     pub copies: usize,
     /// CP10: a recipient's Committed lookup (not a source's publication).
     pub import: bool,
+    /// The relay index this attempt started at (MEDIUM-1 rotation).
+    pub first_relay: usize,
 }
 
 /// Which side a job serves: one process can be both (tests are).
@@ -90,6 +110,9 @@ struct Shared {
     /// Transfers this resumer is publishing (source) or awaiting (import)
     /// now, one thread each.
     jobs: Mutex<BTreeSet<(Flavour, Id)>>,
+    /// CP9 review MEDIUM-2: a wake-up for threads sleeping out a backoff
+    /// (the exit grace makes them attempt at once).
+    wake: (Mutex<u64>, Condvar),
     #[cfg(test)]
     log: Mutex<Vec<Attempt>>,
 }
@@ -108,6 +131,7 @@ impl Resumer {
         Self(Arc::new(Shared {
             backoff,
             jobs: Mutex::new(BTreeSet::new()),
+            wake: (Mutex::new(0), Condvar::new()),
             #[cfg(test)]
             log: Mutex::new(Vec::new()),
         }))
@@ -130,13 +154,43 @@ impl Resumer {
         self.0.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// CP9 review MEDIUM-2: at process exit, wake every thread sleeping out
+    /// a backoff so it attempts at once, then wait at most `grace` (never
+    /// longer) for the jobs to finish. What isn't done resumes at the next
+    /// launch from the durable records.
+    pub fn finish_within(&self, grace: Duration) -> bool {
+        let deadline = std::time::Instant::now() + grace;
+        {
+            let (generation, cv) = &self.0.wake;
+            *generation.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            cv.notify_all();
+        }
+        loop {
+            if self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(20)));
+        }
+    }
+
     /// Take over the Committed publication of the world at `world_dir`
     /// (its `handover/` holds `retired`'s record). Idempotent per transfer;
-    /// nothing to do once its "Committed published" record exists.
-    pub fn adopt(&self, world_dir: &Path, retired: RetiredCommit) -> bool {
+    /// nothing to do once its "Committed published" record exists. CP9
+    /// review LOW-6: only a Commit signed by `install` (this install's
+    /// runtime key) is ever published; anything else is logged and never
+    /// contacts a relay.
+    pub fn adopt(&self, world_dir: &Path, retired: RetiredCommit, install: [u8; 32]) -> bool {
         let transfer = retired.transfer();
+        if retired.event().pubkey.to_bytes() != install {
+            log::warn!("handover: a retirement record under {} isn't this install's; it is not published", world_dir.display());
+            return false;
+        }
         let Ok(store) = existing_store(world_dir) else { return false };
-        if retired.is_published(&store).unwrap_or(true) {
+        if retired.is_published(&store) {
             return false;
         }
         if !self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert((Flavour::Source, transfer)) {
@@ -155,13 +209,24 @@ impl Resumer {
         true
     }
 
+    /// The start-up step `native_boot_services` runs (CP9 review LOW-5):
+    /// every retired world's Committed and every import's wait, bound to
+    /// `install`. Returns (publications, waits) taken over.
+    pub fn boot(&self, worlds_root: &Path, imports: &Path, install: Option<[u8; 32]>) -> (usize, usize) {
+        (self.resume_all(worlds_root, install), self.resume_imports(imports, install))
+    }
+
     /// CP10: take over the wait for `transfer`'s Committed of the import
     /// whose working world is `world_dir` (its `handover/` holds the Prepared
     /// receipt). Idempotent per transfer; nothing to do once Activated or
     /// quarantined. It never opens the world and never creates `handover/`.
-    pub fn adopt_import(&self, world_dir: &Path, transfer: Id) -> bool {
+    pub fn adopt_import(&self, world_dir: &Path, transfer: Id, install: [u8; 32]) -> bool {
         let Ok(store) = existing_store(world_dir) else { return false };
         match AwaitingCommit::read(&store, transfer) {
+            Ok(Some(a)) if a.recipient_runtime() != install => {
+                log::warn!("handover: an import's receipt under {} isn't this install's; it is not resumed", world_dir.display());
+                return false;
+            }
             Ok(Some(_)) => {}
             Ok(None) => return false,
             Err(e) => {
@@ -189,7 +254,8 @@ impl Resumer {
     /// working world's `handover/` holds a Prepared receipt with no Activated
     /// or quarantine record. Bounded; creates nothing. Returns how many waits
     /// it took over.
-    pub fn resume_imports(&self, imports: &Path) -> usize {
+    pub fn resume_imports(&self, imports: &Path, install: Option<[u8; 32]>) -> usize {
+        let Some(install) = install else { return 0 };
         let Ok(entries) = std::fs::read_dir(imports) else { return 0 };
         let mut adopted = 0;
         for (seen, entry) in entries.enumerate() {
@@ -217,7 +283,7 @@ impl Resumer {
                 else {
                     continue;
                 };
-                if self.adopt_import(&working, t) {
+                if self.adopt_import(&working, t, install) {
                     adopted += 1;
                 }
             }
@@ -229,7 +295,8 @@ impl Resumer {
     /// retirement record and no "Committed published" record. Bounded, and
     /// it creates nothing (a world without `handover/` is skipped). Returns
     /// how many publications it took over.
-    pub fn resume_all(&self, worlds_root: &Path) -> usize {
+    pub fn resume_all(&self, worlds_root: &Path, install: Option<[u8; 32]>) -> usize {
+        let Some(install) = install else { return 0 };
         let Ok(entries) = std::fs::read_dir(worlds_root) else { return 0 };
         let mut adopted = 0;
         for (seen, entry) in entries.enumerate() {
@@ -239,14 +306,17 @@ impl Resumer {
             }
             let Ok(entry) = entry else { continue };
             let world = entry.path();
-            if !is_real_dir(&world) || !is_real_dir(&super::authority::dir(&world)) {
+            // CP9 review LOW-5: worlds as the world list sees them (a
+            // symlinked world folder included); `handover/` itself must be a
+            // real directory, as the open guard requires.
+            if !world.is_dir() || !is_real_dir(&super::authority::dir(&world)) {
                 continue;
             }
             let Ok(store) = existing_store(&world) else { continue };
             match RetiredCommit::scan(&store) {
                 Ok(records) => {
                     for retired in records {
-                        if self.adopt(&world, retired) {
+                        if self.adopt(&world, retired, install) {
                             adopted += 1;
                         }
                     }
@@ -272,12 +342,30 @@ fn existing_store(world_dir: &Path) -> crate::handover::Result<MarkerStore> {
     super::authority::store(world_dir)
 }
 
+/// CP9 review LOW-1: the job leaves `jobs` however its thread ends (a
+/// panic included), so the transfer can be taken over again.
+struct JobGuard(Arc<Shared>, (Flavour, Id));
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
+    }
+}
+
+/// Sleep out a backoff, or less if the exit grace wakes the resumer.
+fn pause(shared: &Shared, wait: Duration) {
+    let (generation, cv) = &shared.wake;
+    let g = generation.lock().unwrap_or_else(|e| e.into_inner());
+    let start = *g;
+    let _ = cv.wait_timeout_while(g, wait, |g| *g == start);
+}
+
 /// One publication, until proven and recorded. Never aborts.
 fn run(shared: Arc<Shared>, world: PathBuf, retired: RetiredCommit) {
     let transfer = retired.transfer();
+    let _job = JobGuard(shared.clone(), (Flavour::Source, transfer));
     let mut failures = 0u32;
     let proof = loop {
-        match attempt(&shared, &retired) {
+        match attempt(&shared, &retired, failures) {
             Ok((proof, copies)) => {
                 log::info!("handover: Committed published and read back; {copies} other relay(s) took a copy");
                 break proof;
@@ -286,7 +374,7 @@ fn run(shared: Arc<Shared>, world: PathBuf, retired: RetiredCommit) {
                 failures = failures.saturating_add(1);
                 let wait = shared.backoff.delay(failures);
                 log::warn!("handover: Committed publication attempt {failures} failed ({e}); retrying in {wait:?}");
-                std::thread::sleep(wait);
+                pause(&shared, wait);
             }
         }
     };
@@ -300,21 +388,21 @@ fn run(shared: Arc<Shared>, world: PathBuf, retired: RetiredCommit) {
         };
         match retired.record_published(&store, &proof) {
             Ok(()) => break,
-            Err(_) if retired.is_published(&store).unwrap_or(false) => break,
+            Err(_) if retired.is_published(&store) => break,
             Err(e) => {
                 failures = failures.saturating_add(1);
                 let wait = shared.backoff.delay(failures);
                 log::warn!("handover: the Committed published record failed ({e}); retrying in {wait:?}");
-                std::thread::sleep(wait);
+                pause(&shared, wait);
             }
         }
     }
-    shared.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Source, transfer));
 }
 
 /// CP10: one import's wait for Committed, until Activated (or quarantined).
 /// Never aborts on its own.
 fn run_import(shared: Arc<Shared>, world: PathBuf, transfer: Id) {
+    let _job = JobGuard(shared.clone(), (Flavour::Import, transfer));
     let mut failures = 0u32;
     loop {
         // Re-read the durable state each attempt: a quarantine record (the
@@ -332,7 +420,7 @@ fn run_import(shared: Arc<Shared>, world: PathBuf, transfer: Id) {
             }
         };
         let Some((mut awaiting, store)) = awaiting else { break };
-        let outcome = attempt_import(&shared, &awaiting).and_then(|(proof, stored)| awaiting.activate(&store, &proof, &stored));
+        let outcome = attempt_import(&shared, &awaiting, failures).and_then(|(proof, stored)| awaiting.activate(&store, &proof, &stored));
         match outcome {
             Ok(_) => {
                 log::info!("handover: Committed found and read back; the import is activated");
@@ -345,11 +433,10 @@ fn run_import(shared: Arc<Shared>, world: PathBuf, transfer: Id) {
                 failures = failures.saturating_add(1);
                 let wait = shared.backoff.delay(failures);
                 log::warn!("handover: waiting for Committed, attempt {failures} ({e}); retrying in {wait:?}");
-                std::thread::sleep(wait);
+                pause(&shared, wait);
             }
         }
     }
-    shared.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Import, transfer));
 }
 
 fn unix_now() -> u64 {
@@ -363,6 +450,7 @@ fn unix_now() -> u64 {
 fn attempt_import(
     shared: &Shared,
     awaiting: &AwaitingCommit,
+    number: u32,
 ) -> crate::handover::Result<(crate::handover::crypto::VerifiedCommit, stored::StoredProof)> {
     let mut budget = Budget::new();
     #[cfg(test)]
@@ -377,7 +465,10 @@ fn attempt_import(
         let root = awaiting.root();
         let route = awaiting.route()?;
         let mut last = Err(crate::handover::Error::Invalid("no relay"));
-        for url in root.relays() {
+        let relays = root.relays();
+        for i in relay_order(relays.len(), number) {
+            let url = &relays[i];
+            budget.share_deadline(relay_share(relays.len()));
             let events = match stored::lookup(url, root, route, &mut budget, &NEVER).await {
                 Ok(e) => e,
                 Err(e) => {
@@ -406,6 +497,7 @@ fn attempt_import(
         proven: r.is_ok(),
         copies: 0,
         import: true,
+        first_relay: relay_order(awaiting.root().relays().len(), number)[0],
     });
     r
 }
@@ -414,7 +506,7 @@ fn attempt_import(
 /// root's order until one witnesses the exact event (the proof), then a
 /// best-effort copy to each other relay of the root. Returns the proof and
 /// how many copies a relay took.
-fn attempt(shared: &Shared, retired: &RetiredCommit) -> crate::handover::Result<(stored::StoredProof, usize)> {
+fn attempt(shared: &Shared, retired: &RetiredCommit, number: u32) -> crate::handover::Result<(stored::StoredProof, usize)> {
     let mut budget = Budget::new();
     #[cfg(test)]
     let (started, budget_deadline, budget_bytes_at_start) = (Instant::now(), budget.deadline(), budget.bytes_received());
@@ -428,7 +520,11 @@ fn attempt(shared: &Shared, retired: &RetiredCommit) -> crate::handover::Result<
         let relays = retired.root().relays();
         let mut last = Err(crate::handover::Error::Invalid("no relay"));
         let mut proven = None;
-        for (i, url) in relays.iter().enumerate() {
+        // MEDIUM-1: rotate the first relay per attempt, and give each relay
+        // its own share of the attempt (a copy never counts as proof).
+        for i in relay_order(relays.len(), number) {
+            let url = &relays[i];
+            budget.share_deadline(relay_share(relays.len()));
             match stored::publish_retired(url, retired, &mut budget, &NEVER).await {
                 Ok(p) => {
                     proven = Some((i, p));
@@ -440,7 +536,11 @@ fn attempt(shared: &Shared, retired: &RetiredCommit) -> crate::handover::Result<
         let Some((i, proof)) = proven else { return last };
         let mut copies = 0;
         for (j, url) in relays.iter().enumerate() {
-            if j != i && stored::copy_retired(url, retired, &mut budget, &NEVER).await.is_ok() {
+            if j == i {
+                continue;
+            }
+            budget.share_deadline(relay_share(relays.len()));
+            if stored::copy_retired(url, retired, &mut budget, &NEVER).await.is_ok() {
                 copies += 1;
             }
         }
@@ -455,6 +555,7 @@ fn attempt(shared: &Shared, retired: &RetiredCommit) -> crate::handover::Result<
         proven: r.is_ok(),
         copies: r.as_ref().map_or(0, |(_, c)| *c),
         import: false,
+        first_relay: relay_order(retired.root().relays().len(), number)[0],
     });
     r
 }
@@ -463,6 +564,18 @@ fn attempt(shared: &Shared, retired: &RetiredCommit) -> crate::handover::Result<
 mod tests {
     use super::*;
     /// The production schedule: 5 s doubling to a 300 s ceiling, for ever.
+    /// CP9 review MEDIUM-1: attempt k starts at relay k mod n; each relay
+    /// gets 25 s / n of the attempt, at least 5 s.
+    #[test]
+    fn handover_resumer_rotates_the_first_relay_and_shares_the_deadline() {
+        assert_eq!(relay_order(3, 0), vec![0, 1, 2]);
+        assert_eq!(relay_order(3, 1), vec![1, 2, 0], "attempt 1 didn't start at the next relay");
+        assert_eq!(relay_order(3, 5), vec![2, 0, 1]);
+        assert_eq!(relay_order(1, 7), vec![0]);
+        assert_eq!(relay_share(1), Duration::from_secs(25));
+        assert_eq!(relay_share(2), Duration::from_millis(12_500));
+        assert_eq!(relay_share(8), Duration::from_secs(5), "the floor");
+    }
     #[test]
     fn handover_resumer_backoff_doubles_to_its_ceiling_and_stays_there() {
         let b = Backoff::PRODUCTION;

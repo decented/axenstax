@@ -5657,7 +5657,8 @@ channel copy of each packet (`data.to_vec()`), its send queue and socket
 buffers, the QUIC/TLS stack's plaintext and the serialiser's internal
 buffers; the live invitation itself, held in memory by the online host
 while it hosts (its bearer, and every invite link string made from it: the
-Online panel, the clipboard, `/online` chat lines); and the HKDF state (the
+Online panel, `/online` chat lines; a link copied to the OS clipboard sits
+outside this process and can outlive it, for instance in clipboard history); and the HKDF state (the
 extracted keys in `crypto::recipient` and `prepared_ack_proof`, and the
 derived recipient keys); and, on the recipient, the payload buffers that
 carried the bearer into its Prepared receipt and Activated record are
@@ -5667,13 +5668,29 @@ retained copy are the next slices.
 
 Committed publication (CP9). One background resumer per process
 (`live::resumer::Resumer::global()`), owned by nothing a world owns:
-leaving the world, closing the window and dropping `GameState` never stop
-it. At Retired the source's pump hands it the publication
-(`SourceSession::hand_publication`, once); at start-up
-(`native_boot_services`) `Resumer::resume_all(worlds_root)` takes over every
-world whose `handover/` holds a retirement record and no "Committed
-published" record (bounded scan; it never creates `handover/` and never
-opens a world). Both read the record through the world's `MarkerStore` into
+leaving the world and dropping `GameState` never stop it. Quitting the
+process does (a detached thread doesn't outlive `main`): closing the window
+first gives it a bounded grace of at most 10 s (`Resumer::finish_within`,
+after the router-lease grace), waking any job sleeping out its backoff so it
+attempts at once and never blocking longer; what isn't done then resumes at
+the next launch from the record (CP9 review MEDIUM-2). At Retired (or `RetirementUncertain` whose record reads back, CP9 review
+LOW-4) the source's pump hands it the publication
+(`SourceSession::hand_publication`; handed only when the resumer took it or
+already holds it, otherwise logged and retried at most once a second, with a
+last try when the session ends; a panicking job leaves the job set through
+a drop guard, CP9 review LOW-1); at start-up
+(`native_boot_services` calls `Resumer::boot`, pinned by a test)
+`Resumer::resume_all(worlds_root)` takes over every world whose
+`handover/` holds a retirement record and no "Committed published" record
+(bounded scan over the world folders as the world list sees them, a
+symlinked folder included; `handover/` itself must be a real directory; it
+never creates `handover/` and never opens a world). CP9 review LOW-6: only
+a Commit signed by this install's runtime key
+(`resumer::install_runtime`) is ever published, by the scan or a session
+hand-off; any other record (a world folder unpacked by hand into `worlds/`
+can carry one; the in-game import never brings `handover/`) is logged and
+never contacts a relay. A v1 or tampered-relay record doesn't decode, so it
+is refused and never resumed (tested). Both read the record through the world's `MarkerStore` into
 a `phase::RetiredCommit`, the permit a restarted source publishes with: it
 has no bearer, so it can't rebuild a `VerifiedCommit`; `RetiredCommit` is
 built only by decoding a retirement record read through that store, and
@@ -5682,15 +5699,24 @@ core, the root's public context rebuilt from the stored relays, and the
 recipient key from the Commit's own signed `p` tag. `stored::publish_retired`
 accepts it (the same root binding, route, signature and size checks as
 `publish_readback`, then EVENT, matching OK and a fresh readback). Each
-attempt has a fresh `stored::Budget` bound to the one root (25 s); relays in
-the root's order until one witnesses the exact event by readback (the
-proof); then, in the same attempt, `stored::copy_retired` sends a
+attempt has a fresh `stored::Budget` bound to the one root (25 s); CP9
+review MEDIUM-1: attempt k starts at the root's relay k mod n and goes round
+the others, and each relay's publish and readback get their own share of
+the attempt (`Budget::share_deadline`, 25 s / n, at least 5 s), so a relay
+that never answers can't hold it (tested with a black-holed first relay);
+the first relay that witnesses the exact event by readback is the proof; then, in the same attempt, `stored::copy_retired` sends a
 best-effort copy (EVENT and matching OK, no readback, never a proof) to each
 other relay of the root, and the count is logged (not stored: the record
 stays deterministic). Between attempts the resumer waits 5 s, doubling to a
 300 s ceiling, and never gives up. Once proven it writes
 `published-<transfer>.dat` durably (0600; temp, fsync, rename, directory
-fsync) and drops that world; a world whose `handover/` has been deleted
+fsync) and drops that world. One rule reads it (CP9 review LOW-2): only a
+record of this exact Commit counts; unreadable or mismatched reads as not
+published and is rewritten (re-publishing identical bytes is safe). A
+stale temporary file of any marker kind (partial, empty or other bytes:
+it was never renamed, so nothing durable claims it) is replaced, never
+jamming a write; a temp path that isn't a regular file still refuses
+(CP9 review LOW-3); a world whose `handover/` has been deleted
 meanwhile has nowhere to record it and is dropped after the proof. The open
 guard still refuses the world after publication: retired is forever. The
 resumer is a detached thread, which does not outlive `main`: a publication
@@ -5732,11 +5758,13 @@ Committed is the persisted "awaiting Committed" state, the Prepared
 receipt with no Activated or quarantine record: the stall, the 15-minute
 cap and a closed link end nothing (the session stays `Prepared` and still
 reads the link while it is open). The game's pump hands the wait to the
-process's one resumer (`Resumer::adopt_import`, once, at Prepared), and
+process's one resumer (`Resumer::adopt_import` at Prepared; handed only
+when taken or already held, retried at most once a second), and
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
 which takes over every import whose working world's `handover/` holds a
 Prepared receipt and no Activated or quarantine record (bounded; creates
-nothing). Both read the receipt through the store into a
+nothing), only for a receipt whose Ready this install's runtime signed. The
+relay rotation, shares and exit grace above apply to it too. Both read the receipt through the store into a
 `phase::AwaitingCommit`, never the session's memory. Each attempt has a
 fresh `Budget`: relays in the root's order; on each, a lookup of the
 bearer's route, the stored Prepared re-opened under the bearer's key and

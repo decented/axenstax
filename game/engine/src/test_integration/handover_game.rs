@@ -901,9 +901,9 @@ fn game_harness_handover_retired_world_leaves_without_saving_and_its_commit_stil
     let store = crate::handover::live::authority::store(&world_dir).unwrap();
     let retired = RetiredCommit::read(&store, t).unwrap().expect("no retirement record");
     assert_eq!(retired.exact_bytes(), commit.as_bytes());
-    assert!(Resumer::global().holds(t) || retired.is_published(&store).unwrap(), "nothing holds the publication");
+    assert!(Resumer::global().holds(t) || retired.is_published(&store), "nothing holds the publication");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !retired.is_published(&store).unwrap() {
+    while !retired.is_published(&store) {
         assert!(std::time::Instant::now() < deadline, "the Committed published record never landed");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

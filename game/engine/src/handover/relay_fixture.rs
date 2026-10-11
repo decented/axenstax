@@ -19,6 +19,8 @@ struct State {
     /// Answer every REQ with EOSE only (a relay that acknowledges but
     /// doesn't keep, or withholds what it keeps).
     withhold: bool,
+    /// CP9 review MEDIUM-1: answer nothing at all (no OK, no EOSE).
+    black_hole: bool,
     /// Publications received (EVENT frames), stored or not.
     received: usize,
     /// Subscriptions answered (REQ frames).
@@ -51,6 +53,9 @@ async fn serve(sock: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
     while let Some(Ok(msg)) = ws.next().await {
         let Message::Text(text) = msg else { continue };
         let Ok(Value::Array(a)) = serde_json::from_str::<Value>(&text) else { continue };
+        if state.lock().unwrap().black_hole {
+            continue;
+        }
         let replies: Vec<Value> = match a.first().and_then(Value::as_str) {
             Some("EVENT") if a.len() == 2 => {
                 let Ok(ev) = Event::from_json(a[1].to_string()) else { continue };
@@ -127,6 +132,9 @@ impl Relay {
         if !s.events.iter().any(|e| e.id == ev.id) {
             s.events.push(ev);
         }
+    }
+    pub(crate) fn black_hole(&self, on: bool) {
+        self.state.lock().unwrap().black_hole = on;
     }
     pub(crate) fn withhold(&self, on: bool) {
         self.state.lock().unwrap().withhold = on;

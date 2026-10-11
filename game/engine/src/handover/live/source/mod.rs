@@ -186,6 +186,8 @@ pub struct SourceSession {
     permit: Option<PublicationPermit>,
     /// CP9: the Committed publication went to the background resumer.
     handed: bool,
+    /// CP9 review LOW-1: the last hand-off try (retried at most once a second).
+    hand_tried: Option<std::time::Instant>,
     #[cfg(test)]
     pack_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
@@ -245,6 +247,7 @@ impl SourceSession {
             commit: None,
             permit: None,
             handed: false,
+            hand_tried: None,
             #[cfg(test)]
             pack_hold: None,
             action,
@@ -322,17 +325,28 @@ impl SourceSession {
     /// record back through the world's store (`RetiredCommit`), the same
     /// path the start-up scan takes, so the exact persisted bytes are what
     /// is published. Once per session; false until handed.
+    /// CP9 review LOW-1/LOW-4: handed only when the resumer took it (or
+    /// already holds it); a failure is logged and retried at most once a
+    /// second (the start-up scan stays the backstop). A
+    /// `RetirementUncertain` session whose record reads back is handed too.
     pub fn hand_publication(&mut self, resumer: &super::resumer::Resumer) -> bool {
-        if self.handed || self.stage != SourceStage::Retired {
+        if self.handed || !matches!(self.stage, SourceStage::Retired | SourceStage::RetirementUncertain) {
             return self.handed;
         }
+        if self.hand_tried.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
+            return false;
+        }
+        self.hand_tried = Some(std::time::Instant::now());
         let Some(dir) = self.cfg.world_dir.as_ref() else { return false };
         let read = crate::handover::live::authority::store(dir)
             .and_then(|s| crate::handover::phase::RetiredCommit::read(&s, self.transfer));
         match read {
             Ok(Some(retired)) => {
-                resumer.adopt(dir, retired);
-                self.handed = true;
+                let install = self.cfg.runtime.public_key().to_bytes();
+                self.handed = resumer.adopt(dir, retired, install) || resumer.holds(self.transfer);
+                if !self.handed {
+                    log::error!("handover: the resumer couldn't take the Committed publication; retrying");
+                }
             }
             Ok(None) => log::error!("handover: retired, but no retirement record to publish"),
             Err(e) => log::error!("handover: the retirement record can't be read back: {e}"),
