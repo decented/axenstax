@@ -475,3 +475,90 @@ fn c3d_strict_container_broken_mid_contest_commits_nothing_and_conserves() {
     assert_eq!(ground(&hs), ground_before + 1, "nothing spilled twice");
     assert_eq!(all_holdings(&hs, &[a.i, b.i], cell), before, "every unit and durability conserved over both windows and the ground");
 }
+
+/// Run 11 (run-7 item 4) — a real Strict open past the event budget (1024
+/// numbered events its client hasn't applied): the typed refusal
+/// `OpenRefusal::TooLarge` with an Accepted row, never torn down, nothing
+/// opened or numbered, and no block entity conjured for a lazy chest (the
+/// fix: `ensure_container` runs after the reservation). Retained green:
+/// once the client applies what waits, the same open is served and only
+/// then creates the entity.
+#[test]
+fn c3d_strict_open_past_the_event_budget_is_too_large_and_conjures_nothing() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-container-too-large");
+    let mut hs = start_room_test_server("c3d-container-too-large", 0);
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
+    let mut j = join_as(&mut hs, KEY, 17);
+    let eye = hs.server.players[j.i].player.eye_pos();
+    let cell = [eye.x.floor() as i32 + 1, eye.y.floor() as i32 - 1, eye.z.floor() as i32];
+    let pos = (cell[0], cell[1], cell[2]);
+    hs.server.world.set_block(cell[0], cell[1], cell[2], crate::block::CHEST);
+    assert!(hs.server.world.chest_at(pos).is_none(), "a lazy chest: the block stands, no entity yet");
+    let sp = &mut hs.server.players[j.i];
+    for _ in 0..crate::action_journal::MAX_EVENT_ENTRIES {
+        crate::window_events::queue(sp, crate::window_events::WindowEvent::WearArmour { hits: 1 }, 0);
+    }
+    let waiting = hs.server.players[j.i].window_events.waiting();
+    let digest = Joiner::digest(&hs, j.i);
+    let open = j.op(&mut hs, protocol::WireWindowOp::OpenContainer { cell }, digest, true);
+    let (heard, opens) = heard_with_opens(&j.client);
+    assert!(heard.rejects.is_empty(), "never torn down: {:?}", heard.rejects);
+    assert_eq!(opens.iter().map(|o| o.refused).collect::<Vec<_>>(), vec![Some(protocol::OpenRefusal::TooLarge)], "the typed refusal");
+    assert_eq!(heard.receipts.last().map(|r| (r.action, r.fate)), Some((open, ActionFate::Accepted)), "an Accepted row");
+    let sp = &hs.server.players[j.i];
+    assert_eq!((sp.open_container, sp.window_events.waiting()), (None, waiting), "nothing opened, no view numbered");
+    assert!(hs.server.world.chest_at(pos).is_none(), "a refused open conjures no chest entity");
+    j.apply_all(&mut hs);
+    let digest = Joiner::digest(&hs, j.i);
+    let open = j.op(&mut hs, protocol::WireWindowOp::OpenContainer { cell }, digest, true);
+    let (heard, opens) = heard_with_opens(&j.client);
+    assert!(heard.rejects.is_empty() && opens.len() == 1 && opens[0].refused.is_none(), "served once the budget is free: {:?} {opens:?}", heard.rejects);
+    assert_eq!(heard.receipts.last().map(|r| (r.action, r.fate)), Some((open, ActionFate::Accepted)));
+    assert_eq!(hs.server.players[j.i].open_container, Some(cell));
+    assert!(hs.server.world.chest_at(pos).is_some(), "a served open creates the entity");
+}
+
+/// Run 11 (run-7 item 4) — pins the push path's Plan strip: a host puts a
+/// Plan whose body is past the 2 MiB event budget into a chest a Strict
+/// joiner has open; the push's numbered view holds the body-less
+/// placeholder (`strip_plan_body`), so it is reserved and sent, never torn
+/// down, and the real chest keeps the real body.
+#[test]
+fn c3d_strict_push_of_a_large_plan_counts_its_placeholder() {
+    let _g = crate::save::WorldsRootGuard::new("c3d-container-push-plan");
+    let mut hs = start_room_test_server("c3d-container-push-plan", 0);
+    hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects any mode");
+    let mut j = join_as(&mut hs, KEY, 17);
+    let cell = place_chest(&mut hs, j.i, &[(0, ItemStack::new_block(crate::block::STONE, 1))]);
+    let digest = Joiner::digest(&hs, j.i);
+    let open = j.op(&mut hs, protocol::WireWindowOp::OpenContainer { cell }, digest, true);
+    let (heard, opens) = heard_with_opens(&j.client);
+    assert!(heard.rejects.is_empty() && opens.len() == 1 && opens[0].refused.is_none(), "opened: {:?} {opens:?}", heard.rejects);
+    assert_eq!(heard.receipts.last().map(|r| (r.action, r.fate)), Some((open, ActionFate::Accepted)));
+    j.apply_all(&mut hs);
+    let mut body = crate::plan::PlanData::debug_3x3_stone();
+    let cell0 = body.cells[0].clone();
+    body.cells = vec![cell0; 3 * 1024 * 1024 / std::mem::size_of_val(&body.cells[0]).max(1)];
+    assert!(crate::body_residency::allocated_body_bytes(&body).unwrap() > crate::action_journal::MAX_RETAINED_BYTES, "a body past the event budget");
+    let marker = crate::plan::marker(&body);
+    let kind = ContainerKind::of_block(crate::block::CHEST).unwrap();
+    if let Some(crate::container_window::ContainerMut::Chest(chest)) = crate::container_window::container_at_mut(&mut hs.server.world, cell, kind) {
+        chest.slots[1] = Some(ItemStack { item: Item::Plan(body), count: 1 });
+    }
+    let waiting = hs.server.players[j.i].window_events.waiting();
+    hs.tick();
+    let (mut sets, mut rejects) = (0, Vec::new());
+    while let Some(pkt) = j.client.try_recv_from_server() {
+        match protocol::deserialize_header(&pkt) {
+            Some((protocol::PacketType::WindowSlotSet, _)) => sets += 1,
+            Some((protocol::PacketType::JoinReject, p)) => rejects.push(protocol::safe_deserialize::<protocol::JoinRejectPacket>(p).unwrap().reason),
+            _ => {}
+        }
+    }
+    assert!(rejects.is_empty(), "the push is never torn down: {rejects:?}");
+    assert_eq!(sets, 1, "the push was sent");
+    assert_eq!(hs.server.players[j.i].window_events.waiting(), waiting + 1, "its view was numbered");
+    let real = crate::container_window::container_at(&hs.server.world, cell, kind).unwrap();
+    let Some(ItemStack { item: Item::Plan(kept), .. }) = real.get(1) else { panic!("the real chest keeps the Plan") };
+    assert_eq!(crate::plan::marker(kept), marker, "the real body, untouched");
+}

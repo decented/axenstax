@@ -238,6 +238,25 @@ mod tests {
         assert!(resolve(over).is_none(), "one byte over is not stored");
     }
 
+    /// Run 11 (run-4 review LOW-5) — pins "no residency cap on Mirror":
+    /// Mirror's `remember` stores a body whose allocation alone is past the
+    /// 64 MiB residency cap while its encoding is small. Passing the
+    /// allocated bytes as resident (instead of 0) would refuse it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn c3d_mirror_store_has_no_residency_cap() {
+        let _g = crate::save::WorldsRootGuard::new("c3d-plans-no-residency-cap");
+        let mut body = PlanData::debug_3x3_stone();
+        body.name = "Past the residency cap in allocation, small in encoding".into();
+        let element = std::mem::size_of_val(&body.cells[0]);
+        body.cells.reserve_exact(crate::action_capacity::MAX_RESIDENT_BODY_BYTES / element + 1);
+        assert!(crate::body_residency::allocated_body_bytes(&body).unwrap() > crate::action_capacity::MAX_RESIDENT_BODY_BYTES);
+        let marker = crate::plan::marker(&body);
+        remember(&body);
+        assert!(REMEMBERED.with(|set| set.borrow().contains(&cache_key(marker))), "Mirror stored it: no residency cap");
+        assert_eq!(resolve(marker).map(|b| b.cells), Some(body.cells.clone()), "and it resolves");
+    }
+
     #[test]
     fn c3d_encoding_scratch_is_reserved_before_store_allocation_or_write() {
         let _g = crate::save::WorldsRootGuard::new("c3d-plans-scratch");

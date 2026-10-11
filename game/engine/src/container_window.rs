@@ -1195,6 +1195,32 @@ pub fn container_at_mut(world: &mut World, cell: [i32; 3], kind: ContainerKind) 
     }
 }
 
+/// C3d run 11 (run-7 item 4) — the block entity [`ensure_container`] would
+/// create for `kind`, as a value: what a container whose entity is still
+/// missing (a lazy chest) holds, so it can be viewed before anything is
+/// created.
+pub enum FreshContainer {
+    Chest(ChestData),
+    Furnace(FurnaceData),
+}
+
+impl FreshContainer {
+    pub fn of(kind: ContainerKind) -> Self {
+        match kind {
+            ContainerKind::Chest { tier } => Self::Chest(ChestData::for_tier(tier)),
+            ContainerKind::Dispenser | ContainerKind::Dropper => Self::Chest(crate::dispenser::DispenserData::new().chest),
+            ContainerKind::Furnace => Self::Furnace(FurnaceData::default()),
+        }
+    }
+
+    pub fn view(&self) -> ContainerRef<'_> {
+        match self {
+            Self::Chest(chest) => ContainerRef::Chest(chest),
+            Self::Furnace(furnace) => ContainerRef::Furnace(furnace),
+        }
+    }
+}
+
 /// Create the block entity of `kind` at `cell` if it is missing, as a
 /// client's open always has (a chest sized to its tier, a fresh dispenser,
 /// an empty furnace).

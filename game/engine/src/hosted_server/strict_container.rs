@@ -147,10 +147,18 @@ impl HostedServer {
             Ok(kind) => kind,
             Err(why) => return self.answer_refused_open(i, action, op.op_seq, cell, why),
         };
-        cw::ensure_container(&mut self.server.world, cell, kind);
-        let Some(view) = cw::container_at(&self.server.world, cell, kind) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "the container vanished while opening");
-            return false;
+        // Run 11 (run-7 item 4) — the view is read without conjuring the
+        // block entity: a missing one (a lazy chest) views as the fresh one
+        // `ensure_container` would create, and it is created only once the
+        // view and the result row are reserved, so a refused open
+        // (`TooLarge`) leaves the world exactly as it was.
+        let fresh;
+        let view = match cw::container_at(&self.server.world, cell, kind) {
+            Some(view) => view,
+            None => {
+                fresh = cw::FreshContainer::of(kind);
+                fresh.view()
+            }
         };
         // Run 5 (run-4 review LOW-2) — the view models what the client's
         // mirror holds: a Plan as the body-less placeholder (Plans stay in
@@ -170,6 +178,7 @@ impl HostedServer {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "container open result history is full");
             return false;
         };
+        cw::ensure_container(&mut self.server.world, cell, kind);
         let sp = &mut self.server.players[i];
         sp.open_container = Some(cell);
         sp.container_sent.open_kind = Some(kind);
