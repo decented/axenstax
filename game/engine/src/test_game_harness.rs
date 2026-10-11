@@ -2843,6 +2843,54 @@ mod tests {
         assert_eq!((sp.possession.ammo_believed, sp.possession.mismatched), (0, 0));
     }
 
+    /// C3d run 13 — a STRICT joiner holding right-click with its bow sends
+    /// each shot as ONE typed action through the real `GameState::send_shot`
+    /// (`strict_requests::route_shot`), never the legacy request: never torn
+    /// down, every reservation retired, no Strict refusal, and each shot paid
+    /// on both copies from the server's numbered Take (the client predicts
+    /// nothing).
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_strict_joiner_holding_its_bow_is_served_typed() {
+        use crate::item::{Item, MaterialId};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-strict-bow");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-strict-bow-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Archer", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+        }
+        clear_pad(&mut hg, Some(&mut server));
+        arm_bow(&mut hg, Some((&mut server, slot)), 16);
+        harness_step(&mut server, &mut hg);
+        hold_right_click(&mut hg, Some(&mut server), 60, 40);
+        settle(&mut server, &mut hg);
+        let client = hg.state.remote_client.as_ref().unwrap();
+        assert!(client.is_connected(), "an honest Strict archer is never torn down");
+        assert_eq!(client.action_journal.as_ref().map(|j| j.len()), Some(0), "every typed shot retired");
+        let arrow = Item::Material(MaterialId::Arrow);
+        let client_shots = 16 - held_units(&hg.state.players[0].inventory, &arrow);
+        let sp = &server.server.players[slot];
+        assert!(client_shots >= 2, "the held bow fired: {client_shots}");
+        assert_eq!(16 - held_units(&sp.inventory, &arrow), client_shots, "both copies paid each shot");
+        assert_eq!((sp.strict_refusals.stale_world, sp.strict_refusals.other), (0, 0), "no Strict refusal");
+    }
+
     // ─── C3c-1-fix ─────────────────────────────────────────────────────────
 
     /// Units of `item` in `inv`'s 36 slots.

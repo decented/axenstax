@@ -22544,7 +22544,19 @@ impl super::GameState {
             charge: crate::shot::max_charge(weapon),
         };
         let asked = crate::joiner_actions::Asked::Shoot { weapon, material: tool.material };
-        self.send_use_request(pidx, asked, Some(ammo), hot, action)
+        // C3d run 13 — a Strict seat reserves ONE typed shot and predicts
+        // nothing (`strict_requests`); Mirror sends the legacy request.
+        let pending = crate::joiner_actions::Pending { kind: asked, mob: None, hotbar_slot: hot, held: Some(ammo.clone()) };
+        let p = &mut self.players[pidx];
+        match crate::strict_requests::route_shot(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, &action) {
+            Ok(crate::strict_requests::ShotRoute::Typed(_)) => true,
+            Ok(crate::strict_requests::ShotRoute::Unaffordable) => false,
+            Ok(crate::strict_requests::ShotRoute::Legacy) => self.send_use_request(pidx, asked, Some(ammo), hot, action),
+            Err(error) => {
+                log::warn!("Strict shot could not be reserved: {error}");
+                false
+            }
+        }
     }
 
     /// C3c-2 — player `pidx` (a joiner) places the cart in hand on the rail

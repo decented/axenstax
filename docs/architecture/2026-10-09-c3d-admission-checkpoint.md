@@ -634,3 +634,19 @@ Coordinator decisions on run 3's departures, as built:
 - **Container note.** A waiting container `Correction` makes a refusal's
   `Replace` a `FellBehind` teardown (fail-closed; `event_heap_bytes` has no
   measure for it).
+
+## Run 13 — the client sends a typed shot
+
+- `strict_requests::route_shot` (client): on a Strict seat, the auto-refill
+  setting, then the `joiner_actions` record (the outcome's `seq` and the
+  ammo claim), then ONE reserved `ActionIntent::Item(Shoot)` (recipe
+  `ShotRecipe { slot, weapon, digest }`, no cells), then the send. No
+  prediction: the server's Take and Wear arrive on the outcome. A failed
+  reservation releases the record. Mirror: `ShotRoute::Legacy`, the old
+  request unchanged (`GameState::send_shot`).
+- Server: a shot whose payment the server's copy can't make
+  (`StrictStageError::MissingPayment`) is a corrected refusal (it was a
+  `FellBehind` teardown).
+- No GPU harness shot rig exists (`test_game_harness.rs` has none); the
+  client half is pinned on a real `RemoteClient`
+  (`hosted_server/c3d_client_shot_tests.rs`).

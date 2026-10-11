@@ -47,6 +47,8 @@ mod c3d_death_client_tests;
 mod c3d_client_edit_tests;
 #[cfg(test)]
 mod c3d_refusal_correction_tests;
+#[cfg(test)]
+mod c3d_client_shot_tests;
 
 use std::collections::VecDeque;
 

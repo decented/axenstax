@@ -37,6 +37,9 @@ pub(super) struct Joined {
     pub(super) world: crate::world::World,
     pub(super) intake: crate::chunk_intake::ChunkIntake,
     pub(super) reg: crate::block::BlockRegistry,
+    /// C3d run 13 — the client's request ledger (a shot's `seq` and claim);
+    /// an `ItemActionOutcome` is applied through it as the game loop does.
+    pub(super) actions: crate::joiner_actions::JoinerActions,
 }
 
 /// A real `RemoteClient` joined (as a guest) to a Strict dedicated server
@@ -67,7 +70,7 @@ pub(super) fn joined(tag: &str, items: &[(usize, ItemStack)], refill: bool) -> J
     let mut j = Joined {
         _g: g, hs, rc, i: 0, inv, armour: [None; 4], ui: crate::craft_ui::CraftingUi::new(),
         inbox: Default::default(), world: crate::world::World::new(), intake: Default::default(),
-        reg: crate::block::BlockRegistry::new(),
+        reg: crate::block::BlockRegistry::new(), actions: Default::default(),
     };
     for _ in 0..20 {
         j.pump();
@@ -99,7 +102,7 @@ pub(super) fn joined(tag: &str, items: &[(usize, ItemStack)], refill: bool) -> J
 impl Joined {
     /// One server tick, then the client: its packets read, its window events
     /// applied in event order, its world intake (block changes, receipts).
-    fn pump(&mut self) {
+    pub(super) fn pump(&mut self) {
         self.hs.tick();
         self.rc.poll();
         let outcomes = std::mem::take(&mut self.rc.pending_outcomes);
@@ -116,6 +119,13 @@ impl Joined {
                 }
                 InboxItem::Grant(grant) => {
                     crate::remote_entities::apply_inventory_grant(&mut self.inv, &grant, &self.reg);
+                }
+                // `GameState::apply_item_action_outcome`'s window half.
+                InboxItem::Outcome(RequestOutcome::Item(out)) => {
+                    if let Some(request) = self.actions.take(out.seq) {
+                        crate::joiner_actions::apply_item_outcome(&mut self.inv, &mut self.ui, &request, &out);
+                        crate::joiner_actions::apply_use_wear(&mut self.inv, &request, &out);
+                    }
                 }
                 _ => {}
             }
