@@ -299,6 +299,29 @@ impl MarkerStore {
             Err(_) => Err(Error::Io),
         }
     }
+    /// CP16 (CP15 review MEDIUM-1): whether this folder can still take
+    /// one record of each kind in `kinds` (by `check_capacity`'s own rule:
+    /// fewer than 64 of a kind, fewer than 256 entries before each write)
+    /// and `files` more entries in all. Checked before the bearer leaves, so
+    /// a disclosed transfer can always write the records it may still need.
+    pub fn has_room(&self, kinds: &[MarkerKind], files: usize) -> Result<bool> {
+        let mut total = 0usize;
+        let mut same = vec![0usize; kinds.len()];
+        for entry in fs::read_dir(&self.directory).map_err(|_| Error::Io)? {
+            total += 1;
+            if total + files > 256 {
+                return Ok(false);
+            }
+            let name = entry.map_err(|_| Error::Io)?.file_name();
+            let name = name.to_str().ok_or(Error::Invalid("marker filename"))?;
+            for (n, kind) in same.iter_mut().zip(kinds) {
+                if name.starts_with(&format!("{}-", kind.label())) && name.ends_with(".dat") {
+                    *n += 1;
+                }
+            }
+        }
+        Ok(kinds.iter().zip(&same).all(|(k, n)| n + kinds.iter().filter(|x| *x == k).count() <= 64))
+    }
     fn check_capacity(&self, kind: MarkerKind) -> Result<()> {
         let mut total = 0usize;
         let mut same = 0usize;

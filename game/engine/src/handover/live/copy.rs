@@ -128,13 +128,20 @@ pub const WORLD_IN_TWO_PLACES: &str = "This world may now exist in two places.";
 /// on disk, so the next start of this game publishes the cancellation.
 /// CP16 (CP14 review LOW-1): said only when no Aborted went to the other
 /// player (no link, or the send failed); `ABORT_UNRECORDED_SENT` otherwise.
+/// CP16 (CP15 review MEDIUM-1): no promise of the next start: the room for
+/// the record is checked before the bearer leaves, but a save that keeps
+/// failing (a full disk) fails at every start too.
 pub const ABORT_UNRECORDED: &str =
-    "The cancellation couldn't be saved. The other player's game will keep waiting for this handover until this game is next started.";
+    "The cancellation couldn't be saved. The other player's game will keep waiting for this handover until this game manages to save it; it tries again each time it starts.";
 /// CP16 (CP14 review LOW-1): the abort record couldn't be saved, but the
 /// signed cancellation was sent over the link. A recipient that got it
 /// stops waiting; only one that didn't keeps waiting.
 pub const ABORT_UNRECORDED_SENT: &str =
-    "The cancellation couldn't be saved here, but it was sent. If it didn't reach the other player, their game will keep waiting for this handover until this game is next started.";
+    "The cancellation couldn't be saved here, but it was sent. If it didn't reach the other player, their game will keep waiting for this handover until this game manages to save it; it tries again each time it starts.";
+/// CP16 (CP15 review MEDIUM-1): this world's `handover/` has no room for
+/// every record a handover may need (checked before the bearer leaves).
+pub const WORLD_RECORDS_FULL: &str =
+    "This world has no room for another handover record, so the handover stopped. Nothing was handed over. Play has resumed.";
 /// CP15: the pending abort record couldn't be saved before the bearer could
 /// leave, so nothing was handed over.
 pub const PENDING_ABORT_UNWRITTEN: &str =

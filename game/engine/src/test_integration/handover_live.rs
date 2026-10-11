@@ -2390,6 +2390,68 @@ mod session {
         );
     }
 
+    /// CP16 (CP15 review MEDIUM-1 + CP15 residual, the 64-per-kind cap):
+    /// a world folder already holding 64 records of a kind a disclosed
+    /// transfer may still need (abort records; "published" records) refuses
+    /// the handover at disclosure with `WORLD_RECORDS_FULL`: no bearer left,
+    /// no pending abort record, no receipt on the recipient. One fewer (63)
+    /// still hands over, and its post-disclosure abort writes the 64th
+    /// abort record: the cap is reached through aborts and never stops one.
+    fn plant(world: &std::path::Path, kind: crate::handover::durable::MarkerKind, n: u8) {
+        let store = crate::handover::live::authority::store(world).unwrap();
+        for i in 0..n {
+            let mut id = [0xEE; 16];
+            id[0] = i;
+            store.persist(kind, id, b"an earlier handover's record").unwrap();
+        }
+    }
+    fn refused_when_full(tag: &str, kind: crate::handover::durable::MarkerKind) {
+        let mut p = ready_pair(tag);
+        let t = p.src.transfer();
+        let world = p.dir.0.join("world");
+        plant(&world, kind, 64);
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(
+            p.src.stage(),
+            SourceStage::Aborted(crate::handover::live::copy::WORLD_RECORDS_FULL),
+            "a world with 64 {kind:?} records wasn't refused at disclosure"
+        );
+        assert!(!p.src.bearer_disclosed(), "the bearer left a world with no room for its records");
+        let dir = crate::handover::live::authority::dir(&world);
+        assert!(!dir.join(format!("pending-abort-{}.dat", hex::encode(t))).exists(), "a pending abort record was written");
+        assert!(!has_record(&p.dir, "prepared", t), "the recipient holds a receipt");
+        assert!(!p.hs.handover_frozen(), "the refused handover kept the world frozen");
+        let line = p.src.end_line(crate::handover::live::copy::WORLD_RECORDS_FULL);
+        assert!(!line.contains(crate::handover::live::copy::INVITE_REISSUED), "{line}");
+    }
+    #[test]
+    fn handover_a_world_with_64_abort_records_refuses_before_disclosure() {
+        refused_when_full("full-aborted", crate::handover::durable::MarkerKind::Aborted);
+    }
+    #[test]
+    fn handover_a_world_with_64_published_records_refuses_before_disclosure() {
+        refused_when_full("full-published", crate::handover::durable::MarkerKind::Published);
+    }
+    #[test]
+    fn handover_the_64th_abort_record_is_written_by_a_real_abort() {
+        let mut p = ready_pair("abort-64th");
+        let t = p.src.transfer();
+        let world = p.dir.0.join("world");
+        plant(&world, crate::handover::durable::MarkerKind::Aborted, 63);
+        plant(&world, crate::handover::durable::MarkerKind::Published, 63);
+        p.drop_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        drive(&mut p, SourceStage::Prepared);
+        assert!(p.src.bearer_disclosed(), "63 abort records refused a handover that had room");
+        p.src.abort(&mut p.hs, crate::handover::live::copy::LEFT);
+        assert!(p.src.abort_recorded(), "the 64th abort record wasn't written");
+        let dir = crate::handover::live::authority::dir(&world);
+        assert!(dir.join(format!("aborted-{}.dat", hex::encode(t))).exists());
+        let store = crate::handover::live::authority::store(&world).unwrap();
+        use crate::handover::durable::MarkerKind::{Aborted, Published};
+        assert_eq!(store.has_room(&[Aborted], 0), Ok(false), "64 abort records still leave room");
+        assert_eq!(store.has_room(&[Published], 0), Ok(true), "the 64th published record has no room");
+    }
+
     /// CP16 (CP14 review LOW-1, LOW-4): the hosted server has gone, so no
     /// Aborted can be sent. With the abort record failing, the line keeps
     /// "will keep waiting"; either way the late-save fence lifts and the

@@ -5982,7 +5982,9 @@ fsynced first, BEFORE the source unfreezes. It never refuses the source's
 own world (the open guard reads only `retired-*`). If it can't be written
 the source unfreezes anyway (the world is the source's), logs it, and its
 line adds "The cancellation couldn't be saved. The other player's game
-will keep waiting for this handover until this game is next started."
+will keep waiting for this handover until this game manages to save it; it
+tries again each time it starts." (CP16, CP15 review MEDIUM-1: no promise
+of the next start, since a save that keeps failing fails then too)
 (CP15: the pending abort record below is still on disk, and the next start
 promotes and publishes it) (`copy::ABORT_UNRECORDED`; CP14b, CP13b
 review LOW-3: a recipient past its ack can't cancel, so it doesn't say it
@@ -5993,7 +5995,25 @@ only when no Aborted went out (no link, the send failed, or
 `abort_without_server`); when the sealed Aborted was sent, the line is
 "The cancellation couldn't be saved here, but it was sent. If it didn't
 reach the other player, their game will keep waiting for this handover
-until this game is next started." (`copy::ABORT_UNRECORDED_SENT`). **Exclusivity:** one function
+until this game manages to save it; it tries again each time it starts."
+(`copy::ABORT_UNRECORDED_SENT`). CP16 (CP15 review MEDIUM-1): before the
+bearer can leave, `disclose` also checks the world's `handover/` for room
+for every record the disclosed transfer may still need
+(`MarkerStore::has_room`: one more pending abort, Retired, Aborted and
+"published" record, each under the 64-per-kind cap, and three more
+entries under the 256-entry folder cap); no room, or a folder that can't
+be read, refuses the handover with nothing disclosed: "This world has no
+room for another handover record, so the handover stopped. Nothing was
+handed over. Play has resumed." (`copy::WORLD_RECORDS_FULL`). So a
+disclosed transfer's abort record (and its promotion at start-up) never
+meets the cap. Abort and "published" records are never removed, so one
+world folder takes at most 64 handovers that got past disclosure (each
+leaves one "published" record, 63 aborted ones plus the one that
+retires it, or 64 aborted ones); the 65th is refused before disclosure.
+A handover refused before disclosure leaves no record. CP15 review LOW-1:
+the source phase is built before the pending record is written, so
+nothing can fail between that write and the disclosure and leave an
+orphan record behind. **Exclusivity:** one function
 (`phase::write_terminal`, under one process-wide lock) writes either the
 retirement record or the abort record of a transfer, and refuses when the
 other exists or can't be read: `retire` refuses on an abort record (the

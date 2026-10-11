@@ -22,6 +22,23 @@ impl SourceSession {
         if !crate::handover::ledger::Ledger::install().has_room(2) {
             return Err(Refusal(crate::handover::live::copy::LEDGER_FULL));
         }
+        // CP16 (CP15 review MEDIUM-1): room in this world's `handover/` for
+        // every record a disclosed transfer may still need: its pending
+        // abort record, a terminal record of EITHER kind (Retired or
+        // Aborted) and its "published" record. Three more entries at most
+        // (the pending record is removed once a terminal record lands; one
+        // spare covers a removal that failed). Without it a 65th abort could
+        // never be recorded or promoted, and the recipient would wait for
+        // ever. No room, or the folder can't be read: nothing is disclosed.
+        {
+            use crate::handover::durable::MarkerKind::{Aborted, PendingAbort, Published, Retired};
+            let dir = self.cfg.world_dir.as_ref().ok_or(Refusal(crate::handover::live::copy::NEVER_SAVED))?;
+            let room = crate::handover::live::authority::store(dir).and_then(|s| s.has_room(&[PendingAbort, Retired, Aborted, Published], 3));
+            if !matches!(room, Ok(true)) {
+                log::warn!("handover: this world's handover records have no room for another handover ({room:?}); nothing was disclosed");
+                return Err(Refusal(crate::handover::live::copy::WORLD_RECORDS_FULL));
+            }
+        }
         let unsealed = Refusal("The handover record couldn't be sealed. Play has resumed.");
         let core = self.core.clone().ok_or(Refusal("No certificate."))?;
         let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;
@@ -64,6 +81,11 @@ impl SourceSession {
             return Err(unsealed);
         };
         let record = AbortRecord::new(&va, &vp, ev.as_json().into_bytes(), self.cfg.root.relays().to_vec()).map_err(|_| unsealed.clone())?;
+        // CP16 (CP15 review LOW-1): the phase is built BEFORE the pending
+        // record is written, so nothing can fail between that write and the
+        // disclosure and leave an orphan record for a transfer that never
+        // disclosed (the next start-up would publish its Aborted).
+        let phase = crate::handover::phase::Source::frozen(core, &self.cfg.authority).map_err(|_| unsealed)?;
         let store = self.cfg.world_dir.as_ref().map(|d| crate::handover::live::authority::store(d));
         let Some(Ok(store)) = store else { return Err(unwritten) };
         if let Err(e) = crate::handover::phase::write_pending_abort(&store, &crate::handover::ledger::Ledger::install(), &record) {
@@ -74,7 +96,6 @@ impl SourceSession {
             return Err(unwritten);
         }
         self.pending_abort = Some((ev, record));
-        let phase = crate::handover::phase::Source::frozen(core, &self.cfg.authority).map_err(|_| unsealed)?;
         // Set before the send: a partly written frame may have left.
         self.disclosed = true;
         self.send(hs, &Frame::Bearer { transfer: self.transfer, bearer: self.cfg.bearer.clone() })?;
