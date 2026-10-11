@@ -639,7 +639,7 @@ impl SourceSession {
                 // Re-authenticated: the same identity, seat and records,
                 // still eligible, then freeze.
                 self.check(hs, live)?;
-                hs.handover_freeze().map_err(Refusal)?;
+                hs.handover_freeze(self.cfg.world_dir.as_deref()).map_err(Refusal)?;
                 self.recipient_runtime = Some(runtime);
                 self.recipient_challenge = challenge;
                 self.acceptance = Some(acceptance);

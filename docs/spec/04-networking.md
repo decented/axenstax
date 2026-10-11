@@ -5580,7 +5580,39 @@ host start, dedicated-server start), `refuse_write_over_newer_save`
 (`save_world`, `write_world_folder`, the five-minute `autosave_world`,
 `GameServer::try_save`) and `save_world_meta`; `load_world`, `load_autosave`,
 `GameServer::save_joiner` and `save_live_world` also check it directly. A
-late save job therefore can't rewrite retired authority. Windows: the marker
+late save job therefore can't rewrite retired authority.
+
+The late-save fence (CP14; `save_fence`). Every writer into a world's folder
+runs synchronously on its caller's thread: the world save (`save_world`,
+`write_world_folder`, the first save's staged chunks and their publication),
+chunk files and chunk deletions, the five-minute `autosave_world` (which
+`GameState::tick` runs with no freeze check of its own) and its meta flush,
+`save_world_meta`, `clear_autosave`, joiner sidecars (`save_joiner`, on every
+leave and autosave), the exit save (`save_live_world`, which also refuses a
+frozen world itself), `GameServer::try_save`, and the damaged-file set-asides
+a load makes (`quarantine_corrupt`, `keep_damaged_copy_once`,
+`copy_damaged_aside`). There is no save worker, so no save is in flight on
+another thread at the freeze; the fence makes that structural.
+`HostedServer::handover_freeze(world_dir)` raises a per-world fence before
+the capture is taken; raising takes the commit lock, so a commit already
+under way finishes first and the capture reflects the last save that landed.
+Every commit (`save::write_atomic`/`write_atomic_nosync`'s rename, the staged
+publication's rename, chunk and autosave deletions, the set-asides) checks the
+fence under that lock immediately before it commits; a fenced commit is
+discarded (its temp file removed, one log line) and its save returns the
+error. Writers also refuse early (`refuse_write_over_newer_save`,
+`meta_write_blocked`), before any temp file or folder. The fence lifts only in
+`handover_release` before retirement (an abort that unfreezes); a retired
+link marks it retired and it never lifts in that process; the retirement
+record keeps the world refused after a restart. A HostedServer torn down while
+frozen before retirement leaves the fence up for the process (fail closed).
+No save writes under a world's `handover/`: the save's commit refuses a path
+there (a world folder being a fenced folder, a child of the worlds root, or a
+folder holding `world.dat` or `world_meta.json`). Tested: a save held at its
+commit point across freeze and retirement is discarded (the retirement record
+byte-identical, the world's files unchanged since the capture, the world still
+refused); a frozen world's autosave is refused and lands after an abort.
+Windows: the marker
 and inert stores skip the directory fsync (a directory can't be opened as a
 file there; the rename is NTFS-journaled, as for ordinary saves). Those lines
 are not compiled or tested on this Linux-only build.

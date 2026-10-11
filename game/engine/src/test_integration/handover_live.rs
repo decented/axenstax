@@ -83,7 +83,7 @@ fn handover_link_binds_only_the_exact_authenticated_seat() {
     client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Disconnect, &()));
     host.lend_tick(&mut hs);
     assert!(hs.handover_check().is_err());
-    assert!(hs.handover_freeze().is_err());
+    assert!(hs.handover_freeze(None).is_err());
     assert!(!hs.handover_frozen());
 }
 
@@ -95,7 +95,7 @@ fn handover_frozen_source_runs_no_tick_admits_nobody_and_resumes_after_release()
     let accept = hs.test_accept_channel();
     let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
     let _ = frames_for(&other);
-    hs.handover_freeze().unwrap();
+    hs.handover_freeze(None).unwrap();
     // Every joined player is told play is paused, so its client stops sending.
     use crate::handover::live::wire::Frame;
     assert_eq!(frames_for(&other), vec![Frame::Notice { transfer: T, paused: true }]);
@@ -148,7 +148,7 @@ fn handover_frozen_guest_flood_is_bounded_and_kicked_at_release() {
     let (_client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x54; 32]);
     let (guest, guest_slot, _, _) = signed_join_lent(&mut hs, &mut host, [0x55; 32]);
     let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
-    hs.handover_freeze().unwrap();
+    hs.handover_freeze(None).unwrap();
     let junk = vec![0u8; 60 * 1024];
     let n = crate::transport::MAX_INBOUND_BYTES / junk.len() + 8;
     for _ in 0..n {
@@ -219,7 +219,7 @@ fn handover_dropped_session_lease_releases_the_source_and_tells_the_recipient() 
     let (mut hs, mut host) = start_lent("handover-lease");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x54; 32]);
     let lease = hs.handover_bind(slot, generation, key, T).unwrap();
-    hs.handover_freeze().unwrap();
+    hs.handover_freeze(None).unwrap();
     let tally = host.world.sim_tally;
     host.lend_tick(&mut hs);
     assert!(hs.handover_frozen() && host.world.sim_tally == tally, "held lease: still frozen");
@@ -238,7 +238,7 @@ fn handover_release_discards_a_departed_recipients_waiting_edits() {
     let (mut hs, mut host) = start_lent("handover-departed");
     let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [0x55; 32]);
     let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
-    hs.handover_freeze().unwrap();
+    hs.handover_freeze(None).unwrap();
     let cell = cell_beside(&hs, slot, 1, 0, 0);
     let before = host.world.get_block(cell.0, cell.1, cell.2);
     send_edits(&hs, &client, slot, 1, &[(cell, block::GLASS)]);
@@ -337,7 +337,7 @@ fn handover_silent_freeze_past_the_quic_idle_timeout_keeps_guest_and_recipient()
     let guest = connect_to_server_with(addr, live).unwrap();
     let (guest_slot, ..) = signed_join_quic(&mut hs, &mut host, &guest, [0x72; 32]);
     let _lease = hs.handover_bind(slot, generation, key, T).unwrap();
-    hs.handover_freeze().unwrap();
+    hs.handover_freeze(None).unwrap();
     // Silence for twice the idle timeout: frozen ticks, nothing sent.
     let until = Instant::now() + live.idle * 2;
     while Instant::now() < until {
@@ -1592,6 +1592,104 @@ mod session {
             crate::handover::live::authority::open_guard(&dir.0.join("world")).unwrap_err().0,
             crate::handover::live::copy::RETIRED
         );
+    }
+
+    /// Every file under `dir` (relative path -> bytes); folders aren't files.
+    fn files(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.insert(path.strip_prefix(dir).unwrap().display().to_string(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        out
+    }
+    /// The fixture's world folder (`<dir>/world`) as a real saved world.
+    fn seed_world(p: &Pair) {
+        crate::save::with_worlds_root(&p.dir.0, || {
+            crate::save::write_world_folder(
+                "world",
+                &crate::save::WorldMeta::new("world"),
+                &crate::save::minimal_world_save_for_tests(77),
+                &crate::world::World::new(),
+            )
+        })
+        .unwrap();
+    }
+    /// The frame's five-minute autosave of the fixture's world.
+    fn autosave(root: &std::path::Path) -> Result<(), String> {
+        crate::save::with_worlds_root(root, || {
+            crate::save::autosave_world("world", &crate::world::World::new(), std::slice::from_ref(&seat0()), 77, &[], &[])
+        })
+    }
+
+    /// CP14 (CP9 step 4): a save queued before the freeze whose commit comes
+    /// only after retirement is discarded at its commit: the retirement
+    /// record is byte-identical, the world's files are unchanged since the
+    /// capture, and the world still refuses to open.
+    #[test]
+    fn handover_late_save_queued_before_the_freeze_never_lands_after_retirement() {
+        let mut p = pair("late-save");
+        seed_world(&p);
+        let world = p.dir.0.join("world");
+        let before = files(&world);
+        assert!(before.contains_key("world.dat"));
+        // Queue the save: it runs up to its commit point and waits there.
+        let hold = crate::save_fence::hold::hold(&world);
+        let root = p.dir.0.clone();
+        let late = std::thread::spawn(move || autosave(&root));
+        assert!(hold.wait_arrived(), "the save never reached its commit");
+        // Freeze (the capture), then retire.
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 10_000);
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let t = p.src.transfer();
+        let record = crate::handover::live::authority::dir(&world).join(format!("retired-{}.dat", hex::encode(t)));
+        let retired = std::fs::read(&record).unwrap();
+        let records = files(&crate::handover::live::authority::dir(&world));
+        // Now let the save complete.
+        hold.release();
+        assert_eq!(late.join().unwrap().unwrap_err(), crate::save_fence::DISCARDED);
+        assert_eq!(std::fs::read(&record).unwrap(), retired, "the retirement record changed");
+        assert_eq!(files(&crate::handover::live::authority::dir(&world)), records);
+        let mut now_files = files(&world);
+        now_files.retain(|k, _| !k.starts_with("handover"));
+        assert_eq!(now_files, before, "a late save changed the world after the capture");
+        assert_eq!(
+            crate::handover::live::authority::open_guard(&world).unwrap_err().0,
+            crate::handover::live::copy::RETIRED,
+            "the retired world opens"
+        );
+        assert!(crate::save::with_worlds_root(&p.dir.0, || crate::save::world_open_refusal("world")).is_some());
+        // And it stays fenced: a later save is refused too.
+        assert!(autosave(&p.dir.0).is_err());
+    }
+
+    /// CP14: the fence lifts only on an abort that unfreezes. While frozen a
+    /// save is discarded and changes nothing; after the abort a save lands.
+    #[test]
+    fn handover_abort_that_unfreezes_lifts_the_late_save_fence() {
+        let mut p = pair("fence-abort");
+        seed_world(&p);
+        let world = p.dir.0.join("world");
+        consent(&mut p);
+        assert!(crate::save_fence::is_up(&world), "the freeze raised no fence");
+        let before = files(&world);
+        assert_eq!(autosave(&p.dir.0).unwrap_err(), crate::save_fence::DISCARDED);
+        assert_eq!(files(&world), before, "a frozen world was written");
+        p.src.abort(&mut p.hs, "cancel");
+        assert!(!p.hs.handover_frozen());
+        assert!(!crate::save_fence::is_up(&world), "an abort that unfroze left the fence up");
+        autosave(&p.dir.0).expect("a save after the unfreeze lands");
+        assert!(world.join("autosave").join("world.dat").is_file());
     }
 
     /// M-2: an acknowledgement the recipient's runtime didn't sign is never

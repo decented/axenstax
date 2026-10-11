@@ -513,7 +513,7 @@ fn game_harness_handover_joiners_pause_on_the_hosts_notice_and_send_nothing() {
     // Another joiner is the recipient; the source freezes for it.
     let (_other, slot, generation, k) = signed_join_lent(&mut j.hs, &mut j.host, [0x5a; 32]);
     let _lease = j.hs.handover_bind(slot, generation, k, [0x2b; 16]).unwrap();
-    j.hs.handover_freeze().unwrap();
+    j.hs.handover_freeze(None).unwrap();
     for _ in 0..3 {
         j.hg.frames(1);
     }

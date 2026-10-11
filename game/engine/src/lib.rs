@@ -345,6 +345,7 @@ mod local_join;
 
 // Native-only modules
 mod save;
+mod save_fence;
 mod save_format;
 mod world_open;
 mod data_dir;

@@ -43,6 +43,9 @@ pub struct HandoverLink {
     /// retirement). Nothing unfreezes this world any more: release and reap
     /// do nothing; only tearing the HostedServer down ends the freeze.
     retired: bool,
+    /// CP14: the world folder whose late-save fence this freeze raised
+    /// (`save_fence`). Lifted only by a pre-retirement release.
+    fence: Option<std::path::PathBuf>,
 }
 
 /// Why a link refused or broke. Short reasons, no keys or frame text.
@@ -99,6 +102,7 @@ impl HostedServer {
             lease: std::sync::Arc::downgrade(&lease),
             overflowed: Vec::new(),
             retired: false,
+            fence: None,
         });
         Ok(lease)
     }
@@ -121,12 +125,19 @@ impl HostedServer {
     }
 
     /// Freeze the source. Only after the seat re-check passes. Every joined
-    /// player is told play is paused.
-    pub fn handover_freeze(&mut self) -> Result<(), LinkError> {
+    /// player is told play is paused. CP14: the freeze first raises the
+    /// late-save fence over `world_dir` (`save_fence::raise`, which waits
+    /// for a commit under way), so the capture taken next reflects the last
+    /// save that landed and no later save commits into that folder.
+    pub fn handover_freeze(&mut self, world_dir: Option<&std::path::Path>) -> Result<(), LinkError> {
         self.handover_check()?;
         let mut transfer = None;
         if let Some(l) = &mut self.handover {
             if !l.frozen {
+                if let Some(dir) = world_dir {
+                    crate::save_fence::raise(dir);
+                    l.fence = Some(dir.to_path_buf());
+                }
                 transfer = Some(l.transfer);
             }
             l.frozen = true;
@@ -170,6 +181,10 @@ impl HostedServer {
     pub fn handover_mark_retired(&mut self) {
         if let Some(l) = self.handover.as_mut() {
             l.retired = true;
+            // CP14: a retired world's late-save fence never lifts.
+            if let Some(dir) = &l.fence {
+                crate::save_fence::retire(dir);
+            }
         }
     }
 
@@ -355,6 +370,11 @@ impl HostedServer {
             return;
         }
         let Some(l) = self.handover.take() else { return };
+        // CP14: the one place the late-save fence lifts: an abort that
+        // unfreezes before retirement.
+        if let Some(dir) = &l.fence {
+            crate::save_fence::lift(dir);
+        }
         if !self.handover_seat_live(l.slot, l.generation, l.key) {
             self.inbound[l.slot] = Default::default();
         }

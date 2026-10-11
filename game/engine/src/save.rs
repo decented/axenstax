@@ -1244,6 +1244,16 @@ impl Drop for WorldsRootGuard {
     }
 }
 
+/// Run `f` on this thread with the worlds root at `root` (a test whose world
+/// folder isn't a [`WorldsRootGuard`]'s), restoring the previous root after.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn with_worlds_root<T>(root: &std::path::Path, f: impl FnOnce() -> T) -> T {
+    let prev = WORLDS_ROOT_OVERRIDE.with(|o| o.replace(Some(root.to_path_buf())));
+    let out = f();
+    WORLDS_ROOT_OVERRIDE.with(|o| *o.borrow_mut() = prev);
+    out
+}
+
 /// Write `bytes` to `path` atomically: write a sibling `.tmp`, fsync it, then rename it
 /// over `path`. A crash / power-loss / disk-full can leave the `.tmp` but NEVER a
 /// half-written `path`, so a reader never sees a torn file.
@@ -1260,6 +1270,8 @@ impl Drop for WorldsRootGuard {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
+    // Handover late-save fence: nothing is written into a frozen world.
+    crate::save_fence::check(path)?;
     // Append ".tmp" to the full path (robust for any filename, unlike with_extension).
     let tmp: PathBuf = {
         let mut t = path.as_os_str().to_owned();
@@ -1271,9 +1283,22 @@ pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), S
         f.write_all(bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         f.sync_all().map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
     }
-    fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
-    Ok(())
+    commit_rename(&tmp, path)
+}
+
+/// The rename that commits an atomic write, behind the late-save fence's
+/// commit-time check (`save_fence::commit`): a fenced or `handover/` commit
+/// is discarded and its temp file removed, so the world folder is exactly
+/// as it was.
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_rename(tmp: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    let committed = crate::save_fence::commit(path, || {
+        fs::rename(tmp, path).map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))
+    });
+    if committed.as_ref().is_err_and(|e| crate::save_fence::refused(e)) {
+        let _ = fs::remove_file(tmp);
+    }
+    committed
 }
 
 /// [`write_atomic`] without the per-file `fsync`: tmp + rename only. Used for
@@ -1288,9 +1313,9 @@ pub(crate) fn write_atomic_nosync(path: &std::path::Path, bytes: &[u8]) -> Resul
         t.push(".tmp");
         PathBuf::from(t)
     };
+    crate::save_fence::check(path)?;
     fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))
+    commit_rename(&tmp, path)
 }
 
 /// fsync a directory, making the renames done in it durable. Best-effort on
@@ -1352,7 +1377,7 @@ pub(crate) fn keep_damaged_copy_once(path: &std::path::Path) {
         done.push(path.to_path_buf());
     }
     let dest = corrupt_sibling_path(path);
-    match fs::copy(path, &dest) {
+    match crate::save_fence::commit(&dest, || fs::copy(path, &dest).map_err(|e| e.to_string())) {
         Ok(_) => log::error!(
             "{} only partly decoded; original kept as {}",
             path.display(),
@@ -1378,8 +1403,9 @@ pub(crate) fn quarantine_corrupt(path: &std::path::Path) -> Result<PathBuf, Stri
         return Err(format!("quarantine {}: injected failure", path.display()));
     }
     let dest = corrupt_sibling_path(path);
-    fs::rename(path, &dest)
-        .map_err(|e| format!("quarantine {} -> {}: {e}", path.display(), dest.display()))?;
+    crate::save_fence::commit(&dest, || {
+        fs::rename(path, &dest).map_err(|e| format!("quarantine {} -> {}: {e}", path.display(), dest.display()))
+    })?;
     log::error!(
         "damaged file kept aside for recovery: {} -> {}",
         path.display(),
@@ -1403,8 +1429,9 @@ pub(crate) fn copy_damaged_aside(path: &std::path::Path) -> Result<PathBuf, Stri
         return Err(format!("copy {}: injected failure", path.display()));
     }
     let dest = corrupt_sibling_path(path);
-    fs::copy(path, &dest)
-        .map_err(|e| format!("copy {} -> {}: {e}", path.display(), dest.display()))?;
+    crate::save_fence::commit(&dest, || {
+        fs::copy(path, &dest).map_err(|e| format!("copy {} -> {}: {e}", path.display(), dest.display()))
+    })?;
     log::error!("{} failed to load; a copy is kept as {}", path.display(), dest.display());
     Ok(dest)
 }
@@ -1726,8 +1753,9 @@ fn publish_staged_chunks(dir: &std::path::Path) -> Result<(), String> {
             quarantine_corrupt(&chunks)?;
         }
     }
-    fs::rename(dir.join(STAGED_CHUNKS), &chunks)
-        .map_err(|e| format!("publish {STAGED_CHUNKS}/ as chunks/: {e}"))?;
+    crate::save_fence::commit(&chunks, || {
+        fs::rename(dir.join(STAGED_CHUNKS), &chunks).map_err(|e| format!("publish {STAGED_CHUNKS}/ as chunks/: {e}"))
+    })?;
     sync_dir(dir);
     Ok(())
 }
@@ -1759,8 +1787,9 @@ pub(crate) fn finish_staged_first_save(dir: &std::path::Path) -> Result<(), Stri
     if let Some(file) = crate::world_open::saved_chunk_file(dir)? {
         let from = dir.join(STAGED_CHUNKS);
         let to = aside_sibling_path(&from, "stale");
-        fs::rename(&from, &to).map_err(|e| {
-            format!("stale {STAGED_CHUNKS}/ (beside {file}) can't be set aside ({e})")
+        crate::save_fence::commit(&to, || {
+            fs::rename(&from, &to)
+                .map_err(|e| format!("stale {STAGED_CHUNKS}/ (beside {file}) can't be set aside ({e})"))
         })?;
         log::warn!(
             "{}: {STAGED_CHUNKS}/ is older than the saved chunks beside world.dat ({file}); \
@@ -2133,7 +2162,8 @@ fn save_world_at(
     // write_world_folder then writes only the non-empty ones.
     let (_, to_delete) = partition_chunks_for_save(world);
     for (cx, cy, cz) in to_delete {
-        let _ = fs::remove_file(chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk")));
+        let gone = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
+        let _ = crate::save_fence::commit_quiet(&gone, || fs::remove_file(&gone).map_err(|e| e.to_string()));
     }
 
     // Delegate the actual file writes (world.dat, world_meta.json, chunks/)
@@ -2637,6 +2667,8 @@ pub fn world_open_refusal(_folder_name: &str) -> Option<String> {
 /// [`world_open_refusal`] and the load-failure rule (`world_open::open_world`).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn refuse_write_over_newer_save(dir: &std::path::Path) -> Result<(), String> {
+    // Handover late-save fence (CP14): a frozen or retired world is never written.
+    crate::save_fence::check(dir)?;
     match save_refusal_in(dir) {
         Some(e) => {
             log::error!("refusing to write to {}: {e:?}", dir.display());
@@ -3799,6 +3831,9 @@ pub fn load_world_meta(folder_name: &str) -> WorldMeta {
 /// Either way a write would put defaults over the world's real info.
 #[cfg(not(target_arch = "wasm32"))]
 fn meta_write_blocked(dir: &std::path::Path) -> Option<String> {
+    if crate::save_fence::is_up(dir) {
+        return Some(crate::save_fence::DISCARDED.to_string());
+    }
     // A world saved by a newer build: its meta may carry fields this build would
     // drop on re-write (Spec 02 §8.4). Or one whose world.dat can't be read.
     if let Some(e) = save_refusal_in(dir) {
@@ -4263,7 +4298,8 @@ pub fn autosave_world(
     let mut saved = 0u32;
     let (to_write, to_delete) = partition_chunks_for_save(world);
     for (cx, cy, cz) in to_delete {
-        let _ = fs::remove_file(chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk")));
+        let gone = chunks_dir.join(format!("{cx}_{cy}_{cz}.chunk"));
+        let _ = crate::save_fence::commit_quiet(&gone, || fs::remove_file(&gone).map_err(|e| e.to_string()));
     }
     for (cx, cy, cz) in to_write {
         if let Some(chunk) = world.persistable_chunk(cx, cy, cz) {
@@ -4415,9 +4451,12 @@ pub fn clear_autosave(name: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn clear_autosave_in(folder: &std::path::Path) {
     let dir = folder.join("autosave");
-    match fs::remove_file(dir.join("world.dat")) {
+    let removed = crate::save_fence::commit(&dir, || match fs::remove_file(dir.join("world.dat")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    });
+    match removed {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             log::warn!("Failed to clear autosave ({}): {e}", dir.display());
             return;
