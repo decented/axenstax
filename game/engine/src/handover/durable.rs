@@ -18,6 +18,10 @@ pub enum MarkerKind {
     Prefix,
     /// CP9: a retired source's "Committed published" record.
     Published,
+    /// CP10: a recipient past its PreparedAck heard the source's
+    /// authenticated pre-retirement Abort: no Committed will ever exist, so
+    /// the wait for it ends (the import stays, quarantined, never opened).
+    Quarantined,
 }
 impl MarkerKind {
     fn number(self) -> u8 {
@@ -28,6 +32,7 @@ impl MarkerKind {
             Self::Prepared => 3,
             Self::Prefix => 4,
             Self::Published => 5,
+            Self::Quarantined => 6,
         }
     }
     fn label(self) -> &'static str {
@@ -38,6 +43,7 @@ impl MarkerKind {
             Self::Prepared => "prepared",
             Self::Prefix => "prefix",
             Self::Published => "published",
+            Self::Quarantined => "quarantined",
         }
     }
 }
@@ -245,6 +251,11 @@ impl MarkerStore {
 pub fn retirement_payload(bytes: &[u8], id: Id) -> Result<Vec<u8>> {
     decode_marker(bytes, MarkerKind::Retired, id)
 }
+/// CP10: the same read-only decode for any marker kind (the open guard's
+/// Activated check).
+pub fn marker_payload(bytes: &[u8], kind: MarkerKind, id: Id) -> Result<Vec<u8>> {
+    decode_marker(bytes, kind, id)
+}
 const MARKER_DOMAIN: &str = "AxeNStax/handover/marker/v1";
 const MARKER_OVERHEAD: usize = 4 + MARKER_DOMAIN.len() + 4 + 1 + 16 + 4 + 32;
 /// Unkeyed accidental-corruption checksum, not a machineowner authentication
@@ -428,6 +439,7 @@ pub(crate) mod tests {
             MarkerKind::Prepared,
             MarkerKind::Prefix,
             MarkerKind::Published,
+            MarkerKind::Quarantined,
         ] {
             let id = [kind.number() + 1; 16];
             s.persist(kind, id, b"exact phase binding").unwrap();

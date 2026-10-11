@@ -1,7 +1,9 @@
 //! The live invitation's bearer (H1): the secret `online_admission`'s
 //! `Accept(ByInvite)` checks. A source session holds the online host's
 //! current one; the recipient receives it in the `Frame::Bearer` disclosure
-//! (P2) and stores it only in the imported world's Activated record (H3).
+//! (P2) and stores it only in the imported world's `handover/` records
+//! (H3, amended in CP10): the Prepared receipt, written before its
+//! PreparedAck, then the Activated record. No archive carries it.
 //! Never logged: `Debug` prints nothing of it and there is no `Display`.
 //! Each copy is overwritten with zeros when it is dropped.
 use crate::handover::Id;

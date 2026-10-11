@@ -16,7 +16,6 @@
 use crate::handover::{
     Id,
     context::RootContext,
-    durable::MarkerStore,
     live::{
         capture, copy,
         eligibility::{Refusal, Seat},
@@ -59,7 +58,6 @@ pub(crate) struct SourceEnv {
 pub(crate) struct RecipientEnv {
     pub identity: RecipientIdentity,
     pub imports: PathBuf,
-    pub markers: MarkerStore,
 }
 
 /// L5: the joined session's router lease, held by its recipient session.
@@ -119,20 +117,19 @@ fn handover_dir(leaf: &str) -> Result<PathBuf, String> {
 fn recipient_env() -> Result<RecipientEnv, String> {
     let identity = crate::runtime_identity::RuntimeIdentity::load()?.ok_or("no runtime identity")?;
     let attestation = identity.attestation().cloned().ok_or("no attestation")?;
-    let markers = MarkerStore::new(handover_dir("markers")?).map_err(|e| format!("{e:?}"))?;
+    // CP10: the recipient's records live in each import's own working
+    // world `handover/`, not in a shared markers folder.
     Ok(RecipientEnv {
         identity: RecipientIdentity { runtime: identity.keys().clone(), attestation },
         imports: handover_dir("imports")?,
-        markers,
     })
 }
 
 /// P3: discard every marked inert import under `<data>/handover/imports`
 /// except `live`'s (bounded; at startup and before a new recipient session).
 pub(crate) fn sweep_inert_imports(live: Option<Id>) {
-    let (Ok(imports), Ok(markers)) = (handover_dir("imports"), handover_dir("markers")) else { return };
-    let Ok(markers) = MarkerStore::new(markers) else { return };
-    match crate::handover::live::inert::sweep(&imports, &markers, live) {
+    let Ok(imports) = handover_dir("imports") else { return };
+    match crate::handover::live::inert::sweep(&imports, live) {
         Ok(0) => {}
         Ok(n) => log::info!("handover: discarded {n} inert import(s)"),
         Err(e) => log::warn!("handover: inert import sweep: {e}"),
@@ -169,7 +166,7 @@ pub(crate) fn draw(ctx: &egui::Context, handover: Option<&Handover>, host_paused
                     ("World handover", vec![copy::recipient_stored(&p.world_name)], &[(copy::CANCEL, UiAction::Cancel)])
                 }
                 RecipientStage::Prepared => ("World handover", vec![copy::recipient_finishing(&p.world_name)], &[]),
-                RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) => return None,
+                RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::Activated => return None,
                 _ => (
                     "World handover",
                     vec![copy::recipient_copying(&p.world_name, &p.source_npub)],
@@ -464,8 +461,8 @@ impl crate::GameState {
             return;
         };
         // P3: no session is live here (a running one answers Busy above).
-        let _ = crate::handover::live::inert::sweep(&env.imports, &env.markers, None);
-        match RecipientSession::propose(payload, host, env.identity, env.imports, env.markers, now) {
+        let _ = crate::handover::live::inert::sweep(&env.imports, None);
+        match RecipientSession::propose(payload, host, env.identity, env.imports, now) {
             Ok(s) => {
                 self.handover = Some(Handover::Recipient(Box::new(s)));
                 self.handover_consent_shown = Some(Instant::now());
@@ -559,6 +556,23 @@ impl crate::GameState {
     fn pump_handover_recipient(&mut self, now: u64) {
         let Some(Handover::Recipient(s)) = self.handover.as_mut() else { return };
         let result = s.pump(now);
+        // CP10 (HIGH-2): past the ack the wait for Committed goes to the one
+        // background resumer, which outlives this session, the joined world
+        // and the window (and resumes at start-up from the durable receipt).
+        if s.stage() == RecipientStage::Prepared && !s.activation_handed() {
+            s.hand_activation(crate::handover::live::resumer::Resumer::global());
+        }
+        if s.stage() == RecipientStage::Activated {
+            // The source retired its copy: the joined world is gone for good.
+            let msg = copy::recipient_activated(&s.proposal().world_name);
+            self.handover = None;
+            if self.remote_client.as_ref().is_some_and(|rc| rc.is_parked()) {
+                self.leave_world_with_notice(crate::world_exit::SaveChoice::Discard, msg);
+            } else {
+                self.handover_toast(msg);
+            }
+            return;
+        }
         if let RecipientStage::Aborted(why) = s.stage() {
             let msg = match result {
                 Err(Refusal(r)) => r,
@@ -697,7 +711,9 @@ impl crate::GameState {
     /// cursor must be free for it, mid-play too.
     pub(crate) fn handover_wants_pointer(&self) -> bool {
         match &self.handover {
-            Some(Handover::Recipient(s)) => !matches!(s.stage(), RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)),
+            Some(Handover::Recipient(s)) => {
+                !matches!(s.stage(), RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::Activated)
+            }
             Some(Handover::Source { session, .. }) => source_wants_pointer(session.stage()),
             None => false,
         }

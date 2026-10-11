@@ -20,10 +20,23 @@
 //! - Once proven, the "Committed published" record is written durably
 //!   (`MarkerStore`: 0600, temp + fsync + rename + directory fsync) in the
 //!   same `handover/`, and the resumer drops that world.
+//!
+//! CP10 (HIGH-2), the recipient flavour: a recipient past its PreparedAck
+//! waits for Committed here, not in its session. The live session hands it
+//! over at Prepared (`adopt_import`); start-up resumes every import whose
+//! working world's `handover/` holds a Prepared receipt and no Activated or
+//! quarantine record (`resume_imports`). Both read the durable receipt
+//! (`phase::AwaitingCommit`: the bearer, the exact Prepared event, the root's
+//! relays). Each attempt has a fresh `Budget`: relays in the root's order,
+//! a lookup of the bearer's route, the Committed opened against the stored
+//! Prepared, then an independent readback (the proof); then the durable
+//! Activated record (with the bearer, H3). Same backoff, never gives up;
+//! only the quarantine record (the source's authenticated pre-retirement
+//! Abort) ends the wait.
 use crate::handover::{
     Id,
-    durable::MarkerStore,
-    phase::RetiredCommit,
+    durable::{MarkerKind, MarkerStore},
+    phase::{AwaitingCommit, RetiredCommit},
     stored::{self, Budget},
 };
 use std::collections::BTreeSet;
@@ -61,12 +74,22 @@ pub struct Attempt {
     pub budget_bytes_at_start: usize,
     pub proven: bool,
     pub copies: usize,
+    /// CP10: a recipient's Committed lookup (not a source's publication).
+    pub import: bool,
+}
+
+/// Which side a job serves: one process can be both (tests are).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Flavour {
+    Source,
+    Import,
 }
 
 struct Shared {
     backoff: Backoff,
-    /// Transfers this resumer is publishing now (one thread each).
-    jobs: Mutex<BTreeSet<Id>>,
+    /// Transfers this resumer is publishing (source) or awaiting (import)
+    /// now, one thread each.
+    jobs: Mutex<BTreeSet<(Flavour, Id)>>,
     #[cfg(test)]
     log: Mutex<Vec<Attempt>>,
 }
@@ -96,7 +119,11 @@ impl Resumer {
     }
     /// Whether this resumer is publishing `transfer` now.
     pub fn holds(&self, transfer: Id) -> bool {
-        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).contains(&transfer)
+        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).contains(&(Flavour::Source, transfer))
+    }
+    /// CP10: whether this resumer is awaiting `transfer`'s Committed.
+    pub fn holds_import(&self, transfer: Id) -> bool {
+        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).contains(&(Flavour::Import, transfer))
     }
     #[cfg(test)]
     pub fn attempts(&self) -> Vec<Attempt> {
@@ -112,7 +139,7 @@ impl Resumer {
         if retired.is_published(&store).unwrap_or(true) {
             return false;
         }
-        if !self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(transfer) {
+        if !self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert((Flavour::Source, transfer)) {
             return false;
         }
         let shared = self.0.clone();
@@ -121,11 +148,81 @@ impl Resumer {
             .name("handover-committed".into())
             .spawn(move || run(shared, dir, retired));
         if spawned.is_err() {
-            self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&transfer);
+            self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Source, transfer));
             log::error!("handover: couldn't start the Committed publication; it resumes at the next start");
             return false;
         }
         true
+    }
+
+    /// CP10: take over the wait for `transfer`'s Committed of the import
+    /// whose working world is `world_dir` (its `handover/` holds the Prepared
+    /// receipt). Idempotent per transfer; nothing to do once Activated or
+    /// quarantined. It never opens the world and never creates `handover/`.
+    pub fn adopt_import(&self, world_dir: &Path, transfer: Id) -> bool {
+        let Ok(store) = existing_store(world_dir) else { return false };
+        match AwaitingCommit::read(&store, transfer) {
+            Ok(Some(_)) => {}
+            Ok(None) => return false,
+            Err(e) => {
+                log::warn!("handover: an import's Prepared receipt can't be read: {e}");
+                return false;
+            }
+        }
+        if !self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert((Flavour::Import, transfer)) {
+            return false;
+        }
+        let shared = self.0.clone();
+        let dir = world_dir.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("handover-activate".into())
+            .spawn(move || run_import(shared, dir, transfer));
+        if spawned.is_err() {
+            self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Import, transfer));
+            log::error!("handover: couldn't start waiting for Committed; it resumes at the next start");
+            return false;
+        }
+        true
+    }
+
+    /// CP10 start-up: every import under `imports` (`handover-*`) whose
+    /// working world's `handover/` holds a Prepared receipt with no Activated
+    /// or quarantine record. Bounded; creates nothing. Returns how many waits
+    /// it took over.
+    pub fn resume_imports(&self, imports: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(imports) else { return 0 };
+        let mut adopted = 0;
+        for (seen, entry) in entries.enumerate() {
+            if seen >= super::inert::SCAN_LIMIT {
+                log::warn!("handover: the imports scan stopped at {} entries", super::inert::SCAN_LIMIT);
+                break;
+            }
+            let Ok(entry) = entry else { continue };
+            if !entry.file_name().to_str().is_some_and(|n| n.starts_with("handover-")) {
+                continue;
+            }
+            let working = entry.path().join("working");
+            let records = super::authority::dir(&working);
+            if !is_real_dir(&entry.path()) || !is_real_dir(&working) || !is_real_dir(&records) {
+                continue;
+            }
+            let Ok(names) = std::fs::read_dir(&records) else { continue };
+            for name in names.take(256).flatten() {
+                let name = name.file_name();
+                let Some(t) = name
+                    .to_str()
+                    .and_then(|n| n.strip_prefix("prepared-")?.strip_suffix(".dat"))
+                    .and_then(|v| hex::decode(v).ok())
+                    .and_then(|v| Id::try_from(v).ok())
+                else {
+                    continue;
+                };
+                if self.adopt_import(&working, t) {
+                    adopted += 1;
+                }
+            }
+        }
+        adopted
     }
 
     /// Start-up: every world under `worlds_root` whose `handover/` holds a
@@ -212,7 +309,105 @@ fn run(shared: Arc<Shared>, world: PathBuf, retired: RetiredCommit) {
             }
         }
     }
-    shared.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&transfer);
+    shared.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Source, transfer));
+}
+
+/// CP10: one import's wait for Committed, until Activated (or quarantined).
+/// Never aborts on its own.
+fn run_import(shared: Arc<Shared>, world: PathBuf, transfer: Id) {
+    let mut failures = 0u32;
+    loop {
+        // Re-read the durable state each attempt: a quarantine record (the
+        // source's authenticated Abort) or a deleted import ends the wait.
+        let awaiting = match existing_store(&world).map(|s| (AwaitingCommit::read(&s, transfer), s)) {
+            Ok((Ok(Some(a)), store)) => Some((a, store)),
+            Ok((Ok(None), _)) => None,
+            Ok((Err(e), _)) => {
+                log::warn!("handover: an import's Prepared receipt can't be read ({e}); it stays quarantined");
+                None
+            }
+            Err(_) => {
+                log::warn!("handover: an import's folder is gone; nothing to activate");
+                None
+            }
+        };
+        let Some((mut awaiting, store)) = awaiting else { break };
+        let outcome = attempt_import(&shared, &awaiting).and_then(|(proof, stored)| awaiting.activate(&store, &proof, &stored));
+        match outcome {
+            Ok(_) => {
+                log::info!("handover: Committed found and read back; the import is activated");
+                break;
+            }
+            Err(e) => {
+                if store.read(MarkerKind::Activated, transfer).is_ok_and(|r| r.is_some()) {
+                    break;
+                }
+                failures = failures.saturating_add(1);
+                let wait = shared.backoff.delay(failures);
+                log::warn!("handover: waiting for Committed, attempt {failures} ({e}); retrying in {wait:?}");
+                std::thread::sleep(wait);
+            }
+        }
+    }
+    shared.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Import, transfer));
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// CP10: one recipient attempt with a FRESH Budget bound to the one root:
+/// relays in the root's order; on each, a lookup of the bearer's route,
+/// the Committed opened against the stored Prepared, then an independent
+/// readback of that exact event (the proof).
+fn attempt_import(
+    shared: &Shared,
+    awaiting: &AwaitingCommit,
+) -> crate::handover::Result<(crate::handover::crypto::VerifiedCommit, stored::StoredProof)> {
+    let mut budget = Budget::new();
+    #[cfg(test)]
+    let (started, budget_deadline, budget_bytes_at_start) = (Instant::now(), budget.deadline(), budget.bytes_received());
+    #[cfg(not(test))]
+    let _ = shared;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| crate::handover::Error::Io)?;
+    let r = rt.block_on(async {
+        let root = awaiting.root();
+        let route = awaiting.route()?;
+        let mut last = Err(crate::handover::Error::Invalid("no relay"));
+        for url in root.relays() {
+            let events = match stored::lookup(url, root, route, &mut budget, &NEVER).await {
+                Ok(e) => e,
+                Err(e) => {
+                    last = Err(e);
+                    continue;
+                }
+            };
+            let Some((event, commit)) = awaiting.committed(&events, unix_now()) else {
+                last = Err(crate::handover::Error::Invalid("no Committed yet"));
+                continue;
+            };
+            let verified = crate::handover::crypto::Verified::Committed(commit.clone());
+            match stored::readback(url, root, &event, &verified, route, &mut budget, &NEVER).await {
+                Ok(proof) => return Ok((commit, proof)),
+                Err(e) => last = Err(e),
+            }
+        }
+        last
+    });
+    #[cfg(test)]
+    shared.log.lock().unwrap_or_else(|e| e.into_inner()).push(Attempt {
+        transfer: awaiting.transfer(),
+        started,
+        budget_deadline,
+        budget_bytes_at_start,
+        proven: r.is_ok(),
+        copies: 0,
+        import: true,
+    });
+    r
 }
 
 /// One attempt with a FRESH Budget bound to the one root: relays in the
@@ -259,6 +454,7 @@ fn attempt(shared: &Shared, retired: &RetiredCommit) -> crate::handover::Result<
         budget_bytes_at_start,
         proven: r.is_ok(),
         copies: r.as_ref().map_or(0, |(_, c)| *c),
+        import: false,
     });
     r
 }

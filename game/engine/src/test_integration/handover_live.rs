@@ -582,8 +582,20 @@ mod session {
         .unwrap();
         RecipientIdentity { runtime, attestation }
     }
-    fn markers(dir: &Dir) -> MarkerStore {
-        MarkerStore::new(dir.0.join("markers")).unwrap()
+    /// CP10: the recipient's records live in its import's own working world
+    /// `handover/`. Whether `t`'s `<label>` record exists there.
+    fn has_record(dir: &Dir, label: &str, t: crate::handover::Id) -> bool {
+        let suffix = format!("-{}", hex::encode(t));
+        std::fs::read_dir(dir.0.join("imports")).into_iter().flatten().flatten().any(|e| {
+            e.file_name().to_str().is_some_and(|n| n.starts_with("handover-") && n.ends_with(&suffix))
+                && crate::handover::live::authority::dir(&e.path().join("working"))
+                    .join(format!("{label}-{}.dat", hex::encode(t)))
+                    .is_file()
+        })
+    }
+    /// The import's own records store (the session still holds its checkpoint).
+    fn import_store(p: &Pair) -> MarkerStore {
+        crate::handover::live::authority::store(&p.dst.as_ref().unwrap().checkpoint().unwrap().working_world()).unwrap()
     }
 
     /// A lent source with one signed joiner that keeps PLAYING through its
@@ -643,7 +655,6 @@ mod session {
             joined_host(),
             identity(),
             p.dir.0.join("imports"),
-            markers(&p.dir),
             now(),
         )
         .expect("a proposal from the verified host");
@@ -917,8 +928,7 @@ mod session {
         assert_eq!(dst.stage(), RecipientStage::Ready);
         assert!(p.hs.handover_frozen(), "still frozen at Ready");
         assert!(!dst.gameplay_admitted(), "Ready is not activation");
-        let markers = markers(&p.dir);
-        assert!(markers.read(MarkerKind::Ready, p.src.transfer()).unwrap().is_some(), "Ready persisted");
+        assert!(import_store(&p).read(MarkerKind::Ready, p.src.transfer()).unwrap().is_some(), "Ready persisted");
         // Distinct own records, each bound to its own identity.
         let transfer = p.src.transfer();
         let lineage = root_lineage(&p.root);
@@ -1120,7 +1130,7 @@ mod session {
         let dst = p.dst.as_ref().unwrap();
         assert!(dst.checkpoint().is_none(), "an aborted inert import was kept");
         assert_eq!(import_dirs(&p), Vec::<String>::new(), "the import folder was left behind");
-        assert!(markers(&p.dir).read(MarkerKind::Ready, t).unwrap().is_none(), "the Ready marker was left behind");
+        assert!(!has_record(&p.dir, "ready", t), "the Ready marker was left behind");
         assert!(crate::handover::live::inert::marked(&p.dir.0.join("imports"), t).unwrap().is_none());
     }
 
@@ -1152,19 +1162,21 @@ mod session {
         assert!(inert::marked(&imports, t).unwrap().is_some(), "the import wasn't marked inert");
         let kept = imports.join("handover-00-unmarked");
         std::fs::create_dir_all(kept.join("working")).unwrap();
-        let store = markers(&p.dir);
-        assert_eq!(inert::sweep(&imports, &store, Some(t)).unwrap(), 0, "the live session's import was swept");
+        assert_eq!(inert::sweep(&imports, Some(t)).unwrap(), 0, "the live session's import was swept");
         assert_eq!(import_dirs(&p).len(), 2);
         // The process "crashes": the session is gone without an abort.
         drop(p.dst.take());
-        assert_eq!(inert::sweep(&imports, &store, None).unwrap(), 1);
+        assert_eq!(inert::sweep(&imports, None).unwrap(), 1);
         assert_eq!(import_dirs(&p), vec!["handover-00-unmarked".to_string()], "only the marked import goes");
-        assert!(store.read(MarkerKind::Ready, t).unwrap().is_none(), "its Ready marker went with it");
+        assert!(!has_record(&p.dir, "ready", t), "its Ready marker went with it");
         assert!(inert::marked(&imports, t).unwrap().is_none());
         // A Prepared marker makes a transfer no longer inert: refused.
         inert::mark(&imports, [0x33; 16], [0x44; 16]).unwrap();
+        let prepared = imports.join(format!("handover-{}-{}", hex::encode([0x44u8; 16]), hex::encode([0x33u8; 16])));
+        let store = crate::handover::live::authority::store(&prepared.join("working")).unwrap();
         store.persist(MarkerKind::Prepared, [0x33; 16], b"prepared").unwrap();
-        assert!(inert::discard(&imports, &store, [0x33; 16]).is_err(), "a Prepared import was discarded");
+        assert!(inert::discard(&imports, [0x33; 16]).is_err(), "a Prepared import was discarded");
+        assert!(prepared.is_dir(), "a Prepared import was removed");
     }
 
     /// Pump until the recipient reaches `want` (M1 tests stop at Importing).
@@ -1241,7 +1253,7 @@ mod session {
             assert!(dst.checkpoint().is_none());
             assert_eq!(import_dirs(&p), Vec::<String>::new(), "a cancelled import left its data");
             let t = t_of(&p);
-            assert!(markers(&p.dir).read(MarkerKind::Ready, t).unwrap().is_none(), "a cancelled import wrote Ready");
+            assert!(!has_record(&p.dir, "ready", t), "a cancelled import wrote Ready");
             assert!(crate::handover::live::inert::marked(&p.dir.0.join("imports"), t).unwrap().is_none());
             assert!(p.dst.as_mut().unwrap().return_link().is_some(), "the joined connection comes back");
             p.host.lend_tick(&mut p.hs);
@@ -1400,7 +1412,7 @@ mod session {
             .unwrap()
         };
         let session = |payload: &[u8], host: JoinedHost| {
-            RecipientSession::propose(payload, host, identity(), dir.0.join("imports"), markers(&dir), now())
+            RecipientSession::propose(payload, host, identity(), dir.0.join("imports"), now())
         };
         assert!(session(&propose(npub(&keys(SOURCE_PERSONA)), &r), joined_host()).is_ok(), "the honest proposal");
         // Displays one npub while the invitation names another.
@@ -1434,7 +1446,7 @@ mod session {
             }
             let r = p.src.pump(&mut p.hs, p.live, now());
             if p.src.past_retirement() {
-                assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_some(), "retired before the recipient persisted Prepared");
+                assert!(has_record(&p.dir, "prepared", t), "retired before the recipient persisted Prepared");
             }
             if r.is_err() || matches!(p.src.stage(), SourceStage::Aborted(_)) {
                 break;
@@ -1466,7 +1478,7 @@ mod session {
         assert!(p.src.bearer_disclosed());
         let dst = p.dst.as_ref().unwrap();
         assert_eq!(dst.stage(), RecipientStage::Prepared);
-        assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_some(), "Prepared not persisted");
+        assert!(has_record(&p.dir, "prepared", t), "Prepared not persisted");
         assert!(crate::handover::live::inert::marked(&p.dir.0.join("imports"), t).unwrap().is_none(), "the inert marker stayed");
         assert_eq!(p.relay.stored().len(), 1, "only Prepared may be stored before Committed is published");
         // The durable retirement holds the exact signed Commit bytes.
@@ -1503,8 +1515,8 @@ mod session {
         assert!(!p.src.needs_invite_rotation());
         // M-2: after Prepared the recipient deletes nothing.
         assert!(!import_dirs(&p).is_empty(), "the recipient deleted an import after Prepared");
-        assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_some());
-        assert!(markers(&p.dir).read(MarkerKind::Ready, t).unwrap().is_some());
+        assert!(has_record(&p.dir, "prepared", t));
+        assert!(has_record(&p.dir, "ready", t));
     }
 
     /// P2: a bearer that doesn't derive the key Prepared is sealed to stops
@@ -1519,7 +1531,7 @@ mod session {
         drive(&mut p, SourceStage::Retired);
         let dst = p.dst.as_ref().unwrap();
         assert_eq!(dst.stage(), RecipientStage::Aborted(crate::handover::live::copy::WRONG_BEARER), "a wrong bearer was accepted");
-        assert!(markers(&p.dir).read(MarkerKind::Prepared, t).unwrap().is_none(), "a wrong bearer reached Prepared");
+        assert!(!has_record(&p.dir, "prepared", t), "a wrong bearer reached Prepared");
         assert_eq!(import_dirs(&p), Vec::<String>::new(), "the inert import was kept");
         assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "the source didn't hear the abort");
         assert!(!p.hs.handover_frozen(), "the source didn't resume");
@@ -1565,6 +1577,21 @@ mod session {
         assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "retired without a verified ack");
         assert!(p.src.needs_invite_rotation());
         assert!(!p.hs.handover_frozen());
+        // CP10: the source's authenticated pre-retirement Abort reaches the
+        // recipient past its ack: quarantined, and the durable quarantine
+        // record ends the wait for Committed (no resume at start-up).
+        let t = p.src.transfer();
+        p.host.lend_tick(&mut p.hs);
+        let dst = p.dst.as_mut().unwrap();
+        let _ = dst.pump(now());
+        assert_eq!(dst.stage(), RecipientStage::Quarantined("The host cancelled the handover."));
+        assert!(has_record(&p.dir, "quarantined", t), "no quarantine record after the source's Abort");
+        assert!(has_record(&p.dir, "prepared", t), "a quarantined import lost its receipt");
+        assert_eq!(
+            crate::handover::live::resumer::Resumer::new(FAST).resume_imports(&p.dir.0.join("imports")),
+            0,
+            "a quarantined import went back to waiting for Committed"
+        );
     }
 
     /// CP8 review LOW-2: an ack the recipient's own runtime signed, whose
@@ -1742,5 +1769,147 @@ mod session {
         let dst = dst.as_mut().unwrap();
         let _ = dst.pump(now());
         assert_eq!(dst.stage(), RecipientStage::Prepared, "the recipient heard an Abort after an uncertain retirement");
+    }
+    /// CP10 (HIGH-2): the recipient acknowledges only once the bearer is
+    /// durable with its Prepared receipt. A Prepared write that fails (a
+    /// stale temporary record with other bytes) sends no ack: the source
+    /// never retires, no Commit is sealed, and the recipient aborts while
+    /// still inert (nothing kept).
+    #[test]
+    fn handover_recipient_acks_only_after_its_bearer_is_durable() {
+        let mut p = ready_pair("ack-durable");
+        let t = p.src.transfer();
+        let records = crate::handover::live::authority::dir(&p.dst.as_ref().unwrap().checkpoint().unwrap().working_world());
+        std::fs::write(records.join(format!("prepared.tmp-{}", hex::encode(t))), b"other bytes").unwrap();
+        drive(&mut p, SourceStage::Retired);
+        assert!(!p.src.past_retirement(), "the source retired without a durable bearer on the recipient");
+        assert!(p.src.commit_event().is_none(), "a Commit was sealed without a durable bearer on the recipient");
+        assert!(matches!(p.dst.as_ref().unwrap().stage(), RecipientStage::Aborted(_)), "{:?}", p.dst.as_ref().unwrap().stage());
+        assert!(!has_record(&p.dir, "prepared", t));
+        assert_eq!(import_dirs(&p), Vec::<String>::new(), "an inert import was kept");
+    }
+
+    /// Every file under `root` (recursively) except those under `skip`.
+    fn files_under(root: &std::path::Path, skip: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = e.path();
+                if path.starts_with(skip) {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+    fn holds(bytes: &[u8], needle: &[u8; 16]) -> bool {
+        bytes.windows(16).any(|w| w == needle)
+    }
+
+    /// CP10 (HIGH-2): a recipient restarted between its ack and the
+    /// Committed proof ends Activated. Past the ack the stall and the cap
+    /// end nothing and the import is refused (open guard and every save
+    /// path). Then everything is dropped (session, server, link): the
+    /// source's start-up scan publishes Committed, the recipient's start-up
+    /// scan finds the Prepared receipt (with the bearer) in the import's own
+    /// working world `handover/`, opens and witnesses the Committed, and
+    /// writes the Activated record (with the bearer, 0600). Only then does
+    /// the import open; a later start-up has nothing to resume.
+    #[test]
+    fn handover_recipient_restart_between_the_ack_and_the_committed_proof_ends_activated() {
+        use crate::handover::live::{authority, resumer::Resumer};
+        let mut p = ready_pair("recipient-restart");
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        let dst = p.dst.as_mut().unwrap();
+        let late = now() + crate::handover::live::source::OPERATION_SECS + crate::handover::live::source::STALL_SECS + 1;
+        dst.pump(late).unwrap();
+        assert_eq!(dst.stage(), RecipientStage::Prepared, "the stall or the cap ended the wait for Committed");
+        let prepared = std::fs::read(authority::dir(&working).join(format!("prepared-{}.dat", hex::encode(t)))).unwrap();
+        assert!(holds(&prepared, &TEST_BEARER), "the Prepared receipt doesn't hold the bearer");
+        assert_eq!(authority::open_guard(&working).unwrap_err().0, crate::handover::live::copy::NOT_ACTIVATED, "the import opened before Activated");
+        assert!(crate::save::save_refusal_in(&working).is_some(), "a save path accepts the import before Activated");
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        drop((src, dst, rc, hs, host));
+        assert!(Resumer::new(FAST).resume_all(&dir.0) == 1, "the source's Committed wasn't resumed");
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports")), 1, "the start-up scan didn't resume the wait for Committed");
+        let store = authority::store(&working).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while store.read(MarkerKind::Activated, t).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the recipient never activated");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(relay.stored().len() >= 2, "Committed wasn't on the relay");
+        let r = crate::handover::phase::Receiver::restart(&store, t).unwrap().unwrap();
+        assert!(r.gameplay_admitted(), "the restarted receiver isn't activated");
+        let activated = std::fs::read(authority::dir(&working).join(format!("activated-{}.dat", hex::encode(t)))).unwrap();
+        assert!(holds(&activated, &TEST_BEARER), "the Activated record doesn't carry the bearer");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for kind in ["prepared", "activated"] {
+                let path = authority::dir(&working).join(format!("{kind}-{}.dat", hex::encode(t)));
+                assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600, "{kind} isn't 0600");
+            }
+        }
+        assert!(authority::open_guard(&working).is_ok(), "an Activated import is still refused");
+        assert!(crate::handover::phase::AwaitingCommit::read(&store, t).unwrap().is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while recipient.holds_import(t) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!recipient.holds_import(t), "the resumer kept an activated import");
+        assert_eq!(Resumer::new(FAST).resume_imports(&dir.0.join("imports")), 0, "an activated import was resumed again");
+    }
+
+    /// CP10 (HIGH-2 + H3): the bearer is stored only in the imported world's
+    /// `handover/` records. A source world that itself holds a received
+    /// handover's records (another bearer) hands over: neither that bearer
+    /// nor the recipient's own one reaches the archive the recipient got
+    /// (decompressed), its received or working copy, or anything else in
+    /// the import outside `working/handover/`; the recipient's bearer IS in
+    /// its Prepared receipt there. (The handover pack and the export archive
+    /// are allowlists built from the world state, never a folder walk; the
+    /// retained copy is not built yet.)
+    #[test]
+    fn handover_bearer_is_absent_from_every_archive_and_copy() {
+        use crate::handover::live::authority;
+        use std::io::Read;
+        const OLD: [u8; 16] = [0xB7; 16];
+        let mut p = ready_pair("bearer-archives");
+        let t = p.src.transfer();
+        let old = authority::store(&p.dir.0.join("world")).unwrap();
+        let mut v = Vec::new();
+        crate::handover::codec::frame(&mut v, b"AxeNStax/handover/activated/v2");
+        v.extend_from_slice(&OLD);
+        old.persist(MarkerKind::Prepared, [0x99; 16], &OLD).unwrap();
+        old.persist(MarkerKind::Activated, [0x99; 16], &v).unwrap();
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let cp = p.dst.as_ref().unwrap().checkpoint().unwrap();
+        let records = authority::dir(&cp.working_world());
+        let receipt = std::fs::read(records.join(format!("prepared-{}.dat", hex::encode(t)))).unwrap();
+        assert!(holds(&receipt, &TEST_BEARER), "the positive control: the receipt holds the bearer");
+        let mut checked = 0;
+        for f in files_under(cp.directory(), &records) {
+            let mut bytes = std::fs::read(&f).unwrap();
+            if f.file_name().is_some_and(|n| n == "archive.tar.gz") {
+                let mut plain = Vec::new();
+                flate2::read::GzDecoder::new(&bytes[..]).read_to_end(&mut plain).unwrap();
+                bytes = plain;
+            }
+            assert!(!holds(&bytes, &TEST_BEARER), "the bearer reached {}", f.display());
+            assert!(!holds(&bytes, &OLD), "a received world's bearer reached {}", f.display());
+            checked += 1;
+        }
+        assert!(checked >= 4, "only {checked} files checked");
     }
 }

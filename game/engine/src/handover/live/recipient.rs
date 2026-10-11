@@ -100,9 +100,17 @@ pub enum RecipientStage {
     /// Durable checkpoint, latched listener and persisted Ready: inert.
     Ready,
     /// The disclosed bearer verified against the source's Prepared, which
-    /// is now durable here (inert marker cleared) and acknowledged. From
-    /// here the import is never deleted.
+    /// is now durable here WITH the bearer (CP10, HIGH-2: the Prepared
+    /// receipt in the import's own `handover/`, inert marker cleared) and
+    /// acknowledged. From here the import is never deleted, and the wait for
+    /// Committed is the persisted "awaiting Committed" state: the stall, the
+    /// 15-minute cap and a closed link no longer end it (the process-wide
+    /// resumer carries it, and the start-up scan resumes it). Only the
+    /// source's authenticated pre-retirement Abort quarantines it.
     Prepared,
+    /// CP10: the Activated record (with the bearer, H3) is durable: the
+    /// Committed was found, opened and witnessed. The handover finished.
+    Activated,
     Aborted(&'static str),
     /// Ended after Prepared: the import, its markers and the received
     /// world are kept untouched (M-2), never deleted, never opened.
@@ -123,7 +131,10 @@ pub struct RecipientSession {
     identity: RecipientIdentity,
     persona: [u8; 32],
     imports: PathBuf,
-    markers: MarkerStore,
+    /// CP10: the import's own working world `handover/` (set once the import
+    /// is durable, before Ready): Ready, the Prepared receipt with the
+    /// bearer, Activated, and the quarantine record.
+    markers: Option<MarkerStore>,
     proposal: Proposal,
     challenge: Id,
     acceptance: String,
@@ -157,6 +168,10 @@ pub struct RecipientSession {
     bearer: Option<Bearer>,
     /// The verified Prepared (exact event) this machine persisted.
     prepared: Option<(Event, VerifiedPrepared)>,
+    /// CP10: the awaiting-Committed wait was handed to a resumer.
+    activation_handed: bool,
+    /// CP10: the last second the Activated record was looked for.
+    activation_checked: u64,
 }
 
 /// L5: a router mapping the joined session asked for (native: the UPnP
@@ -208,7 +223,6 @@ impl RecipientSession {
         host: JoinedHost,
         identity: RecipientIdentity,
         imports: PathBuf,
-        markers: MarkerStore,
         now: u64,
     ) -> Result<Self, Refusal> {
         let Ok(Frame::Propose {
@@ -244,7 +258,7 @@ impl RecipientSession {
             identity,
             persona,
             imports,
-            markers,
+            markers: None,
             proposal: Proposal { transfer, world_name, source_npub, challenge, root, lineage },
             challenge: [0; 16],
             acceptance: String::new(),
@@ -269,6 +283,8 @@ impl RecipientSession {
             lease: None,
             bearer: None,
             prepared: None,
+            activation_handed: false,
+            activation_checked: 0,
         })
     }
 
@@ -305,7 +321,7 @@ impl RecipientSession {
     /// deleted (quarantine); Activated is never touched. The connection
     /// stays with the session for `return_link`.
     pub fn abort(&mut self, why: &'static str) {
-        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_)) {
+        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::Activated) {
             return;
         }
         self.send(&Frame::Abort { transfer: self.transfer() });
@@ -327,7 +343,7 @@ impl RecipientSession {
             self.receiver = None;
             // An unmarked import is never touched; a failed discard is left
             // for the next sweep (the marker still names it).
-            let _ = super::inert::discard(&self.imports, &self.markers, self.transfer());
+            let _ = super::inert::discard(&self.imports, self.transfer());
         }
         // M-2: after Prepared nothing is deleted: the session ends quarantined.
         self.stage = if inert { RecipientStage::Aborted(why) } else { RecipientStage::Quarantined(why) };
@@ -433,7 +449,10 @@ impl RecipientSession {
     }
 
     pub fn pump(&mut self, now: u64) -> Result<(), Refusal> {
-        if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::AwaitingConsent) {
+        if matches!(
+            self.stage,
+            RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::AwaitingConsent | RecipientStage::Activated
+        ) {
             return Ok(());
         }
         if let Some(lease) = self.lease.as_mut() {
@@ -447,6 +466,9 @@ impl RecipientSession {
             }
             Ok(None) => {}
             Err(r) => return Err(self.fail(r)),
+        }
+        if self.stage == RecipientStage::Prepared {
+            return self.pump_awaiting_committed(now);
         }
         let Some(link) = &self.link else { return Ok(()) };
         if link.is_closed() {
@@ -473,6 +495,41 @@ impl RecipientSession {
             self.send(&Frame::Notice { transfer: self.transfer(), paused: true });
         }
         Ok(())
+    }
+
+    /// CP10 (HIGH-2): past the ack. The stall, the 15-minute cap and a
+    /// closed link end nothing: the wait for Committed is durable and the
+    /// resumer carries it. The link is still read while it is open, so the
+    /// source's authenticated pre-retirement Abort quarantines. Once a
+    /// second the import's `handover/` is looked at for the Activated record.
+    fn pump_awaiting_committed(&mut self, now: u64) -> Result<(), Refusal> {
+        if self.link.as_ref().is_some_and(|l| !l.is_closed()) {
+            self.read_link(now)?;
+        }
+        if self.stage == RecipientStage::Prepared && now != self.activation_checked {
+            self.activation_checked = now;
+            let t = self.transfer();
+            if self.markers.as_ref().is_some_and(|m| m.read(crate::handover::durable::MarkerKind::Activated, t).is_ok_and(|r| r.is_some())) {
+                self.stage = RecipientStage::Activated;
+            }
+        }
+        Ok(())
+    }
+
+    /// CP10: hand the awaiting-Committed wait to `resumer` (once), which
+    /// outlives this session, the joined world and the window. It reads the
+    /// durable receipt itself (`phase::AwaitingCommit`), never this memory.
+    pub fn hand_activation(&mut self, resumer: &super::resumer::Resumer) {
+        if self.stage != RecipientStage::Prepared || self.activation_handed {
+            return;
+        }
+        if let Some(c) = &self.checkpoint {
+            resumer.adopt_import(&c.working_world(), self.transfer());
+            self.activation_handed = true;
+        }
+    }
+    pub fn activation_handed(&self) -> bool {
+        self.activation_handed
     }
 
     fn read_link(&mut self, now: u64) -> Result<(), Refusal> {
@@ -514,7 +571,19 @@ impl RecipientSession {
             return Err(Refusal("The host mixed up two handovers."));
         }
         match (self.stage, f) {
-            (_, Frame::Abort { .. }) => Err(Refusal("The host cancelled the handover.")),
+            (stage, Frame::Abort { .. }) => {
+                // CP10: past the ack, the source's Abort over this
+                // authenticated link means it never retired, so no Committed
+                // will ever exist: the durable quarantine record ends the
+                // wait (resumer and start-up scan skip it).
+                if stage == RecipientStage::Prepared
+                    && let (Some(r), Some(m)) = (self.receiver.as_mut(), self.markers.as_ref())
+                    && r.quarantine(m).is_err()
+                {
+                    log::warn!("handover: the quarantine record couldn't be stored; the wait for Committed continues");
+                }
+                Err(Refusal("The host cancelled the handover."))
+            }
             (_, Frame::Notice { .. }) => Ok(()),
             (RecipientStage::Accepted, Frame::ManifestPart { total, offset, bytes, .. }) => {
                 if total as usize > crate::handover::manifest::MANIFEST_LIMIT
@@ -584,9 +653,13 @@ impl RecipientSession {
         )
         .map_err(|_| Refusal("Your acknowledgement couldn't be signed."))?
         .as_json();
+        // CP10 (HIGH-2): the Prepared receipt WITH the bearer, the exact
+        // Prepared event and the root's relays is durable before the ack
+        // can leave (a failed write sends nothing and aborts while inert).
         let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;
+        let markers = self.markers.as_ref().ok_or(Refusal("No Ready."))?;
         receiver
-            .prepared(&self.markers, &vp)
+            .prepared(markers, &vp, crate::handover::phase::PreparedReceipt { event: &ev, root: &p.root, bearer })
             .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
         // From here the import is never deleted (a Prepared marker refuses
         // every inert discard); a failed clear quarantines it.
@@ -664,7 +737,7 @@ impl RecipientSession {
         let fence: Arc<Mutex<ImportFence>> = Default::default();
         let (tx, rx) = mpsc::channel();
         let (generation, transfer) = (self.import_generation, self.transfer());
-        let (imports, markers) = (self.imports.clone(), self.markers.directory().to_owned());
+        let imports = self.imports.clone();
         let worker_fence = fence.clone();
         #[cfg(test)]
         let hold = self.import_hold.take();
@@ -682,9 +755,7 @@ impl RecipientSession {
                 let mut g = worker_fence.lock().unwrap_or_else(|e| e.into_inner());
                 if g.cancelled {
                     drop(g);
-                    if let Ok(m) = MarkerStore::new(markers) {
-                        let _ = super::inert::discard(&imports, &m, transfer);
-                    }
+                    let _ = super::inert::discard(&imports, transfer);
                     return;
                 }
                 g.finished = true;
@@ -761,8 +832,13 @@ impl RecipientSession {
         let core = self.core.as_ref().ok_or(Refusal("No certificate."))?;
         let ready = pollster::block_on(crate::handover::crypto::sign_ready(&self.identity.runtime, core, p.challenge))
             .map_err(|_| Refusal("Ready couldn't be signed."))?;
-        let receiver = Receiver::checkpoint_ready(&self.markers, core, &ready, p.challenge, &p.root, now)
+        // CP10: the recipient's records live in the import's own working
+        // world `handover/` (the open guard refuses it until Activated).
+        let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
+        let markers = super::authority::store(&working).map_err(|_| Refusal("Ready couldn't be recorded safely."))?;
+        let receiver = Receiver::checkpoint_ready(&markers, core, &ready, p.challenge, &p.root, now)
             .map_err(|_| Refusal("Ready couldn't be recorded safely."))?;
+        self.markers = Some(markers);
         self.receiver = Some(receiver);
         self.stage = RecipientStage::Ready;
         self.send(&Frame::Ready { transfer: p.transfer, event: ready.as_json() });

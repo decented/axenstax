@@ -6,7 +6,7 @@
 
 pub mod certificate;
 pub mod checkpoint;
-mod codec;
+pub(crate) mod codec;
 pub mod context;
 pub mod crypto;
 pub mod durable;

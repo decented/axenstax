@@ -8,7 +8,6 @@ use super::joiner_authority::{accepted, settle_chunk_push};
 use super::lent_world::start_lent;
 use crate::handover::{
     context::RootContext,
-    durable::MarkerStore,
     live::{
         capture, copy,
         eligibility::Seat,
@@ -110,7 +109,7 @@ impl Drop for Tmp {
     }
 }
 fn recipient_env(dir: &Path) -> RecipientEnv {
-    RecipientEnv { identity: identity(), imports: dir.join("imports"), markers: MarkerStore::new(dir.join("markers")).unwrap() }
+    RecipientEnv { identity: identity(), imports: dir.join("imports") }
 }
 
 // ── Source: the game hosts; the far recipient is driven by hand ─────────────
@@ -206,7 +205,6 @@ fn frozen_after(tag: &str, dir: &Tmp, prep: impl FnOnce(&mut HeadlessGame)) -> (
         joined_host(),
         identity(),
         dir.0.join("imports"),
-        MarkerStore::new(dir.0.join("markers")).unwrap(),
         now(),
     )
     .unwrap();

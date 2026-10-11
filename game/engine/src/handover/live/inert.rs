@@ -4,7 +4,8 @@
 //! or timeout before Prepared removes ONLY that transfer's import (its final
 //! `handover-<world>-<transfer>` directory and any
 //! `.handover-receive-<transfer>-*` scratch), its Ready marker, then the inert
-//! marker itself. After Prepared nothing here deletes: a failure quarantines,
+//! marker itself (CP10: the Ready marker lives inside the import, in its
+//! working world's `handover/`). After Prepared nothing here deletes: a failure quarantines,
 //! and nothing Activated is ever removed. A bounded sweep (before a new
 //! recipient session and at startup) discards marked imports that have no
 //! live session, using the same markers. An unmarked directory is never
@@ -121,11 +122,17 @@ pub fn sweep_pack_scratch(scratch: &Path) -> Result<usize> {
 
 /// Remove `transfer`'s marked inert import, its Ready marker, then the inert
 /// marker. Unmarked: nothing is touched. A Prepared/Activated marker for the
-/// transfer refuses (that import is no longer inert).
-pub fn discard(imports: &Path, markers: &MarkerStore, transfer: Id) -> Result<()> {
+/// transfer refuses (that import is no longer inert). CP10: the recipient's
+/// records live in the import's own working world `handover/`
+/// (`authority::dir(<import>/working)`), so they go with the import.
+pub fn discard(imports: &Path, transfer: Id) -> Result<()> {
     let Some(world) = marked(imports, transfer)? else { return Ok(()) };
-    markers.discard_inert_ready(transfer)?;
-    remove_dir(&imports.join(format!("handover-{}-{}", hex::encode(world), hex::encode(transfer))))?;
+    let import = imports.join(format!("handover-{}-{}", hex::encode(world), hex::encode(transfer)));
+    let records = super::authority::dir(&import.join("working"));
+    if fs::symlink_metadata(&records).is_ok() {
+        MarkerStore::new(records)?.discard_inert_ready(transfer)?;
+    }
+    remove_dir(&import)?;
     let scratch = format!(".handover-receive-{}-", hex::encode(transfer));
     let mut seen = 0;
     for entry in fs::read_dir(imports).map_err(|_| Error::Io)? {
@@ -144,7 +151,7 @@ pub fn discard(imports: &Path, markers: &MarkerStore, transfer: Id) -> Result<()
 
 /// Discard every marked inert import except `live`'s. Bounded; returns how
 /// many it removed. A marker that can't be read is left (and reported).
-pub fn sweep(imports: &Path, markers: &MarkerStore, live: Option<Id>) -> Result<usize> {
+pub fn sweep(imports: &Path, live: Option<Id>) -> Result<usize> {
     let mut transfers = Vec::new();
     let mut seen = 0;
     for entry in fs::read_dir(imports).map_err(|_| Error::Io)? {
@@ -165,7 +172,7 @@ pub fn sweep(imports: &Path, markers: &MarkerStore, live: Option<Id>) -> Result<
     let mut removed = 0;
     let mut first_err = None;
     for t in transfers {
-        match discard(imports, markers, t) {
+        match discard(imports, t) {
             Ok(()) => removed += 1,
             Err(e) => first_err = first_err.or(Some(e)),
         }

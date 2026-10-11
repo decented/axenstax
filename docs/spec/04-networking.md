@@ -5633,8 +5633,9 @@ nothing and touches nothing on disk (`SaveChoice::Abandon`, forced by
 `leave_world`) and tears down the world, its HostedServer and the online
 host; the Cancel arm ignores a click past retirement. The Committed
 publication is not stopped by any of that: see "Committed publication"
-below. Not built yet: the recipient's durable bearer before its ack (CP7
-review HIGH-2). After
+below. The recipient stores the bearer durably before its ack and waits
+for Committed in the background: see "Recipient: durable bearer and
+activation" below (CP10, CP7 review HIGH-2). After
 Prepared the recipient never deletes the import: any failure ends its
 session `Quarantined` (import, markers and received world kept). An abort
 after the bearer was disclosed but before Retired resumes play and rotates
@@ -5658,8 +5659,11 @@ buffers; the live invitation itself, held in memory by the online host
 while it hosts (its bearer, and every invite link string made from it: the
 Online panel, the clipboard, `/online` chat lines); and the HKDF state (the
 extracted keys in `crypto::recipient` and `prepared_ack_proof`, and the
-derived recipient keys). The recipient's Activated record and host
-start, and the retained copy, are the next slices.
+derived recipient keys); and, on the recipient, the payload buffers that
+carried the bearer into its Prepared receipt and Activated record are
+zeroed after the write, while the marker store's encoded copy and the
+kernel's page cache are not. Host start from the imported world and the
+retained copy are the next slices.
 
 Committed publication (CP9). One background resumer per process
 (`live::resumer::Resumer::global()`), owned by nothing a world owns:
@@ -5697,6 +5701,70 @@ server and online host, sends no Abort, and the resumer still publishes the
 exact bytes on the loopback relay fixture and lands the record; a restart
 between Retired and the proof resumes from the start-up scan; failed
 attempts back off and each had a fresh Budget.
+
+Recipient: durable bearer and activation (CP10, CP7 review HIGH-2). The
+recipient's records live in its import's own working world `handover/`
+(`authority::dir(<imports>/handover-<world>-<transfer>/working)`, a 0600
+`MarkerStore`: temp, fsync, rename, directory fsync), not in a shared
+folder: Ready (written once the import is durable), the Prepared receipt,
+the Activated record and a quarantine record. The import receipt checks
+only manifest members, so this extra folder doesn't disturb it, and the
+inert discard reads it there (a Prepared or Activated record refuses).
+H3, as amended: the bearer is stored only in the imported world's
+`handover/` records: the Prepared receipt, then the Activated record.
+Every archive leaves it out: the handover pack and the `.axeworld`/cloud
+export are allowlists built from the world state (meta, `world.dat`,
+chunks, exhibits, participant records), never a folder walk (pinned by a
+test that hands over a world whose own `handover/` holds another
+bearer); the retained copy (next slice) must keep it out too. Order in
+`on_prepared`: verify the bearer against Prepared, sign the ack, persist
+the Prepared receipt v2 (`AxeNStax/handover/receiver-prepared/v2`: core,
+Prepared hash, the exact Prepared event, the root's relays, the bearer;
+on read the root is rebuilt from the relays with `now = 0` and must hash
+to the core's context, the event must hash to the stored Prepared hash,
+and the bearer must derive the key the event is routed to; a v1 receipt
+no longer decodes, so it reads as unreadable), clear the inert marker,
+and only then send `PreparedAck`. A failed write sends no ack and aborts
+while the import is still inert, so the source never retires (pinned by a
+test with a stale temporary record; the control that sends the ack first
+retires the source with no durable bearer). From the ack the wait for
+Committed is the persisted "awaiting Committed" state, the Prepared
+receipt with no Activated or quarantine record: the stall, the 15-minute
+cap and a closed link end nothing (the session stays `Prepared` and still
+reads the link while it is open). The game's pump hands the wait to the
+process's one resumer (`Resumer::adopt_import`, once, at Prepared), and
+start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
+which takes over every import whose working world's `handover/` holds a
+Prepared receipt and no Activated or quarantine record (bounded; creates
+nothing). Both read the receipt through the store into a
+`phase::AwaitingCommit`, never the session's memory. Each attempt has a
+fresh `Budget`: relays in the root's order; on each, a lookup of the
+bearer's route, the stored Prepared re-opened under the bearer's key and
+each candidate opened as the Committed bound to it and to the core, then
+an independent `stored::readback` of that exact event (the proof); then
+the Activated record v2 (`AxeNStax/handover/activated/v2`: core,
+Prepared hash, Committed hash, the bearer). The same backoff as the
+source (5 s doubling to 300 s), never giving up; leaving the world,
+closing the window and restarting never end it. Only the source's
+authenticated pre-retirement Abort (over the verified joined link) ends
+it: the session ends `Quarantined` and writes the durable quarantine
+record, which the resumer and the start-up scan skip. Open question: the
+Committed is opened with the wall clock, so a recipient resumed after the
+invitation root or the attestations expire can't verify it and keeps
+waiting. The open guard refuses the import until it is Activated,
+whatever the inert marker says: any `ready-*`, `prepared-*` or
+`quarantined-*` record of a transfer with no `activated-<same>.dat`
+refuses (`NOT_ACTIVATED`), and an Activated record that doesn't decode
+refuses (`AUTHORITY_UNREADABLE`); `save_refusal_in` carries it to every
+open and save path. Once a second the live session looks for the
+Activated record and moves to `Activated`; the game then ends the
+session and leaves the joined world (the source retired its copy) with
+"is yours now". Opening the imported world as host is the next slice.
+Tests: a recipient restarted between the ack and the proof (everything
+dropped; the source's and the recipient's start-up scans) ends Activated,
+with the bearer in both records (0600) and the import refused until then;
+the bearer reaches no archive or copy; the source's Abort after the ack
+quarantines and nothing resumes it.
 
 Inert imports (P3): before writing any of the import the recipient durably
 writes `<data>/handover/imports/inert-<transfer>.dat` (0600; temp, sync,

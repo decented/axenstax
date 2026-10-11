@@ -100,6 +100,8 @@ pub const TOO_LONG: &str = "The handover took longer than 15 minutes, so it was 
 pub const TOO_LONG_SOURCE: &str = "The handover took longer than 15 minutes, so it was cancelled. Play has resumed.";
 /// D7 open guard (PROPOSED copy, not owner-reviewed).
 pub const RETIRED: &str = "This world was handed over to another player, so it can't be opened or saved here. Its retained copy is a separate world.";
+/// CP10: an imported world whose handover hasn't reached Activated.
+pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
 
 // Slice A (CP7): bearer, Prepared, retirement.
@@ -124,4 +126,9 @@ pub fn source_retired(world: &str, npub: &str) -> String {
 }
 pub fn recipient_finishing(world: &str) -> String {
     format!("Finishing the handover of \u{201c}{world}\u{201d}\u{2026} Keep the game open.")
+}
+
+/// CP10: the recipient's world is activated here: the handover finished.
+pub fn recipient_activated(world: &str) -> String {
+    format!("\"{world}\" is yours now: the handover finished and the world is stored on this device.")
 }

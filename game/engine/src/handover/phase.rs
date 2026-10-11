@@ -555,12 +555,62 @@ pub enum ReceiverStage {
     Activated,
     Aborted,
 }
+
+/// CP10 (HIGH-2): what the recipient persists with its Prepared receipt,
+/// BEFORE its PreparedAck leaves: the exact Prepared event, the invitation
+/// root it is sealed under (its relays: `Core` carries only the digest) and
+/// the disclosed bearer. With these a restarted recipient finds, opens and
+/// witnesses the Committed without the session (`AwaitingCommit`). H3: the
+/// bearer is stored only in the imported world's `handover/` records: this
+/// Prepared receipt, then the Activated record.
+pub struct PreparedReceipt<'a> {
+    pub event: &'a Event,
+    pub root: &'a super::context::RootContext,
+    pub bearer: &'a super::live::bearer::Bearer,
+}
+
+/// What a Prepared receiver holds of its receipt.
+#[derive(Clone)]
+struct Held {
+    bearer: super::live::bearer::Bearer,
+    event: Event,
+    root: super::context::RootContext,
+}
+
 pub struct Receiver {
     core: Core,
     prepared: Hash,
     stage: ReceiverStage,
     committed: Option<Hash>,
+    held: Option<Held>,
 }
+
+const PREPARED_V2: &str = "AxeNStax/handover/receiver-prepared/v2";
+const ACTIVATED_V2: &str = "AxeNStax/handover/activated/v2";
+const QUARANTINED_V1: &str = "AxeNStax/handover/receiver-quarantined/v1";
+
+/// The root a stored receipt names, rebuilt from its relays (`now = 0`: the
+/// root may have expired by a restart) and bound to the core's digest.
+fn stored_root(core: &Core, relays: &[String]) -> Result<super::context::RootContext> {
+    use nostr::ToBech32;
+    let npub = nostr::PublicKey::from_slice(&core.root_persona)
+        .ok()
+        .and_then(|k| k.to_bech32().ok())
+        .ok_or(Error::Invalid("receipt root persona"))?;
+    let root = super::context::RootContext::new(core.root_runtime, &npub, core.root_expiry, relays, 0)?;
+    if root.digest() != core.context || root.relays() != relays {
+        return Err(Error::Invalid("receipt root relays"));
+    }
+    Ok(root)
+}
+
+/// The route the source seals to this bearer under `root`.
+fn bearer_route(core: &Core, root: &super::context::RootContext, bearer: &super::live::bearer::Bearer) -> Result<(nostr::Keys, super::stored::Route)> {
+    let keys = super::crypto::recipient(root, bearer.expose(), None)?;
+    let route = super::stored::Route { author: core.source_runtime, recipient: keys.public_key().to_bytes(), until: root.expiry() };
+    Ok((keys, route))
+}
+
 impl Receiver {
     /// Next integration adapter proves full imported checkpoint durability and
     /// latched listener readiness first. This persists Ready control evidence
@@ -586,22 +636,44 @@ impl Receiver {
             prepared: [0; 32],
             stage: ReceiverStage::Ready,
             committed: None,
+            held: None,
         })
     }
-    pub fn prepared(&mut self, store: &MarkerStore, proof: &VerifiedPrepared) -> Result<()> {
+    /// CP10 (HIGH-2): the Prepared receipt WITH the bearer, the exact
+    /// Prepared event and the root's relays, durably (0600 MarkerStore:
+    /// temp, fsync, rename, directory fsync). The caller sends its
+    /// PreparedAck only after this returns Ok. The bearer must derive the key
+    /// the event is routed to, so the stored bearer always opens it.
+    pub fn prepared(&mut self, store: &MarkerStore, proof: &VerifiedPrepared, receipt: PreparedReceipt<'_>) -> Result<()> {
         if !matches!(self.stage, ReceiverStage::Ready | ReceiverStage::Prepared)
             || proof.core() != &self.core
             || (self.prepared != [0; 32] && self.prepared != proof.event_hash())
+            || receipt.event.id.to_bytes() != proof.event_hash()
+            || receipt.root.digest() != self.core.context
         {
             return Err(Error::State("receiver Prepared boundary"));
         }
+        let (_, route) = bearer_route(&self.core, receipt.root, receipt.bearer)?;
+        if !route.matches(receipt.event) {
+            return Err(Error::Invalid("receipt bearer route"));
+        }
         let mut v = Vec::new();
-        frame(&mut v, b"AxeNStax/handover/receiver-prepared/v1");
+        frame(&mut v, PREPARED_V2.as_bytes());
         frame(&mut v, &self.core.encode());
         v.extend_from_slice(&proof.event_hash());
-        store.persist(MarkerKind::Prepared, self.core.transfer, &v)?;
+        frame(&mut v, receipt.event.as_json().as_bytes());
+        let relays = receipt.root.relays();
+        v.extend_from_slice(&(relays.len() as u32).to_be_bytes());
+        for relay in relays {
+            frame(&mut v, relay.as_bytes());
+        }
+        v.extend_from_slice(receipt.bearer.expose());
+        let r = store.persist(MarkerKind::Prepared, self.core.transfer, &v);
+        zeroize::Zeroize::zeroize(&mut v);
+        r?;
         self.prepared = proof.event_hash();
         self.stage = ReceiverStage::Prepared;
+        self.held = Some(Held { bearer: receipt.bearer.clone(), event: receipt.event.clone(), root: receipt.root.clone() });
         Ok(())
     }
     pub fn gameplay_admitted(&self) -> bool {
@@ -617,6 +689,23 @@ impl Receiver {
         self.stage = ReceiverStage::Aborted;
         Ok(true)
     }
+    /// CP10: the source's authenticated pre-retirement Abort reached a
+    /// recipient past its ack: no Committed will ever exist, so the durable
+    /// "quarantined" record ends the wait (the resumer and the start-up scan
+    /// skip it). The import and every other record stay.
+    pub fn quarantine(&mut self, store: &MarkerStore) -> Result<()> {
+        if self.stage == ReceiverStage::Activated {
+            return Err(Error::State("activated receiver"));
+        }
+        let mut v = Vec::new();
+        frame(&mut v, QUARANTINED_V1.as_bytes());
+        frame(&mut v, &self.core.encode());
+        v.extend_from_slice(&self.prepared);
+        store.persist(MarkerKind::Quarantined, self.core.transfer, &v)?;
+        self.stage = ReceiverStage::Aborted;
+        Ok(())
+    }
+    /// The Activated record carries the bearer forward (H3).
     pub fn activate(
         &mut self,
         store: &MarkerStore,
@@ -639,12 +728,16 @@ impl Receiver {
                 Err(Error::State("activation conflict"))
             };
         }
+        let held = self.held.as_ref().ok_or(Error::State("receiver bearer"))?;
         let mut v = Vec::new();
-        frame(&mut v, b"AxeNStax/handover/activated/v1");
+        frame(&mut v, ACTIVATED_V2.as_bytes());
         frame(&mut v, &self.core.encode());
         v.extend_from_slice(&self.prepared);
         v.extend_from_slice(&proof.event_hash());
-        store.persist(MarkerKind::Activated, self.core.transfer, &v)?;
+        v.extend_from_slice(held.bearer.expose());
+        let r = store.persist(MarkerKind::Activated, self.core.transfer, &v);
+        zeroize::Zeroize::zeroize(&mut v);
+        r?;
         self.committed = Some(proof.event_hash());
         self.stage = ReceiverStage::Activated;
         Ok(true)
@@ -674,34 +767,131 @@ impl Receiver {
             prepared: [0; 32],
             stage: ReceiverStage::Ready,
             committed: None,
+            held: None,
         };
-        if let Some(bytes) = store.read(MarkerKind::Prepared, transfer)? {
-            let mut r = Reader::new(&bytes, 8192)?;
-            r.label("AxeNStax/handover/receiver-prepared/v1")?;
-            let c = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
-            let p = r.array()?;
-            r.end()?;
-            if c != receiver.core || p == [0; 32] {
-                return Err(Error::Invalid("receiver Prepared binding"));
-            }
+        if let Some(mut bytes) = store.read(MarkerKind::Prepared, transfer)? {
+            let held = Self::read_prepared(&receiver.core, &bytes);
+            zeroize::Zeroize::zeroize(&mut bytes);
+            let (p, held) = held?;
             receiver.prepared = p;
+            receiver.held = Some(held);
             receiver.stage = ReceiverStage::Prepared;
         }
-        if let Some(bytes) = store.read(MarkerKind::Activated, transfer)? {
-            let mut r = Reader::new(&bytes, 8192)?;
-            r.label("AxeNStax/handover/activated/v1")?;
-            let c = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
-            let p = r.array::<32>()?;
-            let h = r.array()?;
-            r.end()?;
-            if c != receiver.core || p != receiver.prepared || p == [0; 32] || h == [0; 32] {
-                return Err(Error::Invalid("activation binding"));
-            }
-            store.persist(MarkerKind::Activated, transfer, &bytes)?;
+        if let Some(mut bytes) = store.read(MarkerKind::Activated, transfer)? {
+            let checked = (|| {
+                let mut r = Reader::new(&bytes, 8192)?;
+                r.label(ACTIVATED_V2)?;
+                let c = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
+                let p = r.array::<32>()?;
+                let h = r.array()?;
+                let b = r.array::<16>()?;
+                r.end()?;
+                let same_bearer = receiver.held.as_ref().is_some_and(|held| held.bearer.expose() == &b);
+                if c != receiver.core || p != receiver.prepared || p == [0; 32] || h == [0; 32] || !same_bearer {
+                    return Err(Error::Invalid("activation binding"));
+                }
+                Ok(h)
+            })();
+            let persisted = checked.is_ok().then(|| store.persist(MarkerKind::Activated, transfer, &bytes));
+            zeroize::Zeroize::zeroize(&mut bytes);
+            let h = checked?;
+            persisted.transpose()?;
             receiver.stage = ReceiverStage::Activated;
             receiver.committed = Some(h);
         }
         Ok(Some(receiver))
+    }
+    /// A v2 Prepared receipt: bound to `core`, its exact event hashing to
+    /// the stored Prepared hash, its root rebuilt from the stored relays,
+    /// and its bearer deriving the key the event is routed to. A v1 receipt
+    /// (no bearer, unreleased) no longer decodes: it reads as unreadable.
+    fn read_prepared(core: &Core, bytes: &[u8]) -> Result<(Hash, Held)> {
+        let mut r = Reader::new(bytes, super::durable::MARKER_LIMIT)?;
+        r.label(PREPARED_V2)?;
+        let c = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
+        let p: Hash = r.array()?;
+        let event = Event::from_json(r.framed(super::EVENT_LIMIT)?).map_err(|_| Error::Invalid("stored Prepared event"))?;
+        let n = r.u32()?;
+        if n == 0 || n > 8 {
+            return Err(Error::Limit("receipt relays"));
+        }
+        let mut relays = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let relay = std::str::from_utf8(r.framed(2048)?).map_err(|_| Error::Invalid("receipt relay"))?;
+            relays.push(relay.to_owned());
+        }
+        let bearer = super::live::bearer::Bearer::new(r.array()?);
+        r.end()?;
+        if &c != core || p == [0; 32] || event.id.to_bytes() != p || event.verify().is_err() {
+            return Err(Error::Invalid("receiver Prepared binding"));
+        }
+        let root = stored_root(core, &relays)?;
+        let (_, route) = bearer_route(core, &root, &bearer)?;
+        if !route.matches(&event) {
+            return Err(Error::Invalid("receipt bearer route"));
+        }
+        Ok((p, Held { bearer, event, root }))
+    }
+}
+
+/// CP10 (HIGH-2): a recipient past its PreparedAck whose Activated record
+/// isn't written yet: the persisted "awaiting Committed" state. Built only
+/// by reading the import's own `handover/` through its `MarkerStore`
+/// (`read`), never from a live session's memory, so a restart resumes
+/// exactly what was durable before the ack. `None` once Activated or
+/// quarantined (the source's authenticated pre-retirement Abort).
+pub struct AwaitingCommit {
+    receiver: Receiver,
+}
+impl AwaitingCommit {
+    pub fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
+        if store.read(MarkerKind::Quarantined, transfer)?.is_some() {
+            return Ok(None);
+        }
+        let Some(receiver) = Receiver::restart(store, transfer)? else { return Ok(None) };
+        if receiver.stage != ReceiverStage::Prepared || receiver.held.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self { receiver }))
+    }
+    pub fn transfer(&self) -> Id {
+        self.receiver.core.transfer
+    }
+    fn held(&self) -> &Held {
+        self.receiver.held.as_ref().expect("an AwaitingCommit always holds its receipt")
+    }
+    pub fn root(&self) -> &super::context::RootContext {
+        &self.held().root
+    }
+    /// The route the Committed is sealed to (the bearer's key under the root).
+    pub fn route(&self) -> Result<super::stored::Route> {
+        bearer_route(&self.receiver.core, self.root(), &self.held().bearer).map(|(_, r)| r)
+    }
+    /// This transfer's Committed among `events` (a root relay's answers):
+    /// the stored Prepared is re-opened under the bearer's key, then each
+    /// candidate must open as the Committed bound to it and to the core.
+    pub fn committed(&self, events: &[Event], now: u64) -> Option<(Event, VerifiedCommit)> {
+        let held = self.held();
+        let (keys, _) = bearer_route(&self.receiver.core, &held.root, &held.bearer).ok()?;
+        let source = self.receiver.core.source_runtime;
+        let Ok(super::crypto::Verified::Prepared(vp)) = super::crypto::open(&held.event, &keys, source, &held.root, now, None) else {
+            return None;
+        };
+        if vp.event_hash() != self.receiver.prepared || vp.core() != &self.receiver.core {
+            return None;
+        }
+        events.iter().take(128).find_map(|ev| match super::crypto::open(ev, &keys, source, &held.root, now, Some(&vp)) {
+            Ok(super::crypto::Verified::Committed(c))
+                if c.core() == &self.receiver.core && c.prepared_hash() == self.receiver.prepared =>
+            {
+                Some((ev.clone(), c))
+            }
+            _ => None,
+        })
+    }
+    /// The durable Activated record (with the bearer, H3).
+    pub fn activate(&mut self, store: &MarkerStore, proof: &VerifiedCommit, stored: &StoredProof) -> Result<bool> {
+        self.receiver.activate(store, proof, stored)
     }
 }
 
@@ -904,7 +1094,8 @@ mod tests {
             let mut source = Source::frozen(c.clone(), &Authority::root(&root, c.lineage).unwrap()).unwrap();
             source.prepared(&p, &stored).unwrap();
             let mut receiver = Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100).unwrap();
-            receiver.prepared(&receiver_store, &p).unwrap();
+            let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
+            receiver.prepared(&receiver_store, &p, PreparedReceipt { event: &pe, root: &root, bearer: &bearer }).unwrap();
             let ce = crypto::seal(seal(Some(&p)), &root, 100).await.unwrap();
             let Verified::Committed(cv) = crypto::open(&ce, &keys, root.runtime(), &root, 100, Some(&p)).unwrap() else {
                 panic!("Commit")
@@ -1171,7 +1362,8 @@ mod tests {
             let mut receiver =
                 Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100)
                     .unwrap();
-            receiver.prepared(&receiver_store, &p).unwrap();
+            let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
+            receiver.prepared(&receiver_store, &p, PreparedReceipt { event: &p_event, root: &root, bearer: &bearer }).unwrap();
             assert!(!receiver.gameplay_admitted());
             assert!(
                 !Receiver::restart(&receiver_store, c.transfer)
