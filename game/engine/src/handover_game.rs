@@ -129,11 +129,14 @@ fn recipient_env() -> Result<RecipientEnv, String> {
 /// Committed (read-only: never creates `<data>/handover/imports`). CP13:
 /// plus one line for each handover record the install's ledger doesn't list.
 pub(crate) fn awaiting_import_statuses() -> Vec<String> {
-    crate::handover::live::resumer::awaiting_statuses(
+    let mut lines = crate::handover::live::resumer::awaiting_statuses(
         &crate::save::worlds_root(),
         &crate::data_dir::data_root().join("handover").join("imports"),
         &crate::handover::ledger::Ledger::install(),
-    )
+    );
+    // CP13b (D2): e.g. "This world may now exist in two places."
+    lines.extend(crate::handover::live::resumer::Resumer::global().notices());
+    lines
 }
 
 /// P3: discard every marked inert import under `<data>/handover/imports`
@@ -427,7 +430,7 @@ impl crate::GameState {
                     self.host_paused = paused;
                 }
                 Ok(Frame::Propose { transfer, .. }) => self.on_handover_proposal(&payload, transfer, now),
-                Ok(Frame::Abort { transfer }) => {
+                Ok(Frame::Abort { transfer, .. }) => {
                     if let Some(Handover::Recipient(s)) = &self.handover
                         && s.proposal().transfer == transfer
                         && s.stage() == RecipientStage::AwaitingConsent
@@ -558,20 +561,25 @@ impl crate::GameState {
     pub(crate) fn end_source_handover(&mut self, msg: &str) -> String {
         // CP9 review LOW-1: a last chance to hand a retired publication over
         // before the session goes (the start-up scan stays the backstop).
+        // CP13b (D2): an abort record's Aborted is handed the same way.
         if let Some(Handover::Source { session, .. }) = self.handover.as_mut()
-            && session.past_retirement()
+            && (session.past_retirement() || session.abort_recorded())
             && !session.publication_handed()
         {
             session.hand_publication(crate::handover::live::resumer::Resumer::global());
         }
         let rotate = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.needs_invite_rotation());
+        let unrecorded = matches!(&self.handover, Some(Handover::Source { session, .. }) if session.abort_unrecorded());
         self.handover = None;
+        let mut line = msg.to_string();
         if rotate {
             self.rotate_handover_invite();
-            format!("{msg} {}", copy::INVITE_REISSUED)
-        } else {
-            msg.to_string()
+            line = format!("{line} {}", copy::INVITE_REISSUED);
         }
+        if unrecorded {
+            line = format!("{line} {}", copy::ABORT_UNRECORDED);
+        }
+        line
     }
 
     fn pump_handover_recipient(&mut self, now: u64) {

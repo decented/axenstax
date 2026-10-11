@@ -110,10 +110,32 @@ impl VerifiedCommit {
         Self { core, event_hash, prepared_hash }
     }
 }
+/// CP13b (D2): a source's Aborted after it disclosed the bearer: the same
+/// envelope and kind as Committed, inner `phase: 2` (never readable as
+/// Committed's `1`), bound like Committed to the transfer and context (the
+/// exact core) and to the Prepared hash. Only `open_candidates` builds it.
+#[derive(Clone, Debug)]
+pub struct VerifiedAbort {
+    core: Core,
+    event_hash: Hash,
+    prepared_hash: Hash,
+}
+impl VerifiedAbort {
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+    pub fn event_hash(&self) -> Hash {
+        self.event_hash
+    }
+    pub fn prepared_hash(&self) -> Hash {
+        self.prepared_hash
+    }
+}
 #[derive(Clone, Debug)]
 pub enum Verified {
     Prepared(VerifiedPrepared),
     Committed(VerifiedCommit),
+    Aborted(VerifiedAbort),
 }
 
 fn ready_bytes(core: &Core, challenge: Id) -> Vec<u8> {
@@ -215,6 +237,18 @@ pub struct Seal<'a> {
     pub prepared: Option<&'a VerifiedPrepared>,
 }
 pub async fn seal(request: Seal<'_>, root: &RootContext, now: u64) -> Result<Event> {
+    let phase = u8::from(request.prepared.is_some());
+    seal_phase(request, root, now, phase).await
+}
+/// CP13b (D2): the source's Aborted over its Prepared (`request.prepared`
+/// required): the Committed envelope with inner `phase: 2`.
+pub async fn seal_aborted(request: Seal<'_>, root: &RootContext, now: u64) -> Result<Event> {
+    if request.prepared.is_none() {
+        return Err(Error::Invalid("Aborted without Prepared"));
+    }
+    seal_phase(request, root, now, 2).await
+}
+async fn seal_phase(request: Seal<'_>, root: &RootContext, now: u64, phase: u8) -> Result<Event> {
     let r = request;
     r.core.validate(root, now)?;
     if r.source.public_key().to_bytes() != r.core.source_runtime {
@@ -240,7 +274,7 @@ pub async fn seal(request: Seal<'_>, root: &RootContext, now: u64) -> Result<Eve
     }
     let env = Envelope {
         v: 1,
-        phase: u8::from(r.prepared.is_some()),
+        phase,
         core: STANDARD.encode(r.core.encode()),
         ready: r.ready.as_json(),
         source_attestation: r.source_attestation.as_json(),
@@ -352,7 +386,8 @@ pub fn open_candidates(
             core,
             event_hash: ev.id.to_bytes(),
         })),
-        (1, Some(h)) => {
+        // CP13b (D2): Committed (1) and Aborted (2) share ONE binding check.
+        (phase @ (1 | 2), Some(h)) => {
             let h: Hash = decode_base64(&h, 32)?
                 .try_into()
                 .map_err(|_| Error::Invalid("Prepared hash"))?;
@@ -363,11 +398,12 @@ pub fn open_candidates(
             if h != p.event_hash || core != p.core {
                 return Err(Error::Invalid("Committed Prepared binding"));
             }
-            Ok(Verified::Committed(VerifiedCommit {
-                core,
-                event_hash: ev.id.to_bytes(),
-                prepared_hash: h,
-            }))
+            let event_hash = ev.id.to_bytes();
+            Ok(if phase == 1 {
+                Verified::Committed(VerifiedCommit { core, event_hash, prepared_hash: h })
+            } else {
+                Verified::Aborted(VerifiedAbort { core, event_hash, prepared_hash: h })
+            })
         }
         _ => Err(Error::Invalid("phase")),
     }

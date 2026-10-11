@@ -115,6 +115,11 @@ pub fn unlisted_world(name: &str) -> String {
 pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record this computer didn't make. It is ignored, and the world stays closed.";
 /// CP13 (D2): the world list's line for a quarantined import: it is never
 /// opened.
+/// CP13b (D2): a readback found both the sender's Committed and its
+/// Aborted for one handover; Committed won, so the sender may still hold it.
+pub const WORLD_IN_TWO_PLACES: &str = "This world may now exist in two places.";
+/// CP13b (D2): the source's abort record couldn't be saved; play resumed.
+pub const ABORT_UNRECORDED: &str = "The cancellation couldn't be saved, so the other player may keep waiting until they cancel.";
 pub const HANDOVER_UNFINISHED: &str = "This handover didn't finish. The world stays with the sender.";
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";

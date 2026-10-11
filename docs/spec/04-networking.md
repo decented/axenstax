@@ -5854,7 +5854,7 @@ once quarantined; the receipt is removed rather than rewritten without the
 bearer, which would only stop adoption by accident through the ledger
 digest). This is safe because the source can't retire without the ack. If
 the quarantine write fails, the receipt stays, and the source's published
-Aborted ends it (CP13 step 3, not yet built). A recipient restarted with
+Aborted ends it (CP13b, below). A recipient restarted with
 only a receipt (no Activated, no quarantine) can't know whether its ack
 left, so it only waits for the source's signal (the start-up scan adopts
 it); it never quarantines on restart. A quarantined import is never
@@ -5865,10 +5865,71 @@ when its inert marker is still there (cases (A) and (B): the receipt is
 gone, so `discard_inert_ready` no longer refuses); an import quarantined
 after the ack by the source's live Abort has no inert marker (it was
 cleared before the ack), so the sweep leaves it: it stays, closed, with its
-status line. Tested: (A)
+status line. CP13b: a live Abort after the ack ends exactly like the
+published Aborted (quarantine record, then the receipt and its bearer
+removed). Tested: (A)
 ends quarantined with the bearer gone and no adoption; a recipient Cancel
 after the ack sends no Abort, quarantines nothing, and the import still
-activates on Committed. And
+activates on Committed.
+
+CP13b (D2 (C)/(D), CP12 review LOW-1): **the published Aborted** (provisional
+protocol v90; the handover frame tag is unchanged). When the source aborts
+after disclosing the bearer, for any reason (Cancel, a refusal, a stall, a
+closed seat with no ack read, the liveness abort included, or a session
+dropped without `abort`), it seals an Aborted over its sealed Prepared
+(`crypto::seal_aborted`): the Committed envelope and kind exactly, with the
+inner label `phase: 2` (Committed is `1`, Prepared `0`, so neither can be
+read as the other), bound like Committed to the transfer and context (the
+exact core) and to the Prepared hash, sealed at `core.issued_at`. With no
+Prepared sealed yet there is nothing to answer (no receipt can exist). The
+**abort record** (`aborted-<transfer>.dat`, `phase::AbortRecord`, label
+`AxeNStax/handover/abort/v1`: core, Prepared hash, Aborted hash, the exact
+signed Aborted bytes, the root's relays; nothing secret; it mirrors
+retirement record v2) is written, its ledger entry (`abt`) appended and
+fsynced first, BEFORE the source unfreezes. It never refuses the source's
+own world (the open guard reads only `retired-*`). If it can't be written
+the source unfreezes anyway (the world is the source's), logs it, and its
+line adds "The cancellation couldn't be saved, so the other player may keep
+waiting until they cancel." (`copy::ABORT_UNRECORDED`); the live Abort still
+carries the sealed Aborted. **Exclusivity:** one function
+(`phase::write_terminal`, under one process-wide lock) writes either the
+retirement record or the abort record of a transfer, and refuses when the
+other exists or can't be read: `retire` refuses on an abort record (the
+source stays aborted), and the post-disclosure abort refuses on a
+retirement record (the source stays retired, `RetirementUncertain`: frozen,
+published from its record). Whichever is durable first wins, so a
+concurrent ack and abort can never both write. The abort record reads back
+as the same publication permit as a retirement (`RetiredCommit::read_aborted`,
+ledger kind `Abort`), and the same resumer publishes it with the same
+rotation, backoff, readback proof and "published" record (payload label
+`AxeNStax/handover/aborted-published/v1`); the session hands it over when it
+ends, and `resume_all` scans both kinds at start-up, ledger-listed only. The
+live `Frame::Abort` carries the sealed Aborted after disclosure (`aborted`,
+bounded by the event limit; `None` before). The recipient checks the live
+one and the published one with ONE verification
+(`AwaitingCommit::aborted`: the stored Prepared re-opened under the
+bearer's key at `core.issued_at`, the candidate opened as an Aborted bound
+to the exact core and the stored Prepared hash); an Abort without an
+Aborted that verifies ends the session only and the wait stays with the
+resumer. On a verified Aborted (live or read back): the quarantine record,
+then the receipt and its bearer removed, and the wait drops. If one
+readback yields both a valid Committed and a valid Aborted for one transfer,
+Committed wins (a duplicate world is recoverable by hand, a lost one isn't):
+it is logged and the world list shows "This world may now exist in two
+places." (`copy::WORLD_IN_TWO_PLACES`, from the resumer's notices). **A
+Committed is accepted at any date:** the recipient opens it at
+`core.issued_at`, never today's clock, so the source runtime key alone
+authorises activation, however late it is read. Tested: (C) a crash between
+the receipt and the ack and (D) a dropped link after a lost ack both end
+with the source's abort record, its Aborted published by a restarted
+source's start-up scan, and the recipient quarantined with the receipt
+gone; a live Abort after the ack quarantines through the shared check, and
+one carrying the source's Committed quarantines nothing; an abort racing a
+retire leaves exactly one record; with both on the relay Committed wins
+with the line; an Aborted of another transfer or over another Prepared is
+ignored; a failed abort record still unfreezes, with the line.
+
+And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
 which takes over every import whose working world's `handover/` holds a
 Prepared receipt and no Activated or quarantine record (bounded; creates
@@ -5884,9 +5945,9 @@ the Activated record v2 (`AxeNStax/handover/activated/v2`: core,
 Prepared hash, Committed hash, the bearer). The same backoff as the
 source (5 s doubling to 300 s), never giving up; leaving the world,
 closing the window and restarting never end it. Only the source's
-authenticated pre-retirement Abort (over the verified joined link) ends
-it: the session ends `Quarantined` and writes the durable quarantine
-record, which the resumer and the start-up scan skip. Expiry (CP11,
+Aborted (CP13b: live over the verified joined link or published, one
+verification) ends it: the durable quarantine record, which the resumer
+and the start-up scan skip, then the receipt removed. Expiry (CP11,
 coordinator): the recipient verifies the Committed against the root and
 attestations its Prepared receipt captured, never today's clock (the
 source authorised the transfer before expiry and the recipient already

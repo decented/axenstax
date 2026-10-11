@@ -384,6 +384,7 @@ pub async fn publish_readback(
     let core = match verified {
         Verified::Prepared(p) => p.core(),
         Verified::Committed(c) => c.core(),
+        Verified::Aborted(a) => a.core(),
     };
     if !same_root(core, root) {
         return Err(Error::Invalid("publication of another root's certificate"));
@@ -413,6 +414,9 @@ pub(crate) fn publication_allowed(
             }
             Ok(c.event_hash())
         }
+        // CP13b: an Aborted is published only from its durable abort
+        // record (`publish_retired`), never through this path.
+        Verified::Aborted(_) => Err(Error::State("Aborted publication outside its abort record")),
     }
 }
 /// CP9: the Committed publication of a retired source, from its durable
@@ -548,17 +552,20 @@ pub async fn readback(
     budget: &mut Budget,
     cancel: &AtomicBool,
 ) -> Result<StoredProof> {
-    let Verified::Committed(c) = verified else {
-        return Err(Error::State("readback witnesses only a verified Committed"));
+    // CP13b (D2): a verified Aborted is witnessed the same way.
+    let (core, hash) = match verified {
+        Verified::Committed(c) => (c.core(), c.event_hash()),
+        Verified::Aborted(a) => (a.core(), a.event_hash()),
+        Verified::Prepared(_) => return Err(Error::State("readback witnesses only a verified Committed or Aborted")),
     };
     super::context::validate_relay(url)?;
     budget.authorise_relay(url, root)?;
     // CP5 review MEDIUM-1: the verified Committed must belong to the root
     // context whose relays are being asked.
-    if !same_root(c.core(), root) {
+    if !same_root(core, root) {
         return Err(Error::Invalid("readback of another root's certificate"));
     }
-    if event.id.to_bytes() != c.event_hash()
+    if event.id.to_bytes() != hash
         || !route.matches(event)
         || event.verify().is_err()
         || event.as_json().len() > super::EVENT_LIMIT

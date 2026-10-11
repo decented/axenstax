@@ -47,7 +47,10 @@ pub enum Frame {
     Chunk { transfer: Id, offset: u64, bytes: Vec<u8> },
     Ack { transfer: Id, through: u64 },
     Ready { transfer: Id, event: String },
-    Abort { transfer: Id },
+    /// CP13b (D2): after the bearer was disclosed the source's Abort
+    /// carries its signed Aborted (`aborted`), which a recipient past its ack
+    /// verifies exactly as it verifies the published one; before that, None.
+    Abort { transfer: Id, aborted: Option<String> },
     /// Source → every joined player: play is paused for a handover (or
     /// resumes). Joiners stop sending input while paused.
     Notice { transfer: Id, paused: bool },
@@ -104,7 +107,7 @@ impl Frame {
             | Frame::Chunk { transfer, .. }
             | Frame::Ack { transfer, .. }
             | Frame::Ready { transfer, .. }
-            | Frame::Abort { transfer }
+            | Frame::Abort { transfer, .. }
             | Frame::Notice { transfer, .. }
             | Frame::Bearer { transfer, .. }
             | Frame::Prepared { transfer, .. }
@@ -124,6 +127,7 @@ impl Frame {
             }
             Frame::Ready { event, .. } | Frame::PreparedAck { event, .. } => long(event),
             Frame::Prepared { event, .. } => event.len() > crate::handover::EVENT_LIMIT,
+            Frame::Abort { aborted: Some(event), .. } => event.len() > crate::handover::EVENT_LIMIT,
             _ => false,
         };
         if bad {

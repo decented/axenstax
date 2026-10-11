@@ -357,7 +357,7 @@ impl RecipientSession {
             self.stage = RecipientStage::Quarantined(why);
             return;
         }
-        self.send(&Frame::Abort { transfer: self.transfer() });
+        self.send(&Frame::Abort { transfer: self.transfer(), aborted: None });
         self.import = None;
         self.listener = None;
         self.socket = None;
@@ -662,16 +662,31 @@ impl RecipientSession {
             return Err(Refusal("The host mixed up two handovers."));
         }
         match (self.stage, f) {
-            (stage, Frame::Abort { .. }) => {
-                // CP10: past the ack, the source's Abort over this
-                // authenticated link means it never retired, so no Committed
-                // will ever exist: the durable quarantine record ends the
-                // wait (resumer and start-up scan skip it).
+            (stage, Frame::Abort { aborted, .. }) => {
+                // CP10 + CP13b (D2): past the ack, only the source's signed
+                // Aborted ends the wait, checked by the ONE verification the
+                // published Aborted takes (`AwaitingCommit::aborted`): then
+                // the quarantine record, and the receipt is removed. An
+                // Abort without a verifying Aborted ends this session only;
+                // the wait stays with the resumer.
                 if stage == RecipientStage::Prepared
-                    && let (Some(r), Some(m)) = (self.receiver.as_mut(), self.markers.as_ref())
-                    && r.quarantine(m).is_err()
+                    && let (Some(json), Some(m)) = (aborted, self.markers.as_ref())
                 {
-                    log::warn!("handover: the quarantine record couldn't be stored; the wait for Committed continues");
+                    let t = self.transfer();
+                    let ended = Event::from_json(&json).ok().and_then(|ev| {
+                        let mut awaiting = crate::handover::phase::AwaitingCommit::read(m, t).ok()??;
+                        let (_, proof) = awaiting.aborted(std::slice::from_ref(&ev))?;
+                        Some(awaiting.end_aborted(m, &proof))
+                    });
+                    match ended {
+                        Some(Ok(())) => {
+                            if let Some(r) = self.receiver.as_mut() {
+                                let _ = r.abort();
+                            }
+                        }
+                        Some(Err(e)) => log::warn!("handover: the quarantine record couldn't be stored ({e}); the wait for Committed continues"),
+                        None => log::warn!("handover: the host's Abort carried no Aborted that verifies; the wait for Committed continues"),
+                    }
                 }
                 Err(Refusal("The host cancelled the handover."))
             }

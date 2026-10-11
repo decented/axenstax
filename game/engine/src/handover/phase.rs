@@ -3,7 +3,7 @@ use super::{
     Error, Hash, Id, Result,
     certificate::{Core, VerifiedCommit},
     codec::{Reader, frame},
-    crypto::VerifiedPrepared,
+    crypto::{VerifiedAbort, VerifiedPrepared},
     durable::{MarkerKind, MarkerStore},
     stored::StoredProof,
 };
@@ -228,6 +228,117 @@ impl Retirement {
     }
 }
 
+/// CP13b (D2): a source's abort record, written once it aborted after
+/// disclosing the bearer. It mirrors retirement record v2: the exact signed
+/// Aborted bytes, the core, the Prepared hash it answers and the root's
+/// relays, and nothing secret. It authorises one thing: publishing that
+/// Aborted (`RetiredCommit::read_aborted`), so a recipient past its ack
+/// quarantines. Written only through `write_terminal`, exclusive with the
+/// retirement record of the same transfer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbortRecord {
+    core: Core,
+    prepared: Hash,
+    aborted: Hash,
+    exact_event: Vec<u8>,
+    relays: Vec<String>,
+    verified: bool,
+}
+const ABORT_V1: &str = "AxeNStax/handover/abort/v1";
+impl AbortRecord {
+    pub fn new(abort: &VerifiedAbort, prepared: &VerifiedPrepared, exact_event: Vec<u8>, relays: Vec<String>) -> Result<Self> {
+        if abort.core() != prepared.core() || abort.prepared_hash() != prepared.event_hash() {
+            return Err(Error::Invalid("abort record Prepared"));
+        }
+        let r = Self {
+            core: abort.core().clone(),
+            prepared: prepared.event_hash(),
+            aborted: abort.event_hash(),
+            exact_event,
+            relays,
+            verified: true,
+        };
+        r.validate()?;
+        Ok(r)
+    }
+    fn validate(&self) -> Result<()> {
+        if self.prepared == [0; 32] || self.relays.is_empty() || self.relays.len() > 8 {
+            return Err(Error::Invalid("abort record context"));
+        }
+        if self.exact_event.len() > super::EVENT_LIMIT {
+            return Err(Error::Limit("abort record event"));
+        }
+        let ev = Event::from_json(&self.exact_event).map_err(|_| Error::Invalid("abort record event"))?;
+        if ev.verify().is_err()
+            || ev.id.to_bytes() != self.aborted
+            || ev.pubkey.to_bytes() != self.core.source_runtime
+            || ev.kind != nostr::Kind::Custom(super::STORED_KIND)
+        {
+            return Err(Error::Invalid("abort record signature"));
+        }
+        stored_root(&self.core, &self.relays).map(|_| ())
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let mut v = Vec::new();
+        frame(&mut v, ABORT_V1.as_bytes());
+        frame(&mut v, &self.core.encode());
+        v.extend_from_slice(&self.prepared);
+        v.extend_from_slice(&self.aborted);
+        frame(&mut v, &self.exact_event);
+        v.extend_from_slice(&(self.relays.len() as u32).to_be_bytes());
+        for relay in &self.relays {
+            frame(&mut v, relay.as_bytes());
+        }
+        Ok(v)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(bytes, super::durable::MARKER_LIMIT)?;
+        r.label(ABORT_V1)?;
+        let core = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
+        let prepared = r.array()?;
+        let aborted = r.array()?;
+        let exact_event = r.framed(super::EVENT_LIMIT)?.to_vec();
+        let n = r.u32()?;
+        if n == 0 || n > 8 {
+            return Err(Error::Limit("abort record relays"));
+        }
+        let mut relays = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let relay = std::str::from_utf8(r.framed(2048)?).map_err(|_| Error::Invalid("abort record relay"))?;
+            relays.push(relay.to_owned());
+        }
+        r.end()?;
+        let value = Self { core, prepared, aborted, exact_event, relays, verified: false };
+        value.validate()?;
+        Ok(value)
+    }
+}
+
+/// CP13b (D2): the refusals of the one choke point.
+pub const ABORT_RECORD_EXISTS: &str = "abort record exists";
+pub const RETIREMENT_RECORD_EXISTS: &str = "retirement record exists";
+static TERMINAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// CP13b (D2): the ONE function that writes a source's terminal record for
+/// `transfer`: the retirement record (`Retired`) or the abort record
+/// (`Aborted`). Whichever is durable first wins: under one process-wide lock
+/// it refuses when the other kind exists (or can't be read: fail closed),
+/// then appends and fsyncs the ledger entry, then the record.
+fn write_terminal(store: &MarkerStore, ledger: &super::ledger::Ledger, transfer: Id, kind: MarkerKind, bytes: &[u8]) -> Result<()> {
+    use super::ledger::{Entry, RecordKind, Role};
+    let (other, entry, refusal) = match kind {
+        MarkerKind::Retired => (MarkerKind::Aborted, RecordKind::Retirement, ABORT_RECORD_EXISTS),
+        MarkerKind::Aborted => (MarkerKind::Retired, RecordKind::Abort, RETIREMENT_RECORD_EXISTS),
+        _ => return Err(Error::State("not a terminal record")),
+    };
+    let _serialised = TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
+    if store.read(other, transfer)?.is_some() {
+        return Err(Error::State(refusal));
+    }
+    ledger.append(Entry::of(transfer, Role::Source, entry, bytes))?;
+    store.persist(kind, transfer, bytes)
+}
+
 /// CP9: a retired source's Committed publication, rebuilt from its durable
 /// retirement record ALONE. A restarted source holds no bearer, so it can't
 /// rebuild a `VerifiedCommit`; this is the permit it publishes with instead.
@@ -245,8 +356,28 @@ pub struct RetiredCommit {
     recipient: Hash,
     /// CP13: the SHA-256 of the record's exact payload bytes (its ledger digest).
     record: Hash,
+    /// CP13b (D2): read from an abort record: the event is the Aborted.
+    aborted: bool,
 }
 impl RetiredCommit {
+    /// CP13b (D2): the abort record of `transfer` in `store`, if any, as the
+    /// same publication permit (its event is the exact signed Aborted).
+    pub fn read_aborted(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
+        let Some(bytes) = store.read(MarkerKind::Aborted, transfer)? else {
+            return Ok(None);
+        };
+        Self::from_abort(AbortRecord::decode(&bytes)?, transfer, super::hash(&bytes)).map(Some)
+    }
+    fn from_abort(r: AbortRecord, transfer: Id, record: Hash) -> Result<Self> {
+        let relays = r.relays.clone();
+        let mut out = Self::from_parts(r.core, &relays, r.exact_event, r.aborted, transfer, record)?;
+        out.aborted = true;
+        Ok(out)
+    }
+    /// Whether this permit publishes an Aborted (an abort record).
+    pub fn is_abort(&self) -> bool {
+        self.aborted
+    }
     /// The retirement record of `transfer` in `store`, if there is one.
     pub fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
         let Some(bytes) = store.read(MarkerKind::Retired, transfer)? else {
@@ -254,23 +385,33 @@ impl RetiredCommit {
         };
         Self::from_record(Retirement::decode(&bytes)?, transfer, super::hash(&bytes)).map(Some)
     }
-    /// Every retirement record in `store` (bounded by `retirements`). Any
-    /// record that doesn't decode fails the scan (fail closed).
+    /// Every retirement record in `store` (bounded by `retirements`), then
+    /// (CP13b) every abort record (bounded by `aborts`). Any record that
+    /// doesn't decode fails the scan (fail closed).
     pub fn scan(store: &MarkerStore) -> Result<Vec<Self>> {
-        store
+        let mut out: Vec<Self> = store
             .retirements()?
             .into_iter()
             .map(|(id, bytes)| Self::from_record(Retirement::decode(&bytes)?, id, super::hash(&bytes)))
-            .collect()
+            .collect::<Result<_>>()?;
+        for (id, bytes) in store.aborts()? {
+            out.push(Self::from_abort(AbortRecord::decode(&bytes)?, id, super::hash(&bytes))?);
+        }
+        Ok(out)
     }
     fn from_record(r: Retirement, transfer: Id, record: Hash) -> Result<Self> {
-        if r.core.transfer != transfer {
+        r.root()?;
+        let relays = r.relays.clone();
+        Self::from_parts(r.core, &relays, r.exact_event, r.committed, transfer, record)
+    }
+    fn from_parts(core: Core, relays: &[String], exact_event: Vec<u8>, hash: Hash, transfer: Id, record: Hash) -> Result<Self> {
+        if core.transfer != transfer {
             return Err(Error::Invalid("retirement filename binding"));
         }
-        let root = r.root()?;
-        let event = Event::from_json(&r.exact_event).map_err(|_| Error::Invalid("retirement event"))?;
+        let root = stored_root(&core, relays)?;
+        let event = Event::from_json(&exact_event).map_err(|_| Error::Invalid("retirement event"))?;
         // What is published is exactly what was persisted.
-        if event.as_json().as_bytes() != r.exact_event.as_slice() {
+        if event.as_json().as_bytes() != exact_event.as_slice() {
             return Err(Error::Invalid("retirement event bytes"));
         }
         let tags: Vec<_> = event.tags.iter().collect();
@@ -281,15 +422,7 @@ impl RetiredCommit {
                 .ok_or(Error::Invalid("retirement event route"))?,
             _ => return Err(Error::Invalid("retirement event route")),
         };
-        Ok(Self {
-            core: r.core,
-            root,
-            event,
-            exact_event: r.exact_event,
-            hash: r.committed,
-            recipient,
-            record,
-        })
+        Ok(Self { core, root, event, exact_event, hash, recipient, record, aborted: false })
     }
     pub fn transfer(&self) -> Id {
         self.core.transfer
@@ -298,7 +431,8 @@ impl RetiredCommit {
     /// publishes it.
     pub fn ledger_entry(&self) -> super::ledger::Entry {
         use super::ledger::{Entry, RecordKind, Role};
-        Entry { transfer: self.core.transfer, role: Role::Source, kind: RecordKind::Retirement, digest: self.record }
+        let kind = if self.aborted { RecordKind::Abort } else { RecordKind::Retirement };
+        Entry { transfer: self.core.transfer, role: Role::Source, kind, digest: self.record }
     }
     pub fn core(&self) -> &Core {
         &self.core
@@ -357,7 +491,9 @@ impl RetiredCommit {
     }
     fn published_payload(&self) -> Vec<u8> {
         let mut v = Vec::new();
-        frame(&mut v, b"AxeNStax/handover/committed-published/v1");
+        // CP13b: an Aborted's "published" record has its own label.
+        let label: &[u8] = if self.aborted { b"AxeNStax/handover/aborted-published/v1" } else { b"AxeNStax/handover/committed-published/v1" };
+        frame(&mut v, label);
         v.extend_from_slice(&self.core.transfer);
         v.extend_from_slice(&self.hash);
         v
@@ -518,14 +654,47 @@ impl Source {
         // unreadable existing retirement, unlike treating every IO as absence.
         self.stage = SourceStage::RetirementUncertain;
         self.retirement = Some(record.clone());
-        use super::ledger::{Entry, RecordKind, Role};
-        ledger.append(Entry::of(self.core.transfer, Role::Source, RecordKind::Retirement, &bytes))?;
-        store.persist(MarkerKind::Retired, self.core.transfer, &bytes)?;
+        // CP13b (D2): the one choke point; an abort record of this
+        // transfer already won (nothing was written here): stays aborted.
+        match write_terminal(store, ledger, self.core.transfer, MarkerKind::Retired, &bytes) {
+            Err(Error::State(ABORT_RECORD_EXISTS)) => {
+                self.stage = SourceStage::Aborted;
+                self.retirement = None;
+                return Err(Error::State(ABORT_RECORD_EXISTS));
+            }
+            r => r?,
+        }
         self.stage = SourceStage::Retired;
         Ok(PublicationPermit {
             bytes: record.exact_event,
             hash: record.committed,
         })
+    }
+    /// CP13b (D2): the abort after the bearer was disclosed. The abort
+    /// record (its ledger entry first) is written through the one choke
+    /// point BEFORE the caller unfreezes. A retirement record of this
+    /// transfer already won: refused, and this source stays retired
+    /// (`RetirementUncertain`: frozen, published from its record). Any other
+    /// write failure still ends Aborted (the world is the source's) and is
+    /// returned so the caller shows a status line.
+    pub fn abort_disclosed(&mut self, store: &MarkerStore, ledger: &super::ledger::Ledger, record: AbortRecord) -> Result<()> {
+        if !matches!(self.stage, SourceStage::Frozen | SourceStage::Prepared) {
+            return Err(Error::State("source cannot resume"));
+        }
+        if !record.verified || record.core != self.core || self.prepared.is_some_and(|p| p != record.prepared) {
+            return Err(Error::State("source abort record boundary"));
+        }
+        let bytes = record.encode()?;
+        match write_terminal(store, ledger, self.core.transfer, MarkerKind::Aborted, &bytes) {
+            Err(Error::State(RETIREMENT_RECORD_EXISTS)) => {
+                self.stage = SourceStage::RetirementUncertain;
+                Err(Error::State(RETIREMENT_RECORD_EXISTS))
+            }
+            r => {
+                self.stage = SourceStage::Aborted;
+                r
+            }
+        }
     }
     pub fn published(&mut self, stored: &StoredProof) -> Result<()> {
         if !matches!(self.stage, SourceStage::Retired | SourceStage::Published)
@@ -973,6 +1142,38 @@ impl AwaitingCommit {
             }
             _ => None,
         })
+    }
+    /// CP13b (D2): THE one verification of a source's Aborted, shared by the
+    /// live `Frame::Abort` arm and the published Aborted: the same opening as
+    /// `committed` (at `core.issued_at`, under the bearer's key, against the
+    /// stored Prepared), bound to this transfer and context (the exact core)
+    /// and to the stored Prepared hash.
+    pub fn aborted(&self, events: &[Event]) -> Option<(Event, VerifiedAbort)> {
+        let held = self.held();
+        let (keys, _) = bearer_route(&self.receiver.core, &held.root, &held.bearer).ok()?;
+        let source = self.receiver.core.source_runtime;
+        let now = self.receiver.core.issued_at;
+        let Ok(super::crypto::Verified::Prepared(vp)) = super::crypto::open(&held.event, &keys, source, &held.root, now, None) else {
+            return None;
+        };
+        if vp.event_hash() != self.receiver.prepared || vp.core() != &self.receiver.core {
+            return None;
+        }
+        events.iter().take(128).find_map(|ev| match super::crypto::open(ev, &keys, source, &held.root, now, Some(&vp)) {
+            Ok(super::crypto::Verified::Aborted(a)) if a.core() == &self.receiver.core && a.prepared_hash() == self.receiver.prepared => {
+                Some((ev.clone(), a))
+            }
+            _ => None,
+        })
+    }
+    /// CP13b (D2): a verified Aborted ends the wait: the durable quarantine
+    /// record, then the receipt (and its bearer) is removed.
+    pub fn end_aborted(&mut self, store: &MarkerStore, proof: &VerifiedAbort) -> Result<()> {
+        if proof.core() != &self.receiver.core || proof.prepared_hash() != self.receiver.prepared {
+            return Err(Error::State("Aborted of another receipt"));
+        }
+        self.receiver.quarantine(store)?;
+        store.remove(MarkerKind::Prepared, self.transfer())
     }
     /// The durable Activated record (with the bearer, H3).
     pub fn activate(&mut self, store: &MarkerStore, proof: &VerifiedCommit, stored: &StoredProof) -> Result<bool> {
@@ -1855,5 +2056,160 @@ mod tests {
         assert!(Source::restart(&store, &Authority::root(&root, c.lineage).unwrap()).is_err());
         assert!(store.retirements().is_ok());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// CP13b fixture: a root on `relay`, the core, and its verified
+    /// Prepared, Committed and Aborted (over the same Prepared), plus an
+    /// Aborted over another Prepared of the same core and one of another
+    /// transfer, all sealed to the bearer `[1; 16]`.
+    struct Ends {
+        root: crate::handover::context::RootContext,
+        c: Core,
+        ready: Event,
+        p: VerifiedPrepared,
+        pe: Event,
+        cv: VerifiedCommit,
+        ce: Event,
+        av: VerifiedAbort,
+        ae: Event,
+        other_prepared: Event,
+        other_transfer: Event,
+    }
+    async fn ends(relay: &crate::handover::relay_fixture::Relay) -> Ends {
+        use nostr::{Timestamp, ToBech32};
+        let a = Keys::generate();
+        let b = Keys::generate();
+        let root = crate::handover::context::RootContext::new(a.public_key().to_bytes(), &a.public_key().to_bech32().unwrap(), 900, &[relay.url()], 100).unwrap();
+        let (_, mut c) = crate::handover::certificate::tests::fixture();
+        c.context = root.digest();
+        c.root_runtime = root.runtime();
+        c.root_persona = root.persona();
+        c.source_runtime = root.runtime();
+        c.source_persona = root.persona();
+        c.successor_runtime = b.public_key().to_bytes();
+        c.successor_persona = b.public_key().to_bytes();
+        let aa = crate::runtime_identity::mint_player_attestation(&a, &a.public_key(), Timestamp::from(100), 1).await.unwrap();
+        let ab = crate::runtime_identity::mint_player_attestation(&b, &b.public_key(), Timestamp::from(100), 1).await.unwrap();
+        let keys = crypto::recipient(&root, &[1; 16], if c.epoch == 1 { None } else { Some(c.predecessor) }).unwrap();
+        let aborted = |core: Core, p: VerifiedPrepared| {
+            let (a, b, aa, ab, root, keys) = (a.clone(), b.clone(), aa.clone(), ab.clone(), root.clone(), keys.clone());
+            async move {
+                let ready = crypto::sign_ready(&b, &core, [8; 16]).await.unwrap();
+                let seal = Seal { source: &a, recipient: &keys, core: &core, ready: &ready, challenge: [8; 16], source_attestation: &aa, successor_attestation: &ab, prepared: Some(&p) };
+                crypto::seal_aborted(seal, &root, 100).await.unwrap()
+            }
+        };
+        let ready = crypto::sign_ready(&b, &c, [8; 16]).await.unwrap();
+        let (p, cv, ce, pe) = pair(&a, &b, &aa, &ab, &c, &root).await;
+        let ae = aborted(c.clone(), p.clone()).await;
+        let Verified::Aborted(av) = crypto::open(&ae, &keys, root.runtime(), &root, c.issued_at, Some(&p)).unwrap() else { panic!("Aborted") };
+        let (p2, ..) = pair(&a, &b, &aa, &ab, &c, &root).await;
+        let other_prepared = aborted(c.clone(), p2).await;
+        let mut c2 = c.clone();
+        c2.transfer = [0x42; 16];
+        let (p3, ..) = pair(&a, &b, &aa, &ab, &c2, &root).await;
+        let other_transfer = aborted(c2, p3).await;
+        Ends { root, c, ready, p, pe, cv, ce, av, ae, other_prepared, other_transfer }
+    }
+
+    /// CP13b (D2): retire and the abort after disclosure race to the one
+    /// choke point: exactly one durable terminal record, and it is the only
+    /// one any publication can read. In sequence, each refuses the other.
+    #[test]
+    fn handover_retire_and_abort_are_exclusive_at_one_choke_point() {
+        use std::sync::{Arc, Barrier};
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = rt.block_on(ends(&relay));
+        let stored = rt.block_on(witness(&relay, &e.root, &e.pe, Verified::Prepared(e.p.clone()), None));
+        let capability = crypto::root_capability(&e.root, &[1; 16]).unwrap();
+        let retirement = || {
+            Retirement::new(&e.cv, &e.p, e.ce.as_json().into_bytes(), [9; 16], capability, vec![RetiredRoot { capability, expiry: e.root.expiry() }], e.root.relays().to_vec()).unwrap()
+        };
+        let abort = || AbortRecord::new(&e.av, &e.p, e.ae.as_json().into_bytes(), e.root.relays().to_vec()).unwrap();
+        let source = || {
+            let mut s = Source::frozen(e.c.clone(), &Authority::root(&e.root, e.c.lineage).unwrap()).unwrap();
+            s.prepared(&e.p, &stored).unwrap();
+            s
+        };
+        for round in 0..6 {
+            let (store, _dir) = crate::handover::durable::tests::store(&format!("terminal-race-{round}"));
+            let store = Arc::new(store);
+            let barrier = Arc::new(Barrier::new(2));
+            let (mut retiring, mut aborting) = (source(), source());
+            let (s1, b1, r) = (store.clone(), barrier.clone(), retirement());
+            let retire = std::thread::spawn(move || {
+                b1.wait();
+                retiring.retire(&s1, &crate::handover::ledger::Ledger::install(), r).is_ok()
+            });
+            let (s2, b2, a) = (store.clone(), barrier.clone(), abort());
+            let abort_t = std::thread::spawn(move || {
+                b2.wait();
+                aborting.abort_disclosed(&s2, &crate::handover::ledger::Ledger::install(), a).is_ok()
+            });
+            let (retired, aborted) = (retire.join().unwrap(), abort_t.join().unwrap());
+            let records = RetiredCommit::scan(&store).unwrap();
+            assert_eq!(records.len(), 1, "round {round}: retire {retired}, abort {aborted}: {} durable terminal records", records.len());
+            assert!(retired != aborted, "round {round}: retire {retired}, abort {aborted}");
+            assert_eq!(records[0].is_abort(), aborted);
+            assert_eq!(records[0].event_hash(), if aborted { e.av.event_hash() } else { e.cv.event_hash() }, "round {round}: the record holds the loser's event");
+            assert!(crate::handover::ledger::Ledger::install().lists(&records[0].ledger_entry()));
+        }
+        let (store, _dir) = crate::handover::durable::tests::store("terminal-abort-first");
+        let mut s = source();
+        s.abort_disclosed(&store, &crate::handover::ledger::Ledger::install(), abort()).unwrap();
+        assert_eq!(s.stage(), SourceStage::Aborted);
+        let mut late = source();
+        assert_eq!(late.retire(&store, &crate::handover::ledger::Ledger::install(), retirement()).err(), Some(Error::State(ABORT_RECORD_EXISTS)));
+        assert_eq!(late.stage(), SourceStage::Aborted, "a retire refused by an abort record didn't stay aborted");
+        assert_eq!(store.read(MarkerKind::Retired, e.c.transfer).unwrap(), None);
+        let (store, _dir) = crate::handover::durable::tests::store("terminal-retire-first");
+        source().retire(&store, &crate::handover::ledger::Ledger::install(), retirement()).unwrap();
+        let mut late = source();
+        assert_eq!(late.abort_disclosed(&store, &crate::handover::ledger::Ledger::install(), abort()).err(), Some(Error::State(RETIREMENT_RECORD_EXISTS)));
+        assert_eq!(late.stage(), SourceStage::RetirementUncertain, "an abort refused by a retirement record didn't stay retired");
+        assert_eq!(store.read(MarkerKind::Aborted, e.c.transfer).unwrap(), None);
+    }
+
+    /// CP13b (D2): the recipient's one Aborted verification binds the
+    /// transfer, the context and the Prepared hash (an Aborted of another
+    /// transfer or over another Prepared, and a Committed, are ignored; an
+    /// Aborted never reads as Committed). With both a valid Committed and a
+    /// valid Aborted on the relay, Committed wins, with the player's line.
+    #[test]
+    fn handover_the_aborted_binds_its_prepared_and_committed_wins_over_it() {
+        use crate::handover::live::resumer::{Backoff, Resumer};
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = rt.block_on(ends(&relay));
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).unwrap();
+        let base = std::env::temp_dir().join(format!("axe_handover_both_{}", hex::encode(random)));
+        let imports = base.join("imports");
+        let working = imports.join(format!("handover-w-{}", hex::encode(e.c.transfer))).join("working");
+        std::fs::create_dir_all(&working).unwrap();
+        let store = crate::handover::live::authority::store(&working).unwrap();
+        let mut receiver = Receiver::checkpoint_ready(&store, &e.c, &e.ready, [8; 16], &e.root, 100).unwrap();
+        let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
+        receiver.prepared(&store, &crate::handover::ledger::Ledger::install(), &e.p, PreparedReceipt { event: &e.pe, root: &e.root, bearer: &bearer }).unwrap();
+        let awaiting = AwaitingCommit::read(&store, e.c.transfer).unwrap().unwrap();
+        assert!(
+            awaiting.aborted(&[e.other_prepared.clone(), e.other_transfer.clone(), e.ce.clone()]).is_none(),
+            "an Aborted over another Prepared, of another transfer, or a Committed was accepted as this receipt's Aborted"
+        );
+        assert!(awaiting.aborted(std::slice::from_ref(&e.ae)).is_some(), "the valid Aborted didn't verify");
+        assert!(awaiting.committed(std::slice::from_ref(&e.ae), 0).is_none(), "an Aborted read as Committed");
+        relay.insert(e.ae.clone());
+        relay.insert(e.ce.clone());
+        let resumer = Resumer::new(Backoff { first: std::time::Duration::from_millis(50), ceiling: std::time::Duration::from_millis(200) });
+        assert_eq!(resumer.resume_imports(&imports, &crate::handover::ledger::Ledger::install()), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while store.read(MarkerKind::Activated, e.c.transfer).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "with both on the relay, Committed didn't win");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(store.read(MarkerKind::Quarantined, e.c.transfer).unwrap(), None, "the Aborted quarantined beside the Committed");
+        assert!(resumer.notices().contains(&crate::handover::live::copy::WORLD_IN_TWO_PLACES.to_owned()), "no player-visible line: {:?}", resumer.notices());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

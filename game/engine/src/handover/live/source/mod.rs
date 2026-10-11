@@ -14,7 +14,7 @@ use crate::handover::{
     Hash, Id,
     certificate::Core,
     crypto::{self, Seal, Verified, VerifiedPrepared},
-    phase::{PublicationPermit, RetiredRoot, Retirement},
+    phase::{AbortRecord, PublicationPermit, RetiredRoot, Retirement},
     stored::{Budget, Publication, Route, StoredProof},
     checkpoint::{self, PackBinding, PackedCheckpoint, ParticipantMember},
     context::RootContext,
@@ -188,8 +188,26 @@ pub struct SourceSession {
     handed: bool,
     /// CP9 review LOW-1: the last hand-off try (retried at most once a second).
     hand_tried: Option<std::time::Instant>,
+    /// CP13b (D2): this session's abort record is durable (its Aborted goes
+    /// to the resumer like a Committed), or it couldn't be written.
+    abort_recorded: bool,
+    abort_unrecorded: bool,
+    /// CP13b test hook: the abort record's write fails.
+    #[cfg(test)]
+    pub test_fail_abort_record: bool,
     #[cfg(test)]
     pack_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+}
+
+/// CP13b (D2): what `record_abort` did.
+enum AbortRecorded {
+    /// No bearer disclosed or no Prepared sealed: nothing to answer.
+    Nothing,
+    Recorded(Event),
+    /// Sealed (when `Some`) but not durably recorded.
+    Unrecorded(Option<Event>),
+    /// A retirement record of this transfer already won.
+    Retired,
 }
 
 fn random_id() -> Id {
@@ -248,6 +266,10 @@ impl SourceSession {
             permit: None,
             handed: false,
             hand_tried: None,
+            abort_recorded: false,
+            abort_unrecorded: false,
+            #[cfg(test)]
+            test_fail_abort_record: false,
             #[cfg(test)]
             pack_hold: None,
             action,
@@ -329,8 +351,11 @@ impl SourceSession {
     /// already holds it); a failure is logged and retried at most once a
     /// second (the start-up scan stays the backstop). A
     /// `RetirementUncertain` session whose record reads back is handed too.
+    /// CP13b (D2): an aborted session whose abort record is durable hands
+    /// its Aborted over the same way (`RetiredCommit::read_aborted`).
     pub fn hand_publication(&mut self, resumer: &super::resumer::Resumer) -> bool {
-        if self.handed || !matches!(self.stage, SourceStage::Retired | SourceStage::RetirementUncertain) {
+        let aborted = matches!(self.stage, SourceStage::Aborted(_)) && self.abort_recorded;
+        if self.handed || !(aborted || matches!(self.stage, SourceStage::Retired | SourceStage::RetirementUncertain)) {
             return self.handed;
         }
         if self.hand_tried.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
@@ -339,7 +364,13 @@ impl SourceSession {
         self.hand_tried = Some(std::time::Instant::now());
         let Some(dir) = self.cfg.world_dir.as_ref() else { return false };
         let read = crate::handover::live::authority::store(dir)
-            .and_then(|s| crate::handover::phase::RetiredCommit::read(&s, self.transfer));
+            .and_then(|s| {
+                if aborted {
+                    crate::handover::phase::RetiredCommit::read_aborted(&s, self.transfer)
+                } else {
+                    crate::handover::phase::RetiredCommit::read(&s, self.transfer)
+                }
+            });
         match read {
             Ok(Some(retired)) => {
                 let ledger = crate::handover::ledger::Ledger::install();
@@ -355,6 +386,82 @@ impl SourceSession {
     }
     pub fn publication_handed(&self) -> bool {
         self.handed
+    }
+    /// CP13b (D2): the abort record (the Aborted to publish) is durable.
+    pub fn abort_recorded(&self) -> bool {
+        self.abort_recorded
+    }
+    /// CP13b (D2): aborted after disclosure, but the abort record couldn't
+    /// be written: play resumed anyway, and the caller shows
+    /// `copy::ABORT_UNRECORDED`.
+    pub fn abort_unrecorded(&self) -> bool {
+        self.abort_unrecorded
+    }
+
+    /// CP13b (D2): every abort after the bearer was disclosed (this
+    /// session's `abort`, its liveness aborts, and a session dropped without
+    /// one) seals the Aborted over this session's Prepared, at
+    /// `core.issued_at`, and writes the abort record (ledger entry first)
+    /// through the phase's one choke point BEFORE anything unfreezes. With
+    /// no sealed Prepared yet the recipient can't hold a receipt, so there
+    /// is nothing to answer.
+    fn record_abort(&mut self) -> AbortRecorded {
+        if !self.disclosed || self.abort_recorded || self.abort_unrecorded {
+            return AbortRecorded::Nothing;
+        }
+        let (Some(core), Some(ready), Some(successor), Some((_, vp))) =
+            (self.core.clone(), self.ready.clone(), self.recipient_attestation.clone(), self.prepared.clone())
+        else {
+            return AbortRecorded::Nothing;
+        };
+        let sealed = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).ok().and_then(|keys| {
+            let seal = Seal {
+                source: &self.cfg.runtime,
+                recipient: &keys,
+                core: &core,
+                ready: &ready,
+                challenge: self.challenge,
+                source_attestation: &self.cfg.attestation,
+                successor_attestation: &successor,
+                prepared: Some(&vp),
+            };
+            let ev = pollster::block_on(crypto::seal_aborted(seal, &self.cfg.root, core.issued_at)).ok()?;
+            let Ok(Verified::Aborted(va)) = crypto::open(&ev, &keys, core.source_runtime, &self.cfg.root, core.issued_at, Some(&vp)) else {
+                return None;
+            };
+            let record = AbortRecord::new(&va, &vp, ev.as_json().into_bytes(), self.cfg.root.relays().to_vec()).ok()?;
+            Some((ev, record))
+        });
+        let Some((ev, record)) = sealed else {
+            log::error!("handover: the Aborted couldn't be sealed; play resumes without an abort record");
+            self.abort_unrecorded = true;
+            return AbortRecorded::Unrecorded(None);
+        };
+        #[cfg(test)]
+        let fail = self.test_fail_abort_record;
+        #[cfg(not(test))]
+        let fail = false;
+        let store = match self.cfg.world_dir.as_ref().map(|d| crate::handover::live::authority::store(d)) {
+            Some(Ok(store)) if !fail => store,
+            _ => {
+                log::error!("handover: the abort record couldn't be written; play resumes anyway");
+                self.abort_unrecorded = true;
+                return AbortRecorded::Unrecorded(Some(ev));
+            }
+        };
+        let Some(phase) = self.phase.as_mut() else { return AbortRecorded::Nothing };
+        match phase.abort_disclosed(&store, &crate::handover::ledger::Ledger::install(), record) {
+            Ok(()) => {
+                self.abort_recorded = true;
+                AbortRecorded::Recorded(ev)
+            }
+            Err(crate::handover::Error::State(crate::handover::phase::RETIREMENT_RECORD_EXISTS)) => AbortRecorded::Retired,
+            Err(e) => {
+                log::error!("handover: the abort record couldn't be written ({e}); play resumes anyway");
+                self.abort_unrecorded = true;
+                AbortRecorded::Unrecorded(Some(ev))
+            }
+        }
     }
     /// Retired or quarantined: the original world never resumes.
     pub fn past_retirement(&self) -> bool {
@@ -380,7 +487,18 @@ impl SourceSession {
         if matches!(self.stage, SourceStage::Aborted(_)) || self.past_retirement() {
             return;
         }
-        let _ = self.send(hs, &Frame::Abort { transfer: self.transfer });
+        // CP13b (D2): durable before the release below. A retirement record
+        // that already won keeps this world retired (frozen).
+        let aborted = match self.record_abort() {
+            AbortRecorded::Retired => {
+                self.stage = SourceStage::RetirementUncertain;
+                hs.handover_mark_retired();
+                return;
+            }
+            AbortRecorded::Recorded(ev) | AbortRecorded::Unrecorded(Some(ev)) => Some(ev.as_json()),
+            AbortRecorded::Unrecorded(None) | AbortRecorded::Nothing => None,
+        };
+        let _ = self.send(hs, &Frame::Abort { transfer: self.transfer, aborted });
         hs.handover_release();
         // M-B: a running pack is cancelled and fenced off; its result, if it
         // still arrives, is dropped (and its scratch with it), never sent.
@@ -566,6 +684,11 @@ impl SourceSession {
 /// worker at the next member (its result is dropped with the receiver).
 impl Drop for SourceSession {
     fn drop(&mut self) {
+        // CP13b (D2): dropped after disclosure without `abort` (the link's
+        // reap then releases the world): the abort record still comes first.
+        if !matches!(self.stage, SourceStage::Aborted(_)) && !self.past_retirement() {
+            let _ = self.record_abort();
+        }
         self.pack_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         self.publish_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     }

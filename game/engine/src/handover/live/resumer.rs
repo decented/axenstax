@@ -110,8 +110,17 @@ struct Shared {
     /// CP9 review MEDIUM-2: a wake-up for threads sleeping out a backoff
     /// (the exit grace makes them attempt at once).
     wake: (Mutex<u64>, Condvar),
+    /// CP13b (D2): player-visible lines this resumer raised (the world
+    /// list shows them): a readback that found both a valid Committed and a
+    /// valid Aborted for one transfer (Committed wins).
+    notices: Mutex<Vec<String>>,
     #[cfg(test)]
     log: Mutex<Vec<Attempt>>,
+}
+/// CP13b (D2): what ended an import's wait.
+enum ImportEnd {
+    Committed(crate::handover::crypto::VerifiedCommit, stored::StoredProof),
+    Aborted(crate::handover::crypto::VerifiedAbort),
 }
 
 /// Cheap to clone: every clone is the same resumer.
@@ -134,9 +143,14 @@ impl Resumer {
             clock,
             jobs: Mutex::new(BTreeSet::new()),
             wake: (Mutex::new(0), Condvar::new()),
+            notices: Mutex::new(Vec::new()),
             #[cfg(test)]
             log: Mutex::new(Vec::new()),
         }))
+    }
+    /// CP13b (D2): the player-visible lines this resumer raised.
+    pub fn notices(&self) -> Vec<String> {
+        self.0.notices.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
     /// The process's one resumer (production backoff).
     pub fn global() -> &'static Resumer {
@@ -490,10 +504,19 @@ fn run_import(shared: Arc<Shared>, world: PathBuf, transfer: Id) {
             }
         };
         let Some((mut awaiting, store)) = awaiting else { break };
-        let outcome = attempt_import(&shared, &awaiting, failures).and_then(|(proof, stored)| awaiting.activate(&store, &proof, &stored));
+        let outcome = attempt_import(&shared, &awaiting, failures).and_then(|end| match end {
+            ImportEnd::Committed(proof, stored) => awaiting.activate(&store, &proof, &stored).map(|_| true),
+            // CP13b (D2): the source's published Aborted: quarantine, the
+            // receipt (and its bearer) removed, the wait dropped.
+            ImportEnd::Aborted(proof) => awaiting.end_aborted(&store, &proof).map(|()| false),
+        });
         match outcome {
-            Ok(_) => {
+            Ok(true) => {
                 log::info!("handover: Committed found and read back; the import is activated");
+                break;
+            }
+            Ok(false) => {
+                log::info!("handover: the sender's Aborted found and read back; the import is quarantined");
                 break;
             }
             Err(e) => {
@@ -521,7 +544,7 @@ fn attempt_import(
     shared: &Shared,
     awaiting: &AwaitingCommit,
     number: u32,
-) -> crate::handover::Result<(crate::handover::crypto::VerifiedCommit, stored::StoredProof)> {
+) -> crate::handover::Result<ImportEnd> {
     let mut budget = Budget::new();
     #[cfg(test)]
     let (started, budget_deadline, budget_bytes_at_start) = (Instant::now(), budget.deadline(), budget.bytes_received());
@@ -544,14 +567,32 @@ fn attempt_import(
                     continue;
                 }
             };
-            let Some((event, commit)) = awaiting.committed(&events, (shared.clock)()) else {
-                last = Err(crate::handover::Error::Invalid("no Committed yet"));
-                continue;
+            // CP13b (D2): the Aborted is accepted the same way; if both
+            // verify, Committed wins (a duplicate world is recoverable by
+            // hand, a lost one isn't), logged and shown to the player.
+            let committed = awaiting.committed(&events, (shared.clock)());
+            let aborted = awaiting.aborted(&events);
+            if committed.is_some() && aborted.is_some() {
+                log::error!("handover: both a valid Committed and a valid Aborted for one transfer; Committed wins");
+                let mut notices = shared.notices.lock().unwrap_or_else(|e| e.into_inner());
+                if !notices.iter().any(|n| n == super::copy::WORLD_IN_TWO_PLACES) {
+                    notices.push(super::copy::WORLD_IN_TWO_PLACES.to_owned());
+                }
+            }
+            use crate::handover::crypto::Verified;
+            let (event, verified) = match (committed, aborted) {
+                (Some((event, c)), _) => (event, Verified::Committed(c)),
+                (None, Some((event, a))) => (event, Verified::Aborted(a)),
+                (None, None) => {
+                    last = Err(crate::handover::Error::Invalid("no Committed yet"));
+                    continue;
+                }
             };
-            let verified = crate::handover::crypto::Verified::Committed(commit.clone());
-            match stored::readback(url, root, &event, &verified, route, &mut budget, &NEVER).await {
-                Ok(proof) => return Ok((commit, proof)),
-                Err(e) => last = Err(e),
+            match (stored::readback(url, root, &event, &verified, route, &mut budget, &NEVER).await, verified) {
+                (Ok(proof), Verified::Committed(c)) => return Ok(ImportEnd::Committed(c, proof)),
+                (Ok(_), Verified::Aborted(a)) => return Ok(ImportEnd::Aborted(a)),
+                (Ok(_), Verified::Prepared(_)) => last = Err(crate::handover::Error::Invalid("Prepared read back")),
+                (Err(e), _) => last = Err(e),
             }
         }
         last

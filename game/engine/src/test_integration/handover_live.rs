@@ -229,7 +229,7 @@ fn handover_dropped_session_lease_releases_the_source_and_tells_the_recipient() 
     assert!(!hs.handover_frozen() && hs.handover_link().is_none(), "a dropped session's link is released");
     let got = frames_for(&client);
     use crate::handover::live::wire::Frame;
-    assert!(got.contains(&Frame::Abort { transfer: T }), "the recipient is told: {got:?}");
+    assert!(got.contains(&Frame::Abort { transfer: T, aborted: None }), "the recipient is told: {got:?}");
     assert!(got.contains(&Frame::Notice { transfer: T, paused: false }));
 }
 
@@ -443,6 +443,8 @@ mod session {
         /// Replaces the ack's possession proof (signed by the recipient's
         /// own runtime, so only the proof is wrong).
         ack_forge: Arc<Mutex<Option<(AckForge, RootContext)>>>,
+        /// CP13b: the recipient's PreparedAck is lost in transit.
+        drop_ack: Arc<std::sync::atomic::AtomicBool>,
     }
     /// CP8 review LOW-2: what a correctly signed ack carries in place of the
     /// real possession proof.
@@ -458,6 +460,9 @@ mod session {
     impl ClientTransport for Tap {
         fn send_to_server(&self, data: &[u8]) {
             let frame = crate::handover::live::recipient::handover_payload(data).and_then(|b| Frame::decode(b).ok());
+            if matches!(frame, Some(Frame::PreparedAck { .. })) && self.drop_ack.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             if let Some(Frame::PreparedAck { transfer, event }) = &frame
                 && let Some((forge, root)) = self.ack_forge.lock().unwrap().clone()
             {
@@ -537,6 +542,7 @@ mod session {
         forged_bearer: Arc<Mutex<Option<[u8; 16]>>>,
         forge_ack: Arc<std::sync::atomic::AtomicBool>,
         ack_forge: Arc<Mutex<Option<(AckForge, RootContext)>>>,
+        drop_ack: Arc<std::sync::atomic::AtomicBool>,
         relay: crate::handover::relay_fixture::Relay,
         /// More fixture relays the invitation names (`pair_n`).
         extra: Vec<crate::handover::relay_fixture::Relay>,
@@ -628,12 +634,14 @@ mod session {
         let forged_bearer = Arc::new(Mutex::new(None));
         let forge_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ack_forge = Arc::new(Mutex::new(None));
+        let drop_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let tap = Tap {
             inner: Box::new(client),
             forged_ready: forged_ready.clone(),
             forged_bearer: forged_bearer.clone(),
             forge_ack: forge_ack.clone(),
             ack_forge: ack_forge.clone(),
+            drop_ack: drop_ack.clone(),
         };
         let rc = RemoteClient::from_transport(Box::new(tap), crate::remote_client::build_join_request_guest("dup", 0), None);
         let relay = crate::handover::relay_fixture::Relay::start();
@@ -660,7 +668,7 @@ mod session {
         let action = HostAction { seat, source_key, world_name: "Loop".into() };
         let live = Live { signed_in: Some(source_key), local_seats: 1 };
         let src = SourceSession::begin(&mut hs, action, cfg, live, now()).expect("eligible");
-        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, relay, extra, dir }
+        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, drop_ack, relay, extra, dir }
     }
 
     /// The joined client reads the proposal through its ordinary poll, the
@@ -1606,7 +1614,10 @@ mod session {
         let _ = dst.pump(now());
         assert_eq!(dst.stage(), RecipientStage::Quarantined("The host cancelled the handover."));
         assert!(has_record(&p.dir, "quarantined", t), "no quarantine record after the source's Abort");
-        assert!(has_record(&p.dir, "prepared", t), "a quarantined import lost its receipt");
+        // CP13b (D2): the live Abort carried the signed Aborted, checked by
+        // the one shared verification, and ends like the published one.
+        assert!(!has_record(&p.dir, "prepared", t), "the live Aborted left the receipt (and its bearer)");
+        assert!(p.src.abort_recorded(), "the source's abort after disclosure wrote no abort record");
         assert_eq!(
             crate::handover::live::resumer::Resumer::new(FAST).resume_imports(&p.dir.0.join("imports"), dst_install()),
             0,
@@ -2127,5 +2138,106 @@ mod session {
             assert!(std::time::Instant::now() < deadline, "the import never activated after the Cancel");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// CP13b (D2) (C)/(D): the source aborts after disclosing the bearer
+    /// with no ack read (the ack was lost), so its abort record is durable
+    /// before it unfreezes; a restarted source's start-up scan publishes the
+    /// Aborted, and the recipient's resumer reads it back and quarantines
+    /// (receipt and bearer gone, never adopted again).
+    fn aborted_after_disclosure(tag: &str, dropped_link: bool) {
+        use crate::handover::live::{authority, copy, resumer::{Resumer, awaiting_statuses}};
+        let mut p = ready_pair(tag);
+        p.drop_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Prepared);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !has_record(&p.dir, "prepared", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never persisted its receipt");
+            p.host.lend_tick(&mut p.hs);
+            let _ = p.dst.as_mut().unwrap().pump(now());
+        }
+        assert_eq!(p.dst.as_ref().unwrap().stage(), RecipientStage::Prepared);
+        if dropped_link {
+            // (D): the link drops after the (lost) ack.
+            p.hs.test_close_seat_transport(p.seat.slot);
+            let _ = p.src.pump(&mut p.hs, p.live, now());
+        } else {
+            // (C): the recipient crashed between its receipt and its ack.
+            p.dst = None;
+            let late = now() + crate::handover::live::source::STALL_SECS + 1;
+            let _ = p.src.pump(&mut p.hs, p.live, late);
+        }
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "the source didn't abort ({:?})", p.src.stage());
+        assert!(p.src.abort_recorded(), "the abort after disclosure wrote no abort record");
+        assert!(!p.hs.handover_frozen(), "the source didn't resume");
+        let world = p.dir.0.join("world");
+        assert!(authority::open_guard(&world).is_ok(), "an abort record refused the source's own world");
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        drop((src, rc, hs, host));
+        let src_store = authority::store(&world).unwrap();
+        let aborted = crate::handover::phase::RetiredCommit::read_aborted(&src_store, t).unwrap().expect("no abort record");
+        assert!(aborted.is_abort());
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 1, "the restarted source didn't resume the Aborted");
+        wait_published(&src_store, &aborted);
+        assert!(relay.stored().len() >= 2, "the Aborted wasn't on the relay");
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the recipient's wait wasn't resumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !has_record(&dir, "quarantined", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never quarantined on the published Aborted");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!has_record(&dir, "prepared", t), "the published Aborted left the receipt (and its bearer)");
+        assert!(!has_record(&dir, "activated", t));
+        assert_eq!(Resumer::new(FAST).resume_imports(&dir.0.join("imports"), dst_install()), 0, "a quarantined import was resumed");
+        assert!(
+            awaiting_statuses(&dir.0.join("no-worlds"), &dir.0.join("imports"), dst_install()).contains(&copy::HANDOVER_UNFINISHED.to_owned()),
+            "the quarantined import has no status line"
+        );
+        drop(dst);
+    }
+    #[test]
+    fn handover_c_a_crash_between_the_receipt_and_the_ack_ends_on_the_published_aborted() {
+        aborted_after_disclosure("aborted-c", false);
+    }
+    #[test]
+    fn handover_d_a_dropped_link_after_the_ack_ends_on_the_published_aborted() {
+        aborted_after_disclosure("aborted-d", true);
+    }
+
+    /// CP13b (D2): past the ack, a live Abort ends the wait only through the
+    /// one shared verification. Carrying the source's own signed Committed
+    /// (same author, transfer and kind; never readable as an Aborted) it
+    /// quarantines nothing and the receipt stays.
+    #[test]
+    fn handover_a_live_abort_without_a_valid_aborted_never_quarantines() {
+        let mut p = ready_pair("abort-not-aborted");
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        let committed = p.src.commit_event().unwrap().as_json();
+        let f = Frame::Abort { transfer: t, aborted: Some(committed) };
+        p.hs.handover_send(&f.encode().unwrap()).unwrap();
+        p.host.lend_tick(&mut p.hs);
+        let _ = p.dst.as_mut().unwrap().pump(now());
+        assert!(!has_record(&p.dir, "quarantined", t), "a live Abort carrying a Committed quarantined");
+        assert!(has_record(&p.dir, "prepared", t), "a live Abort carrying a Committed removed the receipt");
+    }
+
+    /// CP13b (D2, CP12 review LOW-1): the abort record's write fails: the
+    /// source still unfreezes, and its status line says so.
+    #[test]
+    fn handover_a_failed_abort_record_still_unfreezes_with_a_status_line() {
+        let mut p = ready_pair("abort-unrecorded");
+        p.src.test_fail_abort_record = true;
+        p.forge_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "{:?}", p.src.stage());
+        assert!(!p.hs.handover_frozen(), "a failed abort record kept the source frozen");
+        assert!(p.src.abort_unrecorded() && !p.src.abort_recorded(), "the failed abort record isn't reported");
+        let world = crate::handover::live::authority::dir(&p.dir.0.join("world"));
+        assert!(!world.join(format!("aborted-{}.dat", hex::encode(t))).exists());
+        assert!(!crate::handover::live::copy::ABORT_UNRECORDED.is_empty());
     }
 }

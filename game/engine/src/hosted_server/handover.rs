@@ -157,7 +157,7 @@ impl HostedServer {
             return;
         }
         let (slot, transfer) = (l.slot, l.transfer);
-        if let Ok(frame) = (crate::handover::live::wire::Frame::Abort { transfer }).encode() {
+        if let Ok(frame) = (crate::handover::live::wire::Frame::Abort { transfer, aborted: None }).encode() {
             let mut pkt = vec![PacketType::Handover as u8];
             pkt.extend_from_slice(&frame);
             self.send_to_joined_slot(slot, &pkt);

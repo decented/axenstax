@@ -22,6 +22,10 @@ pub enum MarkerKind {
     /// authenticated pre-retirement Abort: no Committed will ever exist, so
     /// the wait for it ends (the import stays, quarantined, never opened).
     Quarantined,
+    /// CP13b (D2): a source's abort record after it disclosed the bearer:
+    /// the exact signed Aborted and the root's relays (`phase::AbortRecord`).
+    /// Exclusive with `Retired` for one transfer (`phase` writes either).
+    Aborted,
 }
 impl MarkerKind {
     fn number(self) -> u8 {
@@ -33,6 +37,7 @@ impl MarkerKind {
             Self::Prefix => 4,
             Self::Published => 5,
             Self::Quarantined => 6,
+            Self::Aborted => 7,
         }
     }
     fn label(self) -> &'static str {
@@ -44,6 +49,7 @@ impl MarkerKind {
             Self::Prefix => "prefix",
             Self::Published => "published",
             Self::Quarantined => "quarantined",
+            Self::Aborted => "aborted",
         }
     }
 }
@@ -256,6 +262,15 @@ impl MarkerStore {
     /// Bounded startup scan. Corrupt/unreadable records fail closed; callers must
     /// validate payloads before opening any old lineage, including autosaves.
     pub fn retirements(&self) -> Result<Vec<(Id, Vec<u8>)>> {
+        self.records(MarkerKind::Retired)
+    }
+    /// CP13b (D2): every abort record (bounded like `retirements`).
+    pub fn aborts(&self) -> Result<Vec<(Id, Vec<u8>)>> {
+        self.records(MarkerKind::Aborted)
+    }
+    fn records(&self, kind: MarkerKind) -> Result<Vec<(Id, Vec<u8>)>> {
+        let prefix = format!("{}-", kind.label());
+
         let mut out = Vec::new();
         let mut scanned = 0usize;
         for entry in fs::read_dir(&self.directory).map_err(|_| Error::Io)? {
@@ -267,7 +282,7 @@ impl MarkerStore {
             let name = entry.file_name();
             let name = name.to_str().ok_or(Error::Invalid("marker filename"))?;
             let Some(value) = name
-                .strip_prefix("retired-")
+                .strip_prefix(prefix.as_str())
                 .and_then(|s| s.strip_suffix(".dat"))
             else {
                 continue;
@@ -282,7 +297,7 @@ impl MarkerStore {
             if value != hex::encode(id) {
                 return Err(Error::Invalid("noncanonical retirement filename"));
             }
-            let bytes = self.read(MarkerKind::Retired, id)?.ok_or(Error::Io)?;
+            let bytes = self.read(kind, id)?.ok_or(Error::Io)?;
             out.push((id, bytes));
         }
         Ok(out)
@@ -489,6 +504,7 @@ pub(crate) mod tests {
             MarkerKind::Prefix,
             MarkerKind::Published,
             MarkerKind::Quarantined,
+            MarkerKind::Aborted,
         ] {
             let id = [kind.number() + 1; 16];
             s.persist(kind, id, b"exact phase binding").unwrap();
