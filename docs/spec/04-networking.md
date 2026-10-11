@@ -5676,7 +5676,9 @@ process does (a detached thread doesn't outlive `main`). Every way out goes
 through one exit function, `GameState::exit_app` (CP12, CP10 review
 MEDIUM-1): the window's close button, the lobby's Quit, Esc in the lobby and
 the self-updater's Restart (the lobby's two are `MenuAction`s and the event
-loop exits after the frame; no path calls `process::exit`). It lets online
+loop exits after the frame; none of them calls `process::exit`, whose only
+remaining client uses are start-up failures: an unsupported GPU and a
+failed verification run). It lets online
 hosting go (the router-lease grace), closes the world as the close button
 always did (`close_window`; a failed close-save keeps the window and runs no
 grace), and only then, after `leave_world`'s last-chance hand-off, gives a
