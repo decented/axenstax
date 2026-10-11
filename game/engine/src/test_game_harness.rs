@@ -922,6 +922,84 @@ mod tests {
         assert_eq!(hg.state.players[0].inventory.slot(0).map(|s| s.count), Some(8), "into the client's bag");
     }
 
+    /// C3d run 9 — a Strict joiner's survival placement and mined break
+    /// through the REAL game-loop arms (a right-click on the floor, the held
+    /// left button on the placed block): each is ONE reserved typed `Edit`
+    /// the arm reserves itself, and nothing rides the movement packet (a
+    /// Strict server closes the session on any edit there). The server
+    /// accepts both; the windows, worlds and the yield agree; the tool wore
+    /// once on both copies.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_strict_place_and_break_go_typed() {
+        use crate::item::{Item, ItemStack};
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-strict-edit");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-strict-edit-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Typed", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let pickaxe = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Stone);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+            inv.set_slot(0, Some(ItemStack::new_block(crate::block::COBBLESTONE, 4)));
+            inv.set_slot(1, Some(ItemStack { item: Item::Tool(pickaxe), count: 1 }));
+        }
+        hg.state.players[0].hotbar_slot = 0;
+        for _ in 0..2 { harness_step(&mut server, &mut hg); }
+        let through = |server: &crate::hosted_server::HostedServer| server.server.players[slot].action_frontier.as_ref().map_or(0, |f| f.through());
+        let before = through(&server);
+        // The place arm: aim at the top of the floor two cells ahead.
+        let cell = [feet[0], feet[1], feet[2] - 2];
+        aim_at(&mut hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 - 0.02, cell[2] as f32 + 0.5));
+        right_click(&mut hg);
+        assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), crate::block::COBBLESTONE, "the client placed it");
+        let reserved_edit = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions().any(|a| {
+            matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::Edit { change, .. }) if [change.x, change.y, change.z] == cell)
+        });
+        assert!(reserved_edit(&hg), "the place arm reserved a typed Edit of the cell");
+        assert!(hg.state.pending_block_changes.is_empty() && hg.state.pending_mined.is_empty(), "nothing waits for the movement packet");
+        for _ in 0..4 { harness_step(&mut server, &mut hg); }
+        assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), crate::block::COBBLESTONE, "the server accepted the placement");
+        // The break arm: the pickaxe, the button held until the block breaks.
+        hg.state.players[0].hotbar_slot = 1;
+        harness_step(&mut server, &mut hg);
+        mine_joined(&mut hg, &mut server, slot, cell);
+        assert!(hg.state.pending_block_changes.is_empty() && hg.state.pending_mined.is_empty(), "nothing waits for the movement packet");
+        for _ in 0..4 { harness_step(&mut server, &mut hg); }
+        let rc = hg.state.remote_client.as_ref().unwrap();
+        let reason = match &rc.state { crate::remote_client::ConnectionState::Failed(reason) => reason.clone(), _ => String::new() };
+        assert!(matches!(rc.state, crate::remote_client::ConnectionState::Connected { .. }), "never torn down: nothing rode the movement packet ({reason})");
+        assert_eq!(rc.action_journal.as_ref().map(|j| j.len()), Some(0), "every reservation retired");
+        assert!(through(&server) >= before + 2, "two typed edits accepted (through {} from {before})", through(&server));
+        assert_eq!(server.server.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR, "the server broke it");
+        assert_eq!(hg.state.world.get_block(cell[0], cell[1], cell[2]), crate::block::AIR);
+        let applied = rc.applied_window_boundary();
+        let sp = &mut server.server.players[slot];
+        crate::window_events::apply_through(sp, applied, 0);
+        let p = &hg.state.players[0];
+        let client = crate::window::digest_parts(&p.inventory, &p.armour_slots, &p.crafting_ui.cursor_item, &p.crafting_ui.grid, p.crafting_ui.station());
+        let server_digest = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+        assert_eq!(client, server_digest, "the windows agree");
+        assert_eq!(p.inventory.slot(0).map(|s| s.count), Some(4), "the yield came back: four cobblestone");
+        let worn = |inv: &crate::inventory::Inventory| match inv.slot(1).map(|s| &s.item) { Some(Item::Tool(t)) => t.durability, _ => 0 };
+        assert_eq!((worn(&p.inventory), worn(&sp.inventory)), (pickaxe.durability - 1, pickaxe.durability - 1), "the pickaxe wore once on both copies");
+    }
+
     /// OC (v88) — the full client path: a saved joiner owing Stone 1 joins
     /// by its real signed join; the client's own `apply_window_inbox` (the
     /// `Sync` arm) installs the debt the `InventorySync` carries, the server's

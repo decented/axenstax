@@ -37,6 +37,10 @@ mod action_journal;
 mod body_residency;
 mod window_prediction;
 mod window_actions;
+// C3d runs 7 and 9 — typed block edits: the shared rule and the client's half.
+pub(crate) mod strict_edits;
+// C3d run 9 — a hand placement's meta, one pure rule (hoisted for typed edits).
+mod placement_meta;
 mod action_capacity;
 mod action_wire;
 mod recovery_bundle;

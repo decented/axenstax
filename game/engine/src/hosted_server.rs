@@ -41,6 +41,8 @@ mod c3d_edit_tests;
 mod c3d_correction_tests;
 #[cfg(test)]
 mod c3d_grid_tests;
+#[cfg(test)]
+mod c3d_client_edit_tests;
 
 use std::collections::VecDeque;
 

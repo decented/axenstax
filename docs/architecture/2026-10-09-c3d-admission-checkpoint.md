@@ -547,3 +547,37 @@ Coordinator decisions on run 3's departures, as built:
 - **Tests** `hosted_server/c3d_grid_tests.rs` (a real `RemoteClient`, the real
   `CraftingUi` entry points; nothing forces the screen open) and the GPU
   harness `game_harness_strict_frozen_crafting_esc_pauses_and_e_returns_the_grid`.
+
+## Run 9 — the client half of typed edits
+
+- **The rule.** In a Strict session the client never puts a plain placement
+  or a mined break on its movement packet. The game loop's place arm
+  (`GameState::take_for_placement`) and break arm (`GameState::break_route`)
+  route through `strict_edits::route_place` / `route_break`: the shared
+  `judge` on the client's own window, then `sends_typed` (Strict and
+  Place/Break). A typed edit reserves ONE numbered `ActionIntent::Edit`
+  before prediction (recipe `EditRecipe { kind, slot, digest, sources }`,
+  footprint = the cell), predicts with the shared window halves
+  (`place_window`, `break_window`) the server stages on raw R, then sends.
+  A break reserves (and wears its tool) before `set_block`; the arm skips
+  `pending_block_changes` / `pending_mined` and the later wear. Mirror and
+  unjoined worlds take exactly the old path.
+- **Placement meta hoisted.** `placement_meta::placement_meta(block, face,
+  forward)` is the one rule the place arm writes and a typed `Edit` carries
+  (shape, piston/dispenser/dropper look, directional power axis; `None`
+  keeps the cell's meta, as `World::set_block` does).
+- **LOW-3.** A `Superseded` `Edit` calls `send_back_refused_edit` (its cell
+  and a door's pair); `Edit` result rows (Accepted, Refused, Superseded)
+  carry the edit's cell and a door's pair (`HostedServer::edit_cells`) via
+  `prepare_typed_result_at` / `complete_typed_noop_at` /
+  `refuse_typed_action_at`. The prediction pin is a test
+  (`c3d_client_edit_prediction_is_the_server_staging`), not a wire digest.
+- **Still paused in Strict (reach the movement packet, close the session):**
+  creative edits, same-block edits, door place/break (the door top is a
+  use-tagged edit), non-yielding manual breaks and every use-tagged edit.
+  (The place arm only places into AIR or WATER, so `judge`'s untagged
+  non-emptying refusal is not reachable from it.)
+- **Tests** `hosted_server/c3d_client_edit_tests.rs` (a real `RemoteClient`,
+  the client's window its own, routing through the production
+  `route_place`/`route_break`) and the GPU harness
+  `game_harness_strict_place_and_break_go_typed`.

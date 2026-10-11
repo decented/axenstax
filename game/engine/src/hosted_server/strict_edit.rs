@@ -7,52 +7,11 @@ use crate::action_identity::{ActionFate, ActionHeader};
 use crate::strict_admission::StrictTeardown;
 use crate::window_events::{StrictStageError, WindowEvent};
 
-/// What a Strict edit is, read from raw R at the action's boundary.
-#[derive(Debug)]
-enum StrictEdit {
-    /// A block-item placement; the server-held hotbar slot places exactly
-    /// the edit's block.
-    Place { slot: usize },
-    /// A mined break with the server-held tool in the slot (`None`: the
-    /// slot holds no tool, a bare hand).
-    Break { slot: usize, tool: Option<crate::crafting::Tool> },
-    /// Definitively invalid: a typed `Refused`, zero effect.
-    Refuse(&'static str),
-    /// A category this run doesn't type yet (creative free edit, a same-block
-    /// Noop, a door, a non-yielding manual break, a use): paused, as every
-    /// untyped mutation still is.
-    Unsupported(&'static str),
-}
-
-/// Decision 18 — the classification, exhaustive for this class. `held` is the
-/// server copy's item in the action's slot; the client's claimed hand and
-/// `MinedBlock.tool` are never read.
-fn judge(old: crate::block::BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&crate::item::Item>, creative: bool) -> StrictEdit {
-    use crate::block::{AIR, OAK_DOOR, WATER};
-    let new = change.new_block;
-    if creative { return StrictEdit::Unsupported("Creative free edits await their typed class"); }
-    if old == new { return StrictEdit::Unsupported("A same-block edit awaits the typed Noop class"); }
-    // Decision 20: a door is one compound action (DoorPlace / its pair).
-    if old == OAK_DOOR || new == OAK_DOOR { return StrictEdit::Unsupported("Doors are one compound action"); }
-    if let Some(m) = mined {
-        if (m.x, m.y, m.z) != (change.x, change.y, change.z) { return StrictEdit::Refuse("mined tag names another cell"); }
-        if crate::break_drops::yields_drops(old) && (new == AIR || crate::growth::is_crop(old)) {
-            let tool = match held { Some(crate::item::Item::Tool(t)) => Some(*t), _ => None };
-            return StrictEdit::Break { slot, tool };
-        }
-        return StrictEdit::Unsupported("A non-yielding manual break awaits its typed class");
-    }
-    if (old == AIR || old == WATER) && new != AIR {
-        // Heldness: the historical slot must place exactly this block.
-        return if held.and_then(crate::joiner_inventory::placeable_block) == Some(new) {
-            StrictEdit::Place { slot }
-        } else {
-            StrictEdit::Refuse("the server's copy of the slot doesn't hold the placed block")
-        };
-    }
-    // Untagged emptying edits, untagged in-place changes: no mutation authority.
-    StrictEdit::Refuse("an untagged edit is no placement or break")
-}
+// C3d run 7 — the classification (`judge`) and the window halves
+// (`place_window`, `break_window`) moved to `crate::strict_edits`, shared
+// with the client, which routes an edit typed exactly when its own window
+// judges Place or Break and predicts with the same window halves.
+use crate::strict_edits::{break_window, judge, place_window, StrictEdit};
 
 impl HostedServer {
     /// Refuse a typed edit: the sender's predicted cell is put back by the
@@ -60,9 +19,32 @@ impl HostedServer {
     /// correction that must follow it (`refuse_typed_action`).
     fn refuse_strict_edit(&mut self, i: usize, action: ActionHeader, change: &protocol::BlockChange, budget: &mut EditTickBudget, why: &str) -> bool {
         log::debug!("Strict edit at ({}, {}, {}) refused: {why}", change.x, change.y, change.z);
+        let cells = self.edit_cells(change);
         self.send_back_refused_edit(change, budget);
-        self.refuse_typed_action(i, action);
+        self.refuse_typed_action_at(i, action, &cells);
         false
+    }
+
+    /// Run 9 (run-6 review LOW-3) — the world cells an `Edit`'s result row
+    /// carries (Decision 12's server-known footprint): its own cell, and a
+    /// door's pair — the live matching half when the server's cell is a door
+    /// (`send_back_refused_edit`'s rule), the cell above for a door placement.
+    pub(super) fn edit_cells(&self, bc: &protocol::BlockChange) -> Vec<[i32; 3]> {
+        use crate::block::OAK_DOOR;
+        let world = &self.server.world;
+        let mut cells = vec![[bc.x, bc.y, bc.z]];
+        if world.get_block(bc.x, bc.y, bc.z) == OAK_DOOR {
+            let top = crate::block_shape::door_is_top(world.meta_at(bc.x, bc.y, bc.z));
+            if let Some(y) = bc.y.checked_add(if top { -1 } else { 1 })
+                && world.get_block(bc.x, y, bc.z) == OAK_DOOR
+                && crate::block_shape::door_is_top(world.meta_at(bc.x, y, bc.z)) != top
+            {
+                cells.push([bc.x, y, bc.z]);
+            }
+        } else if bc.new_block == OAK_DOOR && let Some(y) = bc.y.checked_add(1) {
+            cells.push([bc.x, y, bc.z]);
+        }
+        cells
     }
 
     /// One typed Strict edit at the queue head. Every check, the window
@@ -84,7 +66,7 @@ impl HostedServer {
         let (direct, grants, yielded): (Box<dyn FnOnce(&mut crate::window::WindowMut)>, Vec<crate::item::ItemStack>, bool) = match edit {
             StrictEdit::Refuse(why) => return self.refuse_strict_edit(i, action, change, budget, why),
             StrictEdit::Unsupported(why) => { self.pause_typed_action(i, StrictTeardown::Untyped, why); return false; }
-            StrictEdit::Place { slot } => (Box::new(move |v: &mut crate::window::WindowMut| { v.inv.take_placeable_from_hotbar(slot); }), Vec::new(), false),
+            StrictEdit::Place { slot } => (Box::new(move |v: &mut crate::window::WindowMut| { place_window(v.inv, slot); }), Vec::new(), false),
             StrictEdit::Break { slot, tool } => {
                 // The yield's tier is the server-held tool's, never the claim.
                 let Some(y) = self.joiner_break_yield(change, old, tool) else {
@@ -93,7 +75,7 @@ impl HostedServer {
                 };
                 let grants: Vec<_> = y.drops.into_iter().chain(y.gem).filter(|s| s.count > 0).collect();
                 let wear: Box<dyn FnOnce(&mut crate::window::WindowMut)> = if tool.is_some() {
-                    Box::new(move |v: &mut crate::window::WindowMut| { v.inv.use_tool_at(slot); })
+                    Box::new(move |v: &mut crate::window::WindowMut| { break_window(v.inv, slot); })
                 } else { Box::new(|_: &mut crate::window::WindowMut| {}) };
                 (wear, grants, true)
             }
@@ -122,7 +104,8 @@ impl HostedServer {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Whole edit event reservation is unavailable"); return false;
         };
         debug_assert_eq!(prepared.last_number(), included);
-        let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
+        let cells = self.edit_cells(change);
+        let Some(result) = self.prepare_typed_result_at(i, action, ActionFate::Accepted, included, &cells) else {
             prepared.abandon(&mut self.server.players[i]);
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Edit result history is full"); return false;
         };

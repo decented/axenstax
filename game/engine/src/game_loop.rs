@@ -11989,7 +11989,16 @@ impl super::GameState {
                                     }
                                 }
 
-                                if self.players[pidx].break_progress >= break_time {
+                                // C3d run 9 — a Strict client's mined break is
+                                // a reserved typed `Edit`, reserved (its tool
+                                // worn) before the world changes; nothing goes
+                                // on the movement packet (`break_route`).
+                                let route = if self.players[pidx].break_progress >= break_time {
+                                    self.break_route(pidx, pos, blk, tool)
+                                } else {
+                                    crate::strict_edits::BreakRoute::NotYet
+                                };
+                                if route.breaks() {
                                     // Block broken!
                                     // Goal 1 — proof-of-play work accrual: a
                                     // successful can_harvest break does
@@ -12279,10 +12288,13 @@ impl super::GameState {
                                     // self-grant below.
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
+                                        // A typed break went as its own action.
+                                        if !route.is_typed() {
                                         self.pending_block_changes.push(broadcast_change(&self.world, pos[0], pos[1], pos[2], replacement));
+                                        }
                                         // C1 — and tell the server it was MINED,
                                         // with what: it yields a joiner's break.
-                                        if self.joined() {
+                                        if self.joined() && !route.is_typed() {
                                             self.pending_mined.push(crate::protocol::MinedBlock {
                                                 x: pos[0],
                                                 y: pos[1],
@@ -12405,8 +12417,15 @@ impl super::GameState {
                                             self.tick_counter,
                                         );
                                     }
-                                    let hs = self.players[pidx].hotbar_slot;
-                                    let info = self.players[pidx].inventory.use_hotbar_tool(hs);
+                                    // A typed break wore its tool at its
+                                    // reservation (the server's own rule).
+                                    let info = match route {
+                                        crate::strict_edits::BreakRoute::Typed(wear) => wear,
+                                        _ => {
+                                            let hs = self.players[pidx].hotbar_slot;
+                                            self.players[pidx].inventory.use_hotbar_tool(hs)
+                                        }
+                                    };
                                     self.handle_tool_use(info);
                                     self.audio.play_break();
                                     self.players[pidx].breaking_pos = None;
@@ -15825,12 +15844,27 @@ impl super::GameState {
                                 // the same path with no behaviour change.
                                 // C3b-2-fix (M1) — a joiner places nothing a
                                 // request in flight claims (`hand_may_spend`).
+                                // C3d run 9 — a Strict client's plain placement
+                                // is a reserved typed `Edit`, its window
+                                // predicted by the server's own rule, never on
+                                // the movement packet (`take_for_placement`).
+                                let mut typed_place = false;
                                 let block_to_place = if refusal.is_some() {
                                     None
                                 } else if self.is_creative {
                                     self.players[pidx].inventory.hotbar_placeable_id(hotbar)
                                 } else if self.hand_may_spend(pidx) {
-                                    self.players[pidx].inventory.take_placeable_from_hotbar(hotbar)
+                                    match self.take_for_placement(pidx, hotbar, [place_x, place_y, place_z], existing, face) {
+                                        crate::strict_edits::PlaceRoute::Legacy(taken) => taken,
+                                        crate::strict_edits::PlaceRoute::Typed(taken) => {
+                                            typed_place = true;
+                                            taken
+                                        }
+                                        crate::strict_edits::PlaceRoute::Wait => {
+                                            self.players[pidx].place_cooldown = BLOCK_PLACE_COOLDOWN_TICKS;
+                                            None
+                                        }
+                                    }
                                 } else {
                                     None
                                 };
@@ -15842,135 +15876,18 @@ impl super::GameState {
                                     // so re-mining it earns no proof-of-play work.
                                     self.world
                                         .place_player_block(place_x, place_y, place_z, block_to_place);
-                                    // F1 — stamp shaped-block orientation (slab
-                                    // half / stair facing) from the clicked face +
-                                    // camera so it renders + collides correctly.
-                                    // The chunk re-mesh below picks up the meta.
-                                    if crate::block_shape::is_shaped(block_to_place) {
-                                        let ppos = (place_x, place_y, place_z);
-                                        let fwd = self.players[pidx].camera.forward();
-                                        let m = match crate::block_shape::shape_of(block_to_place) {
-                                            // A hand-placed snow layer starts at one
-                                            // thin layer (AUX 0 = 1/8 block).
-                                            crate::block_shape::BlockShape::SnowLayer => 0,
-                                            crate::block_shape::BlockShape::Slab => {
-                                                let f = crate::block_shape::slab_placement_facing(
-                                                    face, 0.5,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            crate::block_shape::BlockShape::Stairs => {
-                                                let (f, top) = crate::block_shape::stairs_placement(
-                                                    fwd.x, fwd.z, face,
-                                                );
-                                                let base = crate::meta::with_facing(0, f);
-                                                if top {
-                                                    crate::meta::with_state(base, 1)
-                                                } else {
-                                                    base
-                                                }
-                                            }
-                                            crate::block_shape::BlockShape::FenceGate => {
-                                                // Faces the player's axis; placed closed.
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            crate::block_shape::BlockShape::Trapdoor => {
-                                                // Hinges to the wall the player faces; a
-                                                // click on a block's underside mounts it
-                                                // at the ceiling (state bit 1).
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                let base = crate::meta::with_facing(0, f);
-                                                if matches!(face, [0, -1, 0]) {
-                                                    crate::meta::with_state(base, 0b10)
-                                                } else {
-                                                    base
-                                                }
-                                            }
-                                            // Connecting shapes derive their
-                                            // geometry from live neighbours, so
-                                            // they store no orientation meta.
-                                            crate::block_shape::BlockShape::Pane
-                                            | crate::block_shape::BlockShape::Wall => 0,
-                                            crate::block_shape::BlockShape::Door => {
-                                                // Bottom half: faces the player,
-                                                // left hinge, closed. The top half
-                                                // is placed by the door block below.
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            // Buttons + levers mount on the face
-                                            // the player clicked (protrude along
-                                            // its outward normal); placed off.
-                                            crate::block_shape::BlockShape::Button
-                                            | crate::block_shape::BlockShape::Lever => {
-                                                let f = crate::block_shape::facing_from_face_normal(
-                                                    face,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            // Pressure plates always lie on the floor.
-                                            crate::block_shape::BlockShape::PressurePlate => 0,
-                                            // Sign board faces across the player's
-                                            // view so the text reads toward them.
-                                            crate::block_shape::BlockShape::Sign => {
-                                                let f = crate::block_shape::facing_from_forward(
-                                                    fwd.x, fwd.z,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            // Item frame mounts on the clicked wall.
-                                            crate::block_shape::BlockShape::ItemFrame => {
-                                                let f = crate::block_shape::facing_from_face_normal(
-                                                    face,
-                                                );
-                                                crate::meta::with_facing(0, f)
-                                            }
-                                            crate::block_shape::BlockShape::FullCube => 0,
-                                        };
-                                        self.world.set_meta(ppos, m);
+                                    // C3d run 9 — the placement's meta (a shaped block's orientation,
+                                    // a piston's, dispenser's or dropper's look facing, a directional
+                                    // power device's axis facing) is ONE pure rule, hoisted so a Strict
+                                    // client's typed `Edit` carries it before anything is predicted
+                                    // (`placement_meta`). The chunk re-mesh below picks up the meta.
+                                    if let Some(m) = crate::placement_meta::placement_meta(block_to_place, face, self.players[pidx].camera.forward()) {
+                                        self.world.set_meta((place_x, place_y, place_z), m);
                                     }
-                                    // P11 — a piston is a plain FullCube (not a
-                                    // shaped block, so the orientation pass above is
-                                    // skipped), but it must remember which way to
-                                    // push. Stamp its facing from the placer's look,
-                                    // pitch included (so up/down pistons work).
-                                    if crate::piston::is_piston(block_to_place) {
-                                        let fwd = self.players[pidx].camera.forward();
-                                        self.world.set_meta(
-                                            (place_x, place_y, place_z),
-                                            crate::meta::with_facing(
-                                                0,
-                                                crate::piston::facing_from_look(
-                                                    fwd.x, fwd.y, fwd.z,
-                                                ),
-                                            ),
-                                        );
-                                    }
-                                    // Dispenser/Dropper (2026-07-04) — same
-                                    // facing stamp as the piston, plus an
-                                    // EAGER block-entity so the power-edge
-                                    // latch exists from tick one (chests are
-                                    // lazy; the latch can't be).
-                                    if block_to_place == block::DISPENSER
-                                        || block_to_place == block::DROPPER
-                                    {
-                                        let fwd = self.players[pidx].camera.forward();
-                                        self.world.set_meta(
-                                            (place_x, place_y, place_z),
-                                            crate::meta::with_facing(
-                                                0,
-                                                crate::piston::facing_from_look(
-                                                    fwd.x, fwd.y, fwd.z,
-                                                ),
-                                            ),
-                                        );
+                                    // Dispenser/Dropper (2026-07-04) — an EAGER block-entity so the
+                                    // power-edge latch exists from tick one (chests are lazy; the latch
+                                    // can't be).
+                                    if block_to_place == block::DISPENSER || block_to_place == block::DROPPER {
                                         self.world.insert_dispenser(
                                             (place_x, place_y, place_z),
                                             crate::dispenser::DispenserData::new(),
@@ -16151,18 +16068,7 @@ impl super::GameState {
                                     if crate::block::is_power_block(block_to_place) {
                                         let ppos = (place_x, place_y, place_z);
                                         if !crate::block::is_cable(block_to_place) {
-                                            let fwd = self.players[pidx].camera.forward();
-                                            let facing = if fwd.x.abs() > fwd.z.abs() {
-                                                if fwd.x > 0.0 {
-                                                    crate::meta::Facing::East
-                                                } else {
-                                                    crate::meta::Facing::West
-                                                }
-                                            } else if fwd.z > 0.0 {
-                                                crate::meta::Facing::South
-                                            } else {
-                                                crate::meta::Facing::North
-                                            };
+                                            let facing = crate::placement_meta::device_facing(self.players[pidx].camera.forward());
                                             // The kind table is shared with the
                                             // host's apply-a-joiner's-placement
                                             // path (`hosted_server`), so a hosted
@@ -16179,20 +16085,10 @@ impl super::GameState {
                                                     crate::world::BlockEntityData::PowerDevice(data),
                                                 );
                                             }
-                                            // Wave 2c — the input devices
-                                            // (button/lever/plate) are now F1
-                                            // shapes whose meta facing was already
-                                            // set from the clicked face above, so
-                                            // their nub sits flush on that surface.
-                                            // Don't clobber it with the look-axis
-                                            // facing; that's only meaningful for
-                                            // directional devices (mirror/gate/…).
-                                            if !crate::block_shape::is_signal_input(block_to_place) {
-                                                self.world.set_meta(
-                                                    ppos,
-                                                    crate::meta::with_facing(0, facing),
-                                                );
-                                            }
+                                            // (The device's meta facing — this
+                                            // `facing`, or an input device's clicked
+                                            // face — was stamped with the placement,
+                                            // `placement_meta`.)
                                         }
                                         self.world.mark_dirty(ppos);
                                     }
@@ -16281,11 +16177,14 @@ impl super::GameState {
                                     // other client one this client had taken
                                     // back; C3c-1 checks a conflicting claim
                                     // first, so it is the placed block).
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    {
-                                        let standing =
-                                            self.world.get_block(place_x, place_y, place_z);
-                                        self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing));
+                                    // A typed placement went as its own action.
+                                    if !typed_place {
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        {
+                                            let standing =
+                                                self.world.get_block(place_x, place_y, place_z);
+                                            self.pending_block_changes.push(broadcast_change(&self.world, place_x, place_y, place_z, standing));
+                                        }
                                     }
                                     // C3c-1 — and a door's top half, after its
                                     // bottom (the server judges it standing on

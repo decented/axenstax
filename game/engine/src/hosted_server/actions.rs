@@ -110,8 +110,20 @@ impl HostedServer {
             // the death sync) gets one fresh whole-window correction
             // `Replace`, at most one outstanding: actions based before it
             // are stale and supersede without another.
+            //
+            // Run 9 (run-6 review LOW-3) — a superseded `Edit` is corrected
+            // in the world too: its predicted cell (and a door's pair) is
+            // sent back by the refusal's path, and its row carries the cell.
             if !config && (stale_base || !sp.is_present_and_alive()) {
-                if !self.complete_typed_noop(i, packet.action, ActionFate::Superseded) { return; }
+                let cells = match &packet.intent {
+                    ActionIntent::Edit { change, .. } => {
+                        let cells = self.edit_cells(change);
+                        self.send_back_refused_edit(change, budget);
+                        cells
+                    }
+                    _ => Vec::new(),
+                };
+                if !self.complete_typed_noop_at(i, packet.action, ActionFate::Superseded, &cells) { return; }
                 if !stale_base { self.queue_correction_replace(i); }
                 continue;
             }
@@ -148,9 +160,16 @@ impl HostedServer {
         self.server.players[i].window_events.death_replace = Some(n);
     }
     pub(super) fn prepare_typed_result(&mut self, i: usize, action: ActionHeader, fate: ActionFate, included_events: u32) -> Option<crate::action_results::PreparedResult> {
+        self.prepare_typed_result_at(i, action, fate, included_events, &[])
+    }
+    /// [`Self::prepare_typed_result`] whose row also carries the action's
+    /// own world cells (run 9, run-6 review LOW-3: an `Edit`'s cell and a
+    /// door's pair), beside the station's table cell.
+    pub(super) fn prepare_typed_result_at(&mut self, i: usize, action: ActionHeader, fate: ActionFate, included_events: u32, extra: &[[i32; 3]]) -> Option<crate::action_results::PreparedResult> {
         let receipt = ActionReceipt { action, fate, included_events };
-        let cells = match self.server.players[i].station { crate::window::Station::Table { cell } => vec![cell].into_boxed_slice(), _ => Box::new([]) };
-        self.server.players[i].action_results.as_mut()?.prepare(receipt, cells).ok()
+        let mut cells: Vec<[i32; 3]> = match self.server.players[i].station { crate::window::Station::Table { cell } => vec![cell], _ => Vec::new() };
+        for cell in extra { if !cells.contains(cell) { cells.push(*cell); } }
+        self.server.players[i].action_results.as_mut()?.prepare(receipt, cells.into_boxed_slice()).ok()
     }
     pub(super) fn complete_typed_result(&mut self, i: usize, action: ActionHeader, fate: ActionFate, result: crate::action_results::PreparedResult) {
         let sp = &mut self.server.players[i];
@@ -160,15 +179,22 @@ impl HostedServer {
         sp.action_results.as_mut().expect("issued results").commit(result);
     }
     pub(super) fn complete_typed_noop(&mut self, i: usize, action: ActionHeader, fate: ActionFate) -> bool {
+        self.complete_typed_noop_at(i, action, fate, &[])
+    }
+    pub(super) fn complete_typed_noop_at(&mut self, i: usize, action: ActionHeader, fate: ActionFate, cells: &[[i32; 3]]) -> bool {
         let included = self.server.players[i].window_events.last_number();
-        let Some(result) = self.prepare_typed_result(i, action, fate, included) else {
+        let Some(result) = self.prepare_typed_result_at(i, action, fate, included, cells) else {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Terminal result history is full"); return false;
         };
         self.complete_typed_result(i, action, fate, result);
         true
     }
     pub(super) fn refuse_typed_action(&mut self, i: usize, action: ActionHeader) {
-        self.terminal_then_correct(i, action, ActionFate::Refused, "action refused at its frontier");
+        self.refuse_typed_action_at(i, action, &[]);
+    }
+    /// [`Self::refuse_typed_action`] whose row carries the action's cells.
+    pub(super) fn refuse_typed_action_at(&mut self, i: usize, action: ActionHeader, cells: &[[i32; 3]]) {
+        if self.complete_typed_noop_at(i, action, ActionFate::Refused, cells) { self.pause_typed_action(i, StrictTeardown::Unconfirmed, "action refused at its frontier"); }
     }
     /// A terminal zero-effect fate (`Refused`, or `NormalisedAcceptedNoop`
     /// for a contested shared container) is retained first; the
