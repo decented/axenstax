@@ -59,11 +59,20 @@ pub enum StrictEdit {
 
 /// Decision 18 — the classification, exhaustive for this class. `held` is
 /// the window's item in the action's slot; a claimed hand or
-/// `MinedBlock.tool` is never read.
-pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&Item>, creative: bool) -> StrictEdit {
+/// `MinedBlock.tool` is never read. `received`: the server judging an edit
+/// its client sent typed (the client classifying its own edit passes
+/// `false`).
+///
+/// C3d run 10 (run-9b review MEDIUM-1) — Decision 19 Drift runs before the
+/// same-block and non-yielding checks ([`drifted`]): an honest edit on a
+/// cell that changed since its client acted (a leaf the server decayed, a
+/// block another player mined, a crop someone harvested) is a Drift
+/// `Refuse`, its cell sent back, never a paused class.
+pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&Item>, creative: bool, received: bool) -> StrictEdit {
     use crate::block::{AIR, OAK_DOOR, WATER};
     let new = change.new_block;
     if creative { return StrictEdit::Unsupported("Creative free edits await their typed class"); }
+    if received && drifted(old, new, mined.is_some()) { return StrictEdit::Refuse(DRIFT); }
     if old == new { return StrictEdit::Unsupported("A same-block edit awaits the typed Noop class"); }
     // Decision 20: a door is one compound action (DoorPlace / its pair).
     if old == OAK_DOOR || new == OAK_DOOR { return StrictEdit::Unsupported("Doors are one compound action"); }
@@ -85,6 +94,19 @@ pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protoc
     }
     // Untagged emptying edits, untagged in-place changes: no mutation authority.
     StrictEdit::Refuse("an untagged edit is no placement or break")
+}
+
+/// Why a drifted edit is refused (Decision 19).
+pub const DRIFT: &str = "Drift: the cell no longer holds what the client acted on";
+
+/// Decision 19 — has the cell of a received typed edit changed under it? A
+/// client sends an edit typed only when its own world judged it Place
+/// (into a cell other than the placed block) or Break (of a block that
+/// yields), so on the server a placement onto its own block, or a mined
+/// edit onto its own result or onto a block that yields nothing (air, a
+/// fluid, fire), means the cell is no longer what the client acted on.
+pub fn drifted(old: BlockId, new: BlockId, mined: bool) -> bool {
+    old == new || (mined && !crate::break_drops::yields_drops(old))
 }
 
 /// A placement's window half: the placed block taken from hotbar `slot`
@@ -258,7 +280,7 @@ pub fn route_place(
     registry: &crate::block::BlockRegistry,
 ) -> Result<Routed<Option<BlockId>>, String> {
     let held = inv.slot(slot).map(|s| s.item.clone());
-    let judged = judge(old, &change, None, slot, held.as_ref(), false);
+    let judged = judge(old, &change, None, slot, held.as_ref(), false, false);
     match remote {
         Some(remote) if sends_typed(Some(remote), &judged) => place_joined(remote, ui, inv, armour, slot, change, registry).map(Routed::Typed),
         _ => Ok(Routed::Legacy),
@@ -283,7 +305,7 @@ pub fn route_break(
     let held = inv.slot(slot).map(|s| s.item.clone());
     let tool = match &held { Some(Item::Tool(t)) => Some(*t), _ => None };
     let mined = protocol::MinedBlock { x: change.x, y: change.y, z: change.z, tool: protocol::WireItem::None };
-    let judged = judge(old, &change, Some(&mined), slot, held.as_ref(), false);
+    let judged = judge(old, &change, Some(&mined), slot, held.as_ref(), false, false);
     match remote {
         Some(remote) if sends_typed(Some(remote), &judged) => break_joined(remote, ui, inv, armour, slot, change, tool, registry).map(Routed::Typed),
         _ => Ok(Routed::Legacy),

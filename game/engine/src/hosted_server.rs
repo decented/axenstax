@@ -692,17 +692,24 @@ pub struct RoomStatus {
 /// full tool-aware bonus for remote players once remote inventories become
 /// server-authoritative (tracked in the CLAUDE.md known-debt list alongside
 /// the rest of the server-side inventory/crafting bridge).
+///
+/// C3d run 10 (run-9b review MEDIUM-2) — a joiner's block edit no longer
+/// passes a claim: `validate_block_edit` reads the held item from the
+/// server's own copy of the edit's slot and passes `held_is_claim = false`,
+/// so a Reach Claw the copy holds counts in both modes. `held_is_claim`
+/// (the old `server_simulated`) still forces the base cap where the item is
+/// only an input's word.
 pub(crate) fn block_change_within_reach(
     dist_sq: f32,
     held_kind: u8,
     held_id: u16,
-    server_simulated: bool,
+    held_is_claim: bool,
 ) -> bool {
     // Measured eye → block centre while the client ray-casts eye → block
     // FACE: up to sqrt(3)/2 further, plus ~0.5 of movement / queue lag
     // (review S4).
     const REACH_MARGIN: f32 = 0.87 + 0.5;
-    let bonus = if server_simulated {
+    let bonus = if held_is_claim {
         0.0
     } else {
         crate::game_loop::reach_bonus_for_item_ref(protocol::ItemRef::from_wire(
@@ -5022,7 +5029,7 @@ impl HostedServer {
     ) {
         let remote = self.server.players[i].server_simulated;
         let use_tag = tag.as_ref().and_then(|t| t.use_tag()).filter(|_| remote);
-        if let Err(why) = self.validate_block_edit(i, bc, hand) {
+        if let Err(why) = self.validate_block_edit(i, bc, hand, slot) {
             log::debug!("Refused slot {i}'s edit at ({}, {}, {}): {why:?}", bc.x, bc.y, bc.z);
             // Un-ghost the refused edit on the sender: re-send what is
             // really there.
@@ -5738,6 +5745,7 @@ impl HostedServer {
         i: usize,
         bc: &protocol::BlockChange,
         (held_kind, held_id): (u8, u16),
+        slot: usize,
     ) -> Result<(), EditRefusal> {
         let Some(sp) = self.server.players.get(i) else {
             return Err(EditRefusal::Malformed);
@@ -5764,7 +5772,17 @@ impl HostedServer {
         let dx = bc.x as f32 + 0.5 - eye.x;
         let dy = bc.y as f32 + 0.5 - eye.y;
         let dz = bc.z as f32 + 0.5 - eye.z;
-        if !block_change_within_reach(dx * dx + dy * dy + dz * dz, held_kind, held_id, sp.server_simulated) {
+        // C3d run 10 (run-9b review MEDIUM-2) — a joiner's Reach Claw counts
+        // when the server's own copy of the edit's hotbar `slot` holds it, in
+        // both modes, never on its input's word; a local slot's hand stays
+        // trusted (position-trust, the same process as the host).
+        let (reach_kind, reach_id) = if sp.server_simulated {
+            sp.inventory.slot(slot).map_or(protocol::ItemRef::Empty.to_wire(), |s| crate::inventory::item_to_ref(&s.item).to_wire())
+        } else {
+            (held_kind, held_id)
+        };
+        // `false`: the item is the server's own copy's or a trusted local hand.
+        if !block_change_within_reach(dx * dx + dy * dy + dz * dz, reach_kind, reach_id, false) {
             return Err(EditRefusal::Reach);
         }
         if sp.server_simulated {

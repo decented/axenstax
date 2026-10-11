@@ -57,12 +57,12 @@ impl HostedServer {
         if slot >= 9 { return self.refuse_strict_edit(i, action, change, budget, "invalid action slot"); }
         let held = self.server.players[i].inventory.slot(slot).map(|s| s.item.clone());
         let held_wire = held.as_ref().map_or((protocol::item_kind::EMPTY, 0), |item| crate::inventory::item_to_ref(item).to_wire());
-        if let Err(why) = self.validate_block_edit(i, change, held_wire) {
+        if let Err(why) = self.validate_block_edit(i, change, held_wire, slot) {
             return self.refuse_strict_edit(i, action, change, budget, &format!("{why:?}"));
         }
         let old = self.server.world.get_block(change.x, change.y, change.z);
         let old_meta = self.server.world.meta_at(change.x, change.y, change.z);
-        let edit = judge(old, change, mined, slot, held.as_ref(), self.server.play_mode.is_creative());
+        let edit = judge(old, change, mined, slot, held.as_ref(), self.server.play_mode.is_creative(), true);
         let (direct, grants, yielded): (Box<dyn FnOnce(&mut crate::window::WindowMut)>, Vec<crate::item::ItemStack>, bool) = match edit {
             StrictEdit::Refuse(why) => return self.refuse_strict_edit(i, action, change, budget, why),
             StrictEdit::Unsupported(why) => { self.pause_typed_action(i, StrictTeardown::Untyped, why); return false; }
@@ -70,7 +70,9 @@ impl HostedServer {
             StrictEdit::Break { slot, tool } => {
                 // The yield's tier is the server-held tool's, never the claim.
                 let Some(y) = self.joiner_break_yield(change, old, tool) else {
-                    // Decision 19 Drift: the server's cell disagrees with the break.
+                    // Decision 19 Drift: the server's cell disagrees with the break
+                    // (what `judge`'s Drift check leaves: a yielding block whose
+                    // yield doesn't leave the change's block).
                     return self.refuse_strict_edit(i, action, change, budget, "the server's cell doesn't break that way");
                 };
                 let grants: Vec<_> = y.drops.into_iter().chain(y.gem).filter(|s| s.count > 0).collect();

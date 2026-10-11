@@ -177,3 +177,63 @@ fn c3d_strict_claimed_better_tool_is_ignored_for_the_drop_tier() {
     assert_eq!(count(r.sp(), COBBLESTONE), 0);
     assert_eq!(ground_items(&r), 0);
 }
+
+/// A cell 6.7 blocks from the joiner's eye: past the base reach limit
+/// (5 + 1.37), inside the Reach Claw's (+2.0).
+const FAR: (i32, i32, i32) = (46, 81, 43);
+
+/// C3d run 10 (run-9b review MEDIUM-1) — Decision 19 Drift first: an honest
+/// mined `Edit` whose cell the server has already changed (a leaf it
+/// decayed, a block another player mined, a crop someone harvested) is a
+/// Drift `Refuse` with its typed `Refused` row (the bridge teardown until
+/// recovery rebases it), never an `Untyped` pause. Zero effect.
+#[test]
+fn c3d_strict_mined_edit_on_an_already_changed_cell_is_a_drift_refusal() {
+    // (case, what the server's cell holds now, what the client's change leaves)
+    for (k, (case, now, left)) in [
+        ("a leaf the server already decayed", AIR, AIR),
+        ("a block another player just mined", AIR, AIR),
+        ("a crop someone already harvested", crate::block::TILLED_SOIL, crate::block::TILLED_SOIL),
+    ].into_iter().enumerate() {
+        let mut r = edit_rig(&format!("drift-{k}"));
+        r.hs.server.world.set_block(ABOVE.0, ABOVE.1, ABOVE.2, now);
+        let wood = pick(ToolMaterial::Wood);
+        r.hs.server.players[r.i].inventory.set_slot(0, Some(ItemStack { item: Item::Tool(wood), count: 1 }));
+        let window = r.sp().inventory.clone();
+        let events = r.sp().window_events.last_number();
+        let action = edit(&mut r, ABOVE, left, 0, Some(&Item::Tool(wood)), Some(Some(wood)));
+        let heard = listen(&r);
+        assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "{case}: a Drift refusal, with its typed row");
+        assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Unconfirmed.reason()), "{case}: the refusal's teardown: {:?}", heard.rejects);
+        assert!(!heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Untyped.reason()), "{case}: never an Untyped pause");
+        assert_eq!(block_at(&r, ABOVE), now, "{case}: the world is untouched");
+        assert_eq!(r.sp().inventory.slot(0), window.slot(0), "{case}: the tool didn't wear");
+        assert_eq!(r.sp().window_events.last_number(), events, "{case}: nothing granted");
+    }
+}
+
+/// C3d run 10 (run-9b review MEDIUM-2) — a Strict joiner's Reach Claw
+/// counts from the server's own copy of the edit's slot: a bare-claw break
+/// at 6.7 blocks is accepted; the same break claiming a claw the copy
+/// doesn't hold is refused.
+#[test]
+fn c3d_strict_reach_claw_break_counts_from_the_servers_copy() {
+    let claw = ItemStack::new_material(crate::item::MaterialId::ReachClaw, 1);
+    for held in [true, false] {
+        let what = if held { "the copy holds the claw" } else { "only claimed" };
+        let mut r = edit_rig(&format!("claw-{held}"));
+        r.hs.server.world.set_block(FAR.0, FAR.1, FAR.2, crate::block::DIRT);
+        if held { r.hs.server.players[r.i].inventory.set_slot(0, Some(claw.clone())); }
+        let action = edit(&mut r, FAR, AIR, 0, Some(&claw.item), Some(None));
+        let heard = listen(&r);
+        let fate = r.row(action).map(|row| row.fate);
+        if held {
+            assert!(heard.rejects.is_empty(), "{what}: never torn down: {:?}", heard.rejects);
+            assert_eq!(fate, Some(ActionFate::Accepted), "{what}: in the claw's reach");
+            assert_eq!(block_at(&r, FAR), AIR, "{what}: broken");
+        } else {
+            assert_eq!(fate, Some(ActionFate::Refused), "{what}: never on the client's word");
+            assert_eq!(block_at(&r, FAR), crate::block::DIRT, "{what}: untouched");
+        }
+    }
+}

@@ -404,6 +404,18 @@ for remote players in the 2026-07-07 hardening pass. `// BRIDGE` in `hosted_serv
 notes the bonus returns for remote players once remote inventory becomes
 server-authoritative.) Melee/combat reach is unaffected — this gate is block-edits only.
 
+**A joiner's Reach Claw counts from the server's copy (C3d run 10, 2026-10-11; run-9b
+review MEDIUM-2).** A remote player's block edit now reads the held item from the
+server's own copy of the edit's hotbar slot (`validate_block_edit`), in both inventory
+modes: a Reach Claw that copy holds gives the full `+2.0`, and the client's claim is
+never read. Before this, a joiner's claw break or placement 6.37 to 7.0 blocks away (in
+the client's reach, past the server's flat cap) was refused and sent back. **This is a
+deliberate fix of a pre-existing default-path (Mirror) bug**, shown red on the old code
+by `test_integration/joiner_inventory.rs`
+`a_joiners_reach_claw_break_counts_from_the_servers_copy_of_its_slot`; Strict:
+`c3d_strict_reach_claw_break_counts_from_the_servers_copy`. Other reach checks that read
+only a claim (a device interact) keep the flat cap.
+
 ### 2.6 Continuous Breaking
 
 Holding the break button mines continuously. When one block breaks, the system immediately begins breaking the next block the crosshair is pointing at (if within reach). The break progress does **not** carry over between blocks — switching targets resets progress to zero. This prevents exploits where players wiggle between blocks to accumulate break progress.
