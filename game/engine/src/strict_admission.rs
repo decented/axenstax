@@ -139,6 +139,13 @@ mod teardown_copy_tests {
 /// seat's typed refusals: stale-world (a Drift: the cell changed under the
 /// client) and other (a rule or a mismatch). Logged in the departure line
 /// beside `PossessionTally`; a measurement, never a cheating count.
+///
+/// C3d run 15 (run-14 review LOW-2) — the bucket follows the client's
+/// `old` (the cell as it says it saw it), so a modified client can steer
+/// it: a forged `old` id is a Drift, so `StaleWorld`. Measurement only (no
+/// item effect). Classifying from server-side facts (the cell, and the
+/// block below it, changed since the server last told this client) waits
+/// for S2/S3's capture.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RefusalTally {
     pub stale_world: u32,

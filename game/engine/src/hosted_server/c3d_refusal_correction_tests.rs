@@ -405,6 +405,9 @@ fn c3d_s1_raw_unrepresentable_placement_is_refused_then_torn_down() {
     j.rc.poll();
     let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
     assert_eq!(reason, crate::strict_admission::StrictTeardown::Unrepresentable.reason(), "its own reason");
+    // Run 15 (run-14 review LOW-4, checked): the edit arm queues the cell's
+    // send-back, but the teardown frees the seat before the tick's block
+    // broadcast, so this client (which is leaving the world) never hears it.
     assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace");
     assert_eq!(j.hs.server.world.get_block(CELLS[0][0], CELLS[0][1], CELLS[0][2]), AIR, "nothing placed");
     assert_eq!(j.sp().inventory.slot(0).map(|s| s.count), Some(4), "nothing taken");
@@ -428,4 +431,32 @@ fn c3d_s1_dead_body_corrections_share_the_rate_bound() {
     }
     assert!(j.hs.slot_is_free(j.i), "the ninth correction tears down");
     assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_RATE_DETAIL, "the rate-bound reason");
+}
+
+/// Run 15 (run-14 review LOW-3) — every literal `FellBehind` detail in the
+/// Strict server paths is distinct, so a test (or a log) tells its
+/// teardowns apart by reason. Whole event reservations name their cap
+/// (`actions::reservation_detail`).
+#[test]
+fn c3d_fell_behind_details_are_distinct() {
+    let sources = [
+        include_str!("actions.rs"),
+        include_str!("strict_attack.rs"),
+        include_str!("strict_container.rs"),
+        include_str!("strict_edit.rs"),
+        include_str!("death.rs"),
+        include_str!("../hosted_server.rs"),
+    ];
+    let marker = "StrictTeardown::FellBehind, \"";
+    let mut seen = std::collections::BTreeMap::new();
+    for source in sources {
+        for (at, _) in source.match_indices(marker) {
+            let rest = &source[at + marker.len()..];
+            let detail = &rest[..rest.find('"').expect("a closed literal")];
+            *seen.entry(detail.to_string()).or_insert(0) += 1;
+        }
+    }
+    assert!(seen.len() >= 15, "the scan found the details: {seen:?}");
+    let shared: Vec<_> = seen.iter().filter(|(_, n)| **n > 1).collect();
+    assert!(shared.is_empty(), "shared FellBehind details: {shared:?}");
 }

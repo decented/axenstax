@@ -87,7 +87,7 @@ impl HostedServer {
         // The outcome names the Wear's number (0 when nothing wears, as
         // Mirror's does): known before anything is reserved.
         let Some(included) = sp.window_events.last_number().checked_add(u32::from(wears)) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "Window event numbers are exhausted"); return false;
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "Attack window event numbers are exhausted"); return false;
         };
         let window_event = if wears { included } else { 0 };
         let outcome = protocol::InteractOutcomePacket { seq: req.seq, entity: req.entity, kind: None, accepted: true, consume_held: 0, note: 0, window_event };
@@ -97,7 +97,8 @@ impl HostedServer {
         }
         let prepared_events = if wears {
             let Ok(prepared) = crate::window_events::prepare_strict_events(&mut self.server.players[i], events) else {
-                self.pause_typed_action(i, StrictTeardown::FellBehind, "Whole attack event reservation is unavailable"); return false;
+                let detail = super::actions::reservation_detail(&self.server.players[i], 1, "attack");
+                self.pause_typed_action(i, StrictTeardown::FellBehind, &detail); return false;
             };
             debug_assert_eq!(prepared.last_number(), included);
             Some(prepared)

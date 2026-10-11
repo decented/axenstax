@@ -470,12 +470,14 @@ fn c3d_strict_doesnt_break_that_way_on_the_same_cell_is_a_rule_refusal() {
     assert_eq!(block_at(&r, ABOVE), crate::block::WHEAT_STAGE_3, "nothing broken");
 }
 
-/// The client saw the same block with another meta: stale-world.
+/// Run 15 (run-14 review LOW-2, revises run 14) — the client claims the
+/// same block with another meta: still a rule refusal (only a different
+/// block id is stale-world; meta decides no yield, and the client picks it).
 #[test]
-fn c3d_strict_doesnt_break_that_way_on_a_changed_cell_is_stale_world() {
+fn c3d_strict_doesnt_break_that_way_on_a_meta_only_difference_is_a_rule_refusal() {
     let mut r = edit_rig("crop-stale");
     let action = crop_claim(&mut r, 3);
     assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused));
-    assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (1, 0), "stale-world");
+    assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (0, 1), "a meta-only difference is a rule refusal");
     assert_eq!(block_at(&r, ABOVE), crate::block::WHEAT_STAGE_3, "nothing broken");
 }

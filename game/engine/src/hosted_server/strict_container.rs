@@ -133,7 +133,7 @@ impl HostedServer {
     fn answer_refused_open(&mut self, i: usize, action: ActionHeader, op_seq: u32, cell: [i32; 3], why: protocol::OpenRefusal) -> bool {
         let included = self.server.players[i].window_events.last_number();
         let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "container open result history is full");
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "refused container open result history is full");
             return false;
         };
         self.server.players[i].last_window_op_seq = op_seq;
@@ -187,7 +187,7 @@ impl HostedServer {
         };
         let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, prepared.last_number()) else {
             prepared.abandon(&mut self.server.players[i]);
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "container open result history is full");
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "container open result history is full after its view was reserved");
             return false;
         };
         cw::ensure_container(&mut self.server.world, cell, kind);

@@ -80,11 +80,13 @@ impl HostedServer {
                     // Decision 19 Drift: the server's cell disagrees with the break
                     // (what `judge`'s Drift check leaves: a yielding block whose
                     // yield doesn't leave the change's block).
-                    // Run 13 (run-12 review LOW-5): not `judge`'s DRIFT. Run 14
-                    // (run-13 review LOW-4, decided): stale-world when the
-                    // server's cell (block and meta) differs from the one the
-                    // client acted on, else a rule refusal.
-                    let kind = if (old, old_meta) != seen { RefusalKind::StaleWorld } else { RefusalKind::Rule };
+                    // Run 13 (run-12 review LOW-5): not `judge`'s DRIFT. Run 15
+                    // (run-14 review LOW-2, revises run 14): stale-world only
+                    // when the server's block id differs from the one the
+                    // client acted on (a real Drift); a meta-only difference
+                    // is a rule refusal (meta decides no yield today, and the
+                    // client picks it). See `RefusalTally` on steering.
+                    let kind = if old != seen.0 { RefusalKind::StaleWorld } else { RefusalKind::Rule };
                     return self.refuse_strict_edit(i, action, change, budget, "the server's cell doesn't break that way", kind);
                 };
                 let grants: Vec<_> = y.drops.into_iter().chain(y.gem).filter(|s| s.count > 0).collect();
@@ -109,7 +111,7 @@ impl HostedServer {
         };
         let first = sp.window_events.last_number();
         let Some(included) = u32::try_from(events.len()).ok().and_then(|n| first.checked_add(n)) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "Window event numbers are exhausted"); return false;
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "Edit window event numbers are exhausted"); return false;
         };
         // Every grant packet is serialised before anything is reserved.
         let mut packets = Vec::with_capacity(grants.len());
@@ -121,8 +123,10 @@ impl HostedServer {
             };
             packets.push(packet);
         }
+        let wanted = events.len();
         let Ok(prepared) = crate::window_events::prepare_strict_events(&mut self.server.players[i], events) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "Whole edit event reservation is unavailable"); return false;
+            let detail = super::actions::reservation_detail(&self.server.players[i], wanted, "edit");
+            self.pause_typed_action(i, StrictTeardown::FellBehind, &detail); return false;
         };
         debug_assert_eq!(prepared.last_number(), included);
         let cells = self.edit_cells(change);

@@ -336,7 +336,7 @@ fn c3d_strict_attack_at_the_event_cap_has_zero_external_effect() {
             assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Accepted));
             assert_eq!(outcome.len(), 1, "one outcome");
         } else {
-            assert_zero_effect_attack(r, cow, id, at, "1024 pending", "Whole attack event reservation is unavailable");
+            assert_zero_effect_attack(r, cow, id, at, "1024 pending", "Whole attack event reservation is unavailable: the pending-event count cap");
         }
     }
 }

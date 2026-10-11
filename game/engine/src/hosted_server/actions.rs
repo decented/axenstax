@@ -394,15 +394,17 @@ impl HostedServer {
         // is reserved, so no reservation waits on a fallible serialisation.
         let included = sp.window_events.last_number().checked_add(2);
         let Some(included) = included else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "Window event numbers are exhausted"); return false;
+            self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot window event numbers are exhausted"); return false;
         };
         let outcome = protocol::ItemActionOutcomePacket { seq: request_seq, accepted: true, consume_held: 1, note: 0, window_event: included, wear_held: true, bite_after: 0 };
         let packet = protocol::serialize_packet(protocol::PacketType::ItemActionOutcome, &outcome);
         if packet.len() > crate::action_journal::MAX_PAGE_BYTES {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot outcome exceeds its reservation"); return false;
         }
+        let wanted = events.len();
         let Ok(prepared_events) = crate::window_events::prepare_strict_events(&mut self.server.players[i], events) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "Whole shot event reservation is unavailable"); return false;
+            let detail = reservation_detail(&self.server.players[i], wanted, "shot");
+            self.pause_typed_action(i, StrictTeardown::FellBehind, &detail); return false;
         };
         debug_assert_eq!(prepared_events.last_number(), included);
         let Some(result) = self.prepare_typed_result(i, action, ActionFate::Accepted, included) else {
@@ -488,6 +490,14 @@ impl HostedServer {
 /// correction-bound teardowns (the player sees `FellBehind`'s sentence).
 pub(super) const CORRECTION_RATE_DETAIL: &str = "the live-correction rate bound: more than 8 correction Replaces in 100 ticks";
 pub(super) const CORRECTION_FIT_DETAIL: &str = "a refusal's correction Replace doesn't fit the pending window events";
+
+/// C3d run 15 (run-14 review LOW-3) — the internal detail of a whole event
+/// reservation `prepare_strict_events` refused for `what` (`wanted` events):
+/// the pending-event count cap (1024) or, short of it, the byte cap (2 MiB).
+pub(super) fn reservation_detail(sp: &crate::server::ServerPlayer, wanted: usize, what: &str) -> String {
+    let cap = if sp.window_events.waiting().saturating_add(wanted) > crate::action_journal::MAX_EVENT_ENTRIES { "count" } else { "byte" };
+    format!("Whole {what} event reservation is unavailable: the pending-event {cap} cap")
+}
 
 /// C3d run 14 (run-13 review LOW-5) — test builds record each teardown's
 /// internal detail on the test's thread, so a test tells its teardowns
