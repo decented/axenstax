@@ -217,8 +217,18 @@ impl HostedServer {
     /// `Replace` carries no container view) or `SetAutoRefill` (a `Replace`
     /// keeps the refill setting): still the bridge teardown.
     pub(super) fn refuse_typed_action_then_teardown(&mut self, i: usize, action: ActionHeader) {
+        self.refuse_then_teardown_for(i, action, StrictTeardown::Unconfirmed, "action refused at its frontier");
+    }
+    /// C3d run 13 (run-12 review LOW-2) — the server's OWN window can't be
+    /// represented exactly (`StrictStageError::RawUnrepresentable`): a
+    /// `Replace` would ship the same window back and the next action would
+    /// refuse again, so it is refused, then torn down with its own reason.
+    pub(super) fn refuse_raw_unrepresentable(&mut self, i: usize, action: ActionHeader) {
+        self.refuse_then_teardown_for(i, action, StrictTeardown::Unrepresentable, "the server's own window can't be represented exactly");
+    }
+    fn refuse_then_teardown_for(&mut self, i: usize, action: ActionHeader, cause: StrictTeardown, detail: &str) {
         if self.strict_slot(i) { self.server.players[i].strict_refusals.note(RefusalKind::Rule); }
-        if self.complete_typed_noop(i, action, ActionFate::Refused) { self.pause_typed_action(i, StrictTeardown::Unconfirmed, "action refused at its frontier"); }
+        if self.complete_typed_noop(i, action, ActionFate::Refused) { self.pause_typed_action(i, cause, detail); }
     }
     /// C3d run 12 (S1) — a LIVE Strict seat's correction `Replace`: the
     /// whole window of [`Self::queue_correction_replace`], but it takes no
@@ -227,12 +237,23 @@ impl HostedServer {
     /// [`crate::window_events::WindowEvents::replace_waiting`]. At most one
     /// waits. One that doesn't fit the pending window events (count and
     /// retained bytes) is never forced in: the seat is torn down.
+    ///
+    /// Run 13 (run-12 review LOW-1) — the room is RESERVED in the deque
+    /// before it is measured (`window_events::reserve_strict_replace`), so
+    /// the `push_back` can't grow it past the byte bound and make the next
+    /// honest action fall behind. Run 13 (LOW-3) — at most
+    /// `strict_admission::MAX_CORRECTIONS_PER_WINDOW` per
+    /// `CORRECTION_WINDOW_TICKS`; the next is a `FellBehind` teardown.
     pub(super) fn queue_live_correction_replace(&mut self, i: usize) {
-        let sp = &self.server.players[i];
+        let now = self.server.tick_counter;
+        let sp = &mut self.server.players[i];
         if sp.window_events.replace_waiting() { return; }
+        if !sp.strict_corrections.admit(now) {
+            return self.strict_bridge_teardown(i, StrictTeardown::FellBehind, "the live-correction rate bound: more than 8 correction Replaces in 100 ticks");
+        }
         let fold = crate::window_events::effective_window_and_debt(sp);
         let probe = crate::window_events::WindowEvent::Replace { window: Box::new(fold.window.clone()), debt: fold.debt.clone(), station: sp.station };
-        if !crate::window_events::strict_replace_fits(sp, &probe) {
+        if !crate::window_events::reserve_strict_replace(sp, &probe) {
             return self.strict_bridge_teardown(i, StrictTeardown::FellBehind, "a refusal's correction Replace doesn't fit the pending window events");
         }
         self.send_inventory_sync(i, fold.window, fold.debt);
@@ -269,6 +290,7 @@ impl HostedServer {
         let mut staged = match staging {
             Ok(staged) => staged,
             Err(crate::window_events::StrictStageError::Debt) => return self.strict_debt_at_staging(i, "window click"),
+            Err(crate::window_events::StrictStageError::RawUnrepresentable) => { self.refuse_raw_unrepresentable(i, action); return false; }
             Err(crate::window_events::StrictStageError::Unrepresentable) => {
                 // Review L1: never commit a window that would drop or clamp a stack.
                 self.refuse_typed_action(i, action); return false;
@@ -319,6 +341,7 @@ impl HostedServer {
         let mut effective = match crate::window_events::strict_effective_marker(sp, &self.server.registry) {
             Ok(effective) => effective,
             Err(crate::window_events::StrictStageError::Debt) => return self.strict_debt_at_staging(i, "shot"),
+            Err(crate::window_events::StrictStageError::RawUnrepresentable) => { self.refuse_raw_unrepresentable(i, action); return false; }
             Err(crate::window_events::StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot source lineage is uncertain"); return false; }
         };
@@ -336,7 +359,12 @@ impl HostedServer {
         match crate::window_events::stage_strict_effects(sp, &self.server.registry, &events) {
             Ok(()) => {}
             Err(crate::window_events::StrictStageError::Debt) => return self.strict_debt_at_staging(i, "shot"),
+            Err(crate::window_events::StrictStageError::RawUnrepresentable) => { self.refuse_raw_unrepresentable(i, action); return false; }
             Err(crate::window_events::StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
+            // C3d run 13 — the ammo isn't there to pay (raw R, or after the
+            // pending prefix): deterministic on this state, so a refusal
+            // the correction `Replace` undoes (the client spent nothing).
+            Err(crate::window_events::StrictStageError::MissingPayment) => { self.refuse_typed_action(i, action); return false; }
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot payment or pending fit is uncertain"); return false; }
         }
         // The outcome's number is the second event's: known before anything

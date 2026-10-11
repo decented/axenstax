@@ -6,7 +6,13 @@ use crate::staged_window::{MarkerSlots, MarkerWindow, SourceBacking, StagedClick
 pub enum StrictStageError { Debt, Replacement, AmbiguousWear, MissingPayment, Source, Fit,
     /// A place or pending stack the marker projection can't carry exactly
     /// (C3d review L1): refused with a typed fate, never dropped or clamped.
-    Unrepresentable }
+    /// A property of the action's result or of a pending event: corrected.
+    Unrepresentable,
+    /// C3d run 13 (run-12 review LOW-2) — the server's OWN raw window (or a
+    /// waiting `Replace`'s) can't round-trip the marker projection: a
+    /// correction would ship the same window back, so the caller refuses,
+    /// then tears down (`StrictTeardown::Unrepresentable`).
+    RawUnrepresentable }
 
 /// Staged raw result, admitted only while every original source survives each
 /// existing pending prefix. The future fold is evidence, not committed state.
@@ -27,7 +33,7 @@ fn marker_stack(stack: &ItemStack, registry: &crate::block::BlockRegistry) -> Re
 }
 
 fn raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
-    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry).ok_or(StrictStageError::Unrepresentable)
+    MarkerWindow::try_capture_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, registry).ok_or(StrictStageError::RawUnrepresentable)
 }
 
 /// Views do not change personal holdings. Replace/correction cannot establish
@@ -80,8 +86,9 @@ pub fn stage_strict_click(sp: &ServerPlayer, registry: &crate::block::BlockRegis
     Ok(StrictWindowStage { raw: staged })
 }
 
-/// Raw R at the action's boundary as marker-only scratch holdings, refused
-/// (`Unrepresentable`) when a place can't round-trip exactly (review L1).
+/// Raw R at the action's boundary as marker-only scratch holdings,
+/// `RawUnrepresentable` when a place can't round-trip exactly (review L1;
+/// run-12 review LOW-2).
 pub fn strict_raw_marker(sp: &ServerPlayer, registry: &crate::block::BlockRegistry) -> Result<MarkerWindow, StrictStageError> {
     strict_obligations(sp, registry)?;
     raw_marker(sp, registry)
@@ -153,7 +160,7 @@ pub fn strict_obligations(sp: &ServerPlayer, registry: &crate::block::BlockRegis
         // across it still can't be established (`admit_staged`).
         if let WindowEvent::Replace { window, debt, .. } = &waiting.event {
             if !debt.is_empty() { return Err(StrictStageError::Debt); }
-            prefix = MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.cursor, &window.grid, registry).ok_or(StrictStageError::Unrepresentable)?;
+            prefix = MarkerWindow::try_capture_parts(&window.inv, &window.armour, &window.cursor, &window.grid, registry).ok_or(StrictStageError::RawUnrepresentable)?;
             // Run 6 (run-4 review Nit) — one source with the applied
             // `Replace`: its locks, the raw copy's auto-refill.
             prefix.set_auto_refill(sp.inventory.auto_refill);
@@ -354,6 +361,19 @@ pub fn strict_replace_fits(sp: &ServerPlayer, event: &WindowEvent) -> bool {
     count.max(waiting.waiting.capacity()).checked_mul(std::mem::size_of::<Waiting>()).and_then(|n| n.checked_add(heap)).is_some_and(|n| n <= crate::action_journal::MAX_RETAINED_BYTES)
 }
 
+/// C3d run 13 (run-12 review LOW-1) — reserve room for one live correction
+/// `Replace` (`probe`) in joiner `sp`'s pending window events, as
+/// [`prepare_strict_events`] does: the deque's slot is reserved first, then
+/// the count and byte bound are measured on its REAL capacity (so the
+/// `push_back` that queues it can't grow it past 2 MiB). On `false` the
+/// capacity is restored and nothing is queued (the caller tears down).
+pub fn reserve_strict_replace(sp: &mut ServerPlayer, probe: &WindowEvent) -> bool {
+    let capacity_before = sp.window_events.waiting.capacity();
+    if sp.window_events.waiting.try_reserve_exact(1).is_ok() && strict_replace_fits(sp, probe) { return true; }
+    sp.window_events.waiting.shrink_to(capacity_before);
+    false
+}
+
 pub fn prepare_strict_events(sp: &mut ServerPlayer, events: Box<[WindowEvent]>) -> Result<PreparedEvents, StrictStageError> {
     let waiting = &mut sp.window_events;
     let count = waiting.waiting.len().checked_add(events.len()).ok_or(StrictStageError::Fit)?;
@@ -456,6 +476,21 @@ mod tests {
         assert!(sp.inventory.slot(0).is_none());
         assert_eq!(sp.cursor.as_ref().unwrap().item, Item::Block(crate::block::OAK_LOG));
         assert!(sp.window_events.debt.is_empty());
+    }
+    /// Run 13 (run-12 review LOW-2) — the two `Unrepresentable`s are told
+    /// apart: the server's own raw window is `RawUnrepresentable` (refused,
+    /// then torn down); an action's result (here a yield grant) is
+    /// `Unrepresentable` (corrected).
+    #[test]
+    fn c3d_raw_and_result_unrepresentable_are_distinct() {
+        let registry = crate::block::BlockRegistry::new();
+        let mut over = crate::crafting::Tool::new(crate::crafting::ToolType::Pickaxe, crate::crafting::ToolMaterial::Stone);
+        over.durability = over.max_durability() + 5;
+        let over = ItemStack { item: Item::Tool(over), count: 1 };
+        let mut sp = player();
+        assert!(matches!(stage_strict_effects(&sp, &registry, &[WindowEvent::Grant(over.clone())]), Err(StrictStageError::Unrepresentable)), "a result the projection can't carry");
+        sp.inventory.set_slot(4, Some(over));
+        assert!(matches!(strict_raw_marker(&sp, &registry), Err(StrictStageError::RawUnrepresentable)), "the server's own window");
     }
     #[test]
     fn c3d_actual_event_deque_reserves_both_shot_effects_without_forcing_an_old_event() {

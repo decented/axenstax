@@ -63,6 +63,11 @@ pub enum StrictTeardown {
     Obligation,
     /// Something unreadable, foreign or conflicting arrived.
     Unreadable,
+    /// C3d run 13 (run-12 review LOW-2) — the server's OWN copy of the
+    /// player's window holds a stack the strict check can't represent
+    /// exactly: a `Replace` would ship the same window back, so a
+    /// correction would loop. Refused, then torn down.
+    Unrepresentable,
 }
 
 impl StrictTeardown {
@@ -74,6 +79,7 @@ impl StrictTeardown {
             StrictTeardown::Untyped => "This world checks inventories strictly, and your game sent a change this world can't take yet, so you've been disconnected. Anything this world saved for you is kept.",
             StrictTeardown::Obligation => "This world's strict inventory check found an obligation it can't account for, so you've been disconnected. Ask whoever runs this world about your save.",
             StrictTeardown::Unreadable => "Your game sent this world something it couldn't read, so you've been disconnected. Anything this world saved for you is kept.",
+            StrictTeardown::Unrepresentable => "This world checks inventories strictly and found something in your inventory it can't check exactly, so you've been disconnected. Anything this world saved for you is kept.",
         }
     }
 }
@@ -107,7 +113,7 @@ mod teardown_copy_tests {
     /// internal term (action, frontier, epoch, receipt, rejoin required).
     #[test]
     fn c3d_strict_teardown_copy_is_plain_and_clean() {
-        for cause in [StrictTeardown::Unconfirmed, StrictTeardown::FellBehind, StrictTeardown::Untyped, StrictTeardown::Obligation, StrictTeardown::Unreadable] {
+        for cause in [StrictTeardown::Unconfirmed, StrictTeardown::FellBehind, StrictTeardown::Untyped, StrictTeardown::Obligation, StrictTeardown::Unreadable, StrictTeardown::Unrepresentable] {
             let text = cause.reason();
             assert!(crate::copy_lint::banned_in(text, crate::copy_lint::BANNED_MONEY_WORDS).is_empty(), "{cause:?}: {text}");
             for jargon in ["action", "frontier", "epoch", "receipt", "rejoin required", "authoritative", "update your game", "carry on with your inventory"] {
@@ -139,6 +145,35 @@ pub struct RefusalTally {
     pub other: u32,
 }
 
+/// C3d run 13 (run-12 review LOW-3) — at most this many live correction
+/// `Replace`s per Strict seat in any [`CORRECTION_WINDOW_TICKS`] window.
+pub const MAX_CORRECTIONS_PER_WINDOW: usize = 8;
+/// The window [`MAX_CORRECTIONS_PER_WINDOW`] counts over, in server ticks.
+pub const CORRECTION_WINDOW_TICKS: u64 = 100;
+
+/// The server ticks of one Strict seat's most recent live correction
+/// `Replace`s (at most [`MAX_CORRECTIONS_PER_WINDOW`]).
+// BRIDGE: correction rate bound — replace when S3 replay lands
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CorrectionRate {
+    recent: std::collections::VecDeque<u64>,
+}
+
+impl CorrectionRate {
+    /// May one more correction `Replace` go at server tick `now`? Records it
+    /// when it may; `false` when [`MAX_CORRECTIONS_PER_WINDOW`] already went
+    /// in the last [`CORRECTION_WINDOW_TICKS`] ticks (the caller tears down).
+    pub fn admit(&mut self, now: u64) -> bool {
+        if self.recent.len() >= MAX_CORRECTIONS_PER_WINDOW {
+            let oldest = self.recent.front().copied().unwrap_or(0);
+            if now.saturating_sub(oldest) < CORRECTION_WINDOW_TICKS { return false; }
+            self.recent.pop_front();
+        }
+        self.recent.push_back(now);
+        true
+    }
+}
+
 /// Which side of [`RefusalTally`] a refusal counts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusalKind {
@@ -157,5 +192,22 @@ impl RefusalTally {
             "Strict refusals: {} stale-world (Drift), {} other (rule or mismatch); not counted as cheating",
             self.stale_world, self.other
         ))
+    }
+}
+
+#[cfg(test)]
+mod correction_rate_tests {
+    use super::*;
+    /// Run-12 review LOW-3 — eight corrections in any 100-tick window; the
+    /// ninth inside it is refused, and one is admitted again once the
+    /// oldest of the eight is 100 ticks old.
+    #[test]
+    fn c3d_correction_rate_admits_eight_per_hundred_ticks() {
+        let mut rate = CorrectionRate::default();
+        for t in 0..8 { assert!(rate.admit(10 + t), "correction {} of 8", t + 1); }
+        assert!(!rate.admit(50), "the ninth inside the window");
+        assert!(!rate.admit(109), "still inside: the oldest went at tick 10");
+        assert!(rate.admit(110), "the oldest is 100 ticks old");
+        assert!(!rate.admit(110), "eight again inside the window: the oldest (tick 11) is 99 ticks old");
     }
 }

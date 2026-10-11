@@ -7,7 +7,8 @@
 //! `Replace`, not torn down. Every in-flight action after it has an older
 //! base, so it is `Superseded` with zero effect and its cell sent back.
 //! Container refusals, the contest and the `SetAutoRefill` refusal still tear
-//! down (`c3d_container_tests` pins them).
+//! down (`c3d_container_tests` pins the container ones; the refill setting's
+//! is pinned here).
 use super::c3d_client_edit_tests::{joined, Joined, CELLS};
 use crate::action_identity::{ActionFate, ActionHeader, InventoryMode};
 use crate::block::{AIR, COBBLESTONE, DIRT, OAK_LEAVES};
@@ -156,37 +157,149 @@ fn c3d_s1_personal_click_digest_refusal_converges_and_is_counted() {
     assert!(j.hs.server.players[j.i].obligations_proven_zero());
     let summary = j.hs.server.players[j.i].strict_refusals.summary().expect("a counted refusal");
     assert!(summary.contains("0 stale-world") && summary.contains("1 other"), "{summary}");
+    // Run 13 (run-12 review LOW-4) — the click after the corrected one is
+    // served: a click suffix converges, not only the digests.
+    j.click(WindowClick::Slot { slot: 0, right: false });
+    let next = j.last_action();
+    j.pumps(3);
+    assert_eq!(j.fate(next), Some(ActionFate::Accepted), "the next click after the Replace");
+    j.assert_agree("the next click");
+    assert!(j.ui.cursor_item.as_ref().is_some_and(|s| s.count == 4), "the bag's stone is on the cursor");
 }
 
-/// S1 test 6 — Mirror never sees any of this. A Mirror client's clicks go
-/// out as its op log, never as typed actions; the same typed click on a
-/// Mirror seat never reaches a Strict handler (`process_typed_actions`
-/// gates each on `strict_slot`), so it is the `Untyped` pause exactly as on
-/// `0e2ab5d4`: no typed row, the `Untyped` reason, no correction `Replace`,
-/// no Strict refusal counted, no flag. (Run 12's version asserted "never
-/// torn down" with the rig's Strict-only `click`: a wrong premise. The
-/// non-Strict branch of `refuse_typed_action_at` is the old line verbatim.)
+/// S1 test 6 (run 13, run-12 review LOW-4) — Mirror never sees any of
+/// this, through Mirror's OWN path: a Mirror client's clicks go out as its
+/// window-op log, never as typed actions. A click whose digest the server's
+/// copy doesn't reproduce is tallied (`window_mismatch`, log-only), never
+/// refused: no typed row, no correction `Replace`, no Strict refusal
+/// counted, the seat kept. (The first op after the join is the baseline,
+/// so a matching op goes first.)
 #[test]
-fn c3d_s1_mirror_click_mismatch_is_unchanged() {
+fn c3d_s1_mirror_op_log_mismatch_is_tallied_never_refused() {
     use super::c3d_grid_tests::{joined as grid_joined, stone};
     let mut j = grid_joined("s1-mirror", InventoryMode::Mirror, None);
     j.give(0, stone(4));
-    assert!(j.open(None), "E opens");
+    let eye = j.hs.server.players[j.i].player.eye_pos();
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, eye, |_| AIR);
     j.pumps(3);
+    assert_eq!(j.hs.server.players[j.i].possession.window_mismatch, 0, "the matching first op is the baseline");
     j.hs.server.players[j.i].inventory.set_slot(7, Some(stone(3)));
     let before = j.hs.server.players[j.i].window_events.last_number();
-    j.click(WindowClick::Slot { slot: 0, right: false });
-    let click = j.last_action();
-    j.hs.tick();
-    assert_eq!(j.fate(click), None, "Mirror: no typed row, as today");
-    assert!(j.hs.slot_is_free(j.i), "Mirror: torn down, as today");
-    j.pumps(1);
-    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
-    assert_eq!(reason, crate::strict_admission::StrictTeardown::Untyped.reason(), "Mirror: the Untyped reason, as today");
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::Slot { slot: 0, right: false }, false, eye, |_| AIR);
+    assert!(j.rc.action_journal.as_ref().is_none_or(|journal| journal.len() == 0), "Mirror reserves no typed action");
+    j.pumps(3);
+    j.assert_live("Mirror: the seat is kept");
     let sp = &j.hs.server.players[j.i];
+    assert_eq!(sp.possession.window_mismatch, 1, "Mirror: the mismatch is tallied");
     assert_eq!(sp.window_events.last_number(), before, "no correction Replace on Mirror");
     assert_eq!((sp.strict_refusals.stale_world, sp.strict_refusals.other), (0, 0), "no Strict refusal counted");
     assert!(sp.window_events.death_replace.is_none() && !sp.window_events.replace_waiting());
+    assert!(sp.cursor.as_ref().is_some_and(|c| c.count == 4), "Mirror served the click on its copy");
+}
+
+/// Run 13 (run-12 review LOW-5) — a typed `Unsupported` edit (here every
+/// edit while the server is Creative) is a rule refusal, corrected; only a
+/// real Drift counts as stale-world.
+#[test]
+fn c3d_s1_unsupported_edit_counts_as_a_rule_refusal() {
+    let mut j = joined("s1-unsupported", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+    j.hs.server.play_mode = crate::play_mode::PlayMode::Creative;
+    j.place(CELLS[0], 0);
+    let action = j.newest_header();
+    j.hs.tick();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "Unsupported is a refusal");
+    assert_eq!(counters(&j), (0, 1), "a rule refusal, not stale-world");
+    j.hs.server.play_mode = crate::play_mode::PlayMode::Survival;
+    assert_corrected(&mut j, "unsupported");
+    assert_eq!(j.held(&Item::Block(COBBLESTONE)), 4, "the placement was undone");
+}
+
+/// Run 13 (run-12 review LOW-2) — the server's OWN window holds a stack the
+/// marker projection can't carry (a tool over its maximum durability): a
+/// `Replace` would ship it back and every action would refuse again, so
+/// the action is refused, then torn down with its own reason. No
+/// correction `Replace`, nothing placed.
+#[test]
+fn c3d_s1_raw_unrepresentable_window_is_refused_then_torn_down() {
+    let mut j = joined("s1-raw-unrep", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+    let mut tool = Tool::new(ToolType::Pickaxe, ToolMaterial::Stone);
+    tool.durability = tool.max_durability() + 5;
+    j.hs.server.players[j.i].inventory.set_slot(5, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
+    let before = j.sp().window_events.last_number();
+    j.place(CELLS[0], 0);
+    // The placement goes after the session's refill setting (`place_joined`
+    // sends it first): that configuration action is the one refused.
+    let first = j.rc.action_journal.as_ref().and_then(|journal| journal.actions().next()).expect("a reserved action").header;
+    j.hs.tick();
+    assert_eq!(fate(&j, first), Some(ActionFate::Refused), "the typed refusal stands");
+    assert!(j.hs.slot_is_free(j.i), "torn down");
+    j.rc.poll();
+    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
+    assert_eq!(reason, crate::strict_admission::StrictTeardown::Unrepresentable.reason(), "its own reason");
+    assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace");
+    assert_eq!(j.hs.server.world.get_block(CELLS[0][0], CELLS[0][1], CELLS[0][2]), AIR, "nothing placed");
+    assert_eq!(j.sp().inventory.slot(0).map(|s| s.count), Some(4), "nothing taken");
+    assert_eq!(counters(&j), (0, 1));
+}
+
+/// Run 13 (run-12 review LOW-3) — a client provoking a refusal every tick
+/// (a personal click whose digest the server's copy, changed under it each
+/// tick, never reproduces) is corrected eight times; the ninth correction
+/// inside 100 ticks is the `FellBehind` teardown. The refused clicks moved
+/// nothing.
+#[test]
+fn c3d_s1_a_refusal_every_tick_is_torn_down_at_the_ninth_correction() {
+    use super::c3d_grid_tests::{joined as grid_joined, stone};
+    let mut j = grid_joined("s1-rate", InventoryMode::Strict, None);
+    j.give(0, stone(4));
+    assert!(j.open(None), "E opens");
+    j.pumps(3);
+    j.assert_agree("open");
+    let start = j.hs.server.tick_counter;
+    for round in 1..=9u8 {
+        j.hs.server.players[j.i].inventory.set_slot(7, Some(stone(round)));
+        j.click(WindowClick::Slot { slot: 0, right: false });
+        let click = j.last_action();
+        j.pumps(1);
+        assert_eq!(j.fate(click), Some(ActionFate::Refused), "round {round}: refused");
+        if round < 9 {
+            j.assert_live(&format!("round {round}: corrected, not torn down"));
+            j.assert_agree(&format!("round {round}: corrected"));
+        }
+    }
+    assert!(j.hs.server.tick_counter - start < crate::strict_admission::CORRECTION_WINDOW_TICKS, "all nine inside one window");
+    assert!(j.hs.slot_is_free(j.i), "the ninth correction tears down");
+    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
+    assert_eq!(reason, crate::strict_admission::StrictTeardown::FellBehind.reason(), "the FellBehind reason");
+    let sp = &j.hs.server.players[j.i];
+    assert_eq!(sp.inventory.slot(0).cloned(), Some(stone(4)), "the refused clicks took nothing");
+    assert!(sp.cursor.is_none(), "nothing on the server's cursor");
+    assert_eq!(sp.strict_refusals.other, 9);
+}
+
+/// Run 13 item 1 — pins the `SetAutoRefill` refusal as it stands today: a
+/// Strict refill setting whose digest the server's copy doesn't reproduce
+/// is refused, then torn down with the `Unconfirmed` reason (a `Replace`
+/// keeps the refill setting, so it can't correct it).
+#[test]
+fn c3d_s1_refused_auto_refill_setting_tears_down_unconfirmed() {
+    use super::c3d_grid_tests::{joined as grid_joined, stone};
+    let mut j = grid_joined("s1-refill", InventoryMode::Strict, None);
+    j.give(0, stone(4));
+    j.pumps(3);
+    j.assert_agree("joined");
+    j.hs.server.players[j.i].inventory.set_slot(7, Some(stone(3)));
+    j.inv.auto_refill = !j.inv.auto_refill;
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    let action = j.last_action();
+    j.pumps(1);
+    assert_eq!(j.fate(action), Some(ActionFate::Refused), "the typed refusal stands");
+    assert!(j.hs.slot_is_free(j.i), "torn down");
+    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
+    assert_eq!(reason, crate::strict_admission::StrictTeardown::Unconfirmed.reason(), "the Unconfirmed reason");
+    let sp = &j.hs.server.players[j.i];
+    assert_eq!((sp.strict_refusals.stale_world, sp.strict_refusals.other), (0, 1));
+    assert!(!sp.window_events.replace_waiting(), "no correction Replace");
 }
 
 /// The live-correction flag test: a live correction leaves the death flag

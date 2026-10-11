@@ -69,10 +69,10 @@ impl HostedServer {
                 let kind = if why == crate::strict_edits::DRIFT { RefusalKind::StaleWorld } else { RefusalKind::Rule };
                 return self.refuse_strict_edit(i, action, change, budget, why, kind);
             }
-            // C3d run 12 (Q11) — the client types an edit only when its own
-            // `judge` says Place or Break, so a server `Unsupported` means the
-            // server's cell or mode changed under it: a stale-world refusal.
-            StrictEdit::Unsupported(why) => return self.refuse_strict_edit(i, action, change, budget, why, RefusalKind::StaleWorld),
+            // C3d run 12 (Q11) — a server `Unsupported` is a refusal,
+            // corrected. Run 13 (run-12 review LOW-5): it counts as a rule
+            // refusal; only a real Drift (`judge`'s DRIFT) is stale-world.
+            StrictEdit::Unsupported(why) => return self.refuse_strict_edit(i, action, change, budget, why, RefusalKind::Rule),
             StrictEdit::Place { slot } => (Box::new(move |v: &mut crate::window::WindowMut| { place_window(v.inv, slot); }), Vec::new(), false),
             StrictEdit::Break { slot, tool } => {
                 // The yield's tier is the server-held tool's, never the claim.
@@ -80,7 +80,8 @@ impl HostedServer {
                     // Decision 19 Drift: the server's cell disagrees with the break
                     // (what `judge`'s Drift check leaves: a yielding block whose
                     // yield doesn't leave the change's block).
-                    return self.refuse_strict_edit(i, action, change, budget, "the server's cell doesn't break that way", RefusalKind::StaleWorld);
+                    // Run 13 (run-12 review LOW-5): not `judge`'s DRIFT, so a rule refusal.
+                    return self.refuse_strict_edit(i, action, change, budget, "the server's cell doesn't break that way", RefusalKind::Rule);
                 };
                 let grants: Vec<_> = y.drops.into_iter().chain(y.gem).filter(|s| s.count > 0).collect();
                 let wear: Box<dyn FnOnce(&mut crate::window::WindowMut)> = if tool.is_some() {
@@ -94,6 +95,11 @@ impl HostedServer {
         let after = match crate::window_events::stage_strict_edit(sp, &self.server.registry, direct, &events) {
             Ok(after) => after,
             Err(StrictStageError::Debt) => return self.strict_debt_at_staging(i, "edit"),
+            Err(StrictStageError::RawUnrepresentable) => {
+                self.send_back_refused_edit(change, budget);
+                self.refuse_raw_unrepresentable(i, action);
+                return false;
+            }
             Err(StrictStageError::Unrepresentable) => return self.refuse_strict_edit(i, action, change, budget, "a place can't be represented exactly", RefusalKind::Rule),
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Edit source or pending fit is uncertain"); return false; }
         };

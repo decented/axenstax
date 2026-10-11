@@ -70,6 +70,7 @@ impl HostedServer {
         match crate::window_events::strict_raw_marker(&self.server.players[i], &self.server.registry) {
             Ok(raw) => Some(raw),
             Err(StrictStageError::Debt) => { self.strict_debt_at_staging(i, path); None }
+            Err(StrictStageError::RawUnrepresentable) => { self.refuse_raw_unrepresentable(i, action); None }
             Err(StrictStageError::Unrepresentable) => {
                 if correctable { self.refuse_typed_action(i, action) } else { self.refuse_typed_action_then_teardown(i, action) }
                 None
@@ -234,6 +235,7 @@ impl HostedServer {
         match crate::window_events::admit_staged(sp, &self.server.registry, &raw, &r) {
             Ok(()) => {}
             Err(StrictStageError::Debt) => return self.strict_debt_at_staging(i, "container click"),
+            Err(StrictStageError::RawUnrepresentable) => { self.refuse_raw_unrepresentable(i, action); return false; }
             Err(StrictStageError::Unrepresentable) => { self.refuse_typed_action_then_teardown(i, action); return false; }
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "container source or pending fit is uncertain"); return false; }
         }

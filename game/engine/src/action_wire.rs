@@ -192,6 +192,10 @@ mod tests {
         want.extend(0x0506u16.to_le_bytes());
         want.push(7);
         assert_eq!(&*bytes, &want[..], "the v89 Edit layout");
+        // Run 13 (run-12 review LOW-4) — the negative: a payload without
+        // `old` (the run-10 layout) doesn't decode.
+        assert!(ActionPacket::decode(&want).is_ok(), "the pinned bytes decode");
+        assert!(ActionPacket::decode(&want[..want.len() - 3]).is_err(), "a payload without `old` fails to decode");
     }
 
     #[test]

@@ -502,8 +502,9 @@ fn c3d_client_stale_base_edit_is_superseded_and_corrected() {
 /// carries the cell as its client saw it (`old`: block id and meta), and a
 /// server cell that differs is a Drift `Refused` with the cell sent back,
 /// never Accepted and never an `Untyped` pause. Five distinct inputs, each
-/// on a real `RemoteClient`: the Drift row, zero effect, the refusal's
-/// teardown (the corrected cell waits for recovery: see below).
+/// on a real `RemoteClient`: the Drift row, zero effect, and (since S1)
+/// the correction: never torn down, and the corrected cell reaches the
+/// client's own world.
 #[test]
 fn c3d_client_drift_is_exact_and_corrects_the_cell() {
     use crate::block::{DIRT, GRAVEL, OAK_LEAVES, TILLED_SOIL, WHEAT_STAGE_0, WHEAT_STAGE_2, WHEAT_STAGE_3};

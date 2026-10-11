@@ -612,3 +612,25 @@ Coordinator decisions on run 3's departures, as built:
   the client's window its own, routing through the production
   `route_place`/`route_break`) and the GPU harness
   `game_harness_strict_place_and_break_go_typed`.
+
+## Run 13 — the run-12 review LOWs
+
+- **LOW-1.** The live `Replace` reserves its deque slot before the byte and
+  count bound is measured on the real capacity
+  (`window_events::reserve_strict_replace`, the `prepare_strict_events`
+  pattern: `try_reserve_exact`, measure, `shrink_to` on failure). Byte half
+  pinned: `c3d_s1_correction_replace_past_the_byte_bound_tears_down`.
+- **LOW-2.** `raw_marker` (and a waiting `Replace`'s window) returns
+  `StrictStageError::RawUnrepresentable`; every Strict caller has its own arm:
+  `HostedServer::refuse_raw_unrepresentable` (refused, then torn down,
+  `StrictTeardown::Unrepresentable`). A result-side `Unrepresentable` (an
+  action's grant, the edit clamp) stays a corrected refusal.
+- **LOW-3.** `strict_admission::CorrectionRate` (BRIDGE until S3 replay):
+  8 live correction `Replace`s per seat per 100 ticks; the ninth is a
+  `FellBehind` teardown naming the bound.
+- **LOW-5.** Only `judge`'s DRIFT counts as stale-world; a typed
+  `Unsupported` edit and a break that doesn't yield that way count as rule
+  refusals.
+- **Container note.** A waiting container `Correction` makes a refusal's
+  `Replace` a `FellBehind` teardown (fail-closed; `event_heap_bytes` has no
+  measure for it).

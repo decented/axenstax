@@ -464,6 +464,10 @@ mod drift_rule_tests {
         assert!(!drifted((AIR, 0), (WATER, 7), COBBLESTONE, false), "and the reverse");
         assert!(drifted((DIRT, 0), (AIR, 0), COBBLESTONE, false), "another block stands there");
         assert!(drifted((WHEAT_STAGE_3, 0), (WHEAT_STAGE_2, 0), AIR, true), "a crop that grew a stage is an id mismatch");
-        assert!(drifted((WATER, 0), (AIR, 0), AIR, true), "the replaceable class is a placement's only");
+        // Run 13 (run-12 review LOW-4): the `!mined` guard on the
+        // replaceable class is unobservable — a mined edit onto AIR or water
+        // is already Drift because neither yields. Pin THAT, which can fail.
+        assert!(!crate::break_drops::yields_drops(WATER) && !crate::break_drops::yields_drops(AIR), "AIR and water yield nothing");
+        assert!(drifted((WATER, 0), (AIR, 0), AIR, true), "so a mined edit onto either is Drift");
     }
 }

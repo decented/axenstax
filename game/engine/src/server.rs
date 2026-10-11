@@ -228,6 +228,9 @@ pub struct ServerPlayer {
     pub possession: crate::joiner_inventory::PossessionTally,
     /// C3d run 12 (S1, Q15) — this seat's Strict refusals by kind.
     pub strict_refusals: crate::strict_admission::RefusalTally,
+    /// C3d run 13 (run-12 review LOW-3) — this seat's recent live correction
+    /// `Replace`s (`strict_admission::CorrectionRate`).
+    pub strict_corrections: crate::strict_admission::CorrectionRate,
     /// C2a — ticks until this joiner's next `Eat` is taken: the server's
     /// copy of the client's cooldown after eating
     /// (`item_actions::EAT_COOLDOWN_TICKS`), counted down every tick.
@@ -572,6 +575,7 @@ impl ServerPlayer {
             drop_bucket: crate::item_actions::DropBucket::default(),
             possession: crate::joiner_inventory::PossessionTally::default(),
             strict_refusals: Default::default(),
+            strict_corrections: Default::default(),
             eat_cooldown: 0,
             slept_night: None,
             armour: [None; 4],

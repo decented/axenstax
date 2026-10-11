@@ -189,6 +189,35 @@ fn c3d_s1_correction_replace_past_the_pending_cap_tears_down() {
     assert_eq!(block_at(&r, ABOVE), AIR, "no block");
 }
 
+/// C3d run 13 (run-12 review LOW-1) — the BYTE half of the bound: a Plan
+/// grant still waiting holds a body over 1 MiB, so the correction
+/// `Replace` (whose window carries the same body once more) passes 2 MiB.
+/// It is never forced in: the row stands, the seat is torn down with a
+/// reason, nothing is numbered and nothing waiting is forced applied.
+#[test]
+fn c3d_s1_correction_replace_past_the_byte_bound_tears_down() {
+    let mut r = edit_rig("over-bytes");
+    let sp = &mut r.hs.server.players[r.i];
+    sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::DIRT, 4)));
+    let mut body = crate::plan::PlanData::debug_3x3_stone();
+    let cell0 = body.cells[0].clone();
+    body.cells = vec![cell0; 1200 * 1024 / std::mem::size_of_val(&body.cells[0]).max(1)];
+    let bytes = crate::body_residency::allocated_body_bytes(&body).unwrap();
+    assert!(bytes > 1024 * 1024 && bytes < 2 * 1024 * 1024 - 256 * 1024, "one body fits the budget alone: {bytes}");
+    crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(ItemStack { item: Item::Plan(body), count: 1 }), 0);
+    assert!(crate::window_events::strict_replace_fits(sp, &crate::window_events::WindowEvent::WearArmour { hits: 1 }), "the waiting grant alone fits");
+    let events = sp.window_events.last_number();
+    let stone = Item::Block(STONE);
+    let action = edit(&mut r, ABOVE, STONE, 0, Some(&stone), None);
+    let heard = listen(&r);
+    assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "the typed refusal stands");
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "past the byte bound: torn down with a reason: {:?}", heard.rejects);
+    assert!(r.hs.slot_is_free(r.i), "torn down");
+    assert_eq!(r.sp().window_events.last_number(), events, "no Replace numbered");
+    assert_eq!(r.sp().window_events.tally.forced, 0, "nothing waiting forced applied");
+    assert_eq!(block_at(&r, ABOVE), AIR, "no block");
+}
+
 /// A break whose input claims a wooden pickaxe while the server's copy of
 /// the slot is empty: the bare hand mines stone for nothing. The claimed
 /// tool never sets the drop tier (Decision 8).
