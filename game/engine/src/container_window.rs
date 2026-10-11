@@ -1199,6 +1199,8 @@ pub fn container_at_mut(world: &mut World, cell: [i32; 3], kind: ContainerKind) 
 /// create for `kind`, as a value: what a container whose entity is still
 /// missing (a lazy chest) holds, so it can be viewed before anything is
 /// created.
+// A short-lived local value (one per open of a missing entity), never stored.
+#[allow(clippy::large_enum_variant)]
 pub enum FreshContainer {
     Chest(ChestData),
     Furnace(FurnaceData),
