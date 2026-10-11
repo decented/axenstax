@@ -978,8 +978,16 @@ mod tests {
         // The break arm: the pickaxe, the button held until the block breaks.
         hg.state.players[0].hotbar_slot = 1;
         harness_step(&mut server, &mut hg);
-        mine_joined(&mut hg, &mut server, slot, cell);
-        assert!(hg.state.pending_block_changes.is_empty() && hg.state.pending_mined.is_empty(), "nothing waits for the movement packet");
+        // Run 11 (run-9b review LOW-3) — checked in the frame the block
+        // broke, before any later frame's tick could send (and so empty) the
+        // movement packet's queues: a Legacy break would still be waiting.
+        mine_joined_to_break(&mut hg, &mut server, slot, cell);
+        assert!(hg.state.pending_block_changes.is_empty() && hg.state.pending_mined.is_empty(), "the break: nothing waits for the movement packet");
+        for _ in 0..10 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+        }
         for _ in 0..4 { harness_step(&mut server, &mut hg); }
         let rc = hg.state.remote_client.as_ref().unwrap();
         let reason = match &rc.state { crate::remote_client::ConnectionState::Failed(reason) => reason.clone(), _ => String::new() };
@@ -2987,6 +2995,20 @@ mod tests {
     /// Hold the left button on `cell` until the client's own world breaks it
     /// (one tick a frame; the server body held where the client stands).
     fn mine_joined(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, slot: usize, cell: [i32; 3]) {
+        mine_joined_to_break(hg, server, slot, cell);
+        for _ in 0..10 {
+            hg.state.tick_accumulator = crate::TICK_DURATION;
+            hg.frames(1);
+            server.tick();
+        }
+    }
+
+    /// [`mine_joined`] up to and including the frame the block breaks in,
+    /// without the trailing frames: that frame's tick (and its movement
+    /// packet) ran BEFORE its break arm, so whatever the break arm left for
+    /// the movement packet is still waiting when this returns (run 11,
+    /// run-9b review LOW-3).
+    fn mine_joined_to_break(hg: &mut HeadlessGame, server: &mut crate::hosted_server::HostedServer, slot: usize, cell: [i32; 3]) {
         let p = hg.state.players[0].player.pos;
         aim_at(hg, glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5));
         hg.state.input.cursor_captured = true;
@@ -3007,11 +3029,6 @@ mod tests {
         }
         hg.state.input.left_held = false;
         assert!(broke, "the joiner's client broke {cell:?}");
-        for _ in 0..10 {
-            hg.state.tick_accumulator = crate::TICK_DURATION;
-            hg.frames(1);
-            server.tick();
-        }
     }
 
     /// C3c-1-fix (M-3) — a joiner breaks one half of a door through the REAL

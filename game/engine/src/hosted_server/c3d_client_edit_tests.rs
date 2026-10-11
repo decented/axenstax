@@ -168,6 +168,49 @@ impl Joined {
         self.world.set_block(cell[0], cell[1], cell[2], AIR);
     }
 
+    /// Run 11 (run-9b review LOW-3) — a shaped or directional placement
+    /// from hotbar `slot` at `cell`, clicked on `face` looking along `fwd`,
+    /// as `GameState::take_for_placement` and the place arm make it: the
+    /// meta hoisted (`placement_meta`, else the cell's), carried by the
+    /// typed `Edit`, and written into the client's world. Returns the meta
+    /// the client predicted.
+    fn place_facing(&mut self, cell: [i32; 3], slot: usize, face: [i32; 3], fwd: glam::Vec3) -> u8 {
+        let new = self.inv.slot(slot).and_then(|s| crate::joiner_inventory::placeable_block(&s.item)).expect("a placeable block");
+        let stamped = crate::placement_meta::placement_meta(new, face, fwd);
+        let meta = stamped.unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
+        let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
+        let old = self.world.get_block(cell[0], cell[1], cell[2]);
+        let routed = route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change, old, &self.reg).expect("reserved and sent");
+        assert!(matches!(routed, Routed::Typed(Some(b)) if b == new), "a shaped placement goes typed");
+        self.world.place_player_block(cell[0], cell[1], cell[2], new);
+        if let Some(m) = stamped { self.world.set_meta((cell[0], cell[1], cell[2]), m); }
+        self.world.meta_at(cell[0], cell[1], cell[2])
+    }
+
+    /// Run 11 (run-9b review LOW-3) — a typed mined break whose cell keeps a
+    /// block (a harvested crop's tilled soil, a papyrus top's stage 0), as
+    /// `GameState::break_route` makes it: the replacement from the client's
+    /// own `break_yield`, the cell's meta carried, the replacement predicted
+    /// in the client's world. Returns the change sent.
+    fn harvest(&mut self, cell: [i32; 3], slot: usize) -> protocol::BlockChange {
+        let old = self.world.get_block(cell[0], cell[1], cell[2]);
+        let tool = match self.inv.slot(slot).map(|s| &s.item) { Some(Item::Tool(t)) => Some(*t), _ => None };
+        let keys = crate::break_drops::PopKeys { secret: &[0; 32], world_seed: 0, epoch: 0 };
+        let replacement = crate::break_drops::break_yield(&self.world, &self.reg, old, (cell[0], cell[1], cell[2]), tool.as_ref(), 0, &keys).replacement;
+        let meta = if replacement == AIR { 0 } else { self.world.meta_at(cell[0], cell[1], cell[2]) };
+        let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: replacement, meta };
+        let routed = route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), old, &self.reg).expect("reserved and sent");
+        assert!(matches!(routed, Routed::Typed(_)), "a harvest goes typed");
+        self.world.set_block(cell[0], cell[1], cell[2], replacement);
+        self.world.set_meta((cell[0], cell[1], cell[2]), meta);
+        change
+    }
+
+    /// The header of the newest reserved action.
+    fn newest_header(&self) -> crate::action_identity::ActionHeader {
+        self.rc.action_journal.as_ref().expect("a joined journal").actions().last().expect("a reserved action").header
+    }
+
     /// The digest the newest reserved edit predicts (its journal recipe).
     fn predicted_digest(&self) -> u32 {
         let journal = self.rc.action_journal.as_ref().expect("a joined journal");
@@ -365,4 +408,92 @@ fn c3d_client_superseded_edit_cell_comes_back_corrected() {
     assert_eq!(j.world.get_block(CELL[0], CELL[1], CELL[2]), AIR, "the superseded edit's cell came back corrected");
     assert_eq!(j.rc.action_journal.as_ref().map(|journal| journal.len()), Some(0), "its receipt retired the reservation");
     assert_eq!(j.client_digest(), j.server_digest(), "the window was corrected too");
+}
+
+/// Run 11 (run-9b review LOW-3) — a shaped and a directional placement (a
+/// stair's facing, a piston's look facing, pitch included): the meta the
+/// client predicted (hoisted by `placement_meta` before the window is
+/// predicted) is the meta the server applied from the typed `Edit`, read
+/// before any broadcast could overwrite the client's; nothing tears down.
+#[test]
+fn c3d_client_shaped_placement_meta_is_the_servers() {
+    use crate::block::{PISTON, STONE_STAIRS};
+    let mut j = joined("shaped", &[(0, ItemStack::new_block(STONE_STAIRS, 2)), (1, ItemStack::new_block(PISTON, 2))], true);
+    let east = glam::Vec3::new(1.0, 0.0, 0.1);
+    let west_and_up = glam::Vec3::new(-1.0, 0.3, 0.1);
+    for (what, cell, slot, fwd, block) in [("a stair", CELLS[0], 0, east, STONE_STAIRS), ("a piston", CELLS[1], 1, west_and_up, PISTON)] {
+        let stamped = crate::placement_meta::placement_meta(block, [0, 1, 0], fwd);
+        assert!(stamped.is_some_and(|m| m != 0), "{what}: a non-default meta is stamped ({stamped:?}), so the comparison is not vacuous");
+        let predicted = j.place_facing(cell, slot, [0, 1, 0], fwd);
+        assert_eq!(Some(predicted), stamped, "{what}: the client predicted the hoisted meta");
+        j.hs.tick();
+        assert_eq!(j.hs.server.world.get_block(cell[0], cell[1], cell[2]), block, "{what}: the server placed it");
+        assert_eq!(j.hs.server.world.meta_at(cell[0], cell[1], cell[2]), predicted, "{what}: the server applied the client's predicted meta");
+        j.assert_honest(what);
+        assert_eq!(j.world.meta_at(cell[0], cell[1], cell[2]), predicted, "{what}: the client's world still agrees");
+    }
+}
+
+/// Run 11 (run-9b review LOW-3) — typed breaks whose cell keeps a block: a
+/// mature wheat on tilled soil goes to TILLED_SOIL, a papyrus top to its
+/// STAGE_0. The edit carries the replacement and the cell's meta; the
+/// server's `joiner_break_yield` accepts that replacement, applies the
+/// carried meta, leaves the cell natural, and the yield lands in both
+/// windows; nothing tears down.
+#[test]
+fn c3d_client_typed_break_with_a_block_left_behind() {
+    use crate::block::{PAPYRUS_STAGE_0, PAPYRUS_STAGE_3, TILLED_SOIL, WHEAT_STAGE_3};
+    let mut j = joined("harvest", &[], true);
+    let (wheat, papyrus) = (CELLS[0], CELLS[1]);
+    for w in [&mut j.hs.server.world, &mut j.world] {
+        w.set_block(wheat[0], wheat[1] - 1, wheat[2], TILLED_SOIL);
+        w.set_block(wheat[0], wheat[1], wheat[2], WHEAT_STAGE_3);
+        w.set_meta((wheat[0], wheat[1], wheat[2]), 5);
+        w.set_block(papyrus[0], papyrus[1], papyrus[2], PAPYRUS_STAGE_3);
+        w.set_meta((papyrus[0], papyrus[1], papyrus[2]), 6);
+    }
+    for (what, cell, left, meta) in [("a mature wheat", wheat, TILLED_SOIL, 5u8), ("a papyrus top", papyrus, PAPYRUS_STAGE_0, 6)] {
+        let change = j.harvest(cell, 0);
+        assert_eq!((change.new_block, change.meta), (left, meta), "{what}: the edit carries the replacement and the cell's meta");
+        j.hs.tick();
+        let w = &j.hs.server.world;
+        assert_eq!(w.get_block(cell[0], cell[1], cell[2]), left, "{what}: the server's joiner_break_yield accepted the replacement");
+        assert_eq!(w.meta_at(cell[0], cell[1], cell[2]), meta, "{what}: the server applied the carried meta");
+        assert!(!w.is_placed(cell[0], cell[1], cell[2]), "{what}: a yielded break leaves the cell natural");
+        j.assert_honest(what);
+        assert_eq!((j.world.get_block(cell[0], cell[1], cell[2]), j.world.meta_at(cell[0], cell[1], cell[2])), (left, meta), "{what}: the client's world agrees");
+    }
+    let wheat_held = j.held(&Item::Material(crate::item::MaterialId::Wheat));
+    let reeds = j.held(&Item::Material(crate::item::MaterialId::PapyrusReed));
+    assert!(wheat_held == 1 && reeds >= 1, "the yields landed: wheat {wheat_held}, reeds {reeds}");
+}
+
+/// Run 11 (run-9b review LOW-3) — the stale-base `Superseded` branch, a
+/// LIVE body: an edit made on a base before a whole-window `Replace` its
+/// client hadn't applied is terminal and zero-effect, its cell is sent
+/// back, its row carries the cell, and the `Replace` it predates is its
+/// correction: no second one is queued. Then the client converges.
+#[test]
+fn c3d_client_stale_base_edit_is_superseded_and_corrected() {
+    const CELL: [i32; 3] = [43, 80, 43];
+    let mut j = joined("stale", &[(0, ItemStack::new_block(COBBLESTONE, 5))], true);
+    j.hs.queue_correction_replace(j.i);
+    let (numbered, replace) = (j.sp().window_events.last_number(), j.sp().window_events.death_replace);
+    assert!(replace.is_some(), "a whole-window Replace waits for the client");
+    j.place(CELL, 0);
+    let action = j.newest_header();
+    assert!(j.sp().window_events.predates_replace(action.events_applied), "the edit's base predates the Replace");
+    assert!(j.sp().is_present_and_alive(), "a live body: the stale-base branch, not the dead-body one");
+    j.hs.tick();
+    let sp = j.sp();
+    assert_eq!(sp.action_results.as_ref().unwrap().peek(action).map(|r| r.fate), Some(crate::action_identity::ActionFate::Superseded), "Superseded");
+    assert!(sp.action_results.as_ref().unwrap().retained_cells().any(|c| *c == CELL), "the row carries the edit's cell");
+    assert_eq!((sp.window_events.last_number(), sp.window_events.death_replace), (numbered, replace), "no second Replace: the one it predates is its correction");
+    assert_eq!(j.hs.server.world.get_block(CELL[0], CELL[1], CELL[2]), AIR, "zero effect on the server's world");
+    for _ in 0..6 { j.pump(); }
+    assert!(matches!(j.rc.state, ConnectionState::Connected { .. }), "never torn down: {}", torn(&j.rc.state));
+    assert_eq!(j.world.get_block(CELL[0], CELL[1], CELL[2]), AIR, "the superseded edit's cell came back corrected");
+    assert_eq!(j.rc.action_journal.as_ref().map(|journal| journal.len()), Some(0), "its receipt retired the reservation");
+    assert_eq!(j.client_digest(), j.server_digest(), "the Replace corrected the window");
+    assert_eq!(j.held(&Item::Block(COBBLESTONE)), 5, "the cobblestone came back");
 }
