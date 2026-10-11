@@ -161,7 +161,7 @@ impl Import {
                 .take()
                 .ok_or(Error::State("failed import stream"))?
                 .finish(now)?;
-            sync_file(&file, &self.directory.join("archive.tar.gz"), observer)?;
+            sync_written(&file, &self.directory.join("archive.tar.gz"), observer)?;
             extract(&self.directory, &self.admitted, self.limits, observer)?;
             self.verified = true;
         }
@@ -221,9 +221,20 @@ fn collision(path: &Path) -> Result<()> {
 pub(super) fn observe(o: &mut impl ImportObserver, b: ImportBoundary, p: &Path) -> Result<()> {
     o.reached(b, p).map_err(|_| Error::Io)
 }
-pub(super) fn sync_file(file: &File, path: &Path, o: &mut impl ImportObserver) -> Result<()> {
+/// A handle this import opened for writing (the archive it received, a
+/// member it extracted).
+pub(super) fn sync_written(file: &File, path: &Path, o: &mut impl ImportObserver) -> Result<()> {
     observe(o, ImportBoundary::FileSync, path)?;
-    file.sync_all().map_err(|_| Error::Io)
+    crate::fsync::sync_written(file).map_err(|_| Error::Io)
+}
+/// CP16 (CP15 review HIGH-1): an existing import file, re-synced by path
+/// through `crate::fsync::sync_file` (write access on Windows, where a
+/// read-only handle can't be flushed), after the same regular-file check
+/// `files::open` makes.
+pub(super) fn sync_existing(path: &Path, o: &mut impl ImportObserver) -> Result<()> {
+    observe(o, ImportBoundary::FileSync, path)?;
+    files::regular(path)?;
+    crate::fsync::sync_file(path).map_err(|_| Error::Io)
 }
 fn write_file(
     path: &Path,
@@ -250,7 +261,7 @@ fn write_file(
     if reader.read(&mut tail).map_err(|_| Error::Io)? != 0 {
         return Err(Error::Invalid("long member"));
     }
-    sync_file(&file, path, o)?;
+    sync_written(&file, path, o)?;
     Ok(hash.finalize().into())
 }
 struct Limited<R> {

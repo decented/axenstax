@@ -49,7 +49,7 @@ pub fn mark(imports: &Path, transfer: Id, world: Id) -> Result<()> {
         opts.mode(0o600);
     }
     let mut f = opts.open(&temp).map_err(|_| Error::Io)?;
-    f.write_all(&record(transfer, world)).and_then(|()| f.sync_all()).map_err(|_| Error::Io)?;
+    f.write_all(&record(transfer, world)).and_then(|()| crate::fsync::sync_written(&f)).map_err(|_| Error::Io)?;
     fs::rename(&temp, &path).map_err(|_| Error::Io)?;
     sync(imports)
 }

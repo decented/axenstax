@@ -1,6 +1,6 @@
 //! Durable receipt binds immutable received members and explicit transformv1.
 use super::super::{Error, Hash, Result, manifest::MemberKind};
-use super::import::{DurableCheckpoint, ImportBoundary, ImportObserver, observe, sync_file};
+use super::import::{DurableCheckpoint, ImportBoundary, ImportObserver, observe, sync_existing};
 use super::{AdmittedManifest, files};
 use std::{fs, path::Path};
 pub(super) fn receipt_bytes(a: &AdmittedManifest, meta: Hash, admission: Hash) -> Result<Vec<u8>> {
@@ -84,7 +84,7 @@ pub(super) fn durable_tree(
         let root = directory.join(prefix);
         for m in &a.manifest().members {
             let path = root.join(&m.path);
-            sync_file(&files::open(&path)?, &path, o)?;
+            sync_existing(&path, o)?;
         }
         for child in ["chunks", "exhibits", "joiners", "participants"] {
             let p = root.join(child);
@@ -110,7 +110,7 @@ pub(super) fn durable_tree(
         "admission.dat",
     ] {
         let p = directory.join(name);
-        sync_file(&files::open(&p)?, &p, o)?;
+        sync_existing(&p, o)?;
     }
     observe(o, ImportBoundary::DirectorySync, directory)?;
     files::sync_dir(directory)

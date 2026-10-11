@@ -5627,8 +5627,16 @@ write access on Windows (no create, no truncate): `FlushFileBuffers` refuses a
 read-only handle, so a read-only re-sync failed every time there and nothing
 was ever published. Directory syncs go through `crate::fsync::sync_dir` (a
 no-op on Windows). A source-guard test pins that no `File::open` + `sync_all`
-/ `sync_data` remains anywhere else in the engine. Those lines are not
-compiled or tested on this Linux-only build.
+/ `sync_data` remains anywhere else in the engine. CP16 (CP15 review
+HIGH-1): that guard missed an import's receipt, which opened each received
+and working file read-only in one file and synced it in another, so on
+Windows no import could ever complete. The import's re-syncs now go by
+path through `crate::fsync::sync_file` (`checkpoint::import::sync_existing`,
+after the regular-file check), a handle the code itself opened for writing
+is synced through `crate::fsync::sync_written`, and a second guard pins
+that no `sync_all(` / `sync_data(` call exists anywhere in the engine's
+source outside `crate::fsync`. Those lines are not compiled or tested on
+this Linux-only build.
 
 Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
 bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the

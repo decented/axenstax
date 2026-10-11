@@ -163,7 +163,7 @@ impl Ledger {
         }
         out.extend_from_slice(entry.line().as_bytes());
         file.write_all(&out).map_err(|_| Error::Io)?;
-        file.sync_all().map_err(|_| Error::Io)?;
+        crate::fsync::sync_written(&file).map_err(|_| Error::Io)?;
         if created {
             super::durable::sync_directory(dir)?;
         }

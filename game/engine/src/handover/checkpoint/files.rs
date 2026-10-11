@@ -7,6 +7,14 @@ use std::{
     path::{Path, PathBuf},
 };
 pub(super) const BUFFER: usize = 16 * 1024;
+/// CP16: the regular-file check `open` makes, without opening.
+pub(super) fn regular(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => Ok(()),
+        Ok(_) => Err(Error::Invalid("unsafe source file")),
+        Err(_) => Err(Error::Io),
+    }
+}
 pub(super) fn open(path: &Path) -> Result<File> {
     let before = fs::symlink_metadata(path).map_err(|_| Error::Io)?;
     if !before.is_file() {

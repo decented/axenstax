@@ -255,7 +255,7 @@ impl MarkerStore {
             }
             let mut f = opts.open(temp).map_err(|_| Error::Io)?;
             f.write_all(bytes)
-                .and_then(|()| f.sync_all())
+                .and_then(|()| crate::fsync::sync_written(&f))
                 .map_err(|_| Error::Io)?;
         }
         Ok(())
