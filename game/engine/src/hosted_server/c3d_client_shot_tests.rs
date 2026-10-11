@@ -134,3 +134,27 @@ fn c3d_client_mirror_shot_stays_the_legacy_request() {
     j.assert_live("Mirror: never torn down");
     assert!(matches!(j.rc.state, ConnectionState::Connected { .. }));
 }
+
+/// C3d run 14 (run-13 review LOW-2) — `RawUnrepresentable` through the shot
+/// arm: refused, then torn down with the `Unrepresentable` sentence; no
+/// projectile, no Replace.
+#[test]
+fn c3d_client_strict_shot_on_a_raw_unrepresentable_window_is_refused_then_torn_down() {
+    let mut j = joined("shot-raw", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.pump();
+    j.assert_honest("the refill setting");
+    let mut tool = Tool::new(ToolType::Pickaxe, ToolMaterial::Stone);
+    tool.durability = tool.max_durability() + 5;
+    j.hs.server.players[j.i].inventory.set_slot(5, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
+    let before = j.sp().window_events.last_number();
+    let shot = shoot(&mut j, 0).expect("typed");
+    j.hs.tick();
+    assert_eq!(fate(&j, shot), Some(ActionFate::Refused), "the shot's refusal stands");
+    assert!(j.hs.slot_is_free(j.i), "torn down");
+    j.rc.poll();
+    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
+    assert_eq!(reason, crate::strict_admission::StrictTeardown::Unrepresentable.reason(), "its own reason");
+    assert_eq!(projectiles(&j), 0, "no projectile");
+    assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace");
+}

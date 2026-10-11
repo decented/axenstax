@@ -21,6 +21,8 @@ impl HostedServer {
     /// history survives the reject.
     pub(super) fn strict_bridge_teardown(&mut self, i: usize, cause: StrictTeardown, detail: &str) {
         log::warn!("Strict session in slot {i} closed ({cause:?}): {detail}");
+        #[cfg(test)]
+        teardown_detail::note(detail);
         if let Some(left) = self.release_slot(i, Some(cause.reason())) { self.send_to_joined_except(i, &left); }
     }
     /// Until complete canonical recovery is connected, a paused action is
@@ -152,9 +154,15 @@ impl HostedServer {
     /// Run 6 — one whole-window correction `Replace` (window, station, lock
     /// mask, debt), re-arming the death/join `Replace` path; none while one
     /// is still unacknowledged.
+    ///
+    /// C3d run 14 (run-13 review LOW-3) — a dead body's correction is a live
+    /// correction for the bound: the same per-seat rate bound
+    /// (`strict_admission::CorrectionRate`) and the same reserved fit as
+    /// [`Self::queue_live_correction_replace`], so a client that never
+    /// respawns can't draw a whole-window sync per superseded action.
     pub(super) fn queue_correction_replace(&mut self, i: usize) {
+        if !self.admit_correction_replace(i) { return; }
         let sp = &self.server.players[i];
-        if sp.window_events.replace_waiting() { return; }
         let fold = crate::window_events::effective_window_and_debt(sp);
         let n = self.send_inventory_sync(i, fold.window, fold.debt);
         self.server.players[i].window_events.death_replace = Some(n);
@@ -245,18 +253,28 @@ impl HostedServer {
     /// `strict_admission::MAX_CORRECTIONS_PER_WINDOW` per
     /// `CORRECTION_WINDOW_TICKS`; the next is a `FellBehind` teardown.
     pub(super) fn queue_live_correction_replace(&mut self, i: usize) {
+        if !self.admit_correction_replace(i) { return; }
+        let fold = crate::window_events::effective_window_and_debt(&self.server.players[i]);
+        self.send_inventory_sync(i, fold.window, fold.debt);
+    }
+    /// Shared by both correction paths: `false` when one already waits
+    /// (nothing queued), or when the seat was torn down at the rate bound or
+    /// the reserved fit. On `true` the deque's room is reserved.
+    fn admit_correction_replace(&mut self, i: usize) -> bool {
         let now = self.server.tick_counter;
         let sp = &mut self.server.players[i];
-        if sp.window_events.replace_waiting() { return; }
+        if sp.window_events.replace_waiting() { return false; }
         if !sp.strict_corrections.admit(now) {
-            return self.strict_bridge_teardown(i, StrictTeardown::FellBehind, "the live-correction rate bound: more than 8 correction Replaces in 100 ticks");
+            self.strict_bridge_teardown(i, StrictTeardown::FellBehind, CORRECTION_RATE_DETAIL);
+            return false;
         }
         let fold = crate::window_events::effective_window_and_debt(sp);
-        let probe = crate::window_events::WindowEvent::Replace { window: Box::new(fold.window.clone()), debt: fold.debt.clone(), station: sp.station };
+        let probe = crate::window_events::WindowEvent::Replace { window: Box::new(fold.window), debt: fold.debt, station: sp.station };
         if !crate::window_events::reserve_strict_replace(sp, &probe) {
-            return self.strict_bridge_teardown(i, StrictTeardown::FellBehind, "a refusal's correction Replace doesn't fit the pending window events");
+            self.strict_bridge_teardown(i, StrictTeardown::FellBehind, CORRECTION_FIT_DETAIL);
+            return false;
         }
-        self.send_inventory_sync(i, fold.window, fold.debt);
+        true
     }
     /// A terminal zero-effect fate (`Refused`, or `NormalisedAcceptedNoop`
     /// for a contested shared container) is retained first; the
@@ -459,6 +477,22 @@ impl HostedServer {
             );
         }
     }
+}
+
+/// C3d run 14 (run-13 review LOW-5) — the internal detail of the two
+/// correction-bound teardowns (the player sees `FellBehind`'s sentence).
+pub(super) const CORRECTION_RATE_DETAIL: &str = "the live-correction rate bound: more than 8 correction Replaces in 100 ticks";
+pub(super) const CORRECTION_FIT_DETAIL: &str = "a refusal's correction Replace doesn't fit the pending window events";
+
+/// C3d run 14 (run-13 review LOW-5) — test builds record each teardown's
+/// internal detail on the test's thread, so a test tells its teardowns
+/// apart by reason, not by context.
+#[cfg(test)]
+pub(super) mod teardown_detail {
+    thread_local! { static LAST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
+    pub fn note(detail: &str) { LAST.with(|l| *l.borrow_mut() = Some(detail.to_string())); }
+    /// The detail of this thread's latest teardown.
+    pub fn last() -> String { LAST.with(|l| l.borrow().clone().unwrap_or_default()) }
 }
 
 /// Test-only fault seam: make a Strict commit leave an obligation in the

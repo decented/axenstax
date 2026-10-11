@@ -650,3 +650,11 @@ Coordinator decisions on run 3's departures, as built:
 - No GPU harness shot rig exists (`test_game_harness.rs` has none); the
   client half is pinned on a real `RemoteClient`
   (`hosted_server/c3d_client_shot_tests.rs`).
+
+## Run 14 — the run-13 review LOWs
+
+- **LOW-1:** `c3d_s1_reserved_replace_never_grows_the_deque_past_its_measure` pins the reserve-before-measure fix: a deque full to its capacity grows on the reservation, and the `push_back` that queues the `Replace` never grows it further. Control (measure without reserving) is red.
+- **LOW-2:** `RawUnrepresentable` is pinned through the edit arm (`c3d_s1_raw_unrepresentable_placement_is_refused_then_torn_down`) and the shot arm (`c3d_client_strict_shot_on_a_raw_unrepresentable_window_is_refused_then_torn_down`), not only the configuration arm. Routing those arms to the correction is red.
+- **LOW-3:** the dead-body correction `Replace` (`queue_correction_replace`) goes through the same `admit_correction_replace` as the live one: one 8-per-100-ticks bound per seat and the reserved fit (`c3d_s1_dead_body_corrections_share_the_rate_bound`).
+- **LOW-4 (decided):** "the server's cell doesn't break that way" counts `StaleWorld` when the server's cell (block and meta) differs from the client's `old`, else `Rule` (two tests in `c3d_edit_tests.rs`).
+- **LOW-5:** `strict_bridge_teardown` records its detail on the test thread (`actions::teardown_detail`); every test that asserts the `FellBehind` sentence also asserts its internal detail (`CORRECTION_RATE_DETAIL`, `CORRECTION_FIT_DETAIL`, or the path's own).

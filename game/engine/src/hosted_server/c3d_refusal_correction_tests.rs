@@ -271,6 +271,7 @@ fn c3d_s1_a_refusal_every_tick_is_torn_down_at_the_ninth_correction() {
     assert!(j.hs.slot_is_free(j.i), "the ninth correction tears down");
     let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
     assert_eq!(reason, crate::strict_admission::StrictTeardown::FellBehind.reason(), "the FellBehind reason");
+    assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_RATE_DETAIL, "the internal reason");
     let sp = &j.hs.server.players[j.i];
     assert_eq!(sp.inventory.slot(0).cloned(), Some(stone(4)), "the refused clicks took nothing");
     assert!(sp.cursor.is_none(), "nothing on the server's cursor");
@@ -320,4 +321,52 @@ fn c3d_s1_live_correction_never_takes_the_death_flag() {
     let mut d = joined("s1-flag-dead", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
     d.hs.queue_correction_replace(d.i);
     assert!(d.sp().window_events.death_replace.is_some(), "a dead body's correction still sets the death flag");
+}
+
+/// C3d run 14 (run-13 review LOW-2) — `RawUnrepresentable` through a
+/// non-configuration arm: the refill setting goes first on agreeing
+/// windows, then the server's copy gets a tool over its maximum
+/// durability, then a typed placement. Refused, then torn down with the
+/// `Unrepresentable` sentence; nothing placed, nothing taken, no Replace.
+#[test]
+fn c3d_s1_raw_unrepresentable_placement_is_refused_then_torn_down() {
+    let mut j = joined("s1-raw-place", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.pump();
+    j.assert_honest("the refill setting");
+    let mut tool = Tool::new(ToolType::Pickaxe, ToolMaterial::Stone);
+    tool.durability = tool.max_durability() + 5;
+    j.hs.server.players[j.i].inventory.set_slot(5, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
+    let before = j.sp().window_events.last_number();
+    j.place(CELLS[0], 0);
+    let action = j.newest_header();
+    j.hs.tick();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "the placement's refusal stands");
+    assert!(j.hs.slot_is_free(j.i), "torn down");
+    j.rc.poll();
+    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
+    assert_eq!(reason, crate::strict_admission::StrictTeardown::Unrepresentable.reason(), "its own reason");
+    assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace");
+    assert_eq!(j.hs.server.world.get_block(CELLS[0][0], CELLS[0][1], CELLS[0][2]), AIR, "nothing placed");
+    assert_eq!(j.sp().inventory.slot(0).map(|s| s.count), Some(4), "nothing taken");
+}
+
+/// C3d run 14 (run-13 review LOW-3) — a dead body's correction `Replace`
+/// shares the seat's one rate bound: eight inside 100 ticks are queued
+/// (each after the last was applied), the ninth tears down with the
+/// rate-bound reason.
+#[test]
+fn c3d_s1_dead_body_corrections_share_the_rate_bound() {
+    let mut j = joined("s1-dead-rate", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+    for round in 1..=9u32 {
+        let n = j.sp().window_events.last_number();
+        crate::window_events::apply_through(&mut j.hs.server.players[j.i], n, 0);
+        j.hs.queue_correction_replace(j.i);
+        if round < 9 {
+            assert!(!j.hs.slot_is_free(j.i), "round {round}: corrected, not torn down");
+            assert_eq!(j.sp().window_events.last_number(), n + 1, "round {round}: one Replace");
+        }
+    }
+    assert!(j.hs.slot_is_free(j.i), "the ninth correction tears down");
+    assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_RATE_DETAIL, "the rate-bound reason");
 }

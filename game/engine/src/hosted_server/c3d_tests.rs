@@ -252,6 +252,7 @@ fn c3d_actual_hosted_lost_receipt_tears_down_with_a_reason_and_saves_a_proven_re
         "the connection is torn down with a reason: {:?}",
         heard.rejects
     );
+    assert_eq!(super::actions::teardown_detail::last(), "authoritative action history could not be delivered", "the internal reason");
     assert!(hs.slot_is_free(i));
     assert!(hs.server.load_joiner(i).expect("the departure saved").obligations_proven_zero());
 }
@@ -291,6 +292,7 @@ fn c3d_actual_hosted_lost_receipt_teardown_saves_the_pending_grant_and_take() {
     hs.tick();
     let heard = hear(&client);
     assert!(heard.rejects.iter().any(|r| r == crate::strict_admission::StrictTeardown::FellBehind.reason()), "torn down: {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), "authoritative action history could not be delivered", "the internal reason");
     let saved = hs.server.load_joiner(i).expect("the departure saved");
     assert!(saved.obligations_proven_zero(), "nothing owed");
     let window = saved.window().expect("a readable window");
@@ -334,6 +336,7 @@ fn c3d_actual_hosted_lost_receipt_teardown_settles_an_unfit_grant_once() {
     hs.tick();
     let heard = hear(&client);
     assert!(heard.rejects.iter().any(|r| r == crate::strict_admission::StrictTeardown::FellBehind.reason()), "torn down: {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), "authoritative action history could not be delivered", "the internal reason");
     let spilled = ground(&hs);
     assert_eq!(spilled.len(), 1, "settlement spills the unfit Grant exactly once: {spilled:?}");
     assert_eq!((spilled[0].item.clone(), spilled[0].count), (crate::item::Item::Block(crate::block::DIRT), 3));

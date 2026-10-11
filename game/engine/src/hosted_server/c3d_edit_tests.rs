@@ -183,6 +183,7 @@ fn c3d_s1_correction_replace_past_the_pending_cap_tears_down() {
     let heard = listen(&r);
     assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "the typed refusal stands");
     assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "past the cap: torn down with a reason: {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_FIT_DETAIL, "the internal reason");
     assert!(r.hs.slot_is_free(r.i), "torn down");
     assert_eq!(r.sp().window_events.last_number(), events, "no Replace numbered");
     assert_eq!(r.sp().window_events.tally.forced, 0, "nothing waiting forced applied");
@@ -212,6 +213,7 @@ fn c3d_s1_correction_replace_past_the_byte_bound_tears_down() {
     let heard = listen(&r);
     assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "the typed refusal stands");
     assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "past the byte bound: torn down with a reason: {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_FIT_DETAIL, "the internal reason");
     assert!(r.hs.slot_is_free(r.i), "torn down");
     assert_eq!(r.sp().window_events.last_number(), events, "no Replace numbered");
     assert_eq!(r.sp().window_events.tally.forced, 0, "nothing waiting forced applied");
@@ -442,4 +444,38 @@ fn c3d_edit_cells_carry_a_doors_pair() {
     assert_eq!(r.hs.edit_cells(&bc(43, 79, 40, AIR)), vec![[43, 79, 40]], "any other edit, its own cell");
     r.hs.server.world.set_meta((41, 81, 40), 0);
     assert_eq!(r.hs.edit_cells(&bc(41, 80, 40, AIR)), vec![[41, 80, 40]], "two bottoms are no pair");
+}
+
+/// C3d run 14 (run-13 review LOW-4, decided) — a typed crop break whose
+/// claimed replacement isn't the server's ("doesn't break that way") with
+/// the server's cell (block and meta) as the client saw it.
+fn crop_claim(r: &mut Rig, seen_meta: u8) -> ActionHeader {
+    r.hs.server.world.set_block(ABOVE.0, ABOVE.1, ABOVE.2, crate::block::WHEAT_STAGE_3);
+    let server_meta = r.hs.server.world.meta_at(ABOVE.0, ABOVE.1, ABOVE.2);
+    let action = r.next();
+    let change = protocol::BlockChange { x: ABOVE.0, y: ABOVE.1, z: ABOVE.2, new_block: crate::block::DIRT, meta: 0 };
+    let mined = Some(protocol::MinedBlock { x: ABOVE.0, y: ABOVE.1, z: ABOVE.2, tool: protocol::WireItem::None });
+    let seen = (crate::block::WHEAT_STAGE_3, server_meta.wrapping_add(seen_meta));
+    r.send(action, ActionIntent::Edit { source_tick: 0, change, hand: (0, protocol::item_kind::EMPTY, 0), mined, use_tag: None, old: seen });
+    action
+}
+
+/// The client saw exactly the server's cell: a rule refusal.
+#[test]
+fn c3d_strict_doesnt_break_that_way_on_the_same_cell_is_a_rule_refusal() {
+    let mut r = edit_rig("crop-rule");
+    let action = crop_claim(&mut r, 0);
+    assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused));
+    assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (0, 1), "a rule refusal");
+    assert_eq!(block_at(&r, ABOVE), crate::block::WHEAT_STAGE_3, "nothing broken");
+}
+
+/// The client saw the same block with another meta: stale-world.
+#[test]
+fn c3d_strict_doesnt_break_that_way_on_a_changed_cell_is_stale_world() {
+    let mut r = edit_rig("crop-stale");
+    let action = crop_claim(&mut r, 3);
+    assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused));
+    assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (1, 0), "stale-world");
+    assert_eq!(block_at(&r, ABOVE), crate::block::WHEAT_STAGE_3, "nothing broken");
 }

@@ -260,6 +260,7 @@ fn c3d_strict_click_at_full_result_history_commits_nothing() {
     assert_eq!(r.row(action), None, "no row was invented for it");
     assert!(heard.receipts.is_empty());
     assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "teardown reason: {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), "Window result history is full", "the internal reason");
 }
 
 fn shoot(r: &mut Rig, tool: crate::crafting::Tool) -> ActionHeader {
@@ -363,7 +364,7 @@ fn snapshot(r: &Rig) -> ShotSnapshot {
 /// A shot refused at a cap: no projectile, no payment, no event, no row,
 /// no grown reservation; the action is not terminal; the connection is
 /// torn down with a reason (fail closed until recovery is wired).
-fn assert_zero_effect_shot(mut r: Rig, why: &str) {
+fn assert_zero_effect_shot(mut r: Rig, why: &str, detail: &str) {
     let tool = bow(30);
     let before = snapshot(&r);
     let action = shoot(&mut r, tool);
@@ -375,6 +376,7 @@ fn assert_zero_effect_shot(mut r: Rig, why: &str) {
     assert!(outcome.is_empty() && heard.receipts.is_empty(), "{why}: nothing answered");
     assert_eq!(r.row(action), None, "{why}: no result row");
     assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "{why}: teardown reason {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), detail, "the internal reason");
 }
 
 /// The 1023/1024 event cap with a two-event shot: at 1022 pending the
@@ -398,7 +400,7 @@ fn c3d_strict_shot_at_the_event_cap_has_zero_external_effect() {
             assert_eq!(r.sp().window_events.waiting(), 1024, "exactly at the cap");
             assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Accepted));
         } else {
-            assert_zero_effect_shot(r, "1023 pending");
+            assert_zero_effect_shot(r, "1023 pending", "Whole shot event reservation is unavailable");
         }
     }
 }
@@ -415,7 +417,7 @@ fn c3d_strict_shot_at_the_byte_and_receipt_caps_has_zero_external_effect() {
     body.name = "p".repeat(crate::action_journal::MAX_RETAINED_BYTES);
     let sp = &mut r.hs.server.players[r.i];
     crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(ItemStack { item: Item::Plan(body), count: 1 }), 0);
-    assert_zero_effect_shot(r, "byte cap");
+    assert_zero_effect_shot(r, "byte cap", "Whole shot event reservation is unavailable");
 
     let mut r = strict_rig("shot-receipts");
     arm(&mut r.hs.server.players[r.i]);
@@ -423,7 +425,7 @@ fn c3d_strict_shot_at_the_byte_and_receipt_caps_has_zero_external_effect() {
     // Run-2 review LOW-4 — an empty deque at its own size, so the shot's
     // two-event reservation must grow it and `abandon` must give it back.
     r.hs.server.players[r.i].window_events.shrink_waiting_to_fit();
-    assert_zero_effect_shot(r, "result cap");
+    assert_zero_effect_shot(r, "result cap", "Shot result history is full");
 }
 
 /// Decision 10, detected at staging: a fold that already owes refuses the

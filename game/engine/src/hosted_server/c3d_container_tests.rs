@@ -357,6 +357,7 @@ fn c3d_strict_container_deposit_of_a_source_a_pending_take_owns_commits_nothing(
     assert_eq!(server_places(&hs.server.players[j.i]), settled, "the Take paid the piece once; nothing else moved");
     assert_eq!(j.row(&mut hs, deposit), None, "uncertain source: no fate row");
     assert!(heard.rejects.iter().any(|m| m == StrictTeardown::FellBehind.reason()), "paused with the plain reason: {:?}", heard.rejects);
+    assert_eq!(super::actions::teardown_detail::last(), "container source or pending fit is uncertain", "the internal reason");
 }
 
 /// Review L2 — edits on a Strict movement packet are never dropped

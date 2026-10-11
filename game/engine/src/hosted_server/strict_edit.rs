@@ -80,8 +80,12 @@ impl HostedServer {
                     // Decision 19 Drift: the server's cell disagrees with the break
                     // (what `judge`'s Drift check leaves: a yielding block whose
                     // yield doesn't leave the change's block).
-                    // Run 13 (run-12 review LOW-5): not `judge`'s DRIFT, so a rule refusal.
-                    return self.refuse_strict_edit(i, action, change, budget, "the server's cell doesn't break that way", RefusalKind::Rule);
+                    // Run 13 (run-12 review LOW-5): not `judge`'s DRIFT. Run 14
+                    // (run-13 review LOW-4, decided): stale-world when the
+                    // server's cell (block and meta) differs from the one the
+                    // client acted on, else a rule refusal.
+                    let kind = if (old, old_meta) != seen { RefusalKind::StaleWorld } else { RefusalKind::Rule };
+                    return self.refuse_strict_edit(i, action, change, budget, "the server's cell doesn't break that way", kind);
                 };
                 let grants: Vec<_> = y.drops.into_iter().chain(y.gem).filter(|s| s.count > 0).collect();
                 let wear: Box<dyn FnOnce(&mut crate::window::WindowMut)> = if tool.is_some() {
