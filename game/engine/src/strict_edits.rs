@@ -68,11 +68,11 @@ pub enum StrictEdit {
 /// cell that changed since its client acted (a leaf the server decayed, a
 /// block another player mined, a crop someone harvested) is a Drift
 /// `Refuse`, its cell sent back, never a paused class.
-pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&Item>, creative: bool, received: bool) -> StrictEdit {
+pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&Item>, creative: bool, received: Option<Received>) -> StrictEdit {
     use crate::block::{AIR, OAK_DOOR, WATER};
     let new = change.new_block;
     if creative { return StrictEdit::Unsupported("Creative free edits await their typed class"); }
-    if received && drifted(old, new, mined.is_some()) { return StrictEdit::Refuse(DRIFT); }
+    if let Some(r) = received && drifted((old, r.meta), r.seen, new, mined.is_some()) { return StrictEdit::Refuse(DRIFT); }
     if old == new { return StrictEdit::Unsupported("A same-block edit awaits the typed Noop class"); }
     // Decision 20: a door is one compound action (DoorPlace / its pair).
     if old == OAK_DOOR || new == OAK_DOOR { return StrictEdit::Unsupported("Doors are one compound action"); }
@@ -105,8 +105,25 @@ pub const DRIFT: &str = "Drift: the cell no longer holds what the client acted o
 /// yields), so on the server a placement onto its own block, or a mined
 /// edit onto its own result or onto a block that yields nothing (air, a
 /// fluid, fire), means the cell is no longer what the client acted on.
-pub fn drifted(old: BlockId, new: BlockId, mined: bool) -> bool {
-    old == new || (mined && !crate::break_drops::yields_drops(old))
+pub fn drifted(server: (BlockId, u8), seen: (BlockId, u8), new: BlockId, mined: bool) -> bool {
+    // C3d run 11 (run-10 review LOW-1, LOW-2) — exact: the server's cell
+    // against the cell the client saw (`ActionIntent::Edit::old`), block id
+    // and meta. Meta is compared where it is the block's own state: not in
+    // AIR, and not a fluid's level (the fluid sim's, which a joiner's client
+    // doesn't run in step).
+    let meta_counts = server.0 != crate::block::AIR && !crate::block::is_fluid(server.0);
+    server.0 != seen.0
+        || (meta_counts && server.1 != seen.1)
+        || server.0 == new
+        || (mined && !crate::break_drops::yields_drops(server.0))
+}
+
+/// What the server's `judge` of a received typed edit knows beyond the
+/// cell's block: the cell's meta, and the cell as its client saw it.
+#[derive(Clone, Copy, Debug)]
+pub struct Received {
+    pub meta: u8,
+    pub seen: (BlockId, u8),
 }
 
 /// A placement's window half: the placed block taken from hotbar `slot`
@@ -160,6 +177,7 @@ fn reserve(
     slot: usize,
     change: protocol::BlockChange,
     mined: Option<protocol::MinedBlock>,
+    old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<crate::action_identity::ActionHeader, String> {
     let slot_u8 = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A typed edit needs a hotbar slot")?;
@@ -187,6 +205,7 @@ fn reserve(
         hand: (slot_u8, kind_id, item_id),
         mined,
         use_tag: None,
+        old,
     };
     let recipe = EditRecipe { kind, slot: slot_u8, digest, sources: crate::action_wire::BoundedList::new(sources)? };
     let bytes = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
@@ -207,10 +226,11 @@ pub fn place_joined(
     armour: &mut [Option<ArmourItem>; 4],
     slot: usize,
     change: protocol::BlockChange,
+    old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<Option<BlockId>, String> {
     ui.sync_auto_refill_joined(remote, inv, armour)?;
-    let action = reserve(remote, ui, inv, armour, EditKind::Place, slot, change, None, registry)?;
+    let action = reserve(remote, ui, inv, armour, EditKind::Place, slot, change, None, old, registry)?;
     let placed = place_window(inv, slot);
     send_reserved(remote, action);
     Ok(placed)
@@ -230,6 +250,7 @@ pub fn break_joined(
     armour: &mut [Option<ArmourItem>; 4],
     slot: usize,
     change: protocol::BlockChange,
+    old: (BlockId, u8),
     claimed: Option<crate::crafting::Tool>,
     registry: &crate::block::BlockRegistry,
 ) -> Result<Option<ToolUseInfo>, String> {
@@ -240,7 +261,7 @@ pub fn break_joined(
         z: change.z,
         tool: claimed.map_or(protocol::WireItem::None, |t| crate::inventory::item_to_wire_full(&Item::Tool(t))),
     };
-    let action = reserve(remote, ui, inv, armour, EditKind::Break, slot, change, Some(mined), registry)?;
+    let action = reserve(remote, ui, inv, armour, EditKind::Break, slot, change, Some(mined), old, registry)?;
     let wear = break_window(inv, slot);
     send_reserved(remote, action);
     Ok(wear)
@@ -277,13 +298,13 @@ pub fn route_place(
     armour: &mut [Option<ArmourItem>; 4],
     slot: usize,
     change: protocol::BlockChange,
-    old: BlockId,
+    old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<Routed<Option<BlockId>>, String> {
     let held = inv.slot(slot).map(|s| s.item.clone());
-    let judged = judge(old, &change, None, slot, held.as_ref(), false, false);
+    let judged = judge(old.0, &change, None, slot, held.as_ref(), false, None);
     match remote {
-        Some(remote) if sends_typed(Some(remote), &judged) => place_joined(remote, ui, inv, armour, slot, change, registry).map(Routed::Typed),
+        Some(remote) if sends_typed(Some(remote), &judged) => place_joined(remote, ui, inv, armour, slot, change, old, registry).map(Routed::Typed),
         _ => Ok(Routed::Legacy),
     }
 }
@@ -300,15 +321,15 @@ pub fn route_break(
     armour: &mut [Option<ArmourItem>; 4],
     slot: usize,
     change: protocol::BlockChange,
-    old: BlockId,
+    old: (BlockId, u8),
     registry: &crate::block::BlockRegistry,
 ) -> Result<Routed<Option<ToolUseInfo>>, String> {
     let held = inv.slot(slot).map(|s| s.item.clone());
     let tool = match &held { Some(Item::Tool(t)) => Some(*t), _ => None };
     let mined = protocol::MinedBlock { x: change.x, y: change.y, z: change.z, tool: protocol::WireItem::None };
-    let judged = judge(old, &change, Some(&mined), slot, held.as_ref(), false, false);
+    let judged = judge(old.0, &change, Some(&mined), slot, held.as_ref(), false, None);
     match remote {
-        Some(remote) if sends_typed(Some(remote), &judged) => break_joined(remote, ui, inv, armour, slot, change, tool, registry).map(Routed::Typed),
+        Some(remote) if sends_typed(Some(remote), &judged) => break_joined(remote, ui, inv, armour, slot, change, old, tool, registry).map(Routed::Typed),
         _ => Ok(Routed::Legacy),
     }
 }
@@ -372,8 +393,9 @@ impl crate::GameState {
         let fwd = self.players[pidx].camera.forward();
         let meta = crate::placement_meta::placement_meta(new, face, fwd).unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
+        let seen = (existing, self.world.meta_at(cell[0], cell[1], cell[2]));
         let p = &mut self.players[pidx];
-        match route_place(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, hotbar, change, existing, &self.registry) {
+        match route_place(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, hotbar, change, seen, &self.registry) {
             Ok(Routed::Legacy) => PlaceRoute::Legacy(p.inventory.take_placeable_from_hotbar(hotbar)),
             Ok(Routed::Typed(placed)) => PlaceRoute::Typed(placed),
             Err(error) => { self.typed_edit_failed(error); PlaceRoute::Wait }
@@ -393,9 +415,10 @@ impl crate::GameState {
         let replacement = crate::break_drops::break_yield(&self.world, &self.registry, blk, cell, tool.as_ref(), self.tick_counter, &self.pop_keys()).replacement;
         let meta = if replacement == crate::block::AIR { 0 } else { self.world.meta_at(pos[0], pos[1], pos[2]) };
         let change = protocol::BlockChange { x: pos[0], y: pos[1], z: pos[2], new_block: replacement, meta };
+        let seen = (blk, self.world.meta_at(pos[0], pos[1], pos[2]));
         let p = &mut self.players[pidx];
         let slot = p.hotbar_slot;
-        match route_break(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, slot, change, blk, &self.registry) {
+        match route_break(self.remote_client.as_mut(), &mut p.crafting_ui, &mut p.inventory, &mut p.armour_slots, slot, change, seen, &self.registry) {
             Ok(Routed::Legacy) => BreakRoute::Legacy,
             Ok(Routed::Typed(wear)) => BreakRoute::Typed(wear),
             Err(error) => {

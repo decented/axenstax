@@ -19,6 +19,10 @@ pub enum ActionIntent {
         hand: protocol::EditHand,
         mined: Option<protocol::MinedBlock>,
         use_tag: Option<protocol::UseTag>,
+        /// C3d run 11 (run-10 review LOW-1, LOW-2) — the cell as the client
+        /// saw it when it acted (block id, meta): the server's Drift check
+        /// compares its own cell with it (`strict_edits::drifted`).
+        old: (u16, u8),
     },
     Window(protocol::WindowOpPacket),
     Attack(protocol::EntityAttackPacket),

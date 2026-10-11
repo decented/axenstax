@@ -51,7 +51,8 @@ impl HostedServer {
     /// staging, the event and result reservations and the grant packets
     /// precede the first effect; then the world, raw R, the numbered grants
     /// and the terminal row commit together. `false` stops this tick's queue.
-    pub(super) fn serve_strict_edit(&mut self, i: usize, action: ActionHeader, change: &protocol::BlockChange, hand: protocol::EditHand, mined: Option<&protocol::MinedBlock>, budget: &mut EditTickBudget) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn serve_strict_edit(&mut self, i: usize, action: ActionHeader, change: &protocol::BlockChange, hand: protocol::EditHand, mined: Option<&protocol::MinedBlock>, seen: (u16, u8), budget: &mut EditTickBudget) -> bool {
         let slot = usize::from(hand.0);
         // Decision 8: an invalid action slot refuses; no latest-slot fallback.
         if slot >= 9 { return self.refuse_strict_edit(i, action, change, budget, "invalid action slot"); }
@@ -62,7 +63,7 @@ impl HostedServer {
         }
         let old = self.server.world.get_block(change.x, change.y, change.z);
         let old_meta = self.server.world.meta_at(change.x, change.y, change.z);
-        let edit = judge(old, change, mined, slot, held.as_ref(), self.server.play_mode.is_creative(), true);
+        let edit = judge(old, change, mined, slot, held.as_ref(), self.server.play_mode.is_creative(), Some(crate::strict_edits::Received { meta: old_meta, seen }));
         let (direct, grants, yielded): (Box<dyn FnOnce(&mut crate::window::WindowMut)>, Vec<crate::item::ItemStack>, bool) = match edit {
             StrictEdit::Refuse(why) => return self.refuse_strict_edit(i, action, change, budget, why),
             StrictEdit::Unsupported(why) => { self.pause_typed_action(i, StrictTeardown::Untyped, why); return false; }

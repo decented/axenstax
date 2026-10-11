@@ -139,7 +139,7 @@ impl Joined {
         let new = held.as_ref().and_then(crate::joiner_inventory::placeable_block).expect("a placeable block");
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta: self.world.meta_at(cell[0], cell[1], cell[2]) };
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
-        match route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), old, &self.reg).expect("reserved and sent") {
+        match route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent") {
             Routed::Typed(placed) => assert_eq!(placed, Some(new), "the window gave the block"),
             Routed::Legacy => {
                 self.inv.take_placeable_from_hotbar(slot);
@@ -157,7 +157,7 @@ impl Joined {
         let tool = match &held { Some(Item::Tool(t)) => Some(*t), _ => None };
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: AIR, meta: 0 };
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
-        match route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), old, &self.reg).expect("reserved and sent") {
+        match route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent") {
             Routed::Typed(_) => {}
             Routed::Legacy => {
                 self.inv.use_tool_at(slot);
@@ -180,7 +180,7 @@ impl Joined {
         let meta = stamped.unwrap_or_else(|| self.world.meta_at(cell[0], cell[1], cell[2]));
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta };
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
-        let routed = route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change, old, &self.reg).expect("reserved and sent");
+        let routed = route_place(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change, (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent");
         assert!(matches!(routed, Routed::Typed(Some(b)) if b == new), "a shaped placement goes typed");
         self.world.place_player_block(cell[0], cell[1], cell[2], new);
         if let Some(m) = stamped { self.world.set_meta((cell[0], cell[1], cell[2]), m); }
@@ -199,7 +199,7 @@ impl Joined {
         let replacement = crate::break_drops::break_yield(&self.world, &self.reg, old, (cell[0], cell[1], cell[2]), tool.as_ref(), 0, &keys).replacement;
         let meta = if replacement == AIR { 0 } else { self.world.meta_at(cell[0], cell[1], cell[2]) };
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: replacement, meta };
-        let routed = route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), old, &self.reg).expect("reserved and sent");
+        let routed = route_break(Some(&mut self.rc), &mut self.ui, &mut self.inv, &mut self.armour, slot, change.clone(), (old, self.world.meta_at(cell[0], cell[1], cell[2])), &self.reg).expect("reserved and sent");
         assert!(matches!(routed, Routed::Typed(_)), "a harvest goes typed");
         self.world.set_block(cell[0], cell[1], cell[2], replacement);
         self.world.set_meta((cell[0], cell[1], cell[2]), meta);
@@ -496,4 +496,44 @@ fn c3d_client_stale_base_edit_is_superseded_and_corrected() {
     assert_eq!(j.rc.action_journal.as_ref().map(|journal| journal.len()), Some(0), "its receipt retired the reservation");
     assert_eq!(j.client_digest(), j.server_digest(), "the Replace corrected the window");
     assert_eq!(j.held(&Item::Block(COBBLESTONE)), 5, "the cobblestone came back");
+}
+
+/// Run 11 (run-10 review LOW-1, LOW-2) — Drift is exact: a typed `Edit`
+/// carries the cell as its client saw it (`old`: block id and meta), and a
+/// server cell that differs is a Drift `Refused` with the cell sent back,
+/// never Accepted and never an `Untyped` pause. Five distinct inputs, each
+/// on a real `RemoteClient`: the Drift row, zero effect, the refusal's
+/// teardown (the corrected cell waits for recovery: see below).
+#[test]
+fn c3d_client_drift_is_exact_and_corrects_the_cell() {
+    use crate::block::{DIRT, GRAVEL, OAK_LEAVES, TILLED_SOIL, WATER, WHEAT_STAGE_0, WHEAT_STAGE_2, WHEAT_STAGE_3};
+    let cell = CELLS[0];
+    // (case, what the client saw, what the server's cell holds now, a placement?)
+    let cases = [
+        ("gravel fell into a mined leaf's cell", OAK_LEAVES, GRAVEL, false),
+        ("the crop was harvested and replanted", WHEAT_STAGE_3, WHEAT_STAGE_0, false),
+        ("the crop grew a stage", WHEAT_STAGE_2, WHEAT_STAGE_3, false),
+        ("a fluid flowed into the cell", AIR, WATER, true),
+        ("another block now stands in the cell", AIR, DIRT, true),
+    ];
+    for (k, (case, saw, now, place)) in cases.into_iter().enumerate() {
+        let mut j = joined(&format!("drift-{k}"), &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+        for (w, block) in [(&mut j.world, saw), (&mut j.hs.server.world, now)] {
+            w.set_block(cell[0], cell[1] - 1, cell[2], TILLED_SOIL);
+            w.set_block(cell[0], cell[1], cell[2], block);
+        }
+        if place { j.place(cell, 0); } else { j.harvest(cell, 1); }
+        let action = j.newest_header();
+        let window = j.sp().inventory.clone();
+        j.hs.tick();
+        let fate = j.sp().action_results.as_ref().unwrap().peek(action).map(|r| r.fate);
+        assert_eq!(fate, Some(crate::action_identity::ActionFate::Refused), "{case}: a Drift refusal, with its typed row");
+        assert_eq!(j.hs.server.world.get_block(cell[0], cell[1], cell[2]), now, "{case}: the server's cell is untouched");
+        assert_eq!(j.sp().inventory.slot(0), window.slot(0), "{case}: the server's copy is untouched");
+        // Until recovery a refusal tears the session down in the same tick
+        // (`StrictTeardown::Unconfirmed`), so the send-back never reaches
+        // this client: its corrected cell is recovery's to prove (run 11).
+        j.rc.poll();
+        assert_eq!(torn(&j.rc.state), crate::strict_admission::StrictTeardown::Unconfirmed.reason(), "{case}: the refusal's teardown, never an Untyped pause");
+    }
 }

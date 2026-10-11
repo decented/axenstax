@@ -137,8 +137,8 @@ impl HostedServer {
                 // C3d run 6 — a plain placement or a mined break
                 // (`strict_edit.rs`); a use-tagged edit still waits for its
                 // typed class.
-                ActionIntent::Edit { change, hand, mined, use_tag: None, .. } if self.strict_slot(i) => {
-                    if !self.serve_strict_edit(i, packet.action, &change, hand, mined.as_ref(), budget) { return; }
+                ActionIntent::Edit { change, hand, mined, use_tag: None, old, .. } if self.strict_slot(i) => {
+                    if !self.serve_strict_edit(i, packet.action, &change, hand, mined.as_ref(), old, budget) { return; }
                 }
                 ActionIntent::Item(req) if self.strict_slot(i) => {
                     if let protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } = req.action {
