@@ -1016,3 +1016,80 @@ fn game_harness_handover_recipient_leaving_while_prepared_ends_the_session_and_s
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+
+
+// ── CP9 review MEDIUM-1 (CP12 step 2, the CP9 step 3 game test): Cancel after the bearer left rotates ──
+
+/// The host game hosting online, driven to `at` (the bearer disclosed),
+/// then the player clicks Cancel: the session ends, `live_bearer()` changed,
+/// the old invite refuses and the new one admits, and the invitation's root
+/// context is unchanged.
+fn cancel_after_disclosure_rotates_the_invite(tag: &str, at: SourceStage) {
+    use crate::online_admission::Admission;
+    use crate::runtime_identity::{RuntimeIdentity, mint_player_attestation};
+    let dir = Tmp::new(tag);
+    let (mut hg, mut far) = frozen(tag, &dir);
+    // The online host whose invitation Cancel must rotate (fake rendezvous
+    // hub, never a relay).
+    let hub = crate::rendezvous::relay_client::FakeRelayHub::new();
+    let runtime = keys(SOURCE_RUNTIME);
+    let att = pollster::block_on(mint_player_attestation(&keys(SOURCE_PERSONA), &runtime.public_key(), Timestamp::from(now() - 10), 90))
+        .unwrap();
+    let host = crate::online_host::OnlineHost::start(
+        RuntimeIdentity::from_parts(runtime, Some(att)),
+        key(SOURCE_PERSONA),
+        Box::new(hub.client()),
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+        Vec::new(),
+        "Loop".into(),
+        vec!["wss://relay.example".into()],
+        Vec::new(),
+        now(),
+    )
+    .map_err(|(e, _)| e)
+    .unwrap();
+    let (old_bearer, old_link, root) = (host.live_bearer(now()), host.invite_link(), host.root_context(now()).unwrap().digest());
+    assert!(old_bearer.is_some(), "no live invitation to rotate");
+    hg.state.online_host = Some(host);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while source_stage(&hg) != Some(at) && std::time::Instant::now() < deadline {
+        let _ = far.dst.as_mut().unwrap().pump(now());
+        if at == SourceStage::Prepared
+            && let Some(Handover::Source { session, .. }) = hg.state.handover.as_mut()
+            && session.stage() == SourceStage::Publishing
+        {
+            session.join_publish_worker();
+        }
+        round(&mut hg);
+    }
+    // The click is handled before the next pump, so Cancel lands in `at`.
+    assert_eq!(source_stage(&hg), Some(at), "the host game never reached {at:?}");
+    hg.state.handover_click = Some(UiAction::Cancel);
+    hg.frames(1);
+    assert!(hg.state.handover.is_none(), "Cancel in {at:?} didn't end the source session");
+    let host = hg.state.online_host.as_ref().expect("Cancel stopped the online host");
+    let stranger = [0x44; 32];
+    assert_ne!(host.live_bearer(now()), old_bearer, "Cancel in {at:?} didn't rotate the live bearer");
+    assert!(host.live_bearer(now()).is_some(), "Cancel in {at:?} left no live invitation");
+    assert!(
+        matches!(host.admission_for_link(&stranger, &old_link, now()), Admission::Refuse(_)),
+        "the old invite still admits after Cancel in {at:?}"
+    );
+    assert!(
+        matches!(host.admission_for_link(&stranger, &host.invite_link(), now()), Admission::Accept(_)),
+        "the new invite doesn't admit after Cancel in {at:?}"
+    );
+    assert_eq!(host.root_context(now()).unwrap().digest(), root, "Cancel in {at:?} changed the root context");
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_cancel_in_publishing_rotates_the_invite_and_keeps_the_root() {
+    cancel_after_disclosure_rotates_the_invite("cancel-publishing", SourceStage::Publishing);
+}
+
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_cancel_in_prepared_rotates_the_invite_and_keeps_the_root() {
+    cancel_after_disclosure_rotates_the_invite("cancel-prepared", SourceStage::Prepared);
+}

@@ -5645,7 +5645,10 @@ LOW-1) goes through `GameState::end_source_handover`, which reads
 `needs_invite_rotation` and calls `OnlineHost::rotate_bearer`. Only the
 bearer changes: the expiry, relays and host fields stay, so the root
 context and lineage are unchanged (CP7 review MEDIUM-1 + LOW-7); old invite
-links stop admitting at once (no grace), and the toast says so. Personas
+links stop admitting at once (no grace), and the toast says so. Tested
+in the real game (CP12, the CP9 step 3 game test): Cancel in Publishing
+and in Prepared ends the session, changes `live_bearer()`, the old invite
+is refused and the new one admitted, and the root context is unchanged. Personas
 the old bearer already admitted stay contacts. `mint_fresh_invite` (new
 expiry) stays the UI's "new invite". The handover session's own copies are
 zeroed: the bearer is wiped with `zeroize` on drop, and the buffers this
