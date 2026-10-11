@@ -315,6 +315,53 @@ fn c3d_s1_refused_auto_refill_setting_is_corrected_then_resent() {
     assert_eq!(j.held(&Item::Block(COBBLESTONE)), 7, "the client's window was corrected to the server's");
 }
 
+/// Run 15 item 1 — the resend can't loop. A server copy that diverges again
+/// before every resend refuses every resend; each refusal is corrected
+/// (one `Replace`), the client resends on its retired `Refused` receipt,
+/// and the ninth correction inside 100 ticks is the rate bound's teardown,
+/// with its own internal reason. Every refused setting changed nothing.
+/// (The honest case, a copy that diverged once, is served on the FIRST
+/// resend: `c3d_s1_refused_auto_refill_setting_is_corrected_then_resent`.)
+#[test]
+fn c3d_s1_a_refill_resend_refused_again_ends_at_the_rate_bound() {
+    let mut j = joined("s1-refill-loop", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.pump();
+    j.assert_honest("the session's setting");
+    let server_refill = j.sp().inventory.auto_refill;
+    j.inv.auto_refill = !j.inv.auto_refill;
+    let start = j.hs.server.tick_counter;
+    let mut sent = 0;
+    for round in 1..=9u8 {
+        // The server's copy diverges again under the client, past the
+        // correction the client applied (else that `Replace` overwrites it).
+        let applied = j.rc.applied_window_boundary();
+        crate::window_events::apply_through(&mut j.hs.server.players[j.i], applied, 0);
+        j.hs.server.players[j.i].inventory.set_slot(7, Some(ItemStack::new_block(COBBLESTONE, round)));
+        if round > 1 { assert!(j.rc.refill_refused, "round {round}: the Refused receipt retired, so the setting goes again"); }
+        let before = j.sp().window_events.last_number();
+        j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+        let action = j.newest_header();
+        sent += 1;
+        j.pump();
+        assert_eq!(fate(&j, action), Some(ActionFate::Refused), "round {round}: refused");
+        assert_eq!(j.sp().inventory.auto_refill, server_refill, "round {round}: zero effect on the setting");
+        if round < 9 {
+            assert!(!j.hs.slot_is_free(j.i), "round {round}: corrected, not torn down");
+            assert_eq!(j.sp().window_events.last_number(), before + 1, "round {round}: one correction Replace");
+            j.pump();
+        }
+    }
+    assert!(j.hs.server.tick_counter - start < crate::strict_admission::CORRECTION_WINDOW_TICKS, "all nine inside one window");
+    assert_eq!(sent, 9, "one resend per correction, never more");
+    assert!(j.hs.slot_is_free(j.i), "the ninth correction tears down");
+    assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_RATE_DETAIL, "the rate bound's internal reason");
+    let sp = &j.hs.server.players[j.i];
+    assert_eq!(sp.inventory.slot(0).cloned(), Some(ItemStack::new_block(COBBLESTONE, 4)), "zero item effect");
+    assert_eq!(sp.inventory.auto_refill, server_refill, "the server's setting never changed");
+    assert_eq!(counters(&j), (0, 9));
+}
+
 /// The live-correction flag test: a live correction leaves the death flag
 /// alone, a dead body's correction still sets it, and a second correction
 /// while one waits queues nothing.
