@@ -174,6 +174,10 @@ pub struct RecipientSession {
     /// last second a hand-off was tried.
     activation_checked: u64,
     hand_tried: u64,
+    /// CP12 (CP10 review LOW-2): the resumer this session hands its wait
+    /// for Committed to (the game: the process's one). `None` hands nothing
+    /// (a session a test drives by hand).
+    resumer: Option<super::resumer::Resumer>,
 }
 
 /// L5: a router mapping the joined session asked for (native: the UPnP
@@ -286,6 +290,7 @@ impl RecipientSession {
             bearer: None,
             prepared: None,
             activation_handed: false,
+            resumer: None,
             activation_checked: 0,
             hand_tried: 0,
         })
@@ -347,6 +352,11 @@ impl RecipientSession {
             // An unmarked import is never touched; a failed discard is left
             // for the next sweep (the marker still names it).
             let _ = super::inert::discard(&self.imports, self.transfer());
+        }
+        // CP12 (CP10 review LOW-2): past the durable receipt the wait for
+        // Committed outlives this session: it goes to the resumer now.
+        if !inert {
+            self.hand_off_wait();
         }
         // M-2: after Prepared nothing is deleted: the session ends quarantined.
         self.stage = if inert { RecipientStage::Aborted(why) } else { RecipientStage::Quarantined(why) };
@@ -519,21 +529,43 @@ impl RecipientSession {
         Ok(())
     }
 
-    /// CP10: hand the awaiting-Committed wait to `resumer` (once), which
-    /// outlives this session, the joined world and the window. It reads the
-    /// durable receipt itself (`phase::AwaitingCommit`), never this memory.
-    pub fn hand_activation(&mut self, resumer: &super::resumer::Resumer, now: u64) {
+    /// CP12: the resumer every end path of this session hands its wait to.
+    pub fn hand_waits_to(&mut self, resumer: super::resumer::Resumer) {
+        self.resumer = Some(resumer);
+    }
+
+    /// CP10: at Prepared the pump hands the awaiting-Committed wait to this
+    /// session's resumer (once; tried at most once a second), which outlives
+    /// this session, the joined world and the window. It reads the durable
+    /// receipt itself (`phase::AwaitingCommit`), never this memory.
+    pub fn hand_activation(&mut self, now: u64) {
         if self.stage != RecipientStage::Prepared || self.activation_handed || self.hand_tried == now {
             return;
         }
         self.hand_tried = now;
-        if let Some(c) = &self.checkpoint {
-            let (t, install) = (self.transfer(), self.identity.runtime.public_key().to_bytes());
-            self.activation_handed = resumer.adopt_import(&c.working_world(), t, install) || resumer.holds_import(t);
-            if !self.activation_handed {
-                log::error!("handover: the resumer couldn't take the wait for Committed; retrying");
-            }
+        if !self.hand_off_wait() {
+            log::error!("handover: the resumer couldn't take the wait for Committed; retrying");
         }
+    }
+
+    /// CP12 (CP10 review LOW-2): hand the wait for Committed to this
+    /// session's resumer, once, whenever the Prepared receipt is durable
+    /// (the receiver is past Ready), whatever the session's stage: the pump
+    /// at Prepared, `abort` when not inert, and every end of the session
+    /// (`end_recipient`, leaving the world). A quarantined or activated
+    /// import has nothing to wait for, and the resumer declines it. Returns
+    /// whether the wait is held.
+    pub fn hand_off_wait(&mut self) -> bool {
+        if self.activation_handed {
+            return true;
+        }
+        let durable = self.receiver.as_ref().is_some_and(|r| r.stage() != crate::handover::phase::ReceiverStage::Ready);
+        let (Some(resumer), Some(c), true) = (self.resumer.as_ref(), self.checkpoint.as_ref(), durable) else {
+            return false;
+        };
+        let (t, install) = (self.transfer(), self.identity.runtime.public_key().to_bytes());
+        self.activation_handed = resumer.adopt_import(&c.working_world(), t, install) || resumer.holds_import(t);
+        self.activation_handed
     }
     pub fn activation_handed(&self) -> bool {
         self.activation_handed

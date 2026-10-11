@@ -5669,11 +5669,23 @@ retained copy are the next slices.
 Committed publication (CP9). One background resumer per process
 (`live::resumer::Resumer::global()`), owned by nothing a world owns:
 leaving the world and dropping `GameState` never stop it. Quitting the
-process does (a detached thread doesn't outlive `main`): closing the window
-first gives it a bounded grace of at most 10 s (`Resumer::finish_within`,
-after the router-lease grace), waking any job sleeping out its backoff so it
-attempts at once and never blocking longer; what isn't done then resumes at
-the next launch from the record (CP9 review MEDIUM-2). At Retired (or `RetirementUncertain` whose record reads back, CP9 review
+process does (a detached thread doesn't outlive `main`). Every way out goes
+through one exit function, `GameState::exit_app` (CP12, CP10 review
+MEDIUM-1): the window's close button, the lobby's Quit, Esc in the lobby and
+the self-updater's Restart (the lobby's two are `MenuAction`s and the event
+loop exits after the frame; no path calls `process::exit`). It lets online
+hosting go (the router-lease grace), closes the world as the close button
+always did (`close_window`; a failed close-save keeps the window and runs no
+grace), and only then, after `leave_world`'s last-chance hand-off, gives a
+Committed publication in flight a bounded grace of at most 10 s
+(`Resumer::finish_within`), waking any job sleeping out its backoff so it
+attempts at once and never blocking longer. Only a source publication holds
+the exit: with none in flight it returns at once, and a recipient's wait for
+Committed never holds it (it can't finish before its source publishes, and
+resumes at the next start). The updater relaunches only after the grace.
+What isn't done then resumes at the next launch from the record (CP9 review
+MEDIUM-2). Tests: the lobby's Quit reaches the exit function; the grace
+returns at once for an import's wait and waits for a publication. At Retired (or `RetirementUncertain` whose record reads back, CP9 review
 LOW-4) the source's pump hands it the publication
 (`SourceSession::hand_publication`; handed only when the resumer took it or
 already holds it, otherwise logged and retried at most once a second, with a
@@ -5764,7 +5776,17 @@ receipt with no Activated or quarantine record: the stall, the 15-minute
 cap and a closed link end nothing (the session stays `Prepared` and still
 reads the link while it is open). The game's pump hands the wait to the
 process's one resumer (`Resumer::adopt_import` at Prepared; handed only
-when taken or already held, retried at most once a second), and
+when taken or already held, retried at most once a second). Every other end
+of a session whose receipt is durable hands it too, once (CP12, CP10 review
+LOW-2; `RecipientSession::hand_off_wait`): `abort` when not inert (a
+protocol error read in the same batch as the Prepared frame, a Cancel), and
+`end_recipient`, which every end of a recipient session goes through.
+Leaving the joined world ends a `Prepared` session (`handover_on_leave` ->
+`end_recipient`): the wait is handed over, the router lease goes back and
+the link closes with it, and no Abort is sent (the ack has left); a session
+before Prepared still carries on to Ready in the lobby. Tested: leaving
+while Prepared ends the session and the resumer still activates the import
+on Committed. And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
 which takes over every import whose working world's `handover/` holds a
 Prepared receipt and no Activated or quarantine record (bounded; creates

@@ -469,7 +469,9 @@ impl crate::GameState {
         // P3: no session is live here (a running one answers Busy above).
         let _ = crate::handover::live::inert::sweep(&env.imports, None);
         match RecipientSession::propose(payload, host, env.identity, env.imports, now) {
-            Ok(s) => {
+            Ok(mut s) => {
+                // CP12 (CP10 review LOW-2): every end path hands its wait here.
+                s.hand_waits_to(crate::handover::live::resumer::Resumer::global().clone());
                 self.handover = Some(Handover::Recipient(Box::new(s)));
                 self.handover_consent_shown = Some(Instant::now());
             }
@@ -574,7 +576,7 @@ impl crate::GameState {
         // background resumer, which outlives this session, the joined world
         // and the window (and resumes at start-up from the durable receipt).
         if s.stage() == RecipientStage::Prepared && !s.activation_handed() {
-            s.hand_activation(crate::handover::live::resumer::Resumer::global(), now);
+            s.hand_activation(now);
         }
         if s.stage() == RecipientStage::Activated {
             // The source retired its copy: the joined world is gone for good.
@@ -607,6 +609,19 @@ impl crate::GameState {
             return;
         }
         let Some(Handover::Recipient(mut s)) = self.handover.take() else { return };
+        // CP12 (CP10 review LOW-2): past the ack, every end of the session
+        // hands its wait for Committed to the resumer first (once: the pump
+        // or `abort` may have already).
+        s.hand_off_wait();
+        if s.stage() == RecipientStage::Prepared {
+            // Leaving the joined world (`handover_on_leave`): the resumer owns
+            // the wait, so the session ends here. Its router lease goes back
+            // (`Drop`) and its link closes with it; no Abort is sent (the ack
+            // has left).
+            drop(s);
+            self.handover_toast(msg);
+            return;
+        }
         let back = s.return_link();
         let parked = self.remote_client.as_ref().is_some_and(|rc| rc.is_parked());
         match (parked, back) {
@@ -691,7 +706,8 @@ impl crate::GameState {
     /// Leaving the world: a source handover is aborted while its world and
     /// link still exist (before any save, which the freeze refuses); an
     /// unanswered proposal is declined. A recipient past consent holds its
-    /// own connection and carries on.
+    /// own connection and carries on, until Prepared: past the ack the
+    /// resumer owns the wait, so the session ends (CP12, CP10 review LOW-2).
     /// Returns the line the lobby shows once the player is there (a source
     /// handover was cancelled by leaving): the caller puts it in the lobby's
     /// `menu.notice` after the leave, where it is actually drawn.
@@ -713,6 +729,12 @@ impl crate::GameState {
                 let transfer = s.proposal().transfer;
                 self.handover = None;
                 self.decline_over_joined(transfer, DeclineReason::Player);
+            }
+            // CP12 (CP10 review LOW-2): `end_recipient` hands the wait over,
+            // gives the lease back and closes the link.
+            Some(Handover::Recipient(s)) if s.stage() == RecipientStage::Prepared => {
+                let line = copy::awaiting_handover(&s.proposal().source_npub);
+                self.end_recipient(&line);
             }
             _ => {}
         }

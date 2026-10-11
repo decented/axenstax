@@ -1098,11 +1098,8 @@ impl super::GameState {
             lease.release_within(std::time::Duration::from_millis(1500));
         }
         self.handover_release_lease_on_exit(std::time::Duration::from_millis(1500));
-        // CP9 review MEDIUM-2: a Committed (or a recipient's wait) still in
-        // flight gets at most 10 s to finish before the process quits; what
-        // isn't done resumes at the next launch.
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::handover::live::resumer::Resumer::global().finish_within(std::time::Duration::from_secs(10));
+        // The handover exit grace is not here: `exit_app` runs it once the
+        // world has closed (CP12, CP10 review MEDIUM-1).
     }
 
     /// The Online panel: this world's invite link, how reachable it is, how many
@@ -8733,6 +8730,10 @@ impl super::GameState {
             }
             #[allow(unused_mut)]
             let mut action = crate::menu::draw_main_menu(&self.renderer.egui.ctx, menu_state);
+            #[cfg(test)]
+            if let Some(a) = self.test_menu_action.take() {
+                action = a;
+            }
             // A recipient's handover outlives the joined world it began in.
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -9536,6 +9537,23 @@ impl super::GameState {
                                 "That address didn't look right.".to_string(),
                                 Instant::now() + std::time::Duration::from_secs(6),
                             ));
+                        }
+                    }
+                }
+                // CP12 (CP10 review MEDIUM-1): the lobby's Quit and the
+                // updater's Restart end the process only through the one exit
+                // function; the event loop exits after this frame.
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::Quit => {
+                    self.exit_now = self.exit_app();
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::menu::MenuAction::RestartForUpdate => {
+                    if self.exit_app() {
+                        match crate::self_update::running_appimage().map(|p| crate::self_update::relaunch(&p)) {
+                            Some(Ok(())) => self.exit_now = true,
+                            Some(Err(e)) => log::error!("relaunch after self-update failed: {e}"),
+                            None => log::error!("relaunch after self-update failed: not running from an AppImage"),
                         }
                     }
                 }

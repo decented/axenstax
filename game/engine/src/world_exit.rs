@@ -234,6 +234,11 @@ pub(crate) fn save_failed_toast(why: &str) -> String {
 /// How long the save-failure toast stays up.
 pub(crate) const SAVE_FAILED_TOAST_SECS: u64 = 10;
 
+/// CP12 (CP10 review MEDIUM-1): the most the exit function waits for a
+/// handover Committed still being published (CP9 review MEDIUM-2).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long an in-world arena launch waits for the web lobby's world list
 /// before it gives up and says so (review W3 S6).
 pub(crate) const QUEUED_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -663,6 +668,32 @@ impl crate::GameState {
                 true
             }
         }
+    }
+
+    /// CP12 (CP10 review MEDIUM-1): the ONE exit function. Every way out of
+    /// the process comes here: the window's close button, the lobby's Quit,
+    /// Esc in the lobby and the updater's Restart (the lobby's two as
+    /// `MenuAction`s; the event loop then exits after the frame). Online
+    /// hosting is let go first (bounded, on this thread), then the world is
+    /// closed as the close button always did ([`Self::close_window`]: a
+    /// failed close-save keeps the window, returns false and runs no grace).
+    /// Only once the close went through, so after `leave_world`'s last-chance
+    /// hand-off of a retired publication, a handover Committed still being
+    /// published gets at most [`EXIT_GRACE`] before the process ends; a
+    /// recipient's wait for Committed never holds the exit (it resumes at
+    /// the next start either way).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn exit_app(&mut self) -> bool {
+        #[cfg(test)]
+        {
+            self.exit_calls += 1;
+        }
+        self.stop_online_on_exit();
+        if !self.close_window() {
+            return false;
+        }
+        crate::handover::live::resumer::Resumer::global().finish_within(EXIT_GRACE);
+        true
     }
 
     /// Leave a world whose session ended under the player (host quit or

@@ -162,11 +162,20 @@ impl Resumer {
         self.0.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// CP9 review MEDIUM-2: at process exit, wake every thread sleeping out
-    /// a backoff so it attempts at once, then wait at most `grace` (never
-    /// longer) for the jobs to finish. What isn't done resumes at the next
-    /// launch from the durable records.
+    /// CP9 review MEDIUM-2 + CP12 (CP10 review MEDIUM-1): the exit grace
+    /// (`GameState::exit_app`, which every way out goes through). Only a
+    /// SOURCE publication in flight is waited for: with none it returns at
+    /// once, and a recipient's wait for Committed never holds the exit (it
+    /// can't finish before its source publishes, and resumes at the next
+    /// start). Otherwise every thread sleeping out a backoff is woken to
+    /// attempt at once, and the publications get at most `grace` (never
+    /// longer). What isn't done resumes at the next launch from the durable
+    /// records.
     pub fn finish_within(&self, grace: Duration) -> bool {
+        if !self.publishing() {
+            return true;
+        }
+        log::info!("handover: finishing a Committed publication before quitting (at most {grace:?})");
         let deadline = std::time::Instant::now() + grace;
         {
             let (generation, cv) = &self.0.wake;
@@ -174,7 +183,7 @@ impl Resumer {
             cv.notify_all();
         }
         loop {
-            if self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+            if !self.publishing() {
                 return true;
             }
             let now = std::time::Instant::now();
@@ -183,6 +192,19 @@ impl Resumer {
             }
             std::thread::sleep((deadline - now).min(Duration::from_millis(20)));
         }
+    }
+
+    /// Whether a source publication is in flight (an import's wait is not).
+    fn publishing(&self) -> bool {
+        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(f, _)| *f == Flavour::Source)
+    }
+    /// Tests: hold a job slot (a publication if `source`, else an import's
+    /// wait) until the guard drops, with no thread behind it.
+    #[cfg(test)]
+    pub(crate) fn test_hold(&self, source: bool, transfer: Id) -> JobGuard {
+        let job = (if source { Flavour::Source } else { Flavour::Import }, transfer);
+        self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(job);
+        JobGuard(self.0.clone(), job)
     }
 
     /// Take over the Committed publication of the world at `world_dir`
@@ -320,7 +342,7 @@ fn existing_store(world_dir: &Path) -> crate::handover::Result<MarkerStore> {
 
 /// CP9 review LOW-1: the job leaves `jobs` however its thread ends (a
 /// panic included), so the transfer can be taken over again.
-struct JobGuard(Arc<Shared>, (Flavour, Id));
+pub(crate) struct JobGuard(Arc<Shared>, (Flavour, Id));
 impl Drop for JobGuard {
     fn drop(&mut self) {
         self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1);
@@ -603,6 +625,28 @@ mod tests {
         assert_eq!(relay_share(2), Duration::from_millis(12_500));
         assert_eq!(relay_share(8), Duration::from_secs(5), "the floor");
     }
+    /// CP12 (CP10 review MEDIUM-1): the exit grace waits only while a
+    /// source publication is in flight; a recipient's wait never holds it.
+    #[test]
+    fn handover_exit_grace_waits_for_a_source_publication_never_for_a_recipients_wait() {
+        let r = Resumer::new(Backoff::PRODUCTION);
+        let wait = r.test_hold(false, [1; 16]);
+        let start = std::time::Instant::now();
+        assert!(r.finish_within(Duration::from_secs(5)), "the exit grace reported a recipient's wait unfinished");
+        assert!(start.elapsed() < Duration::from_secs(1), "the exit grace waited for a recipient's wait");
+        let publishing = r.test_hold(true, [2; 16]);
+        let start = std::time::Instant::now();
+        assert!(!r.finish_within(Duration::from_millis(200)), "the exit grace didn't wait for a source publication in flight");
+        assert!(start.elapsed() >= Duration::from_millis(200), "the exit grace gave up early");
+        let done = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(publishing);
+        });
+        assert!(r.finish_within(Duration::from_secs(5)), "the grace didn't end when the publication finished");
+        done.join().unwrap();
+        drop(wait);
+    }
+
     #[test]
     fn handover_resumer_backoff_doubles_to_its_ceiling_and_stays_there() {
         let b = Backoff::PRODUCTION;

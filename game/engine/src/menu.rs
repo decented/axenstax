@@ -198,6 +198,14 @@ pub enum MenuAction {
     /// Campaign G — pick an `.axeghost` file; the file names its own race, so
     /// one button serves every row. Stored as that race's rival ghost.
     ImportGhost,
+    /// CP12 (CP10 review MEDIUM-1): the lobby's Quit. Ends the process only
+    /// through the game's one exit function (`GameState::exit_app`).
+    #[cfg(not(target_arch = "wasm32"))]
+    Quit,
+    /// CP12: the self-updater's Restart: the exit function first (its
+    /// handover grace included), then the relaunch.
+    #[cfg(not(target_arch = "wasm32"))]
+    RestartForUpdate,
     /// Online play by contact — host this world for friends in other houses.
     /// Native only.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2003,7 +2011,7 @@ fn trigger_stash_download(
 /// the CREATIVE badge's blue: informational, deliberately not a warning
 /// colour.
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_version_line(ui: &mut egui::Ui) {
+fn draw_version_line(ui: &mut egui::Ui, restart: &mut bool) {
     use crate::update_check::{self, UpdateState};
 
     const VERSION_SIZE: f32 = 15.0;
@@ -2079,7 +2087,7 @@ fn draw_version_line(ui: &mut egui::Ui) {
                         .strong(),
                     update_check::DOWNLOAD_PAGE,
                 );
-                draw_self_update_controls(ui, &latest, appimage, VERSION_SIZE, SUBTITLE_COLOR);
+                draw_self_update_controls(ui, &latest, appimage, VERSION_SIZE, SUBTITLE_COLOR, restart);
             });
         }
     }
@@ -2102,6 +2110,7 @@ fn draw_self_update_controls(
     appimage: Option<crate::update_check::AppImageRef>,
     size: f32,
     dim: egui::Color32,
+    restart: &mut bool,
 ) {
     use crate::self_update::{self, Progress};
 
@@ -2133,11 +2142,11 @@ fn draw_self_update_controls(
                     .size(size)
                     .color(dim),
             );
+            // CP12 (CP10 review MEDIUM-1): never a bare `process::exit`: the
+            // game's one exit function runs first, then the relaunch
+            // (`MenuAction::RestartForUpdate`).
             if ui.small_button("Restart").clicked() {
-                match self_update::relaunch(&running) {
-                    Ok(()) => std::process::exit(0),
-                    Err(e) => log::error!("relaunch after self-update failed: {e}"),
-                }
+                *restart = true;
             }
         }
         Progress::Failed(reason) => {
@@ -2805,7 +2814,13 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("AXE'N'STAX").size(30.0).color(TITLE_COLOR).strong());
                     #[cfg(not(target_arch = "wasm32"))]
-                    draw_version_line(ui);
+                    {
+                        let mut restart = false;
+                        draw_version_line(ui, &mut restart);
+                        if restart {
+                            action = MenuAction::RestartForUpdate;
+                        }
+                    }
                     ui.label(egui::RichText::new("Your Worlds").size(14.0).color(SUBTITLE_COLOR));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2830,8 +2845,9 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
+                        // CP12 (CP10 review MEDIUM-1): through the one exit function.
                         if lobby_header_button(ui, "Quit").clicked() {
-                            std::process::exit(0);
+                            action = MenuAction::Quit;
                         }
                         // Native Signet identity (right-to-left: added after Quit, so
                         // it sits to Quit's left). Guest by default; sign-in is opt-in.

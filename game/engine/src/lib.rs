@@ -1272,6 +1272,16 @@ pub(crate) struct GameState {
     /// When the consent window first showed (L7: its buttons arm later).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) handover_consent_shown: Option<web_time::Instant>,
+    /// CP12 (CP10 review MEDIUM-1): the one exit function (`exit_app`) let
+    /// the process end; the event loop exits after this frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) exit_now: bool,
+    /// Tests: how many times the exit function ran.
+    #[cfg(test)]
+    pub(crate) exit_calls: u32,
+    /// Tests: one lobby action, in place of the egui pointer.
+    #[cfg(test)]
+    pub(crate) test_menu_action: Option<crate::menu::MenuAction>,
     /// Tests: one HUD dialog click, in place of the egui pointer.
     #[cfg(test)]
     pub(crate) test_hud_click: Option<crate::handover_game::TestHudClick>,
@@ -1952,6 +1962,12 @@ impl GameState {
             handover_click: None,
             #[cfg(not(target_arch = "wasm32"))]
             handover_consent_shown: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            exit_now: false,
+            #[cfg(test)]
+            exit_calls: 0,
+            #[cfg(test)]
+            test_menu_action: None,
             #[cfg(test)]
             test_hud_click: None,
             #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -2364,12 +2380,11 @@ impl ApplicationHandler for App {
                 // once more and quits either way, keeping the autosave.
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    // Give the router its port back and retire the bearer with
-                    // the bounded, on-thread variant first, so `leave_world`'s
-                    // own `stop_online` finds nothing left to wait on. (Online
-                    // hosting is retired even when the close stays.)
-                    state.stop_online_on_exit();
-                    if state.close_window() {
+                    // CP12 (CP10 review MEDIUM-1): the one exit function.
+                    // It retires online hosting first (even when the close
+                    // stays), then closes, then gives a handover publication
+                    // in flight its bounded grace.
+                    if state.exit_app() {
                         event_loop.exit();
                     } else {
                         state.window.request_redraw();
@@ -2623,6 +2638,14 @@ impl ApplicationHandler for App {
                                         state.showcase_exited = true;
                                         state.release_cursor();
                                     } else {
+                                        // CP12 (CP10 review MEDIUM-1): Esc in
+                                        // the lobby leaves through the one
+                                        // exit function too.
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        if state.exit_app() {
+                                            event_loop.exit();
+                                        }
+                                        #[cfg(target_arch = "wasm32")]
                                         event_loop.exit();
                                     }
                                     return;
@@ -2815,6 +2838,12 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 state.update_and_render();
+                // CP12: the lobby's Quit or the updater's Restart went through
+                // the exit function this frame.
+                #[cfg(not(target_arch = "wasm32"))]
+                if state.exit_now {
+                    event_loop.exit();
+                }
             }
 
             // winit delivers this on Android exactly as in the browser. The

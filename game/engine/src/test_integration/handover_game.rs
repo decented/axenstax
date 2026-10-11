@@ -388,7 +388,8 @@ fn source(j: &mut Joined) -> SourceSession {
         generation: 1,
         scratch: j._dir.0.join("scratch"),
         validity: 600,
-        world_dir: None,
+        // CP12: a world folder, so the source can retire (its record).
+        world_dir: Some(j._dir.0.join("world")),
         bearer: bearer(),
         attestation: source_attestation(),
     };
@@ -913,4 +914,105 @@ fn game_harness_handover_retired_world_leaves_without_saving_and_its_commit_stil
     );
     assert_eq!(crate::handover::live::authority::open_guard(&world_dir).unwrap_err().0, copy::RETIRED, "publication reopened it");
     assert!(handed, "the publication wasn't handed to the resumer at Retired");
+}
+
+// ── CP12 (CP10 review MEDIUM-1): the one exit function ──
+
+/// The lobby's Quit ends the process only through the game's one exit
+/// function (`exit_app`, where the handover grace runs), never a bare
+/// `process::exit`.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_lobby_quit_goes_through_the_exit_function() {
+    isolate_saves();
+    let mut hg = HeadlessGame::boot_into_world("harness-handover-quit");
+    assert!(hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby));
+    assert!(matches!(hg.state.mode, crate::GameMode::Menu(_)), "the leave didn't reach the lobby");
+    hg.frames(1);
+    assert_eq!(hg.state.exit_calls, 0, "the lobby ran the exit function unasked");
+    hg.state.test_menu_action = Some(crate::menu::MenuAction::Quit);
+    // The lobby draws at most every 50 ms (its frame throttle).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while hg.state.test_menu_action.is_some() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        hg.frames(1);
+    }
+    assert!(hg.state.test_menu_action.is_none(), "the lobby never drew a frame");
+    assert_eq!(hg.state.exit_calls, 1, "the lobby Quit didn't go through the exit function");
+    assert!(hg.state.exit_now, "the lobby Quit didn't end the process");
+}
+
+// ── CP12 (CP10 review LOW-2): leaving while Prepared ends the session ──
+
+/// A router lease that records its release.
+struct FlagLease(Arc<std::sync::atomic::AtomicBool>);
+impl crate::handover::live::recipient::HeldLease for FlagLease {
+    fn renew(&mut self) {}
+    fn give_back(self: Box<Self>) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn give_back_within(self: Box<Self>, _grace: std::time::Duration) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
+/// The joined game consents; its session is then pumped BY HAND to
+/// Prepared (the ack has left), so the pump's own hand-off never runs, as
+/// when it failed and is retrying. The source reads the ack, retires and
+/// publishes Committed. The player leaves the joined world: the session
+/// ends, its lease goes back and its link closes, and the wait is the
+/// resumer's: the import activates on the Committed.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_recipient_leaving_while_prepared_ends_the_session_and_still_activates() {
+    use crate::handover::live::resumer::{Backoff, Resumer};
+    let mut j = joined("dst-prepared-leave");
+    let mut src = consented(&mut j);
+    let t = src.transfer();
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let Some(Handover::Recipient(s)) = j.hg.state.handover.as_mut() else { panic!("no recipient session") };
+    drop(s.take_lease());
+    s.hold_lease(Box::new(FlagLease(released.clone())));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !(recipient_stage(&j.hg) == Some(RecipientStage::Prepared) && src.past_retirement()) && std::time::Instant::now() < deadline {
+        j.host.lend_tick(&mut j.hs);
+        if let Some(Handover::Recipient(s)) = j.hg.state.handover.as_mut() {
+            let _ = s.pump(now());
+        }
+        if src.stage() == SourceStage::Publishing {
+            src.join_publish_worker();
+        }
+        if src.pump(&mut j.hs, live(), now()).is_err() {
+            break;
+        }
+    }
+    assert_eq!(recipient_stage(&j.hg), Some(RecipientStage::Prepared), "the recipient never reached Prepared (source {:?})", src.stage());
+    assert!(src.past_retirement(), "the source never retired (stage {:?})", src.stage());
+    let Some(Handover::Recipient(s)) = &j.hg.state.handover else { unreachable!() };
+    assert!(!s.activation_handed() && !Resumer::global().holds_import(t), "the wait was handed before the leave");
+    let working = s.checkpoint().unwrap().working_world();
+    // The source's Committed is on the loopback relay before the leave.
+    let fast = Resumer::new(Backoff { first: std::time::Duration::from_millis(100), ceiling: std::time::Duration::from_millis(400) });
+    assert!(src.hand_publication(&fast), "the publication wasn't taken");
+    let src_store = crate::handover::live::authority::store(&j._dir.0.join("world")).unwrap();
+    let retired = crate::handover::phase::RetiredCommit::read(&src_store, t).unwrap().expect("no retirement record");
+    while !retired.is_published(&src_store) {
+        assert!(std::time::Instant::now() < deadline, "Committed was never published");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(j.hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby), "the leave failed");
+    assert!(j.hg.state.handover.is_none(), "the Prepared session outlived leaving the world");
+    assert!(released.load(Ordering::SeqCst), "leaving didn't give the session's router lease back");
+    assert!(j.hg.state.upnp_lease.is_none(), "the lease came back to a joined session that has gone");
+    let store = crate::handover::live::authority::store(&working).unwrap();
+    let activated = || store.read(crate::handover::durable::MarkerKind::Activated, t).unwrap().is_some();
+    assert!(Resumer::global().holds_import(t) || activated(), "nothing holds the wait for Committed after the leave");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !activated() {
+        assert!(std::time::Instant::now() < deadline, "the recipient never activated after leaving while Prepared");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
