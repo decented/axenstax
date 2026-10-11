@@ -5927,7 +5927,18 @@ gone; a live Abort after the ack quarantines through the shared check, and
 one carrying the source's Committed quarantines nothing; an abort racing a
 retire leaves exactly one record; with both on the relay Committed wins
 with the line; an Aborted of another transfer or over another Prepared is
-ignored; a failed abort record still unfreezes, with the line.
+ignored; a failed abort record still unfreezes, with the line. CP13b (CP13 review MEDIUM-1): the ledger's append
+bound is its read bound (entry 8,193 is refused at append time, before its
+record), so it holds about 4,000 handovers per install for its lifetime
+(compaction is CP14). Before the bearer is disclosed, and before a recipient
+writes its receipt, the ledger must read back with room for 2 more entries,
+or the handover stops with "This device's handover record is full or can't
+be read, so the handover stopped. Nothing was handed over." A ledger write
+error at retire means the record certainly wasn't written: the source goes
+back to Prepared and aborts (the live Abort and the abort-record rule), never
+the `RetirementUncertain` freeze. CP13b (CP13 review LOW-1): a recipient's
+Cancel after its ack says "Waiting for <npub> to finish. You can leave; the
+game will keep checking.", never "cancelled".
 
 And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,

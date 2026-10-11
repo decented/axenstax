@@ -619,6 +619,11 @@ impl RecipientSession {
         self.activation_handed = resumer.adopt_import(&c.working_world(), t, &ledger) || resumer.holds_import(t);
         self.activation_handed
     }
+    /// CP13b (CP13 review LOW-1): the ack send has started (from here the
+    /// recipient never aborts on its own).
+    pub fn ack_started(&self) -> bool {
+        self.ack_started
+    }
     pub fn activation_handed(&self) -> bool {
         self.activation_handed
     }
@@ -762,6 +767,10 @@ impl RecipientSession {
         // CP10 (HIGH-2): the Prepared receipt WITH the bearer, the exact
         // Prepared event and the root's relays is durable before the ack
         // can leave (a failed write sends nothing and aborts while inert).
+        // CP13b (CP13 review MEDIUM-1): room in the ledger before the receipt.
+        if !crate::handover::ledger::Ledger::install().has_room(2) {
+            return Err(Refusal(super::copy::LEDGER_FULL));
+        }
         let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;
         let markers = self.markers.as_ref().ok_or(Refusal("No Ready."))?;
         receiver

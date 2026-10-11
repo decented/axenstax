@@ -318,6 +318,9 @@ impl AbortRecord {
 /// CP13b (D2): the refusals of the one choke point.
 pub const ABORT_RECORD_EXISTS: &str = "abort record exists";
 pub const RETIREMENT_RECORD_EXISTS: &str = "retirement record exists";
+/// CP13b (CP13 review MEDIUM-1): the ledger entry couldn't be written, so
+/// the record certainly wasn't: a certain non-retirement (an abort).
+pub const LEDGER_UNWRITTEN: &str = "handover ledger unwritten";
 static TERMINAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// CP13b (D2): the ONE function that writes a source's terminal record for
 /// `transfer`: the retirement record (`Retired`) or the abort record
@@ -335,7 +338,7 @@ fn write_terminal(store: &MarkerStore, ledger: &super::ledger::Ledger, transfer:
     if store.read(other, transfer)?.is_some() {
         return Err(Error::State(refusal));
     }
-    ledger.append(Entry::of(transfer, Role::Source, entry, bytes))?;
+    ledger.append(Entry::of(transfer, Role::Source, entry, bytes)).map_err(|_| Error::State(LEDGER_UNWRITTEN))?;
     store.persist(kind, transfer, bytes)
 }
 
@@ -652,6 +655,7 @@ impl Source {
         let bytes = record.encode()?;
         // Pessimistically quarantine on ANY persistence error. This also covers
         // unreadable existing retirement, unlike treating every IO as absence.
+        let was = self.stage;
         self.stage = SourceStage::RetirementUncertain;
         self.retirement = Some(record.clone());
         // CP13b (D2): the one choke point; an abort record of this
@@ -661,6 +665,15 @@ impl Source {
                 self.stage = SourceStage::Aborted;
                 self.retirement = None;
                 return Err(Error::State(ABORT_RECORD_EXISTS));
+            }
+            // Nothing written this time: back to where it was (Prepared
+            // aborts; an earlier uncertain write stays uncertain).
+            Err(Error::State(LEDGER_UNWRITTEN)) => {
+                self.stage = was;
+                if was == SourceStage::Prepared {
+                    self.retirement = None;
+                }
+                return Err(Error::State(LEDGER_UNWRITTEN));
             }
             r => r?,
         }
@@ -1778,6 +1791,9 @@ mod tests {
             let decoded = Retirement::decode(&retirement.encode().unwrap()).unwrap();
             assert!(source.retire(&store, &crate::handover::ledger::Ledger::install(), decoded).is_err());
             assert!(source.retire(&store, &blocked, retirement.clone()).is_err(), "a failed ledger write still retired");
+            // CP13b (CP13 review MEDIUM-1): a certain non-retirement, so the
+            // source can abort; never the RetirementUncertain freeze.
+            assert_eq!(source.stage(), SourceStage::Prepared, "a ledger error at retire froze the source");
             assert_eq!(store.read(MarkerKind::Retired, c.transfer).unwrap(), None, "the retirement record was written before its ledger entry");
             let permit = source.retire(&store, &crate::handover::ledger::Ledger::install(), retirement).unwrap();
             assert!(

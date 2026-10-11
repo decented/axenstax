@@ -14,6 +14,11 @@ impl SourceSession {
         if self.cfg.world_dir.is_none() {
             return Err(Refusal(crate::handover::live::copy::NEVER_SAVED));
         }
+        // CP13b (CP13 review MEDIUM-1): room for this handover's records in
+        // the install's ledger before the bearer can leave.
+        if !crate::handover::ledger::Ledger::install().has_room(2) {
+            return Err(Refusal(crate::handover::live::copy::LEDGER_FULL));
+        }
         let unsealed = Refusal("The handover record couldn't be sealed. Play has resumed.");
         let core = self.core.clone().ok_or(Refusal("No certificate."))?;
         let ready = self.ready.clone().ok_or(Refusal("No Ready."))?;

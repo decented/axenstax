@@ -120,6 +120,12 @@ pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record thi
 pub const WORLD_IN_TWO_PLACES: &str = "This world may now exist in two places.";
 /// CP13b (D2): the source's abort record couldn't be saved; play resumed.
 pub const ABORT_UNRECORDED: &str = "The cancellation couldn't be saved, so the other player may keep waiting until they cancel.";
+/// CP13b (CP13 review MEDIUM-1): the ledger can't take this handover.
+pub const LEDGER_FULL: &str = "This device's handover record is full or can't be read, so the handover stopped. Nothing was handed over.";
+/// CP13b (CP13 review LOW-1): a recipient's Cancel after its ack.
+pub fn waiting_after_ack(npub: &str) -> String {
+    format!("Waiting for {npub} to finish. You can leave; the game will keep checking.")
+}
 pub const HANDOVER_UNFINISHED: &str = "This handover didn't finish. The world stays with the sender.";
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";

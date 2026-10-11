@@ -697,8 +697,11 @@ impl crate::GameState {
                 self.handover_toast(copy::DECLINED);
             }
             (UiAction::Cancel, Some(Handover::Recipient(s))) => {
+                // CP13b (CP13 review LOW-1): after the ack nothing is
+                // cancelled; the wait goes on in the background.
+                let line = if s.ack_started() { copy::waiting_after_ack(&s.proposal().source_npub) } else { copy::CANCELLED.to_owned() };
                 s.abort("You cancelled the handover.");
-                self.end_recipient(copy::CANCELLED);
+                self.end_recipient(&line);
             }
             (UiAction::Cancel, Some(Handover::Source { session, .. })) => {
                 // CP7 review HIGH-1: Cancel is not drawn past retirement, and

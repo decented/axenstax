@@ -146,7 +146,10 @@ impl Ledger {
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let mut file = options.open(&self.path).map_err(|_| Error::Io)?;
         let len = file.metadata().map_err(|_| Error::Io)?.len();
-        if len + LINE as u64 > MAX_BYTES {
+        // CP13b (CP13 review MEDIUM-1): the read bound, at append time. The
+        // file after this append (a torn tail's newline included) must still
+        // read back whole, so entry 8,193 is refused here, before its record.
+        if len + 1 + LINE as u64 > MAX_BYTES || whole_entries(&mut file, len)? >= MAX_ENTRIES {
             return Err(Error::Limit("handover ledger"));
         }
         let mut out = Vec::with_capacity(LINE + 1);
@@ -165,6 +168,14 @@ impl Ledger {
             super::durable::sync_directory(dir)?;
         }
         Ok(())
+    }
+
+    /// CP13b (CP13 review MEDIUM-1): whether the ledger reads back and has
+    /// room for `n` more entries (checked before the bearer is disclosed and
+    /// before a receipt, so a handover never starts that can't be listed).
+    pub fn has_room(&self, n: usize) -> bool {
+        let len = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        self.entries().is_ok_and(|e| e.len() + n <= MAX_ENTRIES) && len + n as u64 * (LINE as u64 + 1) <= MAX_BYTES
     }
 
     /// Every whole entry, in order. A missing file is empty. A torn or
@@ -200,10 +211,32 @@ impl Ledger {
     }
 }
 
+/// The whole entries in the first `len` bytes of `file` (under the lock).
+fn whole_entries(file: &mut std::fs::File, len: u64) -> Result<usize> {
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+    (&mut *file).take(len).read_to_end(&mut bytes).map_err(|_| Error::Io)?;
+    Ok(bytes.split(|b| *b == b'\n').filter_map(Entry::parse).count())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// CP13b (CP13 review MEDIUM-1): the append bound is the read bound.
+    #[test]
+    fn handover_ledger_refuses_entry_8193_before_its_record_and_reports_headroom() {
+        let l = temp("full");
+        std::fs::create_dir_all(l.path().parent().unwrap()).unwrap();
+        std::fs::write(l.path(), entry(1, RecordKind::Retirement).line().repeat(MAX_ENTRIES - 2)).unwrap();
+        assert!(l.has_room(2) && !l.has_room(3), "the headroom check is off");
+        l.append(entry(2, RecordKind::Abort)).unwrap();
+        l.append(entry(3, RecordKind::Abort)).unwrap();
+        assert!(!l.has_room(1));
+        assert!(l.append(entry(4, RecordKind::Abort)).is_err(), "entry 8,193 was appended");
+        assert_eq!(l.entries().unwrap().len(), MAX_ENTRIES, "the full ledger no longer reads back");
+        assert!(l.lists(&entry(3, RecordKind::Abort)));
+    }
     fn temp(tag: &str) -> Ledger {
         let dir = std::env::temp_dir().join(format!("axenstax-ledger-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
