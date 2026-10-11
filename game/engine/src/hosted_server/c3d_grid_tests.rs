@@ -18,22 +18,28 @@ use crate::transport::ClientTransport as _;
 use crate::window::{Station, WindowClick};
 use crate::window_events::InboxItem;
 
-const TABLE: [i32; 3] = [41, 80, 40];
+pub(super) const TABLE: [i32; 3] = [41, 80, 40];
 const SECKEY: [u8; 32] = [71; 32];
 
-struct Joined {
+pub(super) struct Joined {
     _g: crate::save::WorldsRootGuard,
-    hs: HostedServer,
-    rc: RemoteClient,
-    i: usize,
-    inv: crate::inventory::Inventory,
-    armour: [Option<crate::armour::ArmourItem>; 4],
-    ui: crate::craft_ui::CraftingUi,
+    pub(super) hs: HostedServer,
+    pub(super) rc: RemoteClient,
+    pub(super) i: usize,
+    pub(super) inv: crate::inventory::Inventory,
+    pub(super) armour: [Option<crate::armour::ArmourItem>; 4],
+    pub(super) ui: crate::craft_ui::CraftingUi,
     inbox: crate::window_events::WindowInbox,
-    reg: crate::block::BlockRegistry,
+    pub(super) reg: crate::block::BlockRegistry,
+    /// Whole-window syncs the client applied.
+    pub(super) syncs: usize,
 }
 
-fn stone(n: u8) -> ItemStack { ItemStack::new_block(STONE, n) }
+/// A saved record to rejoin from: its grid cells (row, col, stack), and the
+/// stack every bag slot holds (`None`: an empty bag).
+type Record<'a> = (&'a [(usize, usize, ItemStack)], Option<ItemStack>);
+
+pub(super) fn stone(n: u8) -> ItemStack { ItemStack::new_block(STONE, n) }
 
 fn units(inv: &crate::inventory::Inventory, item: &crate::item::Item) -> u32 {
     (0..36).filter_map(|at| inv.slot(at)).filter(|s| s.item == *item).map(|s| u32::from(s.count)).sum()
@@ -42,7 +48,25 @@ fn units(inv: &crate::inventory::Inventory, item: &crate::item::Item) -> u32 {
 /// A server in `mode` on a stone floor with a crafting table beside the
 /// joiner's spot (40.5, 80, 40.5). `saved_grid`: a signed rejoin whose saved
 /// record holds those grid cells (row, col, stack); otherwise a guest.
-fn joined(tag: &str, mode: InventoryMode, saved_grid: Option<&[(usize, usize, ItemStack)]>) -> Joined {
+pub(super) fn joined(tag: &str, mode: InventoryMode, saved_grid: Option<&[(usize, usize, ItemStack)]>) -> Joined {
+    joined_from(tag, mode, saved_grid.map(|grid| (grid, None)))
+}
+
+/// [`joined`] from a full [`Record`], the join sync applied.
+fn joined_from(tag: &str, mode: InventoryMode, record: Option<Record>) -> Joined {
+    let saved = record.is_some();
+    let mut j = start(tag, mode, record);
+    for _ in 0..20 {
+        j.pump();
+        if j.rc.player_index().is_some() && (!saved || j.rc.applied_window_boundary() >= 1) { break; }
+    }
+    j.pumps(2);
+    j.place();
+    j
+}
+
+/// The server and the client before the join is heard (nothing polled).
+fn start(tag: &str, mode: InventoryMode, record: Option<Record>) -> Joined {
     let name = format!("c3d-grid-{tag}");
     let g = crate::save::WorldsRootGuard::new(&name);
     let mut hs = super::tests::start_room_test_server(&name, 0);
@@ -59,9 +83,9 @@ fn joined(tag: &str, mode: InventoryMode, saved_grid: Option<&[(usize, usize, It
     hs.server.world.set_block(TABLE[0], TABLE[1], TABLE[2], CRAFTING_TABLE);
     let cs = crate::chunk::CHUNK_SIZE as i32;
     hs.server.loaded_columns.insert((40i32.div_euclid(cs), 40i32.div_euclid(cs)));
-    let rc = match saved_grid {
+    let rc = match record {
         None => RemoteClient::from_transport(Box::new(hs.attach_test_remote()), crate::remote_client::build_join_request_guest("Crafter", 0), None),
-        Some(cells) => {
+        Some((cells, bag)) => {
             // A saved record: a crash, a drop or a refused Close left items
             // in the grid (the save keeps the grid).
             let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&SECKEY).unwrap());
@@ -70,6 +94,7 @@ fn joined(tag: &str, mode: InventoryMode, saved_grid: Option<&[(usize, usize, It
             saved.verified_pubkey = Some(keys.public_key().to_bytes());
             saved.enter_world();
             for (row, col, stack) in cells { saved.craft_grid[*row][*col] = Some(stack.clone()); }
+            if let Some(bag) = bag { for at in 0..36 { saved.inventory.set_slot(at, Some(bag.clone())); } }
             hs.server.players.push(saved);
             hs.server.save_joiner(hs.server.players.len() - 1).expect("the record is saved");
             hs.server.players.pop();
@@ -85,25 +110,22 @@ fn joined(tag: &str, mode: InventoryMode, saved_grid: Option<&[(usize, usize, It
             RemoteClient::from_transport(Box::new(transport), request, None)
         }
     };
-    let mut j = Joined {
+    Joined {
         _g: g, hs, rc, i: 0, inv: crate::inventory::Inventory::new(), armour: [None; 4],
-        ui: crate::craft_ui::CraftingUi::new(), inbox: Default::default(), reg: crate::block::BlockRegistry::new(),
-    };
-    for _ in 0..20 {
-        j.pump();
-        if j.rc.player_index().is_some() && (saved_grid.is_none() || j.rc.applied_window_boundary() >= 1) { break; }
+        ui: crate::craft_ui::CraftingUi::new(), inbox: Default::default(), reg: crate::block::BlockRegistry::new(), syncs: 0,
     }
-    j.pumps(2);
-    j.i = j.rc.player_index().expect("joined") as usize;
-    assert_eq!(j.rc.inventory_mode, mode, "the session's mode");
-    let p = &mut j.hs.server.players[j.i].player;
-    p.pos = glam::Vec3::new(40.5, 80.0, 40.5);
-    p.velocity = glam::Vec3::ZERO;
-    p.on_ground = true;
-    j
 }
 
 impl Joined {
+    /// The joiner's slot, its body on its spot beside the table.
+    fn place(&mut self) {
+        self.i = self.rc.player_index().expect("joined") as usize;
+        let p = &mut self.hs.server.players[self.i].player;
+        p.pos = glam::Vec3::new(40.5, 80.0, 40.5);
+        p.velocity = glam::Vec3::ZERO;
+        p.on_ground = true;
+    }
+
     /// One server tick, then the client reads and applies what it was sent,
     /// in event order (the game loop's `apply_window_inbox`).
     fn pump(&mut self) {
@@ -120,6 +142,7 @@ impl Joined {
                     let mut w = crate::window::WindowMut { inv: &mut self.inv, armour: &mut self.armour, cursor: &mut self.ui.cursor_item, grid: &mut self.ui.grid, container: None };
                     let station = crate::inventory_sync::apply(&mut w, &pkt, &self.reg, &mut crate::use_edits::SentUses::default(), &mut self.inbox.debt, self.rc.inventory_mode).expect("a readable sync");
                     if let Some(station) = station { self.ui.adopt_station(station); }
+                    self.syncs += 1;
                 }
                 InboxItem::Grant(grant) => { crate::remote_entities::apply_inventory_grant(&mut self.inv, &grant, &self.reg); }
                 _ => {}
@@ -132,40 +155,53 @@ impl Joined {
         }
     }
 
-    fn pumps(&mut self, n: usize) { for _ in 0..n { self.pump(); } }
+    pub(super) fn pumps(&mut self, n: usize) { for _ in 0..n { self.pump(); } }
 
     /// Both copies hold `stack` in their bags from the same grant.
-    fn give(&mut self, slot: usize, stack: ItemStack) {
+    pub(super) fn give(&mut self, slot: usize, stack: ItemStack) { self.set_both(slot, Some(stack)); }
+
+    /// Bag `slot` emptied on both copies (the player made room).
+    fn clear(&mut self, slot: usize) { self.set_both(slot, None); }
+
+    fn set_both(&mut self, slot: usize, stack: Option<ItemStack>) {
         let applied = self.rc.applied_window_boundary();
         let sp = &mut self.hs.server.players[self.i];
         crate::window_events::apply_through(sp, applied, 0);
-        sp.inventory.set_slot(slot, Some(stack.clone()));
-        self.inv.set_slot(slot, Some(stack));
+        sp.inventory.set_slot(slot, stack.clone());
+        self.inv.set_slot(slot, stack);
     }
 
     /// A Strict click through the real reserving entry point, by a body
     /// beside the table.
-    fn click(&mut self, click: WindowClick) {
+    pub(super) fn click(&mut self, click: WindowClick) {
         let eye = self.hs.server.players[self.i].player.eye_pos();
         let ctx = crate::window::ClickCtx::new(false, self.ui.station(), eye, |_| CRAFTING_TABLE);
         self.ui.apply_joined_click(&mut self.rc, &mut self.inv, &mut self.armour, &click, &ctx, &self.reg).expect("reserved and sent");
     }
 
     /// E (or a table) through the real open: Strict reserves, Mirror logs.
-    fn open(&mut self, table: Option<[i32; 3]>) -> bool {
+    pub(super) fn open(&mut self, table: Option<[i32; 3]>) -> bool {
         match self.rc.inventory_mode {
             InventoryMode::Strict => self.ui.open_joined(&mut self.rc, table, &mut self.inv, &mut self.armour, &self.reg).expect("reserved and sent"),
             InventoryMode::Mirror => self.ui.open_crafting(table, &mut self.inv, &mut self.armour),
         }
     }
 
-    fn kill(&mut self) {
+    /// E (or Esc) on an open screen: its `Close`. Strict reserves, Mirror logs.
+    fn close(&mut self) -> bool {
+        match self.rc.inventory_mode {
+            InventoryMode::Strict => self.ui.close_joined(&mut self.rc, &mut self.inv, &mut self.armour, &self.reg).expect("reserved and sent"),
+            InventoryMode::Mirror => self.ui.close(&mut self.inv, &mut self.armour),
+        }
+    }
+
+    pub(super) fn kill(&mut self) {
         let sp = &mut self.hs.server.players[self.i];
         sp.combat.health = 0.0;
         sp.combat.dead = true;
     }
 
-    fn respawn(&mut self) {
+    pub(super) fn respawn(&mut self) {
         self.hs.server.players[self.i].dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
         self.rc.send_respawn();
         self.pumps(3);
@@ -173,16 +209,36 @@ impl Joined {
     }
 
     /// The server's copy once it has applied what the client has.
-    fn server_settled(&mut self) -> &crate::server::ServerPlayer {
+    pub(super) fn server_settled(&mut self) -> &crate::server::ServerPlayer {
         let applied = self.rc.applied_window_boundary();
         let sp = &mut self.hs.server.players[self.i];
         crate::window_events::apply_through(sp, applied, 0);
         sp
     }
 
-    fn assert_live(&self, what: &str) {
+    pub(super) fn assert_live(&self, what: &str) {
         assert!(matches!(self.rc.state, ConnectionState::Connected { .. }), "{what}: never torn down");
         assert!(self.hs.server.players.get(self.i).is_some_and(|sp| sp.is_present_and_alive()), "{what}: the joiner is still in the world");
+    }
+
+    /// Never torn down, and the client's window digests as the server's
+    /// copy does once that has applied what the client has.
+    pub(super) fn assert_agree(&mut self, what: &str) {
+        self.assert_live(what);
+        let mine = self.ui.digest(&self.inv, &self.armour);
+        let sp = self.server_settled();
+        let theirs = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+        assert_eq!(mine, theirs, "{what}: the two windows agree");
+    }
+
+    /// The header of the client's newest reserved action.
+    pub(super) fn last_action(&self) -> crate::action_identity::ActionHeader {
+        self.rc.action_journal.as_ref().and_then(|j| j.actions().last()).expect("a reserved action").header
+    }
+
+    /// The server's retained fate for `action` (read without a resend).
+    pub(super) fn fate(&self, action: crate::action_identity::ActionHeader) -> Option<crate::action_identity::ActionFate> {
+        self.hs.server.players[self.i].action_results.as_ref()?.peek(action).map(|row| row.fate)
     }
 
     /// The grid is empty and `stack`'s units are in the bag on both copies,
@@ -288,4 +344,66 @@ fn c3d_strict_e_to_e_across_a_waiting_correction_ends_at_the_snapshot_station() 
     assert!(j.ui.close_joined(&mut j.rc, &mut j.inv, &mut j.armour, &j.reg).expect("reserved"));
     j.pumps(3);
     j.assert_returned(&stone(4), "after the respawn");
+}
+
+/// C3d run 10 (run-8 review LOW-A, LOW-B) — the refused return-the-grid
+/// `Close`: a rejoin from a record with a full bag and a table's leftovers
+/// beyond the 2×2 (the record keeps the grid, not the table, so the station
+/// is the player's), then E or a table. The open's `Close` is refused, so
+/// the asked screen doesn't open: the screen shows the leftovers at its own
+/// station, drawing every held cell, with nothing sent and both copies
+/// agreeing. Once one bag slot is free, E (a `Close` on the open screen)
+/// returns them to the bag on both copies.
+#[test]
+fn c3d_grid_refused_return_close_shows_every_held_cell_in_both_modes() {
+    let dirt = ItemStack::new_block(crate::block::DIRT, 64);
+    for mode in [InventoryMode::Mirror, InventoryMode::Strict] {
+        for ask in [None, Some(TABLE)] {
+            let what = format!("{mode:?}, asked {ask:?}");
+            let held = [(2, 0, stone(5)), (1, 2, stone(3))];
+            let mut j = joined_from(&format!("held-{mode:?}-{}", ask.is_some()), mode, Some((&held, Some(dirt.clone()))));
+            assert!(!j.ui.open && j.ui.grid[2][0].is_some(), "{what}: the join sync restored the grid behind a closed screen");
+            assert!(!j.open(ask), "{what}: the return Close is refused (a full bag): the asked screen doesn't open");
+            j.pumps(3);
+            j.assert_live(&what);
+            assert!(j.ui.open, "{what}: the screen shows what is left");
+            assert_eq!(j.ui.station(), Station::Player, "{what}: at its own station, never the asked one");
+            assert_eq!(j.ui.grid[2][0].as_ref().map(|s| s.count), Some(5), "{what}: the leftovers are intact");
+            assert_eq!(j.ui.grid[1][2].as_ref().map(|s| s.count), Some(3), "{what}: all of them");
+            assert_eq!(j.ui.view_grid_size(), 3, "{what}: every held cell is drawn");
+            let server_grid = j.server_settled().craft_grid.clone();
+            assert_eq!(server_grid, j.ui.grid, "{what}: the server's copy holds the same grid");
+            j.assert_agree(&what);
+            j.clear(35);
+            assert!(j.close(), "{what}: E closes once the bag has room");
+            j.pumps(3);
+            j.assert_returned(&stone(8), &what);
+        }
+    }
+}
+
+/// C3d run 10 (run-8 review LOW-D) — a Mirror joiner locks a slot before its
+/// client applies the join sync: the op is served on the server's copy at
+/// the old base, then the join `Replace` applies there. The copy keeps the
+/// lock (a Mirror client keeps its own locks, run 7, and `bdd4fe87`'s
+/// `set_slot` never touched them), so the two windows agree.
+#[test]
+fn c3d_mirror_lock_toggled_before_the_join_sync_survives_its_replace() {
+    let mut j = start("lock-race", InventoryMode::Mirror, Some((&[], None)));
+    for _ in 0..20 {
+        j.hs.tick();
+        j.rc.poll();
+        if j.rc.player_index().is_some() { break; }
+    }
+    j.place();
+    assert_eq!(j.rc.applied_window_boundary(), 0, "the join sync is heard, not applied");
+    j.ui.apply_click(&mut j.inv, &mut j.armour, &WindowClick::ToggleLock { slot: 3 }, false, glam::Vec3::ZERO, |_| AIR);
+    for logged in j.ui.take_ops(&j.inv, &j.armour) { j.rc.send_window_op(logged); }
+    j.hs.tick();
+    assert!(j.hs.server.players[j.i].inventory.is_locked(3), "the lock is served on the old base");
+    j.pumps(3);
+    assert!(j.rc.applied_window_boundary() >= 1 && j.syncs == 1, "the client applied the join sync");
+    assert!(j.inv.is_locked(3), "the Mirror client keeps its lock");
+    assert!(j.server_settled().inventory.is_locked(3), "the join Replace kept the server copy's lock");
+    j.assert_agree("after the join sync");
 }

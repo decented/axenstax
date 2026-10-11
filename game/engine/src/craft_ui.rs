@@ -159,12 +159,28 @@ impl CraftingUi {
 
     /// C3d run 8 (review H1) — the return-the-grid `Close` an open sends
     /// first was refused (a full bag): the screen opens at its OWN station
-    /// with what is left on it, so nothing is hidden (a 2×2 opened over a
-    /// table's 3×3 leftovers would hide five cells). Nothing is sent: the
-    /// server's copy is at that station already.
+    /// with what is left on it, never at the one asked for. Nothing is sent:
+    /// the server's copy is at that station already. C3d run 10 (run-8
+    /// review LOW-A) — the station can be the player's 2×2 while a table's
+    /// leftovers sit beyond it (a rejoin, or a death sync, restores a grid
+    /// but not the table); the screen then draws every cell that holds an
+    /// item ([`Self::view_grid_size`]), so nothing is hidden.
     fn show_held_grid(&mut self) {
         self.reset_screen(self.table);
         self.update_result();
+    }
+
+    /// C3d run 10 (run-8 review LOW-A) — the side of the grid the screen
+    /// draws: the station's, or 3 while a cell beyond the station's 2×2
+    /// holds an item. View only: the station, the digest and the click rule
+    /// are unchanged (the server's copy is at the same station), and a cell
+    /// the station doesn't have is drawn but takes no click; a `Close` once
+    /// the bag has room returns it.
+    pub fn view_grid_size(&self) -> usize {
+        let size = self.station().grid_size();
+        let beyond = self.grid.iter().enumerate()
+            .any(|(r, row)| row.iter().enumerate().any(|(c, cell)| cell.is_some() && (r >= size || c >= size)));
+        if beyond { 3 } else { size }
     }
 
     /// Open the player's own 2×2 grid (E). Logged as a window op
@@ -871,7 +887,10 @@ pub fn draw_crafting_ui(
     if !any_down {
         ui_state.clear_drag();
     }
-    let grid_size = if ui_state.is_table() { 3usize } else { 2 };
+    // C3d run 10 (LOW-A) — every cell holding an item is drawn; only the
+    // station's own cells take clicks.
+    let grid_size = ui_state.view_grid_size();
+    let station_size = ui_state.station().grid_size();
     let slot_size = 48.0;
     let gap = 4.0;
     // Controller slot-cursor: rect of the focused slot, captured while
@@ -968,6 +987,9 @@ pub fn draw_crafting_ui(
                                     );
                                     if pad_focused {
                                         focused_rect = Some(response.rect);
+                                    }
+                                    if r >= station_size || c >= station_size {
+                                        continue; // shown, never clicked (LOW-A)
                                     }
                                     if response.clicked() {
                                         click_target = ClickTarget::GridSlot(r, c, false);

@@ -60,6 +60,13 @@ impl ActionResults {
         row.needs_send = true;
         Some(row.receipt)
     }
+    /// Tests: the retained row for `action`, read without re-arming its send
+    /// (a real client would hear a second receipt from [`Self::repeat`]).
+    #[cfg(test)]
+    pub fn peek(&self, action: ActionHeader) -> Option<ActionReceipt> {
+        if !self.owns(action) { return None; }
+        self.rows.iter().find(|r| r.receipt.action.seq == action.seq).map(|r| r.receipt)
+    }
     pub fn take_unsent(&mut self) -> Vec<ActionReceipt> {
         self.rows.iter_mut().filter_map(|r| {
             if !r.needs_send { return None; }

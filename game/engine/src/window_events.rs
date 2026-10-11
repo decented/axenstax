@@ -461,9 +461,16 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
     if forced {
         sp.window_events.tally.forced = sp.window_events.tally.forced.saturating_add(1);
     }
+    // C3d run 10 (run-8 review LOW-D) — a Mirror copy keeps its own lock mask
+    // across a `Replace`, as its client does (run 7) and as `bdd4fe87` did; a
+    // lock toggled before the join sync applied is never wiped.
+    let strict = sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict;
+    let mirror_locks = (!strict && matches!(w.event, WindowEvent::Replace { .. })).then(|| sp.inventory.locked_indices());
     let mut parts =
         Parts { inv: &mut sp.inventory, armour: &mut sp.armour, cursor: &mut sp.cursor, grid: &mut sp.craft_grid };
-    match (apply_to(&mut parts, &mut sp.window_events.debt, &w.event), w.event) {
+    let effect = apply_to(&mut parts, &mut sp.window_events.debt, &w.event);
+    if let Some(locks) = mirror_locks { sp.inventory.set_locked_from(&locks); }
+    match (effect, w.event) {
         (Effect::Granted { landed }, WindowEvent::Grant(stack)) => {
             let overflow = stack.count.saturating_sub(landed);
             sp.possession.grant_overflow = sp.possession.grant_overflow.saturating_add(u32::from(overflow));
@@ -495,7 +502,7 @@ fn apply_front(sp: &mut ServerPlayer, now: u64, forced: bool) {
             sp.window_events.forced_corrections.clear();
             // C3d run 8 (review LOW-2) — Strict only: a Mirror client keeps its
             // own station (run 7), so its server copy does too.
-            if sp.server_simulated && sp.inventory_mode == crate::action_identity::InventoryMode::Strict { sp.station = station; }
+            if strict { sp.station = station; }
         }
         (Effect::Weapon(check), _) => sp.possession.note_wear(check),
         (Effect::Viewed, WindowEvent::ContainerView(view)) => view.apply(&mut sp.container_sent.seen),
