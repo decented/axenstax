@@ -62,7 +62,7 @@ impl Rig {
     }
     /// Fill the unacknowledged result history to its cap with terminal
     /// CancelledNoops (as a client that never acknowledges would).
-    fn fill_results(&mut self) {
+    pub(super) fn fill_results(&mut self) {
         let sp = &mut self.hs.server.players[self.i];
         let frontier = sp.action_frontier.as_mut().unwrap();
         let results = sp.action_results.as_mut().unwrap();

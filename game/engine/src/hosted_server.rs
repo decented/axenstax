@@ -27,6 +27,7 @@ mod sidecar;
 mod actions;
 mod strict_container;
 mod strict_edit;
+mod strict_attack;
 #[cfg(test)]
 mod c3d_tests;
 #[cfg(test)]
@@ -49,6 +50,8 @@ mod c3d_client_edit_tests;
 mod c3d_refusal_correction_tests;
 #[cfg(test)]
 mod c3d_client_shot_tests;
+#[cfg(test)]
+mod c3d_client_attack_tests;
 
 use std::collections::VecDeque;
 
@@ -2086,32 +2089,56 @@ impl HostedServer {
     }
 
     fn land_joiner_swing(&mut self, i: usize, req: &protocol::EntityAttackPacket) -> bool {
-        let Some((target, _kind)) = self.joiner_target(i, req.entity) else {
+        let Some(target) = self.check_joiner_swing(i, req) else {
             return false;
         };
+        // BRIDGE: possession check — replace when phase C makes joiner
+        // inventories server-authoritative. The held item is the client's
+        // word (as a block placement's is, `validate_block_edit`): it sets
+        // the damage, so a modified client can claim a better sword than it
+        // holds. Nothing else of the swing is its word. (A Strict seat's
+        // swing takes the server copy's item: `strict_attack.rs`.)
+        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
+        let base_damage = held.as_ref().map_or(1.0, crate::item::Item::attack_damage);
+        self.strike_joiner_swing(i, target, req.sprint, req.sneak, base_damage);
+        true
+    }
+
+    /// MP-D2b, split in C3d run 15 — the swing's rules, with no effect: a
+    /// living mob in reach of (and ahead of) the server's body for joiner
+    /// `i` ([`Self::joiner_target`]), never the joiner's own pet unless the
+    /// swing is a deliberate (sneaking) hit (1C no-friendly-fire), and off
+    /// the server's swing schedule (up to the jitter early). The one rule
+    /// both the Mirror swing and a Strict seat's typed attack check.
+    pub(super) fn check_joiner_swing(&self, i: usize, req: &protocol::EntityAttackPacket) -> Option<hecs::Entity> {
+        let (target, _kind) = self.joiner_target(i, req.entity)?;
         let tick = self.server.tick_counter;
         // A guest's key is empty: no pet is ever its own.
         let key = self.server.players[i].pet_owner_key().unwrap_or_default();
         // 1C no-friendly-fire: the joiner's own pet takes a swing only as a
         // deliberate (sneaking) hit, as single-player's target pick has it.
         if !req.sneak && crate::tameable::is_own_pet(&self.server.ecs, target, &key, None) {
-            return false;
+            return None;
         }
-        let sp = &mut self.server.players[i];
         // Review D2b LOW-2 — on the server's schedule: up to the jitter
-        // early, and each swing moves it a full cooldown on (never banking
-        // swings an idle client didn't make).
-        if tick + u64::from(ATTACK_COOLDOWN_JITTER_TICKS) < sp.next_swing_tick {
-            return false;
+        // early (each landed swing moves it a full cooldown on, never
+        // banking swings an idle client didn't make).
+        if tick + u64::from(ATTACK_COOLDOWN_JITTER_TICKS) < self.server.players[i].next_swing_tick {
+            return None;
         }
+        Some(target)
+    }
+
+    /// MP-D2b, split in C3d run 15 — land a swing [`Self::check_joiner_swing`]
+    /// passed: the schedule moves a full cooldown on, then `combat::strike`
+    /// + `combat::after_swing`, the single-player rule: `base_damage`, a
+    /// critical hit if the server's body is airborne, knockback, the sweep,
+    /// `LastAttacker` naming this joiner, a Nostrich's kick-back.
+    pub(super) fn strike_joiner_swing(&mut self, i: usize, target: hecs::Entity, sprint: bool, sneak: bool, base_damage: f32) {
+        let tick = self.server.tick_counter;
+        let key = self.server.players[i].pet_owner_key().unwrap_or_default();
+        let sp = &mut self.server.players[i];
         sp.next_swing_tick = sp.next_swing_tick.max(tick) + u64::from(crate::combat::ATTACK_COOLDOWN);
-        // BRIDGE: possession check — replace when phase C makes joiner
-        // inventories server-authoritative. The held item is the client's
-        // word (as a block placement's is, `validate_block_edit`): it sets
-        // the damage, so a modified client can claim a better sword than it
-        // holds. Nothing else of the swing is its word.
-        let held = held_item_from_wire(req.held_kind, req.held_id, &req.held_full, &self.server.registry);
-        let base_damage = held.as_ref().map_or(1.0, crate::item::Item::attack_damage);
         let eye = sp.player.eye_pos();
         let look_dir = crate::camera::forward_from(sp.yaw, sp.pitch);
         let crit = !sp.player.on_ground;
@@ -2124,13 +2151,13 @@ impl HostedServer {
                 eye,
                 look_dir,
                 crit,
-                sprinting: req.sprint,
-                sneaking: req.sneak,
+                sprinting: sprint,
+                sneaking: sneak,
                 base_damage,
             },
         );
         let kick =
-            crate::combat::after_swing(&mut self.server.ecs, target, &key, None, req.sneak, eye, tick);
+            crate::combat::after_swing(&mut self.server.ecs, target, &key, None, sneak, eye, tick);
         if let Some(kick) = kick {
             // Spec 28d.nostrich v2 — the kick-back lands on the joiner's body
             // (no armour, as in single-player).
@@ -2140,7 +2167,6 @@ impl HostedServer {
                 crate::survival::DamageCause::Mob(crate::mob::MobType::Nostrich),
             );
         }
-        true
     }
 
     /// MP-D2b — joiner `i` right-clicks `req.entity` for `req.kind`.

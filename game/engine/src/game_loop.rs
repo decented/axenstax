@@ -22115,18 +22115,14 @@ impl super::GameState {
     /// decides, and the weapon wears when it confirms (`InteractOutcome`).
     pub(crate) fn send_entity_attack(&mut self, pidx: usize, target: crate::remote_mobs::MirrorTarget, sprint: bool, sneak: bool) {
         let (hot, held, held_kind, held_id, held_full) = self.held_for_request(pidx);
-        let next_input = self.request_input_seq();
-        let seq = self.joiner_actions.record(
-            crate::joiner_actions::Pending {
-                kind: crate::joiner_actions::Asked::Swing,
-                mob: Some(target.kind),
-                hotbar_slot: hot,
-                held,
-            },
-            next_input,
-        );
-        self.send_request(crate::remote_client::Request::Attack(crate::protocol::EntityAttackPacket {
-            seq,
+        let pending = crate::joiner_actions::Pending {
+            kind: crate::joiner_actions::Asked::Swing,
+            mob: Some(target.kind),
+            hotbar_slot: hot,
+            held,
+        };
+        let packet = crate::protocol::EntityAttackPacket {
+            seq: 0,
             entity: target.id,
             held_kind,
             held_id,
@@ -22138,7 +22134,20 @@ impl super::GameState {
             hotbar_slot: hot.min(usize::from(u8::MAX)) as u8,
             // Stamped by `RemoteClient::send_entity_attack`.
             events_applied: 0,
-        }));
+        };
+        // C3d run 15 — a Strict seat reserves ONE typed attack and predicts
+        // nothing (`strict_requests::route_attack`); Mirror sends the legacy
+        // request below, unchanged.
+        if crate::strict_requests::shot_goes_typed(self.remote_client.as_ref()) {
+            let p = &mut self.players[pidx];
+            if let Err(error) = crate::strict_requests::route_attack(self.remote_client.as_mut(), &mut p.crafting_ui, &p.inventory, &p.armour_slots, &mut self.joiner_actions, pending, packet) {
+                log::warn!("Strict attack could not be reserved: {error}");
+            }
+            return;
+        }
+        let next_input = self.request_input_seq();
+        let seq = self.joiner_actions.record(pending, next_input);
+        self.send_request(crate::remote_client::Request::Attack(crate::protocol::EntityAttackPacket { seq, ..packet }));
     }
 
     /// MP-D2b — ask the server for interaction `kind` with its mob `target`

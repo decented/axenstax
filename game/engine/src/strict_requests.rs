@@ -1,4 +1,4 @@
-//! C3d run 13 — a Strict client's typed requests (a shot today).
+//! C3d run 13 — a Strict client's typed requests (a shot; run 15, an attack).
 //!
 //! On a Strict seat a shot is ONE typed `ActionIntent::Item` (`Shoot`),
 //! reserved in the action journal BEFORE anything else changes, as a typed
@@ -91,4 +91,54 @@ pub fn route_shot(
         log::warn!("Reserved shot {} could not be sent: {error}", header.seq);
     }
     Ok(ShotRoute::Typed(header))
+}
+
+/// What a reserved typed attack retains in its journal entry.
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AttackRecipe {
+    /// The hotbar slot the swing was made from (the server reads its own
+    /// copy's item there, never the claim).
+    pub slot: u8,
+    /// The window it was made on; an attack predicts nothing, so it is also
+    /// the window after it until the outcome arrives.
+    pub digest: u32,
+}
+
+/// C3d run 15 — route player 0's swing `packet` (its `events_applied` is
+/// stamped here), recorded as `pending` (what Mirror's
+/// `GameState::send_entity_attack` records): on a Strict seat, the
+/// session's refill setting, the record, ONE reserved
+/// `ActionIntent::Attack`, then the send, and `Some(header)`; nothing is
+/// predicted (the weapon wears when the server's `InteractOutcome` names
+/// its numbered Wear). `None` off a Strict seat: the caller sends the
+/// legacy `EntityAttack` request, unchanged. A failed reservation releases
+/// the record and changes nothing else.
+#[allow(clippy::too_many_arguments)]
+pub fn route_attack(
+    remote: Option<&mut RemoteClient>,
+    ui: &mut CraftingUi,
+    inv: &Inventory,
+    armour: &[Option<ArmourItem>; 4],
+    actions: &mut JoinerActions,
+    pending: Pending,
+    mut packet: protocol::EntityAttackPacket,
+) -> Result<Option<ActionHeader>, String> {
+    let Some(remote) = remote.filter(|r| shot_goes_typed(Some(&**r))) else { return Ok(None) };
+    ui.sync_auto_refill_joined(remote, inv, armour)?;
+    let recipe = AttackRecipe { slot: packet.hotbar_slot, digest: ui.digest(inv, armour) };
+    let recipe = bincode::serialize(&recipe).map_err(|e| e.to_string())?.into_boxed_slice();
+    packet.seq = actions.record(pending, remote.next_input_seq());
+    packet.events_applied = remote.applied_window_boundary();
+    let seq = packet.seq;
+    let header = match remote.reserve_action(crate::action_wire::ActionIntent::Attack(packet), recipe, Box::new([])) {
+        Ok(header) => header,
+        Err(error) => {
+            actions.release(seq);
+            return Err(error);
+        }
+    };
+    if let Err(error) = remote.send_reserved_action(header) {
+        log::warn!("Reserved attack {} could not be sent: {error}", header.seq);
+    }
+    Ok(Some(header))
 }

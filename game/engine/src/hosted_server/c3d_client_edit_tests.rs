@@ -127,6 +127,13 @@ impl Joined {
                         crate::joiner_actions::apply_use_wear(&mut self.inv, &request, &out);
                     }
                 }
+                // C3d run 15 — `GameState::apply_interact_outcome`'s window
+                // half: an accepted swing wears the weapon.
+                InboxItem::Outcome(RequestOutcome::Interact(out)) => {
+                    if let Some(request) = self.actions.take(out.seq) {
+                        crate::joiner_actions::apply_outcome(&mut self.inv, &mut self.ui, &request, &out);
+                    }
+                }
                 _ => {}
             }
             self.rc.note_window_event(event);

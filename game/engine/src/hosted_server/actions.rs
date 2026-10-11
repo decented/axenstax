@@ -147,6 +147,10 @@ impl HostedServer {
                         if !self.serve_strict_shot(i, packet.action, req.seq, weapon, hotbar_slot, (held_kind, held_id, held_full), Aim { yaw, pitch, charge }) { return; }
                     } else { return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed item handler is awaiting authoritative integration"); }
                 }
+                // C3d run 15 — a swing at the server's mob (`strict_attack.rs`).
+                ActionIntent::Attack(req) if self.strict_slot(i) => {
+                    if !self.serve_strict_attack(i, packet.action, &req) { return; }
+                }
                 _ => return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed mutation handler is awaiting authoritative integration"),
             }
         }
@@ -210,7 +214,8 @@ impl HostedServer {
     /// `Replace` plus the cell send-back fully undoes: typed edits (every
     /// Drift included), personal clicks and a refused Autofill, shots,
     /// `OpenPlayer`/`OpenTable`, and (run 14) `SetAutoRefill`, whose client
-    /// sends its setting again when its `Refused` receipt retires. The rest call
+    /// sends its setting again when its `Refused` receipt retires, and (run 15)
+    /// entity attacks (`strict_attack.rs`). The rest call
     /// [`Self::refuse_typed_action_then_teardown`].
     pub(super) fn refuse_typed_action_at(&mut self, i: usize, action: ActionHeader, cells: &[[i32; 3]], kind: RefusalKind) {
         if !self.strict_slot(i) {
