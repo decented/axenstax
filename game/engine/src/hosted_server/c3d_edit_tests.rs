@@ -9,6 +9,7 @@ use crate::action_wire::ActionIntent;
 use crate::block::{AIR, COBBLESTONE, STONE};
 use crate::crafting::{Tool, ToolMaterial, ToolType};
 use crate::item::{Item, ItemStack};
+use crate::transport::ClientTransport as _;
 
 /// The floor cell beside the joiner (in reach) and the air cell above it.
 const FLOOR: (i32, i32, i32) = (41, 79, 40);
@@ -57,7 +58,6 @@ fn edit(r: &mut Rig, cell: (i32, i32, i32), new: u16, slot: u8, claimed: Option<
 struct Heard { grants: Vec<protocol::InventoryGrantPacket>, rejects: Vec<String> }
 
 fn listen(r: &Rig) -> Heard {
-    use crate::transport::ClientTransport as _;
     let mut out = Heard::default();
     while let Some(pkt) = r.client.try_recv_from_server() {
         match protocol::deserialize_header(&pkt) {
@@ -236,4 +236,147 @@ fn c3d_strict_reach_claw_break_counts_from_the_servers_copy() {
             assert_eq!(block_at(&r, FAR), crate::block::DIRT, "{what}: untouched");
         }
     }
+}
+
+/// One mined `Edit` of `cell` (left as AIR) by hotbar slot 0 holding `tool`
+/// in the server's copy, claiming `claimed`: its header and intent.
+fn mined_edit(r: &mut Rig, cell: (i32, i32, i32), claimed: Tool) -> (ActionHeader, ActionIntent) {
+    let change = protocol::BlockChange { x: cell.0, y: cell.1, z: cell.2, new_block: AIR, meta: 0 };
+    let (kind, id) = crate::inventory::item_to_ref(&Item::Tool(claimed)).to_wire();
+    let mined = Some(protocol::MinedBlock { x: cell.0, y: cell.1, z: cell.2, tool: crate::inventory::item_to_wire_full(&Item::Tool(claimed)) });
+    (r.next(), ActionIntent::Edit { source_tick: 0, change, hand: (0, kind, id), mined, use_tag: None })
+}
+
+/// C3d run 10 (run-6 review LOW-4) — an `Edit` sent twice under one
+/// identity (a duplicate, or a replay after a reconnect) is served once:
+/// the second repeats the retained receipt, and the yield is granted once.
+#[test]
+fn c3d_strict_edit_duplicate_grants_its_yield_once() {
+    let mut r = edit_rig("replay");
+    let wood = pick(ToolMaterial::Wood);
+    r.hs.server.players[r.i].inventory.set_slot(0, Some(ItemStack { item: Item::Tool(wood), count: 1 }));
+    let events = r.sp().window_events.last_number();
+    let (action, intent) = mined_edit(&mut r, FLOOR, wood);
+    r.send(action, intent.clone());
+    let worn = r.sp().inventory.slot(0).cloned();
+    r.send(action, intent);
+    r.hs.tick();
+    let heard = listen(&r);
+    assert!(heard.rejects.is_empty(), "never torn down: {:?}", heard.rejects);
+    assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Accepted));
+    assert_eq!(r.sp().window_events.last_number(), events + 1, "one numbered grant, not two");
+    assert_eq!(heard.grants.len(), 1, "carried once");
+    assert_eq!(r.sp().inventory.slot(0).cloned(), worn, "the tool wore once");
+    let sp = &mut r.hs.server.players[r.i];
+    crate::window_events::apply_through(sp, events + 1, 0);
+    assert_eq!(count(sp, COBBLESTONE), 1, "the yield, once");
+    assert_eq!(ground_items(&r), 0);
+}
+
+/// C3d run 10 (run-6 review LOW-4) — a dead body's `Edit`, and a live
+/// body's `Edit` on a base older than the death sync it hasn't applied
+/// (stale): both `Superseded` with zero effect (no block, no wear, no
+/// yield), never torn down.
+#[test]
+fn c3d_strict_dead_and_stale_edits_are_superseded_with_zero_effect() {
+    for stale in [false, true] {
+        let what = if stale { "a stale base" } else { "a dead body" };
+        let mut r = edit_rig(&format!("superseded-{stale}"));
+        let wood = pick(ToolMaterial::Wood);
+        r.hs.server.players[r.i].inventory.set_slot(0, Some(ItemStack { item: Item::Tool(wood), count: 1 }));
+        let sp = &mut r.hs.server.players[r.i];
+        sp.combat.health = 0.0;
+        sp.combat.dead = true;
+        r.hs.tick();
+        if stale {
+            r.hs.server.players[r.i].dead_ticks = crate::server::MIN_DEAD_TICKS_BEFORE_RESPAWN;
+            r.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Respawn, &()));
+            r.hs.tick();
+            assert!(r.sp().is_present_and_alive(), "{what}: respawned, the death sync unapplied");
+        }
+        let window = r.sp().inventory.clone();
+        let events = r.sp().window_events.last_number();
+        let (action, intent) = mined_edit(&mut r, FLOOR, wood);
+        r.send(action, intent);
+        let heard = listen(&r);
+        assert!(heard.rejects.is_empty(), "{what}: never torn down: {:?}", heard.rejects);
+        assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Superseded), "{what}");
+        assert_eq!(block_at(&r, FLOOR), STONE, "{what}: no block change");
+        assert_eq!(r.sp().inventory.slot(0), window.slot(0), "{what}: no wear");
+        assert!(heard.grants.is_empty() && r.sp().window_events.last_number() <= events + 1, "{what}: no yield");
+        assert_eq!(ground_items(&r), 0);
+    }
+}
+
+/// C3d run 10 (run-6 review LOW-4) — five typed edits in one tick: the
+/// per-tick edit budget (`MAX_BLOCK_CHANGES_PER_TICK`, four) serves four;
+/// the fifth waits, unanswered, and is served on the next tick.
+#[test]
+fn c3d_strict_five_edits_in_a_tick_meet_the_budget() {
+    let mut r = edit_rig("budget");
+    r.hs.server.players[r.i].inventory.set_slot(0, Some(ItemStack::new_block(STONE, 5)));
+    let stone = Item::Block(STONE);
+    let (kind, id) = crate::inventory::item_to_ref(&stone).to_wire();
+    let cells = [(41, 80, 40), (42, 80, 40), (43, 80, 40), (41, 80, 41), (42, 80, 41)];
+    let mut actions = Vec::new();
+    for (x, y, z) in cells {
+        let action = r.next();
+        let change = protocol::BlockChange { x, y, z, new_block: STONE, meta: 0 };
+        let intent = ActionIntent::Edit { source_tick: 0, change, hand: (0, kind, id), mined: None, use_tag: None };
+        r.client.send_to_server(&protocol::serialize_packet(protocol::PacketType::Action, &crate::action_wire::ActionPacket { action, intent }));
+        actions.push(action);
+    }
+    r.hs.tick();
+    let fates: Vec<_> = actions.iter().map(|a| r.row(*a).map(|row| row.fate)).collect();
+    assert_eq!(fates[..4], [Some(ActionFate::Accepted); 4], "four served");
+    assert_eq!(fates[4], None, "the fifth waits for the next tick");
+    assert_eq!(cells.iter().filter(|c| block_at(&r, **c) == STONE).count(), 4);
+    r.hs.tick();
+    assert_eq!(r.row(actions[4]).map(|row| row.fate), Some(ActionFate::Accepted), "served next tick");
+    assert_eq!(block_at(&r, cells[4]), STONE);
+    assert!(listen(&r).rejects.is_empty());
+}
+
+/// C3d run 10 (run-6 review LOW-4) — the server's copy holds a wooden
+/// pickaxe and the input claims an iron one, on iron ore: the held lower
+/// tier sets the yield (nothing: wood can't harvest iron) and wears once.
+#[test]
+fn c3d_strict_held_lower_tier_beats_a_claimed_higher_tier_on_ore() {
+    let mut r = edit_rig("ore-tier");
+    r.hs.server.world.set_block(FLOOR.0, FLOOR.1, FLOOR.2, crate::block::IRON_ORE);
+    let wood = pick(ToolMaterial::Wood);
+    r.hs.server.players[r.i].inventory.set_slot(0, Some(ItemStack { item: Item::Tool(wood), count: 1 }));
+    let mut predicted = r.sp().inventory.clone();
+    assert!(predicted.use_tool_at(0).is_some());
+    let events = r.sp().window_events.last_number();
+    let (action, intent) = mined_edit(&mut r, FLOOR, pick(ToolMaterial::Iron));
+    r.send(action, intent);
+    let heard = listen(&r);
+    assert!(heard.rejects.is_empty(), "{:?}", heard.rejects);
+    assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Accepted));
+    assert_eq!(block_at(&r, FLOOR), AIR, "broken");
+    assert!(heard.grants.is_empty(), "the held wooden tier yields no ore");
+    assert_eq!(r.sp().window_events.last_number(), events, "no grant numbered");
+    assert_eq!(r.sp().inventory.slot(0), predicted.slot(0), "the held pickaxe wore once");
+}
+
+/// C3d run 10 (run-9b brief vs code) — an `Edit`'s result cells carry a
+/// door's pair: the live matching half of a door cell (from either half),
+/// the cell above a door placement, and only its own cell otherwise.
+#[test]
+fn c3d_edit_cells_carry_a_doors_pair() {
+    use crate::block::OAK_DOOR;
+    let mut r = edit_rig("door-cells");
+    let w = &mut r.hs.server.world;
+    w.set_block(41, 80, 40, OAK_DOOR);
+    w.set_meta((41, 80, 40), 0);
+    w.set_block(41, 81, 40, OAK_DOOR);
+    w.set_meta((41, 81, 40), crate::use_edits::door_top_meta(0));
+    let bc = |x, y, z, new_block| protocol::BlockChange { x, y, z, new_block, meta: 0 };
+    assert_eq!(r.hs.edit_cells(&bc(41, 80, 40, AIR)), vec![[41, 80, 40], [41, 81, 40]], "the bottom half carries its top");
+    assert_eq!(r.hs.edit_cells(&bc(41, 81, 40, AIR)), vec![[41, 81, 40], [41, 80, 40]], "the top half carries its bottom");
+    assert_eq!(r.hs.edit_cells(&bc(43, 80, 40, OAK_DOOR)), vec![[43, 80, 40], [43, 81, 40]], "a door placement carries the cell above");
+    assert_eq!(r.hs.edit_cells(&bc(43, 79, 40, AIR)), vec![[43, 79, 40]], "any other edit, its own cell");
+    r.hs.server.world.set_meta((41, 81, 40), 0);
+    assert_eq!(r.hs.edit_cells(&bc(41, 80, 40, AIR)), vec![[41, 80, 40]], "two bottoms are no pair");
 }

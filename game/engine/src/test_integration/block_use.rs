@@ -1024,6 +1024,16 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
             i + 1
         );
     }
+    // C3d run 10 (run-9b note) — and no raw placement take remains in
+    // game_loop.rs: every one goes through `take_for_placement` (Mirror's
+    // take, or a Strict client's typed `Edit`).
+    let raw: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("//") && l.contains("take_placeable_from_hotbar("))
+        .map(|(i, _)| i + 1)
+        .collect();
+    assert!(raw.is_empty(), "hand-spend lint: a raw `take_placeable_from_hotbar(` in game_loop.rs at lines {raw:?} bypasses `take_for_placement`");
 }
 
 /// C3c-3-fix (M2) — a modified client's `UseBlock` on an item frame that

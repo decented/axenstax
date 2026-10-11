@@ -96,6 +96,30 @@ fn c3d_strict_open_player_at_a_base_before_the_death_sync_is_served() {
     assert_eq!(r.row(e).map(|row| row.fate), Some(ActionFate::Accepted), "configuration at a stale base is served");
 }
 
+/// C3d run 10 (run-6 review LOW-4, LOW-2's narrowing) — the overdue valve
+/// applied the death `Replace` on the server's copy before the client did;
+/// an `OpenPlayer` the client then sends on its old base (whose window
+/// differs from the replaced copy) is served with its digest skipped,
+/// because its base predates the latest `Replace`, not because one waits
+/// (the old `replace_waiting()` skip would compare it and refuse).
+#[test]
+fn c3d_strict_stale_config_after_a_valve_applied_replace_is_served() {
+    let mut r = edit_rig("valve-config");
+    let mut c = Client::joined(&r);
+    c.inv.set_slot(5, Some(ItemStack::new_block(crate::block::DIRT, 1)));
+    kill(&mut r);
+    let now = r.hs.server.tick_counter + crate::window_events::EVENT_ACK_TIMEOUT_TICKS;
+    crate::window_events::apply_overdue(&mut r.hs.server.players[r.i], now);
+    assert!(!r.sp().window_events.replace_waiting(), "the valve applied the death Replace");
+    let sp = r.sp();
+    let copy = crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station);
+    assert_ne!(c.digest(), copy, "the client's old base differs from the replaced copy");
+    let e = op(&mut r, protocol::WireWindowOp::OpenPlayer, c.digest(), true);
+    c.receive(&mut r);
+    assert!(c.rejects.is_empty(), "never torn down: {:?}", c.rejects);
+    assert_eq!(r.row(e).map(|row| row.fate), Some(ActionFate::Accepted), "served, its digest skipped");
+}
+
 /// Configuration while dead moves no items: `SetAutoRefill`, `OpenTable`
 /// and `OpenPlayer` against a body with `combat.dead` set are Accepted with
 /// their configuration result and zero movement over window, world and
