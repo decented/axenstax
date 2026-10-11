@@ -2570,6 +2570,45 @@ mod session {
         assert!(!source_record(&p.dir, "pending-abort", t).exists() && !source_record(&p.dir, "aborted", t).exists());
         assert!(authority::open_guard(&p.dir.0.join("world")).is_ok());
     }
+    /// CP15 (CP13b review LOW-4): exclusivity defeated (a valid Aborted
+    /// and a valid Committed of one transfer), the Aborted on the relay
+    /// tried first and the Committed only on the second: the recipient
+    /// finishes the round, activates on the Committed and never quarantines.
+    #[test]
+    fn handover_an_aborted_on_the_first_relay_doesnt_hide_a_committed_on_the_next() {
+        use crate::handover::live::resumer::Resumer;
+        let mut p = pair_n("committed-next-relay", 2);
+        consent(&mut p);
+        offer(&mut p, &seat0());
+        stream(&mut p, 10_000);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Prepared);
+        let pending = std::fs::read(source_record(&p.dir, "pending-abort", t)).expect("no pending abort record");
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let committed = p.src.commit_event().expect("no Commit").clone();
+        // The relay a first attempt tries first is the root's first relay.
+        let relay_first = p.root.relays()[0] == p.relay.url();
+        let Pair { hs, host, src, rc, dst, relay, extra, dir, .. } = p;
+        drop((src, dst, rc, hs, host));
+        let payload = crate::handover::durable::marker_payload(&pending, crate::handover::durable::MarkerKind::PendingAbort, t).unwrap();
+        let record = crate::handover::phase::AbortRecord::decode(&payload).unwrap();
+        let aborted = nostr::Event::from_json(record.exact_event()).unwrap();
+        let (first, second) = if relay_first { (&relay, &extra[0]) } else { (&extra[0], &relay) };
+        first.insert(aborted);
+        second.insert(committed);
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the recipient's wait wasn't resumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !has_record(&dir, "activated", t) && !has_record(&dir, "quarantined", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient neither activated nor quarantined");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!has_record(&dir, "quarantined", t), "the first relay's Aborted quarantined a transfer with a Committed on the next relay");
+        assert!(has_record(&dir, "activated", t), "the Committed on the second relay wasn't accepted");
+        assert!(recipient.notices().contains(&crate::handover::live::copy::WORLD_IN_TWO_PLACES.to_owned()), "no two-places line");
+        drop((relay, extra));
+    }
     fn frames_for_seat_hold_bearer(p: &Pair) -> bool {
         p.dst.as_ref().is_some_and(|d| d.bearer_received())
     }

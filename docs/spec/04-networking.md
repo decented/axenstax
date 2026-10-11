@@ -6002,7 +6002,21 @@ then the receipt and its bearer removed, and the wait drops. If one
 readback yields both a valid Committed and a valid Aborted for one transfer,
 Committed wins (a duplicate world is recoverable by hand, a lost one isn't):
 it is logged and the world list shows "This world may now exist in two
-places." (`copy::WORLD_IN_TWO_PLACES`, from the resumer's notices). **A
+places." (`copy::WORLD_IN_TWO_PLACES`, from the resumer's notices). CP15
+(CP13b review LOW-4): "Committed wins" holds for the transfer, not one
+relay's answer: a recipient attempt that proves an Aborted on one relay
+finishes the round over the remaining relays (within the attempt's budget)
+looking for a Committed, and only then quarantines; a Committed found later
+in the round wins with the same log and line (tested: the Aborted on the
+relay tried first and the Committed only on the next one activates).
+CP15 (CP13b review LOW-6): the start-up scan decodes abort records one at a
+time; one that can't be listed or decoded is logged and skipped
+(`RetiredCommit::unreadable_aborts`; the world list shows "A handover note
+on this computer can't be checked. It is ignored; the world is
+unaffected."), so a damaged old abort record never stops a later
+retirement's publication (a damaged retirement record still fails closed).
+Known limit (CP13b review LOW-6, open): abort and "published" records are
+never removed, and each kind is capped at 64 per world. **A
 Committed is accepted at any date:** the recipient opens it at
 `core.issued_at`, never today's clock, so the source runtime key alone
 authorises activation, however late it is read. Tested: (C) a crash between

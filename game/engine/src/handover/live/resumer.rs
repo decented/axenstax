@@ -429,6 +429,13 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
         .collect();
     // CP13 (D2): a quarantined import is never opened.
     lines.extend(import_records(imports, "quarantined-").into_iter().map(|_| super::copy::HANDOVER_UNFINISHED.to_owned()));
+    // CP15 (CP13b review LOW-6): a damaged abort record is skipped by the
+    // scan; the lobby says a note was ignored (the world is unaffected).
+    for world in handover_worlds(worlds_root) {
+        if existing_store(&world).is_ok_and(|s| RetiredCommit::unreadable_aborts(&s) > 0) {
+            lines.push(super::copy::UNLISTED_ABORT.to_owned());
+        }
+    }
     for (world, retired) in retired_worlds(worlds_root) {
         if !ledger.lists(&retired.ledger_entry()) && retired.is_abort() {
             lines.push(super::copy::UNLISTED_ABORT.to_owned());
@@ -589,6 +596,11 @@ fn attempt_import(
         let root = awaiting.root();
         let route = awaiting.route()?;
         let mut last = Err(crate::handover::Error::Invalid("no relay"));
+        // CP15 (CP13b review LOW-4): a verified Aborted doesn't end the
+        // attempt at once: the round finishes over the remaining relays
+        // (within the budget) looking for a Committed, so "Committed wins"
+        // holds for the transfer, not for one relay's answer.
+        let mut aborted_proof = None;
         let relays = root.relays();
         for i in relay_order(relays.len(), number) {
             let url = &relays[i];
@@ -615,6 +627,9 @@ fn attempt_import(
             use crate::handover::crypto::Verified;
             let (event, verified) = match (committed, aborted) {
                 (Some((event, c)), _) => (event, Verified::Committed(c)),
+                // An Aborted already proven on an earlier relay: only a
+                // Committed is still worth reading back.
+                (None, Some(_)) if aborted_proof.is_some() => continue,
                 (None, Some((event, a))) => (event, Verified::Aborted(a)),
                 (None, None) => {
                     last = Err(crate::handover::Error::Invalid("no Committed yet"));
@@ -622,13 +637,25 @@ fn attempt_import(
                 }
             };
             match (stored::readback(url, root, &event, &verified, route, &mut budget, &NEVER).await, verified) {
-                (Ok(proof), Verified::Committed(c)) => return Ok(ImportEnd::Committed(c, proof)),
-                (Ok(_), Verified::Aborted(a)) => return Ok(ImportEnd::Aborted(a)),
+                (Ok(proof), Verified::Committed(c)) => {
+                    if aborted_proof.is_some() {
+                        log::error!("handover: a valid Committed and a valid Aborted for one transfer on different relays; Committed wins");
+                        let mut notices = shared.notices.lock().unwrap_or_else(|e| e.into_inner());
+                        if !notices.iter().any(|n| n == super::copy::WORLD_IN_TWO_PLACES) {
+                            notices.push(super::copy::WORLD_IN_TWO_PLACES.to_owned());
+                        }
+                    }
+                    return Ok(ImportEnd::Committed(c, proof));
+                }
+                (Ok(_), Verified::Aborted(a)) => aborted_proof = Some(a),
                 (Ok(_), Verified::Prepared(_)) => last = Err(crate::handover::Error::Invalid("Prepared read back")),
                 (Err(e), _) => last = Err(e),
             }
         }
-        last
+        match aborted_proof {
+            Some(a) => Ok(ImportEnd::Aborted(a)),
+            None => last,
+        }
     });
     #[cfg(test)]
     shared.log.lock().unwrap_or_else(|e| e.into_inner()).push(Attempt {

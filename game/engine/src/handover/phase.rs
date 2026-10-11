@@ -261,6 +261,10 @@ impl AbortRecord {
         r.validate()?;
         Ok(r)
     }
+    /// The exact signed Aborted bytes this record holds.
+    pub fn exact_event(&self) -> &[u8] {
+        &self.exact_event
+    }
     /// The id of the signed Aborted this record holds.
     pub fn aborted_hash(&self) -> Hash {
         self.aborted
@@ -529,18 +533,41 @@ impl RetiredCommit {
         Self::from_record(Retirement::decode(&bytes)?, transfer, super::hash(&bytes)).map(Some)
     }
     /// Every retirement record in `store` (bounded by `retirements`), then
-    /// (CP13b) every abort record (bounded by `aborts`). Any record that
-    /// doesn't decode fails the scan (fail closed).
+    /// (CP13b) every abort record (bounded by `aborts`). A retirement record
+    /// that doesn't decode fails the scan (fail closed: the world stays
+    /// refused). CP15 (CP13b review LOW-6): abort records are decoded one at
+    /// a time; one that can't be listed or decoded is logged and skipped
+    /// (`unreadable_aborts` gives the lobby its line), so an old damaged
+    /// abort record never stops a later retirement's publication.
     pub fn scan(store: &MarkerStore) -> Result<Vec<Self>> {
         let mut out: Vec<Self> = store
             .retirements()?
             .into_iter()
             .map(|(id, bytes)| Self::from_record(Retirement::decode(&bytes)?, id, super::hash(&bytes)))
             .collect::<Result<_>>()?;
-        for (id, bytes) in store.aborts()? {
-            out.push(Self::from_abort(AbortRecord::decode(&bytes)?, id, super::hash(&bytes))?);
+        match store.aborts() {
+            Ok(aborts) => {
+                for (id, bytes) in aborts {
+                    match AbortRecord::decode(&bytes).and_then(|r| Self::from_abort(r, id, super::hash(&bytes))) {
+                        Ok(r) => out.push(r),
+                        Err(e) => log::warn!("handover: an abort record can't be read ({e}); it is skipped"),
+                    }
+                }
+            }
+            Err(e) => log::warn!("handover: the abort records can't be listed ({e}); they are skipped"),
         }
         Ok(out)
+    }
+    /// CP15 (CP13b review LOW-6): how many of `store`'s abort records the
+    /// scan skips (they can't be listed or decoded).
+    pub fn unreadable_aborts(store: &MarkerStore) -> usize {
+        match store.aborts() {
+            Ok(aborts) => aborts
+                .iter()
+                .filter(|(id, bytes)| AbortRecord::decode(bytes).and_then(|r| Self::from_abort(r, *id, super::hash(bytes))).is_err())
+                .count(),
+            Err(_) => 1,
+        }
     }
     fn from_record(r: Retirement, transfer: Id, record: Hash) -> Result<Self> {
         r.root()?;
@@ -2410,5 +2437,24 @@ mod tests {
         assert_eq!(store.read(MarkerKind::Quarantined, e.c.transfer).unwrap(), None, "the Aborted quarantined beside the Committed");
         assert!(resumer.notices().contains(&crate::handover::live::copy::WORLD_IN_TWO_PLACES.to_owned()), "no player-visible line: {:?}", resumer.notices());
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// CP15 (CP13b review LOW-6): a damaged abort record of another
+    /// transfer never blinds the scan: the retirement record is still
+    /// listed (and so published), and the lobby count names the skipped one.
+    #[test]
+    fn handover_a_damaged_abort_record_never_gates_a_retirement() {
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = rt.block_on(ends(&relay));
+        let capability = crypto::root_capability(&e.root, &[1; 16]).unwrap();
+        let retirement = Retirement::new(&e.cv, &e.p, e.ce.as_json().into_bytes(), [9; 16], capability, vec![RetiredRoot { capability, expiry: e.root.expiry() }], e.root.relays().to_vec()).unwrap();
+        let (store, _dir) = crate::handover::durable::tests::store("damaged-abort");
+        store.persist(MarkerKind::Retired, e.c.transfer, &retirement.encode().unwrap()).unwrap();
+        store.persist(MarkerKind::Aborted, [0x55; 16], b"an old abort record, damaged").unwrap();
+        let records = RetiredCommit::scan(&store).expect("a damaged abort record failed the whole scan");
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].is_abort() && records[0].transfer() == e.c.transfer);
+        assert_eq!(RetiredCommit::unreadable_aborts(&store), 1);
     }
 }
