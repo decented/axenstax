@@ -3169,7 +3169,7 @@ mod tests {
         use crate::action_wire::{BoundedList, RebasePage, RecoveryPacket};
         let (srv, client) = channel_pair();
         let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
-        let accept = proofless_accept();
+        let accept = protocol::JoinAcceptPacket { inventory_mode: crate::action_identity::InventoryMode::Strict, ..proofless_accept() };
         srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
         rc.poll();
         let cut = crate::action_identity::RecoveryCut { session: accept.action_session, id: 1, epoch: 1, life: 0, through: 0 };
@@ -3190,6 +3190,23 @@ mod tests {
         assert!(rc.recovery_assembly.as_ref().unwrap().ready());
         // Still no Ack/retirement until canonical bundle installation succeeds.
         assert_eq!(rc.recovery_prepare, Some(cut));
+    }
+
+    /// C3d run 12 (survey §4.6) — a Mirror connection fails closed on any
+    /// recovery carrier, even a cut its (Mirror) journal would accept.
+    #[test]
+    fn c3d_s1_mirror_client_fails_closed_on_recovery() {
+        let (srv, client) = channel_pair();
+        let mut rc = RemoteClient::from_transport(Box::new(client), build_join_request("Player", 0, None), None);
+        let accept = proofless_accept();
+        assert_eq!(accept.inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        srv.send_to_client(&protocol::serialize_packet(PacketType::JoinAccept, &accept));
+        rc.poll();
+        let cut = crate::action_identity::RecoveryCut { session: accept.action_session, id: 1, epoch: 1, life: 0, through: 0 };
+        srv.send_to_client(&protocol::serialize_packet(PacketType::Recovery, &crate::action_wire::RecoveryPacket::Prepare(cut)));
+        rc.poll();
+        assert!(matches!(rc.state, ConnectionState::Failed(_)), "Mirror fails closed on recovery");
+        assert!(rc.recovery_prepare.is_none());
     }
 
     #[test]

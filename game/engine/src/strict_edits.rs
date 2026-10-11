@@ -69,7 +69,7 @@ pub enum StrictEdit {
 /// block another player mined, a crop someone harvested) is a Drift
 /// `Refuse`, its cell sent back, never a paused class.
 pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protocol::MinedBlock>, slot: usize, held: Option<&Item>, creative: bool, received: Option<Received>) -> StrictEdit {
-    use crate::block::{AIR, OAK_DOOR, WATER};
+    use crate::block::{AIR, OAK_DOOR};
     let new = change.new_block;
     if creative { return StrictEdit::Unsupported("Creative free edits await their typed class"); }
     if let Some(r) = received && drifted((old, r.meta), r.seen, new, mined.is_some()) { return StrictEdit::Refuse(DRIFT); }

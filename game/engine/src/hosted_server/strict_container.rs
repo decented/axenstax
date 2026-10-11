@@ -64,17 +64,22 @@ impl HostedServer {
     }
 
     /// Raw R as marker scratch, or the typed refusal / pause it calls for.
-    fn strict_raw_or_stop(&mut self, i: usize, action: ActionHeader, path: &str) -> Option<crate::staged_window::MarkerWindow> {
+    /// `correctable`: an `OpenPlayer`/`OpenTable` refusal is corrected by a
+    /// `Replace` (C3d run 12, S1); a container or `SetAutoRefill` one tears down.
+    fn strict_raw_or_stop(&mut self, i: usize, action: ActionHeader, path: &str, correctable: bool) -> Option<crate::staged_window::MarkerWindow> {
         match crate::window_events::strict_raw_marker(&self.server.players[i], &self.server.registry) {
             Ok(raw) => Some(raw),
             Err(StrictStageError::Debt) => { self.strict_debt_at_staging(i, path); None }
-            Err(StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); None }
+            Err(StrictStageError::Unrepresentable) => {
+                if correctable { self.refuse_typed_action(i, action) } else { self.refuse_typed_action_then_teardown(i, action) }
+                None
+            }
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, path); None }
         }
     }
 
     fn serve_strict_config(&mut self, i: usize, action: ActionHeader, op: &protocol::WindowOpPacket) -> bool {
-        let Some(mut raw) = self.strict_raw_or_stop(i, action, "window configuration") else { return false };
+        let Some(mut raw) = self.strict_raw_or_stop(i, action, "window configuration", !matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })) else { return false };
         let now = self.server.tick_counter;
         let sp = &self.server.players[i];
         let (mut station, mut gone, mut refill) = (sp.station, sp.table_gone_ticks, sp.inventory.auto_refill);
@@ -96,7 +101,8 @@ impl HostedServer {
         // the latest `Replace`, not whenever one waits.
         let stale = self.server.players[i].window_events.predates_replace(action.events_applied);
         if !stale && raw.digest_with(station, None) != op.digest {
-            self.refuse_typed_action(i, action);
+            // C3d run 12 (S1): a `Replace` carries the station, not the refill setting.
+            if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. }) { self.refuse_typed_action_then_teardown(i, action) } else { self.refuse_typed_action(i, action) }
             return false;
         }
         let included = self.server.players[i].window_events.last_number();
@@ -135,11 +141,11 @@ impl HostedServer {
     fn serve_strict_open(&mut self, i: usize, action: ActionHeader, op: &protocol::WindowOpPacket, cell: [i32; 3]) -> bool {
         // (An open while dead or on a base before a waiting `Replace` never
         // gets here: it is `Superseded`, `actions.rs`.)
-        let Some(raw) = self.strict_raw_or_stop(i, action, "container open") else { return false };
+        let Some(raw) = self.strict_raw_or_stop(i, action, "container open", false) else { return false };
         // Nothing opens until the server answers: the client's digest is
         // its window unchanged.
         if raw.digest_with(self.server.players[i].station, None) != op.digest {
-            self.refuse_typed_action(i, action);
+            self.refuse_typed_action_then_teardown(i, action);
             return false;
         }
         let now = self.server.tick_counter;
@@ -199,21 +205,21 @@ impl HostedServer {
         // Stale world (no container open, its cell gone, out of reach, the
         // client's mirror shows another): a terminal refusal (Drift).
         let (Some((cell, kind)), Some(real_pre), Some(seen)) = (open, real_pre, seen) else {
-            self.refuse_typed_action(i, action);
+            self.refuse_typed_action_then_teardown(i, action);
             return false;
         };
         if seen.cell != cell || seen.kind != kind || !cw::container_in_server_reach(sp.player.eye_pos(), cell) {
-            self.refuse_typed_action(i, action);
+            self.refuse_typed_action_then_teardown(i, action);
             return false;
         }
-        let Some(raw) = self.strict_raw_or_stop(i, action, "container click") else { return false };
+        let Some(raw) = self.strict_raw_or_stop(i, action, "container click", false) else { return false };
         let sp = &self.server.players[i];
         let ctx = crate::window_ops::server_click_ctx(sp, &self.server.world, creative).with_shared(true);
         // P — the client's prediction, on exactly the view it predicted on.
         let mut predicted = seen.contents.clone();
         let p = crate::staged_window::stage_container(&raw, &mut predicted, click, &ctx);
         if p.after.digest_with(sp.station, Some(predicted.as_ref())) != op.digest {
-            self.refuse_typed_action(i, action);
+            self.refuse_typed_action_then_teardown(i, action);
             return false;
         }
         // R — the same click on the REAL container.
@@ -228,7 +234,7 @@ impl HostedServer {
         match crate::window_events::admit_staged(sp, &self.server.registry, &raw, &r) {
             Ok(()) => {}
             Err(StrictStageError::Debt) => return self.strict_debt_at_staging(i, "container click"),
-            Err(StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
+            Err(StrictStageError::Unrepresentable) => { self.refuse_typed_action_then_teardown(i, action); return false; }
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "container source or pending fit is uncertain"); return false; }
         }
         let included = sp.window_events.last_number();

@@ -139,8 +139,9 @@ fn c3d_strict_honest_break_wears_the_held_tool_and_grants_its_yield_once() {
 
 /// A placement of an item the server's copy doesn't hold in that slot (a
 /// modified client claiming stone in an empty hand): refused with its typed
-/// fate and zero effect — no block, no event, the window untouched — and
-/// the session corrected (the bridge teardown until recovery is wired).
+/// fate and zero effect — no block, the window untouched — and the session
+/// CORRECTED (C3d run 12b, S1): one whole-window correction `Replace` is
+/// the only event, never a teardown.
 #[test]
 fn c3d_strict_unheld_placement_is_refused_with_zero_effect() {
     let mut r = edit_rig("unheld");
@@ -153,11 +154,39 @@ fn c3d_strict_unheld_placement_is_refused_with_zero_effect() {
     let heard = listen(&r);
     assert_eq!(block_at(&r, ABOVE), AIR, "no block");
     assert_eq!(r.sp().inventory.slot(0), window.slot(0), "window untouched");
-    assert_eq!(r.sp().window_events.last_number(), events, "no event");
+    assert_eq!(r.sp().window_events.last_number(), events + 1, "one event: the correction Replace");
+    assert!(r.sp().window_events.replace_waiting() && r.sp().window_events.death_replace.is_none(), "a live correction, never the death flag");
     assert_eq!(r.through(), action.seq, "terminal at its seq");
     assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "its typed fate");
-    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Unconfirmed.reason()), "{:?}", heard.rejects);
-    assert!(r.hs.server.load_joiner(r.i).expect("departure saved").obligations_proven_zero());
+    assert!(heard.rejects.is_empty(), "corrected, never torn down: {:?}", heard.rejects);
+    assert!(!r.hs.slot_is_free(r.i), "still joined");
+    assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (0, 1), "a rule refusal, not a Drift");
+    assert!(r.sp().obligations_proven_zero());
+}
+
+/// C3d run 12b (S1) — the bound still holds: a refusal whose correction
+/// `Replace` doesn't fit the pending window events (here the count cap,
+/// 1024 already waiting) is never forced in. The typed `Refused` row
+/// stands, the seat is torn down with a reason, no `Replace` is numbered
+/// and nothing waiting is forced applied.
+#[test]
+fn c3d_s1_correction_replace_past_the_pending_cap_tears_down() {
+    let mut r = edit_rig("over-cap");
+    let sp = &mut r.hs.server.players[r.i];
+    sp.inventory.set_slot(0, Some(ItemStack::new_block(crate::block::DIRT, 4)));
+    while sp.window_events.waiting() < crate::action_journal::MAX_EVENT_ENTRIES {
+        crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(ItemStack::new_block(STONE, 1)), 0);
+    }
+    let events = sp.window_events.last_number();
+    let stone = Item::Block(STONE);
+    let action = edit(&mut r, ABOVE, STONE, 0, Some(&stone), None);
+    let heard = listen(&r);
+    assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "the typed refusal stands");
+    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::FellBehind.reason()), "past the cap: torn down with a reason: {:?}", heard.rejects);
+    assert!(r.hs.slot_is_free(r.i), "torn down");
+    assert_eq!(r.sp().window_events.last_number(), events, "no Replace numbered");
+    assert_eq!(r.sp().window_events.tally.forced, 0, "nothing waiting forced applied");
+    assert_eq!(block_at(&r, ABOVE), AIR, "no block");
 }
 
 /// A break whose input claims a wooden pickaxe while the server's copy of
@@ -186,8 +215,9 @@ const FAR: (i32, i32, i32) = (46, 81, 43);
 /// C3d run 10 (run-9b review MEDIUM-1) — Decision 19 Drift first: an honest
 /// mined `Edit` whose cell the server has already changed (a leaf it
 /// decayed, a block another player mined, a crop someone harvested) is a
-/// Drift `Refuse` with its typed `Refused` row (the bridge teardown until
-/// recovery rebases it), never an `Untyped` pause. Zero effect.
+/// Drift `Refuse` with its typed `Refused` row, never an `Untyped` pause.
+/// Zero effect; since C3d run 12b (S1) CORRECTED by one whole-window
+/// `Replace` (no grant in it), never torn down.
 #[test]
 fn c3d_strict_mined_edit_on_an_already_changed_cell_is_a_drift_refusal() {
     // (case, what the server's cell holds now, what the client's change leaves)
@@ -205,11 +235,13 @@ fn c3d_strict_mined_edit_on_an_already_changed_cell_is_a_drift_refusal() {
         let action = edit(&mut r, ABOVE, left, 0, Some(&Item::Tool(wood)), Some(Some(wood)));
         let heard = listen(&r);
         assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "{case}: a Drift refusal, with its typed row");
-        assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Unconfirmed.reason()), "{case}: the refusal's teardown: {:?}", heard.rejects);
-        assert!(!heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Untyped.reason()), "{case}: never an Untyped pause");
+        assert!(heard.rejects.is_empty(), "{case}: corrected, never torn down (nor an Untyped pause): {:?}", heard.rejects);
+        assert!(!r.hs.slot_is_free(r.i), "{case}: still joined");
         assert_eq!(block_at(&r, ABOVE), now, "{case}: the world is untouched");
         assert_eq!(r.sp().inventory.slot(0), window.slot(0), "{case}: the tool didn't wear");
-        assert_eq!(r.sp().window_events.last_number(), events, "{case}: nothing granted");
+        assert!(heard.grants.is_empty(), "{case}: nothing granted");
+        assert_eq!(r.sp().window_events.last_number(), events + 1, "{case}: one event, the correction Replace");
+        assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (1, 0), "{case}: a stale-world refusal");
     }
 }
 

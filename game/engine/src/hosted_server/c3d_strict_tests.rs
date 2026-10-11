@@ -220,8 +220,8 @@ fn c3d_strict_click_through_real_dispatch_conserves_places_bodies_and_durability
 
 /// A click whose digest the server's raw transition doesn't reproduce is
 /// Refused at its seq: zero effect on the server copy, no event, no
-/// accepted row, the typed fate retained; until recovery is wired the
-/// connection is torn down with a reason (fail closed).
+/// accepted row, the typed fate retained; since C3d run 12b (S1) the seat
+/// is CORRECTED by one whole-window `Replace`, never torn down.
 #[test]
 fn c3d_strict_refused_click_has_zero_effect_and_its_typed_fate() {
     let mut r = strict_rig("refused");
@@ -232,14 +232,16 @@ fn c3d_strict_refused_click_has_zero_effect_and_its_typed_fate() {
     let action = click_packet(&mut r, &mut cw, WindowClick::Slot { slot: 0, right: false }, true);
     let heard = hear(&r.client);
     assert_eq!(server_places(r.sp()), before, "zero effect on the server copy");
-    assert_eq!(r.sp().window_events.last_number(), events, "no event numbered");
-    assert_eq!(r.sp().window_events.waiting(), 0);
+    assert_eq!(r.sp().window_events.last_number(), events + 1, "one event numbered: the correction Replace");
+    assert_eq!(r.sp().window_events.waiting(), 1);
+    assert!(r.sp().window_events.replace_waiting() && r.sp().window_events.death_replace.is_none());
     assert_eq!(r.through(), action.seq, "the refusal is terminal at its seq");
     assert_eq!(r.row(action).map(|row| row.fate), Some(ActionFate::Refused), "its typed fate");
-    assert!(heard.receipts.is_empty(), "no Accepted receipt reaches the client");
-    assert!(heard.rejects.iter().any(|m| m == crate::strict_admission::StrictTeardown::Unconfirmed.reason()), "teardown reason: {:?}", heard.rejects);
-    assert!(r.hs.slot_is_free(r.i));
-    assert!(r.hs.server.load_joiner(r.i).expect("departure saved").obligations_proven_zero());
+    assert!(heard.receipts.iter().all(|rc| rc.fate != ActionFate::Accepted), "no Accepted receipt reaches the client");
+    assert!(heard.rejects.is_empty(), "corrected, never torn down: {:?}", heard.rejects);
+    assert!(!r.hs.slot_is_free(r.i));
+    assert_eq!((r.sp().strict_refusals.stale_world, r.sp().strict_refusals.other), (0, 1));
+    assert!(r.sp().obligations_proven_zero());
 }
 
 /// The result row is reserved BEFORE the raw commit: with the

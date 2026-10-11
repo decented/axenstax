@@ -268,13 +268,16 @@ pub struct PreparedEvents {
     last: u32,
 }
 
+/// The heap one item owns beyond its inline size: a Plan's body.
+fn item_heap_bytes(item: &Item) -> Result<usize, StrictStageError> {
+    match item {
+        Item::Plan(body) => crate::body_residency::allocated_body_bytes(body).map(|bytes| bytes - std::mem::size_of::<crate::plan::PlanData>()).map_err(|_| StrictStageError::Fit),
+        _ => Ok(0),
+    }
+}
+
 fn event_heap_bytes(event: &WindowEvent) -> Result<usize, StrictStageError> {
-    let item_bytes = |item: &Item| -> Result<usize, StrictStageError> {
-        match item {
-            Item::Plan(body) => crate::body_residency::allocated_body_bytes(body).map(|bytes| bytes - std::mem::size_of::<crate::plan::PlanData>()).map_err(|_| StrictStageError::Fit),
-            _ => Ok(0),
-        }
-    };
+    let item_bytes = item_heap_bytes;
     match event {
         WindowEvent::Grant(stack) => item_bytes(&stack.item),
         WindowEvent::Take { item, .. } => item_bytes(item),
@@ -311,6 +314,44 @@ fn view_heap_bytes(view: &crate::window_ops::ViewEvent, item_bytes: &dyn Fn(&Ite
         }
     }
     Ok(total)
+}
+
+/// C3d run 12b (S1) — a whole-window `Replace`'s real owned heap: its boxed
+/// window, every Plan body in it, and its carried debt's entries. Only the
+/// pending-window bound ([`strict_replace_fits`]) measures a `Replace` this
+/// way; staging still never crosses a waiting one ([`event_heap_bytes`]
+/// keeps refusing it, `Replacement`).
+fn replace_heap_bytes(window: &EffectiveWindow, debt: &crate::container_window::CorrectionDebt) -> Result<usize, StrictStageError> {
+    let mut total = std::mem::size_of::<EffectiveWindow>();
+    let mut add = |n: usize| -> Result<(), StrictStageError> { total = total.checked_add(n).ok_or(StrictStageError::Fit)?; Ok(()) };
+    let grid = window.grid.iter().flatten().flatten();
+    for stack in window.inv.slots_iter().flatten().chain(window.cursor.iter()).chain(grid) { add(item_heap_bytes(&stack.item)?)?; }
+    add(debt.entries().len().checked_mul(std::mem::size_of::<(Item, u32)>()).ok_or(StrictStageError::Fit)?)?;
+    for (item, _) in debt.entries() { add(item_heap_bytes(item)?)?; }
+    Ok(total)
+}
+
+/// C3d run 12 (S1) — would one more numbered `event` (a live correction
+/// `Replace`) fit joiner `sp`'s pending window events: the count and
+/// retained-bytes caps [`prepare_strict_events`] checks (1024 events,
+/// 2 MiB)? `queue` would otherwise force the oldest waiting event applied.
+/// A `Replace` (the probe, or a join/death sync still waiting) counts its
+/// real owned heap ([`replace_heap_bytes`]); a waiting container
+/// `Correction` has no reservation measure, so nothing fits beside it
+/// (fail closed: the caller tears down).
+pub fn strict_replace_fits(sp: &ServerPlayer, event: &WindowEvent) -> bool {
+    let waiting = &sp.window_events;
+    let count = waiting.waiting.len().saturating_add(1);
+    if count > crate::action_journal::MAX_EVENT_ENTRIES { return false; }
+    let bytes = |e: &WindowEvent| match e {
+        WindowEvent::Replace { window, debt, .. } => replace_heap_bytes(window, debt),
+        other => event_heap_bytes(other),
+    };
+    let mut heap = 0usize;
+    for e in waiting.waiting.iter().map(|w| &w.event).chain(std::iter::once(event)) {
+        match bytes(e).ok().and_then(|n| heap.checked_add(n)) { Some(h) => heap = h, None => return false }
+    }
+    count.max(waiting.waiting.capacity()).checked_mul(std::mem::size_of::<Waiting>()).and_then(|n| n.checked_add(heap)).is_some_and(|n| n <= crate::action_journal::MAX_RETAINED_BYTES)
 }
 
 pub fn prepare_strict_events(sp: &mut ServerPlayer, events: Box<[WindowEvent]>) -> Result<PreparedEvents, StrictStageError> {

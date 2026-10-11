@@ -81,6 +81,8 @@ impl RemoteClient {
 
     pub(super) fn receive_recovery(&mut self, packet: crate::action_wire::RecoveryPacket) -> Result<(), String> {
         use crate::action_wire::RecoveryPacket;
+        // C3d run 12 (survey §4.6) — Mirror never sees recovery: fail closed.
+        if self.inventory_mode != crate::action_identity::InventoryMode::Strict { return Err("Recovery on a Mirror connection".into()); }
         match packet {
             RecoveryPacket::Prepare(cut) => {
                 if self.recovery_prepare == Some(cut) { return Ok(()); }

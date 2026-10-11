@@ -2,7 +2,7 @@
 use super::*;
 use crate::action_identity::{ActionFate, ActionHeader, InventoryMode};
 use crate::action_wire::{ActionIntent, ActionPacket, ActionReceipt, AppliedActionAck};
-use crate::strict_admission::StrictTeardown;
+use crate::strict_admission::{RefusalKind, StrictTeardown};
 
 impl HostedServer {
     pub(super) fn strict_slot(&self, i: usize) -> bool {
@@ -190,11 +190,52 @@ impl HostedServer {
         true
     }
     pub(super) fn refuse_typed_action(&mut self, i: usize, action: ActionHeader) {
-        self.refuse_typed_action_at(i, action, &[]);
+        self.refuse_typed_action_at(i, action, &[], RefusalKind::Rule);
     }
     /// [`Self::refuse_typed_action`] whose row carries the action's cells.
-    pub(super) fn refuse_typed_action_at(&mut self, i: usize, action: ActionHeader, cells: &[[i32; 3]]) {
-        if self.complete_typed_noop_at(i, action, ActionFate::Refused, cells) { self.pause_typed_action(i, StrictTeardown::Unconfirmed, "action refused at its frontier"); }
+    ///
+    /// C3d run 12 (S1) — on a Strict seat a refusal is CORRECTED, not torn
+    /// down: its `Refused` row, then ONE whole-window correction `Replace`
+    /// ([`Self::queue_live_correction_replace`]). Every in-flight action
+    /// after it has an older base, so it is `Superseded` with zero effect,
+    /// its cell sent back. Only for refusals whose client prediction a
+    /// `Replace` plus the cell send-back fully undoes: typed edits (every
+    /// Drift included), personal clicks and a refused Autofill, shots,
+    /// `OpenPlayer`/`OpenTable`. The rest call
+    /// [`Self::refuse_typed_action_then_teardown`].
+    pub(super) fn refuse_typed_action_at(&mut self, i: usize, action: ActionHeader, cells: &[[i32; 3]], kind: RefusalKind) {
+        if !self.strict_slot(i) {
+            if self.complete_typed_noop_at(i, action, ActionFate::Refused, cells) { self.pause_typed_action(i, StrictTeardown::Unconfirmed, "action refused at its frontier"); }
+            return;
+        }
+        self.server.players[i].strict_refusals.note(kind);
+        if !self.complete_typed_noop_at(i, action, ActionFate::Refused, cells) { return; }
+        // BRIDGE: the refused action's suffix is superseded, not replayed (Decision 16) — replace in S3 (recovery bundle + replay)
+        self.queue_live_correction_replace(i);
+    }
+    /// A refusal a `Replace` can't undo — a container open or click (the
+    /// `Replace` carries no container view) or `SetAutoRefill` (a `Replace`
+    /// keeps the refill setting): still the bridge teardown.
+    pub(super) fn refuse_typed_action_then_teardown(&mut self, i: usize, action: ActionHeader) {
+        if self.strict_slot(i) { self.server.players[i].strict_refusals.note(RefusalKind::Rule); }
+        if self.complete_typed_noop(i, action, ActionFate::Refused) { self.pause_typed_action(i, StrictTeardown::Unconfirmed, "action refused at its frontier"); }
+    }
+    /// C3d run 12 (S1) — a LIVE Strict seat's correction `Replace`: the
+    /// whole window of [`Self::queue_correction_replace`], but it takes no
+    /// death-only flag (`death_replace` keeps meaning a death sync, which
+    /// gates requests); the neutral "a correction `Replace` waits" flag is
+    /// [`crate::window_events::WindowEvents::replace_waiting`]. At most one
+    /// waits. One that doesn't fit the pending window events (count and
+    /// retained bytes) is never forced in: the seat is torn down.
+    pub(super) fn queue_live_correction_replace(&mut self, i: usize) {
+        let sp = &self.server.players[i];
+        if sp.window_events.replace_waiting() { return; }
+        let fold = crate::window_events::effective_window_and_debt(sp);
+        let probe = crate::window_events::WindowEvent::Replace { window: Box::new(fold.window.clone()), debt: fold.debt.clone(), station: sp.station };
+        if !crate::window_events::strict_replace_fits(sp, &probe) {
+            return self.strict_bridge_teardown(i, StrictTeardown::FellBehind, "a refusal's correction Replace doesn't fit the pending window events");
+        }
+        self.send_inventory_sync(i, fold.window, fold.debt);
     }
     /// A terminal zero-effect fate (`Refused`, or `NormalisedAcceptedNoop`
     /// for a contested shared container) is retained first; the

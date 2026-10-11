@@ -22,27 +22,27 @@ use crate::strict_edits::{route_break, route_place, EditRecipe, Routed};
 use crate::window_events::InboxItem;
 
 /// Cells beside the joiner standing at (40.5, 80, 40.5), on its stone floor.
-const CELLS: [[i32; 3]; 3] = [[41, 80, 40], [41, 80, 41], [39, 80, 40]];
+pub(super) const CELLS: [[i32; 3]; 3] = [[41, 80, 40], [41, 80, 41], [39, 80, 40]];
 
-struct Joined {
-    _g: crate::save::WorldsRootGuard,
-    hs: HostedServer,
-    rc: RemoteClient,
-    i: usize,
-    inv: crate::inventory::Inventory,
-    armour: [Option<crate::armour::ArmourItem>; 4],
-    ui: crate::craft_ui::CraftingUi,
-    inbox: crate::window_events::WindowInbox,
+pub(super) struct Joined {
+    pub(super) _g: crate::save::WorldsRootGuard,
+    pub(super) hs: HostedServer,
+    pub(super) rc: RemoteClient,
+    pub(super) i: usize,
+    pub(super) inv: crate::inventory::Inventory,
+    pub(super) armour: [Option<crate::armour::ArmourItem>; 4],
+    pub(super) ui: crate::craft_ui::CraftingUi,
+    pub(super) inbox: crate::window_events::WindowInbox,
     /// The client's world: its own predictions, then the server's changes.
-    world: crate::world::World,
-    intake: crate::chunk_intake::ChunkIntake,
-    reg: crate::block::BlockRegistry,
+    pub(super) world: crate::world::World,
+    pub(super) intake: crate::chunk_intake::ChunkIntake,
+    pub(super) reg: crate::block::BlockRegistry,
 }
 
 /// A real `RemoteClient` joined (as a guest) to a Strict dedicated server
 /// whose joiner stands on a stone floor; both windows then hold `items`
 /// (slot, stack) and the client's auto-refill is `refill`.
-fn joined(tag: &str, items: &[(usize, ItemStack)], refill: bool) -> Joined {
+pub(super) fn joined(tag: &str, items: &[(usize, ItemStack)], refill: bool) -> Joined {
     let g = crate::save::WorldsRootGuard::new(&format!("c3d-client-edit-{tag}"));
     let mut hs = super::tests::start_room_test_server(&format!("c3d-client-edit-{tag}"), 0);
     hs.select_inventory_mode(InventoryMode::Strict).expect("a dedicated server selects Strict");
@@ -134,7 +134,7 @@ impl Joined {
 
     /// A plain placement from hotbar `slot` at `cell`, routed as the game
     /// loop routes it (`route_place`): typed, or on the movement packet.
-    fn place(&mut self, cell: [i32; 3], slot: usize) {
+    pub(super) fn place(&mut self, cell: [i32; 3], slot: usize) {
         let held = self.inv.slot(slot).map(|s| s.item.clone());
         let new = held.as_ref().and_then(crate::joiner_inventory::placeable_block).expect("a placeable block");
         let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: new, meta: self.world.meta_at(cell[0], cell[1], cell[2]) };
@@ -192,7 +192,7 @@ impl Joined {
     /// `GameState::break_route` makes it: the replacement from the client's
     /// own `break_yield`, the cell's meta carried, the replacement predicted
     /// in the client's world. Returns the change sent.
-    fn harvest(&mut self, cell: [i32; 3], slot: usize) -> protocol::BlockChange {
+    pub(super) fn harvest(&mut self, cell: [i32; 3], slot: usize) -> protocol::BlockChange {
         let old = self.world.get_block(cell[0], cell[1], cell[2]);
         let tool = match self.inv.slot(slot).map(|s| &s.item) { Some(Item::Tool(t)) => Some(*t), _ => None };
         let keys = crate::break_drops::PopKeys { secret: &[0; 32], world_seed: 0, epoch: 0 };
@@ -207,7 +207,7 @@ impl Joined {
     }
 
     /// The header of the newest reserved action.
-    fn newest_header(&self) -> crate::action_identity::ActionHeader {
+    pub(super) fn newest_header(&self) -> crate::action_identity::ActionHeader {
         self.rc.action_journal.as_ref().expect("a joined journal").actions().last().expect("a reserved action").header
     }
 
@@ -226,7 +226,7 @@ impl Joined {
         crate::window::digest_parts(&sp.inventory, &sp.armour, &sp.cursor, &sp.craft_grid, sp.station)
     }
 
-    fn sp(&self) -> &crate::server::ServerPlayer { &self.hs.server.players[self.i] }
+    pub(super) fn sp(&self) -> &crate::server::ServerPlayer { &self.hs.server.players[self.i] }
 
     fn client_digest(&self) -> u32 {
         crate::window::digest_parts(&self.inv, &self.armour, &self.ui.cursor_item, &self.ui.grid, self.ui.station())
@@ -243,7 +243,7 @@ impl Joined {
 
     /// Never torn down; every reservation retired by its receipt; the two
     /// windows agree.
-    fn assert_honest(&mut self, what: &str) {
+    pub(super) fn assert_honest(&mut self, what: &str) {
         for _ in 0..3 { self.pump(); }
         assert!(matches!(self.rc.state, ConnectionState::Connected { .. }), "{what}: never torn down: {}", torn(&self.rc.state));
         assert!(self.sp().is_present_and_alive(), "{what}: the joiner is still in the world");
@@ -254,7 +254,7 @@ impl Joined {
     }
 
     /// Units of `item` in the client's window.
-    fn held(&self, item: &Item) -> u32 {
+    pub(super) fn held(&self, item: &Item) -> u32 {
         self.inv.slots_iter().flatten().filter(|s| &s.item == item).map(|s| u32::from(s.count)).sum()
     }
 
@@ -538,11 +538,12 @@ fn c3d_client_drift_is_exact_and_corrects_the_cell() {
         assert_eq!(fate, Some(crate::action_identity::ActionFate::Refused), "{case}: a Drift refusal, with its typed row");
         assert_eq!(j.hs.server.world.get_block(cell[0], cell[1], cell[2]), now, "{case}: the server's cell is untouched");
         assert_eq!(j.sp().inventory.slot(0), window.slot(0), "{case}: the server's copy is untouched");
-        // Until recovery a refusal tears the session down in the same tick
-        // (`StrictTeardown::Unconfirmed`), so the send-back never reaches
-        // this client: its corrected cell is recovery's to prove (run 11).
-        j.rc.poll();
-        assert_eq!(torn(&j.rc.state), crate::strict_admission::StrictTeardown::Unconfirmed.reason(), "{case}: the refusal's teardown, never an Untyped pause");
+        // Run 12 (S1) — corrected, not torn down: one correction `Replace`,
+        // and the send-back reaches this client (the corrected cell).
+        assert_eq!((j.sp().strict_refusals.stale_world, j.sp().strict_refusals.other), (1, 0), "{case}: one stale-world refusal");
+        for _ in 0..3 { j.pump(); }
+        assert!(matches!(j.rc.state, ConnectionState::Connected { .. }), "{case}: corrected, never torn down: {}", torn(&j.rc.state));
+        assert_eq!(j.world.get_block(cell[0], cell[1], cell[2]), now, "{case}: the client's cell is the server's");
     }
 }
 

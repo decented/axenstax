@@ -128,3 +128,34 @@ mod teardown_copy_tests {
         assert!(text.ends_with('.'));
     }
 }
+
+/// C3d run 12 (S1; Decision 19's measurement, survey Q15) — one Strict
+/// seat's typed refusals: stale-world (a Drift: the cell changed under the
+/// client) and other (a rule or a mismatch). Logged in the departure line
+/// beside `PossessionTally`; a measurement, never a cheating count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefusalTally {
+    pub stale_world: u32,
+    pub other: u32,
+}
+
+/// Which side of [`RefusalTally`] a refusal counts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalKind {
+    StaleWorld,
+    Rule,
+}
+
+impl RefusalTally {
+    pub fn note(&mut self, kind: RefusalKind) {
+        let n = match kind { RefusalKind::StaleWorld => &mut self.stale_world, RefusalKind::Rule => &mut self.other };
+        *n = n.saturating_add(1);
+    }
+    /// The departure line's addition, or `None` if nothing was refused.
+    pub fn summary(&self) -> Option<String> {
+        (*self != Self::default()).then(|| format!(
+            "Strict refusals: {} stale-world (Drift), {} other (rule or mismatch); not counted as cheating",
+            self.stale_world, self.other
+        ))
+    }
+}

@@ -45,6 +45,8 @@ mod c3d_grid_tests;
 mod c3d_death_client_tests;
 #[cfg(test)]
 mod c3d_client_edit_tests;
+#[cfg(test)]
+mod c3d_refusal_correction_tests;
 
 use std::collections::VecDeque;
 
@@ -1855,6 +1857,12 @@ impl HostedServer {
             // C3a-fix-1 — and on its ordered window events.
             if sp.server_simulated
                 && let Some(line) = sp.window_events.summary()
+            {
+                log::info!("{} — {line}", sp.display_name);
+            }
+            // C3d run 12 (S1, Q15) — and on its Strict refusals by kind.
+            if sp.server_simulated
+                && let Some(line) = sp.strict_refusals.summary()
             {
                 log::info!("{} — {line}", sp.display_name);
             }

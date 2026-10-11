@@ -43,7 +43,7 @@
 //! the count the input reports (`GameState::apply_window_inbox`).
 
 mod strict;
-pub use strict::{admit_staged, stage_strict_click, stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker, strict_leaves_no_unpaid_obligation, strict_raw_marker, prepare_strict_events, StrictStageError};
+pub use strict::{admit_staged, stage_strict_click, stage_strict_edit, stage_strict_effects, stage_strict_refused_autofill, strict_effective_marker, strict_leaves_no_unpaid_obligation, strict_raw_marker, prepare_strict_events, strict_replace_fits, StrictStageError};
 
 use std::collections::VecDeque;
 
