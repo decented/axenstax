@@ -5820,7 +5820,21 @@ Leaving the joined world ends a `Prepared` session (`handover_on_leave` ->
 the link closes with it, and no Abort is sent (the ack has left); a session
 before Prepared still carries on to Ready in the lobby. Tested: leaving
 while Prepared ends the session and the resumer still activates the import
-on Committed. And
+on Committed. CP13 (CP12 review MEDIUM-1): the leave can close the link
+before a slow source has read the ack, so a frozen source's
+`HostedServer::handover_take_frames` drains the bound seat's queued
+Handover frames BEFORE its liveness refusal (the transport guarantees
+"closed => its last frame is in `rx`"). It does this only for exactly the
+bound seat (same slot, attach generation and verified key, still
+authenticated and not disconnected) whose transport alone has closed; a
+broken link, a disconnect or a reconnect is refused first, and a closed
+seat with nothing queued is refused as before. A verified, bearer-proven
+`PreparedAck` read that way retires the world: the retirement re-check
+(`eligibility::seats`) accepts that seat, and never another seat, a
+reconnect, or a closed seat with no verified ack. Tested
+(`game_harness_handover_recipient_leaving_before_the_source_reads_the_ack_still_activates`):
+the recipient leaves at Prepared, the source is pumped only after the
+leave, and it retires, publishes Committed and the import activates. And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
 which takes over every import whose working world's `handover/` holds a
 Prepared receipt and no Activated or quarantine record (bounded; creates

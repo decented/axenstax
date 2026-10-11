@@ -200,12 +200,26 @@ impl HostedServer {
     /// Control frames the bound seat sent, oldest first. While frozen they
     /// are read straight out of that seat's queue (no tick runs); before
     /// that, `process_inbound_packets` routes them into the link's inbox.
+    ///
+    /// CP13 (CP12 review MEDIUM-1): a frozen link drains the seat's queue
+    /// BEFORE the liveness refusal. The transport guarantees "closed => its
+    /// last frame is in `rx`", so a PreparedAck the recipient sent before it
+    /// left (CP12's leave closes the link) is still read; verified and
+    /// bearer-proven, it retires the world (`eligibility::seats` still
+    /// requires that exact seat, generation and key). Only the same seat
+    /// whose transport alone has closed: a broken link, a disconnect or a
+    /// reconnect is refused first, and a closed seat with nothing queued is
+    /// refused as before.
     pub fn handover_take_frames(&mut self) -> Result<Vec<Vec<u8>>, LinkError> {
-        self.handover_check()?;
-        let (slot, frozen) = match &self.handover {
-            Some(l) => (l.slot, l.frozen),
+        let (slot, generation, key, frozen) = match &self.handover {
+            Some(l) if l.broken.is_some() => return self.handover_check().map(|()| Vec::new()),
+            Some(l) => (l.slot, l.generation, l.key, l.frozen),
             None => return Err("no handover link"),
         };
+        let live = self.handover_seat_live(slot, generation, key);
+        if !live && !(frozen && self.handover_seat_closed(slot, generation, key)) {
+            return self.handover_check().map(|()| Vec::new());
+        }
         let mut out: Vec<Vec<u8>> = Vec::new();
         if let Some(l) = &mut self.handover {
             out.extend(l.inbox.drain(..));
@@ -228,7 +242,50 @@ impl HostedServer {
             }));
             self.handover_fill_guests(slot);
         }
+        if !live && out.is_empty() {
+            return self.handover_check().map(|()| out);
+        }
         Ok(out)
+    }
+
+    /// Test only (CP13): the seat's connection closes the way the QUIC
+    /// transport's does (network.rs: "closed => its last frame is in `rx`"):
+    /// `is_closed` turns true at once, and what it already sent stays queued.
+    /// (The in-process channel only reports closed once its queue is empty.)
+    #[cfg(test)]
+    pub(crate) fn test_close_seat_transport(&mut self, slot: usize) {
+        use crate::transport::{ClosedTransport, Packet, ServerTransport};
+        struct ClosedAtOnce(Box<dyn ServerTransport>);
+        impl ServerTransport for ClosedAtOnce {
+            fn send_to_client(&self, data: &[u8]) {
+                self.0.send_to_client(data)
+            }
+            fn try_recv_from_client(&self) -> Option<Packet> {
+                self.0.try_recv_from_client()
+            }
+            fn channel_binding(&self) -> Option<[u8; 32]> {
+                self.0.channel_binding()
+            }
+            fn is_websocket(&self) -> bool {
+                self.0.is_websocket()
+            }
+            fn is_closed(&self) -> bool {
+                true
+            }
+        }
+        let inner = std::mem::replace(&mut self.transports[slot], Box::new(ClosedTransport));
+        self.transports[slot] = Box::new(ClosedAtOnce(inner));
+    }
+
+    /// CP13: `slot` is exactly the bound seat, still authenticated and not
+    /// disconnected, and only its transport has closed (the leave).
+    fn handover_seat_closed(&self, slot: usize, generation: u32, key: [u8; 32]) -> bool {
+        self.handshake_done.get(slot).copied().unwrap_or(false)
+            && !self.disconnected.get(slot).copied().unwrap_or(true)
+            && self.transports.get(slot).is_some_and(|t| t.is_closed())
+            && self.server.players.get(slot).is_some_and(|sp| {
+                sp.connected && sp.server_simulated && sp.attach_gen == generation && sp.verified_pubkey == Some(key)
+            })
     }
 
     /// L1: while frozen, every other seat's packets move into its own

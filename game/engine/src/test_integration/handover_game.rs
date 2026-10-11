@@ -1018,6 +1018,58 @@ fn game_harness_handover_recipient_leaving_while_prepared_ends_the_session_and_s
 }
 
 
+/// CP13 (CP12 review MEDIUM-1): the recipient leaves at Prepared BEFORE the
+/// source has pumped past its ack (a slow or minimised source). The leave
+/// closes the link; the source, pumped only after it, still reads the
+/// queued, verified ack and retires; Committed is published and the
+/// recipient's import activates.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_recipient_leaving_before_the_source_reads_the_ack_still_activates() {
+    use crate::handover::live::resumer::{Backoff, Resumer};
+    let mut j = joined("dst-leave-before-ack");
+    let mut src = consented(&mut j);
+    let t = src.transfer();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "the recipient never reached Prepared (source {:?})", src.stage());
+        j.host.lend_tick(&mut j.hs);
+        if let Some(Handover::Recipient(s)) = j.hg.state.handover.as_mut() {
+            let _ = s.pump(now());
+        }
+        // Stop the moment the recipient has acked: the source hasn't read it.
+        if recipient_stage(&j.hg) == Some(RecipientStage::Prepared) {
+            break;
+        }
+        if src.stage() == SourceStage::Publishing {
+            src.join_publish_worker();
+        }
+        src.pump(&mut j.hs, live(), now()).expect("the source refused before Prepared");
+    }
+    assert!(!src.past_retirement(), "the source read the ack before the leave");
+    let Some(Handover::Recipient(s)) = &j.hg.state.handover else { unreachable!() };
+    let working = s.checkpoint().unwrap().working_world();
+    assert!(j.hg.state.leave_world(crate::world_exit::SaveChoice::Discard, crate::world_exit::ExitTo::Lobby), "the leave failed");
+    assert!(j.hg.state.handover.is_none(), "the Prepared session outlived leaving the world");
+    // The link closes as QUIC's does: closed at once, the ack still queued.
+    j.hs.test_close_seat_transport(j.slot);
+    // Only now does the source pump: the link has closed.
+    while !src.past_retirement() {
+        assert!(std::time::Instant::now() < deadline, "the source never retired (stage {:?})", src.stage());
+        if let Err(r) = src.pump(&mut j.hs, live(), now()) {
+            panic!("the source refused after the leave instead of reading the queued ack: {}", r.0);
+        }
+    }
+    let fast = Resumer::new(Backoff { first: std::time::Duration::from_millis(100), ceiling: std::time::Duration::from_millis(400) });
+    assert!(src.hand_publication(&fast), "the publication wasn't taken");
+    let store = crate::handover::live::authority::store(&working).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while store.read(crate::handover::durable::MarkerKind::Activated, t).unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline, "the recipient never activated after leaving before the ack was read");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 // ── CP9 review MEDIUM-1 (CP12 step 2, the CP9 step 3 game test): Cancel after the bearer left rotates ──
 
 /// The host game hosting online, driven to `at` (the bearer disclosed),
