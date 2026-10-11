@@ -2453,4 +2453,124 @@ mod session {
         }
         drop((rc, hs, host, dst, relay));
     }
+
+    /// CP15: the source's world folder path of `t`'s `<label>` record.
+    fn source_record(dir: &Dir, label: &str, t: crate::handover::Id) -> std::path::PathBuf {
+        crate::handover::live::authority::dir(&dir.0.join("world")).join(format!("{label}-{}.dat", hex::encode(t)))
+    }
+    /// Drive to Prepared with the recipient's ack lost in transit, until
+    /// the recipient's receipt is durable (it is past its ack).
+    fn past_the_ack(tag: &str) -> Pair {
+        let mut p = ready_pair(tag);
+        p.drop_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Prepared);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !has_record(&p.dir, "prepared", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never persisted its receipt");
+            p.host.lend_tick(&mut p.hs);
+            let _ = p.dst.as_mut().unwrap().pump(now());
+        }
+        assert_eq!(p.src.stage(), SourceStage::Prepared);
+        p
+    }
+
+    /// CP15 (a) (CP13b review LOW-3, coordinator): a source killed after the
+    /// bearer left and before any terminal record (no `abort`, no `Drop`)
+    /// leaves its pending abort record. The next start-up promotes it to
+    /// the abort record through the choke point, publishes the Aborted on
+    /// the relay fixture, and the recipient past its ack quarantines
+    /// instead of waiting forever. The world opens, the pending record is
+    /// gone, and nothing on disk holds the bearer (invitations are never
+    /// persisted: the restarted host's invitation is a fresh one).
+    #[test]
+    fn handover_a_source_killed_after_disclosure_is_promoted_at_start_up() {
+        use crate::handover::live::{authority, resumer::Resumer};
+        let p = past_the_ack("pending-crash");
+        let t = p.src.transfer();
+        assert!(source_record(&p.dir, "pending-abort", t).is_file(), "no pending abort record before the bearer left");
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        // The kill: no `abort`, no `Drop` backstop.
+        std::mem::forget(src);
+        drop((rc, hs, host));
+        let world = dir.0.join("world");
+        assert!(!source_record(&dir, "aborted", t).exists(), "the kill left an abort record");
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 1, "the restarted source didn't promote and publish the pending abort");
+        assert!(!source_record(&dir, "pending-abort", t).exists(), "the promoted pending abort record stayed");
+        let store = authority::store(&world).unwrap();
+        let aborted = crate::handover::phase::RetiredCommit::read_aborted(&store, t).unwrap().expect("no abort record after the promotion");
+        wait_published(&store, &aborted);
+        assert!(relay.stored().iter().any(|e| e.id.to_bytes() == aborted.event_hash()), "the Aborted wasn't on the relay");
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the recipient's wait wasn't resumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !has_record(&dir, "quarantined", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient past its ack never quarantined");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!has_record(&dir, "prepared", t), "the published Aborted left the receipt");
+        assert!(authority::open_guard(&world).is_ok(), "the promoted abort refused the source's world");
+        let bearer = TEST_BEARER;
+        for f in files_under(&world, &dir.0.join("imports")) {
+            assert!(!holds(&std::fs::read(&f).unwrap(), &bearer), "{} holds the bearer", f.display());
+        }
+        drop((dst, relay));
+    }
+
+    /// CP15 (b): a pending abort record beside the transfer's retirement
+    /// record: the retirement wins. The start-up publishes the Committed
+    /// only, writes no abort record, and discards the pending record.
+    #[test]
+    fn handover_a_pending_abort_beside_a_retirement_record_loses_to_it() {
+        use crate::handover::live::{authority, resumer::Resumer};
+        let mut p = ready_pair("pending-retired");
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Prepared);
+        let pending = std::fs::read(source_record(&p.dir, "pending-abort", t)).expect("no pending abort record");
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        assert!(!source_record(&p.dir, "pending-abort", t).exists(), "a clean retire kept the pending abort record");
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        drop((src, dst, rc, hs, host));
+        // As a crash between the retirement and the removal would leave it.
+        std::fs::write(source_record(&dir, "pending-abort", t), &pending).unwrap();
+        let world = dir.0.join("world");
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 1, "the Committed wasn't resumed");
+        let store = authority::store(&world).unwrap();
+        let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().expect("no retirement record");
+        wait_published(&store, &retired);
+        assert!(!source_record(&dir, "aborted", t).exists(), "a pending abort beside a retirement became an abort record");
+        assert!(!source_record(&dir, "pending-abort", t).exists(), "the losing pending abort record wasn't discarded");
+        let payload = crate::handover::durable::marker_payload(&pending, crate::handover::durable::MarkerKind::PendingAbort, t).unwrap();
+        let aborted = crate::handover::phase::AbortRecord::decode(&payload).unwrap().aborted_hash();
+        let ids: Vec<_> = relay.stored().iter().map(|e| e.id.to_bytes()).collect();
+        assert!(ids.contains(&retired.event_hash()));
+        assert!(!ids.contains(&aborted), "the losing pending abort's Aborted was published");
+        assert_eq!(authority::open_guard(&world).unwrap_err().0, crate::handover::live::copy::RETIRED);
+    }
+
+    /// CP15 (c): the pending abort record can't be written: the handover
+    /// stops before anything leaves (no bearer frame, no invitation to
+    /// rotate), the source unfreezes, and no record is left behind.
+    #[test]
+    fn handover_a_pending_abort_record_that_cant_be_written_discloses_nothing() {
+        use crate::handover::durable::{MarkerKind, WriteBoundary, fault};
+        use crate::handover::live::{authority, copy};
+        let mut p = ready_pair("pending-unwritten");
+        let t = p.src.transfer();
+        fault::arm(MarkerKind::PendingAbort, WriteBoundary::TempSynced);
+        let r = p.src.pump(&mut p.hs, p.live, now());
+        assert_eq!(r.map_err(|e| e.0), Err(copy::PENDING_ABORT_UNWRITTEN), "the handover didn't stop on the unwritten pending abort");
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "{:?}", p.src.stage());
+        assert!(!p.src.bearer_disclosed() && !p.src.needs_invite_rotation(), "the bearer was disclosed without a pending abort record");
+        assert!(!p.hs.handover_frozen(), "the source stayed frozen");
+        p.host.lend_tick(&mut p.hs);
+        let _ = p.dst.as_mut().unwrap().pump(now());
+        assert!(!frames_for_seat_hold_bearer(&p), "a bearer frame reached the recipient");
+        assert!(!source_record(&p.dir, "pending-abort", t).exists() && !source_record(&p.dir, "aborted", t).exists());
+        assert!(authority::open_guard(&p.dir.0.join("world")).is_ok());
+    }
+    fn frames_for_seat_hold_bearer(p: &Pair) -> bool {
+        p.dst.as_ref().is_some_and(|d| d.bearer_received())
+    }
 }

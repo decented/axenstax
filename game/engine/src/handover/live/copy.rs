@@ -124,7 +124,14 @@ pub const WORLD_IN_TWO_PLACES: &str = "This world may now exist in two places.";
 /// CP13b (D2): the source's abort record couldn't be saved; play resumed.
 /// CP14b (CP13b review LOW-3): a recipient past its ack can't cancel, so the
 /// line says what is true.
-pub const ABORT_UNRECORDED: &str = "The cancellation couldn't be saved. The other player's game will keep waiting for this handover.";
+/// CP15: the pending abort record written before the bearer left is still
+/// on disk, so the next start of this game publishes the cancellation.
+pub const ABORT_UNRECORDED: &str =
+    "The cancellation couldn't be saved. The other player's game will keep waiting for this handover until this game is next started.";
+/// CP15: the pending abort record couldn't be saved before the bearer could
+/// leave, so nothing was handed over.
+pub const PENDING_ABORT_UNWRITTEN: &str =
+    "The handover couldn't be saved on this device, so it stopped. Nothing was handed over. Play has resumed.";
 /// CP13b (CP13 review MEDIUM-1): the ledger can't take this handover.
 pub const LEDGER_FULL: &str = "This device's handover record is full or can't be read, so the handover stopped. Nothing was handed over.";
 /// CP13b (CP13 review LOW-1): a recipient's Cancel after its ack.

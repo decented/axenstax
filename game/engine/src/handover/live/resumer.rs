@@ -314,7 +314,15 @@ impl Resumer {
     /// retirement record and no "Committed published" record. Bounded, and
     /// it creates nothing (a world without `handover/` is skipped). Returns
     /// how many publications it took over.
+    /// CP15: first, every world's pending abort records with no terminal
+    /// record are promoted (`phase::promote_pending_aborts`), so the scan
+    /// below publishes their Aborted; this runs before any world opens.
     pub fn resume_all(&self, worlds_root: &Path, ledger: &Ledger) -> usize {
+        for world in handover_worlds(worlds_root) {
+            if let Ok(store) = existing_store(&world) {
+                crate::handover::phase::promote_pending_aborts(&store, ledger);
+            }
+        }
         let mut adopted = 0;
         for (world, retired) in retired_worlds(worlds_root) {
             if self.adopt(&world, retired, ledger) {
@@ -435,6 +443,21 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
 /// creates nothing; a world without a real `handover/` is skipped).
 fn retired_worlds(worlds_root: &Path) -> Vec<(PathBuf, RetiredCommit)> {
     let mut out = Vec::new();
+    for world in handover_worlds(worlds_root) {
+        let Ok(store) = existing_store(&world) else { continue };
+        match RetiredCommit::scan(&store) {
+            Ok(records) => out.extend(records.into_iter().map(|r| (world.clone(), r))),
+            // Unreadable: the world stays refused; nothing to publish.
+            Err(e) => log::warn!("handover: a retirement record under {} can't be read: {e}", world.display()),
+        }
+    }
+    out
+}
+
+/// Every world folder under `worlds_root` with a real `handover/`
+/// (bounded; it creates nothing).
+fn handover_worlds(worlds_root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(worlds_root) else { return out };
     for (seen, entry) in entries.enumerate() {
         if seen >= WORLDS_SCAN_LIMIT {
@@ -449,12 +472,7 @@ fn retired_worlds(worlds_root: &Path) -> Vec<(PathBuf, RetiredCommit)> {
         if !world.is_dir() || !is_real_dir(&super::authority::dir(&world)) {
             continue;
         }
-        let Ok(store) = existing_store(&world) else { continue };
-        match RetiredCommit::scan(&store) {
-            Ok(records) => out.extend(records.into_iter().map(|r| (world.clone(), r))),
-            // Unreadable: the world stays refused; nothing to publish.
-            Err(e) => log::warn!("handover: a retirement record under {} can't be read: {e}", world.display()),
-        }
+        out.push(world);
     }
     out
 }

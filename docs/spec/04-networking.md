@@ -5937,8 +5937,8 @@ dropped without `abort`), it seals an Aborted over its sealed Prepared
 (`crypto::seal_aborted`): the Committed envelope and kind exactly, with the
 inner label `phase: 2` (Committed is `1`, Prepared `0`, so neither can be
 read as the other), bound like Committed to the transfer and context (the
-exact core) and to the Prepared hash, sealed at `core.issued_at`. With no
-Prepared sealed yet there is nothing to answer (no receipt can exist). The
+exact core) and to the Prepared hash, sealed at `core.issued_at` (CP15: sealed once, with the Prepared, before
+the bearer leaves; see the pending abort record below). The
 **abort record** (`aborted-<transfer>.dat`, `phase::AbortRecord`, label
 `AxeNStax/handover/abort/v1`: core, Prepared hash, Aborted hash, the exact
 signed Aborted bytes, the root's relays; nothing secret; it mirrors
@@ -5947,7 +5947,9 @@ fsynced first, BEFORE the source unfreezes. It never refuses the source's
 own world (the open guard reads only `retired-*`). If it can't be written
 the source unfreezes anyway (the world is the source's), logs it, and its
 line adds "The cancellation couldn't be saved. The other player's game
-will keep waiting for this handover." (`copy::ABORT_UNRECORDED`; CP14b, CP13b
+will keep waiting for this handover until this game is next started."
+(CP15: the pending abort record below is still on disk, and the next start
+promotes and publishes it) (`copy::ABORT_UNRECORDED`; CP14b, CP13b
 review LOW-3: a recipient past its ack can't cancel, so it doesn't say it
 can; the leave path's lobby notice is this composed line too,
 `SourceSession::end_line`, CP13b review LOW-5); the live Abort still
@@ -5994,7 +5996,57 @@ gone; a live Abort after the ack quarantines through the shared check, and
 one carrying the source's Committed quarantines nothing; an abort racing a
 retire leaves exactly one record; with both on the relay Committed wins
 with the line; an Aborted of another transfer or over another Prepared is
-ignored; a failed abort record still unfreezes, with the line. CP13b (CP13 review MEDIUM-1): the ledger's append
+ignored; a failed abort record still unfreezes, with the line.
+
+CP15 (CP13b review LOW-3, coordinator 2026-10-11): **the pending abort
+record.** A source killed after the bearer left and before any terminal
+record used to leave nothing that said "disclosed": the world reopened at
+the next start, no Aborted was ever sealed, and a recipient past its ack
+waited without end. Now `disclose` seals the Aborted together with the
+Prepared (same seal, `prepared` = the just-sealed Prepared, at
+`core.issued_at`) and writes it as the **pending abort record**
+(`pending-abort-<transfer>.dat`, the exact `phase::AbortRecord` bytes,
+`phase::write_pending_abort`: its ledger line, kind `abt` over those exact
+bytes, appended and fsynced first, then the file and the directory fsynced)
+BEFORE `disclosed` is set and the bearer frame is sent. If it can't be
+written nothing is disclosed: the handover stops with "The handover couldn't
+be saved on this device, so it stopped. Nothing was handed over. Play has
+resumed." (`copy::PENDING_ABORT_UNWRITTEN`), and a record that did land is
+withdrawn. Every later abort of the session writes exactly that record as its
+abort record (`record_abort` never re-seals), so the abort record's ledger
+line is the pending one's (`write_terminal` appends a line only for a record
+not yet listed: still 2 lines per handover, and the 2-entry headroom check is
+unchanged). A durable terminal record (a clean retire, a clean abort, or a
+promotion) REMOVES the pending record, inside `write_terminal`, only after
+its own persist returned Ok (file and directory fsynced): removal rather than
+a superseded record kept beside it, because each record kind is capped at 64
+per world (kept pending records would end that world's later handovers), and
+a removal needs no ledger line (the ledger lists what may be published). An
+uncertain retirement keeps it. **At start-up**, before the scan and before
+any world opens (`Resumer::resume_all`, run by `native_boot_services`), each
+world's pending abort records are promoted (`phase::promote_pending_aborts`,
+under the same process-wide lock): each is decoded on its own (one that
+doesn't decode, or whose exact digest this install's ledger doesn't list, is
+logged and ignored); one whose abort record exists is removed; otherwise it
+is written as the abort record through the choke point (`write_terminal`), so
+retire/abort exclusivity holds. **A pending abort record and a retirement
+record: the retirement wins**, the pending record is discarded, and that is
+logged. The scan then publishes the promoted record through
+`Resumer::adopt` (which re-persists it first), and the recipient past its
+ack quarantines on it. The invitation needs no rotation step at start-up:
+invitations live only in memory (`OnlineHost::start` mints a fresh bearer
+each time), so the bearer a dead process disclosed admits nobody after the
+restart. This is safe only because a Committed is never published without a
+durable retirement record (CP14/CP14b: the session and the scan both
+publish only through `adopt`'s `persist_again`): no retirement record means
+no Committed left the machine. Tested: (a) a source killed after the
+recipient's (lost) ack restarts, promotes, publishes the Aborted and the
+recipient quarantines; (b) a pending abort record beside a retirement
+record publishes only the Committed and leaves no abort record; (c) a
+pending abort record that can't be written stops the handover with nothing
+disclosed.
+
+CP13b (CP13 review MEDIUM-1): the ledger's append
 bound is its read bound (entry 8,193 is refused at append time, before its
 record), so it holds about 4,000 handovers per install for its lifetime
 (compaction is CP14). Before the bearer is disclosed, and before a recipient

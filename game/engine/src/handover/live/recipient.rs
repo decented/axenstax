@@ -308,6 +308,11 @@ impl RecipientSession {
         })
     }
 
+    /// Test builds (CP15): whether the source's bearer frame arrived.
+    #[cfg(test)]
+    pub fn bearer_received(&self) -> bool {
+        self.bearer.is_some()
+    }
     pub fn stage(&self) -> RecipientStage {
         self.stage
     }

@@ -26,6 +26,13 @@ pub enum MarkerKind {
     /// the exact signed Aborted and the root's relays (`phase::AbortRecord`).
     /// Exclusive with `Retired` for one transfer (`phase` writes either).
     Aborted,
+    /// CP15: the source's PENDING abort record, written (its ledger line
+    /// first) before the bearer leaves: the same `phase::AbortRecord`
+    /// bytes, sealed with the Prepared. Removed once a terminal record of
+    /// the transfer is durable; promoted to `Aborted` at the next start-up
+    /// when none is (`phase::promote_pending_aborts`). Its label is no
+    /// prefix of another kind's (the scans split names on `<label>-`).
+    PendingAbort,
 }
 impl MarkerKind {
     fn number(self) -> u8 {
@@ -38,6 +45,7 @@ impl MarkerKind {
             Self::Published => 5,
             Self::Quarantined => 6,
             Self::Aborted => 7,
+            Self::PendingAbort => 8,
         }
     }
     fn label(self) -> &'static str {
@@ -50,6 +58,7 @@ impl MarkerKind {
             Self::Published => "published",
             Self::Quarantined => "quarantined",
             Self::Aborted => "aborted",
+            Self::PendingAbort => "pending-abort",
         }
     }
 }
@@ -283,6 +292,10 @@ impl MarkerStore {
     /// CP13b (D2): every abort record (bounded like `retirements`).
     pub fn aborts(&self) -> Result<Vec<(Id, Vec<u8>)>> {
         self.records(MarkerKind::Aborted)
+    }
+    /// CP15: every pending abort record (bounded like `retirements`).
+    pub fn pending_aborts(&self) -> Result<Vec<(Id, Vec<u8>)>> {
+        self.records(MarkerKind::PendingAbort)
     }
     fn records(&self, kind: MarkerKind) -> Result<Vec<(Id, Vec<u8>)>> {
         let prefix = format!("{}-", kind.label());
@@ -578,6 +591,7 @@ pub(crate) mod tests {
             MarkerKind::Published,
             MarkerKind::Quarantined,
             MarkerKind::Aborted,
+            MarkerKind::PendingAbort,
         ] {
             let id = [kind.number() + 1; 16];
             s.persist(kind, id, b"exact phase binding").unwrap();

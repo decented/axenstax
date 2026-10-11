@@ -192,6 +192,10 @@ pub struct SourceSession {
     /// to the resumer like a Committed), or it couldn't be written.
     abort_recorded: bool,
     abort_unrecorded: bool,
+    /// CP15: the Aborted sealed with the Prepared before the bearer left,
+    /// and its abort record (durable as the pending abort record). Every
+    /// abort after disclosure writes exactly this record.
+    pending_abort: Option<(Event, AbortRecord)>,
     /// CP13b test hook: the abort record's write fails.
     #[cfg(test)]
     pub test_fail_abort_record: bool,
@@ -268,6 +272,7 @@ impl SourceSession {
             hand_tried: None,
             abort_recorded: false,
             abort_unrecorded: false,
+            pending_abort: None,
             #[cfg(test)]
             test_fail_abort_record: false,
             #[cfg(test)]
@@ -434,40 +439,19 @@ impl SourceSession {
 
     /// CP13b (D2): every abort after the bearer was disclosed (this
     /// session's `abort`, its liveness aborts, and a session dropped without
-    /// one) seals the Aborted over this session's Prepared, at
-    /// `core.issued_at`, and writes the abort record (ledger entry first)
-    /// through the phase's one choke point BEFORE anything unfreezes. With
-    /// no sealed Prepared yet the recipient can't hold a receipt, so there
-    /// is nothing to answer.
+    /// one) writes the abort record (ledger entry first) through the phase's
+    /// one choke point BEFORE anything unfreezes. CP15: the record is the
+    /// one sealed with the Prepared before the bearer left (`disclose`, the
+    /// pending abort record), so the Aborted a crash leaves for the next
+    /// start-up and the one a live abort writes are the same signed bytes.
     fn record_abort(&mut self) -> AbortRecorded {
         if !self.disclosed || self.abort_recorded || self.abort_unrecorded {
             return AbortRecorded::Nothing;
         }
-        let (Some(core), Some(ready), Some(successor), Some((_, vp))) =
-            (self.core.clone(), self.ready.clone(), self.recipient_attestation.clone(), self.prepared.clone())
-        else {
-            return AbortRecorded::Nothing;
-        };
-        let sealed = crypto::recipient(&self.cfg.root, self.cfg.bearer.expose(), None).ok().and_then(|keys| {
-            let seal = Seal {
-                source: &self.cfg.runtime,
-                recipient: &keys,
-                core: &core,
-                ready: &ready,
-                challenge: self.challenge,
-                source_attestation: &self.cfg.attestation,
-                successor_attestation: &successor,
-                prepared: Some(&vp),
-            };
-            let ev = pollster::block_on(crypto::seal_aborted(seal, &self.cfg.root, core.issued_at)).ok()?;
-            let Ok(Verified::Aborted(va)) = crypto::open(&ev, &keys, core.source_runtime, &self.cfg.root, core.issued_at, Some(&vp)) else {
-                return None;
-            };
-            let record = AbortRecord::new(&va, &vp, ev.as_json().into_bytes(), self.cfg.root.relays().to_vec()).ok()?;
-            Some((ev, record))
-        });
-        let Some((ev, record)) = sealed else {
-            log::error!("handover: the Aborted couldn't be sealed; play resumes without an abort record");
+        let Some((ev, record)) = self.pending_abort.clone() else {
+            // Unreachable: `disclose` sets `disclosed` only after the
+            // pending abort record is durable.
+            log::error!("handover: disclosed without a pending abort record; play resumes without an abort record");
             self.abort_unrecorded = true;
             return AbortRecorded::Unrecorded(None);
         };

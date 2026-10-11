@@ -16,6 +16,9 @@ impl SourceSession {
         }
         // CP13b (CP13 review MEDIUM-1): room for this handover's records in
         // the install's ledger before the bearer can leave.
+        // CP15: two lines per handover still: the Abort line (written with
+        // the pending abort record, reused by the abort record) and the
+        // Retirement line.
         if !crate::handover::ledger::Ledger::install().has_room(2) {
             return Err(Refusal(crate::handover::live::copy::LEDGER_FULL));
         }
@@ -38,6 +41,39 @@ impl SourceSession {
         let Ok(Verified::Prepared(vp)) = crypto::open(&event, &keys, core.source_runtime, &self.cfg.root, now, None) else {
             return Err(unsealed);
         };
+        // CP15 (coordinator 2026-10-11): the Aborted is sealed together with
+        // the Prepared, and its pending abort record is durable (ledger line,
+        // then file and directory fsync) BEFORE the bearer can leave. A
+        // source that dies past this point leaves that record, and the next
+        // start-up promotes and publishes it (`phase::promote_pending_aborts`),
+        // so a recipient past its ack never waits without end. It can't be
+        // written: nothing is disclosed and the handover stops.
+        let pending = Seal {
+            source: &self.cfg.runtime,
+            recipient: &keys,
+            core: &core,
+            ready: &ready,
+            challenge: self.challenge,
+            source_attestation: &self.cfg.attestation,
+            successor_attestation: &successor,
+            prepared: Some(&vp),
+        };
+        let unwritten = Refusal(crate::handover::live::copy::PENDING_ABORT_UNWRITTEN);
+        let ev = pollster::block_on(crypto::seal_aborted(pending, &self.cfg.root, core.issued_at)).map_err(|_| unsealed.clone())?;
+        let Ok(Verified::Aborted(va)) = crypto::open(&ev, &keys, core.source_runtime, &self.cfg.root, core.issued_at, Some(&vp)) else {
+            return Err(unsealed);
+        };
+        let record = AbortRecord::new(&va, &vp, ev.as_json().into_bytes(), self.cfg.root.relays().to_vec()).map_err(|_| unsealed.clone())?;
+        let store = self.cfg.world_dir.as_ref().map(|d| crate::handover::live::authority::store(d));
+        let Some(Ok(store)) = store else { return Err(unwritten) };
+        if let Err(e) = crate::handover::phase::write_pending_abort(&store, &crate::handover::ledger::Ledger::install(), &record) {
+            log::error!("handover: the pending abort record couldn't be written ({e}); nothing was disclosed");
+            // Nothing left this machine: a record that did land (its
+            // directory fsync failed) is withdrawn so no start-up publishes it.
+            let _ = store.remove(crate::handover::durable::MarkerKind::PendingAbort, self.transfer);
+            return Err(unwritten);
+        }
+        self.pending_abort = Some((ev, record));
         let phase = crate::handover::phase::Source::frozen(core, &self.cfg.authority).map_err(|_| unsealed)?;
         // Set before the send: a partly written frame may have left.
         self.disclosed = true;

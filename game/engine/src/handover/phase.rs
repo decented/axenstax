@@ -261,6 +261,10 @@ impl AbortRecord {
         r.validate()?;
         Ok(r)
     }
+    /// The id of the signed Aborted this record holds.
+    pub fn aborted_hash(&self) -> Hash {
+        self.aborted
+    }
     fn validate(&self) -> Result<()> {
         if self.prepared == [0; 32] || self.relays.is_empty() || self.relays.len() > 8 {
             return Err(Error::Invalid("abort record context"));
@@ -328,18 +332,137 @@ static TERMINAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// it refuses when the other kind exists (or can't be read: fail closed),
 /// then appends and fsyncs the ledger entry, then the record.
 fn write_terminal(store: &MarkerStore, ledger: &super::ledger::Ledger, transfer: Id, kind: MarkerKind, bytes: &[u8]) -> Result<()> {
+    let _serialised = TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
+    write_terminal_locked(store, ledger, transfer, kind, bytes)
+}
+fn write_terminal_locked(store: &MarkerStore, ledger: &super::ledger::Ledger, transfer: Id, kind: MarkerKind, bytes: &[u8]) -> Result<()> {
     use super::ledger::{Entry, RecordKind, Role};
     let (other, entry, refusal) = match kind {
         MarkerKind::Retired => (MarkerKind::Aborted, RecordKind::Retirement, ABORT_RECORD_EXISTS),
         MarkerKind::Aborted => (MarkerKind::Retired, RecordKind::Abort, RETIREMENT_RECORD_EXISTS),
         _ => return Err(Error::State("not a terminal record")),
     };
-    let _serialised = TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
     if store.read(other, transfer)?.is_some() {
         return Err(Error::State(refusal));
     }
-    ledger.append(Entry::of(transfer, Role::Source, entry, bytes)).map_err(|_| Error::State(LEDGER_UNWRITTEN))?;
-    store.persist(kind, transfer, bytes)
+    // CP15: the abort record's bytes are the pending abort record's bytes,
+    // whose ledger line (kind Abort, same digest) was written before the
+    // bearer left. One line per record keeps the ledger simple: the
+    // headroom checked at disclosure (`has_room(2)`: this Abort line and the
+    // Retirement line) still covers every handover, and a record listed
+    // already is never listed twice.
+    let entry = Entry::of(transfer, Role::Source, entry, bytes);
+    if !(kind == MarkerKind::Aborted && ledger.lists(&entry)) {
+        ledger.append(entry).map_err(|_| Error::State(LEDGER_UNWRITTEN))?;
+    }
+    store.persist(kind, transfer, bytes)?;
+    // CP15: a durable terminal record supersedes the pending abort record,
+    // which is REMOVED rather than kept beside it: the store caps each kind
+    // at 64 records per world, so kept pending records would end every
+    // later handover of the world, and a removal needs no ledger line (the
+    // ledger lists what may be published; a removed file publishes
+    // nothing). Only after an Ok persist (file and directory fsynced): an
+    // uncertain write keeps the pending record as the start-up backstop.
+    if let Err(e) = store.remove(MarkerKind::PendingAbort, transfer) {
+        log::warn!("handover: a pending abort record couldn't be removed ({e}); the next start-up removes it");
+    }
+    Ok(())
+}
+
+/// CP15 (CP13b review LOW-3, coordinator 2026-10-11): the pending abort
+/// record, written before the bearer leaves the source (the caller sets
+/// `disclosed` only after an Ok). Its ledger line first (kind Abort, the
+/// digest of these exact bytes, which are the abort record the promotion
+/// or a clean abort writes later), then the record (file and directory
+/// fsynced). Any error: nothing may be disclosed.
+pub fn write_pending_abort(store: &MarkerStore, ledger: &super::ledger::Ledger, record: &AbortRecord) -> Result<()> {
+    use super::ledger::{Entry, RecordKind, Role};
+    if !record.verified {
+        return Err(Error::Invalid("pending abort record is not a new seal"));
+    }
+    let bytes = record.encode()?;
+    let transfer = record.core.transfer;
+    ledger
+        .append(Entry::of(transfer, Role::Source, RecordKind::Abort, &bytes))
+        .map_err(|_| Error::State(LEDGER_UNWRITTEN))?;
+    store.persist(MarkerKind::PendingAbort, transfer, &bytes)
+}
+
+/// CP15: what the start-up promotion did with `world`'s pending abort records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Promotion {
+    /// Promoted to abort records (published by the scan that follows).
+    pub promoted: usize,
+    /// Discarded because a retirement record of the transfer exists.
+    pub retired_won: usize,
+}
+
+/// CP15 (coordinator 2026-10-11): at start-up, before any world opens, a
+/// pending abort record with no terminal record is promoted to the abort
+/// record through the one choke point (`write_terminal`: retire/abort
+/// exclusivity holds; no retire can race a process that died). The scan
+/// that follows publishes it (`Resumer::adopt`, which re-persists it
+/// first), and the recipient past its ack quarantines on it instead of
+/// waiting forever. The restarted process holds no bearer: invitations are
+/// never persisted, so the old one is already rotated.
+///
+/// Safe only because a Committed is never published without a durable
+/// retirement record (CP14/CP14b: the session hands a Committed over only
+/// through `adopt`'s `persist_again`, and the scan publishes only records
+/// it read and re-persisted). No retirement record here means no Committed
+/// left this machine, so an Aborted can't contradict one.
+///
+/// A pending record and a retirement record: the retirement wins, the
+/// pending record is discarded and that is logged. A pending record whose
+/// abort record already exists is just removed. Each record is decoded on
+/// its own (one bad record is logged and skipped, never gating another),
+/// and only a record whose exact digest `ledger` lists is promoted.
+pub fn promote_pending_aborts(store: &MarkerStore, ledger: &super::ledger::Ledger) -> Promotion {
+    use super::ledger::{Entry, RecordKind, Role};
+    let mut out = Promotion::default();
+    let pending = match store.pending_aborts() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("handover: pending abort records under {} can't be listed: {e}", store.directory().display());
+            return out;
+        }
+    };
+    let _serialised = TERMINAL.lock().unwrap_or_else(|e| e.into_inner());
+    for (transfer, bytes) in pending {
+        if let Err(e) = AbortRecord::decode(&bytes).and_then(|r| {
+            if r.core.transfer == transfer { Ok(()) } else { Err(Error::Invalid("pending abort filename binding")) }
+        }) {
+            log::warn!("handover: a pending abort record can't be read ({e}); it is ignored");
+            continue;
+        }
+        if !ledger.lists(&Entry::of(transfer, Role::Source, RecordKind::Abort, &bytes)) {
+            log::warn!("handover: a pending abort record isn't in this install's ledger; it is ignored");
+            continue;
+        }
+        match store.read(MarkerKind::Aborted, transfer) {
+            Ok(Some(_)) => {
+                let _ = store.remove(MarkerKind::PendingAbort, transfer);
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!("handover: an abort record can't be read ({e}); its pending record stays");
+                continue;
+            }
+        }
+        match write_terminal_locked(store, ledger, transfer, MarkerKind::Aborted, &bytes) {
+            Ok(()) => out.promoted += 1,
+            Err(Error::State(RETIREMENT_RECORD_EXISTS)) => {
+                log::warn!("handover: a pending abort record lost to the transfer's retirement record; the retirement stands and the pending record is discarded");
+                if let Err(e) = store.remove(MarkerKind::PendingAbort, transfer) {
+                    log::warn!("handover: the discarded pending abort record couldn't be removed ({e})");
+                }
+                out.retired_won += 1;
+            }
+            Err(e) => log::error!("handover: a pending abort record couldn't be promoted ({e}); the next start-up tries again"),
+        }
+    }
+    out
 }
 
 /// CP9: a retired source's Committed publication, rebuilt from its durable
