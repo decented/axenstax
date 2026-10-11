@@ -212,6 +212,11 @@ impl CraftingUi {
     /// setting's digest covers (the session starts by sending it, as the
     /// Mirror op log does).
     pub fn sync_auto_refill_joined(&mut self, remote: &mut crate::remote_client::RemoteClient, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
+        // Run 14 — a refused setting (its `Refused` receipt retired) is sent
+        // again: the correction `Replace` keeps each copy's refill setting.
+        if std::mem::take(&mut remote.refill_refused) {
+            self.ops.forget_auto_refill();
+        }
         if self.ops.auto_refill_sent() == Some(inv.auto_refill) {
             return Ok(());
         }

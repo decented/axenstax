@@ -363,6 +363,10 @@ pub struct RemoteClient {
     pub recovery_assembly: Option<crate::rebase_assembly::RebaseAssembly>,
     /// Exact receipts wait for the actual ordered world boundary.
     pub action_receipts: std::collections::VecDeque<crate::action_wire::ActionReceipt>,
+    /// C3d run 14 — a retired `Refused` receipt named this client's
+    /// `SetAutoRefill`: its next window action sends the setting again
+    /// (`CraftingUi::sync_auto_refill_joined`).
+    pub refill_refused: bool,
     last_recovery_id: u64,
     queued_action_receipts: usize,
     pending_action_ack: Option<crate::action_wire::AppliedActionAck>,
@@ -781,6 +785,7 @@ impl RemoteClient {
             recovery_prepare: None,
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
+            refill_refused: false,
             last_recovery_id: 0,
             queued_action_receipts: 0,
             pending_action_ack: None,
@@ -842,6 +847,7 @@ impl RemoteClient {
             recovery_prepare: None,
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
+            refill_refused: false,
             last_recovery_id: 0,
             queued_action_receipts: 0,
             pending_action_ack: None,

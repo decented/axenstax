@@ -64,8 +64,9 @@ impl HostedServer {
     }
 
     /// Raw R as marker scratch, or the typed refusal / pause it calls for.
-    /// `correctable`: an `OpenPlayer`/`OpenTable` refusal is corrected by a
-    /// `Replace` (C3d run 12, S1); a container or `SetAutoRefill` one tears down.
+    /// `correctable`: a configuration refusal is corrected by a `Replace`
+    /// (C3d run 12, S1; `SetAutoRefill` since run 14); a container one tears
+    /// down.
     fn strict_raw_or_stop(&mut self, i: usize, action: ActionHeader, path: &str, correctable: bool) -> Option<crate::staged_window::MarkerWindow> {
         match crate::window_events::strict_raw_marker(&self.server.players[i], &self.server.registry) {
             Ok(raw) => Some(raw),
@@ -80,7 +81,7 @@ impl HostedServer {
     }
 
     fn serve_strict_config(&mut self, i: usize, action: ActionHeader, op: &protocol::WindowOpPacket) -> bool {
-        let Some(mut raw) = self.strict_raw_or_stop(i, action, "window configuration", !matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })) else { return false };
+        let Some(mut raw) = self.strict_raw_or_stop(i, action, "window configuration", true) else { return false };
         let now = self.server.tick_counter;
         let sp = &self.server.players[i];
         let (mut station, mut gone, mut refill) = (sp.station, sp.table_gone_ticks, sp.inventory.auto_refill);
@@ -102,8 +103,12 @@ impl HostedServer {
         // the latest `Replace`, not whenever one waits.
         let stale = self.server.players[i].window_events.predates_replace(action.events_applied);
         if !stale && raw.digest_with(station, None) != op.digest {
-            // C3d run 12 (S1): a `Replace` carries the station, not the refill setting.
-            if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. }) { self.refuse_typed_action_then_teardown(i, action) } else { self.refuse_typed_action(i, action) }
+            // C3d run 12 (S1): a `Replace` carries the station. Run 14: a
+            // refused `SetAutoRefill` is corrected too. The `Replace` keeps
+            // each copy's refill setting, so the client, seeing its setting's
+            // `Refused` receipt, sends it again on the corrected window
+            // (`RemoteClient::refill_refused`).
+            self.refuse_typed_action(i, action);
             return false;
         }
         let included = self.server.players[i].window_events.last_number();

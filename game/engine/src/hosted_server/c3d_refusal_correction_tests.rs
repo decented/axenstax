@@ -278,29 +278,41 @@ fn c3d_s1_a_refusal_every_tick_is_torn_down_at_the_ninth_correction() {
     assert_eq!(sp.strict_refusals.other, 9);
 }
 
-/// Run 13 item 1 — pins the `SetAutoRefill` refusal as it stands today: a
-/// Strict refill setting whose digest the server's copy doesn't reproduce
-/// is refused, then torn down with the `Unconfirmed` reason (a `Replace`
-/// keeps the refill setting, so it can't correct it).
+/// Run 14 item 1 (revises run 13's teardown pin) — a Strict refill setting
+/// whose digest the server's copy doesn't reproduce is refused with zero
+/// effect and CORRECTED, never torn down: one correction `Replace` puts the
+/// window back; the `Replace` keeps each copy's refill setting, so the
+/// client, seeing its setting's `Refused` receipt, sends the setting again
+/// on the corrected window, where it is served. Both copies then agree,
+/// refill setting included.
 #[test]
-fn c3d_s1_refused_auto_refill_setting_tears_down_unconfirmed() {
-    use super::c3d_grid_tests::{joined as grid_joined, stone};
-    let mut j = grid_joined("s1-refill", InventoryMode::Strict, None);
-    j.give(0, stone(4));
-    j.pumps(3);
-    j.assert_agree("joined");
-    j.hs.server.players[j.i].inventory.set_slot(7, Some(stone(3)));
-    j.inv.auto_refill = !j.inv.auto_refill;
+fn c3d_s1_refused_auto_refill_setting_is_corrected_then_resent() {
+    let mut j = joined("s1-refill", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
     j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
-    let action = j.last_action();
-    j.pumps(1);
-    assert_eq!(j.fate(action), Some(ActionFate::Refused), "the typed refusal stands");
-    assert!(j.hs.slot_is_free(j.i), "torn down");
-    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.as_str(), _ => "not Failed" };
-    assert_eq!(reason, crate::strict_admission::StrictTeardown::Unconfirmed.reason(), "the Unconfirmed reason");
-    let sp = &j.hs.server.players[j.i];
-    assert_eq!((sp.strict_refusals.stale_world, sp.strict_refusals.other), (0, 1));
-    assert!(!sp.window_events.replace_waiting(), "no correction Replace");
+    j.pump();
+    j.assert_honest("the session's setting");
+    j.hs.server.players[j.i].inventory.set_slot(7, Some(ItemStack::new_block(COBBLESTONE, 3)));
+    let server_refill = j.sp().inventory.auto_refill;
+    j.inv.auto_refill = !j.inv.auto_refill;
+    let before = j.sp().window_events.last_number();
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    let action = j.newest_header();
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "the typed refusal stands");
+    assert!(!j.hs.slot_is_free(j.i) && matches!(j.rc.state, ConnectionState::Connected { .. }), "corrected, never torn down");
+    assert_eq!(j.sp().inventory.auto_refill, server_refill, "zero effect: the server's setting unchanged");
+    assert_eq!(j.sp().window_events.last_number(), before + 1, "exactly one correction Replace");
+    assert_eq!(counters(&j), (0, 1));
+    j.pump();
+    assert!(j.rc.refill_refused, "the Refused receipt retired: the setting goes again");
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("resent");
+    let resent = j.newest_header();
+    assert_ne!(resent, action, "a new setting action");
+    j.pump();
+    assert_eq!(fate(&j, resent), Some(ActionFate::Accepted), "served on the corrected window");
+    assert_eq!(j.sp().inventory.auto_refill, j.inv.auto_refill, "the copies' refill settings agree");
+    j.assert_honest("the corrected setting");
+    assert_eq!(j.held(&Item::Block(COBBLESTONE)), 7, "the client's window was corrected to the server's");
 }
 
 /// The live-correction flag test: a live correction leaves the death flag

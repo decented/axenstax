@@ -225,6 +225,12 @@ impl OpLog {
         self.pending.first().map(|l| l.stamp)
     }
 
+    /// C3d run 14 — a Strict client's refill setting was refused: forget
+    /// that it was sent, so the next window action sends it again.
+    pub fn forget_auto_refill(&mut self) {
+        self.auto_refill = None;
+    }
+
     /// Drop everything (not joined, so nothing is sent) and forget the
     /// setting, so the next joined session starts by sending it.
     pub fn discard(&mut self) {

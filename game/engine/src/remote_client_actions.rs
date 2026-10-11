@@ -170,6 +170,12 @@ impl RemoteClient {
                 self.queued_action_receipts -= 1;
                 continue;
             }
+            if receipt.fate == crate::action_identity::ActionFate::Refused
+                && journal.actions().find(|a| a.header == receipt.action).and_then(|a| crate::action_wire::ActionPacket::decode(&a.intent).ok())
+                    .is_some_and(|p| matches!(p.intent, crate::action_wire::ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })))
+            {
+                self.refill_refused = true;
+            }
             if let Err(error) = journal.retire_receipt(receipt, self.events_applied, receipt.action.seq) {
                 self.state = ConnectionState::Failed(format!("Invalid applied action receipt: {error:?}"));
                 break;

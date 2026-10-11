@@ -209,7 +209,8 @@ impl HostedServer {
     /// its cell sent back. Only for refusals whose client prediction a
     /// `Replace` plus the cell send-back fully undoes: typed edits (every
     /// Drift included), personal clicks and a refused Autofill, shots,
-    /// `OpenPlayer`/`OpenTable`. The rest call
+    /// `OpenPlayer`/`OpenTable`, and (run 14) `SetAutoRefill`, whose client
+    /// sends its setting again when its `Refused` receipt retires. The rest call
     /// [`Self::refuse_typed_action_then_teardown`].
     pub(super) fn refuse_typed_action_at(&mut self, i: usize, action: ActionHeader, cells: &[[i32; 3]], kind: RefusalKind) {
         if !self.strict_slot(i) {
@@ -222,8 +223,7 @@ impl HostedServer {
         self.queue_live_correction_replace(i);
     }
     /// A refusal a `Replace` can't undo — a container open or click (the
-    /// `Replace` carries no container view) or `SetAutoRefill` (a `Replace`
-    /// keeps the refill setting): still the bridge teardown.
+    /// `Replace` carries no container view): still the bridge teardown.
     pub(super) fn refuse_typed_action_then_teardown(&mut self, i: usize, action: ActionHeader) {
         self.refuse_then_teardown_for(i, action, StrictTeardown::Unconfirmed, "action refused at its frontier");
     }

@@ -90,7 +90,7 @@ fn c3d_client_strict_shot_is_served_typed() {
 fn c3d_client_strict_shot_without_server_ammo_is_corrected() {
     let mut j = joined("shot-refused", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
     // The session's refill setting goes first, on agreeing windows (its own
-    // refusal still tears down: `c3d_s1_refused_auto_refill_setting_tears_down_unconfirmed`).
+    // refusal is corrected and resent since run 14: `c3d_s1_refused_auto_refill_setting_is_corrected_then_resent`).
     j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
     j.assert_honest("the refill setting");
     j.hs.server.players[j.i].inventory.set_slot(1, None);
