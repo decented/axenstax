@@ -1045,7 +1045,9 @@ fn kick_off_profile_export() -> std::rc::Rc<std::cell::RefCell<Option<Result<Str
 fn handle_card_action(state: &mut MenuState, idx: usize, card_action: CardAction) -> MenuAction {
     // A world saved by a newer version is never opened or hosted (Spec 02 §8.4):
     // stay in the lobby and say why, before anything reads or writes it.
-    if matches!(card_action, CardAction::DoubleClick | CardAction::Play | CardAction::Host)
+    // CP15 (CP14 review MEDIUM-1): nor forked (a refused world is never
+    // copied into a playable one); the card says why instead.
+    if matches!(card_action, CardAction::DoubleClick | CardAction::Play | CardAction::Host | CardAction::Fork)
         && let Some(why) = save::world_open_refusal(&state.worlds[idx].folder_name)
     {
         state.notice = Some(why);
@@ -2426,6 +2428,7 @@ pub fn draw_main_menu(ctx: &egui::Context, state: &mut MenuState) -> MenuAction 
                     }
                     Err(e) => {
                         log::error!("Fork failed: {e}");
+                        state.notice = Some(e);
                     }
                 }
             }
@@ -6117,6 +6120,25 @@ mod tests {
     use super::{
         app_feature_copy, plan_lobby_settings, AppFeature, LobbySettingsPlan, SettingsPanelAction,
     };
+
+    /// CP15 (CP14 review MEDIUM-1): the lobby's Fork on a refused (retired)
+    /// world opens no fork dialog and shows the refusal line.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn handover_lobby_fork_of_a_refused_world_shows_why_and_forks_nothing() {
+        let _root = crate::save::WorldsRootGuard::new("lobby-fork-refused");
+        let name = "refused";
+        crate::save::write_world_folder(name, &crate::save::WorldMeta::new(name), &crate::save::minimal_world_save_for_tests(5), &crate::world::World::new()).unwrap();
+        let store = crate::handover::live::authority::store(&crate::save::world_dir(name)).unwrap();
+        store.persist(crate::handover::durable::MarkerKind::Retired, [9; 16], b"a retirement record").unwrap();
+        let mut state = super::MenuState::new();
+        state.worlds = crate::save::list_world_entries();
+        let idx = state.worlds.iter().position(|w| w.folder_name == name).expect("the world isn't listed");
+        let action = super::handle_card_action(&mut state, idx, super::CardAction::Fork);
+        assert!(matches!(action, super::MenuAction::None));
+        assert!(!matches!(state.dialog, super::MenuDialog::Forking { .. }), "the lobby opened a fork of a refused world");
+        assert!(state.notice.is_some(), "the lobby didn't say why the world can't be forked");
+    }
 
     #[test]
     fn lobby_settings_changed_persists_and_applies_display_only() {

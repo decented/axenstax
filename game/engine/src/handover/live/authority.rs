@@ -157,14 +157,26 @@ mod tests {
         p
     }
 
-    /// CP14 (CP10 review LOW-4): a fork of a retired world, and of a world
-    /// holding an Activated import's records, carries no `handover/` and no
-    /// bearer.
+    /// CP14 (CP10 review LOW-4) + CP15 (CP14 review MEDIUM-1, DECIDED: a
+    /// refused world can't be forked): the fork of a retired world is
+    /// refused and makes no folder; the fork of an Activated import (which
+    /// opens) is a clean copy that carries no `handover/` and no bearer.
     #[test]
     fn handover_fork_carries_no_handover_folder_and_no_bearer() {
         const BEARER: [u8; 16] = [0xC3; 16];
         let _root = crate::save::WorldsRootGuard::new("handover-fork");
-        for (name, kinds) in [("retired", &[MarkerKind::Retired][..]), ("activated", &[MarkerKind::Prepared, MarkerKind::Activated][..])] {
+        let (_, core) = crate::handover::certificate::tests::fixture();
+        let mut activated = Vec::new();
+        crate::handover::codec::frame(&mut activated, b"AxeNStax/handover/activated/v2");
+        crate::handover::codec::frame(&mut activated, &core.encode());
+        activated.extend_from_slice(&[1; 32]);
+        activated.extend_from_slice(&[2; 32]);
+        activated.extend_from_slice(&BEARER);
+        let retirement = b"a retirement record".to_vec();
+        for (name, kind, id, payload) in [
+            ("retired", MarkerKind::Retired, [7; 16], &retirement),
+            ("activated", MarkerKind::Activated, core.transfer, &activated),
+        ] {
             let w = crate::save::world_dir(name);
             crate::save::write_world_folder(
                 name,
@@ -173,20 +185,21 @@ mod tests {
                 &crate::world::World::new(),
             )
             .unwrap();
-            let s = store(&w).unwrap();
-            for k in kinds {
-                s.persist(*k, [7; 16], &BEARER).unwrap();
-            }
+            store(&w).unwrap().persist(kind, id, payload).unwrap();
             let before: Vec<_> = std::fs::read_dir(crate::save::worlds_root()).unwrap().flatten().map(|e| e.path()).collect();
             let forked = crate::save::fork_world(name, name);
-            // Whatever the fork returned, no folder it made carries
-            // `handover/` or the bearer.
             let made: Vec<_> = std::fs::read_dir(crate::save::worlds_root())
                 .unwrap()
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| !before.contains(p))
                 .collect();
+            if name == "retired" {
+                assert!(forked.is_err(), "a retired world was forked: {forked:?}");
+                assert!(made.is_empty(), "the refused fork made a folder");
+                continue;
+            }
+            assert!(open_guard(&w).is_ok(), "the Activated import doesn't open");
             assert!(!made.is_empty(), "{name}: the fork made no folder ({forked:?})");
             for f in &made {
                 assert!(!dir(f).exists(), "{name}: the fork carried handover/");

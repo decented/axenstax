@@ -108,9 +108,7 @@ pub(super) fn read(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 pub(super) fn sync_dir(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|_| Error::Io)
+    crate::fsync::sync_dir(path).map_err(|_| Error::Io)
 }
 
 /// Atomic no-replace is necessary even for two imports racing within one host.

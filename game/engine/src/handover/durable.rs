@@ -164,9 +164,7 @@ impl MarkerStore {
         };
         if let Some(old) = existing {
             if old.as_slice() == bytes {
-                fs::File::open(&path)
-                    .and_then(|f| f.sync_all())
-                    .map_err(|_| Error::UncertainDurability)?;
+                crate::fsync::sync_file(&path).map_err(|_| Error::UncertainDurability)?;
                 sync_directory(&self.directory).map_err(|_| Error::UncertainDurability)?;
                 observer
                     .reached(WriteBoundary::DirectorySynced)
@@ -220,9 +218,7 @@ impl MarkerStore {
             fs::remove_file(&temp).map_err(|_| Error::Io)?;
         }
         if reuse {
-            fs::File::open(&temp)
-                .and_then(|f| f.sync_all())
-                .map_err(|_| Error::Io)?;
+            crate::fsync::sync_file(&temp).map_err(|_| Error::Io)?;
         } else {
             let mut opts = OpenOptions::new();
             opts.write(true).create_new(true);
@@ -382,17 +378,9 @@ fn decode_marker(bytes: &[u8], kind: MarkerKind, id: Id) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn sync_directory(path: &Path) -> Result<()> {
-    // Windows can't open a directory to fsync it; the rename before this is
-    // NTFS-journaled, as main's saves rely on (C3d). Not compiled here.
-    #[cfg(windows)]
-    {
-        let _ = path;
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    fs::File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|_| Error::Io)
+    // Windows can't open a directory to fsync it (a no-op there, see
+    // `crate::fsync`); the rename before this is NTFS-journaled.
+    crate::fsync::sync_dir(path).map_err(|_| Error::Io)
 }
 /// A stale temp's bytes, never more than `MARKER_LIMIT` (+1 to tell an
 /// over-long one apart), or `None` if it can't be read.

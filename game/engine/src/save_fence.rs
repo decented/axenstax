@@ -73,6 +73,14 @@ pub(crate) fn lift(dir: &Path) {
     fences().retain(|f| f.dir != dir || f.retired);
 }
 
+/// CP15 (CP14 review MEDIUM-2): `dir`'s folder was deleted (its handover
+/// records with it): drop its fence, retired or not, so a new world made at
+/// the same path saves. Only `save::delete_world` calls this, after the
+/// folder is gone.
+pub(crate) fn forget(dir: &Path) {
+    fences().retain(|f| f.dir != dir);
+}
+
 /// Is `path` inside a fenced world folder?
 pub(crate) fn is_up(path: &Path) -> bool {
     covers(&fences(), path)
@@ -208,6 +216,33 @@ pub(crate) mod hold {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    /// CP15 (CP14 review MEDIUM-2): a retired world deleted in the lobby,
+    /// then a new world made at the same folder name in the same process:
+    /// its saves land (the retired fence went with the folder).
+    #[test]
+    fn handover_a_deleted_retired_world_leaves_no_fence_on_its_folder_name() {
+        let _root = crate::save::WorldsRootGuard::new("fence-forget");
+        let name = "valley";
+        let world = || {
+            crate::save::write_world_folder(
+                name,
+                &crate::save::WorldMeta::new(name),
+                &crate::save::minimal_world_save_for_tests(3),
+                &crate::world::World::new(),
+            )
+        };
+        world().unwrap();
+        let dir = crate::save::world_dir(name);
+        raise(&dir);
+        retire(&dir);
+        assert!(world().is_err(), "a retired world's save landed");
+        crate::save::delete_world(name).unwrap();
+        assert!(!dir.exists());
+        world().expect("a new world at a deleted retired world's folder name can't save");
+        assert!(dir.join("world.dat").is_file());
+        assert!(!is_up(&dir), "the deleted world's fence is still up");
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("save-fence-{tag}-{}", std::process::id()));

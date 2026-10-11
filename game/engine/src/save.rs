@@ -1322,8 +1322,8 @@ pub(crate) fn write_atomic_nosync(path: &std::path::Path, bytes: &[u8]) -> Resul
 /// platforms where a directory can't be opened for sync.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sync_dir(dir: &std::path::Path) {
-    if let Ok(f) = fs::File::open(dir)
-        && let Err(e) = f.sync_all()
+    if let Err(e) = crate::fsync::sync_dir(dir)
+        && e.kind() != std::io::ErrorKind::NotFound
     {
         log::warn!("fsync {}: {e}", dir.display());
     }
@@ -4031,6 +4031,15 @@ pub fn fork_world(source_folder: &str, source_display_name: &str) -> Result<Stri
     if !source_dir.exists() {
         return Err(format!("Source world '{}' not found", source_folder));
     }
+    // CP15 (CP14 review MEDIUM-1, DECIDED: a refused world can't be
+    // forked): a world this build won't open (retired by a handover, an
+    // import not yet Activated, an unreadable handover record, a save from
+    // a newer build) is never copied into a playable world, exactly as
+    // `load_world` and export refuse it. A source's retained copy is the
+    // retained-copy slice's job, with its own rules, not this path.
+    if let Some(why) = save_refusal_in(&source_dir) {
+        return Err(why.to_string());
+    }
 
     // Load the source metadata to preserve integrity fields
     let source_meta = load_world_meta(source_folder);
@@ -4486,6 +4495,12 @@ pub fn delete_world(folder_name: &str) -> Result<(), String> {
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| format!("delete: {e}"))?;
         log::info!("Deleted world '{folder_name}'");
+    }
+    // CP15 (CP14 review MEDIUM-2): a retired world's fence never lifts, but
+    // it guards only that folder's records; with the folder gone a new
+    // world made at the same path in this process must save.
+    if !dir.exists() {
+        crate::save_fence::forget(&dir);
     }
     Ok(())
 }

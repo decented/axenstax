@@ -5604,7 +5604,10 @@ error. Writers also refuse early (`refuse_write_over_newer_save`,
 `meta_write_blocked`), before any temp file or folder. The fence lifts only in
 `handover_release` before retirement (an abort that unfreezes); a retired
 link marks it retired and it never lifts in that process; the retirement
-record keeps the world refused after a restart. A HostedServer torn down while
+record keeps the world refused after a restart. CP15 (CP14 review MEDIUM-2):
+deleting the world (`save::delete_world`) forgets its fence once the folder
+is gone (`save_fence::forget`), so a new world made at the same folder name
+in the same process saves (tested: retire, delete, recreate, the save lands). A HostedServer torn down while
 frozen before retirement leaves the fence up for the process (fail closed)
 until the session aborts: the game's server-gone path calls
 `abort_without_server`, which lifts it after the abort record (CP14b).
@@ -5616,8 +5619,16 @@ byte-identical, the world's files unchanged since the capture, the world still
 refused); a frozen world's autosave is refused and lands after an abort.
 Windows: the marker
 and inert stores skip the directory fsync (a directory can't be opened as a
-file there; the rename is NTFS-journaled, as for ordinary saves). Those lines
-are not compiled or tested on this Linux-only build.
+file there; the rename is NTFS-journaled, as for ordinary saves). CP15 (CP14
+review HIGH-1): every re-sync of an EXISTING file (the identical-record
+re-persist that `Resumer::adopt` runs before any publication, and a reused
+stale temp) goes through `crate::fsync::sync_file`, which opens the file with
+write access on Windows (no create, no truncate): `FlushFileBuffers` refuses a
+read-only handle, so a read-only re-sync failed every time there and nothing
+was ever published. Directory syncs go through `crate::fsync::sync_dir` (a
+no-op on Windows). A source-guard test pins that no `File::open` + `sync_all`
+/ `sync_data` remains anywhere else in the engine. Those lines are not
+compiled or tested on this Linux-only build.
 
 Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
 bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the
@@ -5706,8 +5717,14 @@ buffer included; existence checks such as `Receiver::restart`'s and the
 quarantine check use `MarkerStore::exists` and decode nothing); the kernel's
 page cache is not. `handover/` and the marker folders are created 0700 (an
 existing one is tightened) and every record is 0600. `save::fork_world`
-never copies a world's top-level `handover/`: a fork of a retired world, or
-of an activated import, carries no record and no bearer (tested). Host start from the imported world and the
+never copies a world's top-level `handover/` (defence in depth). CP15 (CP14
+review MEDIUM-1, decided: a refused world can't be forked): `fork_world`
+refuses any world `save_refusal_in` refuses (retired, an import not yet
+Activated, an unreadable handover record, a newer save), as loading and
+export do, and the lobby's Fork is gated by `world_open_refusal` like Play
+and Host (the card shows the refusal line). A fork of an Activated import is
+a clean copy with no record and no bearer (tested; a retired world's fork is
+refused and makes no folder). Host start from the imported world and the
 retained copy are the next slices.
 
 Committed publication (CP9). One background resumer per process

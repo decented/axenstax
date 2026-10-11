@@ -346,6 +346,8 @@ mod local_join;
 // Native-only modules
 mod save;
 mod save_fence;
+// CP15 (CP14 review HIGH-1): re-syncs of existing files and directories.
+mod fsync;
 mod save_format;
 mod world_open;
 mod data_dir;
