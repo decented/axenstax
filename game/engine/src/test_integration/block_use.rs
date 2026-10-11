@@ -993,7 +993,11 @@ fn a_joined_hand_spends_nothing_a_block_use_in_flight_claims() {
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("hand-spend lint: cannot read {} ({e})", path.display()));
     let lines: Vec<&str> = raw.lines().collect();
     for needle in [
-        ".take_placeable_from_hotbar(hotbar)",
+        // C3d run 9 — the placement's take lives in
+        // `GameState::take_for_placement` (`strict_edits.rs`: Mirror's
+        // `take_placeable_from_hotbar`, or a Strict client's typed `Edit`);
+        // the place arm asks `hand_may_spend` before calling it.
+        ".take_for_placement(pidx, hotbar,",
         ".consume_one_material(hotbar, seed_id)",
         ".consume_one_material(hotbar, crate::item::MaterialId::PapyrusReed)",
         ".consume_one_material(hotbar, material)",
