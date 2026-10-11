@@ -274,8 +274,8 @@ Strict stays internally selected (no operator flag), Mirror the default bridge.
   without the grace; `close_container_view` on the ops that close a view). Order:
   marker raw stage with prefix source backing and pending fit → digest → result
   row reserved → raw commit → post-commit fold guard. A digest the raw transition
-  doesn't reproduce is `Refused` at its seq with zero effect (fail-closed
-  teardown until recovery is wired). A window the marker projection can't carry
+  doesn't reproduce is `Refused` at its seq with zero effect, then corrected
+  by one live whole-window `Replace` (C3d run 12b, S1; "Refusal" below). A window the marker projection can't carry
   exactly (a broken tool, an unregistered block, a clamped durability) is refused
   with a typed fate before commit; nothing is dropped or clamped; the projection
   is fallible (`MarkerWindow::try_capture_parts`, `staged_window::exact_marker`),
@@ -470,11 +470,26 @@ Coordinator decisions on run 3's departures, as built:
   (`apply_edit_world` / `finish_edit_world`, split out of `process_one_edit`
   so Mirror runs the same code), raw R, the numbered grants, the terminal row
   and the grant packets; then the debt-zero guard.
-- **Refusal.** The predicted cell is put back by the existing block-correction
-  path (`send_back_refused_edit`), the `Refused` row is retained, and the
-  bridge teardown follows (no client recipe undo yet). A stale world (the
-  server's cell doesn't break that way, reach, protection) therefore still
-  tears down an honest Strict player until recovery is wired.
+- **Refusal (C3d run 12b, S1).** The predicted cell is put back by the
+  existing block-correction path (`send_back_refused_edit`), the `Refused` row
+  is retained, and ONE whole-window correction `Replace` follows to the live
+  player (`HostedServer::queue_live_correction_replace`), never the teardown.
+  Every in-flight action after it has an older base: `Superseded`, zero
+  effect, its cell sent back (BRIDGE: the suffix is superseded, not replayed,
+  Decision 16, until S3). Scope: typed edits (every Drift; a typed
+  `Unsupported` edit, Q11, and an uncarriable yield, Q12, are refusals),
+  personal clicks and a refused Autofill, shots, `OpenPlayer`/`OpenTable`.
+  Still torn down (`refuse_typed_action_then_teardown`): container open and
+  click refusals and the contest (no container view in a `Replace`),
+  `SetAutoRefill` (a `Replace` keeps the refill setting), every U, C and A
+  class. The live `Replace` takes no death flag (`replace_waiting` is the
+  neutral flag; at most one waits) and must fit the pending window events
+  (1024, 2 MiB) by its real owned heap (`strict_replace_fits`; run 12's red
+  was `event_heap_bytes` refusing every `Replace` by design, so every probe
+  "didn't fit"); one that doesn't is a `FellBehind` teardown. Per-seat
+  `RefusalTally` (stale-world vs other) goes in the departure line, never as
+  cheating. Tests: `hosted_server/c3d_refusal_correction_tests.rs`,
+  `c3d_s1_correction_replace_past_the_pending_cap_tears_down`.
 - **Client half not built.** No honest client sends `ActionIntent::Edit` yet:
   a Strict client's edits still ride its movement packet and fail closed. The
   client half reserves an Edit before predicting, as a click does; its receipt

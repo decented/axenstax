@@ -55,6 +55,7 @@ fn c3d_s1_placement_drift_is_refused_and_corrected() {
     let action = j.newest_header();
     j.hs.tick();
     assert_eq!(fate(&j, action), Some(ActionFate::Refused), "a Drift refusal with its typed row");
+    assert!(!j.hs.slot_is_free(j.i), "never torn down: the server keeps the seat");
     assert!(matches!(j.rc.state, ConnectionState::Connected { .. }), "never torn down");
     assert_eq!(j.sp().window_events.last_number(), before + 1, "exactly one correction Replace queued");
     assert!(j.sp().window_events.replace_waiting(), "the neutral flag: a correction Replace waits");
