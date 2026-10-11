@@ -114,6 +114,12 @@ impl HostedServer {
         };
         // Effects: the world, raw R, the numbered yield, the terminal row.
         let now = self.server.tick_counter;
+        // C3d run 12 (coordinator, run-11 review) — a typed crop harvest
+        // leaves its replacement with the server's OWN cell meta (what an
+        // honest client's harvest claims), never the client's `change.meta`.
+        // Mirror still believes the claim (Spec 05).
+        let applied = if yielded && change.new_block != crate::block::AIR { protocol::BlockChange { meta: old_meta, ..change.clone() } } else { change.clone() };
+        let change = &applied;
         self.apply_edit_world(change, old, true, yielded);
         if yielded { crate::break_drops::mark_exposed_neighbours(&mut self.server.world, change.x, change.y, change.z, now); }
         let (inv, armour, cursor, grid) = after.into_parts();

@@ -506,14 +506,14 @@ fn c3d_client_stale_base_edit_is_superseded_and_corrected() {
 /// teardown (the corrected cell waits for recovery: see below).
 #[test]
 fn c3d_client_drift_is_exact_and_corrects_the_cell() {
-    use crate::block::{DIRT, GRAVEL, OAK_LEAVES, TILLED_SOIL, WATER, WHEAT_STAGE_0, WHEAT_STAGE_2, WHEAT_STAGE_3};
+    use crate::block::{DIRT, GRAVEL, OAK_LEAVES, TILLED_SOIL, WHEAT_STAGE_0, WHEAT_STAGE_2, WHEAT_STAGE_3};
     let cell = CELLS[0];
     // (case, what the client saw, what the server's cell holds now, a placement?)
     let cases = [
         ("gravel fell into a mined leaf's cell", OAK_LEAVES, GRAVEL, false),
         ("the crop was harvested and replanted", WHEAT_STAGE_3, WHEAT_STAGE_0, false),
         ("the crop grew a stage", WHEAT_STAGE_2, WHEAT_STAGE_3, false),
-        ("a fluid flowed into the cell", AIR, WATER, true),
+        ("the placed block already stands there", AIR, COBBLESTONE, true),
         ("another block now stands in the cell", AIR, DIRT, true),
     ];
     for (k, (case, saw, now, place)) in cases.into_iter().enumerate() {
@@ -522,7 +522,15 @@ fn c3d_client_drift_is_exact_and_corrects_the_cell() {
             w.set_block(cell[0], cell[1] - 1, cell[2], TILLED_SOIL);
             w.set_block(cell[0], cell[1], cell[2], block);
         }
-        if place { j.place(cell, 0); } else { j.harvest(cell, 1); }
+        let change = if place {
+            j.place(cell, 0);
+            protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: COBBLESTONE, meta: 0 }
+        } else { j.harvest(cell, 1) };
+        // Run 12 (run-11 review LOW-1) — the reason is DRIFT, not only a refusal.
+        let mined = (!place).then_some(protocol::MinedBlock { x: cell[0], y: cell[1], z: cell[2], tool: protocol::WireItem::None });
+        let server_meta = j.hs.server.world.meta_at(cell[0], cell[1], cell[2]);
+        let reason = crate::strict_edits::judge(now, &change, mined.as_ref(), 0, None, false, Some(crate::strict_edits::Received { meta: server_meta, seen: (saw, 0) }));
+        assert_eq!(reason, crate::strict_edits::StrictEdit::Refuse(crate::strict_edits::DRIFT), "{case}: the DRIFT reason");
         let action = j.newest_header();
         let window = j.sp().inventory.clone();
         j.hs.tick();
@@ -536,4 +544,32 @@ fn c3d_client_drift_is_exact_and_corrects_the_cell() {
         j.rc.poll();
         assert_eq!(torn(&j.rc.state), crate::strict_admission::StrictTeardown::Unconfirmed.reason(), "{case}: the refusal's teardown, never an Untyped pause");
     }
+}
+
+/// C3d run 12 (coordinator, run-11 review) — a typed crop harvest in
+/// Strict leaves the replacement with the server's OWN cell meta; a
+/// modified client's `change.meta` is never written (Mirror still believes
+/// it: Spec 05).
+#[test]
+fn c3d_client_strict_crop_harvest_writes_the_servers_meta() {
+    use crate::block::{TILLED_SOIL, WHEAT_STAGE_3};
+    let cell = CELLS[0];
+    let mut j = joined("crop-meta", &[], true);
+    for w in [&mut j.world, &mut j.hs.server.world] {
+        w.set_block(cell[0], cell[1] - 1, cell[2], TILLED_SOIL);
+        w.set_block(cell[0], cell[1], cell[2], WHEAT_STAGE_3);
+    }
+    j.hs.server.world.set_meta((cell[0], cell[1], cell[2]), 2);
+    let keys = crate::break_drops::PopKeys { secret: &[0; 32], world_seed: 0, epoch: 0 };
+    let replacement = crate::break_drops::break_yield(&j.world, &j.reg, WHEAT_STAGE_3, (cell[0], cell[1], cell[2]), None, 0, &keys).replacement;
+    assert_ne!(replacement, AIR, "a harvest that leaves a block");
+    // A modified client: its change claims meta 9.
+    let change = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: replacement, meta: 9 };
+    let routed = route_break(Some(&mut j.rc), &mut j.ui, &mut j.inv, &mut j.armour, 1, change, (WHEAT_STAGE_3, 0), &j.reg).expect("reserved and sent");
+    assert!(matches!(routed, Routed::Typed(_)), "a harvest goes typed");
+    let action = j.newest_header();
+    j.hs.tick();
+    assert_eq!(j.sp().action_results.as_ref().unwrap().peek(action).map(|r| r.fate), Some(crate::action_identity::ActionFate::Accepted));
+    assert_eq!(j.hs.server.world.get_block(cell[0], cell[1], cell[2]), replacement);
+    assert_eq!(j.hs.server.world.meta_at(cell[0], cell[1], cell[2]), 2, "the server's own meta, never the claim");
 }

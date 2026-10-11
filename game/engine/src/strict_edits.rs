@@ -84,7 +84,7 @@ pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protoc
         }
         return StrictEdit::Unsupported("A non-yielding manual break awaits its typed class");
     }
-    if (old == AIR || old == WATER) && new != AIR {
+    if placement_replaceable(old) && new != AIR {
         // Heldness: the slot must place exactly this block.
         return if held.and_then(crate::joiner_inventory::placeable_block) == Some(new) {
             StrictEdit::Place { slot }
@@ -94,6 +94,23 @@ pub fn judge(old: BlockId, change: &protocol::BlockChange, mined: Option<&protoc
     }
     // Untagged emptying edits, untagged in-place changes: no mutation authority.
     StrictEdit::Refuse("an untagged edit is no placement or break")
+}
+
+/// Decision 19 (C3d run 12, coordinator, after the run-11 review) — the
+/// blocks whose cell meta decides a typed Place or Break's outcome, so whose
+/// meta a Drift compares. EMPTY today: growth stages are block ids
+/// (`block.rs`, `growth.rs`), and no Place or Break outcome reads the cell's
+/// meta (`break_drops.rs`). Meta the server changes without a broadcast must
+/// never make an honest edit Drift. Doors add their half bit
+/// (`block_shape::door_is_top`) when they become typed; an open/closed bit
+/// must never be on it; any later class whose outcome reads meta adds its
+/// own entry when it is typed.
+pub const DRIFT_META_BLOCKS: &[BlockId] = &[];
+
+/// The cells a plain placement may fill: AIR and water (`judge`'s Place
+/// arm), one replaceable class for Drift too.
+pub fn placement_replaceable(block: BlockId) -> bool {
+    block == crate::block::AIR || block == crate::block::WATER
 }
 
 /// Why a drifted edit is refused (Decision 19).
@@ -107,12 +124,14 @@ pub const DRIFT: &str = "Drift: the cell no longer holds what the client acted o
 /// fluid, fire), means the cell is no longer what the client acted on.
 pub fn drifted(server: (BlockId, u8), seen: (BlockId, u8), new: BlockId, mined: bool) -> bool {
     // C3d run 11 (run-10 review LOW-1, LOW-2) — exact: the server's cell
-    // against the cell the client saw (`ActionIntent::Edit::old`), block id
-    // and meta. Meta is compared where it is the block's own state: not in
-    // AIR, and not a fluid's level (the fluid sim's, which a joiner's client
-    // doesn't run in step).
-    let meta_counts = server.0 != crate::block::AIR && !crate::block::is_fluid(server.0);
-    server.0 != seen.0
+    // against the cell the client saw (`ActionIntent::Edit::old`).
+    // C3d run 12 (coordinator, run-11 review) — ids only: meta counts only
+    // for a block on [`DRIFT_META_BLOCKS`] (empty today). For a placement,
+    // AIR and water are one replaceable class (the Place arm's own set):
+    // the outcome is the same, so a mismatch between them is no Drift.
+    let same = server.0 == seen.0 || (!mined && placement_replaceable(server.0) && placement_replaceable(seen.0));
+    let meta_counts = DRIFT_META_BLOCKS.contains(&server.0);
+    !same
         || (meta_counts && server.1 != seen.1)
         || server.0 == new
         || (mined && !crate::break_drops::yields_drops(server.0))
@@ -427,5 +446,24 @@ impl crate::GameState {
                 BreakRoute::Wait
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod drift_rule_tests {
+    use super::*;
+    use crate::block::{AIR, COBBLESTONE, DIRT, OAK_LEAVES, WATER, WHEAT_STAGE_2, WHEAT_STAGE_3};
+
+    /// C3d run 12 — Drift compares ids; meta never (the allow-list is empty);
+    /// AIR and water are one replaceable class for a placement.
+    #[test]
+    fn c3d_drift_compares_ids_with_one_replaceable_class() {
+        assert!(DRIFT_META_BLOCKS.is_empty(), "no Place or Break outcome reads meta today");
+        assert!(!drifted((OAK_LEAVES, 5), (OAK_LEAVES, 0), AIR, true), "a leaf's unbroadcast meta never makes an honest break Drift");
+        assert!(!drifted((WATER, 3), (AIR, 0), COBBLESTONE, false), "client saw AIR, the server has water: same outcome");
+        assert!(!drifted((AIR, 0), (WATER, 7), COBBLESTONE, false), "and the reverse");
+        assert!(drifted((DIRT, 0), (AIR, 0), COBBLESTONE, false), "another block stands there");
+        assert!(drifted((WHEAT_STAGE_3, 0), (WHEAT_STAGE_2, 0), AIR, true), "a crop that grew a stage is an id mismatch");
+        assert!(drifted((WATER, 0), (AIR, 0), AIR, true), "the replaceable class is a placement's only");
     }
 }

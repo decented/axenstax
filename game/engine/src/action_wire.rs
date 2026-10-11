@@ -158,6 +158,42 @@ pub enum RecoveryPacket {
 mod tests {
     use super::*;
 
+    /// C3d run 12 (run-11 review LOW-3) — the v89 `Edit` layout, pinned
+    /// byte for byte (bincode: little-endian fixed ints, a u32 variant tag,
+    /// a u8 `Option` tag).
+    #[test]
+    fn c3d_wire_edit_layout_is_pinned() {
+        let action = ActionHeader { session: [7; 16], epoch: 2, life: 3, seq: 900, events_applied: 4 };
+        let intent = ActionIntent::Edit {
+            source_tick: 5,
+            change: protocol::BlockChange { x: 1, y: -2, z: 3, new_block: 0x0102, meta: 9 },
+            hand: (4, 1, 0x0304),
+            mined: Some(protocol::MinedBlock { x: 1, y: -2, z: 3, tool: protocol::WireItem::None }),
+            use_tag: None,
+            old: (0x0506, 7),
+        };
+        let bytes = ActionPacket { action, intent }.encode().unwrap();
+        let mut want: Vec<u8> = vec![7; 16];
+        want.extend(2u32.to_le_bytes());
+        want.extend(900u64.to_le_bytes());
+        want.extend(3u32.to_le_bytes());
+        want.extend(4u32.to_le_bytes());
+        want.extend(0u32.to_le_bytes()); // ActionIntent::Edit
+        want.extend(5u64.to_le_bytes()); // source_tick
+        for v in [1i32, -2, 3] { want.extend(v.to_le_bytes()); }
+        want.extend(0x0102u16.to_le_bytes());
+        want.push(9);
+        want.extend([4u8, 1]);
+        want.extend(0x0304u16.to_le_bytes());
+        want.push(1); // Some(mined)
+        for v in [1i32, -2, 3] { want.extend(v.to_le_bytes()); }
+        want.extend(0u32.to_le_bytes()); // WireItem::None
+        want.push(0); // use_tag: None
+        want.extend(0x0506u16.to_le_bytes());
+        want.push(7);
+        assert_eq!(&*bytes, &want[..], "the v89 Edit layout");
+    }
+
     #[test]
     fn c3d_wire_action_is_distinct_from_movement_and_bounded_before_retention() {
         let action = ActionHeader { session: [7; 16], epoch: 2, life: 3, seq: 900, events_applied: 4 };
