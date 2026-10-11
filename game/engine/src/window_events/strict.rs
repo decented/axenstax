@@ -492,6 +492,26 @@ mod tests {
         sp.inventory.set_slot(4, Some(over));
         assert!(matches!(strict_raw_marker(&sp, &registry), Err(StrictStageError::RawUnrepresentable)), "the server's own window");
     }
+    /// C3d run 14 (owed control for run 13's LOW-1) — a reserved live
+    /// correction `Replace` is measured on the deque's REAL capacity: with
+    /// the deque full to its capacity, the reservation grows it first, and
+    /// the `push_back` that queues the `Replace` then never grows it past
+    /// the capacity the byte bound measured (a doubling would make the next
+    /// honest action fall behind).
+    #[test]
+    fn c3d_s1_reserved_replace_never_grows_the_deque_past_its_measure() {
+        let mut sp = player();
+        for _ in 0..16 { queue(&mut sp, WindowEvent::WearArmour { hits: 1 }, 0); }
+        sp.window_events.waiting.shrink_to_fit();
+        assert_eq!(sp.window_events.waiting.capacity(), sp.window_events.waiting.len(), "premise: the deque is full to its capacity");
+        let probe = WindowEvent::WearArmour { hits: 1 };
+        assert!(reserve_strict_replace(&mut sp, &probe), "one more event fits");
+        let measured = sp.window_events.waiting.capacity();
+        assert!(measured > sp.window_events.waiting.len(), "the slot is reserved before it is measured");
+        queue(&mut sp, probe, 0);
+        assert_eq!(sp.window_events.waiting.capacity(), measured, "the push never grows the deque past the capacity the fit measured");
+        assert_eq!(sp.window_events.tally.forced, 0);
+    }
     #[test]
     fn c3d_actual_event_deque_reserves_both_shot_effects_without_forcing_an_old_event() {
         let mut sp = player();
