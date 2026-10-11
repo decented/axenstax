@@ -95,6 +95,15 @@ impl MarkerStore {
             .map(|bytes| decode_marker(&bytes, kind, id))
             .transpose()
     }
+    /// CP13: remove one record (a missing one is fine), then fsync the
+    /// directory so the removal is durable.
+    pub fn remove(&self, kind: MarkerKind, id: Id) -> Result<()> {
+        match fs::remove_file(self.path(kind, id)) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(Error::Io),
+        }
+    }
     pub fn persist(&self, kind: MarkerKind, id: Id, bytes: &[u8]) -> Result<()> {
         self.persist_observed(kind, id, bytes, &mut NoFault)
     }

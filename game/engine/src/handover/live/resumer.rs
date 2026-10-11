@@ -334,6 +334,11 @@ fn pause(shared: &Shared, wait: Duration) {
 /// Bounded (the inert scan limit, 256 records a world); creates nothing and
 /// follows no symlinked folder.
 fn import_receipts(imports: &Path) -> Vec<(PathBuf, Id)> {
+    import_records(imports, "prepared-")
+}
+
+/// CP13: the same scan for any record kind's file prefix.
+fn import_records(imports: &Path, prefix: &str) -> Vec<(PathBuf, Id)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(imports) else { return out };
     for (seen, entry) in entries.enumerate() {
@@ -355,7 +360,7 @@ fn import_receipts(imports: &Path) -> Vec<(PathBuf, Id)> {
             let name = name.file_name();
             if let Some(t) = name
                 .to_str()
-                .and_then(|n| n.strip_prefix("prepared-")?.strip_suffix(".dat"))
+                .and_then(|n| n.strip_prefix(prefix)?.strip_suffix(".dat"))
                 .and_then(|v| hex::decode(v).ok())
                 .and_then(|v| Id::try_from(v).ok())
             {
@@ -387,6 +392,8 @@ pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) ->
             Some(super::copy::awaiting_handover(&awaiting.source_npub()?))
         })
         .collect();
+    // CP13 (D2): a quarantined import is never opened.
+    lines.extend(import_records(imports, "quarantined-").into_iter().map(|_| super::copy::HANDOVER_UNFINISHED.to_owned()));
     for (world, retired) in retired_worlds(worlds_root) {
         if !ledger.lists(&retired.ledger_entry()) {
             lines.push(super::copy::unlisted_world(&world.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));

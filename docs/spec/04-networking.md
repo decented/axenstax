@@ -5834,7 +5834,41 @@ seat with nothing queued is refused as before. A verified, bearer-proven
 reconnect, or a closed seat with no verified ack. Tested
 (`game_harness_handover_recipient_leaving_before_the_source_reads_the_ack_still_activates`):
 the recipient leaves at Prepared, the source is pumped only after the
-leave, and it retires, publishes Committed and the import activates. And
+leave, and it retires, publishes Committed and the import activates.
+CP13 (D2, CP10 review MEDIUM-3): **the recipient's ack boundary.** The
+session sets `ack_started` the moment the PreparedAck starts to leave
+(after the receipt is durable and the inert marker is cleared). Before it,
+the recipient may abort on its own; from it on, it never does, because the
+source may already have retired: a Cancel, leave or failure (`abort`) hands
+the wait to the resumer, never sends Abort and never quarantines, and only
+the source's Committed (-> Activated) or Aborted (-> quarantine) ends the
+wait. `hand_off_wait` is keyed on `ack_started`, not on the durable
+receipt: a receipt with no ack attempt never hands off. Instead `abort`
+quarantines it locally when the receipt may be on disk with the ack unsent
+((A) it persisted and the inert clear failed; (B) its persist returned
+`UncertainDurability`, so the receiver is still at Ready but the file
+exists): the quarantine record is written first (`Receiver::quarantine`),
+then the receipt and its bearer are removed (`MarkerStore::remove`, with a
+directory fsync), so no resumer adopts it (`AwaitingCommit::read` is `None`
+once quarantined; the receipt is removed rather than rewritten without the
+bearer, which would only stop adoption by accident through the ledger
+digest). This is safe because the source can't retire without the ack. If
+the quarantine write fails, the receipt stays, and the source's published
+Aborted ends it (CP13 step 3, not yet built). A recipient restarted with
+only a receipt (no Activated, no quarantine) can't know whether its ack
+left, so it only waits for the source's signal (the start-up scan adopts
+it); it never quarantines on restart. A quarantined import is never
+opened; the world list shows "This handover didn't finish. The world stays
+with the sender." for each `quarantined-<transfer>.dat`. The existing sweep
+(`inert::sweep`) discards a locally quarantined import at the next start
+when its inert marker is still there (cases (A) and (B): the receipt is
+gone, so `discard_inert_ready` no longer refuses); an import quarantined
+after the ack by the source's live Abort has no inert marker (it was
+cleared before the ack), so the sweep leaves it: it stays, closed, with its
+status line. Tested: (A)
+ends quarantined with the bearer gone and no adoption; a recipient Cancel
+after the ack sends no Abort, quarantines nothing, and the import still
+activates on Committed. And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
 which takes over every import whose working world's `handover/` holds a
 Prepared receipt and no Activated or quarantine record (bounded; creates

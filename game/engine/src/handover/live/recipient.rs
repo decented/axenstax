@@ -170,6 +170,15 @@ pub struct RecipientSession {
     prepared: Option<(Event, VerifiedPrepared)>,
     /// CP10: the awaiting-Committed wait was handed to a resumer.
     activation_handed: bool,
+    /// CP13 (D2): set the moment the PreparedAck starts to leave. From then
+    /// on the recipient never aborts on its own (the source may already have
+    /// retired): a Cancel, leave or failure hands the wait to the resumer,
+    /// never sends Abort and never quarantines.
+    ack_started: bool,
+    /// Test only: `inert::clear` fails after the receipt persisted (CP10
+    /// review MEDIUM-3 (A)).
+    #[cfg(test)]
+    pub(crate) test_fail_inert_clear: bool,
     /// CP10: the last second the Activated record was looked for, and the
     /// last second a hand-off was tried.
     activation_checked: u64,
@@ -290,6 +299,9 @@ impl RecipientSession {
             bearer: None,
             prepared: None,
             activation_handed: false,
+            ack_started: false,
+            #[cfg(test)]
+            test_fail_inert_clear: false,
             resumer: None,
             activation_checked: 0,
             hand_tried: 0,
@@ -328,8 +340,21 @@ impl RecipientSession {
     /// the inert marker (`inert::discard`). From Prepared on nothing is
     /// deleted (quarantine); Activated is never touched. The connection
     /// stays with the session for `return_link`.
+    ///
+    /// CP13 (D2, CP10 review MEDIUM-3): once the ack has started to leave,
+    /// nothing here aborts: the wait goes to the resumer, and only the
+    /// source's Committed or Aborted ends it (no Abort is sent, nothing is
+    /// quarantined). Before the ack, a receipt that may be on disk (it
+    /// persisted, or its persist returned `UncertainDurability`) is
+    /// quarantined locally and then removed (safe: the source can't retire
+    /// without the ack).
     pub fn abort(&mut self, why: &'static str) {
         if matches!(self.stage, RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::Activated) {
+            return;
+        }
+        if self.ack_started {
+            self.hand_off_wait();
+            self.stage = RecipientStage::Quarantined(why);
             return;
         }
         self.send(&Frame::Abort { transfer: self.transfer() });
@@ -345,6 +370,32 @@ impl RecipientSession {
             g.cancelled = true;
             !g.finished
         });
+        let t = self.transfer();
+        let receipt_on_disk = self.receiver.as_ref().is_some_and(|r| r.stage() != crate::handover::phase::ReceiverStage::Ready)
+            || self.markers.as_ref().is_some_and(|m| match m.read(crate::handover::durable::MarkerKind::Prepared, t) {
+                Ok(Some(mut b)) => {
+                    zeroize::Zeroize::zeroize(&mut b);
+                    true
+                }
+                Ok(None) => false,
+                Err(_) => true,
+            });
+        if receipt_on_disk {
+            // (A)/(B): the quarantine record first, then the receipt (and
+            // its bearer) goes. If the quarantine record can't be written the
+            // receipt stays, and the source's published Aborted ends it.
+            let quarantined = match (self.receiver.as_mut(), self.markers.as_ref()) {
+                (Some(r), Some(m)) => r.quarantine(m).is_ok(),
+                _ => false,
+            };
+            if !quarantined {
+                log::warn!("handover: the quarantine record couldn't be stored; the receipt is kept until the sender's abort is read");
+            } else if self.markers.as_ref().is_some_and(|m| m.remove(crate::handover::durable::MarkerKind::Prepared, t).is_err()) {
+                log::warn!("handover: the quarantined receipt couldn't be removed; no resumer adopts it");
+            }
+            self.stage = RecipientStage::Quarantined(why);
+            return;
+        }
         let inert = self.receiver.as_ref().is_none_or(|r| r.stage() == crate::handover::phase::ReceiverStage::Ready);
         if inert && !worker_cleans {
             self.checkpoint = None;
@@ -559,8 +610,9 @@ impl RecipientSession {
         if self.activation_handed {
             return true;
         }
-        let durable = self.receiver.as_ref().is_some_and(|r| r.stage() != crate::handover::phase::ReceiverStage::Ready);
-        let (Some(resumer), Some(c), true) = (self.resumer.as_ref(), self.checkpoint.as_ref(), durable) else {
+        // CP13 (D2): keyed on the start of the ack send, not the durable
+        // receipt: a receipt with no ack attempt quarantines instead.
+        let (Some(resumer), Some(c), true) = (self.resumer.as_ref(), self.checkpoint.as_ref(), self.ack_started) else {
             return false;
         };
         let (t, ledger) = (self.transfer(), crate::handover::ledger::Ledger::install());
@@ -702,9 +754,15 @@ impl RecipientSession {
             .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
         // From here the import is never deleted (a Prepared marker refuses
         // every inert discard); a failed clear quarantines it.
-        super::inert::clear(&self.imports, transfer).map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
+        let cleared = super::inert::clear(&self.imports, transfer);
+        #[cfg(test)]
+        let cleared = if self.test_fail_inert_clear { Err(crate::handover::Error::Io) } else { cleared };
+        cleared.map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
         self.prepared = Some((ev, vp));
         self.stage = RecipientStage::Prepared;
+        // CP13 (D2): the ack boundary. From here this session never aborts
+        // on its own.
+        self.ack_started = true;
         self.send(&Frame::PreparedAck { transfer, event: ack });
         Ok(())
     }

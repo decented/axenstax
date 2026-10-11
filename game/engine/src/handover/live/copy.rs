@@ -113,6 +113,9 @@ pub fn unlisted_world(name: &str) -> String {
 }
 /// CP13: the same for an incoming world's receipt.
 pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record this computer didn't make. It is ignored, and the world stays closed.";
+/// CP13 (D2): the world list's line for a quarantined import: it is never
+/// opened.
+pub const HANDOVER_UNFINISHED: &str = "This handover didn't finish. The world stays with the sender.";
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
 

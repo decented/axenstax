@@ -2072,4 +2072,60 @@ mod session {
         let boot = lib.find("fn native_boot_services").unwrap();
         assert!(lib[boot..boot + 2500].contains("Resumer::global().boot("), "native_boot_services doesn't run the handover boot step");
     }
+
+    /// CP13 (D2, CP10 review MEDIUM-3 (A)): the receipt persisted, then the
+    /// inert clear failed, so the ack never left. The recipient quarantines
+    /// locally (record first, then the receipt and its bearer go), the
+    /// source (no ack) aborts and keeps its world, no resumer adopts the
+    /// import, and the world list says the handover didn't finish.
+    #[test]
+    fn handover_a_receipt_with_no_ack_is_quarantined_locally_and_never_adopted() {
+        use crate::handover::live::{copy, resumer::{Resumer, awaiting_statuses}};
+        let mut p = ready_pair("no-ack-quarantine");
+        p.dst.as_mut().unwrap().test_fail_inert_clear = true;
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        let dst = p.dst.as_ref().unwrap();
+        assert!(matches!(dst.stage(), RecipientStage::Quarantined(_)), "the recipient ended {:?}", dst.stage());
+        assert!(has_record(&p.dir, "quarantined", t), "no local quarantine record");
+        assert!(!has_record(&p.dir, "prepared", t), "the receipt (and its bearer) stayed after the local quarantine");
+        assert!(!dst.activation_handed(), "a receipt with no ack attempt was handed off");
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "the source retired without the ack ({:?})", p.src.stage());
+        assert!(crate::handover::live::authority::open_guard(&p.dir.0.join("world")).is_ok(), "the source lost its world");
+        assert_eq!(Resumer::new(FAST).resume_imports(&p.dir.0.join("imports"), dst_install()), 0, "a resumer adopted the quarantined import");
+        assert!(
+            awaiting_statuses(&p.dir.0.join("no-worlds"), &p.dir.0.join("imports"), dst_install()).contains(&copy::HANDOVER_UNFINISHED.to_owned()),
+            "the quarantined import has no status line"
+        );
+    }
+
+    /// CP13 (D2): a recipient Cancel after the ack sends no Abort and
+    /// quarantines nothing; the wait stays adoptable and the import still
+    /// activates on Committed.
+    #[test]
+    fn handover_a_recipient_cancel_after_the_ack_sends_no_abort_and_still_activates() {
+        use crate::handover::live::resumer::Resumer;
+        use crate::handover::live::wire::Frame;
+        let mut p = ready_pair("cancel-after-ack");
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Retired);
+        assert_eq!(p.src.stage(), SourceStage::Retired);
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        p.dst.as_mut().unwrap().abort("cancel");
+        let frames = p.hs.handover_take_frames().unwrap_or_default();
+        assert!(
+            !frames.iter().any(|b| matches!(Frame::decode(b), Ok(Frame::Abort { .. }))),
+            "a recipient Cancel after the ack sent Abort"
+        );
+        assert!(!has_record(&p.dir, "quarantined", t), "a recipient Cancel after the ack quarantined");
+        assert!(p.src.hand_publication(&Resumer::new(FAST)), "the publication wasn't taken");
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&p.dir.0.join("imports"), dst_install()), 1, "the wait wasn't adoptable after the Cancel");
+        let store = crate::handover::live::authority::store(&working).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while store.read(MarkerKind::Activated, t).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the import never activated after the Cancel");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
