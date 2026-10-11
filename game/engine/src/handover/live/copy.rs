@@ -126,8 +126,15 @@ pub const WORLD_IN_TWO_PLACES: &str = "This world may now exist in two places.";
 /// line says what is true.
 /// CP15: the pending abort record written before the bearer left is still
 /// on disk, so the next start of this game publishes the cancellation.
+/// CP16 (CP14 review LOW-1): said only when no Aborted went to the other
+/// player (no link, or the send failed); `ABORT_UNRECORDED_SENT` otherwise.
 pub const ABORT_UNRECORDED: &str =
     "The cancellation couldn't be saved. The other player's game will keep waiting for this handover until this game is next started.";
+/// CP16 (CP14 review LOW-1): the abort record couldn't be saved, but the
+/// signed cancellation was sent over the link. A recipient that got it
+/// stops waiting; only one that didn't keeps waiting.
+pub const ABORT_UNRECORDED_SENT: &str =
+    "The cancellation couldn't be saved here, but it was sent. If it didn't reach the other player, their game will keep waiting for this handover until this game is next started.";
 /// CP15: the pending abort record couldn't be saved before the bearer could
 /// leave, so nothing was handed over.
 pub const PENDING_ABORT_UNWRITTEN: &str =

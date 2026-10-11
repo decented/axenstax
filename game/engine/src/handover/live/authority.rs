@@ -130,19 +130,14 @@ fn recipient_guard(
 /// A regular file of at most `MARKER_LIMIT` bytes, read without following
 /// a symlink. Zeroed on drop (CP10 review LOW-4: it may hold a bearer).
 fn read_bounded(path: &Path) -> Option<zeroize::Zeroizing<Vec<u8>>> {
-    use std::io::Read;
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > crate::handover::durable::MARKER_LIMIT as u64 {
         return None;
     }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(crate::handover::durable::MARKER_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let bytes = zeroize::Zeroizing::new(bytes);
-    (bytes.len() <= crate::handover::durable::MARKER_LIMIT).then_some(bytes)
+    // CP16 (CP14 review LOW-3): one zeroised buffer from before the read
+    // (never reallocated; a part-way failure drops it zeroed).
+    let bytes = crate::handover::durable::read_zeroized(path, meta.len()).ok()?;
+    (bytes.len() as u64 == meta.len()).then_some(bytes)
 }
 
 #[cfg(test)]

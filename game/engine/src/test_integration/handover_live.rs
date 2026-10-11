@@ -2378,10 +2378,58 @@ mod session {
         // one `end_source_handover` returns, the leave path's notice
         // included) says the cancellation wasn't saved.
         let line = p.src.end_line(crate::handover::live::copy::LEFT);
+        // CP16 (CP14 review LOW-1): the link was up, so the sealed Aborted
+        // went out: the line must not claim the other player keeps waiting.
         assert!(
-            line.contains(crate::handover::live::copy::ABORT_UNRECORDED),
-            "the end line doesn't say the cancellation couldn't be saved: {line}"
+            line.contains(crate::handover::live::copy::ABORT_UNRECORDED_SENT),
+            "the end line doesn't say the cancellation was sent but not saved: {line}"
         );
+        assert!(
+            !line.contains(crate::handover::live::copy::ABORT_UNRECORDED),
+            "the end line claims the other player keeps waiting after the Aborted was sent: {line}"
+        );
+    }
+
+    /// CP16 (CP14 review LOW-1, LOW-4): the hosted server has gone, so no
+    /// Aborted can be sent. With the abort record failing, the line keeps
+    /// "will keep waiting"; either way the late-save fence lifts and the
+    /// session ends Aborted. With the record written, the abort record is
+    /// on disk.
+    fn abort_without_server_after_disclosure(tag: &str, fail_record: bool) {
+        let mut p = ready_pair(tag);
+        p.drop_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = p.src.transfer();
+        drive(&mut p, SourceStage::Prepared);
+        assert_eq!(p.src.stage(), SourceStage::Prepared);
+        assert!(p.src.bearer_disclosed(), "the bearer was never disclosed");
+        let world = p.dir.0.join("world");
+        assert!(crate::save_fence::is_up(&world), "the freeze raised no fence");
+        p.src.test_fail_abort_record = fail_record;
+        p.src.abort_without_server(crate::handover::live::copy::LEFT);
+        assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "{:?}", p.src.stage());
+        assert!(!crate::save_fence::is_up(&world), "abort_without_server left the late-save fence up");
+        let aborted = crate::handover::live::authority::dir(&world).join(format!("aborted-{}.dat", hex::encode(t)));
+        assert_eq!(aborted.exists(), !fail_record, "abort record on disk: {}", aborted.exists());
+        assert_eq!(p.src.abort_recorded(), !fail_record);
+        let line = p.src.end_line(crate::handover::live::copy::LEFT);
+        assert!(line.contains(crate::handover::live::copy::INVITE_REISSUED), "{line}");
+        if fail_record {
+            assert!(
+                line.contains(crate::handover::live::copy::ABORT_UNRECORDED)
+                    && !line.contains(crate::handover::live::copy::ABORT_UNRECORDED_SENT),
+                "with no server nothing was sent, but the line says otherwise: {line}"
+            );
+        } else {
+            assert!(!line.contains("couldn't be saved"), "{line}");
+        }
+    }
+    #[test]
+    fn handover_abort_without_server_records_and_lifts_the_fence() {
+        abort_without_server_after_disclosure("abort-noserver", false);
+    }
+    #[test]
+    fn handover_abort_without_server_unrecorded_says_nothing_was_sent() {
+        abort_without_server_after_disclosure("abort-noserver-unrec", true);
     }
 
     /// CP14b (CP13b review LOW-3): a certain failure writing the retirement
@@ -2405,6 +2453,11 @@ mod session {
         assert!(!p.hs.handover_frozen(), "the source stayed frozen");
         let world = p.dir.0.join("world");
         assert!(!authority::dir(&world).join(format!("retired-{}.dat", hex::encode(t))).exists());
+        // CP16 (CP14 review LOW-2): the signed Commit doesn't linger in a temp.
+        assert!(
+            !authority::dir(&world).join(format!("retired.tmp-{}", hex::encode(t))).exists(),
+            "the retirement record's temp (the signed Commit) outlived the certain failure"
+        );
         assert!(authority::open_guard(&world).is_ok(), "the world doesn't open after a failed retire");
         assert!(!crate::save_fence::is_up(&world), "the late-save fence stayed up");
         let resumer = Resumer::new(FAST);

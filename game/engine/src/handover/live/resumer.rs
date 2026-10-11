@@ -263,7 +263,10 @@ impl Resumer {
     /// The start-up step `native_boot_services` runs (CP9 review LOW-5):
     /// every retired world's Committed and every import's wait that
     /// `ledger` lists. Returns (publications, waits) taken over.
+    /// CP16 (CP14 review LOW-2): first, every world's and every import's
+    /// `handover/` is swept of stale `*.tmp-*` files (`sweep_temps`).
     pub fn boot(&self, worlds_root: &Path, imports: &Path, ledger: &Ledger) -> (usize, usize) {
+        sweep_temps(worlds_root, imports);
         (self.resume_all(worlds_root, ledger), self.resume_imports(imports, ledger))
     }
 
@@ -463,6 +466,22 @@ fn retired_worlds(worlds_root: &Path) -> Vec<(PathBuf, RetiredCommit)> {
 
 /// Every world folder under `worlds_root` with a real `handover/`
 /// (bounded; it creates nothing).
+/// CP16 (CP14 review LOW-2): the start-up temp sweep over every world's
+/// and every import working world's existing `handover/` (creates nothing).
+/// Returns how many temps were removed.
+pub(crate) fn sweep_temps(worlds_root: &Path, imports: &Path) -> usize {
+    let mut dirs = handover_worlds(worlds_root);
+    if let Ok(entries) = std::fs::read_dir(imports) {
+        for entry in entries.take(super::inert::SCAN_LIMIT).flatten() {
+            let working = entry.path().join("working");
+            if entry.file_name().to_str().is_some_and(|n| n.starts_with("handover-")) && is_real_dir(&entry.path()) && is_real_dir(&working) {
+                dirs.push(working);
+            }
+        }
+    }
+    dirs.iter().filter_map(|d| existing_store(d).ok()).map(|s| s.sweep_temps()).sum()
+}
+
 fn handover_worlds(worlds_root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(worlds_root) else { return out };
@@ -765,6 +784,32 @@ mod tests {
         assert!(r.finish_within(Duration::from_secs(5)), "the grace didn't end when the publication finished");
         done.join().unwrap();
         drop(wait);
+    }
+
+    /// CP16 (CP14 review LOW-2): the start-up sweep reaches every world's
+    /// and every import working world's `handover/`, and creates nothing.
+    #[test]
+    fn handover_boot_sweep_reaches_worlds_and_imports() {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).unwrap();
+        let root = std::env::temp_dir().join(format!("axenstax-sweep-{}", hex::encode(random)));
+        let worlds = root.join("worlds");
+        let imports = root.join("imports");
+        let world = worlds.join("w");
+        let working = imports.join("handover-x").join("working");
+        let bare = worlds.join("no-handover");
+        std::fs::create_dir_all(&bare).unwrap();
+        let mut temps = Vec::new();
+        for w in [&world, &working] {
+            let store = super::super::authority::store(w).unwrap();
+            let temp = store.directory().join("retired.tmp-0101");
+            std::fs::write(&temp, b"a signed Commit").unwrap();
+            temps.push(temp);
+        }
+        assert_eq!(sweep_temps(&worlds, &imports), 2);
+        assert!(temps.iter().all(|t| !t.exists()), "a stale temp survived the start-up sweep");
+        assert!(!super::super::authority::dir(&bare).exists(), "the sweep created a handover folder");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

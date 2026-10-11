@@ -192,6 +192,10 @@ pub struct SourceSession {
     /// to the resumer like a Committed), or it couldn't be written.
     abort_recorded: bool,
     abort_unrecorded: bool,
+    /// CP16 (CP14 review LOW-1): the sealed Aborted went out on the link
+    /// (the send returned Ok). What `end_line` may claim about the other
+    /// player's wait depends on it.
+    abort_sent: bool,
     /// CP15: the Aborted sealed with the Prepared before the bearer left,
     /// and its abort record (durable as the pending abort record). Every
     /// abort after disclosure writes exactly this record.
@@ -272,6 +276,7 @@ impl SourceSession {
             hand_tried: None,
             abort_recorded: false,
             abort_unrecorded: false,
+            abort_sent: false,
             pending_abort: None,
             #[cfg(test)]
             test_fail_abort_record: false,
@@ -422,7 +427,11 @@ impl SourceSession {
             line = format!("{line} {}", super::copy::INVITE_REISSUED);
         }
         if self.abort_unrecorded {
-            line = format!("{line} {}", super::copy::ABORT_UNRECORDED);
+            // CP16 (CP14 review LOW-1): say only what is known. A sealed
+            // Aborted that went out ends a recipient's wait if it arrived
+            // (before its ack it just ends; past it, it quarantines).
+            let why = if self.abort_sent { super::copy::ABORT_UNRECORDED_SENT } else { super::copy::ABORT_UNRECORDED };
+            line = format!("{line} {why}");
         }
         line
     }
@@ -538,7 +547,9 @@ impl SourceSession {
         };
         match hs {
             Some(hs) => {
-                let _ = self.send(hs, &Frame::Abort { transfer: self.transfer, aborted });
+                let carried = aborted.is_some();
+                let sent = self.send(hs, &Frame::Abort { transfer: self.transfer, aborted }).is_ok();
+                self.abort_sent = carried && sent;
                 hs.handover_release();
             }
             None => {

@@ -5713,7 +5713,11 @@ carried the bearer into its Prepared receipt and Activated record are
 zeroed after the write, and so (CP14, CP10 review LOW-4) are the marker
 store's encoded write buffer and every read of a record (`MarkerStore::read`
 and the open guard's bounded read return `Zeroizing<Vec<u8>>`, the raw file
-buffer included; existence checks such as `Receiver::restart`'s and the
+buffer included; CP16, CP14 review LOW-3: every such read, and the
+comparison read of a stale temp, fills one `Zeroizing` buffer sized to the
+file before the read starts and reads at most one byte more, so it never
+reallocates (a freed partial copy) and a read that fails part-way is zeroed
+too; a file that changed length under the read is refused; existence checks such as `Receiver::restart`'s and the
 quarantine check use `MarkerStore::exists` and decode nothing); the kernel's
 page cache is not. `handover/` and the marker folders are created 0700 (an
 existing one is tightened) and every record is 0600. `save::fork_world`
@@ -5841,7 +5845,13 @@ other bytes: it was never renamed, so nothing durable claims it) is
 replaced, never jamming a write; it is compared only when its length is
 exactly the record's, and that read is bounded by the record limit
 (CP11); a temp path that isn't a regular file still refuses
-(CP9 review LOW-3); a world whose `handover/` has been deleted
+(CP9 review LOW-3); CP16 (CP14 review LOW-2): a certain failure after the
+temp exists and before its rename (write, fsync, the `TempSynced`
+boundary, the rename) removes the temp (best effort, then a directory
+fsync), so a retirement's signed Commit never lingers beside a world that
+aborted, and the start-up step (`Resumer::boot`) first sweeps every
+regular `*.tmp-*` from every world's and every import's `handover/`
+(nothing renamed them, and no session runs yet); a world whose `handover/` has been deleted
 meanwhile has nowhere to record it and is dropped after the proof. The open
 guard still refuses the world after publication: retired is forever. The
 resumer is a detached thread, which does not outlive `main`: a publication
@@ -5970,7 +5980,12 @@ promotes and publishes it) (`copy::ABORT_UNRECORDED`; CP14b, CP13b
 review LOW-3: a recipient past its ack can't cancel, so it doesn't say it
 can; the leave path's lobby notice is this composed line too,
 `SourceSession::end_line`, CP13b review LOW-5); the live Abort still
-carries the sealed Aborted. **Exclusivity:** one function
+carries the sealed Aborted. CP16 (CP14 review LOW-1): that line is said
+only when no Aborted went out (no link, the send failed, or
+`abort_without_server`); when the sealed Aborted was sent, the line is
+"The cancellation couldn't be saved here, but it was sent. If it didn't
+reach the other player, their game will keep waiting for this handover
+until this game is next started." (`copy::ABORT_UNRECORDED_SENT`). **Exclusivity:** one function
 (`phase::write_terminal`, under one process-wide lock) writes either the
 retirement record or the abort record of a transfer, and refuses when the
 other exists or can't be read: `retire` refuses on an abort record (the

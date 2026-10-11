@@ -212,30 +212,25 @@ impl MarkerStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(Error::Io),
         };
-        let reuse = stale == Some(bytes.len() as u64) && read_stale_temp(&temp).is_some_and(|old| old == bytes);
+        let reuse = stale == Some(bytes.len() as u64) && read_stale_temp(&temp, bytes.len() as u64).is_some_and(|old| old.as_slice() == bytes);
         let stale = stale.is_some();
         if stale && !reuse {
             fs::remove_file(&temp).map_err(|_| Error::Io)?;
         }
-        if reuse {
-            crate::fsync::sync_file(&temp).map_err(|_| Error::Io)?;
-        } else {
-            let mut opts = OpenOptions::new();
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
+        // CP16 (CP14 review LOW-2): from here until the rename lands, a
+        // certain failure removes the temp (best effort, then a directory
+        // fsync): a never-renamed record (a retirement's signed Commit, a
+        // Prepared's bearer) must not linger beside a world that carries on.
+        let written = self.write_temp(&temp, bytes, reuse).and_then(|()| {
+            observer.reached(WriteBoundary::TempSynced).map_err(|_| Error::Io)?;
+            fs::rename(&temp, &path).map_err(|_| Error::Io)
+        });
+        if let Err(e) = written {
+            if fs::remove_file(&temp).is_ok() {
+                let _ = sync_directory(&self.directory);
             }
-            let mut f = opts.open(&temp).map_err(|_| Error::Io)?;
-            f.write_all(bytes)
-                .and_then(|()| f.sync_all())
-                .map_err(|_| Error::Io)?;
+            return Err(e);
         }
-        observer
-            .reached(WriteBoundary::TempSynced)
-            .map_err(|_| Error::Io)?;
-        fs::rename(&temp, &path).map_err(|_| Error::Io)?;
         observer
             .reached(WriteBoundary::Renamed)
             .map_err(|_| Error::UncertainDurability)?;
@@ -244,6 +239,49 @@ impl MarkerStore {
             .reached(WriteBoundary::DirectorySynced)
             .map_err(|_| Error::UncertainDurability)?;
         Ok(())
+    }
+    /// The temp of `persist`: an identical stale one fsynced again, or a
+    /// fresh owner-only file written and fsynced.
+    fn write_temp(&self, temp: &Path, bytes: &[u8], reuse: bool) -> Result<()> {
+        if reuse {
+            crate::fsync::sync_file(temp).map_err(|_| Error::Io)?;
+        } else {
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(temp).map_err(|_| Error::Io)?;
+            f.write_all(bytes)
+                .and_then(|()| f.sync_all())
+                .map_err(|_| Error::Io)?;
+        }
+        Ok(())
+    }
+    /// CP16 (CP14 review LOW-2): the start-up sweep. Every `*.tmp-*` here
+    /// was never renamed (so nothing durable claims it), and at start-up no
+    /// session can be writing one: each regular one is removed (never
+    /// through a symlink; anything that isn't a regular file is left alone).
+    /// Bounded like the other scans. Returns how many were removed.
+    pub fn sweep_temps(&self) -> usize {
+        let Ok(entries) = fs::read_dir(&self.directory) else { return 0 };
+        let mut removed = 0;
+        for entry in entries.take(super::live::inert::SCAN_LIMIT).flatten() {
+            if !entry.file_name().to_str().is_some_and(|n| n.contains(".tmp-")) {
+                continue;
+            }
+            let path = entry.path();
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            let _ = sync_directory(&self.directory);
+            log::info!("handover: removed {removed} unfinished record(s) under {}", self.directory.display());
+        }
+        removed
     }
     /// P3: an inert import's Ready marker goes with the import it describes
     /// (pre-Prepared abort, timeout or sweep). Refused once a Prepared or
@@ -384,10 +422,23 @@ pub(crate) fn sync_directory(path: &Path) -> Result<()> {
 }
 /// A stale temp's bytes, never more than `MARKER_LIMIT` (+1 to tell an
 /// over-long one apart), or `None` if it can't be read.
-fn read_stale_temp(path: &Path) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    fs::File::open(path).ok()?.take(MARKER_LIMIT as u64 + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() <= MARKER_LIMIT).then_some(bytes)
+/// CP16 (CP14 review LOW-3): zeroed on drop (a stale Prepared or Activated
+/// temp holds the bearer).
+fn read_stale_temp(path: &Path, len: u64) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    let bytes = read_zeroized(path, len).ok()?;
+    (bytes.len() as u64 == len && bytes.len() <= MARKER_LIMIT).then_some(bytes)
+}
+/// CP16 (CP14 review LOW-3): a file `len` bytes long (by its metadata),
+/// read into one `Zeroizing` buffer allocated before the read: at most
+/// `len + 1` bytes are read into `len + 1` of capacity, so `read_to_end`
+/// never reallocates (each reallocation would free an unzeroed copy of a
+/// prefix), and a read that fails part-way drops a zeroed buffer. A length
+/// of `len + 1` tells the caller the file grew under the read.
+pub(crate) fn read_zeroized(path: &Path, len: u64) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> {
+    let cap = usize::try_from(len).ok().and_then(|n| n.checked_add(1)).ok_or(std::io::ErrorKind::InvalidInput)?;
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(cap));
+    fs::File::open(path)?.take(len + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 fn read_bounded(path: &Path) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
     let meta = match fs::symlink_metadata(path) {
@@ -401,13 +452,8 @@ fn read_bounded(path: &Path) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
     if meta.len() > MARKER_LIMIT as u64 {
         return Err(Error::Limit("marker file"));
     }
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    fs::File::open(path)
-        .map_err(|_| Error::Io)?
-        .take(MARKER_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Error::Io)?;
-    if bytes.is_empty() || bytes.len() > MARKER_LIMIT {
+    let bytes = read_zeroized(path, meta.len()).map_err(|_| Error::Io)?;
+    if bytes.is_empty() || bytes.len() > MARKER_LIMIT || bytes.len() as u64 != meta.len() {
         return Err(Error::Invalid("marker size"));
     }
     Ok(Some(bytes))
@@ -508,6 +554,9 @@ pub(crate) mod tests {
             if boundary == WriteBoundary::TempSynced {
                 assert_eq!(err, Error::Io);
                 assert_eq!(s.read(MarkerKind::Retired, [1; 16]).unwrap(), None);
+                // CP16 (CP14 review LOW-2): a certain failure leaves no temp.
+                let temp = s.directory.join(format!("{}.tmp-{}", MarkerKind::Retired.label(), hex::encode([1u8; 16])));
+                assert!(!temp.exists(), "a certain failure left the record's temp behind");
             } else {
                 assert_eq!(err, Error::UncertainDurability);
                 assert_eq!(
@@ -636,6 +685,45 @@ pub(crate) mod tests {
         fs::remove_file(s.path(MarkerKind::Published, id)).unwrap();
         fs::create_dir(s.path(MarkerKind::Published, id)).unwrap();
         assert!(s.persist(MarkerKind::Published, id, &payload).is_err(), "a directory at the record's path was replaced");
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    /// CP16 (CP14 review LOW-3): the bounded reads fill one buffer sized
+    /// before the read (never reallocated); a stale temp is read zeroised.
+    #[test]
+    fn handover_bounded_reads_never_reallocate() {
+        let (s, p) = store("zeroized");
+        let id = [10; 16];
+        s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
+        let path = s.path(MarkerKind::Ready, id);
+        let len = fs::metadata(&path).unwrap().len() as usize;
+        let read = read_bounded(&path).unwrap().unwrap();
+        assert_eq!(read.capacity(), len + 1, "the bounded read reallocated its buffer");
+        let temp = s.directory.join("ready.tmp-x");
+        fs::write(&temp, b"bearer-ish").unwrap();
+        let stale: zeroize::Zeroizing<Vec<u8>> = read_stale_temp(&temp, 10).unwrap();
+        assert_eq!(stale.capacity(), 11, "the stale-temp read reallocated its buffer");
+        assert!(read_stale_temp(&temp, 9).is_none(), "a temp longer than its metadata said was accepted");
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    /// CP16 (CP14 review LOW-2): the start-up sweep removes every regular
+    /// `*.tmp-*` and leaves records, and anything that isn't a regular file.
+    #[test]
+    fn handover_start_up_sweep_removes_stale_temps_only() {
+        let (s, p) = store("sweep");
+        let id = [9; 16];
+        s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
+        let retired = s.directory.join(format!("{}.tmp-{}", MarkerKind::Retired.label(), hex::encode(id)));
+        let prepared = s.directory.join(format!("{}.tmp-{}", MarkerKind::Prepared.label(), hex::encode(id)));
+        fs::write(&retired, b"a signed Commit").unwrap();
+        fs::write(&prepared, b"a bearer").unwrap();
+        let odd = s.directory.join(format!("{}.tmp-{}", MarkerKind::Aborted.label(), hex::encode(id)));
+        fs::create_dir(&odd).unwrap();
+        assert_eq!(s.sweep_temps(), 2);
+        assert!(!retired.exists() && !prepared.exists(), "a stale temp survived the sweep");
+        assert!(odd.is_dir(), "the sweep removed something that isn't a regular file");
+        assert_eq!(s.read(MarkerKind::Ready, id).unwrap().unwrap().as_slice(), b"ready record");
         fs::remove_dir_all(p).unwrap();
     }
 
