@@ -594,9 +594,17 @@ impl RecipientSession {
             return;
         }
         self.hand_tried = now;
-        if !self.hand_off_wait() {
+        if !self.hand_off_wait() && !self.nothing_to_wait_for() {
             log::error!("handover: the resumer couldn't take the wait for Committed; retrying");
         }
+    }
+
+    /// CP14 (CP10 review LOW-8): the import is already Activated or
+    /// quarantined, so a declined hand-off isn't a failure to log.
+    fn nothing_to_wait_for(&self) -> bool {
+        let Some(c) = self.checkpoint.as_ref() else { return false };
+        let (d, t) = (crate::handover::live::authority::dir(&c.working_world()), hex::encode(self.transfer()));
+        ["activated", "quarantined"].iter().any(|k| std::fs::symlink_metadata(d.join(format!("{k}-{t}.dat"))).is_ok())
     }
 
     /// CP12 (CP10 review LOW-2): hand the wait for Committed to this

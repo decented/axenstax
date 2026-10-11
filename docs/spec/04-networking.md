@@ -5697,8 +5697,15 @@ outside this process and can outlive it, for instance in clipboard history); and
 extracted keys in `crypto::recipient` and `prepared_ack_proof`, and the
 derived recipient keys); and, on the recipient, the payload buffers that
 carried the bearer into its Prepared receipt and Activated record are
-zeroed after the write, while the marker store's encoded copy and the
-kernel's page cache are not. Host start from the imported world and the
+zeroed after the write, and so (CP14, CP10 review LOW-4) are the marker
+store's encoded write buffer and every read of a record (`MarkerStore::read`
+and the open guard's bounded read return `Zeroizing<Vec<u8>>`, the raw file
+buffer included; existence checks such as `Receiver::restart`'s and the
+quarantine check use `MarkerStore::exists` and decode nothing); the kernel's
+page cache is not. `handover/` and the marker folders are created 0700 (an
+existing one is tightened) and every record is 0600. `save::fork_world`
+never copies a world's top-level `handover/`: a fork of a retired world, or
+of an activated import, carries no record and no bearer (tested). Host start from the imported world and the
 retained copy are the next slices.
 
 Committed publication (CP9). One background resumer per process
@@ -5733,7 +5740,20 @@ a drop guard, CP9 review LOW-1); at start-up
 `handover/` holds a retirement record and no "Committed published" record
 (bounded scan over the world folders as the world list sees them, a
 symlinked folder included; `handover/` itself must be a real directory; it
-never creates `handover/` and never opens a world). CP13 (CP10 review
+never creates `handover/` and never opens a world). CP14 (CP10 review LOW-8): nothing is published from a record that is only
+visible. `Resumer::adopt`, the one path both the live session's hand-off
+and the start-up scan take, first re-persists the identical record (retirement or abort)
+(`RetiredCommit::persist_again`: the digest must be the permit's, and
+`persist` returns Ok only after the file and the directory are fsynced
+again); if that fails nothing is taken over (the session retries, the scan
+resumes it at the next start). This covers a `RetirementUncertain` record
+that merely reads back and a record a crash left after its rename but
+before the directory fsync, so "no retirement record" at a later boot means
+no Committed was ever published (tested: a failed re-persist at start-up
+publishes nothing; the next start-up publishes). An uncertain retirement
+whose record never landed logs once, not every second; an already-published
+record is handed silently; a recipient whose import is already Activated or
+quarantined doesn't log its hand-off. CP13 (CP10 review
 MEDIUM-2 + LOW-1): **the install-local handover ledger** decides which
 records are this install's, not the runtime key. `handover::ledger::Ledger`
 is one append-only file, `<data root>/handover/ledger` (0600; beside, never
@@ -6015,8 +6035,15 @@ open guard refuses the import until it is Activated,
 whatever the inert marker says: any `ready-*`, `prepared-*` or
 `quarantined-*` record of a transfer with no `activated-<same>.dat`
 refuses (`NOT_ACTIVATED`), and an Activated record that doesn't decode
-refuses (`AUTHORITY_UNREADABLE`); `save_refusal_in` carries it to every
-open and save path. Once a second the live session looks for the
+refuses (`AUTHORITY_UNREADABLE`). CP14 (CP10 review LOW-3): "decodes" means
+the whole record, parsed read-only (`phase::activated_record_checks`): the
+label, the core (bound to the transfer), the Prepared hash, the Commit hash,
+the 16-byte bearer (its copy zeroed) and nothing after it; when the
+transfer's receipt (`prepared-<t>.dat`) is readable the record must name its
+Prepared, and a receipt that exists but doesn't decode refuses. The right
+label over a truncated payload refuses (tested). `Receiver::activate` doesn't
+look for a quarantine record; the guard fails closed on one instead
+(`NOT_ACTIVATED`). `save_refusal_in` carries it to every open and save path. Once a second the live session looks for the
 Activated record and moves to `Activated`; the game then ends the
 session and leaves the joined world (the source retired its copy) with
 "is yours now". Opening the imported world as host is the next slice.

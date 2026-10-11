@@ -234,6 +234,19 @@ impl Resumer {
         if !self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert((Flavour::Source, transfer)) {
             return false;
         }
+        // CP14b (CP10 review LOW-8): nothing is published until its record
+        // is durable (file and directory fsynced), whoever hands it over:
+        // the live session (an uncertain retirement's record only read
+        // back) or the start-up scan (a record left by a crash after its
+        // rename but before the directory fsync). CP15's boot promotion
+        // relies on it: no retirement record means no Committed was ever
+        // published. Not made durable: not published (the session retries;
+        // the scan resumes it at the next start).
+        if let Err(e) = retired.persist_again(&store) {
+            self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Source, transfer));
+            log::warn!("handover: a record under {} couldn't be made durable ({e}); it is not published yet", world_dir.display());
+            return false;
+        }
         let shared = self.0.clone();
         let dir = world_dir.to_path_buf();
         let spawned = std::thread::Builder::new()

@@ -381,6 +381,23 @@ impl RetiredCommit {
     pub fn is_abort(&self) -> bool {
         self.aborted
     }
+    /// CP14b (CP10 review LOW-8): make the record this permit was read from
+    /// durable before anything publishes it. A record that reads back is
+    /// only VISIBLE: a crash (or a failed directory fsync) after its rename
+    /// can leave it unsynced. This re-reads the exact payload, requires its
+    /// digest to be the one the permit was built from, and persists the
+    /// identical bytes, which returns Ok only after the file and the
+    /// directory are fsynced again.
+    pub fn persist_again(&self, store: &MarkerStore) -> Result<()> {
+        let kind = if self.aborted { MarkerKind::Aborted } else { MarkerKind::Retired };
+        let Some(bytes) = store.read(kind, self.core.transfer)? else {
+            return Err(Error::State("terminal record gone"));
+        };
+        if super::hash(&bytes) != self.record {
+            return Err(Error::State("terminal record changed"));
+        }
+        store.persist(kind, self.core.transfer, &bytes)
+    }
     /// The retirement record of `transfer` in `store`, if there is one.
     pub fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
         let Some(bytes) = store.read(MarkerKind::Retired, transfer)? else {
@@ -480,7 +497,7 @@ impl RetiredCommit {
     /// safe, and the record write replaces a mismatched one.
     pub fn is_published(&self, store: &MarkerStore) -> bool {
         match store.read(MarkerKind::Published, self.core.transfer) {
-            Ok(Some(b)) if b == self.published_payload() => true,
+            Ok(Some(b)) if *b == self.published_payload() => true,
             Ok(None) => false,
             Ok(Some(_)) => {
                 log::warn!("handover: a Committed published record names another Commit; publishing again");
@@ -809,6 +826,36 @@ const PREPARED_V2: &str = "AxeNStax/handover/receiver-prepared/v2";
 const ACTIVATED_V2: &str = "AxeNStax/handover/activated/v2";
 const QUARANTINED_V1: &str = "AxeNStax/handover/receiver-quarantined/v1";
 
+/// CP14 (CP10 review LOW-3): the open guard's read-only full parse of an
+/// Activated record's `payload` for `transfer`: the label, the core (bound
+/// to the transfer), the Prepared hash, the Commit hash, the 16-byte bearer
+/// and nothing after (`r.end()`). When the transfer's Prepared receipt is
+/// readable (`receipt`, its marker payload), the record must name that
+/// receipt's Prepared. Writes nothing; the bearer copy is zeroed.
+pub(crate) fn activated_record_checks(payload: &[u8], transfer: Id, receipt: Option<&[u8]>) -> bool {
+    let checked = (|| -> Result<()> {
+        let mut r = Reader::new(payload, super::durable::MARKER_LIMIT)?;
+        r.label(ACTIVATED_V2)?;
+        let core = Core::decode(r.framed(super::certificate::CORE_LIMIT)?)?;
+        let prepared: Hash = r.array()?;
+        let committed: Hash = r.array()?;
+        let mut bearer = r.array::<16>()?;
+        zeroize::Zeroize::zeroize(&mut bearer);
+        r.end()?;
+        if core.transfer != transfer || prepared == [0; 32] || committed == [0; 32] {
+            return Err(Error::Invalid("activation record"));
+        }
+        if let Some(receipt) = receipt {
+            let (receipt_prepared, _held) = Receiver::read_prepared(&core, receipt)?;
+            if receipt_prepared != prepared {
+                return Err(Error::Invalid("activation binding"));
+            }
+        }
+        Ok(())
+    })();
+    checked.is_ok()
+}
+
 /// The root a stored receipt names, rebuilt from its relays (`now = 0`: the
 /// root may have expired by a restart) and bound to the core's digest.
 fn stored_root(core: &Core, relays: &[String]) -> Result<super::context::RootContext> {
@@ -974,8 +1021,7 @@ impl Receiver {
     }
     pub fn restart(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
         let Some(bytes) = store.read(MarkerKind::Ready, transfer)? else {
-            if store.read(MarkerKind::Prepared, transfer)?.is_some()
-                || store.read(MarkerKind::Activated, transfer)?.is_some()
+            if store.exists(MarkerKind::Prepared, transfer)? || store.exists(MarkerKind::Activated, transfer)?
             {
                 return Err(Error::Invalid("receiver missing Ready"));
             }
@@ -1077,7 +1123,7 @@ pub struct AwaitingCommit {
 }
 impl AwaitingCommit {
     pub fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
-        if store.read(MarkerKind::Quarantined, transfer)?.is_some() {
+        if store.exists(MarkerKind::Quarantined, transfer)? {
             return Ok(None);
         }
         let Some(receiver) = Receiver::restart(store, transfer)? else { return Ok(None) };

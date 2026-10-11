@@ -1836,6 +1836,40 @@ mod session {
         assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 0, "a published world was resumed again");
     }
 
+    /// CP14b (CP10 review LOW-8, coordinator): the start-up scan publishes
+    /// no retirement record until it has been re-persisted (file and
+    /// directory fsynced). A re-persist that fails takes nothing over and
+    /// nothing reaches the relay; the next start-up re-persists, then
+    /// publishes the exact Commit.
+    #[test]
+    fn handover_start_up_scan_publishes_no_retirement_before_re_persisting_it() {
+        use crate::handover::durable::{MarkerKind, WriteBoundary, fault};
+        use crate::handover::live::resumer::Resumer;
+        let (t, _, relay, dir) = retired_and_dropped("scan-durable");
+        let world = dir.0.join("world");
+        let store = crate::handover::live::authority::store(&world).unwrap();
+        let retired = crate::handover::phase::RetiredCommit::read(&store, t).unwrap().expect("no retirement record");
+        let on_relay = |r: &crate::handover::relay_fixture::Relay| {
+            r.stored().into_iter().filter(|e| e.id.to_bytes() == retired.event_hash()).count()
+        };
+        // The directory fsync of the identical re-persist fails.
+        fault::arm(MarkerKind::Retired, WriteBoundary::DirectorySynced);
+        let resumer = Resumer::new(FAST);
+        assert_eq!(
+            resumer.resume_all(&dir.0, src_install()),
+            0,
+            "the start-up scan took a retirement record over before re-persisting it"
+        );
+        assert!(!resumer.holds(t));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(on_relay(&relay), 0, "a Commit was published from a record not made durable");
+        assert!(!retired.is_published(&store));
+        // The next start-up re-persists it and publishes.
+        assert_eq!(resumer.resume_all(&dir.0, src_install()), 1);
+        wait_published(&store, &retired);
+        assert_eq!(on_relay(&relay), 1);
+    }
+
     /// Bounded backoff that never gives up: while the relay withholds what
     /// it stores, attempts fail (no witness); once it serves again a later
     /// attempt proves it. Every attempt had a fresh Budget (nothing received

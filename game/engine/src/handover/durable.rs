@@ -82,7 +82,7 @@ impl MarkerStore {
         {
             return Err(Error::Invalid("marker directory"));
         }
-        fs::create_dir_all(&directory).map_err(|_| Error::Io)?;
+        create_private_dir(&directory)?;
         sync_directory(&directory)?;
         if let Some(parent) = directory.parent() {
             sync_directory(parent)?;
@@ -96,10 +96,22 @@ impl MarkerStore {
         self.directory
             .join(format!("{}-{}.dat", kind.label(), hex::encode(id)))
     }
-    pub fn read(&self, kind: MarkerKind, id: Id) -> Result<Option<Vec<u8>>> {
+    /// CP14 (CP10 review LOW-4): the payload is zeroed on drop (a receipt
+    /// or Activated record holds the bearer), and so is the raw file buffer.
+    pub fn read(&self, kind: MarkerKind, id: Id) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
         read_bounded(&self.path(kind, id))?
-            .map(|bytes| decode_marker(&bytes, kind, id))
+            .map(|bytes| decode_marker(&bytes, kind, id).map(zeroize::Zeroizing::new))
             .transpose()
+    }
+    /// CP14 (CP10 review LOW-4): whether a record of `kind` exists, without
+    /// reading or decoding it (a symlink or a non-file counts, failing
+    /// closed). For checks that don't need the content.
+    pub fn exists(&self, kind: MarkerKind, id: Id) -> Result<bool> {
+        match fs::symlink_metadata(self.path(kind, id)) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(Error::Io),
+        }
     }
     /// CP13: remove one record (a missing one is fine), then fsync the
     /// directory so the removal is durable.
@@ -111,6 +123,10 @@ impl MarkerStore {
         }
     }
     pub fn persist(&self, kind: MarkerKind, id: Id, bytes: &[u8]) -> Result<()> {
+        #[cfg(test)]
+        if let Some(at) = fault::take(kind) {
+            return self.persist_observed(kind, id, bytes, &mut fault::At(at));
+        }
         self.persist_observed(kind, id, bytes, &mut NoFault)
     }
     pub fn persist_observed(
@@ -124,7 +140,7 @@ impl MarkerStore {
             return Err(Error::Limit("marker record"));
         }
         let payload = bytes;
-        let encoded = encode_marker(kind, id, payload)?;
+        let encoded = zeroize::Zeroizing::new(encode_marker(kind, id, payload)?);
         let bytes = encoded.as_slice();
         let path = self.path(kind, id);
         let existing = match read_bounded(&path) {
@@ -138,7 +154,7 @@ impl MarkerStore {
             r => r?,
         };
         if let Some(old) = existing {
-            if old == bytes {
+            if old.as_slice() == bytes {
                 fs::File::open(&path)
                     .and_then(|f| f.sync_all())
                     .map_err(|_| Error::UncertainDurability)?;
@@ -297,8 +313,8 @@ impl MarkerStore {
             if value != hex::encode(id) {
                 return Err(Error::Invalid("noncanonical retirement filename"));
             }
-            let bytes = self.read(kind, id)?.ok_or(Error::Io)?;
-            out.push((id, bytes));
+            let mut bytes = self.read(kind, id)?.ok_or(Error::Io)?;
+            out.push((id, std::mem::take(&mut *bytes)));
         }
         Ok(out)
     }
@@ -372,7 +388,7 @@ fn read_stale_temp(path: &Path) -> Option<Vec<u8>> {
     fs::File::open(path).ok()?.take(MARKER_LIMIT as u64 + 1).read_to_end(&mut bytes).ok()?;
     (bytes.len() <= MARKER_LIMIT).then_some(bytes)
 }
-fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
+fn read_bounded(path: &Path) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -384,7 +400,7 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
     if meta.len() > MARKER_LIMIT as u64 {
         return Err(Error::Limit("marker file"));
     }
-    let mut bytes = Vec::new();
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
     fs::File::open(path)
         .map_err(|_| Error::Io)?
         .take(MARKER_LIMIT as u64 + 1)
@@ -394,6 +410,63 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
         return Err(Error::Invalid("marker size"));
     }
     Ok(Some(bytes))
+}
+
+/// CP14 (CP10 review LOW-4): a record folder is owner-only (0700), so
+/// other accounts can't list the record names (the records are 0600). Its
+/// parents are created as usual; an existing folder is tightened.
+fn create_private_dir(dir: &Path) -> Result<()> {
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent).map_err(|_| Error::Io)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        match fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(Error::Io),
+        }
+        let meta = fs::symlink_metadata(dir).map_err(|_| Error::Io)?;
+        if !meta.is_dir() {
+            return Err(Error::Invalid("marker directory"));
+        }
+        if meta.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|_| Error::Io)?;
+        }
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(dir).map_err(|_| Error::Io)?;
+    Ok(())
+}
+
+/// Test seam: fail the next [`MarkerStore::persist`] of a kind on THIS
+/// thread at a write boundary (before the rename: `Io`; after: uncertain).
+#[cfg(test)]
+pub(crate) mod fault {
+    use super::{MarkerKind, WriteBoundary};
+    use std::cell::Cell;
+    thread_local! {
+        static NEXT: Cell<Option<(MarkerKind, WriteBoundary)>> = const { Cell::new(None) };
+    }
+    pub(crate) fn arm(kind: MarkerKind, at: WriteBoundary) {
+        NEXT.with(|n| n.set(Some((kind, at))));
+    }
+    pub(super) fn take(kind: MarkerKind) -> Option<WriteBoundary> {
+        NEXT.with(|n| match n.get() {
+            Some((k, at)) if k == kind => {
+                n.set(None);
+                Some(at)
+            }
+            _ => None,
+        })
+    }
+    pub(super) struct At(pub(super) WriteBoundary);
+    impl super::BoundaryObserver for At {
+        fn reached(&mut self, b: WriteBoundary) -> std::io::Result<()> {
+            if b == self.0 { Err(std::io::Error::other("injected")) } else { Ok(()) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -437,7 +510,7 @@ pub(crate) mod tests {
             } else {
                 assert_eq!(err, Error::UncertainDurability);
                 assert_eq!(
-                    s.read(MarkerKind::Retired, [1; 16]).unwrap().unwrap(),
+                    s.read(MarkerKind::Retired, [1; 16]).unwrap().unwrap().as_slice(),
                     b"exact Commit"
                 );
             }
@@ -465,7 +538,7 @@ pub(crate) mod tests {
         );
         assert_eq!(s.retirements().unwrap().len(), 64);
         assert_eq!(
-            s.read(MarkerKind::Retired, [1; 16]).unwrap().unwrap(),
+            s.read(MarkerKind::Retired, [1; 16]).unwrap().unwrap().as_slice(),
             b"unchanged old record"
         );
         fs::remove_dir_all(p).unwrap();
@@ -556,7 +629,7 @@ pub(crate) mod tests {
             s.persist_observed(MarkerKind::Published, id, &payload, &mut count)
                 .unwrap_or_else(|e| panic!("a {}-byte undecodable published record wasn't replaced: {e:?}", planted.len()));
             assert_eq!(count.0, 1, "a {}-byte undecodable published record took {} writes", planted.len(), count.0);
-            assert_eq!(s.read(MarkerKind::Published, id).unwrap().unwrap(), payload);
+            assert_eq!(s.read(MarkerKind::Published, id).unwrap().unwrap().as_slice(), payload);
         }
         fs::remove_file(s.path(MarkerKind::Published, id)).unwrap();
         fs::create_dir(s.path(MarkerKind::Published, id)).unwrap();
@@ -573,7 +646,7 @@ pub(crate) mod tests {
         let temp = s.directory.join(format!("{}.tmp-{}", MarkerKind::Ready.label(), hex::encode(id)));
         fs::write(&temp, vec![0xCD; MARKER_LIMIT * 4]).unwrap();
         s.persist(MarkerKind::Ready, id, b"ready record").unwrap();
-        assert_eq!(s.read(MarkerKind::Ready, id).unwrap().unwrap(), b"ready record");
+        assert_eq!(s.read(MarkerKind::Ready, id).unwrap().unwrap().as_slice(), b"ready record");
         assert!(!temp.exists(), "the stale temp outlived the write");
         fs::remove_dir_all(p).unwrap();
     }

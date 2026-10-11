@@ -361,22 +361,42 @@ impl SourceSession {
         if self.hand_tried.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
             return false;
         }
+        let first = self.hand_tried.is_none();
         self.hand_tried = Some(std::time::Instant::now());
+        let uncertain = self.stage == SourceStage::RetirementUncertain;
         let Some(dir) = self.cfg.world_dir.as_ref() else { return false };
-        let read = crate::handover::live::authority::store(dir)
-            .and_then(|s| {
-                if aborted {
-                    crate::handover::phase::RetiredCommit::read_aborted(&s, self.transfer)
-                } else {
-                    crate::handover::phase::RetiredCommit::read(&s, self.transfer)
-                }
-            });
+        let t = self.transfer;
+        let read = crate::handover::live::authority::store(dir).and_then(|s| {
+            let retired = if aborted {
+                crate::handover::phase::RetiredCommit::read_aborted(&s, t)?
+            } else {
+                // CP14 (CP10 review LOW-8): an uncertain retirement whose
+                // record reads back is only VISIBLE, not proven durable (its
+                // directory fsync failed). `Resumer::adopt` re-persists the
+                // identical record (`RetiredCommit::persist_again`: Ok only
+                // after the file and the directory are fsynced again) before
+                // it takes the publication, so the Committed is handed only
+                // once the retirement is durable (a lost rename after
+                // publication would fork the world).
+                crate::handover::phase::RetiredCommit::read(&s, t)?
+            };
+            Ok(retired.map(|r| (r.is_published(&s), r)))
+        });
         match read {
-            Ok(Some(retired)) => {
+            // Already proven and recorded: nothing left to hand.
+            Ok(Some((true, _))) => self.handed = true,
+            Ok(Some((false, retired))) => {
                 let ledger = crate::handover::ledger::Ledger::install();
-                self.handed = resumer.adopt(dir, retired, &ledger) || resumer.holds(self.transfer);
+                self.handed = resumer.adopt(dir, retired, &ledger) || resumer.holds(t);
                 if !self.handed {
                     log::error!("handover: the resumer couldn't take the Committed publication; retrying");
+                }
+            }
+            // An uncertain retirement whose record never landed: nothing to
+            // publish (logged once, not every second).
+            Ok(None) if uncertain => {
+                if first {
+                    log::warn!("handover: the retirement record never landed; nothing to publish");
                 }
             }
             Ok(None) => log::error!("handover: retired, but no retirement record to publish"),

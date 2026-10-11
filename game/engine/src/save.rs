@@ -4038,7 +4038,10 @@ pub fn fork_world(source_folder: &str, source_display_name: &str) -> Result<Stri
     let new_folder = sanitize_folder_name(&new_display_name);
     let dest_dir = world_dir(&new_folder);
 
-    copy_dir_recursive(&source_dir, &dest_dir)
+    // CP14 (CP10 review LOW-4): a fork never carries `handover/` (the
+    // retirement, Activated and receipt records and the bearer they hold):
+    // a forked copy is a new world, and duplicating them would breach H3.
+    copy_dir_recursive(&source_dir, &dest_dir, Some("handover"))
         .map_err(|e| format!("fork copy: {e}"))?;
 
     // Write new metadata for the fork
@@ -4535,13 +4538,16 @@ fn dir_size(path: &std::path::Path) -> u64 {
 
 /// Recursively copy a directory.
 #[cfg(not(target_arch = "wasm32"))]
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path, skip_top: Option<&str>) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        if skip_top.is_some_and(|n| entry.file_name() == n) {
+            continue;
+        }
         let dest_path = dst.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
+            copy_dir_recursive(&entry.path(), &dest_path, None)?;
         } else {
             fs::copy(entry.path(), &dest_path)?;
         }

@@ -104,9 +104,22 @@ fn recipient_guard(
     }
     for t in activated {
         let path = d.join(format!("activated-{}.dat", hex::encode(t)));
+        // CP14 (CP10 review LOW-3): the whole record parses, read-only, and
+        // names the Prepared of the transfer's receipt when that is readable
+        // (a receipt that exists but doesn't decode refuses). Note:
+        // `Receiver::activate` doesn't look for a quarantine record; this
+        // guard fails closed on one instead (the loop above).
+        let receipt = match read_bounded(&d.join(format!("prepared-{}.dat", hex::encode(t)))) {
+            None => None,
+            Some(b) => match marker_payload(&b, MarkerKind::Prepared, *t) {
+                Ok(p) => Some(zeroize::Zeroizing::new(p)),
+                Err(_) => return Err(Refusal(super::copy::AUTHORITY_UNREADABLE)),
+            },
+        };
         let decoded = read_bounded(&path)
             .and_then(|b| marker_payload(&b, MarkerKind::Activated, *t).ok())
-            .is_some_and(|p| crate::handover::codec::Reader::new(&p, crate::handover::durable::MARKER_LIMIT).and_then(|mut r| r.label("AxeNStax/handover/activated/v2")).is_ok());
+            .map(zeroize::Zeroizing::new)
+            .is_some_and(|p| crate::handover::phase::activated_record_checks(&p, *t, receipt.as_deref().map(Vec::as_slice)));
         if !decoded {
             return Err(Refusal(super::copy::AUTHORITY_UNREADABLE));
         }
@@ -115,8 +128,8 @@ fn recipient_guard(
 }
 
 /// A regular file of at most `MARKER_LIMIT` bytes, read without following
-/// a symlink.
-fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+/// a symlink. Zeroed on drop (CP10 review LOW-4: it may hold a bearer).
+fn read_bounded(path: &Path) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     use std::io::Read;
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > crate::handover::durable::MARKER_LIMIT as u64 {
@@ -128,6 +141,7 @@ fn read_bounded(path: &Path) -> Option<Vec<u8>> {
         .take(crate::handover::durable::MARKER_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
+    let bytes = zeroize::Zeroizing::new(bytes);
     (bytes.len() <= crate::handover::durable::MARKER_LIMIT).then_some(bytes)
 }
 
@@ -143,6 +157,56 @@ mod tests {
         p
     }
 
+    /// CP14 (CP10 review LOW-4): a fork of a retired world, and of a world
+    /// holding an Activated import's records, carries no `handover/` and no
+    /// bearer.
+    #[test]
+    fn handover_fork_carries_no_handover_folder_and_no_bearer() {
+        const BEARER: [u8; 16] = [0xC3; 16];
+        let _root = crate::save::WorldsRootGuard::new("handover-fork");
+        for (name, kinds) in [("retired", &[MarkerKind::Retired][..]), ("activated", &[MarkerKind::Prepared, MarkerKind::Activated][..])] {
+            let w = crate::save::world_dir(name);
+            crate::save::write_world_folder(
+                name,
+                &crate::save::WorldMeta::new(name),
+                &crate::save::minimal_world_save_for_tests(77),
+                &crate::world::World::new(),
+            )
+            .unwrap();
+            let s = store(&w).unwrap();
+            for k in kinds {
+                s.persist(*k, [7; 16], &BEARER).unwrap();
+            }
+            let before: Vec<_> = std::fs::read_dir(crate::save::worlds_root()).unwrap().flatten().map(|e| e.path()).collect();
+            let forked = crate::save::fork_world(name, name);
+            // Whatever the fork returned, no folder it made carries
+            // `handover/` or the bearer.
+            let made: Vec<_> = std::fs::read_dir(crate::save::worlds_root())
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| !before.contains(p))
+                .collect();
+            assert!(!made.is_empty(), "{name}: the fork made no folder ({forked:?})");
+            for f in &made {
+                assert!(!dir(f).exists(), "{name}: the fork carried handover/");
+            }
+            let f = crate::save::world_dir(&forked.expect("the fork failed"));
+            assert!(f.join("world.dat").is_file(), "{name}: the fork didn't copy the world");
+            let mut stack = made;
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).unwrap().flatten() {
+                    if e.path().is_dir() {
+                        stack.push(e.path());
+                    } else {
+                        let b = std::fs::read(e.path()).unwrap();
+                        assert!(!b.windows(16).any(|x| x == BEARER), "{name}: the fork carried the bearer in {:?}", e.path());
+                    }
+                }
+            }
+        }
+    }
+
     /// The guard: an ordinary world opens; any retirement record, valid or
     /// not, refuses; an unreadable authority directory refuses (fail closed).
     #[test]
@@ -156,12 +220,18 @@ mod tests {
         assert_eq!(open_guard(&w).unwrap_err().0, crate::handover::live::copy::NOT_ACTIVATED, "an unactivated import opened");
         s.persist(MarkerKind::Activated, [3; 16], b"not an Activated record").unwrap();
         assert_eq!(open_guard(&w).unwrap_err().0, crate::handover::live::copy::AUTHORITY_UNREADABLE, "an undecodable Activated opened");
+        // CP14 (CP10 review LOW-3): the right label over a truncated
+        // payload refuses (the full parse, not the label, decides). A whole
+        // Activated record opening is pinned end to end in handover_live.
         let a = store(&world("guard-activated")).unwrap();
         let mut v = Vec::new();
         crate::handover::codec::frame(&mut v, b"AxeNStax/handover/activated/v2");
-        a.persist(MarkerKind::Prepared, [5; 16], b"receipt").unwrap();
         a.persist(MarkerKind::Activated, [5; 16], &v).unwrap();
-        assert!(open_guard(a.directory().parent().unwrap()).is_ok(), "an Activated import refused");
+        assert_eq!(
+            open_guard(a.directory().parent().unwrap()).map_err(|r| r.0),
+            Err(crate::handover::live::copy::AUTHORITY_UNREADABLE),
+            "an Activated record with the right label and a truncated payload opened"
+        );
         a.persist(MarkerKind::Quarantined, [5; 16], b"quarantined").unwrap();
         assert_eq!(open_guard(a.directory().parent().unwrap()).unwrap_err().0, crate::handover::live::copy::NOT_ACTIVATED);
         let _ = std::fs::remove_dir_all(a.directory().parent().unwrap());
@@ -172,6 +242,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let meta = std::fs::metadata(dir(&w).join(format!("retired-{}.dat", hex::encode([4u8; 16])))).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600, "the authority record isn't 0600");
+            // CP14 (CP10 review LOW-4): the folder itself is owner-only.
+            let meta = std::fs::metadata(dir(&w)).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o700, "handover/ isn't 0700");
         }
         // LOW-5: read-only: a world with no handover/ stays without one.
         let r = world("guard-ro");
