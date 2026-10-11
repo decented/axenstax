@@ -1657,7 +1657,11 @@ mod session {
         let records = files(&crate::handover::live::authority::dir(&world));
         // Now let the save complete.
         hold.release();
-        assert_eq!(late.join().unwrap().unwrap_err(), crate::save_fence::DISCARDED);
+        assert_eq!(
+            late.join().unwrap(),
+            Err(crate::save_fence::DISCARDED.to_string()),
+            "a save queued before the freeze committed after retirement"
+        );
         assert_eq!(std::fs::read(&record).unwrap(), retired, "the retirement record changed");
         assert_eq!(files(&crate::handover::live::authority::dir(&world)), records);
         let mut now_files = files(&world);
