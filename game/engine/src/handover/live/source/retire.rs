@@ -74,7 +74,7 @@ impl SourceSession {
         )
         .map_err(|_| unsealed)?;
         let phase = self.phase.as_mut().ok_or(Refusal("No Prepared."))?;
-        match phase.retire(&store, record) {
+        match phase.retire(&store, &crate::handover::ledger::Ledger::install(), record) {
             Ok(permit) => {
                 self.permit = Some(permit);
                 self.commit = Some(commit);

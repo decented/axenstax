@@ -3035,12 +3035,12 @@ fn native_boot_services() {
     // gets its exact retry from the record (the world itself stays refused).
     // CP10: and every import past its PreparedAck that isn't Activated yet
     // goes back to waiting for its Committed (from its durable receipt).
-    // Both only for records bound to this install's runtime key.
+    // CP13: both only for records this install's handover ledger lists.
     #[cfg(not(target_arch = "wasm32"))]
     handover::live::resumer::Resumer::global().boot(
         &save::worlds_root(),
         &crate::data_dir::data_root().join("handover").join("imports"),
-        handover::live::resumer::install_runtime(),
+        &handover::ledger::Ledger::install(),
     );
     let identity = signet::native_signer::init_identity();
     match identity.npub() {

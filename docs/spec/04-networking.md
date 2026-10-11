@@ -5701,13 +5701,42 @@ a drop guard, CP9 review LOW-1); at start-up
 `handover/` holds a retirement record and no "Committed published" record
 (bounded scan over the world folders as the world list sees them, a
 symlinked folder included; `handover/` itself must be a real directory; it
-never creates `handover/` and never opens a world). CP9 review LOW-6: only
-a Commit signed by this install's runtime key
-(`resumer::install_runtime`) is ever published, by the scan or a session
-hand-off; any other record (a world folder unpacked by hand into `worlds/`
-can carry one; the in-game import never brings `handover/`) is logged and
-never contacts a relay. A v1 or tampered-relay record doesn't decode, so it
-is refused and never resumed (tested). Both read the record through the world's `MarkerStore` into
+never creates `handover/` and never opens a world). CP13 (CP10 review
+MEDIUM-2 + LOW-1): **the install-local handover ledger** decides which
+records are this install's, not the runtime key. `handover::ledger::Ledger`
+is one append-only file, `<data root>/handover/ledger` (0600; beside, never
+inside, the imports folder, and outside every world, so a world zip can
+never carry it). Each line is `v1 <transfer> <s|r> <ret|abt|rcp> <SHA-256 of
+the record's exact payload bytes> <checksum>`: the transfer id, the role
+(source or recipient), the record kind (retirement, abort or receipt), the
+digest of exactly the bytes handed to `MarkerStore::persist` (what `read`
+returns), and the first 8 bytes of the SHA-256 of the rest of the line. A
+torn or damaged line is skipped and the rest are kept (an append after a
+torn tail starts a new line first); reads are bounded (8,192 entries and
+their bytes) and fail closed past the bound (nothing listed, appends
+refused). The entry is appended and fsynced (plus a directory fsync when
+the append created the file) BEFORE the record it authorises:
+`phase::Source::retire` before the retirement record (a failed ledger write
+fails the step as a failed persist does: `RetirementUncertain`, no record),
+`phase::Receiver::prepared` before the Prepared receipt (no receipt, no
+ack). The resumers (`resume_all`, `resume_imports`, and the in-session
+`adopt`/`adopt_import`) act only on a record whose exact digest the ledger
+lists for that transfer and role (`RetiredCommit::ledger_entry`,
+`AwaitingCommit::ledger_entry`). The runtime key is no longer the adoption
+gate, so a damaged or re-minted `runtime_key.json` strands nothing (tested:
+a re-minted key still resumes a listed retirement and a listed receipt);
+every event the recipient reads back is still signature-verified and bound
+to the source runtime its receipt names. Any record the ledger doesn't list
+(a world folder unpacked by hand into `worlds/` can carry one; the in-game
+import never brings `handover/`) is logged, never contacts a relay, and the
+world stays refused by the open guard; the world list shows one line for it
+("\"<world>\" holds a handover record this computer didn't make. It is
+ignored, and the world stays closed.", or the incoming-world form). This
+covers LOW-1's plant, which a decode check alone could not: this install's
+own real signed Commit with `core.context` recomputed for an attacker's
+relays decodes, and is still never published (tested, against a second
+loopback relay that hears nothing). A v1 or naively tampered record
+doesn't decode, and is refused too. Both read the record through the world's `MarkerStore` into
 a `phase::RetiredCommit`, the permit a restarted source publishes with: it
 has no bearer, so it can't rebuild a `VerifiedCommit`; `RetiredCommit` is
 built only by decoding a retirement record read through that store, and
@@ -5795,7 +5824,8 @@ on Committed. And
 start-up (`native_boot_services`) calls `Resumer::resume_imports(<data>/handover/imports)`,
 which takes over every import whose working world's `handover/` holds a
 Prepared receipt and no Activated or quarantine record (bounded; creates
-nothing), only for a receipt whose Ready this install's runtime signed. The
+nothing), only for a receipt whose exact digest this install's handover
+ledger lists (CP13, above). The
 relay rotation, shares and exit grace above apply to it too. Both read the receipt through the store into a
 `phase::AwaitingCommit`, never the session's memory. Each attempt has a
 fresh `Budget`: relays in the root's order; on each, a lookup of the

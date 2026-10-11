@@ -563,8 +563,8 @@ impl RecipientSession {
         let (Some(resumer), Some(c), true) = (self.resumer.as_ref(), self.checkpoint.as_ref(), durable) else {
             return false;
         };
-        let (t, install) = (self.transfer(), self.identity.runtime.public_key().to_bytes());
-        self.activation_handed = resumer.adopt_import(&c.working_world(), t, install) || resumer.holds_import(t);
+        let (t, ledger) = (self.transfer(), crate::handover::ledger::Ledger::install());
+        self.activation_handed = resumer.adopt_import(&c.working_world(), t, &ledger) || resumer.holds_import(t);
         self.activation_handed
     }
     pub fn activation_handed(&self) -> bool {
@@ -698,7 +698,7 @@ impl RecipientSession {
         let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;
         let markers = self.markers.as_ref().ok_or(Refusal("No Ready."))?;
         receiver
-            .prepared(markers, &vp, crate::handover::phase::PreparedReceipt { event: &ev, root: &p.root, bearer })
+            .prepared(markers, &crate::handover::ledger::Ledger::install(), &vp, crate::handover::phase::PreparedReceipt { event: &ev, root: &p.root, bearer })
             .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
         // From here the import is never deleted (a Prepared marker refuses
         // every inert discard); a failed clear quarantines it.

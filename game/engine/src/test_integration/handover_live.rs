@@ -555,11 +555,15 @@ mod session {
     }
     const TEST_BEARER: [u8; 16] = [0x5A; 16];
     /// CP9 review LOW-6: the start-up scans take only this install's records.
-    fn src_install() -> Option<[u8; 32]> {
-        Some(keys(SOURCE_RUNTIME).public_key().to_bytes())
+    /// CP13: the install ledger every session in this test process writes
+    /// (`<per-process test data root>/handover/ledger`); source and
+    /// recipient entries are told apart by role.
+    fn src_install() -> &'static crate::handover::ledger::Ledger {
+        static L: std::sync::OnceLock<crate::handover::ledger::Ledger> = std::sync::OnceLock::new();
+        L.get_or_init(crate::handover::ledger::Ledger::install)
     }
-    fn dst_install() -> Option<[u8; 32]> {
-        Some(keys(RECIPIENT_RUNTIME).public_key().to_bytes())
+    fn dst_install() -> &'static crate::handover::ledger::Ledger {
+        src_install()
     }
     fn bearer() -> crate::handover::live::bearer::Bearer {
         crate::handover::live::bearer::Bearer::new(TEST_BEARER)
@@ -1856,6 +1860,13 @@ mod session {
         assert!(crate::save::save_refusal_in(&working).is_some(), "a save path accepts the import before Activated");
         let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
         drop((src, dst, rc, hs, host));
+        // CP13 (CP10 review MEDIUM-2): the runtime key file is damaged before
+        // the next launch and re-mints; the ledger, not the key, says which
+        // records are this install's, so both still resume.
+        let key_file = dir.0.join("runtime_key.json");
+        std::fs::write(&key_file, b"{ damaged").unwrap();
+        let reminted = crate::runtime_identity::load_or_mint_runtime(&key_file).unwrap().public_key();
+        assert!(reminted != keys(SOURCE_RUNTIME).public_key() && reminted != keys(RECIPIENT_RUNTIME).public_key());
         assert!(Resumer::new(FAST).resume_all(&dir.0, src_install()) == 1, "the source's Committed wasn't resumed");
         // CP11 (CP10 review HIGH-1): the recipient restarts two days later,
         // past the certificate (<= 1 h), the root (1 h) and both
@@ -1998,7 +2009,7 @@ mod session {
     /// install's record is resumed by the same call `native_boot_services`
     /// makes.
     #[test]
-    fn handover_boot_resumes_only_this_installs_decodable_records() {
+    fn handover_boot_resumes_only_records_this_installs_ledger_lists() {
         use crate::handover::live::{authority, copy, resumer::Resumer};
         let (t, _, relay, dir) = retired_and_dropped("boot-planted");
         let bytes = authority::store(&dir.0.join("world")).unwrap().read(MarkerKind::Retired, t).unwrap().unwrap();
@@ -2021,17 +2032,39 @@ mod session {
             authority::store(&w).unwrap().persist(MarkerKind::Retired, t, record).unwrap();
             assert_eq!(authority::open_guard(&w).unwrap_err().0, copy::AUTHORITY_UNREADABLE, "a {name} record isn't refused");
         }
+        // CP13 (CP10 review LOW-1): the planted record that DOES decode: this
+        // install's own real signed Commit, `core.context` recomputed for an
+        // attacker's relays, in a world folder the player unzipped.
+        let attacker = crate::handover::relay_fixture::Relay::start();
+        let low1 = crate::handover::phase::Retirement::replanted(&bytes, &[attacker.url()]);
+        assert!(crate::handover::phase::Retirement::decode(&low1).is_ok(), "the LOW-1 plant doesn't decode");
+        let unzipped = dir.0.join("unzipped");
+        authority::store(&unzipped.join("Gift")).unwrap().persist(MarkerKind::Retired, t, &low1).unwrap();
         let received = relay.received();
-        // Another install: nothing is published, nothing contacts a relay.
+        // Another install (an empty ledger): nothing is published, nothing
+        // contacts a relay. (This process's recipient receipt is listed in
+        // the same test ledger, so the source-side scans here pass no imports.)
         let other = Resumer::new(FAST);
-        assert_eq!(other.boot(&dir.0, &dir.0.join("imports"), Some([0x44; 32])), (0, 0), "another install's record was resumed");
-        assert_eq!(other.boot(&planted, &dir.0.join("imports"), src_install()), (0, 0), "an undecodable record was resumed");
-        assert_eq!(other.boot(&dir.0, &dir.0.join("imports"), None), (0, 0), "resumed with no install key");
+        let elsewhere = crate::handover::ledger::Ledger::at(dir.0.join("another-install").join("ledger"));
+        assert_eq!(other.boot(&dir.0, &dir.0.join("no-imports"), &elsewhere), (0, 0), "another install's record was resumed");
+        assert_eq!(other.boot(&planted, &dir.0.join("no-imports"), src_install()), (0, 0), "an undecodable record was resumed");
+        assert_eq!(other.boot(&unzipped, &dir.0.join("no-imports"), src_install()), (0, 0), "the planted record was resumed");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(relay.received(), received, "a planted record contacted a relay");
+        assert_eq!(attacker.received(), 0, "the planted record reached the attacker's relay");
+        assert!(authority::open_guard(&unzipped.join("Gift")).is_err(), "the planted world opened");
+        assert_eq!(
+            crate::handover::live::resumer::awaiting_statuses(&unzipped, &dir.0.join("no-imports"), src_install()),
+            vec![copy::unlisted_world("Gift")],
+            "the planted record has no status line"
+        );
+        assert!(
+            crate::handover::live::resumer::awaiting_statuses(&dir.0, &dir.0.join("no-imports"), src_install()).is_empty(),
+            "this install's own retirement shows as unlisted"
+        );
         // This install: the boot step publishes it.
         let mine = Resumer::new(FAST);
-        assert_eq!(mine.boot(&dir.0, &dir.0.join("imports"), src_install()), (1, 0));
+        assert_eq!(mine.boot(&dir.0, &dir.0.join("no-imports"), src_install()), (1, 0));
         let store = authority::store(&dir.0.join("world")).unwrap();
         wait_published(&store, &crate::handover::phase::RetiredCommit::read(&store, t).unwrap().unwrap());
         // The boot call is the one native_boot_services makes.

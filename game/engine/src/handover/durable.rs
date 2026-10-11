@@ -328,7 +328,7 @@ fn decode_marker(bytes: &[u8], kind: MarkerKind, id: Id) -> Result<Vec<u8>> {
     Ok(payload.to_vec())
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     // Windows can't open a directory to fsync it; the rename before this is
     // NTFS-journaled, as main's saves rely on (C3d). Not compiled here.
     #[cfg(windows)]

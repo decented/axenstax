@@ -342,8 +342,8 @@ impl SourceSession {
             .and_then(|s| crate::handover::phase::RetiredCommit::read(&s, self.transfer));
         match read {
             Ok(Some(retired)) => {
-                let install = self.cfg.runtime.public_key().to_bytes();
-                self.handed = resumer.adopt(dir, retired, install) || resumer.holds(self.transfer);
+                let ledger = crate::handover::ledger::Ledger::install();
+                self.handed = resumer.adopt(dir, retired, &ledger) || resumer.holds(self.transfer);
                 if !self.handed {
                     log::error!("handover: the resumer couldn't take the Committed publication; retrying");
                 }

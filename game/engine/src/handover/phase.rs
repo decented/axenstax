@@ -33,6 +33,19 @@ impl Retirement {
     pub fn core(&self) -> &Core {
         &self.core
     }
+    /// Test only (CP10 review LOW-1): the same record re-encoded to name
+    /// `relays`, with `core.context` recomputed so it still decodes: the
+    /// planted record a ledger must refuse.
+    #[cfg(test)]
+    pub fn replanted(bytes: &[u8], relays: &[String]) -> Vec<u8> {
+        use nostr::ToBech32;
+        let mut r = Self::decode(bytes).unwrap();
+        let npub = nostr::PublicKey::from_slice(&r.core.root_persona).unwrap().to_bech32().unwrap();
+        let other = super::context::RootContext::new(r.core.root_runtime, &npub, r.core.root_expiry, relays, 0).unwrap();
+        r.core.context = other.digest();
+        r.relays = other.relays().to_vec();
+        r.encode().unwrap()
+    }
     pub fn committed_hash(&self) -> Hash {
         self.committed
     }
@@ -230,6 +243,8 @@ pub struct RetiredCommit {
     exact_event: Vec<u8>,
     hash: Hash,
     recipient: Hash,
+    /// CP13: the SHA-256 of the record's exact payload bytes (its ledger digest).
+    record: Hash,
 }
 impl RetiredCommit {
     /// The retirement record of `transfer` in `store`, if there is one.
@@ -237,7 +252,7 @@ impl RetiredCommit {
         let Some(bytes) = store.read(MarkerKind::Retired, transfer)? else {
             return Ok(None);
         };
-        Self::from_record(Retirement::decode(&bytes)?, transfer).map(Some)
+        Self::from_record(Retirement::decode(&bytes)?, transfer, super::hash(&bytes)).map(Some)
     }
     /// Every retirement record in `store` (bounded by `retirements`). Any
     /// record that doesn't decode fails the scan (fail closed).
@@ -245,10 +260,10 @@ impl RetiredCommit {
         store
             .retirements()?
             .into_iter()
-            .map(|(id, bytes)| Self::from_record(Retirement::decode(&bytes)?, id))
+            .map(|(id, bytes)| Self::from_record(Retirement::decode(&bytes)?, id, super::hash(&bytes)))
             .collect()
     }
-    fn from_record(r: Retirement, transfer: Id) -> Result<Self> {
+    fn from_record(r: Retirement, transfer: Id, record: Hash) -> Result<Self> {
         if r.core.transfer != transfer {
             return Err(Error::Invalid("retirement filename binding"));
         }
@@ -273,10 +288,17 @@ impl RetiredCommit {
             exact_event: r.exact_event,
             hash: r.committed,
             recipient,
+            record,
         })
     }
     pub fn transfer(&self) -> Id {
         self.core.transfer
+    }
+    /// CP13: the ledger entry that must list this record before any resumer
+    /// publishes it.
+    pub fn ledger_entry(&self) -> super::ledger::Entry {
+        use super::ledger::{Entry, RecordKind, Role};
+        Entry { transfer: self.core.transfer, role: Role::Source, kind: RecordKind::Retirement, digest: self.record }
     }
     pub fn core(&self) -> &Core {
         &self.core
@@ -471,7 +493,10 @@ impl Source {
         self.stage = SourceStage::Aborted;
         Ok(())
     }
-    pub fn retire(&mut self, store: &MarkerStore, record: Retirement) -> Result<PublicationPermit> {
+    /// CP13: the ledger entry (this install's handover ledger) is written
+    /// durably BEFORE the retirement record it authorises; if it fails, the
+    /// record isn't written and the step fails as a failed persist does.
+    pub fn retire(&mut self, store: &MarkerStore, ledger: &super::ledger::Ledger, record: Retirement) -> Result<PublicationPermit> {
         if !record.verified {
             return Err(Error::Invalid(
                 "restored record is not a new retirement proof",
@@ -493,6 +518,8 @@ impl Source {
         // unreadable existing retirement, unlike treating every IO as absence.
         self.stage = SourceStage::RetirementUncertain;
         self.retirement = Some(record.clone());
+        use super::ledger::{Entry, RecordKind, Role};
+        ledger.append(Entry::of(self.core.transfer, Role::Source, RecordKind::Retirement, &bytes))?;
         store.persist(MarkerKind::Retired, self.core.transfer, &bytes)?;
         self.stage = SourceStage::Retired;
         Ok(PublicationPermit {
@@ -655,7 +682,14 @@ impl Receiver {
     /// temp, fsync, rename, directory fsync). The caller sends its
     /// PreparedAck only after this returns Ok. The bearer must derive the key
     /// the event is routed to, so the stored bearer always opens it.
-    pub fn prepared(&mut self, store: &MarkerStore, proof: &VerifiedPrepared, receipt: PreparedReceipt<'_>) -> Result<()> {
+    /// CP13: its ledger entry is written durably first (as `retire`).
+    pub fn prepared(
+        &mut self,
+        store: &MarkerStore,
+        ledger: &super::ledger::Ledger,
+        proof: &VerifiedPrepared,
+        receipt: PreparedReceipt<'_>,
+    ) -> Result<()> {
         if !matches!(self.stage, ReceiverStage::Ready | ReceiverStage::Prepared)
             || proof.core() != &self.core
             || (self.prepared != [0; 32] && self.prepared != proof.event_hash())
@@ -679,7 +713,10 @@ impl Receiver {
             frame(&mut v, relay.as_bytes());
         }
         v.extend_from_slice(receipt.bearer.expose());
-        let r = store.persist(MarkerKind::Prepared, self.core.transfer, &v);
+        use super::ledger::{Entry, RecordKind, Role};
+        let r = ledger
+            .append(Entry::of(self.core.transfer, Role::Recipient, RecordKind::Receipt, &v))
+            .and_then(|()| store.persist(MarkerKind::Prepared, self.core.transfer, &v));
         zeroize::Zeroize::zeroize(&mut v);
         r?;
         self.prepared = proof.event_hash();
@@ -853,6 +890,8 @@ impl Receiver {
 /// quarantined (the source's authenticated pre-retirement Abort).
 pub struct AwaitingCommit {
     receiver: Receiver,
+    /// CP13: the SHA-256 of the Prepared receipt's exact payload bytes.
+    receipt: Hash,
 }
 impl AwaitingCommit {
     pub fn read(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
@@ -863,10 +902,19 @@ impl AwaitingCommit {
         if receiver.stage != ReceiverStage::Prepared || receiver.held.is_none() {
             return Ok(None);
         }
-        Ok(Some(Self { receiver }))
+        let mut bytes = store.read(MarkerKind::Prepared, transfer)?.ok_or(Error::Io)?;
+        let receipt = super::hash(&bytes);
+        zeroize::Zeroize::zeroize(&mut bytes);
+        Ok(Some(Self { receiver, receipt }))
     }
     pub fn transfer(&self) -> Id {
         self.receiver.core.transfer
+    }
+    /// CP13: the ledger entry that must list this receipt before any resumer
+    /// waits on it.
+    pub fn ledger_entry(&self) -> super::ledger::Entry {
+        use super::ledger::{Entry, RecordKind, Role};
+        Entry { transfer: self.transfer(), role: Role::Recipient, kind: RecordKind::Receipt, digest: self.receipt }
     }
     /// The runtime that signed this recipient's Ready (the successor).
     pub fn recipient_runtime(&self) -> Hash {
@@ -1132,7 +1180,7 @@ mod tests {
             source.prepared(&p, &stored).unwrap();
             let mut receiver = Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100).unwrap();
             let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
-            receiver.prepared(&receiver_store, &p, PreparedReceipt { event: &pe, root: &root, bearer: &bearer }).unwrap();
+            receiver.prepared(&receiver_store, &crate::handover::ledger::Ledger::install(), &p, PreparedReceipt { event: &pe, root: &root, bearer: &bearer }).unwrap();
             let ce = crypto::seal(seal(Some(&p)), &root, 100).await.unwrap();
             let Verified::Committed(cv) = crypto::open(&ce, &keys, root.runtime(), &root, 100, Some(&p)).unwrap() else {
                 panic!("Commit")
@@ -1156,7 +1204,7 @@ mod tests {
                 root.relays().to_vec(),
             )
             .unwrap();
-            let permit = source.retire(&store, retirement).unwrap();
+            let permit = source.retire(&store, &crate::handover::ledger::Ledger::install(), retirement).unwrap();
             let committed = publish(relay.url(), &ce, &vc, Some(&permit)).await.unwrap();
             source.published(&committed).unwrap();
             assert_eq!(source.stage(), SourceStage::Published);
@@ -1182,7 +1230,7 @@ mod tests {
         use nostr::{Timestamp, ToBech32};
         let relay = crate::handover::relay_fixture::Relay::start();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let (root, c, b, ready, pe, ce, p, source_npub) = rt.block_on(async {
+        let (root, c, _b, ready, pe, ce, p, source_npub) = rt.block_on(async {
             let a = Keys::generate();
             let b = Keys::generate();
             let root = crate::handover::context::RootContext::new(
@@ -1216,7 +1264,7 @@ mod tests {
         let store = crate::handover::live::authority::store(&working).unwrap();
         let mut receiver = Receiver::checkpoint_ready(&store, &c, &ready, [8; 16], &root, 100).unwrap();
         let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
-        receiver.prepared(&store, &p, PreparedReceipt { event: &pe, root: &root, bearer: &bearer }).unwrap();
+        receiver.prepared(&store, &crate::handover::ledger::Ledger::install(), &p, PreparedReceipt { event: &pe, root: &root, bearer: &bearer }).unwrap();
         relay.insert(ce.clone());
         let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert!(today > root.expiry() && today > 100 + 86_400, "the fixture's root and attestations haven't expired");
@@ -1226,19 +1274,19 @@ mod tests {
             "a recipient resumed after the root and attestations expired refused its Committed"
         );
         assert_eq!(
-            awaiting_statuses(&imports),
+            awaiting_statuses(&imports.join("no-worlds"), &imports, &crate::handover::ledger::Ledger::install()),
             vec![format!("Waiting for {source_npub} to finish handing this world over")],
             "the world list doesn't show the awaiting import"
         );
         let resumer = Resumer::new(Backoff { first: std::time::Duration::from_millis(50), ceiling: std::time::Duration::from_millis(200) });
-        assert_eq!(resumer.resume_imports(&imports, Some(b.public_key().to_bytes())), 1, "the expired import wasn't resumed");
+        assert_eq!(resumer.resume_imports(&imports, &crate::handover::ledger::Ledger::install()), 1, "the expired import wasn't resumed");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while store.read(MarkerKind::Activated, c.transfer).unwrap().is_none() {
             assert!(std::time::Instant::now() < deadline, "the resumed recipient never activated after the root and attestations expired");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(Receiver::restart(&store, c.transfer).unwrap().unwrap().gameplay_admitted());
-        assert!(awaiting_statuses(&imports).is_empty(), "an activated import still shows as awaiting");
+        assert!(awaiting_statuses(&imports.join("no-worlds"), &imports, &crate::handover::ledger::Ledger::install()).is_empty(), "an activated import still shows as awaiting");
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -1472,7 +1520,18 @@ mod tests {
                 Receiver::checkpoint_ready(&receiver_store, &c, &ready, [8; 16], &root, 100)
                     .unwrap();
             let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
-            receiver.prepared(&receiver_store, &p, PreparedReceipt { event: &p_event, root: &root, bearer: &bearer }).unwrap();
+            // CP13: the ledger entry comes BEFORE the record it authorises. A
+            // ledger that can't be written leaves no record and fails the step.
+            let blocker = std::env::temp_dir().join(format!("axenstax-ledger-blocked-{}", std::process::id()));
+            std::fs::write(&blocker, b"a file, not a folder").unwrap();
+            let blocked = crate::handover::ledger::Ledger::at(blocker.join("ledger"));
+            assert!(receiver.prepared(&receiver_store, &blocked, &p, PreparedReceipt { event: &p_event, root: &root, bearer: &bearer }).is_err(), "a failed ledger write still stored the receipt");
+            assert_eq!(receiver_store.read(MarkerKind::Prepared, c.transfer).unwrap(), None, "the receipt was written before its ledger entry");
+            receiver.prepared(&receiver_store, &crate::handover::ledger::Ledger::install(), &p, PreparedReceipt { event: &p_event, root: &root, bearer: &bearer }).unwrap();
+            assert!(
+                AwaitingCommit::read(&receiver_store, c.transfer).unwrap().is_some_and(|a| crate::handover::ledger::Ledger::install().lists(&a.ledger_entry())),
+                "the ledger doesn't list the receipt's exact bytes"
+            );
             assert!(!receiver.gameplay_admitted());
             assert!(
                 !Receiver::restart(&receiver_store, c.transfer)
@@ -1516,8 +1575,14 @@ mod tests {
                 retirement.encode().unwrap()
             );
             let decoded = Retirement::decode(&retirement.encode().unwrap()).unwrap();
-            assert!(source.retire(&store, decoded).is_err());
-            let permit = source.retire(&store, retirement).unwrap();
+            assert!(source.retire(&store, &crate::handover::ledger::Ledger::install(), decoded).is_err());
+            assert!(source.retire(&store, &blocked, retirement.clone()).is_err(), "a failed ledger write still retired");
+            assert_eq!(store.read(MarkerKind::Retired, c.transfer).unwrap(), None, "the retirement record was written before its ledger entry");
+            let permit = source.retire(&store, &crate::handover::ledger::Ledger::install(), retirement).unwrap();
+            assert!(
+                RetiredCommit::read(&store, c.transfer).unwrap().is_some_and(|r| crate::handover::ledger::Ledger::install().lists(&r.ledger_entry())),
+                "the ledger doesn't list the retirement record's exact bytes"
+            );
             assert_eq!(permit.bytes(), event.as_json().as_bytes());
             assert!(source.abort().is_err());
             assert!(
@@ -1612,6 +1677,7 @@ mod tests {
             source
                 .retire(
                     &store,
+                    &crate::handover::ledger::Ledger::install(),
                     Retirement::new(
                         &proof1,
                         &p1,
@@ -1664,6 +1730,7 @@ mod tests {
             source
                 .retire(
                     &store,
+                    &crate::handover::ledger::Ledger::install(),
                     Retirement::new(
                         &proof3,
                         &p3,
@@ -1743,6 +1810,7 @@ mod tests {
             source
                 .retire(
                     &store,
+                    &crate::handover::ledger::Ledger::install(),
                     Retirement::new(
                         &proof,
                         &p,

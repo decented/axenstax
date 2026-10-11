@@ -39,6 +39,7 @@ use crate::handover::{
     phase::{AwaitingCommit, RetiredCommit},
     stored::{self, Budget},
 };
+use crate::handover::ledger::Ledger;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -71,13 +72,6 @@ pub fn relay_order(n: usize, attempt: u32) -> Vec<usize> {
 /// Each relay's own share of an attempt's 25 s: 25 s / n, at least 5 s.
 pub fn relay_share(n: usize) -> Duration {
     (Duration::from_secs(25) / n.max(1) as u32).max(Duration::from_secs(5))
-}
-
-/// CP9 review LOW-6: this install's runtime key (the one its handovers sign
-/// with), `None` when it has none. The start-up scans publish or await only
-/// records bound to it; a planted record never contacts a relay.
-pub fn install_runtime() -> Option<[u8; 32]> {
-    crate::runtime_identity::RuntimeIdentity::load().ok().flatten().map(|i| i.keys().public_key().to_bytes())
 }
 
 /// What a test sees of one attempt.
@@ -209,14 +203,14 @@ impl Resumer {
 
     /// Take over the Committed publication of the world at `world_dir`
     /// (its `handover/` holds `retired`'s record). Idempotent per transfer;
-    /// nothing to do once its "Committed published" record exists. CP9
-    /// review LOW-6: only a Commit signed by `install` (this install's
-    /// runtime key) is ever published; anything else is logged and never
-    /// contacts a relay.
-    pub fn adopt(&self, world_dir: &Path, retired: RetiredCommit, install: [u8; 32]) -> bool {
+    /// nothing to do once its "Committed published" record exists. CP13
+    /// (CP10 review MEDIUM-2 + LOW-1): only a record whose exact digest this
+    /// install's handover ledger lists is ever published; anything else is
+    /// logged, never contacts a relay, and the world stays refused.
+    pub fn adopt(&self, world_dir: &Path, retired: RetiredCommit, ledger: &Ledger) -> bool {
         let transfer = retired.transfer();
-        if retired.event().pubkey.to_bytes() != install {
-            log::warn!("handover: a retirement record under {} isn't this install's; it is not published", world_dir.display());
+        if !ledger.lists(&retired.ledger_entry()) {
+            log::warn!("handover: a retirement record under {} isn't in this install's ledger; it is not published", world_dir.display());
             return false;
         }
         let Ok(store) = existing_store(world_dir) else { return false };
@@ -240,21 +234,22 @@ impl Resumer {
     }
 
     /// The start-up step `native_boot_services` runs (CP9 review LOW-5):
-    /// every retired world's Committed and every import's wait, bound to
-    /// `install`. Returns (publications, waits) taken over.
-    pub fn boot(&self, worlds_root: &Path, imports: &Path, install: Option<[u8; 32]>) -> (usize, usize) {
-        (self.resume_all(worlds_root, install), self.resume_imports(imports, install))
+    /// every retired world's Committed and every import's wait that
+    /// `ledger` lists. Returns (publications, waits) taken over.
+    pub fn boot(&self, worlds_root: &Path, imports: &Path, ledger: &Ledger) -> (usize, usize) {
+        (self.resume_all(worlds_root, ledger), self.resume_imports(imports, ledger))
     }
 
     /// CP10: take over the wait for `transfer`'s Committed of the import
     /// whose working world is `world_dir` (its `handover/` holds the Prepared
     /// receipt). Idempotent per transfer; nothing to do once Activated or
     /// quarantined. It never opens the world and never creates `handover/`.
-    pub fn adopt_import(&self, world_dir: &Path, transfer: Id, install: [u8; 32]) -> bool {
+    /// CP13: only a receipt whose exact digest `ledger` lists.
+    pub fn adopt_import(&self, world_dir: &Path, transfer: Id, ledger: &Ledger) -> bool {
         let Ok(store) = existing_store(world_dir) else { return false };
         match AwaitingCommit::read(&store, transfer) {
-            Ok(Some(a)) if a.recipient_runtime() != install => {
-                log::warn!("handover: an import's receipt under {} isn't this install's; it is not resumed", world_dir.display());
+            Ok(Some(a)) if !ledger.lists(&a.ledger_entry()) => {
+                log::warn!("handover: an import's receipt under {} isn't in this install's ledger; it is not resumed", world_dir.display());
                 return false;
             }
             Ok(Some(_)) => {}
@@ -284,43 +279,19 @@ impl Resumer {
     /// working world's `handover/` holds a Prepared receipt with no Activated
     /// or quarantine record. Bounded; creates nothing. Returns how many waits
     /// it took over.
-    pub fn resume_imports(&self, imports: &Path, install: Option<[u8; 32]>) -> usize {
-        let Some(install) = install else { return 0 };
-        import_receipts(imports).into_iter().filter(|(working, t)| self.adopt_import(working, *t, install)).count()
+    pub fn resume_imports(&self, imports: &Path, ledger: &Ledger) -> usize {
+        import_receipts(imports).into_iter().filter(|(working, t)| self.adopt_import(working, *t, ledger)).count()
     }
 
     /// Start-up: every world under `worlds_root` whose `handover/` holds a
     /// retirement record and no "Committed published" record. Bounded, and
     /// it creates nothing (a world without `handover/` is skipped). Returns
     /// how many publications it took over.
-    pub fn resume_all(&self, worlds_root: &Path, install: Option<[u8; 32]>) -> usize {
-        let Some(install) = install else { return 0 };
-        let Ok(entries) = std::fs::read_dir(worlds_root) else { return 0 };
+    pub fn resume_all(&self, worlds_root: &Path, ledger: &Ledger) -> usize {
         let mut adopted = 0;
-        for (seen, entry) in entries.enumerate() {
-            if seen >= WORLDS_SCAN_LIMIT {
-                log::warn!("handover: start-up scan stopped at {WORLDS_SCAN_LIMIT} entries");
-                break;
-            }
-            let Ok(entry) = entry else { continue };
-            let world = entry.path();
-            // CP9 review LOW-5: worlds as the world list sees them (a
-            // symlinked world folder included); `handover/` itself must be a
-            // real directory, as the open guard requires.
-            if !world.is_dir() || !is_real_dir(&super::authority::dir(&world)) {
-                continue;
-            }
-            let Ok(store) = existing_store(&world) else { continue };
-            match RetiredCommit::scan(&store) {
-                Ok(records) => {
-                    for retired in records {
-                        if self.adopt(&world, retired, install) {
-                            adopted += 1;
-                        }
-                    }
-                }
-                // Unreadable: the world stays refused; nothing to publish.
-                Err(e) => log::warn!("handover: a retirement record under {} can't be read: {e}", world.display()),
+        for (world, retired) in retired_worlds(worlds_root) {
+            if self.adopt(&world, retired, ledger) {
+                adopted += 1;
             }
         }
         adopted
@@ -400,15 +371,56 @@ fn import_receipts(imports: &Path) -> Vec<(PathBuf, Id)> {
 /// quarantine record): "Waiting for <npub> to finish handing this world
 /// over". Read-only and bounded like the start-up scan; there is no "take
 /// over anyway" (it risks two live copies).
-pub fn awaiting_statuses(imports: &Path) -> Vec<String> {
-    import_receipts(imports)
+///
+/// CP13: an import whose receipt `ledger` doesn't list shows the
+/// "not made on this computer" line instead, as does every retired world
+/// under `worlds_root` whose record isn't listed.
+pub fn awaiting_statuses(worlds_root: &Path, imports: &Path, ledger: &Ledger) -> Vec<String> {
+    let mut lines: Vec<String> = import_receipts(imports)
         .into_iter()
         .filter_map(|(working, t)| {
             let store = existing_store(&working).ok()?;
-            let npub = AwaitingCommit::read(&store, t).ok()??.source_npub()?;
-            Some(super::copy::awaiting_handover(&npub))
+            let awaiting = AwaitingCommit::read(&store, t).ok()??;
+            if !ledger.lists(&awaiting.ledger_entry()) {
+                return Some(super::copy::UNLISTED_IMPORT.to_owned());
+            }
+            Some(super::copy::awaiting_handover(&awaiting.source_npub()?))
         })
-        .collect()
+        .collect();
+    for (world, retired) in retired_worlds(worlds_root) {
+        if !ledger.lists(&retired.ledger_entry()) {
+            lines.push(super::copy::unlisted_world(&world.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        }
+    }
+    lines
+}
+
+/// Every (world folder, retirement record) under `worlds_root` (bounded; it
+/// creates nothing; a world without a real `handover/` is skipped).
+fn retired_worlds(worlds_root: &Path) -> Vec<(PathBuf, RetiredCommit)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(worlds_root) else { return out };
+    for (seen, entry) in entries.enumerate() {
+        if seen >= WORLDS_SCAN_LIMIT {
+            log::warn!("handover: start-up scan stopped at {WORLDS_SCAN_LIMIT} entries");
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        let world = entry.path();
+        // CP9 review LOW-5: worlds as the world list sees them (a
+        // symlinked world folder included); `handover/` itself must be a
+        // real directory, as the open guard requires.
+        if !world.is_dir() || !is_real_dir(&super::authority::dir(&world)) {
+            continue;
+        }
+        let Ok(store) = existing_store(&world) else { continue };
+        match RetiredCommit::scan(&store) {
+            Ok(records) => out.extend(records.into_iter().map(|r| (world.clone(), r))),
+            // Unreadable: the world stays refused; nothing to publish.
+            Err(e) => log::warn!("handover: a retirement record under {} can't be read: {e}", world.display()),
+        }
+    }
+    out
 }
 
 fn run(shared: Arc<Shared>, world: PathBuf, retired: RetiredCommit) {

@@ -105,6 +105,14 @@ pub const RETIRED: &str = "This world was handed over to another player, so it c
 pub fn awaiting_handover(npub: &str) -> String {
     format!("Waiting for {npub} to finish handing this world over")
 }
+/// CP13: the world list's line for a retired world whose handover record
+/// this install's ledger doesn't list (planted, or from another computer).
+/// It is ignored: no network action, and the world stays closed.
+pub fn unlisted_world(name: &str) -> String {
+    format!("\"{name}\" holds a handover record this computer didn't make. It is ignored, and the world stays closed.")
+}
+/// CP13: the same for an incoming world's receipt.
+pub const UNLISTED_IMPORT: &str = "An incoming world holds a handover record this computer didn't make. It is ignored, and the world stays closed.";
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
 
