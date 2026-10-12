@@ -396,7 +396,7 @@ mod session {
         durable::{MarkerKind, MarkerStore},
         live::{
             capture,
-            eligibility::Seat,
+            eligibility::{Refusal, Seat},
             recipient::{JoinedHost, RecipientConsent, RecipientIdentity, RecipientSession, RecipientStage},
             source::{Capture, HostAction, Live, SourceConfig, SourceSession, SourceStage},
             wire::{Frame, root_lineage},
@@ -624,10 +624,16 @@ mod session {
     }
     /// A pair whose invitation names `n` loopback fixture relays.
     fn pair_n(tag: &str, n: usize) -> Pair {
+        pair_planted(tag, n, |_| {}).expect("eligible")
+    }
+    /// CP17: `pair_n` with `plant` run on the world folder before the
+    /// handover begins; the begin's refusal, if any.
+    fn pair_planted(tag: &str, n: usize, plant: impl FnOnce(&std::path::Path)) -> Result<Pair, Refusal> {
         let dir = Dir::new(tag);
         for d in ["imports", "markers", "scratch", "world"] {
             std::fs::create_dir_all(dir.0.join(d)).unwrap();
         }
+        plant(&dir.0.join("world"));
         let (mut hs, mut host) = start_lent(&format!("handover-{tag}"));
         let (client, slot, generation, key) = signed_join_lent(&mut hs, &mut host, [RECIPIENT_PERSONA; 32]);
         let forged_ready = Arc::new(Mutex::new(None));
@@ -667,8 +673,8 @@ mod session {
         let source_key = keys(SOURCE_PERSONA).public_key().to_bytes();
         let action = HostAction { seat, source_key, world_name: "Loop".into() };
         let live = Live { signed_in: Some(source_key), local_seats: 1 };
-        let src = SourceSession::begin(&mut hs, action, cfg, live, now()).expect("eligible");
-        Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, drop_ack, relay, extra, dir }
+        let src = SourceSession::begin(&mut hs, action, cfg, live, now())?;
+        Ok(Pair { hs, host, src, rc, dst: None, seat, live, root, forged_ready, forged_bearer, forge_ack, ack_forge, drop_ack, relay, extra, dir })
     }
 
     /// The joined client reads the proposal through its ordinary poll, the
@@ -2423,6 +2429,14 @@ mod session {
         assert!(!p.hs.handover_frozen(), "the refused handover kept the world frozen");
         let line = p.src.end_line(crate::handover::live::copy::WORLD_RECORDS_FULL);
         assert!(!line.contains(crate::handover::live::copy::INVITE_REISSUED), "{line}");
+    }
+    /// CP17 (CP16 review LOW-2): the same rule at the session start, so a
+    /// full world is refused before it freezes and streams.
+    #[test]
+    fn handover_a_world_with_64_abort_records_is_refused_at_the_start() {
+        let r = pair_planted("full-at-start", 1, |w| plant(w, crate::handover::durable::MarkerKind::Aborted, 64)).err();
+        assert_eq!(r.map(|r| r.0), Some(crate::handover::live::copy::WORLD_RECORDS_FULL), "a full world began a handover");
+        assert!(pair_planted("room-at-start", 1, |w| plant(w, crate::handover::durable::MarkerKind::Aborted, 63)).is_ok());
     }
     #[test]
     fn handover_a_world_with_64_abort_records_refuses_before_disclosure() {

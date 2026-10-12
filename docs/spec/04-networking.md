@@ -6020,9 +6020,20 @@ for every record the disclosed transfer may still need
 entries under the 256-entry folder cap); no room, or a folder that can't
 be read, refuses the handover with nothing disclosed: "This world has no
 room for another handover record, so the handover stopped. Nothing was
-handed over. Play has resumed." (`copy::WORLD_RECORDS_FULL`). So a
-disclosed transfer's abort record (and its promotion at start-up) never
-meets the cap. Abort and "published" records are never removed, so one
+handed over. Play has resumed." (`copy::WORLD_RECORDS_FULL`). CP17 (CP16
+review LOW-1): that alone did not cover an earlier transfer's pending
+abort record still waiting for promotion (a promotion that failed at a
+start-up), which is a future Aborted and "published" record too; the rule
+(`MarkerStore::has_room_for_handover`, the one rule both checks use) now
+reserves one more of each, and two more entries, for every pending record
+already in the folder. So a disclosed transfer's abort record, and the
+promotion of any pending record the folder held at disclosure, never
+meets the cap. CP17 (LOW-2): the same rule also runs when the handover
+begins (`SourceSession::begin`, same line), so a full world is refused
+before it freezes and the whole world streams; the disclosure check stays
+the authority, since the folder can change in between. Pinned by a unit
+test at every edge (63/64 of each of the four kinds, 253/254 entries, a
+pending record's reservation). Abort and "published" records are never removed, so one
 world folder takes at most 64 handovers that got past disclosure (each
 leaves one "published" record, 63 aborted ones plus the one that
 retires it, or 64 aborted ones); the 65th is refused before disclosure.

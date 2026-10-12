@@ -235,6 +235,15 @@ impl SourceSession {
     /// The host action: refusals first, then bind the exact seat and propose.
     pub fn begin(hs: &mut HostedServer, action: HostAction, cfg: SourceConfig, live: Live, now: u64) -> Result<Self, Refusal> {
         check(hs, &action, &cfg, live)?;
+        // CP17 (CP16 review LOW-2): a world with no room for this handover's
+        // records is refused now, before it freezes and streams, not after
+        // the whole world has been copied (disclosure checks again).
+        if let Some(dir) = cfg.world_dir.as_deref()
+            && super::authority::dir(dir).is_dir()
+            && !matches!(super::authority::store(dir).and_then(|s| s.has_room_for_handover()), Ok(true))
+        {
+            return Err(Refusal(super::copy::WORLD_RECORDS_FULL));
+        }
         // H1: no live invitation capability, no handover.
         if *cfg.bearer.expose() == [0; 16] {
             return Err(Refusal(super::copy::NO_LIVE_INVITE));

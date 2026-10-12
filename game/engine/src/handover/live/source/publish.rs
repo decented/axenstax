@@ -25,13 +25,16 @@ impl SourceSession {
         // CP16 (CP15 review MEDIUM-1): room in this world's `handover/` for
         // every record a disclosed transfer may still need: its pending
         // abort record, a terminal record of EITHER kind (Retired or
-        // Aborted) and its "published" record. Three more entries at most
-        // (the pending record is removed once a terminal record lands; one
-        // spare covers a removal that failed). Without it a 65th abort could
+        // Aborted) and its "published" record: three more entries, the
+        // last landing while the pending record may still be there (its
+        // removal failed). CP17 (CP16 review LOW-1): each earlier pending
+        // record not yet promoted reserves its own Aborted and Published
+        // (`MarkerStore::has_room_for_handover`). CP17 (LOW-2): the same
+        // rule also runs at session start, before anything freezes or
+        // streams; this one stays the authority. Without it a 65th abort could
         // never be recorded or promoted, and the recipient would wait for
         // ever. No room, or the folder can't be read: nothing is disclosed.
         {
-            use crate::handover::durable::MarkerKind::{Aborted, PendingAbort, Published, Retired};
             let dir = self.cfg.world_dir.as_ref().ok_or(Refusal(crate::handover::live::copy::NEVER_SAVED))?;
             // CP17 (CP15 review LOW-3): the world's handover lock, from
             // before the pending abort record until a terminal record is
@@ -49,7 +52,7 @@ impl SourceSession {
                     return Err(Refusal(crate::handover::live::copy::PENDING_ABORT_UNWRITTEN));
                 }
             }
-            let room = crate::handover::live::authority::store(dir).and_then(|s| s.has_room(&[PendingAbort, Retired, Aborted, Published], 3));
+            let room = crate::handover::live::authority::store(dir).and_then(|s| s.has_room_for_handover());
             if !matches!(room, Ok(true)) {
                 log::warn!("handover: this world's handover records have no room for another handover ({room:?}); nothing was disclosed");
                 return Err(Refusal(crate::handover::live::copy::WORLD_RECORDS_FULL));

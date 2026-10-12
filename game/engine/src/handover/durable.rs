@@ -79,6 +79,10 @@ impl BoundaryObserver for NoFault {
     }
 }
 
+/// CP17: the entries one handover's records take in its world's folder
+/// (pending abort, a terminal record, published).
+pub const HANDOVER_ENTRIES: usize = 3;
+
 pub struct MarkerStore {
     directory: PathBuf,
 }
@@ -322,6 +326,39 @@ impl MarkerStore {
         }
         Ok(kinds.iter().zip(&same).all(|(k, n)| n + kinds.iter().filter(|x| *x == k).count() <= 64))
     }
+    /// CP17 (CP16 review LOW-1, LOW-5): room for one more handover in this
+    /// world, the ONE rule both the session start and the disclosure use.
+    /// The new transfer needs a PendingAbort, a terminal record of either
+    /// kind (Retired or Aborted) and a Published: `HANDOVER_ENTRIES` (3)
+    /// entries. Every pending abort record already here (an earlier
+    /// transfer's, not yet promoted: a promotion that failed at start-up)
+    /// is a future Aborted and Published too, so each reserves one more of
+    /// each kind and two more entries: a later promotion never meets the cap.
+    pub fn has_room_for_handover(&self) -> Result<bool> {
+        use MarkerKind::{Aborted, PendingAbort, Published, Retired};
+        let pending = self.count(PendingAbort)?;
+        let mut kinds = vec![PendingAbort, Retired];
+        for _ in 0..=pending {
+            kinds.extend([Aborted, Published]);
+        }
+        self.has_room(&kinds, HANDOVER_ENTRIES + 2 * pending)
+    }
+    /// How many `<kind>-*.dat` names this folder holds (bounded like the
+    /// other scans: more than 256 entries is a `Limit`).
+    fn count(&self, kind: MarkerKind) -> Result<usize> {
+        let mut n = 0;
+        for (seen, entry) in fs::read_dir(&self.directory).map_err(|_| Error::Io)?.enumerate() {
+            if seen >= 256 {
+                return Err(Error::Limit("marker directory entries"));
+            }
+            let name = entry.map_err(|_| Error::Io)?.file_name();
+            let name = name.to_str().ok_or(Error::Invalid("marker filename"))?;
+            if name.starts_with(&format!("{}-", kind.label())) && name.ends_with(".dat") {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
     fn check_capacity(&self, kind: MarkerKind) -> Result<()> {
         let mut total = 0usize;
         let mut same = 0usize;
@@ -542,6 +579,43 @@ pub(crate) mod fault {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// CP17 (CP16 review LOW-5): the handover room rule's parts, each at
+    /// its edge: 63 of any of the four kinds leaves room, 64 doesn't; 253
+    /// other entries leave room for the 3, 254 don't; and every pending
+    /// record already here reserves an Aborted and a Published of its own.
+    #[test]
+    fn handover_room_rule_pins_every_kind_and_the_entry_reservation() {
+        let fill = |s: &MarkerStore, prefix: &str, n: usize| {
+            for i in 0..n {
+                std::fs::write(s.directory().join(format!("{prefix}-{i:032x}.dat")), b"").unwrap();
+            }
+        };
+        for kind in [MarkerKind::PendingAbort, MarkerKind::Retired, MarkerKind::Aborted, MarkerKind::Published] {
+            let (s, p) = store("room-kind");
+            fill(&s, kind.label(), 63);
+            assert_eq!(s.has_room_for_handover(), Ok(true), "63 {} left no room", kind.label());
+            fill(&s, &format!("{}-x", kind.label()), 1);
+            assert_eq!(s.has_room_for_handover(), Ok(false), "64 {} still left room", kind.label());
+            std::fs::remove_dir_all(p).unwrap();
+        }
+        let (s, p) = store("room-entries");
+        fill(&s, "other", 253);
+        assert_eq!(s.has_room_for_handover(), Ok(true), "253 entries left no room for 3 more");
+        fill(&s, "another", 1);
+        assert_eq!(s.has_room_for_handover(), Ok(false), "254 entries still left room for 3 more");
+        std::fs::remove_dir_all(p).unwrap();
+        // LOW-1: 62 Aborted + one earlier pending record: its promotion
+        // takes the 63rd, this handover's abort the 64th: room. 63 Aborted
+        // + one pending: no room (the promotion would meet the cap).
+        let (s, p) = store("room-pending");
+        fill(&s, MarkerKind::Aborted.label(), 62);
+        fill(&s, MarkerKind::PendingAbort.label(), 1);
+        assert_eq!(s.has_room_for_handover(), Ok(true));
+        fill(&s, "aborted-x", 1);
+        assert_eq!(s.has_room_for_handover(), Ok(false), "an earlier pending record's Aborted wasn't reserved");
+        std::fs::remove_dir_all(p).unwrap();
+    }
     pub(crate) fn store(tag: &str) -> (MarkerStore, PathBuf) {
         let mut random = [0; 16];
         getrandom::fill(&mut random).unwrap();
