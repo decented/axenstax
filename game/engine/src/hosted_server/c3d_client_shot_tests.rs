@@ -137,6 +137,7 @@ fn c3d_client_strict_shot_without_server_ammo_is_corrected() {
     assert_eq!(j.sp().window_events.last_number(), before + 1, "exactly one correction Replace");
     assert!(!j.hs.slot_is_free(j.i), "never torn down");
     j.assert_honest("the refused shot");
+    assert_eq!(j.actions.len(), 0, "the refused shot's ammo claim is released at once (run-15 review LOW-2)");
     assert_eq!(j.held(&arrows(1).item), 0, "the client's phantom arrows are corrected away");
     assert!(matches!(j.inv.slot(0).map(|s| &s.item), Some(Item::Tool(t)) if t.durability == bow().durability), "no wear");
     assert_eq!((j.sp().strict_refusals.stale_world, j.sp().strict_refusals.other), (0, 1));

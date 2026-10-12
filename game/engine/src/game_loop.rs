@@ -23052,7 +23052,18 @@ impl super::GameState {
     /// server to apply it before that packet. The ops logged before them go
     /// out first, with the count before them. Then the acknowledgement that
     /// ends the requests' claims (joiner_actions N4). Not joined: dropped.
+    /// C3d run 17 (run-15 review LOW-2) — the typed attacks and shots whose
+    /// `Refused` or `Superseded` receipt retired are never answered: their
+    /// request records go, so a refused shot's ammo stops claiming at once.
+    fn release_retired_requests(&mut self) {
+        let Some(client) = self.remote_client.as_mut() else { return };
+        for seq in client.released_requests.drain(..) {
+            self.joiner_actions.release(seq);
+        }
+    }
+
     pub(crate) fn apply_window_inbox(&mut self) {
+        self.release_retired_requests();
         if self.window_inbox.is_empty() {
             return;
         }
@@ -23153,6 +23164,7 @@ impl super::GameState {
         if let Some(acked) = ack {
             self.joiner_actions.acknowledged(acked);
         }
+        self.release_retired_requests();
         if satori {
             self.audio.play_gem_pickup();
             self.toast = Some(("+1 Satori".to_string(), Instant::now() + std::time::Duration::from_secs(3)));

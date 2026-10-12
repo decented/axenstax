@@ -147,6 +147,12 @@ impl Joined {
             }
             self.rc.note_window_event(event);
         }
+        self.release_retired_requests();
+    }
+
+    /// `GameState::release_retired_requests`.
+    fn release_retired_requests(&mut self) {
+        for seq in self.rc.released_requests.drain(..) { self.actions.release(seq); }
     }
 
     /// The second half of [`Self::pump`]: the world intake (block changes
@@ -161,6 +167,7 @@ impl Joined {
                 _ => {}
             }
         }
+        self.release_retired_requests();
     }
 
     /// A plain placement from hotbar `slot` at `cell`, routed as the game

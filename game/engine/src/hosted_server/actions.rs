@@ -518,10 +518,18 @@ pub(super) const CORRECTION_FIT_DETAIL: &str = "a refusal's correction Replace d
 
 /// C3d run 15 (run-14 review LOW-3) — the internal detail of a whole event
 /// reservation `prepare_strict_events` refused for `what` (`wanted` events):
-/// the pending-event count cap (1024) or, short of it, the byte cap (2 MiB).
+/// the pending-event count cap (1024) or, short of it, the byte cap (2 MiB)
+/// or an allocation failure (run 17, run-15 review LOW-4: the two are not
+/// told apart, so the label names both).
 pub(super) fn reservation_detail(sp: &crate::server::ServerPlayer, wanted: usize, what: &str) -> String {
-    let cap = if sp.window_events.waiting().saturating_add(wanted) > crate::action_journal::MAX_EVENT_ENTRIES { "count" } else { "byte" };
-    format!("Whole {what} event reservation is unavailable: the pending-event {cap} cap")
+    reservation_detail_text(sp.window_events.waiting().saturating_add(wanted) > crate::action_journal::MAX_EVENT_ENTRIES, what)
+}
+
+/// The text of [`reservation_detail`]: the count cap, or the byte cap or
+/// an allocation failure.
+pub(super) fn reservation_detail_text(count_cap: bool, what: &str) -> String {
+    let cap = if count_cap { "count cap" } else { "byte cap or allocation" };
+    format!("Whole {what} event reservation is unavailable: the pending-event {cap}")
 }
 
 /// C3d run 14 (run-13 review LOW-5) — test builds record each teardown's

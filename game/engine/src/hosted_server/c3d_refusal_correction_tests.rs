@@ -475,10 +475,12 @@ fn c3d_s1_dead_body_corrections_share_the_rate_bound() {
     assert_eq!(super::actions::teardown_detail::last(), super::actions::CORRECTION_RATE_DETAIL, "the rate-bound reason");
 }
 
-/// Run 15 (run-14 review LOW-3) — every literal `FellBehind` detail in the
-/// Strict server paths is distinct, so a test (or a log) tells its
-/// teardowns apart by reason. Whole event reservations name their cap
-/// (`actions::reservation_detail`).
+/// Run 15 (run-14 review LOW-3), widened in run 17 (run-15 review LOW-4) —
+/// every `FellBehind` detail in the Strict server paths is distinct, so a
+/// test (or a log) tells its teardowns apart by reason: the literals, the
+/// `strict_raw_or_stop` path names, both texts of every whole event
+/// reservation (`actions::reservation_detail`) and the correction-bound
+/// consts. Any other argument form is unclassified and fails the scan.
 #[test]
 fn c3d_fell_behind_details_are_distinct() {
     let sources = [
@@ -489,16 +491,40 @@ fn c3d_fell_behind_details_are_distinct() {
         include_str!("death.rs"),
         include_str!("../hosted_server.rs"),
     ];
-    let marker = "StrictTeardown::FellBehind, \"";
+    fn literal_after<'a>(source: &'a str, at: usize) -> &'a str {
+        let rest = &source[at..];
+        let open = rest.find('"').expect("a literal") + 1;
+        &rest[open..open + rest[open..].find('"').expect("a closed literal")]
+    }
     let mut seen = std::collections::BTreeMap::new();
+    let mut note = |d: String| *seen.entry(d).or_insert(0) += 1;
+    let (mut literals, mut paths, mut reservations) = (0, 0, 0);
     for source in sources {
+        let marker = "StrictTeardown::FellBehind, ";
         for (at, _) in source.match_indices(marker) {
             let rest = &source[at + marker.len()..];
-            let detail = &rest[..rest.find('"').expect("a closed literal")];
-            *seen.entry(detail.to_string()).or_insert(0) += 1;
+            if rest.starts_with('"') {
+                note(literal_after(source, at).to_string());
+                literals += 1;
+            } else {
+                let arg = &rest[..rest.find([')', ';']).expect("an argument")];
+                assert!(["path", "&detail", "CORRECTION_RATE_DETAIL", "CORRECTION_FIT_DETAIL"].contains(&arg), "an unclassified FellBehind detail: {arg}");
+            }
+        }
+        for (at, _) in source.match_indices("strict_raw_or_stop(i, action, ") {
+            note(literal_after(source, at).to_string());
+            paths += 1;
+        }
+        for (at, _) in source.match_indices("reservation_detail(&self.server.players[i], ") {
+            let what = literal_after(source, at);
+            note(super::actions::reservation_detail_text(true, what));
+            note(super::actions::reservation_detail_text(false, what));
+            reservations += 1;
         }
     }
-    assert!(seen.len() >= 15, "the scan found the details: {seen:?}");
+    note(super::actions::CORRECTION_RATE_DETAIL.to_string());
+    note(super::actions::CORRECTION_FIT_DETAIL.to_string());
+    assert!(literals >= 15 && paths >= 3 && reservations >= 3, "the scan found the details: {literals} {paths} {reservations} {seen:?}");
     let shared: Vec<_> = seen.iter().filter(|(_, n)| **n > 1).collect();
     assert!(shared.is_empty(), "shared FellBehind details: {shared:?}");
 }

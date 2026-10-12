@@ -417,7 +417,7 @@ fn c3d_strict_shot_at_the_byte_and_receipt_caps_has_zero_external_effect() {
     body.name = "p".repeat(crate::action_journal::MAX_RETAINED_BYTES);
     let sp = &mut r.hs.server.players[r.i];
     crate::window_events::queue(sp, crate::window_events::WindowEvent::Grant(ItemStack { item: Item::Plan(body), count: 1 }), 0);
-    assert_zero_effect_shot(r, "byte cap", "Whole shot event reservation is unavailable: the pending-event byte cap");
+    assert_zero_effect_shot(r, "byte cap", "Whole shot event reservation is unavailable: the pending-event byte cap or allocation");
 
     let mut r = strict_rig("shot-receipts");
     arm(&mut r.hs.server.players[r.i]);

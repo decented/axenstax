@@ -373,6 +373,12 @@ pub struct RemoteClient {
     /// when the receipt (held behind the chunk intake) retires. An
     /// unchanged setting resent is served harmlessly.
     pub refill_refused: bool,
+    /// C3d run 17 (run-15 review LOW-2) — the request `seq`s of typed
+    /// attacks and shots whose `Refused` or `Superseded` receipt retired:
+    /// no outcome will ever answer them, so the game loop releases their
+    /// `JoinerActions` records (`GameState::release_retired_requests`).
+    /// Bounded by `joiner_actions::MAX_PENDING` (the oldest goes first).
+    pub released_requests: Vec<u32>,
     last_recovery_id: u64,
     queued_action_receipts: usize,
     pending_action_ack: Option<crate::action_wire::AppliedActionAck>,
@@ -792,6 +798,7 @@ impl RemoteClient {
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
             refill_refused: false,
+            released_requests: Vec::new(),
             last_recovery_id: 0,
             queued_action_receipts: 0,
             pending_action_ack: None,
@@ -854,6 +861,7 @@ impl RemoteClient {
             recovery_assembly: None,
             action_receipts: std::collections::VecDeque::with_capacity(crate::action_journal::MAX_ACTIONS),
             refill_refused: false,
+            released_requests: Vec::new(),
             last_recovery_id: 0,
             queued_action_receipts: 0,
             pending_action_ack: None,

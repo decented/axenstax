@@ -186,9 +186,20 @@ impl RemoteClient {
             {
                 self.refill_refused = true;
             }
+            // Run 17 — a refused or superseded attack or shot is never
+            // answered: its request record goes (review LOW-2).
+            let released = if matches!(receipt.fate, crate::action_identity::ActionFate::Refused | crate::action_identity::ActionFate::Superseded) {
+                journal.actions().find(|a| a.header == receipt.action).and_then(|a| unanswered_request(&a.intent))
+            } else {
+                None
+            };
             if let Err(error) = journal.retire_receipt(receipt, self.events_applied, receipt.action.seq) {
                 self.state = ConnectionState::Failed(format!("Invalid applied action receipt: {error:?}"));
                 break;
+            }
+            if let Some(seq) = released {
+                if self.released_requests.len() >= crate::joiner_actions::MAX_PENDING { self.released_requests.remove(0); }
+                self.released_requests.push(seq);
             }
             let ack = crate::action_wire::AppliedActionAck { session: receipt.action.session, epoch: receipt.action.epoch, life: receipt.action.life, through: receipt.action.seq, included_events: receipt.included_events };
             self.pending_action_ack = Some(ack);
@@ -203,6 +214,16 @@ impl RemoteClient {
 }
 
 /// Is a journaled intent (its encoded packet) a `SetAutoRefill`?
+/// C3d run 17 — the request `seq` of a journaled typed attack or shot (the
+/// two typed classes recorded in `JoinerActions`), else `None`.
+fn unanswered_request(intent: &[u8]) -> Option<u32> {
+    match crate::action_wire::ActionPacket::decode(intent).ok()?.intent {
+        crate::action_wire::ActionIntent::Attack(p) => Some(p.seq),
+        crate::action_wire::ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. }) => Some(p.seq),
+        _ => None,
+    }
+}
+
 fn is_set_auto_refill(intent: &[u8]) -> bool {
     crate::action_wire::ActionPacket::decode(intent)
         .is_ok_and(|p| matches!(p.intent, crate::action_wire::ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })))

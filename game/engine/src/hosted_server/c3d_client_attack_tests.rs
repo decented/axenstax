@@ -116,6 +116,51 @@ fn c3d_client_strict_hit_is_served_from_the_server_item() {
     assert_eq!((j.sp().strict_refusals.stale_world, j.sp().strict_refusals.other), (0, 0));
 }
 
+/// C3d run 17 (run-15 review LOW-3) — the one place a Strict action kills
+/// its own actor mid-commit: a joiner at 1 HP hits an adult wild Nostrich
+/// with an iron sword and its kick-back kills it. The swing is served
+/// (ONE numbered Wear, reserved before the damage, committed with the
+/// swing), the debt-zero fold still holds after the commit (never torn
+/// down for an obligation), and the death that follows is the existing
+/// "Wear pending at death" case: the death `Replace` comes after the Wear,
+/// and the sword (worn exactly once) is conserved over the window, every
+/// grave and the ground.
+#[test]
+fn c3d_client_strict_attacker_killed_by_the_nostrich_kick_back_conserves_the_worn_sword() {
+    let iron = sword(ToolMaterial::Iron);
+    let mut j = joined("attack-kick", &[(0, held(iron))], true);
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.pump();
+    j.assert_honest("the refill setting");
+    let at = ahead(j.sp().player.pos, 1.5);
+    let e = crate::entity::spawn_mob(&mut j.hs.server.ecs, MobType::Nostrich, at);
+    j.hs.tick();
+    let id = j.hs.server.ecs.get::<&crate::entity::ProtocolId>(e).expect("broadcast").0;
+    let nowhere = [0, -200, 0];
+    let before_hold = super::c3d_container_tests::all_holdings(&j.hs, &[j.i], nowhere);
+    let mut worn = iron;
+    worn.durability -= 1;
+    let expect_worn = super::c3d_strict_tests::holdings([Some(crate::inventory::stack_to_wire(&held(worn)))].iter());
+    assert_ne!(before_hold, expect_worn, "the sword starts unworn");
+    j.hs.server.players[j.i].combat.health = 1.0;
+    j.hs.server.players[j.i].combat.invincible_timer = 0;
+    let before = j.sp().window_events.last_number();
+    let action = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, e, at);
+    j.hs.tick();
+    assert_eq!(fate(&j, action), Some(ActionFate::Accepted), "the swing is served");
+    assert!(!j.hs.slot_is_free(j.i), "the fold held: never torn down for an obligation");
+    let sp = j.sp();
+    assert!(sp.combat.dead, "the kick-back killed the attacker");
+    assert!(sp.window_events.last_number() >= before + 1, "the Wear is numbered");
+    let replace = sp.window_events.death_replace.expect("the death Replace is queued");
+    assert!(replace > before + 1, "the death Replace ({replace}) follows the Wear ({})", before + 1);
+    j.pump();
+    j.pump();
+    assert!(matches!(j.rc.state, ConnectionState::Connected { .. }), "never torn down");
+    assert_eq!(super::c3d_container_tests::all_holdings(&j.hs, &[j.i], nowhere), expect_worn, "the sword, worn exactly once, over window + graves + ground");
+}
+
 /// A bare-hand hit: damage 1, no event, Accepted, never torn down.
 #[test]
 fn c3d_client_strict_bare_hand_hit_wears_nothing() {
@@ -156,6 +201,7 @@ fn c3d_client_strict_claimed_better_sword_is_refused_and_corrected() {
     assert_eq!(j.sp().window_events.last_number(), before + 1, "exactly one correction Replace, no Wear");
     assert!(!j.hs.slot_is_free(j.i), "never torn down");
     j.assert_honest("the refused claim");
+    assert_eq!(j.actions.len(), 0, "the refused attack's request record is released (run-15 review LOW-2)");
     assert_eq!(j.inv.slot(0).cloned(), Some(held(wood)), "the client's slot corrected to the server's sword");
     assert_eq!((j.sp().strict_refusals.stale_world, j.sp().strict_refusals.other), (0, 1));
 }
@@ -184,6 +230,7 @@ fn c3d_client_strict_out_of_reach_hit_is_refused_uncorrected() {
     assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace, no Wear");
     assert!(!j.sp().window_events.replace_waiting(), "no correction waits");
     j.assert_honest("the out-of-reach hit");
+    assert_eq!(j.actions.len(), 0, "the refused attack's request record is released (run-15 review LOW-2)");
     assert_eq!(durability(&j.inv, 0), Some(iron.durability), "no wear");
     assert_eq!(durability(&j.sp().inventory, 0), Some(iron.durability), "no wear on the server copy");
     let t = j.sp().strict_refusals;
