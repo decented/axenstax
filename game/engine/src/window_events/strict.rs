@@ -59,8 +59,9 @@ fn apply_marker_event(window: &mut MarkerWindow, event: &WindowEvent) -> Result<
     let view = window.view();
     if let WindowEvent::WearWeapon { slot, tool } = event {
         let item = Item::Tool(*tool);
-        let matches = view.inv.slots_iter().flatten().filter(|stack| crate::joiner_actions::same_item(&stack.item, &item)).count();
-        if matches != 1 || crate::joiner_actions::where_now(view.inv, *slot, &item).is_none() {
+        // C3d run 16 (run-15 review MEDIUM-1) — the named held slot first;
+        // ambiguous only when it doesn't hold the kind and several do.
+        if crate::joiner_actions::strict_wear_target(view.inv, *slot, &item).is_none() {
             return Err(StrictStageError::AmbiguousWear);
         }
     }
@@ -460,8 +461,20 @@ mod tests {
         assert!(matches!(effective.view().inv.slot(0).unwrap().item, Item::Tool(t) if t.durability == 2));
         assert!(stage_strict_effects(&sp, &registry, &[WindowEvent::WearWeapon { slot: 0, tool }]).is_ok());
         assert!(matches!(sp.inventory.slot(0).unwrap().item, Item::Tool(t) if t.durability == 3));
+        // Run 16 (run-15 review MEDIUM-1) — a second piece of the kind
+        // elsewhere: the named slot still holds one, so it is not ambiguous
+        // and the named piece wears; ambiguous only once the named slot
+        // doesn't hold the kind and two others do.
         sp.inventory.set_slot(1, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
-        assert!(matches!(strict_effective_marker(&sp, &registry), Err(StrictStageError::AmbiguousWear)));
+        let mut effective = strict_effective_marker(&sp, &registry).expect("the named slot resolves the wear");
+        assert!(matches!(effective.view().inv.slot(0).unwrap().item, Item::Tool(t) if t.durability == 2), "the named piece wore");
+        assert!(matches!(effective.view().inv.slot(1).unwrap().item, Item::Tool(t) if t.durability == 3), "the spare didn't");
+        let named = sp.inventory.slot(0).cloned();
+        sp.inventory.set_slot(0, None);
+        sp.inventory.set_slot(2, Some(ItemStack { item: Item::Tool(tool), count: 1 }));
+        assert!(matches!(strict_effective_marker(&sp, &registry), Err(StrictStageError::AmbiguousWear)), "named slot empty, two elsewhere");
+        sp.inventory.set_slot(2, None);
+        sp.inventory.set_slot(0, named);
         sp.inventory.set_slot(1, None);
         sp.inventory.set_slot(0, Some(ItemStack { item: Item::Tool(crate::crafting::Tool { durability: 1, ..tool }), count: 1 }));
         assert!(matches!(stage_strict_effects(&sp, &registry, &[WindowEvent::WearWeapon { slot: 0, tool }]), Err(StrictStageError::Source | StrictStageError::AmbiguousWear)));
