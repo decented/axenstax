@@ -290,6 +290,11 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
     format!("world '{name}'{place} couldn't be opened: {why}. Nothing was changed.")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// CP21 (CP19 review HIGH-1): the Trial's folder holds a handed-over world.
+pub(crate) const ARENA_HOLDS_A_HANDOVER: &str =
+    "This Trial's folder holds a world that was handed over, so the Trial won't start there. That world is safe in your world list.";
+
 /// How a Trial arena launch treats its folder, decided from what is ON DISK and
 /// before anything is written (Spec 02 §8.4). A world is there when
 /// [`is_new_world`] says so — not when the lobby lists it (only folders with a
@@ -300,10 +305,6 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
 /// (`save::world_open_refusal`) or a folder that can't be checked — then
 /// nothing is wiped, created or entered. Reads only.
 #[cfg(not(target_arch = "wasm32"))]
-/// CP21 (CP19 review HIGH-1): the Trial's folder holds a handed-over world.
-pub(crate) const ARENA_HOLDS_A_HANDOVER: &str =
-    "This Trial's folder holds a world that was handed over, so the Trial won't start there. That world is safe in your world list.";
-
 pub(crate) fn plan_arena_folder(
     mode: crate::scenario::ArenaMode,
     name: &str,
@@ -314,7 +315,6 @@ pub(crate) fn plan_arena_folder(
     // CP21 (CP19 review HIGH-1, defence in depth): a folder carrying
     // handover records is a handed-over (or handing-over) world, never an
     // arena: the Trial refuses rather than open or wipe it.
-    #[cfg(not(target_arch = "wasm32"))]
     if std::fs::symlink_metadata(crate::save::world_dir(name).join("handover")).is_ok() {
         log::warn!("Trial arena '{name}' carries handover records; the Trial won't open or wipe it");
         return Err(ARENA_HOLDS_A_HANDOVER.to_owned());
