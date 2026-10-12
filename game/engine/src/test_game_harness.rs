@@ -2888,7 +2888,11 @@ mod tests {
         let sp = &server.server.players[slot];
         assert!(client_shots >= 2, "the held bow fired: {client_shots}");
         assert_eq!(16 - held_units(&sp.inventory, &arrow), client_shots, "both copies paid each shot");
-        assert_eq!((sp.strict_refusals.stale_world, sp.strict_refusals.other), (0, 0), "no Strict refusal");
+        // C3d run 18 (run-17 review LOW-2) — world-fact refusals too.
+        let t = sp.strict_refusals;
+        assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "no Strict refusal");
+        // Run-17 review LOW-1 — the game loop's shot bracket really compared.
+        assert!(crate::strict_requests::checked::seen().contains(&"shot"), "the shot's NoPrediction bracket ran");
     }
 
     /// C3d run 16 — a STRICT joiner's swing through its REAL client

@@ -600,7 +600,32 @@ fn c3d_strict_last_point_sword_replaced_in_flight_by_an_identical_kind_is_a_know
     place(&mut j.hs, j.i, cow, at);
     j.hs.tick();
     assert!(j.hs.slot_is_free(j.i), "torn down today (fail-closed)");
-    assert_eq!(super::actions::teardown_detail::last(), "Attack wear or pending fit is uncertain", "the internal reason");
+    // C3d run 18 (run-17 review LOW-4) — the cause named, not the catch-all.
+    assert_eq!(super::actions::teardown_detail::last(), "Attack wear is ambiguous (AmbiguousWear)", "the internal reason");
     assert_eq!(cow_state(&j.hs, cow).0, health, "zero effect: no second hit");
-    let _ = second;
+    assert_ne!(fate(&j, second), Some(ActionFate::Accepted), "the second swing is not served");
+}
+
+/// C3d run 18 (run-17 review LOW-4) — the no-grant twin: without the
+/// identical sword granted into the freed slot, the second swing names a
+/// weapon the effective window no longer holds: a corrected refusal, never
+/// a teardown. Pins the grant as the teardown's cause.
+#[test]
+fn c3d_strict_last_point_sword_without_a_replacement_is_refused_and_corrected() {
+    let mut last = sword(ToolMaterial::Iron);
+    last.durability = 1;
+    let (mut j, cow, id, at) = rig("attack-ambiguous-twin", &[(0, held(last))], 2.0);
+    let first = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, cow, at);
+    j.hs.tick();
+    assert_eq!(fate(&j, first), Some(ActionFate::Accepted), "swing 1 is served");
+    j.hs.server.players[j.i].next_swing_tick = 0;
+    let (health, _, _) = cow_state(&j.hs, cow);
+    let second = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, cow, at);
+    j.hs.tick();
+    assert!(!j.hs.slot_is_free(j.i), "never torn down");
+    assert_eq!(fate(&j, second), Some(ActionFate::Refused), "refused");
+    assert_eq!(cow_state(&j.hs, cow).0, health, "zero effect: no second hit");
+    j.assert_honest("the corrected refusal");
 }

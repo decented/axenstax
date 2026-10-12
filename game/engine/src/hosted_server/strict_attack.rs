@@ -92,6 +92,8 @@ impl HostedServer {
                 Err(StrictStageError::Debt) => return self.strict_debt_at_staging(i, "attack"),
                 Err(StrictStageError::RawUnrepresentable) => { self.refuse_raw_unrepresentable(i, action); return false; }
                 Err(StrictStageError::Unrepresentable) => { self.refuse_typed_action(i, action); return false; }
+                // C3d run 18 (run-17 review LOW-4) — the ambiguous wear named apart.
+                Err(StrictStageError::AmbiguousWear) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Attack wear is ambiguous (AmbiguousWear)"); return false; }
                 Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Attack wear or pending fit is uncertain"); return false; }
             }
         }

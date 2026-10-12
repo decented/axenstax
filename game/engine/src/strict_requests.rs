@@ -164,7 +164,9 @@ pub struct NoPrediction {
 impl NoPrediction {
     /// On a Strict seat, the window's digest before `what`; else `None`.
     pub fn begin(remote: Option<&RemoteClient>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], what: &'static str) -> Option<Self> {
-        shot_goes_typed(remote).then(|| NoPrediction { digest: ui.digest(inv, armour), what })
+        // C3d run 18 (DECIDED after the run-17 review) — the digests run in
+        // debug builds only; a release build computes nothing here.
+        (cfg!(debug_assertions) && shot_goes_typed(remote)).then(|| NoPrediction { digest: ui.digest(inv, armour), what })
     }
 
     /// `Err` when the window changed since [`Self::begin`].
@@ -180,9 +182,44 @@ impl NoPrediction {
     /// [`Self::end`] where the game loop runs it: an error is logged, and a
     /// debug build stops.
     pub fn check(guard: Option<Self>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+        #[cfg(test)]
+        if let Some(g) = &guard { checked::note(g.what); }
         if let Some(guard) = guard && let Err(error) = guard.end(ui, inv, armour) {
             log::error!("{error}");
             debug_assert!(false, "{error}");
+        }
+    }
+}
+
+/// C3d run 18 (run-17 review LOW-1) — the `NoPrediction` brackets that
+/// actually compared on this thread (each test runs on its own), so a test
+/// driving the real game-loop branch can show its bracket ran.
+#[cfg(test)]
+pub mod checked {
+    use std::cell::RefCell;
+    thread_local!(static SEEN: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) });
+    pub(super) fn note(what: &'static str) { SEEN.with(|s| s.borrow_mut().push(what)); }
+    /// The brackets checked on this thread so far.
+    pub fn seen() -> Vec<&'static str> { SEEN.with(|s| s.borrow().clone()) }
+}
+
+#[cfg(test)]
+mod bracket_position_tests {
+    /// C3d run 18 (run-17 review LOW-1) — a SOURCE-POSITION guard (the GPU
+    /// swing test calls `send_entity_attack` directly, so no test drives the
+    /// game loop's joined swing branch): the swing bracket opens before
+    /// `send_entity_attack` and closes after the local-hit wear block; the
+    /// shot bracket encloses `send_shot`. Moving or removing either fails.
+    #[test]
+    fn c3d_no_prediction_brackets_enclose_the_swing_and_the_shot() {
+        let src = include_str!("game_loop.rs");
+        for (what, inside) in [("\"swing\")", &["self.send_entity_attack(pidx", "inventory.use_hotbar_tool(hotbar)"][..]), ("\"shot\")", &["self.send_shot(pidx, weapon)"][..])] {
+            let begin = src.find(&format!("NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, {what}")).unwrap_or_else(|| panic!("the {what} bracket opens in the game loop"));
+            let end = begin + src[begin..].find("NoPrediction::check(").unwrap_or_else(|| panic!("the {what} bracket closes"));
+            for call in inside {
+                let at = src[begin..end].find(call);
+                assert!(at.is_some(), "the {what} bracket encloses `{call}`");
+            }
         }
     }
 }
