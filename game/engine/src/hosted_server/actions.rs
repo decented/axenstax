@@ -8,6 +8,11 @@ impl HostedServer {
     pub(super) fn strict_slot(&self, i: usize) -> bool {
         self.server.players.get(i).is_some_and(|p| p.server_simulated && p.inventory_mode == InventoryMode::Strict)
     }
+    /// C3d run 19 — a joiner on the default Mirror rules (server-simulated,
+    /// not Strict): the seats whose typed `ToggleBlock` is served.
+    pub(super) fn mirror_slot(&self, i: usize) -> bool {
+        self.server.players.get(i).is_some_and(|p| p.server_simulated && p.inventory_mode == InventoryMode::Mirror)
+    }
     pub(super) fn reject_legacy_inventory(&mut self, i: usize) {
         self.strict_bridge_teardown(i, StrictTeardown::Untyped, "untyped inventory mutation on a Strict connection");
     }
@@ -139,7 +144,10 @@ impl HostedServer {
                     _ => Vec::new(),
                 };
                 if !self.complete_typed_noop_at(i, packet.action, ActionFate::Superseded, &cells) { return; }
-                if !stale_base { self.queue_correction_replace(i); }
+                // C3d run 19 — a Mirror seat's typed action (a toggle, its
+                // only one) predicts no window: its cells go back, no
+                // whole-window correction.
+                if !stale_base && self.strict_slot(i) { self.queue_correction_replace(i); }
                 continue;
             }
             match packet.intent {
@@ -164,8 +172,14 @@ impl HostedServer {
                 ActionIntent::DoorPlace { bottom, facing, hotbar_slot } if self.strict_slot(i) => {
                     if !self.serve_strict_door_place(i, packet.action, bottom, facing, hotbar_slot, budget) { return; }
                 }
-                ActionIntent::ToggleBlock { cell, expected_block } if self.strict_slot(i) => {
-                    if !self.serve_strict_toggle(i, packet.action, cell, expected_block, budget) { return; }
+                ActionIntent::ToggleBlock { cell, expected_block, hotbar_slot } if self.strict_slot(i) => {
+                    if !self.serve_toggle(i, packet.action, cell, expected_block, hotbar_slot, budget) { return; }
+                }
+                // C3d run 19 — a Mirror joiner's toggle: the same shared
+                // footprint, its `FlipEach` rule, refusals sent back
+                // uncorrected (`strict_door.rs`).
+                ActionIntent::ToggleBlock { cell, expected_block, hotbar_slot } if self.mirror_slot(i) => {
+                    if !self.serve_toggle(i, packet.action, cell, expected_block, hotbar_slot, budget) { return; }
                 }
                 // C3d run 15 — a swing at the server's mob (`strict_attack.rs`).
                 ActionIntent::Attack(req) if self.strict_slot(i) => {

@@ -31,7 +31,10 @@ pub enum ActionIntent {
     Device { cell: [i32; 3], hotbar_slot: u8 },
     /// Only the bottom is asserted; the server derives both halves atomically.
     DoorPlace { bottom: [i32; 3], facing: u8, hotbar_slot: u8 },
-    ToggleBlock { cell: [i32; 3], expected_block: u16 },
+    /// C3d run 19 — `hotbar_slot` (appended, v89 unreleased): the toggle's
+    /// reach uses the server copy's item in that slot, as an edit's does
+    /// (a Reach Claw counts), in both modes.
+    ToggleBlock { cell: [i32; 3], expected_block: u16, hotbar_slot: u8 },
     HoldBegin { target: [i32; 3], hotbar_slot: u8 },
     HoldCancel { hold: ActionHeader },
     HoldStrike { hold: ActionHeader },
@@ -268,6 +271,31 @@ mod tests {
         }
         assert_eq!(deserialize_header(&[67]).map(|(t, _)| t), Some(PacketType::InventorySync), "OC's v88 tag 67 is unchanged");
         assert!(deserialize_header(&[72]).is_none(), "no tag past 71");
+    }
+
+    /// C3d run 19 — the `ToggleBlock` layout with its appended
+    /// `hotbar_slot`: header, then the variant tag (7, after `DoorPlace`),
+    /// the cell, the expected block, the slot. Pinned bytes decode.
+    #[test]
+    fn c3d_wire_toggle_block_carries_its_hotbar_slot() {
+        let action = ActionHeader { session: [7; 16], epoch: 0, life: 0, seq: 1, events_applied: 0 };
+        let packet = ActionPacket { action, intent: ActionIntent::ToggleBlock { cell: [1, -2, 3], expected_block: 0x0102, hotbar_slot: 5 } };
+        let bytes = packet.encode().unwrap();
+        let mut want = Vec::new();
+        want.extend_from_slice(&[7; 16]);
+        want.extend_from_slice(&0u32.to_le_bytes());
+        want.extend_from_slice(&1u64.to_le_bytes());
+        want.extend_from_slice(&0u32.to_le_bytes());
+        want.extend_from_slice(&0u32.to_le_bytes());
+        want.extend_from_slice(&7u32.to_le_bytes());
+        for v in [1i32, -2, 3] { want.extend_from_slice(&v.to_le_bytes()); }
+        want.extend_from_slice(&0x0102u16.to_le_bytes());
+        want.push(5);
+        assert_eq!(&bytes[..], &want[..], "the ToggleBlock layout");
+        match ActionPacket::decode(&want).unwrap().intent {
+            ActionIntent::ToggleBlock { cell, expected_block, hotbar_slot } => assert_eq!((cell, expected_block, hotbar_slot), ([1, -2, 3], 0x0102, 5)),
+            other => panic!("decoded {other:?}"),
+        }
     }
 
     #[test]

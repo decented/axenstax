@@ -717,3 +717,29 @@ A Strict `SetAutoRefill` the server's copy can't reproduce (its digest) is a typ
   the primary by the bare-hand rule). All refusals corrected (cells sent
   back, `Refused` row, one `Replace`); a superseded door action sends its
   cells back. Server: `hosted_server/strict_door.rs`. Spec 04 `0x44` "Doors".
+
+## Run 19 — doors open for everyone (run 18's Mirror finding fixed)
+
+- The one sanctioned Mirror change (coordinator, 2026-10-12): the door
+  toggle path only. A Mirror joiner's door/gate/trapdoor click is a typed
+  `ToggleBlock` (`strict_doors::reserve_toggle`, no refill setting), still
+  predicted locally by `FlipEach`. The server arm is shared
+  (`HostedServer::serve_toggle`, dispatched by `strict_slot` or
+  `mirror_slot`): Strict = `Canonical` + corrected refusals; Mirror =
+  `FlipEach`, refusals sent back with a `Refused` row and no `Replace`; a
+  superseded Mirror toggle sends its cells back with no `Replace`.
+- Validation in both modes = a joiner's block edit: the primary through
+  `validate_block_edit` (reach with the server copy's item in the named slot,
+  `remote_may_touch`, economy owner), the companions through `cell_permitted`.
+- Wire (v89 unreleased): `ToggleBlock { cell, expected_block, hotbar_slot }`,
+  layout pinned (`c3d_wire_toggle_block_carries_its_hotbar_slot`). Run 18's
+  Reach Claw note is closed.
+- Host/single-player: the toggle arm records each footprint cell on
+  `pending_block_changes` (`broadcast_change`) when not joined; a lending
+  host broadcasts it unvalidated like its other edits; single-player discards
+  it at the send. `--no-lend`: by reading, the owning server applies the
+  host's meta-only edits through the local-slot path (budget 4/tick, refused
+  cells sent back); untested, left under the `--no-lend` BRIDGE.
+- Mirror behaviour change to know: a Mirror joiner in Adventure/Spectator
+  (`can_edit_world` false) can no longer keep a door open on the server (its
+  predicted door is sent back shut); before, it opened only on its own screen.

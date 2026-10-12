@@ -1,5 +1,7 @@
-//! C3d run 18 — doors (Decision 20): a Mirror joiner's toggle (item 0, a
-//! finding), and the Strict compound door place, break and toggle.
+//! C3d run 18 — doors (Decision 20): the Strict compound door place, break
+//! and toggle. C3d run 19 — a Mirror joiner's toggle reaches the server and
+//! every other player (run 18's finding, fixed): a typed `ToggleBlock`
+//! served under `FlipEach`, refusals sent back.
 use super::*;
 use crate::action_identity::InventoryMode;
 use crate::block::{AIR, OAK_DOOR, STONE};
@@ -12,6 +14,8 @@ pub(super) struct MirrorJoined {
     pub(super) hs: HostedServer,
     pub(super) rc: RemoteClient,
     pub(super) world: crate::world::World,
+    /// The fates of the action receipts this client retired, in order.
+    pub(super) fates: Vec<crate::action_identity::ActionFate>,
 }
 
 pub(super) fn mirror_joined(tag: &str) -> MirrorJoined {
@@ -30,7 +34,7 @@ pub(super) fn mirror_joined(tag: &str) -> MirrorJoined {
     let col = (40i32.div_euclid(cs), 40i32.div_euclid(cs));
     hs.server.loaded_columns.insert(col);
     let rc = RemoteClient::from_transport(Box::new(hs.attach_test_remote()), crate::remote_client::build_join_request_guest("Doorman", 0), None);
-    let mut m = MirrorJoined { _g: g, hs, rc, world: crate::world::World::new() };
+    let mut m = MirrorJoined { _g: g, hs, rc, world: crate::world::World::new(), fates: Vec::new() };
     for _ in 0..20 {
         m.pump();
         if m.rc.player_index().is_some() { break; }
@@ -46,11 +50,65 @@ pub(super) fn mirror_joined(tag: &str) -> MirrorJoined {
 }
 
 impl MirrorJoined {
+    /// One server tick; the client's packets read, its block changes
+    /// applied to its world and its action receipts retired (as the game
+    /// loop's intake does).
     pub(super) fn pump(&mut self) {
         self.hs.tick();
         self.rc.poll();
         for change in std::mem::take(&mut self.rc.pending_block_changes) { self.world.apply_remote_block_change(&change); }
+        for (_, item) in std::mem::take(&mut self.rc.chunk_queue) {
+            if let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = item {
+                self.rc.apply_action_receipt(receipt);
+                self.fates.push(receipt.fate);
+            }
+        }
     }
+
+    /// The game loop's Mirror toggle arm (run 19): ONE reserved
+    /// `ToggleBlock` (hotbar slot 0), then `FlipEach` predicted in its own
+    /// world exactly as before. Pumped until the receipt retires.
+    fn toggle(&mut self, cell: [i32; 3]) -> crate::action_identity::ActionFate {
+        let expected = self.world.get_block(cell[0], cell[1], cell[2]);
+        crate::strict_doors::reserve_toggle(&mut self.rc, &self.world, cell, expected, 0).expect("reserved and sent");
+        for (c, meta) in crate::strict_doors::toggle_metas(&self.world, cell, crate::strict_doors::OpenRule::FlipEach) {
+            self.world.set_meta((c[0], c[1], c[2]), meta);
+        }
+        let before = self.fates.len();
+        for _ in 0..6 {
+            self.pump();
+            if self.fates.len() > before { break; }
+        }
+        assert_eq!(self.fates.len(), before + 1, "the toggle's receipt retired");
+        assert_eq!(self.rc.action_journal.as_ref().map(|j| j.actions().count()), Some(0), "nothing left in the journal");
+        assert!(!self.hs.disconnected[self.rc.player_index().expect("still joined") as usize], "never torn down");
+        self.fates[before]
+    }
+
+    fn open_on_server(&self, c: [i32; 3]) -> bool { crate::block_shape::is_open(self.hs.server.world.meta_at(c[0], c[1], c[2])) }
+    fn open_on_client(&self, c: [i32; 3]) -> bool { crate::block_shape::is_open(self.world.meta_at(c[0], c[1], c[2])) }
+}
+
+/// A second Mirror guest joined to `m`'s server, its column held: its
+/// client and its own world (fed only by what the server sends it).
+fn second_joiner(m: &mut MirrorJoined) -> (RemoteClient, crate::world::World) {
+    let mut rc = RemoteClient::from_transport(Box::new(m.hs.attach_test_remote()), crate::remote_client::build_join_request_guest("Neighbour", 0), None);
+    for _ in 0..20 {
+        m.pump();
+        rc.poll();
+        if rc.player_index().is_some() { break; }
+    }
+    let i = rc.player_index().expect("the second guest joined") as usize;
+    let cs = crate::chunk::CHUNK_SIZE as i32;
+    m.hs.hold_column_for_test(i, (40i32.div_euclid(cs), 40i32.div_euclid(cs)));
+    let p = &mut m.hs.server.players[i].player;
+    p.pos = glam::Vec3::new(38.5, 80.0, 38.5);
+    p.velocity = glam::Vec3::ZERO;
+    p.on_ground = true;
+    m.pump();
+    rc.poll();
+    let _ = std::mem::take(&mut rc.pending_block_changes);
+    (rc, crate::world::World::new())
 }
 
 /// A closed door (bottom at `bottom`, facing `f`) standing in `world`.
@@ -62,31 +120,82 @@ pub(super) fn stand_door(world: &mut crate::world::World, bottom: [i32; 3], f: c
     world.set_meta((bottom[0], bottom[1] + 1, bottom[2]), crate::use_edits::door_top_meta(m));
 }
 
-/// Item 0 (a finding, no behaviour change): a Mirror joiner opens a door;
-/// does the server (the world every other player is served from) see it?
-/// The joiner's toggle is the game loop's toggle arm (`game_loop.rs`, the
-/// `is_toggleable` branch of the use click): it writes its own world's meta
-/// and re-meshes, and pushes nothing onto `pending_block_changes`, so the
-/// joiner's next movement packet carries no change for it.
+/// Run 18's finding, fixed in run 19: a Mirror joiner opens a door (the
+/// game loop's Mirror arm: a typed `ToggleBlock`, `FlipEach` predicted) and
+/// the server — the world every other player is served from — opens it
+/// too; closing it again closes it. Served `Accepted`, never torn down.
 #[test]
-#[ignore = "Mirror multiplayer gap (C3d run 18 item 0): a door/gate/trapdoor toggle is client-local in every mode — the game loop's toggle arm (game_loop.rs `is_toggleable` branch) only writes its own world's meta and sends nothing, so the server and every other player keep the door shut. The coordinator decides the fix; Mirror is unchanged in run 18."]
 fn c3d_mirror_joiner_door_toggle_reaches_the_server() {
     let mut m = mirror_joined("mirror-toggle");
     let bottom = [41, 80, 40];
     stand_door(&mut m.hs.server.world, bottom, crate::meta::Facing::North);
     stand_door(&mut m.world, bottom, crate::meta::Facing::North);
-    // The joiner's toggle, as the game loop's Mirror arm does it (run 18:
-    // the shared rule, `FlipEach`): both halves of its own door flipped
-    // open in its own world...
-    for (c, meta) in crate::strict_doors::toggle_metas(&m.world, [41, 80, 40], crate::strict_doors::OpenRule::FlipEach) {
-        m.world.set_meta((c[0], c[1], c[2]), meta);
+    for (click, open) in [([41, 80, 40], true), ([41, 81, 40], false)] {
+        assert_eq!(m.toggle(click), crate::action_identity::ActionFate::Accepted, "served");
+        for y in [80, 81] {
+            assert_eq!(m.open_on_client([41, y, 40]), open, "the joiner's own half at y={y}");
+            assert_eq!(m.open_on_server([41, y, 40]), open, "the server (and so every other player) sees the door at y={y} {}", if open { "open" } else { "shut" });
+        }
     }
-    assert!(crate::block_shape::is_open(m.world.meta_at(41, 80, 40)), "the joiner sees its door open");
-    // ...then its ordinary movement packet, which carries no change for it.
-    m.rc.send_input(&protocol::InputPacket::default());
-    for _ in 0..4 { m.pump(); }
+}
+
+/// Run 19: another joiner hears the door open (the server broadcasts the
+/// footprint it applied).
+#[test]
+fn c3d_mirror_joiner_door_toggle_reaches_a_second_joiner() {
+    let mut m = mirror_joined("mirror-toggle-second");
+    let (mut other, mut other_world) = second_joiner(&mut m);
+    for w in [&mut m.hs.server.world, &mut m.world, &mut other_world] { stand_door(w, [41, 80, 40], crate::meta::Facing::North); }
+    assert_eq!(m.toggle([41, 80, 40]), crate::action_identity::ActionFate::Accepted);
+    for _ in 0..3 {
+        m.pump();
+        other.poll();
+        for change in std::mem::take(&mut other.pending_block_changes) { other_world.apply_remote_block_change(&change); }
+    }
     for y in [80, 81] {
-        assert!(crate::block_shape::is_open(m.hs.server.world.meta_at(41, y, 40)), "the server (and so every other player) sees the door at y={y} open");
+        assert!(crate::block_shape::is_open(other_world.meta_at(41, y, 40)), "the second joiner sees the door at y={y} open");
+    }
+}
+
+/// Run 19: a toggle the server refuses (the door stands in someone else's
+/// plot) changes nothing on the server, is sent back — the joiner's door
+/// shuts again — and retires `Refused`, never torn down.
+#[test]
+fn c3d_mirror_joiner_toggle_in_a_foreign_plot_is_sent_back() {
+    let mut m = mirror_joined("mirror-toggle-plot");
+    m.hs.server.world.plots.push(crate::plot::PlotData { owner: crate::plot::PlotOwner::Npub("npub1someoneelse".into()), marker: (50, 80, 40), min_x: 36, max_x: 58, min_z: 30, max_z: 50 });
+    stand_door(&mut m.hs.server.world, [41, 80, 40], crate::meta::Facing::North);
+    stand_door(&mut m.world, [41, 80, 40], crate::meta::Facing::North);
+    assert_eq!(m.toggle([41, 80, 40]), crate::action_identity::ActionFate::Refused, "refused");
+    for y in [80, 81] {
+        assert!(!m.open_on_server([41, y, 40]), "the server's half at y={y} stays shut");
+        assert!(!m.open_on_client([41, y, 40]), "the joiner's half at y={y} was sent back shut");
+    }
+}
+
+/// Run 19: a double door opens whole (both halves of both doors), a
+/// trapdoor and a fence gate open, on the server and the joiner alike.
+#[test]
+fn c3d_mirror_joiner_toggles_a_double_door_a_trapdoor_and_a_gate() {
+    let mut m = mirror_joined("mirror-toggle-kinds");
+    for w in [&mut m.hs.server.world, &mut m.world] {
+        stand_door(w, [41, 80, 41], crate::meta::Facing::North);
+        stand_door(w, [42, 80, 41], crate::meta::Facing::North);
+        w.set_block(39, 80, 40, crate::block::OAK_TRAPDOOR);
+        w.set_block(40, 80, 42, crate::block::OAK_FENCE_GATE);
+        w.set_meta((40, 80, 42), crate::meta::with_facing(0, crate::meta::Facing::North));
+    }
+    let cases: [([i32; 3], Vec<[i32; 3]>); 3] = [
+        ([42, 81, 41], vec![[41, 80, 41], [41, 81, 41], [42, 80, 41], [42, 81, 41]]),
+        ([39, 80, 40], vec![[39, 80, 40]]),
+        ([40, 80, 42], vec![[40, 80, 42]]),
+    ];
+    for (click, cells) in cases {
+        assert_eq!(m.toggle(click), crate::action_identity::ActionFate::Accepted, "{click:?} served");
+        for c in cells {
+            assert!(m.open_on_server(c), "the server's cell {c:?} open after a click on {click:?}");
+            assert_eq!(m.world.meta_at(c[0], c[1], c[2]), m.hs.server.world.meta_at(c[0], c[1], c[2]), "client and server agree at {c:?}");
+        }
     }
 }
 
@@ -114,9 +223,13 @@ impl Joined {
 
     /// The game loop's Strict toggle arm: the typed `ToggleBlock`, then the
     /// server's canonical rule predicted in its world.
-    fn toggle(&mut self, cell: [i32; 3]) {
+    fn toggle(&mut self, cell: [i32; 3]) { self.toggle_from(cell, 0) }
+
+    /// [`Self::toggle`] with hotbar `slot` selected (run 19: its item sets
+    /// the reach).
+    fn toggle_from(&mut self, cell: [i32; 3], slot: usize) {
         let expected = self.world.get_block(cell[0], cell[1], cell[2]);
-        toggle_joined(&mut self.rc, &mut self.ui, &self.inv, &self.armour, &self.world, cell, expected).expect("reserved and sent");
+        toggle_joined(&mut self.rc, &mut self.ui, &self.inv, &self.armour, &self.world, cell, expected, slot).expect("reserved and sent");
         for (c, m) in toggle_metas(&self.world, cell, OpenRule::Canonical) { self.world.set_meta((c[0], c[1], c[2]), m); }
     }
 
@@ -274,4 +387,22 @@ fn c3d_strict_toggle_stale_block_is_stale_world_otherwise_rule() {
     j.assert_honest("out of reach");
     assert_eq!(j.refusals(), (1, 1, 0), "the same block out of reach is a rule refusal");
     assert!(!crate::block_shape::is_open(j.client_cell([47, 80, 47]).1), "corrected shut");
+}
+
+/// Run 19 — the toggle names its hotbar slot, so its reach is an edit's: the
+/// server copy's Reach Claw in that slot lengthens it (run 18's note), an
+/// empty slot does not (a corrected rule refusal), in Strict as in Mirror.
+#[test]
+fn c3d_strict_toggle_reach_uses_the_server_copys_slot_item() {
+    let claw = ItemStack { item: Item::Material(crate::item::MaterialId::ReachClaw), count: 1 };
+    let mut j = joined("door-claw", &[(0, claw)], false);
+    for w in [&mut j.hs.server.world, &mut j.world] { stand_door(w, [47, 80, 40], Facing::North); }
+    j.toggle_from([47, 80, 40], 1);
+    j.assert_honest("empty hand, 7 blocks");
+    assert!(!crate::block_shape::is_open(j.server_cell([47, 80, 40]).1), "out of bare-hand reach: shut");
+    assert_eq!(j.refusals(), (0, 1, 0), "a rule refusal");
+    j.toggle_from([47, 80, 40], 0);
+    j.assert_honest("Reach Claw, 7 blocks");
+    for y in [80, 81] { assert!(crate::block_shape::is_open(j.server_cell([47, y, 40]).1), "the Claw reaches: open at y={y}"); }
+    assert_eq!(j.refusals(), (0, 1, 0), "no further refusal");
 }

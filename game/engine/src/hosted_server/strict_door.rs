@@ -5,6 +5,10 @@
 //! the clicked primary only; the whole action refuses if any companion is
 //! forbidden. Refusals are corrected (the client predicted the door): the
 //! affected cells sent back, then the `Refused` row and one `Replace`.
+//!
+//! C3d run 19 — a Mirror joiner's toggle is a typed `ToggleBlock` too, served
+//! by the same arm under its own rule (`FlipEach`, uncorrected refusals), so
+//! a door opens for everyone.
 use super::*;
 use crate::action_identity::{ActionFate, ActionHeader};
 use crate::block::{AIR, OAK_DOOR};
@@ -148,27 +152,42 @@ impl HostedServer {
         self.strict_fold_holds(i, "door")
     }
 
-    /// Decision 20 — a typed toggle of `cell`'s door, gate or trapdoor: the
-    /// shared footprint derived from the server's world, the canonical open
-    /// bit from its primary, every cell's permission preflighted, reach to
-    /// the primary only. No window change. `false` stops the queue.
-    pub(super) fn serve_strict_toggle(&mut self, i: usize, action: ActionHeader, cell: [i32; 3], expected: crate::block::BlockId, budget: &mut EditTickBudget) -> bool {
+    /// A typed toggle of `cell`'s door, gate or trapdoor, from either kind
+    /// of seat: the shared footprint derived from the server's world, reach
+    /// to the primary with the server copy's item in `hotbar_slot` (an
+    /// edit's rule, `validate_block_edit`, so a Reach Claw counts; run 19),
+    /// every other cell's permission preflighted. No window change.
+    ///
+    /// Strict (Decision 20): the canonical open bit from the primary;
+    /// refusals corrected (`refuse_door`). Mirror (run 19): `FlipEach`, the
+    /// rule its client predicted, byte-for-byte the old local click; a
+    /// refusal sends the footprint back and retires `Refused`, uncorrected
+    /// (nothing in the window was predicted). `false` stops the queue.
+    pub(super) fn serve_toggle(&mut self, i: usize, action: ActionHeader, cell: [i32; 3], expected: crate::block::BlockId, hotbar_slot: u8, budget: &mut EditTickBudget) -> bool {
+        let strict = self.strict_slot(i);
         let block = self.server.world.get_block(cell[0], cell[1], cell[2]);
         let cells = crate::strict_doors::toggle_footprint(&self.server.world, cell);
+        let refuse = |hs: &mut Self, why: &str, kind: RefusalKind, budget: &mut EditTickBudget| -> bool {
+            if strict { return hs.refuse_door(i, action, &cells, budget, why, kind); }
+            log::debug!("Mirror toggle at {cell:?} refused: {why}");
+            hs.send_back_cells(&cells, budget);
+            hs.complete_typed_noop_at(i, action, ActionFate::Refused, &cells)
+        };
         // Run 15's rule: stale-world only when the block id differs.
-        if block != expected { return self.refuse_door(i, action, &cells, budget, "the cell no longer holds what the client toggled", RefusalKind::StaleWorld); }
-        if !crate::block_shape::is_toggleable(block) { return self.refuse_door(i, action, &cells, budget, "not a toggleable block", RefusalKind::Rule); }
-        // Reach to the primary, by the bare-hand rule (the wire names no slot).
-        let eye = self.server.players[i].player.eye_pos();
-        let d = glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5) - eye;
-        let (kind, id) = protocol::ItemRef::Empty.to_wire();
-        if !block_change_within_reach(d.length_squared(), kind, id, false) {
-            return self.refuse_door(i, action, &cells, budget, "out of reach", RefusalKind::Rule);
+        if block != expected { return refuse(self, "the cell no longer holds what the client toggled", RefusalKind::StaleWorld, budget); }
+        if !crate::block_shape::is_toggleable(block) { return refuse(self, "not a toggleable block", RefusalKind::Rule, budget); }
+        let slot = usize::from(hotbar_slot);
+        if slot >= 9 { return refuse(self, "invalid action slot", RefusalKind::Rule, budget); }
+        let rule = if strict { crate::strict_doors::OpenRule::Canonical } else { crate::strict_doors::OpenRule::FlipEach };
+        let metas = crate::strict_doors::toggle_metas(&self.server.world, cell, rule);
+        let held = self.server.players[i].inventory.slot(slot).map_or(protocol::ItemRef::Empty.to_wire(), |s| crate::inventory::item_to_ref(&s.item).to_wire());
+        let primary = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: block, meta: metas[0].1 };
+        if let Err(why) = self.validate_block_edit(i, &primary, held, slot) {
+            return refuse(self, &format!("primary: {why:?}"), RefusalKind::Rule, budget);
         }
-        if let Err(why) = self.all_permitted(i, &cells) {
-            return self.refuse_door(i, action, &cells, budget, &format!("{why:?}"), RefusalKind::Rule);
+        if let Err(why) = self.all_permitted(i, &cells[1..]) {
+            return refuse(self, &format!("{why:?}"), RefusalKind::Rule, budget);
         }
-        let metas = crate::strict_doors::toggle_metas(&self.server.world, cell, crate::strict_doors::OpenRule::Canonical);
         let included = self.server.players[i].window_events.last_number();
         let Some(result) = self.prepare_typed_result_at(i, action, ActionFate::Accepted, included, &cells) else {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Toggle result history is full"); return false;

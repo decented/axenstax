@@ -13885,15 +13885,29 @@ impl super::GameState {
                         // trapdoors and doors (a door's other half and any
                         // horizontally adjacent door open together, #29).
                         // C3d run 18 — the footprint is ONE shared rule
-                        // (`strict_doors::toggle_metas`): Mirror, the host and
-                        // single-player flip each cell exactly as before; a
-                        // Strict seat sends a typed `ToggleBlock` and predicts
-                        // the server's canonical open bit (Decision 20).
+                        // (`strict_doors::toggle_metas`); a Strict seat sends a
+                        // typed `ToggleBlock` and predicts the server's
+                        // canonical open bit (Decision 20).
+                        // C3d run 19 — the toggle reaches everyone: a Mirror
+                        // joiner sends a `ToggleBlock` too and predicts
+                        // `FlipEach` exactly as before (the server applies the
+                        // same rule); a host's (or single-player's) cells are
+                        // recorded like any of its edits, so its joiners hear
+                        // them (single-player discards them at the send).
+                        let slot = self.players[pidx].hotbar_slot;
                         let rule = if self.strict_remote(pidx) {
                             let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
                             let p = &mut self.players[pidx];
-                            match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &self.world, pos, target_blk) {
+                            match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &self.world, pos, target_blk, slot) {
                                 Ok(()) => Some(crate::strict_doors::OpenRule::Canonical),
+                                Err(error) => {
+                                    self.typed_edit_failed(error);
+                                    None
+                                }
+                            }
+                        } else if pidx == 0 && let Some(remote) = self.remote_client.as_mut() {
+                            match crate::strict_doors::reserve_toggle(remote, &self.world, pos, target_blk, slot) {
+                                Ok(()) => Some(crate::strict_doors::OpenRule::FlipEach),
                                 Err(error) => {
                                     self.typed_edit_failed(error);
                                     None
@@ -13902,9 +13916,14 @@ impl super::GameState {
                         } else {
                             Some(crate::strict_doors::OpenRule::FlipEach)
                         };
+                        let record = !self.joined();
                         if let Some(rule) = rule {
                             for (c, m) in crate::strict_doors::toggle_metas(&self.world, pos, rule) {
                                 self.world.set_meta((c[0], c[1], c[2]), m);
+                                if record {
+                                    let b = self.world.get_block(c[0], c[1], c[2]);
+                                    self.pending_block_changes.push(broadcast_change(&self.world, c[0], c[1], c[2], b));
+                                }
                                 self.rebuild_chunk_at(c[0], c[1], c[2]);
                             }
                         }

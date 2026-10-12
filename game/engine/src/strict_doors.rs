@@ -1,7 +1,8 @@
 //! C3d run 18 — Decision 20, the parts shared by the client and the server:
 //! the toggle footprint (one rule for the Mirror click, the Strict client's
 //! prediction and the Strict server arm), the door-place cells, and the
-//! Strict client's typed `DoorPlace` / `ToggleBlock` routes.
+//! Strict client's typed `DoorPlace` / `ToggleBlock` routes, and (run 19)
+//! the Mirror joiner's `ToggleBlock`.
 use crate::{
     armour::ArmourItem,
     block::{BlockId, OAK_DOOR},
@@ -115,16 +116,27 @@ pub fn place_door_joined(
     Ok(placed)
 }
 
-/// The Strict client's toggle click on `primary` (holding `expected`): ONE
-/// reserved `ToggleBlock`, sent; the caller then predicts
-/// [`toggle_metas`] with [`OpenRule::Canonical`] (the server's rule). No
-/// window change; the auto-refill setting goes first, as before every
-/// typed action, so both copies' windows agree.
+/// The Strict client's toggle click on `primary` (holding `expected`,
+/// hotbar `slot` selected): the auto-refill setting first, as before every
+/// typed action, so both copies' windows agree; then [`reserve_toggle`].
+/// The caller predicts [`toggle_metas`] with [`OpenRule::Canonical`] (the
+/// server's rule). No window change.
 #[allow(clippy::too_many_arguments)]
-pub fn toggle_joined(remote: &mut RemoteClient, ui: &mut CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], world: &World, primary: [i32; 3], expected: BlockId) -> Result<(), String> {
+pub fn toggle_joined(remote: &mut RemoteClient, ui: &mut CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], world: &World, primary: [i32; 3], expected: BlockId, slot: usize) -> Result<(), String> {
     ui.sync_auto_refill_joined(remote, inv, armour)?;
+    reserve_toggle(remote, world, primary, expected, slot)
+}
+
+/// C3d run 19 — a joined toggle click on `primary`: ONE reserved
+/// `ToggleBlock` naming the clicked cell, the block the client saw there
+/// and its selected hotbar `slot`, sent. A Mirror joiner calls this alone
+/// (no window op: a Mirror seat keeps its refill setting on its own path)
+/// and predicts [`OpenRule::FlipEach`] exactly as before; the server
+/// applies the same rule to its world and every other player hears it.
+pub fn reserve_toggle(remote: &mut RemoteClient, world: &World, primary: [i32; 3], expected: BlockId, slot: usize) -> Result<(), String> {
+    let hotbar_slot = u8::try_from(slot).ok().filter(|s| *s < 9).ok_or("A toggle needs a hotbar slot")?;
     let cells = toggle_footprint(world, primary).into_boxed_slice();
-    let intent = crate::action_wire::ActionIntent::ToggleBlock { cell: primary, expected_block: expected };
+    let intent = crate::action_wire::ActionIntent::ToggleBlock { cell: primary, expected_block: expected, hotbar_slot };
     let action = remote.reserve_action(intent, Box::new([]), cells)?;
     if let Err(error) = remote.send_reserved_action(action) {
         log::warn!("Reserved toggle {} could not be sent: {error}", action.seq);

@@ -3280,6 +3280,115 @@ mod tests {
         }
     }
 
+    /// C3d run 19 — a lending host opens its door (the REAL use arm, a
+    /// right-click): both halves reach a joiner open. (Before, the toggle
+    /// arm wrote its own world and recorded nothing: a joiner kept the door
+    /// shut.)
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_a_lending_hosts_door_toggle_reaches_a_joiner() {
+        use crate::transport::ClientTransport;
+        isolate_saves();
+        let name = "harness-lend-door-toggle";
+        let mut hg = HeadlessGame::boot_into_world(name);
+        let seed = hg.state.biome_gen.seed;
+        let hs = crate::hosted_server::HostedServer::start_host(
+            1,
+            name.to_string(),
+            seed,
+            0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+            crate::hosted_server::HostWorld::Lent,
+        )
+        .expect("lending host starts");
+        hg.state.hosted_server = Some(hs);
+        assert!(hg.state.sim_lent());
+        let client = hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+        let req = crate::remote_client::build_join_request_guest("Visitor", 0);
+        client.send_to_server(&crate::protocol::serialize_packet(crate::protocol::PacketType::JoinRequest, &req));
+        hg.hosted_ticks(8);
+        let feet = clear_pad(&mut hg, None);
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        hg.state.world.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+        hg.state.world.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+        hg.state.world.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        let hs = hg.state.hosted_server.as_mut().unwrap();
+        let joiner = hs.server.players.len() - 1;
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        hs.hold_column_for_test(joiner, (bottom[0].div_euclid(cs), bottom[2].div_euclid(cs)));
+        hg.hosted_ticks(2);
+        while client.try_recv_from_server().is_some() {}
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        hg.state.tick_accumulator = crate::TICK_DURATION;
+        right_click(&mut hg);
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "the host opened its half at {c:?}");
+        }
+        hg.hosted_ticks(3);
+        let mut seen = Vec::new();
+        while let Some(pkt) = client.try_recv_from_server() {
+            if let Some((crate::protocol::PacketType::StateUpdate, payload)) = crate::protocol::deserialize_header(&pkt)
+                && let Ok(s) = crate::protocol::safe_deserialize::<crate::protocol::StateUpdatePacket>(payload)
+            {
+                seen.extend(s.block_changes);
+            }
+        }
+        for c in [bottom, top] {
+            assert!(
+                seen.iter().any(|b| (b.x, b.y, b.z, b.new_block) == (c[0], c[1], c[2], crate::block::OAK_DOOR) && crate::block_shape::is_open(b.meta)),
+                "the joiner hears the half at {c:?} open: {seen:?}"
+            );
+        }
+    }
+
+    /// C3d run 19 — a Mirror joiner opens a door through the REAL use arm (a
+    /// right-click): ONE typed `ToggleBlock` reserved, its own door opened
+    /// (`FlipEach`, as before), and the dedicated server's door opens too,
+    /// served and retired.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_mirror_joiners_door_toggle_opens_the_servers_door() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-mirror-toggle");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-mirror-toggle-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Doorman", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Mirror);
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+            w.set_meta((bottom[0], bottom[1], bottom[2]), 0);
+            w.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+            w.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        }
+        for _ in 0..2 { harness_step(&mut server, &mut hg); }
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        right_click(&mut hg);
+        let toggles = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions()
+            .filter(|a| matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::ToggleBlock { cell, .. }) if cell == bottom))
+            .count();
+        assert_eq!(toggles(&hg), 1, "one ToggleBlock reserved");
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(hg.state.world.meta_at(c[0], c[1], c[2])), "the joiner opened its half at {c:?}");
+        }
+        for _ in 0..6 { harness_step(&mut server, &mut hg); }
+        for c in [bottom, top] {
+            assert!(crate::block_shape::is_open(server.server.world.meta_at(c[0], c[1], c[2])), "the server's half at {c:?} is open");
+        }
+        assert_eq!(toggles(&hg), 0, "the toggle retired");
+        assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
+    }
+
     // ─── C3c-3r ────────────────────────────────────────────────────────────
 
     /// C3c-3r — the toast text on a client now, if any.
