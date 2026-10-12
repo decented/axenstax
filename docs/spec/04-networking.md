@@ -6317,7 +6317,20 @@ resumer's wait, which read it at its old path) nor another process holds
 its handover lock; otherwise it is left for the next refresh. The folder
 name is the lobby's new-world naming (`save::slugify_folder_name` of the
 world's display name) with the `_2`, `_3`, … collision rule, applied to the
-"world" fallback too. After the rename both parent folders are fsynced
+"world" fallback too. CP19 (CP18 review MEDIUM-3 + LOW-1, DECIDED): a
+reserved name counts as taken whether or not it exists
+(`save::is_reserved_folder`, shared with `sanitize_folder_name`: the
+Workshop's `the_workshop`, the joined-world `remote_game`, and the Windows
+device names `con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any
+case, with or without an extension), so a world called "The Workshop" lands
+in `the_workshop_2`; past `_99` the time-stamped fallback is checked too.
+The move never replaces a folder at the target, even an empty one
+(`promote::rename_no_replace`: `renameat2(RENAME_NOREPLACE)` on Linux;
+Windows' `MoveFileExW` never replaces a directory; other Unix re-check the
+target just before `rename`, a residual race). Tests:
+`handover_promote_never_names_a_reserved_folder`,
+`handover_promote_rename_never_replaces_a_folder`,
+`handover_promote_a_world_named_the_workshop_gets_its_own_folder`. After the rename both parent folders are fsynced
 (`crate::fsync::sync_dir`). Idempotent: the rename is atomic, every import
 scan reads `working/handover/`, so a moved import vanishes from them all,
 and an import whose Activated transfer already has a world in the worlds

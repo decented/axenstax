@@ -54,7 +54,33 @@ pub type SyncDir = fn(&Path) -> std::io::Result<()>;
 /// Move every Activated, unquarantined, unheld import under `imports` into
 /// `worlds_root`. See the module docs.
 pub fn promote_activated_imports(imports: &Path, worlds_root: &Path) -> Promoted {
-    promote_with(imports, worlds_root, |from, to| std::fs::rename(from, to))
+    promote_with(imports, worlds_root, rename_no_replace)
+}
+
+/// CP19 (CP18 review MEDIUM-3 / LOW-1): the move never replaces a folder
+/// at the target, even an empty one someone else just made there. Linux:
+/// `renameat2(RENAME_NOREPLACE)`, atomic (EEXIST if anything is there).
+/// Windows: `MoveFileExW` never replaces a directory target (std's rename
+/// fails when a folder exists there). Other Unix: the target is checked
+/// absent just before the `rename` (a residual race, as `rename(2)` would
+/// replace an empty folder).
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let f = std::ffi::CString::new(from.as_os_str().as_bytes())?;
+        let t = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: two valid NUL-terminated paths; no memory is shared.
+        let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+        if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        std::fs::rename(from, to)
+    }
 }
 
 pub fn promote_with(imports: &Path, worlds_root: &Path, rename: Rename) -> Promoted {
@@ -224,14 +250,61 @@ fn display_name(working: &Path) -> String {
 /// its `_2`, `_3`, … collision rule, applied against `worlds_root` (not the
 /// global root) and to the "world" fallback too, which
 /// `save::sanitize_folder_name` returns without a collision check.
+///
+/// CP19 (CP18 review MEDIUM-3, LOW-1): a reserved name
+/// (`save::is_reserved_folder`: the Workshop, the joined-world folder,
+/// Windows device names) counts as taken, and the fallback past `_99` is
+/// checked too (time-stamped, then counted).
 fn free_folder(worlds_root: &Path, display: &str) -> String {
     let base = crate::save::slugify_folder_name(display);
-    let free = |c: &str| matches!(std::fs::symlink_metadata(worlds_root.join(c)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    let free = |c: &str| !crate::save::is_reserved_folder(c) && matches!(std::fs::symlink_metadata(worlds_root.join(c)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
     if free(&base) {
         return base;
     }
-    (2..100u32)
+    let stamp = std::time::UNIX_EPOCH.elapsed().unwrap_or_default().as_secs();
+    (2..100u64)
         .map(|i| format!("{base}_{i}"))
+        .chain((0..1000u64).map(|i| format!("{base}_{}", stamp + i)))
         .find(|c| free(c))
-        .unwrap_or_else(|| format!("{base}_{}", std::time::UNIX_EPOCH.elapsed().unwrap_or_default().as_secs()))
+        .unwrap_or_else(|| format!("world_{stamp}_{}", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    fn root(tag: &str) -> std::path::PathBuf {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let d = std::env::temp_dir().join(format!("axenstax-promote-{tag}-{}", hex::encode(r)));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// CP19 (CP18 review MEDIUM-3): reserved names are taken even when the
+    /// folder doesn't exist, so "The Workshop" never lands on the Workshop
+    /// and "CON"/"Lpt1.txt" never on a Windows device name.
+    #[test]
+    fn handover_promote_never_names_a_reserved_folder() {
+        let d = root("reserved");
+        for (display, want) in [("The Workshop", "the_workshop_2"), ("the workshop!", "the_workshop_2"), ("CON", "con_2"), ("Lpt1", "lpt1_2"), ("Remote Game", "remote_game_2"), ("Comet", "comet")] {
+            assert_eq!(super::free_folder(&d, display), want, "{display}");
+        }
+        assert!(crate::save::is_reserved_folder("nul.txt") && crate::save::is_reserved_folder("COM9") && !crate::save::is_reserved_folder("com10"));
+        assert!(!d.join("the_workshop").exists(), "the Workshop folder was made");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// CP19 (CP18 review LOW-1): the move never replaces an existing folder
+    /// at the target, even an empty one.
+    #[test]
+    fn handover_promote_rename_never_replaces_a_folder() {
+        let d = root("noreplace");
+        std::fs::create_dir_all(d.join("from")).unwrap();
+        std::fs::write(d.join("from").join("world.dat"), b"w").unwrap();
+        std::fs::create_dir_all(d.join("to")).unwrap();
+        assert!(super::rename_no_replace(&d.join("from"), &d.join("to")).is_err(), "the move replaced an empty folder");
+        assert!(d.join("from").join("world.dat").exists());
+        super::rename_no_replace(&d.join("from"), &d.join("free")).unwrap();
+        assert!(d.join("free").join("world.dat").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -2657,4 +2657,21 @@ mod tests {
         assert_eq!(crate::save::world_open_refusal(&listed[0].folder_name), None);
         let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
+
+    /// CP19 (CP18 review MEDIUM-3): a handed-over world called "The
+    /// Workshop" lands in its own listed folder, never the Workshop's (which
+    /// the recipient hasn't made yet, and still hasn't afterwards).
+    #[test]
+    fn handover_promote_a_world_named_the_workshop_gets_its_own_folder() {
+        let _root = crate::save::WorldsRootGuard::new("promote-workshop");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("workshop", "The Workshop", &relay);
+        activate_import(&imports, &working, t);
+        assert_eq!(promote_until_moved(&imports).moved, vec!["the_workshop_2".to_owned()]);
+        let root = crate::save::worlds_root();
+        assert!(!root.join(crate::workshop::WORKSHOP_FOLDER).exists(), "the handed-over world landed on the Workshop folder");
+        let listed = crate::save::list_world_entries();
+        assert_eq!(listed.iter().map(|e| e.folder_name.as_str()).collect::<Vec<_>>(), vec!["the_workshop_2"]);
+        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
+    }
 }

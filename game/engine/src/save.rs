@@ -3999,8 +3999,24 @@ fn slug_or_fallback(display_name: &str) -> Option<String> {
     Some(truncated.trim_end_matches('_').to_string())
 }
 
+/// CP19 (CP18 review MEDIUM-3, DECIDED): a folder name under the worlds
+/// folder that no world may be given, whether or not it exists yet: the
+/// game's own singleton folders (the Workshop, the joined-world scratch) and
+/// the Windows reserved device names (`con`, `prn`, `aux`, `nul`,
+/// `com1`–`com9`, `lpt1`–`lpt9`, any case, with or without an extension).
+pub fn is_reserved_folder(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower == crate::workshop::WORKSHOP_FOLDER || lower == crate::remote_client::JOINED_WORLD_FOLDER {
+        return true;
+    }
+    let stem = lower.split('.').next().unwrap_or("").trim_end_matches([' ', '_']);
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || ((stem.starts_with("com") || stem.starts_with("lpt")) && stem.len() == 4 && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
 /// Sanitize a display name into a valid folder name, deduplicated against the
-/// worlds directory (native) with a `_2`, `_3`, … suffix.
+/// worlds directory (native) with a `_2`, `_3`, … suffix. CP19: a reserved
+/// name (`is_reserved_folder`) counts as taken.
 pub fn sanitize_folder_name(display_name: &str) -> String {
     let Some(base) = slug_or_fallback(display_name) else {
         return "world".to_string();
@@ -4008,12 +4024,12 @@ pub fn sanitize_folder_name(display_name: &str) -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let worlds_dir = worlds_root();
-        if !worlds_dir.join(&base).exists() {
+        if !is_reserved_folder(&base) && !worlds_dir.join(&base).exists() {
             return base;
         }
         for i in 2..100 {
             let candidate = format!("{base}_{i}");
-            if !worlds_dir.join(&candidate).exists() {
+            if !is_reserved_folder(&candidate) && !worlds_dir.join(&candidate).exists() {
                 return candidate;
             }
         }
