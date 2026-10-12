@@ -4006,12 +4006,29 @@ fn slug_or_fallback(display_name: &str) -> Option<String> {
 /// `com1`–`com9`, `lpt1`–`lpt9`, any case, with or without an extension).
 pub fn is_reserved_folder(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
+    if is_arena_folder(&lower) {
+        return true;
+    }
     if lower == crate::workshop::WORKSHOP_FOLDER || lower == crate::remote_client::JOINED_WORLD_FOLDER {
         return true;
     }
     let stem = lower.split('.').next().unwrap_or("").trim_end_matches([' ', '_']);
     matches!(stem, "con" | "prn" | "aux" | "nul")
         || ((stem.starts_with("com") || stem.starts_with("lpt")) && stem.len() == 4 && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// CP21 (CP19 review HIGH-1, DECIDED): the Trial arena family
+/// (`scenario::experience_world_slug`: `exp-<slug>`, and KeepNew's
+/// `exp-<slug>-<seed>`), any case. A Reuse Trial wipes its folder on every
+/// launch, so no other world may ever be named into it.
+pub fn is_arena_folder(name: &str) -> bool {
+    name.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("exp-"))
+}
+
+/// A slug in the arena family moves out of it (`Exp-Hash-Dash` →
+/// `Exp_Hash-Dash`), so a world with that name still gets a readable folder.
+pub fn off_arena_folder(base: String) -> String {
+    if is_arena_folder(&base) { format!("{}_{}", &base[..3], &base[4..]) } else { base }
 }
 
 /// Sanitize a display name into a valid folder name, deduplicated against the
@@ -4021,6 +4038,7 @@ pub fn sanitize_folder_name(display_name: &str) -> String {
     let Some(base) = slug_or_fallback(display_name) else {
         return "world".to_string();
     };
+    let base = off_arena_folder(base);
     #[cfg(not(target_arch = "wasm32"))]
     {
         let worlds_dir = worlds_root();

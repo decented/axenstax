@@ -275,7 +275,7 @@ fn display_name(working: &Path) -> String {
 /// Windows device names) counts as taken, and the fallback past `_99` is
 /// checked too (time-stamped, then counted).
 fn free_folder(worlds_root: &Path, display: &str) -> String {
-    let base = crate::save::slugify_folder_name(display);
+    let base = crate::save::off_arena_folder(crate::save::slugify_folder_name(display));
     let free = |c: &str| !crate::save::is_reserved_folder(c) && matches!(std::fs::symlink_metadata(worlds_root.join(c)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
     if free(&base) {
         return base;
@@ -309,6 +309,14 @@ mod tests {
         }
         assert!(crate::save::is_reserved_folder("nul.txt") && crate::save::is_reserved_folder("COM9") && !crate::save::is_reserved_folder("com10"));
         assert!(!d.join("the_workshop").exists(), "the Workshop folder was made");
+        // CP21 (CP19 review HIGH-1): never a Trial arena's folder, any case;
+        // the world still gets a readable, non-`exp-` folder.
+        for (display, want) in [("Exp-Hash-Dash", "exp_hash-dash"), ("exp-satori-rush", "exp_satori-rush"), ("Expedition", "expedition")] {
+            let got = super::free_folder(&d, display);
+            assert_eq!(got, want, "{display}");
+            assert!(!crate::save::is_arena_folder(&got), "{display} landed on a Trial arena folder: {got}");
+        }
+        assert!(crate::save::is_reserved_folder("EXP-hash-dash") && crate::save::is_reserved_folder("exp-hash-dash-0000beef"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

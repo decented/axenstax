@@ -300,12 +300,24 @@ pub(crate) fn server_refusal_message(name: &str, why: &str) -> String {
 /// (`save::world_open_refusal`) or a folder that can't be checked — then
 /// nothing is wiped, created or entered. Reads only.
 #[cfg(not(target_arch = "wasm32"))]
+/// CP21 (CP19 review HIGH-1): the Trial's folder holds a handed-over world.
+pub(crate) const ARENA_HOLDS_A_HANDOVER: &str =
+    "This Trial's folder holds a world that was handed over, so the Trial won't start there. That world is safe in your world list.";
+
 pub(crate) fn plan_arena_folder(
     mode: crate::scenario::ArenaMode,
     name: &str,
 ) -> Result<crate::scenario::ArenaLaunch, String> {
     if let Some(why) = crate::save::world_open_refusal(name) {
         return Err(why);
+    }
+    // CP21 (CP19 review HIGH-1, defence in depth): a folder carrying
+    // handover records is a handed-over (or handing-over) world, never an
+    // arena: the Trial refuses rather than open or wipe it.
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::fs::symlink_metadata(crate::save::world_dir(name).join("handover")).is_ok() {
+        log::warn!("Trial arena '{name}' carries handover records; the Trial won't open or wipe it");
+        return Err(ARENA_HOLDS_A_HANDOVER.to_owned());
     }
     let on_disk = !is_new_world(name).map_err(|why| crate::save_format::unopenable_message(&why))?;
     Ok(crate::scenario::plan_arena_launch(mode, on_disk))
@@ -846,6 +858,19 @@ mod tests {
             assert!(err.contains("world.dat can't be read"), "{mode:?}: {err}");
         }
         assert_eq!(snapshot(&d), before);
+        // CP21 (CP19 review HIGH-1): a folder carrying handover records is
+        // never opened or wiped as an arena, whatever the mode.
+        let h = saved_world("exp-hash-dash");
+        fs::create_dir(h.join("handover")).unwrap();
+        // The lock file every handed-over world carries (an Activated
+        // world passes the open guard, so only this rule stands in the way).
+        fs::write(h.join("handover").join(".live"), b"").unwrap();
+        assert_eq!(crate::save::world_open_refusal("exp-hash-dash"), None);
+        let before = snapshot(&h);
+        for mode in [ArenaMode::Reuse, ArenaMode::Resume, ArenaMode::KeepNew] {
+            assert_eq!(plan_arena_folder(mode, "exp-hash-dash"), Err(ARENA_HOLDS_A_HANDOVER.to_owned()), "{mode:?}");
+        }
+        assert_eq!(snapshot(&h), before, "a handed-over world in an arena folder was touched");
     }
 
     /// A world with chunks in several columns, several chunks tall — every

@@ -211,8 +211,13 @@ pub fn import_profile_world(bytes: &[u8], entry_name: &str) -> Result<(String, b
     let mut world = World::new();
     let (meta, save, images) = unpack_world_for_import(bytes, &mut world)?;
 
-    let base_slug = slugify_folder_name(entry_name);
-    let final_name = keep_both_name(&base_slug, &existing_world_folders()?);
+    // CP21 (CP19 review HIGH-1): never a Trial arena's or a reserved folder.
+    let base_slug = crate::save::off_arena_folder(slugify_folder_name(entry_name));
+    let mut taken = existing_world_folders()?;
+    if crate::save::is_reserved_folder(&base_slug) {
+        taken.push(base_slug.clone());
+    }
+    let final_name = keep_both_name(&base_slug, &taken);
     let renamed = final_name != base_slug;
 
     write_unpacked_world(&final_name, &base_slug, meta, &save, &world, &images)?;

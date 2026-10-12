@@ -6333,10 +6333,21 @@ world's display name) with the `_2`, `_3`, … collision rule, applied to the
 "world" fallback too. CP19 (CP18 review MEDIUM-3 + LOW-1, DECIDED): a
 reserved name counts as taken whether or not it exists
 (`save::is_reserved_folder`, shared with `sanitize_folder_name`: the
-Workshop's `the_workshop`, the joined-world `remote_game`, and the Windows
+Workshop's `the_workshop`, the joined-world `remote_game`, every Trial arena folder
+(CP21, CP19 review HIGH-1: any name starting `exp-`, any case — `exp-<slug>` and KeepNew's
+`exp-<slug>-<seed>`; a slug in that family moves out of it, "Exp-Hash-Dash" →
+`exp_hash-dash`, via `save::off_arena_folder`, used by promotion, new worlds and the web-zip
+import), and the Windows
 device names `con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any
 case, with or without an extension), so a world called "The Workshop" lands
-in `the_workshop_2`; past `_99` the time-stamped fallback is checked too.
+in `the_workshop_2`; past `_99` the time-stamped fallback is checked too. Defence in
+depth: a Trial never opens or wipes a folder carrying `handover/`
+(`world_open::plan_arena_folder` refuses with `ARENA_HOLDS_A_HANDOVER` and the player stays
+in the lobby; the lobby's own Delete still deletes such a world — it is the player's).
+Folder families the game makes under the worlds folder (CP21 grep): `the_workshop`,
+`remote_game`, `exp-*` arenas, the dedicated server's `.identity` (no slug starts with `.`).
+Tests: `handover_promote_never_names_a_reserved_folder` ("Exp-Hash-Dash"),
+`an_arena_is_planned_from_the_disk_and_planning_writes_nothing`.
 The move never replaces a folder at the target, even an empty one
 (`promote::rename_no_replace` → `handover::rename::no_replace`:
 `renameat2(RENAME_NOREPLACE)` on Linux; Windows' `MoveFileExW` never replaces a directory;
