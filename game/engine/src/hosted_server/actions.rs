@@ -154,7 +154,12 @@ impl HostedServer {
                 // C3d run 19 — a Mirror seat's typed action (a toggle, its
                 // only one) predicts no window: its cells go back, no
                 // whole-window correction.
-                if !stale_base && self.strict_slot(i) { self.queue_correction_replace(i); }
+                // Run 20 (run-19 review LOW-2) — nor does a Strict toggle:
+                // it predicted no window either (M1: a toggle never costs a
+                // correction), so a dead body's superseded toggle gets its
+                // cells back and no `Replace`.
+                let predicted_window = !matches!(packet.intent, ActionIntent::ToggleBlock { .. });
+                if !stale_base && predicted_window && self.strict_slot(i) { self.queue_correction_replace(i); }
                 continue;
             }
             match packet.intent {

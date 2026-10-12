@@ -65,7 +65,12 @@ pub fn toggle_sendback_cells(world: &World, primary: [i32; 3], expected: BlockId
     if expected == OAK_DOOR {
         for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
             for dy in [0, -1, 1] {
-                let c = [primary[0] + dx, primary[1] + dy, primary[2] + dz];
+                // Run 20 (run-19 review LOW-1): the primary is the client's
+                // raw wire cell, not yet validated — a neighbour past
+                // `i32`'s range is skipped (no overflow panic in a debug
+                // build; nothing there to send back).
+                let (Some(x), Some(y), Some(z)) = (primary[0].checked_add(dx), primary[1].checked_add(dy), primary[2].checked_add(dz)) else { continue };
+                let c = [x, y, z];
                 if !cells.contains(&c) { cells.push(c); }
             }
         }
@@ -309,6 +314,19 @@ mod tests {
         assert!(toggle_preflight(crate::play_mode::PlayMode::Adventure, eye, [5, 70, 5], None).is_ok());
         assert!(toggle_preflight(crate::play_mode::PlayMode::Spectator, eye, [5, 70, 5], None).is_ok());
         assert!(toggle_preflight(crate::play_mode::PlayMode::Survival, eye, [5, 70, 12], None).is_err(), "9.5 blocks bare-handed");
+    }
+
+    /// Run 20 (run-19 review LOW-1) — a crafted toggle cell at the edge of
+    /// `i32` never panics the send-back (overflow checks are on in debug
+    /// and test builds); the neighbours past the range are skipped.
+    #[test]
+    fn c3d_toggle_sendback_of_a_crafted_edge_cell_does_not_overflow() {
+        let w = World::new();
+        let cells = toggle_sendback_cells(&w, [i32::MAX, i32::MIN, i32::MAX], OAK_DOOR);
+        assert_eq!(cells[0], [i32::MAX, i32::MIN, i32::MAX], "the primary itself");
+        assert_eq!(cells.len(), 6, "only the neighbours inside the range: (0,0,0), (-1,0,0), (0,0,-1) at dy 0 and +1");
+        let cells = toggle_sendback_cells(&w, [i32::MIN, i32::MAX, i32::MIN], OAK_DOOR);
+        assert_eq!(cells.len(), 6, "mirrored at the other edges");
     }
 
     #[test]

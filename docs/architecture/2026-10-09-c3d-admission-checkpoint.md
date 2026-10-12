@@ -766,3 +766,8 @@ A Strict `SetAutoRefill` the server's copy can't reproduce (its digest) is a typ
   joiner's waiting edits (`hosted_server.rs` read loop,
   `is_typed_action`). Residue: a toggle already deferred on the item budget
   can run after later edits (world only, refused + sent back if stale).
+- Run-19 review LOWs: LOW-1 checked neighbour arithmetic in
+  `toggle_sendback_cells`; LOW-2 no correction `Replace` for a superseded
+  toggle (either mode); LOW-3 the held-click test paced (25 clicks / 200
+  ticks, `CorrectionRate` untouched); LOW-4 an accepted toggle sends back
+  the union less its footprint (ghost companions); LOW-5 notes in Spec 04.

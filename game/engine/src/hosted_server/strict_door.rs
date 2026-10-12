@@ -234,6 +234,13 @@ impl HostedServer {
             self.pending_block_changes.push(protocol::BlockChange { x: c[0], y: c[1], z: c[2], new_block: b, meta: m });
             if self.lends_host_world() { self.lent_edit_cells.push(pos); }
         }
+        // Run 20 (run-19 review LOW-4) — a cell only the client's footprint
+        // could hold (a door half or neighbour its stale world has and the
+        // server's lacks) was flipped by its prediction and nothing else
+        // corrects it: send those back as the server holds them (at most
+        // 15 cells, the refusal's union less the footprint just broadcast).
+        let ghosts: Vec<[i32; 3]> = back.into_iter().filter(|c| !cells.contains(c)).collect();
+        self.send_back_cells(&ghosts, budget);
         self.complete_typed_result(i, action, ActionFate::Accepted, result);
         true
     }

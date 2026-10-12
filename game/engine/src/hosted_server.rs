@@ -59,6 +59,8 @@ mod c3d_wear_target_tests;
 mod c3d_door_tests;
 #[cfg(test)]
 mod c3d_mirror_toggle_tests;
+#[cfg(test)]
+mod c3d_door_review_tests;
 
 use std::collections::VecDeque;
 

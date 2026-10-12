@@ -68,7 +68,7 @@ impl MirrorJoined {
     /// The game loop's Mirror toggle arm (run 19): ONE reserved
     /// `ToggleBlock` (hotbar slot 0), then `FlipEach` predicted in its own
     /// world exactly as before. Pumped until the receipt retires.
-    fn toggle(&mut self, cell: [i32; 3]) -> crate::action_identity::ActionFate {
+    pub(super) fn toggle(&mut self, cell: [i32; 3]) -> crate::action_identity::ActionFate {
         let expected = self.world.get_block(cell[0], cell[1], cell[2]);
         crate::strict_doors::reserve_toggle(&mut self.rc, &self.world, cell, expected, 0).expect("reserved and sent");
         for (c, meta) in crate::strict_doors::toggle_metas(&self.world, cell, crate::strict_doors::OpenRule::FlipEach) {
@@ -85,8 +85,8 @@ impl MirrorJoined {
         self.fates[before]
     }
 
-    fn open_on_server(&self, c: [i32; 3]) -> bool { crate::block_shape::is_open(self.hs.server.world.meta_at(c[0], c[1], c[2])) }
-    fn open_on_client(&self, c: [i32; 3]) -> bool { crate::block_shape::is_open(self.world.meta_at(c[0], c[1], c[2])) }
+    pub(super) fn open_on_server(&self, c: [i32; 3]) -> bool { crate::block_shape::is_open(self.hs.server.world.meta_at(c[0], c[1], c[2])) }
+    pub(super) fn open_on_client(&self, c: [i32; 3]) -> bool { crate::block_shape::is_open(self.world.meta_at(c[0], c[1], c[2])) }
 }
 
 /// A second Mirror guest joined to `m`'s server, its column held: its
@@ -254,11 +254,11 @@ impl Joined {
 
     /// The game loop's Strict toggle arm: the typed `ToggleBlock`, then the
     /// server's canonical rule predicted in its world.
-    fn toggle(&mut self, cell: [i32; 3]) { self.toggle_from(cell, 0) }
+    pub(super) fn toggle(&mut self, cell: [i32; 3]) { self.toggle_from(cell, 0) }
 
     /// [`Self::toggle`] with hotbar `slot` selected (run 19: its item sets
     /// the reach).
-    fn toggle_from(&mut self, cell: [i32; 3], slot: usize) {
+    pub(super) fn toggle_from(&mut self, cell: [i32; 3], slot: usize) {
         let expected = self.world.get_block(cell[0], cell[1], cell[2]);
         toggle_joined(&mut self.rc, &mut self.ui, &self.inv, &self.armour, &self.world, cell, expected, slot).expect("reserved and sent");
         for (c, m) in toggle_metas(&self.world, cell, OpenRule::Canonical) { self.world.set_meta((c[0], c[1], c[2]), m); }
@@ -275,10 +275,10 @@ impl Joined {
         for y in [cell[1], pair_y] { self.world.set_block(cell[0], y, cell[2], AIR); self.world.set_meta((cell[0], y, cell[2]), 0); }
     }
 
-    fn server_cell(&self, c: [i32; 3]) -> (u16, u8) { (self.hs.server.world.get_block(c[0], c[1], c[2]), self.hs.server.world.meta_at(c[0], c[1], c[2])) }
-    fn client_cell(&self, c: [i32; 3]) -> (u16, u8) { (self.world.get_block(c[0], c[1], c[2]), self.world.meta_at(c[0], c[1], c[2])) }
+    pub(super) fn server_cell(&self, c: [i32; 3]) -> (u16, u8) { (self.hs.server.world.get_block(c[0], c[1], c[2]), self.hs.server.world.meta_at(c[0], c[1], c[2])) }
+    pub(super) fn client_cell(&self, c: [i32; 3]) -> (u16, u8) { (self.world.get_block(c[0], c[1], c[2]), self.world.meta_at(c[0], c[1], c[2])) }
     fn server_doors(&self) -> u32 { self.sp().inventory.slots_iter().flatten().filter(|s| s.item == Item::Block(OAK_DOOR)).map(|s| u32::from(s.count)).sum() }
-    fn refusals(&self) -> (u32, u32, u32) { let t = self.sp().strict_refusals; (t.stale_world, t.other, t.world_fact) }
+    pub(super) fn refusals(&self) -> (u32, u32, u32) { let t = self.sp().strict_refusals; (t.stale_world, t.other, t.world_fact) }
 }
 
 trait Routed2 { fn is_typed(&self) -> bool; }
@@ -462,19 +462,26 @@ fn c3d_strict_toggle_reach_uses_the_server_copys_slot_item() {
 
 /// Run-18 review M1 — a refused toggle never costs a window correction: an
 /// honest Strict joiner holding right-click on a door in someone else's
-/// plot (twelve refused clicks inside a few ticks, past the correction
-/// bound's 8 per 100 ticks) is never torn down, draws no `Replace`, and its
-/// door ends shut as the server holds it.
+/// plot is never torn down, draws no `Replace`, and its door ends shut as
+/// the server holds it. Run 20 (run-19 review LOW-3): the hold is paced as
+/// the game loop paces it — a click every 8 ticks for 200 ticks, each on a
+/// fresh base after the last one's send-back — so 25 refusals land well
+/// past the correction bound's 8 per 100 ticks, and no correction is ever
+/// admitted.
 #[test]
 fn c3d_strict_held_toggle_in_a_foreign_plot_never_tears_down() {
     let mut j = joined("door-held-plot", &[], false);
     j.hs.server.world.plots.push(crate::plot::PlotData { owner: crate::plot::PlotOwner::Npub("npub1someoneelse".into()), marker: (50, 80, 40), min_x: 36, max_x: 58, min_z: 30, max_z: 50 });
     for w in [&mut j.hs.server.world, &mut j.world] { stand_door(w, [41, 80, 40], Facing::North); }
-    for _ in 0..12 { j.toggle([41, 80, 40]); }
-    for _ in 0..10 { j.pump(); }
+    for click in 0..25 {
+        assert!(!j.hs.disconnected[j.i], "never torn down (before click {click})");
+        j.toggle([41, 80, 40]);
+        for _ in 0..8 { j.pump(); }
+    }
     assert!(!j.hs.disconnected[j.i], "never torn down");
+    assert_eq!(j.sp().strict_corrections, crate::strict_admission::CorrectionRate::default(), "no correction Replace ever admitted");
     assert!(j.hs.server.players[j.i].window_events.death_replace.is_none(), "no correction Replace outstanding");
-    assert_eq!(j.refusals(), (0, 12, 0), "twelve rule refusals, tallied");
+    assert_eq!(j.refusals(), (0, 25, 0), "25 rule refusals, tallied");
     for c in [[41, 80, 40], [41, 81, 40]] {
         assert!(!crate::block_shape::is_open(j.client_cell(c).1), "the client's half at {c:?} ends shut");
         assert_eq!(j.client_cell(c), j.server_cell(c), "as the server holds it");
