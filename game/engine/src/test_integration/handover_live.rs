@@ -2596,8 +2596,10 @@ mod session {
     /// the abort record through the choke point, publishes the Aborted on
     /// the relay fixture, and the recipient past its ack quarantines
     /// instead of waiting forever. The world opens, the pending record is
-    /// gone, and nothing on disk holds the bearer (invitations are never
-    /// persisted: the restarted host's invitation is a fresh one).
+    /// gone, and no file under the world or imports trees holds the bearer.
+    /// CP16 (CP15 review LOW-4): that is all this test shows; the invite
+    /// "rotation" at a restart is structural (invitations are never
+    /// persisted, `OnlineHost::start` mints a fresh one), checked by grep.
     #[test]
     fn handover_a_source_killed_after_disclosure_is_promoted_at_start_up() {
         use crate::handover::live::{authority, resumer::Resumer};
@@ -2667,13 +2669,14 @@ mod session {
     /// CP15 (c): the pending abort record can't be written: the handover
     /// stops before anything leaves (no bearer frame, no invitation to
     /// rotate), the source unfreezes, and no record is left behind.
-    #[test]
-    fn handover_a_pending_abort_record_that_cant_be_written_discloses_nothing() {
-        use crate::handover::durable::{MarkerKind, WriteBoundary, fault};
+    /// CP16 (CP15 review LOW-5): also at `Renamed` (the record landed, its
+    /// directory fsync failed): the landed record is withdrawn.
+    fn pending_unwritten(tag: &str, at: crate::handover::durable::WriteBoundary) {
+        use crate::handover::durable::{MarkerKind, fault};
         use crate::handover::live::{authority, copy};
-        let mut p = ready_pair("pending-unwritten");
+        let mut p = ready_pair(tag);
         let t = p.src.transfer();
-        fault::arm(MarkerKind::PendingAbort, WriteBoundary::TempSynced);
+        fault::arm(MarkerKind::PendingAbort, at);
         let r = p.src.pump(&mut p.hs, p.live, now());
         assert_eq!(r.map_err(|e| e.0), Err(copy::PENDING_ABORT_UNWRITTEN), "the handover didn't stop on the unwritten pending abort");
         assert!(matches!(p.src.stage(), SourceStage::Aborted(_)), "{:?}", p.src.stage());
@@ -2682,8 +2685,19 @@ mod session {
         p.host.lend_tick(&mut p.hs);
         let _ = p.dst.as_mut().unwrap().pump(now());
         assert!(!frames_for_seat_hold_bearer(&p), "a bearer frame reached the recipient");
-        assert!(!source_record(&p.dir, "pending-abort", t).exists() && !source_record(&p.dir, "aborted", t).exists());
+        assert!(
+            !source_record(&p.dir, "pending-abort", t).exists() && !source_record(&p.dir, "aborted", t).exists(),
+            "a pending abort record was left behind ({at:?})"
+        );
         assert!(authority::open_guard(&p.dir.0.join("world")).is_ok());
+    }
+    #[test]
+    fn handover_a_pending_abort_record_that_cant_be_written_discloses_nothing() {
+        pending_unwritten("pending-unwritten", crate::handover::durable::WriteBoundary::TempSynced);
+    }
+    #[test]
+    fn handover_a_pending_abort_record_that_landed_uncertain_is_withdrawn() {
+        pending_unwritten("pending-uncertain", crate::handover::durable::WriteBoundary::Renamed);
     }
     /// CP15 (CP13b review LOW-4): exclusivity defeated (a valid Aborted
     /// and a valid Committed of one transfer), the Aborted on the relay
