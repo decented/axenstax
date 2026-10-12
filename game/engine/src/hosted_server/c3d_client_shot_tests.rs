@@ -222,6 +222,9 @@ fn c3d_client_strict_early_shot_is_refused_uncorrected() {
 
 /// C3d run 17 (run-16 review LOW-1) — the observed guard on a shot: an
 /// honest Strict shot predicts nothing; ammo taken locally trips it.
+// Run-18 review M2: `NoPrediction` is debug-only, so this runs only
+// under `debug_assertions` (`./check.sh --release` skips it).
+#[cfg(debug_assertions)]
 #[test]
 fn c3d_strict_no_prediction_guard_trips_on_a_predicted_shot() {
     use crate::strict_requests::NoPrediction;

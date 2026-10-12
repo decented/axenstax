@@ -516,6 +516,9 @@ fn c3d_strict_attack_at_the_result_cap_has_zero_external_effect() {
 /// `ActionIntent::predicts_nothing`: an honest Strict swing leaves the
 /// joined window's digest as it was until its answer, and a predicting path
 /// (the weapon worn locally, as a single-player hit does) trips it.
+// Run-18 review M2: `NoPrediction` is debug-only, so this runs only
+// under `debug_assertions` (`./check.sh --release` skips it).
+#[cfg(debug_assertions)]
 #[test]
 fn c3d_strict_no_prediction_guard_trips_on_a_predicted_swing_wear() {
     use crate::strict_requests::NoPrediction;

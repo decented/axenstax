@@ -2892,6 +2892,8 @@ mod tests {
         let t = sp.strict_refusals;
         assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "no Strict refusal");
         // Run-17 review LOW-1 — the game loop's shot bracket really compared.
+        // Run-18 review M2: the guard is debug-only (a release run skips this).
+        #[cfg(debug_assertions)]
         assert!(crate::strict_requests::checked::seen().contains(&"shot"), "the shot's NoPrediction bracket ran");
     }
 
