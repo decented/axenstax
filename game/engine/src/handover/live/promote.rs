@@ -45,15 +45,71 @@ use std::path::{Path, PathBuf};
 
 static ACTIVATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// CP20: a recipient import reached Activated (called by
-/// `Receiver::activate` and its restart path).
+#[cfg(test)]
+thread_local! {
+    /// Tests: the activations noted on this thread (the process-wide count
+    /// also moves with every other test's activations).
+    static THREAD_ACTIVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// CP20: a recipient import reached Activated. CP22 (CP21 review MEDIUM-1,
+/// DECIDED): called only on `Receiver::activate`'s real transition, never
+/// when a restart or a status read finds an import already Activated (boot
+/// and lobby entry promote those anyway), so the lobby's pass runs once per
+/// activation, not every frame.
 pub fn note_activated() {
     ACTIVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    THREAD_ACTIVATIONS.with(|c| c.set(c.get() + 1));
 }
 
 /// CP20: how many imports have reached Activated in this process.
 pub fn activations() -> u64 {
     ACTIVATIONS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Tests: `activations` as noted on this thread only.
+#[cfg(test)]
+pub fn activations_on_this_thread() -> u64 {
+    THREAD_ACTIVATIONS.with(|c| c.get())
+}
+
+/// CP22 (CP21 review MEDIUM-1, DECIDED): when the lobby runs a promotion
+/// pass. Due once per new activation, then again on the 500 ms cadence only
+/// while the last pass found an Activated import whose lock is still held
+/// (its holder lets go a moment after Activated). An import that stays
+/// unmoved for any other reason (a twin, another drive, a failed move)
+/// costs nothing per frame: it is tried again at the next lobby entry,
+/// refresh or activation.
+#[derive(Debug)]
+pub struct LobbyPoll {
+    seen: u64,
+    retry: Option<std::time::Instant>,
+}
+
+impl LobbyPoll {
+    /// The retry cadence while an import's lock is held.
+    pub const RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// `seen`: the activation count read before the lobby's entry pass;
+    /// `held`: that pass found a held import.
+    pub fn new(seen: u64, held: bool, now: std::time::Instant) -> Self {
+        Self { seen, retry: held.then_some(now) }
+    }
+
+    /// Whether a pass is due now, given the current activation count.
+    pub fn due(&mut self, activations: u64, now: std::time::Instant) -> bool {
+        if activations != self.seen {
+            self.seen = activations;
+            return true;
+        }
+        self.retry.is_some_and(|t| now.duration_since(t) >= Self::RETRY)
+    }
+
+    /// Record a pass's outcome.
+    pub fn ran(&mut self, promoted: &Promoted, now: std::time::Instant) {
+        self.retry = promoted.held.then_some(now);
+    }
 }
 
 /// What one promotion pass did.

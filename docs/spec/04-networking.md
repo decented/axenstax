@@ -6317,12 +6317,18 @@ lists as an ordinary world card, and Play, Host and Fork work on it as on a
 world made here. It runs on the main thread only, at start-up (after the
 resumer's boot step), on lobby entry and every lobby refresh, before the list is read;
 never on the resumer's thread. CP20/CP21 (CP18 review MEDIUM-1): the lobby also
-refreshes itself when a handover activates while it is up. `Receiver::activate` (and its
-restart path) bumps a process-wide counter (`promote::note_activated`); each lobby frame
-`MenuState::poll_handovers` compares it, and on a change promotes and re-lists IN PLACE
-(the open dialog and page stay; the selection follows its folder name). An import skipped
-because its lock is still held here (the session lets go a moment after Activated) is
-retried every 500 ms until it moves. A player in the lobby sees the "Waiting for…" line
+refreshes itself when a handover activates while it is up. `Receiver::activate`'s real
+transition (its `Ok(true)`, never a restart or a status read that finds an import already
+Activated; CP22, CP21 review MEDIUM-1) bumps a process-wide counter
+(`promote::note_activated`); each lobby frame `MenuState::poll_handovers` asks
+`promote::LobbyPoll`, and once per new activation promotes and re-lists IN PLACE
+(the open dialog and page stay; the selection follows its folder name), also whenever the
+waiting lines changed (CP21 review LOW-1: another process may have moved the world in).
+An import skipped because its lock is still held (the session lets go a moment after
+Activated) is retried every 500 ms while held; an import that stays unmoved for any other
+reason (a twin, another drive, a failed move) costs nothing per frame and is tried again at
+the next lobby entry, refresh or activation (test
+`handover_promote_a_stuck_import_runs_no_pass_per_lobby_frame`). A player in the lobby sees the "Waiting for…" line
 replaced by the world's card without leaving the lobby. An import is moved only when it holds an
 Activated record, has no `quarantined-*` record, passes the open guard, and
 no holder in this process (`world_lock::held_here`: the live session or the
@@ -6381,8 +6387,8 @@ world list shows `copy::import_on_other_drive` ("Move one of them so both are on
 same drive"; CP20, CP18 review LOW-6: the line names no environment variable). CP20
 (CP18 review LOW-2): an Activated import that stays put says why in the world list:
 a damaged handover record (`copy::import_record_damaged`, the open guard refuses) or a
-move that failed for another reason, retried on the next refresh
-(`copy::import_not_moved_yet`); a hand-made twin of a world already moved in and a
+move that failed for another reason, retried at the next lobby entry or refresh
+(`copy::import_not_moved_yet`: "…will try again when you come back to the world list"; CP22, CP21 review LOW-2); a hand-made twin of a world already moved in and a
 quarantined import show no line (the twin is logged once and never moved or deleted;
 the quarantine has the resumer's notice). Before
 activation, and on quarantine, there is no card, as above. Tests:

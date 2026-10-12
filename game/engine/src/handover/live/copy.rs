@@ -217,7 +217,7 @@ pub fn import_record_damaged(world: &str) -> String {
 /// folder failed for another reason; it is tried again.
 pub fn import_not_moved_yet(world: &str) -> String {
     format!(
-        "\u{201c}{world}\u{201d} was handed over to you, but it couldn't be moved into your world list yet. The game will try again."
+        "\u{201c}{world}\u{201d} was handed over to you, but it couldn't be moved into your world list yet. The game will try again when you come back to the world list."
     )
 }
 /// CP10: the recipient's world is activated here: the handover finished.

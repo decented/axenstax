@@ -1242,7 +1242,9 @@ impl Receiver {
             persisted.transpose()?;
             receiver.stage = ReceiverStage::Activated;
             receiver.committed = Some(h);
-            crate::handover::live::promote::note_activated();
+            // CP22 (CP21 review MEDIUM-1): no `note_activated` here. A
+            // restart finds an import already Activated (every lobby status
+            // read restarts it); boot and lobby entry promote those.
         }
         Ok(Some(receiver))
     }
@@ -2562,6 +2564,42 @@ mod tests {
         assert_eq!(crate::save::list_world_entries().len(), 1, "the handed-over world is listed twice");
         let fork = crate::save::fork_world("harbour_town", "Harbour Town").expect("the moved world forks");
         assert!(!crate::save::world_dir(&fork).join("handover").exists(), "the fork carried handover/");
+        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
+    }
+
+    /// CP22 (CP21 review MEDIUM-1, DECIDED): an Activated import that stays
+    /// unmoved (here a hand-made twin of a world already moved in) costs
+    /// nothing per lobby frame: reading the lobby's status lines (which
+    /// restarts every awaiting import) notes no activation, so after the
+    /// lobby's entry pass no frame runs another promotion.
+    #[test]
+    fn handover_promote_a_stuck_import_runs_no_pass_per_lobby_frame() {
+        use crate::handover::live::promote::{activations_on_this_thread, promote_activated_imports, LobbyPoll};
+        let _root = crate::save::WorldsRootGuard::new("promote-stuck");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("stuck", "Still Pond", &relay);
+        activate_import(&imports, &working, t);
+        assert_eq!(promote_until_moved(&imports).moved, vec!["still_pond".to_owned()]);
+        let root = crate::save::worlds_root();
+        crate::save::copy_dir_recursive(&root.join("still_pond"), &working, None).unwrap();
+        let ledger = crate::handover::ledger::Ledger::install();
+        // Lobby entry: the count first, then the entry pass and the lines.
+        let now = std::time::Instant::now();
+        let entry = promote_activated_imports(&imports, &root);
+        let mut poll = LobbyPoll::new(activations_on_this_thread(), entry.held, now);
+        let _ = crate::handover::live::resumer::awaiting_statuses(&root, &imports, &ledger);
+        let mut passes = 0;
+        for _ in 0..30 {
+            let now = std::time::Instant::now();
+            if poll.due(activations_on_this_thread(), now) {
+                passes += 1;
+                let p = promote_activated_imports(&imports, &root);
+                poll.ran(&p, now);
+                let _ = crate::handover::live::resumer::awaiting_statuses(&root, &imports, &ledger);
+            }
+        }
+        assert_eq!(passes, 0, "a stuck Activated import ran a promotion pass on {passes} of 30 lobby frames");
+        assert!(working.join("handover").exists(), "the twin was touched");
         let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }
 
