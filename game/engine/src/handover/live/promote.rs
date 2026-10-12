@@ -34,8 +34,27 @@
 //!   both folders and removes it. An import folder is removed only then:
 //!   never one that isn't Activated and moved (an import still receiving
 //!   has no `working` either, and no world carries its transfer).
+//! - CP20 (CP18 review MEDIUM-1, DECIDED): every recipient import that
+//!   reaches Activated (the live session or the resumer's wait, any thread)
+//!   bumps [`activations`]; the lobby compares it each frame and, when it
+//!   moves, promotes and re-lists, retrying while a pass reports an import
+//!   still [`Promoted::held`] (the holder lets go of the import's lock a
+//!   moment after Activated). Promotion also runs on lobby entry.
 use crate::handover::Id;
 use std::path::{Path, PathBuf};
+
+static ACTIVATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// CP20: a recipient import reached Activated (called by
+/// `Receiver::activate` and its restart path).
+pub fn note_activated() {
+    ACTIVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// CP20: how many imports have reached Activated in this process.
+pub fn activations() -> u64 {
+    ACTIVATIONS.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// What one promotion pass did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -44,6 +63,20 @@ pub struct Promoted {
     pub moved: Vec<String>,
     /// Plain lobby lines for imports that couldn't be moved (and why).
     pub lines: Vec<String>,
+    /// CP20: an Activated import was skipped because its lock is still
+    /// held (here or by another process); a later pass may move it.
+    pub held: bool,
+}
+
+/// One import's outcome.
+enum Step {
+    Moved(String),
+    /// Its lock is held; try again shortly.
+    Held,
+    /// Nothing to do (quarantined, or a hand-made twin of a moved world).
+    Skip,
+    /// Stays put; the lobby shows this line.
+    Line(String),
 }
 
 /// The rename boundary (injectable so a test can force a different drive).
@@ -78,25 +111,29 @@ pub fn promote_with_io(imports: &Path, worlds_root: &Path, rename: Rename, sync:
             continue;
         }
         match promote_one(&working, transfer, worlds_root, rename, sync) {
-            Ok(Some(folder)) => out.moved.push(folder),
-            Ok(None) => {}
-            Err(line) => out.lines.push(line),
+            Step::Moved(folder) => out.moved.push(folder),
+            Step::Held => out.held = true,
+            Step::Skip => {}
+            Step::Line(line) => out.lines.push(line),
         }
     }
     out
 }
 
-/// `Ok(Some(folder))` moved; `Ok(None)` not (yet) movable, try again later;
-/// `Err(line)` stays put with a line for the lobby.
-fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename, sync: SyncDir) -> Result<Option<String>, String> {
+/// CP20 (CP18 review LOW-2): an Activated import that stays put says why
+/// in the lobby (a damaged record, or a move that failed and is retried),
+/// except a hand-made twin of a world already moved in (step 3, DECIDED:
+/// logged once, never moved twice, never deleted) and a quarantined import
+/// (the resumer's notices carry that).
+fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename, sync: SyncDir) -> Step {
     let records = super::authority::dir(working);
     if std::fs::symlink_metadata(records.join(format!("quarantined-{}.dat", hex::encode(transfer)))).is_ok() {
-        return Ok(None);
+        return Step::Skip;
     }
     // The session or the resumer's wait in this process, or another game
     // process, still works on the import at this path.
     if super::world_lock::held_here(working) || super::world_lock::held_elsewhere(working) {
-        return Ok(None);
+        return Step::Held;
     }
     // Every transfer it holds is Activated, every Activated record parses
     // and binds its receipt, and nothing is quarantined.
@@ -104,7 +141,7 @@ fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename,
         if super::resumer::log_due("promote: refused", transfer) {
             log::warn!("handover: an activated import under {} is refused by the open guard; it isn't moved", working.display());
         }
-        return Ok(None);
+        return Step::Line(super::copy::import_record_damaged(&display_name(working)));
     }
     if let Some(world) = already_moved(worlds_root, transfer) {
         if super::resumer::log_due("promote: already moved", transfer) {
@@ -114,13 +151,13 @@ fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename,
                 working.display()
             );
         }
-        return Ok(None);
+        return Step::Skip;
     }
     let name = display_name(working);
     let folder = free_folder(worlds_root, &name);
     let target = worlds_root.join(&folder);
     if std::fs::create_dir_all(worlds_root).is_err() {
-        return Ok(None);
+        return Step::Line(super::copy::import_not_moved_yet(&name));
     }
     match rename(working, &target) {
         Ok(()) => {}
@@ -128,20 +165,20 @@ fn promote_one(working: &Path, transfer: Id, worlds_root: &Path, rename: Rename,
             if super::resumer::log_due("promote: other drive", transfer) {
                 log::warn!("handover: {} and {} are on different drives; the world isn't moved", working.display(), worlds_root.display());
             }
-            return Err(super::copy::import_on_other_drive(&name));
+            return Step::Line(super::copy::import_on_other_drive(&name));
         }
         Err(e) => {
             if super::resumer::log_due("promote: rename", transfer) {
                 log::warn!("handover: the handed-over world couldn't be moved into the worlds folder ({e}); it is tried again");
             }
-            return Ok(None);
+            return Step::Line(super::copy::import_not_moved_yet(&name));
         }
     }
     log::info!("handover: the handed-over world is now in the worlds folder as {folder}");
     if let Some(import) = working.parent() {
         remove_once_durable(import, worlds_root, sync);
     }
-    Ok(Some(folder))
+    Step::Moved(folder)
 }
 
 /// CP19: fsync the import folder (the rename's source parent) and the

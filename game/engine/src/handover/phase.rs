@@ -1183,6 +1183,8 @@ impl Receiver {
         r?;
         self.committed = Some(proof.event_hash());
         self.stage = ReceiverStage::Activated;
+        // CP20 (CP18 review MEDIUM-1): the lobby lists the world without a restart.
+        crate::handover::live::promote::note_activated();
         Ok(true)
     }
     pub fn restart(store: &MarkerStore, transfer: Id) -> Result<Option<Self>> {
@@ -1240,6 +1242,7 @@ impl Receiver {
             persisted.transpose()?;
             receiver.stage = ReceiverStage::Activated;
             receiver.committed = Some(h);
+            crate::handover::live::promote::note_activated();
         }
         Ok(Some(receiver))
     }
@@ -2532,7 +2535,7 @@ mod tests {
         assert!(while_held.moved.is_empty() && working.exists(), "an import was moved while its handover lock was held here");
         drop(held);
         let moved = promote_until_moved(&imports);
-        assert_eq!(moved, crate::handover::live::promote::Promoted { moved: vec!["harbour_town".into()], lines: vec![] });
+        assert_eq!(moved, crate::handover::live::promote::Promoted { moved: vec!["harbour_town".into()], lines: vec![], held: false });
         assert!(!working.exists(), "the import's working world is still there");
         let listed = crate::save::list_world_entries();
         assert_eq!(listed.len(), 1, "the world list: {:?}", listed.iter().map(|e| &e.folder_name).collect::<Vec<_>>());
@@ -2544,8 +2547,18 @@ mod tests {
         assert_eq!(promote_activated_imports(&imports, &root), Default::default());
         // A twin of the import beside the moved world (e.g. a copy put back
         // by hand, or a move a crash repeated): never moved in a second time.
+        // CP20 (step 3, DECIDED): we can't prove it is a leftover rather
+        // than the player's copy, so it is never deleted either, and the
+        // lobby shows no line for it; the log says so once (a minute).
         crate::save::copy_dir_recursive(&root.join("harbour_town"), &working, None).unwrap();
-        assert!(promote_activated_imports(&imports, &root).moved.is_empty(), "a world was moved in twice");
+        for _ in 0..2 {
+            assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "a world was moved in twice");
+            assert!(working.join("handover").exists(), "the hand-made twin was deleted");
+        }
+        assert!(
+            !crate::handover::live::resumer::log_due("promote: already moved", t),
+            "the twin wasn't logged (or was logged on every pass)"
+        );
         assert_eq!(crate::save::list_world_entries().len(), 1, "the handed-over world is listed twice");
         let fork = crate::save::fork_world("harbour_town", "Harbour Town").expect("the moved world forks");
         assert!(!crate::save::world_dir(&fork).join("handover").exists(), "the fork carried handover/");
@@ -2572,16 +2585,33 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
-        assert_eq!(other_drive, crate::handover::live::promote::Promoted { moved: vec![], lines: vec![copy::import_on_other_drive("Far Field")] });
+        assert_eq!(other_drive, crate::handover::live::promote::Promoted { moved: vec![], lines: vec![copy::import_on_other_drive("Far Field")], held: false });
         assert!(working.exists() && crate::save::list_world_entries().is_empty(), "something moved across drives");
         let child = world_lock::tests::ChildHolder::hold(&working);
-        assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "an import another process holds was moved");
+        // CP20: held, so the lobby retries shortly; no line.
+        assert_eq!(
+            promote_activated_imports(&imports, &root),
+            crate::handover::live::promote::Promoted { held: true, ..Default::default() },
+            "an import another process holds was moved"
+        );
         child.kill();
         let quarantined = crate::handover::live::authority::dir(&working).join(format!("quarantined-{}.dat", hex::encode(t)));
         std::fs::write(&quarantined, b"q").unwrap();
         assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "a quarantined import was moved");
         assert!(crate::save::list_world_entries().is_empty(), "a quarantined import is listed");
         std::fs::remove_file(&quarantined).unwrap();
+        // CP20 (CP18 review LOW-2): an Activated import that stays put for
+        // another reason says so in the lobby: a move that failed (tried
+        // again), and a damaged Activated record (the open guard refuses it).
+        let failed = promote_with(&imports, &root, |_, _| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        assert_eq!(failed.lines, vec![copy::import_not_moved_yet("Far Field")], "a failed move showed no line");
+        let record = crate::handover::live::authority::dir(&working).join(format!("activated-{}.dat", hex::encode(t)));
+        let intact = std::fs::read(&record).unwrap();
+        std::fs::write(&record, b"damaged").unwrap();
+        let damaged = promote_activated_imports(&imports, &root);
+        assert_eq!(damaged.lines, vec![copy::import_record_damaged("Far Field")], "a damaged record showed no line");
+        assert!(damaged.moved.is_empty() && working.exists(), "an import with a damaged record moved");
+        std::fs::write(&record, &intact).unwrap();
         assert_eq!(promote_until_moved(&imports).moved, vec!["far_field".to_owned()]);
         let _ = std::fs::remove_dir_all(imports.parent().unwrap());
     }

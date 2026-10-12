@@ -6315,8 +6315,15 @@ import is Activated, `handover::live::promote::promote_activated_imports`
 moves its `working` folder into the worlds folder with one `rename`, so it
 lists as an ordinary world card, and Play, Host and Fork work on it as on a
 world made here. It runs on the main thread only, at start-up (after the
-resumer's boot step) and on every lobby refresh, before the list is read;
-never on the resumer's thread. An import is moved only when it holds an
+resumer's boot step), on lobby entry and every lobby refresh, before the list is read;
+never on the resumer's thread. CP20/CP21 (CP18 review MEDIUM-1): the lobby also
+refreshes itself when a handover activates while it is up. `Receiver::activate` (and its
+restart path) bumps a process-wide counter (`promote::note_activated`); each lobby frame
+`MenuState::poll_handovers` compares it, and on a change promotes and re-lists IN PLACE
+(the open dialog and page stay; the selection follows its folder name). An import skipped
+because its lock is still held here (the session lets go a moment after Activated) is
+retried every 500 ms until it moves. A player in the lobby sees the "Waiting for…" line
+replaced by the world's card without leaving the lobby. An import is moved only when it holds an
 Activated record, has no `quarantined-*` record, passes the open guard, and
 no holder in this process (`world_lock::held_here`: the live session or the
 resumer's wait, which read it at its old path) nor another process holds
@@ -6359,7 +6366,14 @@ hand-made twin (a `working` beside a world that already carries its
 transfer) is still left alone. A
 worlds folder on another drive (`AXENSTAX_WORLDS_DIR` elsewhere, the rename
 fails with `CrossesDevices`) has no copy path: the import stays, and the
-world list shows `copy::import_on_other_drive` (what to change). Before
+world list shows `copy::import_on_other_drive` ("Move one of them so both are on the
+same drive"; CP20, CP18 review LOW-6: the line names no environment variable). CP20
+(CP18 review LOW-2): an Activated import that stays put says why in the world list:
+a damaged handover record (`copy::import_record_damaged`, the open guard refuses) or a
+move that failed for another reason, retried on the next refresh
+(`copy::import_not_moved_yet`); a hand-made twin of a world already moved in and a
+quarantined import show no line (the twin is logged once and never moved or deleted;
+the quarantine has the resumer's notice). Before
 activation, and on quarantine, there is no card, as above. Tests:
 `handover_promote_moves_an_activated_import_into_the_world_list_once`,
 `handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine`, and

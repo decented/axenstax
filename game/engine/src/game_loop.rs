@@ -8728,6 +8728,10 @@ impl super::GameState {
             {
                 menu_state.tester_feedback = crate::native_mailbox::feedback_enabled(&self.graphics);
             }
+            // CP20 (CP18 review MEDIUM-1): a handover that finished while
+            // the lobby is up lists its world without leaving the lobby.
+            #[cfg(not(target_arch = "wasm32"))]
+            menu_state.poll_handovers();
             #[allow(unused_mut)]
             let mut action = crate::menu::draw_main_menu(&self.renderer.egui.ctx, menu_state);
             #[cfg(test)]

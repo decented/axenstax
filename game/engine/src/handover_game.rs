@@ -146,12 +146,14 @@ static PROMOTE_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec:
 
 /// CP18: move every Activated import into the worlds folder, so it lists
 /// as an ordinary world (`handover::live::promote`). Main thread only: at
-/// start-up and on every lobby refresh, before the world list is read.
+/// start-up, on lobby entry and every lobby refresh, and (CP20) from the
+/// lobby's per-frame `MenuState::poll_handovers` once an import activates.
 /// Never creates `<data>/handover/imports`.
-pub(crate) fn promote_activated_imports() {
+pub(crate) fn promote_activated_imports() -> crate::handover::live::promote::Promoted {
     let imports = crate::data_dir::data_root().join("handover").join("imports");
-    let promoted = crate::handover::live::promote::promote_activated_imports(&imports, &crate::save::worlds_root());
-    *PROMOTE_LINES.lock().unwrap_or_else(|e| e.into_inner()) = promoted.lines;
+    let mut promoted = crate::handover::live::promote::promote_activated_imports(&imports, &crate::save::worlds_root());
+    *PROMOTE_LINES.lock().unwrap_or_else(|e| e.into_inner()) = std::mem::take(&mut promoted.lines);
+    promoted
 }
 
 /// P3: discard every marked inert import under `<data>/handover/imports`

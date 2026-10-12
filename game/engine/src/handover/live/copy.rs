@@ -198,16 +198,29 @@ pub fn recipient_finishing(world: &str) -> String {
     format!("Finishing the handover of \u{201c}{world}\u{201d}\u{2026} Keep the game open.")
 }
 
-/// CP10: the recipient's world is activated here: the handover finished.
 /// CP18: an Activated import that can't be moved into the worlds folder
 /// because that folder is on a different drive (no copy path).
+/// CP20 (CP18 review LOW-6, DECIDED): names no environment variable.
 pub fn import_on_other_drive(world: &str) -> String {
     format!(
         "\u{201c}{world}\u{201d} was handed over to you, but it can't be moved into your world list because your worlds folder \
-         is on a different drive from the game's data folder. Put the worlds folder (AXENSTAX_WORLDS_DIR) on the same drive \
-         and start the game again."
+         is on a different drive from the game's data folder. Move one of them so both are on the same drive, then start \
+         the game again."
     )
 }
+/// CP20 (CP18 review LOW-2): an Activated import the open guard refuses
+/// (its handover record is damaged), so it is never moved in.
+pub fn import_record_damaged(world: &str) -> String {
+    format!("\u{201c}{world}\u{201d} was handed over to you, but it can't be opened because its handover record is damaged.")
+}
+/// CP20 (CP18 review LOW-2): moving an Activated import into the worlds
+/// folder failed for another reason; it is tried again.
+pub fn import_not_moved_yet(world: &str) -> String {
+    format!(
+        "\u{201c}{world}\u{201d} was handed over to you, but it couldn't be moved into your world list yet. The game will try again."
+    )
+}
+/// CP10: the recipient's world is activated here: the handover finished.
 pub fn recipient_activated(world: &str) -> String {
     format!("\"{world}\" is yours now: the handover finished and the world is stored on this device.")
 }

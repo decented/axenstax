@@ -109,7 +109,18 @@ impl Drop for Tmp {
     }
 }
 fn recipient_env(dir: &Path) -> RecipientEnv {
-    RecipientEnv { identity: identity(), imports: dir.join("imports") }
+    recipient_env_at(dir.join("imports"))
+}
+fn recipient_env_at(imports: PathBuf) -> RecipientEnv {
+    RecipientEnv { identity: identity(), imports }
+}
+/// CP20 (CP18 review LOW-5): the imports folder the lobby itself promotes
+/// from (`handover_game::promote_activated_imports`), pid-scoped in tests
+/// and shared by every harness test in the process.
+fn lobby_imports() -> PathBuf {
+    let imports = crate::data_dir::data_root().join("handover").join("imports");
+    std::fs::create_dir_all(&imports).unwrap();
+    imports
 }
 
 // ── Source: the game hosts; the far recipient is driven by hand ─────────────
@@ -334,6 +345,12 @@ fn step(j: &mut Joined) {
 
 /// The game joined, signed, to a non-GPU lent server whose host it verified.
 fn joined(tag: &str) -> Joined {
+    joined_into(tag, None)
+}
+
+/// [`joined`], its recipient importing into `imports` (default: the test's
+/// own folder).
+fn joined_into(tag: &str, imports: Option<PathBuf>) -> Joined {
     isolate_saves();
     let dir = Tmp::new(tag);
     let mut hg = HeadlessGame::boot_into_world(&format!("harness-handover-{tag}"));
@@ -355,9 +372,9 @@ fn joined(tag: &str) -> Joined {
     let transport = Counting { inner, sent: sent.clone() };
     hg.state.remote_client = Some(RemoteClient::from_transport(Box::new(transport), request, None));
     hg.state.set_joined_host(key(SOURCE_PERSONA), key(SOURCE_RUNTIME));
-    let env_dir = dir.0.clone();
+    let imports = imports.unwrap_or_else(|| dir.0.join("imports"));
     hg.state.handover_fixture =
-        Some(Fixture { signed_in: None, recipient: Some(Box::new(move || Ok(recipient_env(&env_dir)))) });
+        Some(Fixture { signed_in: None, recipient: Some(Box::new(move || Ok(recipient_env_at(imports.clone())))) });
     let mut j = Joined { hg, hs, host, slot: usize::MAX, sent, _dir: dir };
     for _ in 0..400 {
         step(&mut j);
@@ -475,7 +492,10 @@ fn game_harness_handover_recipient_consents_while_joined_and_keeps_its_session_a
         matches!(&j.hg.state.handover, Some(Handover::Recipient(s)) if s.holds_lease()),
         "leaving the world released the lease the session holds"
     );
-    for _ in 0..ROUNDS {
+    // CP21: a wall-clock bound (on the slow ecryptfs test folder the
+    // import outlasted ROUNDS frames).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while std::time::Instant::now() < deadline {
         j.hg.frames(1);
         if src.pump(&mut j.hs, live(), now()).is_err() || src.stage() == SourceStage::ReadyVerified {
             break;
@@ -968,15 +988,22 @@ impl crate::handover::live::recipient::HeldLease for FlagLease {
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
 fn game_harness_handover_recipient_leaving_while_prepared_ends_the_session_and_still_activates() {
-    leave_while_prepared_then_activate("dst-prepared-leave");
+    let (_j, _src, working, t) = leave_while_prepared("dst-prepared-leave", None);
+    let store = crate::handover::live::authority::store(&working).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while store.read(crate::handover::durable::MarkerKind::Activated, t).unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline, "the recipient never activated after leaving while Prepared");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
-/// The body of the test above: the recipient leaves at Prepared and its
-/// import activates in the background. Returns the joined game (now in the
-/// lobby), the source session and the import's working world.
-fn leave_while_prepared_then_activate(tag: &str) -> (Joined, SourceSession, PathBuf) {
+/// The body of the test above, up to the leave: the recipient leaves at
+/// Prepared with Committed already published, and its import's wait is the
+/// resumer's. Returns the joined game (now in the lobby), the source
+/// session, the import's working world and the transfer.
+fn leave_while_prepared(tag: &str, imports: Option<PathBuf>) -> (Joined, SourceSession, PathBuf, crate::handover::Id) {
     use crate::handover::live::resumer::{Backoff, Resumer};
-    let mut j = joined(tag);
+    let mut j = joined_into(tag, imports);
     let mut src = consented(&mut j);
     let t = src.transfer();
     let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1017,35 +1044,49 @@ fn leave_while_prepared_then_activate(tag: &str) -> (Joined, SourceSession, Path
     let store = crate::handover::live::authority::store(&working).unwrap();
     let activated = || store.read(crate::handover::durable::MarkerKind::Activated, t).unwrap().is_some();
     assert!(Resumer::global().holds_import(t) || activated(), "nothing holds the wait for Committed after the leave");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-    while !activated() {
-        assert!(std::time::Instant::now() < deadline, "the recipient never activated after leaving while Prepared");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    (j, src, working)
+    (j, src, working, t)
 }
 
-/// CP18: once Activated, the lobby's refresh moves the handed-over world
-/// into the world list; Play opens it through the lobby's own load path
-/// (the open guard passes the Activated record it carries), it hosts, and
-/// a joiner joins it.
+/// CP18: once Activated, the handed-over world moves into the world list;
+/// Play opens it through the lobby's own load path (the open guard passes
+/// the Activated record it carries), it saves, it hosts, and a joiner
+/// joins it.
+///
+/// CP20 (CP18 review MEDIUM-1, LOW-5): the recipient is already in the
+/// lobby (it left at Prepared, its import under the lobby's own imports
+/// folder) when the import activates in the background. Only lobby frames
+/// run: no promotion or refresh by hand. The "Waiting for…" line goes and
+/// the card appears without leaving the lobby.
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
 fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_lobby() {
-    let (mut j, _src, working) = leave_while_prepared_then_activate("dst-opens-activated");
-    assert!(matches!(j.hg.state.mode, crate::GameMode::Menu(_)), "the recipient isn't in the lobby");
-    // The lobby's refresh, until the resumer's wait has let go of the import.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (mut j, _src, working, t) = leave_while_prepared("dst-opens-activated", Some(lobby_imports()));
+    let activated_record = format!("activated-{}.dat", hex::encode(t));
+    let ours = |ms: &crate::menu::MenuState| {
+        ms.worlds
+            .iter()
+            .find(|e| crate::handover::live::authority::dir(&crate::save::worlds_root().join(&e.folder_name)).join(&activated_record).exists())
+            .map(|e| e.folder_name.clone())
+    };
+    {
+        let crate::GameMode::Menu(ms) = &j.hg.state.mode else { panic!("the recipient isn't in the lobby") };
+        assert!(ours(ms).is_none(), "the world was listed before it activated");
+        assert!(ms.awaiting_imports.iter().any(|l| l.starts_with("Waiting for")), "no waiting line in the lobby: {:?}", ms.awaiting_imports);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let folder = loop {
-        // The harness's import lives in its own folder, not the data dir
-        // the lobby's refresh promotes from; the refresh then lists it.
-        let p = crate::handover::live::promote::promote_activated_imports(&j._dir.0.join("imports"), &crate::save::worlds_root());
-        let crate::GameMode::Menu(ms) = &mut j.hg.state.mode else { unreachable!() };
-        ms.refresh();
-        if let Some(f) = p.moved.first() {
-            break f.clone();
+        j.hg.frames(1);
+        let crate::GameMode::Menu(ms) = &j.hg.state.mode else { panic!("the recipient left the lobby") };
+        if let Some(f) = ours(ms)
+            && !ms.awaiting_imports.iter().any(|l| l.starts_with("Waiting for"))
+        {
+            break f;
         }
-        assert!(std::time::Instant::now() < deadline, "the activated import never moved into the world list");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the lobby never listed the handed-over world (waiting lines {:?})",
+            ms.awaiting_imports
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     assert!(!working.exists(), "the import's working world is still there");
@@ -1064,6 +1105,8 @@ fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_
         assert!(std::time::Instant::now() < deadline, "the handed-over world never opened");
     }
     assert_eq!(j.hg.state.world_name, folder);
+    // CP20 (CP18 review LOW-5): a real save of the moved world.
+    assert_eq!(j.hg.state.save_live_world(), Ok(()), "the handed-over world didn't save");
     // Host it (a lent host on the in-process transport), and a joiner joins.
     let hs = HostedServer::start_host(
         1,

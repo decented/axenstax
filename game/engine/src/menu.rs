@@ -335,6 +335,12 @@ pub struct MenuState {
     /// be opened until Activated.
     #[cfg(not(target_arch = "wasm32"))]
     pub awaiting_imports: Vec<String>,
+    /// CP20 (CP18 review MEDIUM-1): the last `promote::activations()` the
+    /// lobby acted on, and when it last promoted while an import was held.
+    #[cfg(not(target_arch = "wasm32"))]
+    activations_seen: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    promote_retry: Option<std::time::Instant>,
     /// Native: in-flight OS file-dialog channel. `Some` while the worker thread
     /// is running (or has a result waiting); cleared by `poll_dialog` once the
     /// result has been consumed or the channel disconnects.
@@ -418,9 +424,13 @@ pub struct MenuState {
 impl MenuState {
     pub fn new() -> Self {
         // CP18: a handed-over world that has finished arriving moves into
-        // the worlds folder first, so it lists below.
+        // the worlds folder first, so it lists below. CP20: the activation
+        // count is read before that pass, so one landing during it is
+        // still acted on by `poll_handovers`.
         #[cfg(not(target_arch = "wasm32"))]
-        crate::handover_game::promote_activated_imports();
+        let activations_at_entry = crate::handover::live::promote::activations();
+        #[cfg(not(target_arch = "wasm32"))]
+        let held_at_entry = crate::handover_game::promote_activated_imports().held;
         #[cfg(not(target_arch = "wasm32"))]
         let worlds = save::list_world_entries();
         #[cfg(target_arch = "wasm32")]
@@ -464,6 +474,10 @@ impl MenuState {
             #[cfg(not(target_arch = "wasm32"))]
             awaiting_imports: crate::handover_game::awaiting_import_statuses(),
             #[cfg(not(target_arch = "wasm32"))]
+            activations_seen: activations_at_entry,
+            #[cfg(not(target_arch = "wasm32"))]
+            promote_retry: held_at_entry.then(std::time::Instant::now),
+            #[cfg(not(target_arch = "wasm32"))]
             pending_dialog: None,
             world_page: 0,
             stash_input: String::new(),
@@ -498,6 +512,39 @@ impl MenuState {
         }
 
         state
+    }
+
+    /// CP20 (CP18 review MEDIUM-1, DECIDED): called every lobby frame. When
+    /// a recipient import has reached Activated since the lobby last looked,
+    /// promote and re-list in place (selection, open dialog and page kept);
+    /// while a pass finds an Activated import whose lock is still held (its
+    /// holder lets go a moment after Activated), try again twice a second.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_handovers(&mut self) {
+        const RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+        let now = std::time::Instant::now();
+        let seen = crate::handover::live::promote::activations();
+        let due = if seen != self.activations_seen {
+            self.activations_seen = seen;
+            true
+        } else {
+            self.promote_retry.is_some_and(|t| now.duration_since(t) >= RETRY)
+        };
+        if !due {
+            return;
+        }
+        let promoted = crate::handover_game::promote_activated_imports();
+        self.promote_retry = promoted.held.then_some(now);
+        let awaiting = crate::handover_game::awaiting_import_statuses();
+        if promoted.moved.is_empty() && awaiting == self.awaiting_imports {
+            return;
+        }
+        self.awaiting_imports = awaiting;
+        if !promoted.moved.is_empty() {
+            let selected = self.selected.and_then(|i| self.worlds.get(i)).map(|e| e.folder_name.clone());
+            self.worlds = save::list_world_entries();
+            self.selected = selected.and_then(|f| self.worlds.iter().position(|e| e.folder_name == f));
+        }
     }
 
     pub fn refresh(&mut self) {
