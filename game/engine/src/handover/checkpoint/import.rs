@@ -9,7 +9,7 @@ use super::receipt::{durable_tree, receipt_bytes, verify_receipt};
 use super::{AdmittedManifest, files, validate_metadata};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File},
+    fs,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
