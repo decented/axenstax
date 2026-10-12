@@ -125,70 +125,10 @@ pub(super) fn sync_dir(path: &Path) -> Result<()> {
 
 /// Atomic no-replace is necessary even for two imports racing within one host.
 pub(super) fn rename_new(source: &Path, destination: &Path) -> Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let from = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|_| Error::Io)?;
-        let to =
-            std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(|_| Error::Io)?;
-        // SAFETY: both NUL-terminated paths remain alive; flags forbid replacement.
-        #[cfg(target_os = "linux")]
-        let result = unsafe {
-            libc::renameat2(
-                libc::AT_FDCWD,
-                from.as_ptr(),
-                libc::AT_FDCWD,
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        // Bionic's renameat2 symbol requires API30, but the app supports API24.
-        // The existing syscall symbol avoids a new dynamic API dependency;
-        // older kernels return an error and no overwriting fallback is used.
-        #[cfg(target_os = "android")]
-        let result = unsafe {
-            // SAFETY: kernel receives live terminated paths and no-replace flag.
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                from.as_ptr(),
-                libc::AT_FDCWD,
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result == 0 {
-            return Ok(());
-        }
-        Err(Error::Io)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let from = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|_| Error::Io)?;
-        let to =
-            std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(|_| Error::Io)?;
-        // SAFETY: live terminated paths; RENAME_EXCL forbids existing targets.
-        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
-            return Ok(());
-        }
-        Err(Error::Io)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Directory rename on Windows refuses an already-existing directory/file.
-        fs::rename(source, destination).map_err(|_| Error::Io)
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "windows"
-    )))]
-    {
-        let _ = (source, destination);
-        Err(Error::State("atomic no-replace unavailable"))
-    }
+    // CP21 (CP19 review MEDIUM-2): one no-replace move for the import and
+    // the promotion, with the check-then-rename fallback where the
+    // filesystem rejects the flag (ecryptfs, NFS, FUSE without rename2).
+    crate::handover::rename::no_replace(source, destination).map_err(|_| Error::Io)
 }
 
 /// Hash the bytes actually handed to tar, so a source-file change between its

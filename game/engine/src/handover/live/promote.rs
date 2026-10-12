@@ -58,29 +58,11 @@ pub fn promote_activated_imports(imports: &Path, worlds_root: &Path) -> Promoted
 }
 
 /// CP19 (CP18 review MEDIUM-3 / LOW-1): the move never replaces a folder
-/// at the target, even an empty one someone else just made there. Linux:
-/// `renameat2(RENAME_NOREPLACE)`, atomic (EEXIST if anything is there).
-/// Windows: `MoveFileExW` never replaces a directory target (std's rename
-/// fails when a folder exists there). Other Unix: the target is checked
-/// absent just before the `rename` (a residual race, as `rename(2)` would
-/// replace an empty folder).
+/// at the target, even an empty one someone else just made there. CP21:
+/// the platform rules and the fallback for a filesystem without the
+/// no-replace flag live in `crate::handover::rename`.
 pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let f = std::ffi::CString::new(from.as_os_str().as_bytes())?;
-        let t = std::ffi::CString::new(to.as_os_str().as_bytes())?;
-        // SAFETY: two valid NUL-terminated paths; no memory is shared.
-        let r = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-        if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-        }
-        std::fs::rename(from, to)
-    }
+    crate::handover::rename::no_replace(from, to)
 }
 
 pub fn promote_with(imports: &Path, worlds_root: &Path, rename: Rename) -> Promoted {

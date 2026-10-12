@@ -15,6 +15,7 @@ pub mod live;
 pub mod manifest;
 pub mod personal;
 pub mod phase;
+pub mod rename;
 pub mod stored;
 #[cfg(test)]
 pub(crate) mod relay_fixture;

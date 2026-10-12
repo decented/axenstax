@@ -5203,8 +5203,14 @@ sync must succeed. Pre-rename cleanup removes only its own scratch folder;
 post-rename uncertainty preserves the import for exact restart/retry and late
 cleanup never deletes it. Native no-replace uses Linux renameat2 and Android SYS_renameat2 via the
 existing syscall symbol (no API30 Bionic dependency on the API24 app),
-macOS exclusive rename and Windows directory rename; unsupported kernels/targets fail
-closed. These platform paths still require their own platform validation and
+macOS exclusive rename and Windows directory rename. CP21 (CP19 review MEDIUM-2): a
+filesystem or kernel that rejects the no-replace flag (EINVAL/ENOSYS: NFS, FUSE without
+rename2, ecryptfs-encrypted home folders, an old Android kernel) falls back to checking the
+target absent just before a plain rename (a residual race: `rename(2)` may replace an EMPTY
+folder made in between, never a non-empty one or a file); any other error fails closed. One
+helper serves the import and the world-list move (`handover::rename::no_replace`; test
+`handover_rename_without_the_flag_falls_back_and_still_never_replaces`). Before CP21 every
+receipt on such a filesystem refused before Ready after the whole transfer. These platform paths still require their own platform validation and
 this milestone does not claim portable completed handover.
 
 Bounded admission evidence retains only the signed offer, public root context,
@@ -6325,8 +6331,9 @@ device names `con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, any
 case, with or without an extension), so a world called "The Workshop" lands
 in `the_workshop_2`; past `_99` the time-stamped fallback is checked too.
 The move never replaces a folder at the target, even an empty one
-(`promote::rename_no_replace`: `renameat2(RENAME_NOREPLACE)` on Linux;
-Windows' `MoveFileExW` never replaces a directory; other Unix re-check the
+(`promote::rename_no_replace` → `handover::rename::no_replace`:
+`renameat2(RENAME_NOREPLACE)` on Linux; Windows' `MoveFileExW` never replaces a directory;
+other Unix, and a Linux filesystem that rejects the flag with EINVAL/ENOSYS, re-check the
 target just before `rename`, a residual race). Tests:
 `handover_promote_never_names_a_reserved_folder`,
 `handover_promote_rename_never_replaces_a_folder`,

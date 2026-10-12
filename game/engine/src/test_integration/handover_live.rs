@@ -1059,11 +1059,12 @@ mod session {
         pkt.extend_from_slice(&frame);
         *p.forged_ready.lock().unwrap() = Some(pkt);
         let mut refusal = None;
-        for _ in 0..10_000 {
+        // CP21: a wall-clock bound, not a pump count (on a slow disk the
+        // source's pack outlasted 10,000 spins and the loop ended first).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
             let _ = p.dst.as_mut().unwrap().pump(now());
-            if p.dst.as_ref().unwrap().stage() == RecipientStage::Importing {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
             if let Err(r) = p.src.pump(&mut p.hs, p.live, now()) {
                 refusal = Some(r);
                 break;
@@ -2673,7 +2674,13 @@ mod session {
             assert!(std::time::Instant::now() < deadline, "the recipient past its ack never quarantined");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert!(!has_record(&dir, "prepared", t), "the published Aborted left the receipt");
+        // CP21: `end_aborted` makes the quarantine durable, THEN removes the
+        // receipt (two writes); on a slow disk (the ecryptfs test folder)
+        // the poll above lands between them.
+        while has_record(&dir, "prepared", t) {
+            assert!(std::time::Instant::now() < deadline, "the published Aborted left the receipt");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(authority::open_guard(&world).is_ok(), "the promoted abort refused the source's world");
         let bearer = TEST_BEARER;
         for f in files_under(&world, &dir.0.join("imports")) {
