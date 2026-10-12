@@ -5848,6 +5848,19 @@ impl HostedServer {
         if !self.server.play_mode.can_edit_world() {
             return Err(EditRefusal::PlayMode);
         }
+        self.remote_plot_allows(sp, x, z)
+    }
+
+    /// The plot half of [`Self::remote_may_touch`] (C3d run 20): a remote
+    /// player may not touch a cell in someone else's plot, outside
+    /// Creative. A door toggle (a use, not an edit) checks this without the
+    /// edit's play-mode gate (`strict_door.rs`).
+    pub(super) fn remote_plot_allows(
+        &self,
+        sp: &crate::server::ServerPlayer,
+        x: i32,
+        z: i32,
+    ) -> Result<(), EditRefusal> {
         let npub = verified_npub(sp.verified_pubkey);
         if !self.server.play_mode.is_creative()
             && crate::plot::is_in_foreign_plot_for_npub(&self.server.world.plots, x, z, npub.as_deref())

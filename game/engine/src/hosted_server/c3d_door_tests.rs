@@ -91,24 +91,34 @@ impl MirrorJoined {
 
 /// A second Mirror guest joined to `m`'s server, its column held: its
 /// client and its own world (fed only by what the server sends it).
-fn second_joiner(m: &mut MirrorJoined) -> (RemoteClient, crate::world::World) {
-    let mut rc = RemoteClient::from_transport(Box::new(m.hs.attach_test_remote()), crate::remote_client::build_join_request_guest("Neighbour", 0), None);
+fn second_joiner(m: &mut MirrorJoined) -> (RemoteClient, crate::world::World) { second_guest(&mut m.hs) }
+
+/// A second guest joined to `hs` (either mode), its column held: its
+/// client and its own world (fed only by what the server sends it).
+fn second_guest(hs: &mut HostedServer) -> (RemoteClient, crate::world::World) {
+    let mut rc = RemoteClient::from_transport(Box::new(hs.attach_test_remote()), crate::remote_client::build_join_request_guest("Neighbour", 0), None);
     for _ in 0..20 {
-        m.pump();
+        hs.tick();
         rc.poll();
         if rc.player_index().is_some() { break; }
     }
     let i = rc.player_index().expect("the second guest joined") as usize;
     let cs = crate::chunk::CHUNK_SIZE as i32;
-    m.hs.hold_column_for_test(i, (40i32.div_euclid(cs), 40i32.div_euclid(cs)));
-    let p = &mut m.hs.server.players[i].player;
+    hs.hold_column_for_test(i, (40i32.div_euclid(cs), 40i32.div_euclid(cs)));
+    let p = &mut hs.server.players[i].player;
     p.pos = glam::Vec3::new(38.5, 80.0, 38.5);
     p.velocity = glam::Vec3::ZERO;
     p.on_ground = true;
-    m.pump();
+    hs.tick();
     rc.poll();
     let _ = std::mem::take(&mut rc.pending_block_changes);
     (rc, crate::world::World::new())
+}
+
+/// `other` reads what the server sent it into `world`.
+fn hear(other: &mut RemoteClient, world: &mut crate::world::World) {
+    other.poll();
+    for change in std::mem::take(&mut other.pending_block_changes) { world.apply_remote_block_change(&change); }
 }
 
 /// A closed door (bottom at `bottom`, facing `f`) standing in `world`.
@@ -154,6 +164,27 @@ fn c3d_mirror_joiner_door_toggle_reaches_a_second_joiner() {
     }
     for y in [80, 81] {
         assert!(crate::block_shape::is_open(other_world.meta_at(41, y, 40)), "the second joiner sees the door at y={y} open");
+    }
+}
+
+/// C3d run 20 — a toggle is a USE, not an edit: on an Adventure world
+/// (where a joiner can't break or place) a Mirror joiner still opens and
+/// shuts a door, as single-player always let it; served `Accepted`, the
+/// server and a second joiner see it, never torn down.
+#[test]
+fn c3d_mirror_adventure_joiner_opens_and_shuts_a_door() {
+    let mut m = mirror_joined("mirror-toggle-adventure");
+    m.hs.server.play_mode = crate::play_mode::PlayMode::Adventure;
+    let (mut other, mut other_world) = second_joiner(&mut m);
+    for w in [&mut m.hs.server.world, &mut m.world, &mut other_world] { stand_door(w, [41, 80, 40], crate::meta::Facing::North); }
+    for (click, open) in [([41, 80, 40], true), ([41, 81, 40], false)] {
+        assert_eq!(m.toggle(click), crate::action_identity::ActionFate::Accepted, "an Adventure joiner's toggle is served");
+        for _ in 0..3 { m.pump(); hear(&mut other, &mut other_world); }
+        for y in [80, 81] {
+            assert_eq!(m.open_on_server([41, y, 40]), open, "the server's half at y={y}");
+            assert_eq!(m.open_on_client([41, y, 40]), open, "the joiner's own half at y={y}");
+            assert_eq!(crate::block_shape::is_open(other_world.meta_at(41, y, 40)), open, "the second joiner's half at y={y}");
+        }
     }
 }
 
@@ -310,6 +341,28 @@ fn c3d_strict_door_open_close_single_and_double() {
         for c in cells {
             assert_eq!(crate::block_shape::is_open(j.server_cell(c).1), open, "the server's half at {c:?} after a click on {click:?}");
             assert_eq!(j.server_cell(c), j.client_cell(c), "client and server agree at {c:?}");
+        }
+    }
+    assert_eq!(j.refusals(), (0, 0, 0), "no Strict refusal");
+}
+
+/// C3d run 20 — the Strict twin: on an Adventure world a Strict joiner's
+/// typed toggle opens and shuts a door (a use, not an edit), served with
+/// no refusal and no teardown, and a second joiner sees it.
+#[test]
+fn c3d_strict_adventure_joiner_opens_and_shuts_a_door() {
+    let mut j = joined("door-toggle-adventure", &[], false);
+    j.hs.server.play_mode = crate::play_mode::PlayMode::Adventure;
+    let (mut other, mut other_world) = second_guest(&mut j.hs);
+    for w in [&mut j.hs.server.world, &mut j.world, &mut other_world] { stand_door(w, [41, 80, 40], Facing::North); }
+    for (click, open) in [([41, 80, 40], true), ([41, 81, 40], false)] {
+        j.toggle(click);
+        j.assert_honest("an Adventure toggle");
+        hear(&mut other, &mut other_world);
+        for c in [[41, 80, 40], [41, 81, 40]] {
+            assert_eq!(crate::block_shape::is_open(j.server_cell(c).1), open, "the server's half at {c:?}");
+            assert_eq!(j.server_cell(c), j.client_cell(c), "client and server agree at {c:?}");
+            assert_eq!(crate::block_shape::is_open(other_world.meta_at(c[0], c[1], c[2])), open, "the second joiner's half at {c:?}");
         }
     }
     assert_eq!(j.refusals(), (0, 0, 0), "no Strict refusal");

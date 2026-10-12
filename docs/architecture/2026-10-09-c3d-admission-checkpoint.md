@@ -740,6 +740,22 @@ A Strict `SetAutoRefill` the server's copy can't reproduce (its digest) is a typ
   it at the send. `--no-lend`: by reading, the owning server applies the
   host's meta-only edits through the local-slot path (budget 4/tick, refused
   cells sent back); untested, left under the `--no-lend` BRIDGE.
-- Mirror behaviour change to know: a Mirror joiner in Adventure/Spectator
+- Mirror behaviour change to know (superseded by run 20): a Mirror joiner in Adventure/Spectator
   (`can_edit_world` false) can no longer keep a door open on the server (its
   predicted door is sent back shut); before, it opened only on its own screen.
+
+## Run 20 — a door toggle is a use, not an edit
+
+- Coordinator decision (2026-10-12): a toggle's play-mode rule is exactly
+  the single-player toggle arm's (no gate on main), so Adventure and
+  Spectator joiners open doors, in Mirror and Strict, and every player sees
+  it. One rule, `strict_doors::toggle_mode_allows` (exhaustive), asked by
+  the client preflight (`toggle_preflight`) and the server
+  (`HostedServer::toggle_cell_permitted`, used for the primary and every
+  companion in place of `validate_block_edit` / `cell_permitted`). The
+  server's other checks are unchanged and in an edit's order: in the world,
+  loaded, not bedrock, reach with the server copy's slot item (primary
+  only), foreign plot (`remote_plot_allows`, split out of
+  `remote_may_touch`, whose other callers are unchanged), economy owner.
+- Owner question: should Spectator toggle at all? Kept as single-player has
+  it.

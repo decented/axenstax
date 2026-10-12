@@ -40,9 +40,35 @@ impl HostedServer {
         Ok(())
     }
 
-    /// Every cell of `cells` permitted ([`Self::cell_permitted`]).
-    fn all_permitted(&self, i: usize, cells: &[[i32; 3]]) -> Result<(), EditRefusal> {
-        cells.iter().try_for_each(|c| self.cell_permitted(i, *c))
+    /// C3d run 20 — what a toggle of `cell` needs: a toggle is a USE, not
+    /// an edit, so its play-mode rule is the single-player toggle arm's
+    /// (`strict_doors::toggle_mode_allows`: an Adventure player opens
+    /// doors), and the server's other checks stay as an edit's, in an
+    /// edit's order: in the world, loaded, not bedrock, then (with
+    /// `reach_slot`, the clicked primary only) reach with the server copy's
+    /// item in that hotbar slot, then the play mode, a foreign plot and a
+    /// foreign economy block. Structurally derived companions pass `None`.
+    fn toggle_cell_permitted(&self, i: usize, cell: [i32; 3], reach_slot: Option<usize>) -> Result<(), EditRefusal> {
+        let sp = self.server.players.get(i).ok_or(EditRefusal::Malformed)?;
+        let cs = crate::chunk::CHUNK_SIZE as i32;
+        if cell[1] < 0 || cell[1] >= 6 * cs { return Err(EditRefusal::OutOfWorld); }
+        if !self.server.loaded_columns.contains(&(cell[0].div_euclid(cs), cell[2].div_euclid(cs))) { return Err(EditRefusal::Unloaded); }
+        let current = self.server.world.get_block(cell[0], cell[1], cell[2]);
+        if current == crate::block::BEDROCK { return Err(EditRefusal::Protected); }
+        if let Some(slot) = reach_slot {
+            let (kind, id) = sp.inventory.slot(slot).map_or(protocol::ItemRef::Empty.to_wire(), |s| crate::inventory::item_to_ref(&s.item).to_wire());
+            let d = glam::Vec3::new(cell[0] as f32 + 0.5, cell[1] as f32 + 0.5, cell[2] as f32 + 0.5) - sp.player.eye_pos();
+            if !block_change_within_reach(d.length_squared(), kind, id, false) { return Err(EditRefusal::Reach); }
+        }
+        if sp.server_simulated {
+            if !crate::strict_doors::toggle_mode_allows(self.server.play_mode) { return Err(EditRefusal::PlayMode); }
+            self.remote_plot_allows(sp, cell[0], cell[2])?;
+            let npub = verified_npub(sp.verified_pubkey);
+            if !economy_owner_allows(&self.server.world, (cell[0], cell[1], cell[2]), current, npub.as_deref()) {
+                return Err(EditRefusal::EconomyOwner);
+            }
+        }
+        Ok(())
     }
 
     /// The server's live matching half of the door at `cell`, if any (the
@@ -155,8 +181,11 @@ impl HostedServer {
     /// A typed toggle of `cell`'s door, gate or trapdoor, from either kind
     /// of seat: the shared footprint derived from the server's world, reach
     /// to the primary with the server copy's item in `hotbar_slot` (an
-    /// edit's rule, `validate_block_edit`, so a Reach Claw counts; run 19),
-    /// every other cell's permission preflighted. No window change.
+    /// edit's reach rule, so a Reach Claw counts; run 19), every other
+    /// cell's permission preflighted. No window change. Run 20: a toggle is
+    /// a use, not an edit — its play-mode rule is the single-player toggle
+    /// arm's ([`Self::toggle_cell_permitted`]), so an Adventure joiner opens
+    /// doors.
     ///
     /// Strict (Decision 20): the canonical open bit from the primary.
     /// Mirror (run 19): `FlipEach`, the rule its client predicted,
@@ -186,12 +215,11 @@ impl HostedServer {
         if slot >= 9 { return refuse(self, "invalid action slot", RefusalKind::Rule, budget); }
         let rule = if strict { crate::strict_doors::OpenRule::Canonical } else { crate::strict_doors::OpenRule::FlipEach };
         let metas = crate::strict_doors::toggle_metas(&self.server.world, cell, rule);
-        let held = self.server.players[i].inventory.slot(slot).map_or(protocol::ItemRef::Empty.to_wire(), |s| crate::inventory::item_to_ref(&s.item).to_wire());
-        let primary = protocol::BlockChange { x: cell[0], y: cell[1], z: cell[2], new_block: block, meta: metas[0].1 };
-        if let Err(why) = self.validate_block_edit(i, &primary, held, slot) {
+        // Run 20: a use's permission, not an edit's (no edit play-mode gate).
+        if let Err(why) = self.toggle_cell_permitted(i, cell, Some(slot)) {
             return refuse(self, &format!("primary: {why:?}"), RefusalKind::Rule, budget);
         }
-        if let Err(why) = self.all_permitted(i, &cells[1..]) {
+        if let Err(why) = cells[1..].iter().try_for_each(|c| self.toggle_cell_permitted(i, *c, None)) {
             return refuse(self, &format!("{why:?}"), RefusalKind::Rule, budget);
         }
         let included = self.server.players[i].window_events.last_number();
