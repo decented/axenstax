@@ -3429,7 +3429,12 @@ mod tests {
         let floor = [feet[0], feet[1] - 1, feet[2]];
         let standing = hg.state.world.get_block(floor[0], floor[1], floor[2]);
         hg.state.pending_block_changes.push(crate::protocol::BlockChange { x: floor[0], y: floor[1], z: floor[2], new_block: standing, meta: 0 });
+        // The click frame runs no tick (so no input is sent before the use
+        // arm, which runs after the frame's ticks): the edit is still unsent.
+        hg.state.last_tick = std::time::Instant::now();
+        hg.state.tick_accumulator = std::time::Duration::ZERO;
         right_click(&mut hg);
+        assert!(!hg.state.pending_block_changes.is_empty(), "the edit was still waiting at the click");
         assert_eq!(toggles(&hg), 0, "nothing reserved while an edit waits");
         assert!(!crate::block_shape::is_open(hg.state.world.meta_at(bottom[0], bottom[1], bottom[2])), "nothing predicted");
         assert_eq!(toast_text(&hg).as_deref(), Some(crate::strict_doors::TOGGLE_WAITS_TOAST), "the toast asks again");
