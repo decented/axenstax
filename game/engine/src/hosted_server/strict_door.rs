@@ -79,7 +79,7 @@ impl HostedServer {
     pub(super) fn door_intent_cells(&self, intent: &crate::action_wire::ActionIntent) -> Vec<[i32; 3]> {
         match intent {
             crate::action_wire::ActionIntent::DoorPlace { bottom, .. } => vec![*bottom, [bottom[0], bottom[1].saturating_add(1), bottom[2]]],
-            crate::action_wire::ActionIntent::ToggleBlock { cell, .. } => crate::strict_doors::toggle_footprint(&self.server.world, *cell),
+            crate::action_wire::ActionIntent::ToggleBlock { cell, expected_block, .. } => crate::strict_doors::toggle_sendback_cells(&self.server.world, *cell, *expected_block),
             _ => Vec::new(),
         }
     }
@@ -158,20 +158,26 @@ impl HostedServer {
     /// edit's rule, `validate_block_edit`, so a Reach Claw counts; run 19),
     /// every other cell's permission preflighted. No window change.
     ///
-    /// Strict (Decision 20): the canonical open bit from the primary;
-    /// refusals corrected (`refuse_door`). Mirror (run 19): `FlipEach`, the
-    /// rule its client predicted, byte-for-byte the old local click; a
-    /// refusal sends the footprint back and retires `Refused`, uncorrected
-    /// (nothing in the window was predicted). `false` stops the queue.
+    /// Strict (Decision 20): the canonical open bit from the primary.
+    /// Mirror (run 19): `FlipEach`, the rule its client predicted,
+    /// byte-for-byte the old local click. A refusal in either mode sends
+    /// the cells back and retires `Refused`, uncorrected (run-18 review M1:
+    /// nothing in the window was predicted). `false` stops the queue.
     pub(super) fn serve_toggle(&mut self, i: usize, action: ActionHeader, cell: [i32; 3], expected: crate::block::BlockId, hotbar_slot: u8, budget: &mut EditTickBudget) -> bool {
         let strict = self.strict_slot(i);
         let block = self.server.world.get_block(cell[0], cell[1], cell[2]);
         let cells = crate::strict_doors::toggle_footprint(&self.server.world, cell);
+        // Run 19 (run-18 review M1/L2): a toggle changes no window, so a
+        // refusal in either mode is the cells sent back (the union of the
+        // server's footprint and the client's possible one) and the
+        // `Refused` row — no whole-window `Replace`, no tick of the
+        // correction bound. Strict still tallies it.
+        let back = crate::strict_doors::toggle_sendback_cells(&self.server.world, cell, expected);
         let refuse = |hs: &mut Self, why: &str, kind: RefusalKind, budget: &mut EditTickBudget| -> bool {
-            if strict { return hs.refuse_door(i, action, &cells, budget, why, kind); }
-            log::debug!("Mirror toggle at {cell:?} refused: {why}");
-            hs.send_back_cells(&cells, budget);
-            hs.complete_typed_noop_at(i, action, ActionFate::Refused, &cells)
+            log::debug!("Toggle at {cell:?} refused: {why}");
+            if strict { hs.server.players[i].strict_refusals.note(kind); }
+            hs.send_back_cells(&back, budget);
+            hs.complete_typed_noop_at(i, action, ActionFate::Refused, &back)
         };
         // Run 15's rule: stale-world only when the block id differs.
         if block != expected { return refuse(self, "the cell no longer holds what the client toggled", RefusalKind::StaleWorld, budget); }

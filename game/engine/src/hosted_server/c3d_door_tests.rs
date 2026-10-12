@@ -406,3 +406,24 @@ fn c3d_strict_toggle_reach_uses_the_server_copys_slot_item() {
     for y in [80, 81] { assert!(crate::block_shape::is_open(j.server_cell([47, y, 40]).1), "the Claw reaches: open at y={y}"); }
     assert_eq!(j.refusals(), (0, 1, 0), "no further refusal");
 }
+
+/// Run-18 review M1 — a refused toggle never costs a window correction: an
+/// honest Strict joiner holding right-click on a door in someone else's
+/// plot (twelve refused clicks inside a few ticks, past the correction
+/// bound's 8 per 100 ticks) is never torn down, draws no `Replace`, and its
+/// door ends shut as the server holds it.
+#[test]
+fn c3d_strict_held_toggle_in_a_foreign_plot_never_tears_down() {
+    let mut j = joined("door-held-plot", &[], false);
+    j.hs.server.world.plots.push(crate::plot::PlotData { owner: crate::plot::PlotOwner::Npub("npub1someoneelse".into()), marker: (50, 80, 40), min_x: 36, max_x: 58, min_z: 30, max_z: 50 });
+    for w in [&mut j.hs.server.world, &mut j.world] { stand_door(w, [41, 80, 40], Facing::North); }
+    for _ in 0..12 { j.toggle([41, 80, 40]); }
+    for _ in 0..10 { j.pump(); }
+    assert!(!j.hs.disconnected[j.i], "never torn down");
+    assert!(j.hs.server.players[j.i].window_events.death_replace.is_none(), "no correction Replace outstanding");
+    assert_eq!(j.refusals(), (0, 12, 0), "twelve rule refusals, tallied");
+    for c in [[41, 80, 40], [41, 81, 40]] {
+        assert!(!crate::block_shape::is_open(j.client_cell(c).1), "the client's half at {c:?} ends shut");
+        assert_eq!(j.client_cell(c), j.server_cell(c), "as the server holds it");
+    }
+}

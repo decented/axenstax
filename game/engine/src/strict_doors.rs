@@ -53,6 +53,42 @@ pub fn toggle_footprint(world: &World, primary: [i32; 3]) -> Vec<[i32; 3]> {
     cells
 }
 
+/// C3d run 19 (run-18 review M1/L2) — the cells a refused or superseded
+/// toggle puts back as the server holds them: the server's footprint, and,
+/// when the client clicked a door, every cell its own footprint could hold
+/// (the primary, the cells above and below it, the four same-height
+/// neighbours and the cells above and below each: at most 15), whatever the
+/// server's cells hold now — so a companion only the client predicted is
+/// put back too. A toggle changes no window: this send-back undoes it whole.
+pub fn toggle_sendback_cells(world: &World, primary: [i32; 3], expected: BlockId) -> Vec<[i32; 3]> {
+    let mut cells = toggle_footprint(world, primary);
+    if expected == OAK_DOOR {
+        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            for dy in [0, -1, 1] {
+                let c = [primary[0] + dx, primary[1] + dy, primary[2] + dz];
+                if !cells.contains(&c) { cells.push(c); }
+            }
+        }
+    }
+    cells
+}
+
+/// C3d run 19 (run-18 review M1b) — what a joined client can know before
+/// it sends a toggle the server would refuse: the play mode lets it edit
+/// the world, and the primary's centre is within an edit's reach of its eye
+/// with the item it holds (the server's own rule,
+/// `block_change_within_reach`). `Err` is the toast; nothing is sent or
+/// predicted. (A foreign plot is not checked here: the client can't tell
+/// its own signed-in plots from others'; the server's refusal of one is a
+/// cheap send-back.)
+pub fn toggle_preflight(play_mode: crate::play_mode::PlayMode, eye: glam::Vec3, primary: [i32; 3], held: Option<&crate::item::Item>) -> Result<(), &'static str> {
+    if !play_mode.can_edit_world() { return Err("You can't open that in this game mode."); }
+    let d = glam::Vec3::new(primary[0] as f32 + 0.5, primary[1] as f32 + 0.5, primary[2] as f32 + 0.5) - eye;
+    let (kind, id) = held.map_or(crate::protocol::ItemRef::Empty.to_wire(), |item| crate::inventory::item_to_ref(item).to_wire());
+    if !crate::hosted_server::block_change_within_reach(d.length_squared(), kind, id, false) { return Err("That's too far away to open."); }
+    Ok(())
+}
+
 /// The metas a toggle click on `primary` leaves, cell by cell, under `rule`
 /// ([`toggle_footprint`]'s cells, primary first). Applying them is the
 /// whole toggle (the caller re-meshes or broadcasts each cell).
@@ -238,6 +274,22 @@ mod tests {
         door(&mut agree, [5, 70, 5], Facing::North, false);
         door(&mut agree, [6, 70, 5], Facing::North, false);
         assert_eq!(toggle_metas(&agree, [6, 71, 5], OpenRule::Canonical), toggle_metas(&agree, [6, 71, 5], OpenRule::FlipEach));
+    }
+
+    /// Run 19 — the send-back covers a companion only the client holds,
+    /// and the preflight refuses Adventure and an out-of-reach door.
+    #[test]
+    fn c3d_toggle_sendback_and_preflight() {
+        let mut w = World::new();
+        w.set_block(5, 70, 5, STONE);
+        let back = toggle_sendback_cells(&w, [5, 70, 5], OAK_DOOR);
+        assert_eq!(back.len(), 15, "the whole bounded candidate set");
+        assert!(back.contains(&[6, 71, 5]) && back.contains(&[5, 69, 5]));
+        assert_eq!(toggle_sendback_cells(&w, [5, 70, 5], OAK_FENCE_GATE), vec![[5, 70, 5]]);
+        let eye = glam::Vec3::new(5.5, 71.6, 2.5);
+        assert!(toggle_preflight(crate::play_mode::PlayMode::Survival, eye, [5, 70, 5], None).is_ok());
+        assert!(toggle_preflight(crate::play_mode::PlayMode::Adventure, eye, [5, 70, 5], None).is_err());
+        assert!(toggle_preflight(crate::play_mode::PlayMode::Survival, eye, [5, 70, 12], None).is_err(), "9.5 blocks bare-handed");
     }
 
     #[test]

@@ -13895,7 +13895,19 @@ impl super::GameState {
                         // recorded like any of its edits, so its joiners hear
                         // them (single-player discards them at the send).
                         let slot = self.players[pidx].hotbar_slot;
-                        let rule = if self.strict_remote(pidx) {
+                        // Run-18 review M1b — a joined seat never sends a
+                        // toggle it knows the server refuses (play mode,
+                        // reach with the held item): a toast instead.
+                        let preflight = if pidx == 0 && self.joined() {
+                            let p = &self.players[pidx];
+                            crate::strict_doors::toggle_preflight(self.play_mode, p.player.eye_pos(), pos, p.inventory.hotbar_slot(slot).map(|s| &s.item))
+                        } else {
+                            Ok(())
+                        };
+                        let rule = if let Err(text) = preflight {
+                            self.toast = Some((text.to_string(), Instant::now() + Duration::from_secs(2)));
+                            None
+                        } else if self.strict_remote(pidx) {
                             let remote = self.remote_client.as_mut().expect("a Strict seat is joined");
                             let p = &mut self.players[pidx];
                             match crate::strict_doors::toggle_joined(remote, &mut p.crafting_ui, &p.inventory, &p.armour_slots, &self.world, pos, target_blk, slot) {
