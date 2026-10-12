@@ -5809,7 +5809,7 @@ impl HostedServer {
             return Err(EditRefusal::Malformed);
         }
         let cs = crate::chunk::CHUNK_SIZE as i32;
-        if bc.y < 0 || bc.y >= 6 * cs {
+        if bc.y < 0 || bc.y >= crate::world::WORLD_HEIGHT {
             return Err(EditRefusal::OutOfWorld);
         }
         if !self
@@ -5958,7 +5958,7 @@ impl HostedServer {
         let cs = crate::chunk::CHUNK_SIZE as i32;
         if budget.send_backs >= MAX_SEND_BACKS_PER_CLIENT_PER_TICK
             || bc.y < 0
-            || bc.y >= 6 * cs
+            || bc.y >= crate::world::WORLD_HEIGHT
             || !self
                 .server
                 .loaded_columns

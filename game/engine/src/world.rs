@@ -12,6 +12,12 @@ use crate::chunk::{Chunk, CHUNK_SIZE};
 /// Maximum chunk Y coordinate for terrain generation.
 pub const MAX_CHUNK_Y: i32 = 5;
 
+/// The world's height in blocks: cells `0..WORLD_HEIGHT` exist
+/// (`World::set_block` writes nothing above). C3d run 22 (run-21 review
+/// LOW-5) — the one bound the joined door ceiling refusal and the server's
+/// out-of-world checks read, never a literal.
+pub const WORLD_HEIGHT: i32 = (MAX_CHUNK_Y + 1) * CHUNK_SIZE as i32;
+
 /// Version of the terrain generator's output (gap-audit T2-9, Spec 02 §5).
 ///
 /// **Bump this whenever generation output for a given seed + world flags

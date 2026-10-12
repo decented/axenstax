@@ -15863,7 +15863,8 @@ impl super::GameState {
                                 // never saw). Single-player and joined alike.
                                 let refusal = match self.players[pidx].inventory.hotbar_placeable_id(hotbar) {
                                     // C3d run 21 (run-18 review L4) — joined, a top
-                                    // above the world is refused too (no ghost top).
+                                    // above the world is refused too (before: a Mirror
+                                    // half door, a Strict corrected refusal per click).
                                     Some(block::OAK_DOOR)
                                         if crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>
                                     {

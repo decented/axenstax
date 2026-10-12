@@ -390,8 +390,7 @@ fn c3d_strict_door_break_derives_the_pair_once() {
 #[test]
 fn c3d_strict_door_place_with_a_forbidden_upper_cell_is_refused_whole() {
     let mut j = joined("door-forbidden-top", &[(0, doors(3))], false);
-    let cs = crate::chunk::CHUNK_SIZE as i32;
-    let top_y = 6 * cs - 1;
+    let top_y = crate::world::WORLD_HEIGHT - 1;
     for x in 39..=42 { for z in 39..=42 { j.hs.server.world.set_block(x, top_y - 3, z, STONE); } }
     let p = &mut j.hs.server.players[j.i].player;
     p.pos = glam::Vec3::new(40.5, (top_y - 2) as f32, 40.5);

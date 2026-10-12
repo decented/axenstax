@@ -41,13 +41,17 @@ pub(crate) fn door_pair_cell(cell: [i32; 3], m: u8) -> Option<[i32; 3]> {
 /// C3d run 21 (run-18 review L4) — the place arm's door headroom refusal,
 /// checked before a door is taken: the cell above `bottom` isn't AIR, or,
 /// on a joined client (Mirror and Strict alike), it lies outside the
-/// world's height. The server refuses a top half above the world, and no
-/// send-back reaches a cell there, so a joined client that placed one kept
-/// a ghost top. Single-player is unchanged (the AIR check alone).
+/// world's height ([`crate::world::WORLD_HEIGHT`]). Before (run-21 review
+/// LOW-1, the real before/after): `World::set_block` already wrote nothing
+/// above the world, so no top was ever seen; a Mirror client placed a
+/// bottom-only door (a half door) and sent a `DoorUpper` coupon for a cell
+/// outside the world, and a Strict client sent a `DoorPlace` the server
+/// refused as a corrected `Rule` refusal (`OutOfWorld`), one correction per
+/// click. Now both refuse before the door is taken: no half door, no
+/// correction. Single-player is unchanged (the AIR check alone).
 pub fn door_headroom_refused(world: &World, bottom: [i32; 3], joined: bool) -> bool {
     let top = bottom[1].saturating_add(1);
-    let cs = crate::chunk::CHUNK_SIZE as i32;
-    (joined && !(0..6 * cs).contains(&top)) || world.get_block(bottom[0], top, bottom[2]) != crate::block::AIR
+    (joined && !(0..crate::world::WORLD_HEIGHT).contains(&top)) || world.get_block(bottom[0], top, bottom[2]) != crate::block::AIR
 }
 
 /// The complete bounded footprint of a toggle click on the toggleable
@@ -380,10 +384,9 @@ mod run21_tests {
     /// reaches); single-player keeps its AIR check alone.
     #[test]
     fn c3d_joined_door_headroom_refuses_a_top_above_the_world() {
-        let cs = crate::chunk::CHUNK_SIZE as i32;
         let mut world = World::new();
-        let ceiling = [3, 6 * cs - 1, 3];
-        assert_eq!(world.get_block(3, 6 * cs, 3), AIR, "above the world reads AIR");
+        let ceiling = [3, crate::world::WORLD_HEIGHT - 1, 3];
+        assert_eq!(world.get_block(3, crate::world::WORLD_HEIGHT, 3), AIR, "above the world reads AIR");
         assert!(door_headroom_refused(&world, ceiling, true), "joined: refused at the ceiling");
         assert!(!door_headroom_refused(&world, ceiling, false), "single-player: unchanged");
         let low = [3, 70, 3];
@@ -402,6 +405,8 @@ mod run21_tests {
     fn c3d_game_loop_door_wiring_is_pinned() {
         let src = include_str!("game_loop.rs");
         assert!(src.contains("if let Some(top) = door_top.filter(|_| !typed_place) {"), "no DoorUpper coupon after a typed placement");
+        // Run-21 review LOW-2 — the place arm asks the joined ceiling rule.
+        assert!(src.contains("if crate::strict_doors::door_headroom_refused(&self.world, [place_x, place_y, place_z], self.joined()) =>"), "the place arm refuses a joined door above the world");
         let strict = src.find("crate::strict_doors::toggle_joined(").expect("the Strict toggle arm");
         let mirror = strict + src[strict..].find("crate::strict_doors::reserve_toggle_unsent(").expect("the Mirror toggle arm");
         let local = mirror + src[mirror..].find("crate::strict_doors::toggle_metas(").expect("the prediction");

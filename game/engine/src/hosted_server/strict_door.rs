@@ -26,7 +26,7 @@ impl HostedServer {
     pub(super) fn cell_permitted(&self, i: usize, cell: [i32; 3]) -> Result<(), EditRefusal> {
         let sp = self.server.players.get(i).ok_or(EditRefusal::Malformed)?;
         let cs = crate::chunk::CHUNK_SIZE as i32;
-        if cell[1] < 0 || cell[1] >= 6 * cs { return Err(EditRefusal::OutOfWorld); }
+        if cell[1] < 0 || cell[1] >= crate::world::WORLD_HEIGHT { return Err(EditRefusal::OutOfWorld); }
         if !self.server.loaded_columns.contains(&(cell[0].div_euclid(cs), cell[2].div_euclid(cs))) { return Err(EditRefusal::Unloaded); }
         let current = self.server.world.get_block(cell[0], cell[1], cell[2]);
         if current == crate::block::BEDROCK { return Err(EditRefusal::Protected); }
@@ -51,7 +51,7 @@ impl HostedServer {
     fn toggle_cell_permitted(&self, i: usize, cell: [i32; 3], reach_slot: Option<usize>) -> Result<(), EditRefusal> {
         let sp = self.server.players.get(i).ok_or(EditRefusal::Malformed)?;
         let cs = crate::chunk::CHUNK_SIZE as i32;
-        if cell[1] < 0 || cell[1] >= 6 * cs { return Err(EditRefusal::OutOfWorld); }
+        if cell[1] < 0 || cell[1] >= crate::world::WORLD_HEIGHT { return Err(EditRefusal::OutOfWorld); }
         if !self.server.loaded_columns.contains(&(cell[0].div_euclid(cs), cell[2].div_euclid(cs))) { return Err(EditRefusal::Unloaded); }
         let current = self.server.world.get_block(cell[0], cell[1], cell[2]);
         if current == crate::block::BEDROCK { return Err(EditRefusal::Protected); }
