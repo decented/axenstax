@@ -2459,4 +2459,130 @@ mod tests {
         assert!(!records[0].is_abort() && records[0].transfer() == e.c.transfer);
         assert_eq!(RetiredCommit::unreadable_aborts(&store), 1);
     }
+
+    // ── CP18: the recipient's activated import moves into the world list ──
+
+    /// An import past its PreparedAck whose working world is a real saved
+    /// world named `name` (written under the test's worlds root, then moved
+    /// into the import); its Committed waits on `relay`.
+    fn prepared_world_import(tag: &str, name: &str, relay: &crate::handover::relay_fixture::Relay) -> (std::path::PathBuf, std::path::PathBuf, crate::handover::Id) {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = rt.block_on(ends(relay));
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).unwrap();
+        let imports = std::env::temp_dir().join(format!("axe_handover_promote_{tag}_{}", hex::encode(random))).join("imports");
+        let import = imports.join(format!("handover-w-{}", hex::encode(e.c.transfer)));
+        std::fs::create_dir_all(&import).unwrap();
+        crate::save::write_world_folder("arriving", &crate::save::WorldMeta::new(name), &crate::save::minimal_world_save_for_tests(7), &crate::world::World::new()).unwrap();
+        let working = import.join("working");
+        std::fs::rename(crate::save::world_dir("arriving"), &working).unwrap();
+        let store = crate::handover::live::authority::store(&working).unwrap();
+        let mut receiver = Receiver::checkpoint_ready(&store, &e.c, &e.ready, [8; 16], &e.root, 100).unwrap();
+        let bearer = crate::handover::live::bearer::Bearer::new([1; 16]);
+        receiver.prepared(&store, &crate::handover::ledger::Ledger::install(), &e.p, PreparedReceipt { event: &e.pe, root: &e.root, bearer: &bearer }).unwrap();
+        relay.insert(e.ce.clone());
+        (imports, working, e.c.transfer)
+    }
+
+    /// The wait for Committed, run to Activated.
+    fn activate_import(imports: &std::path::Path, working: &std::path::Path, t: crate::handover::Id) {
+        use crate::handover::live::resumer::{Backoff, Resumer};
+        let resumer = Resumer::new(Backoff { first: std::time::Duration::from_millis(50), ceiling: std::time::Duration::from_millis(200) });
+        assert_eq!(resumer.resume_imports(imports, &crate::handover::ledger::Ledger::install()), 1, "the import's wait wasn't taken");
+        let store = crate::handover::live::authority::store(working).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while store.read(MarkerKind::Activated, t).unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the import never activated");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Promote until something moves (the resumer's wait lets go of the
+    /// import's lock a moment after Activated), or the deadline.
+    fn promote_until_moved(imports: &std::path::Path) -> crate::handover::live::promote::Promoted {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let p = crate::handover::live::promote::promote_activated_imports(imports, &crate::save::worlds_root());
+            if !p.moved.is_empty() || std::time::Instant::now() > deadline {
+                return p;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// CP18: not before Activated, not while the import's handover lock is
+    /// held in this process; then once, into the world list, openable, its
+    /// Activated record beside it. A second pass (the next start, or a
+    /// crash that left a twin of the import) never moves it again, and a
+    /// fork of the moved world carries no `handover/`.
+    #[test]
+    fn handover_promote_moves_an_activated_import_into_the_world_list_once() {
+        use crate::handover::live::{promote::promote_activated_imports, world_lock};
+        let _root = crate::save::WorldsRootGuard::new("promote-once");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("once", "Harbour Town", &relay);
+        let root = crate::save::worlds_root();
+        let before = promote_activated_imports(&imports, &root);
+        assert!(before.moved.is_empty() && working.exists(), "an import was moved before it was Activated");
+        assert!(crate::save::list_world_entries().is_empty(), "an import listed before it was Activated");
+        let held = world_lock::acquire(&working).unwrap();
+        activate_import(&imports, &working, t);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let while_held = promote_activated_imports(&imports, &root);
+        assert!(while_held.moved.is_empty() && working.exists(), "an import was moved while its handover lock was held here");
+        drop(held);
+        let moved = promote_until_moved(&imports);
+        assert_eq!(moved, crate::handover::live::promote::Promoted { moved: vec!["harbour_town".into()], lines: vec![] });
+        assert!(!working.exists(), "the import's working world is still there");
+        let listed = crate::save::list_world_entries();
+        assert_eq!(listed.len(), 1, "the world list: {:?}", listed.iter().map(|e| &e.folder_name).collect::<Vec<_>>());
+        assert_eq!((listed[0].folder_name.as_str(), listed[0].meta.display_name.as_str()), ("harbour_town", "Harbour Town"));
+        assert_eq!(crate::save::world_open_refusal("harbour_town"), None, "the moved world is refused");
+        let moved_records = crate::handover::live::authority::dir(&root.join("harbour_town"));
+        assert!(moved_records.join(format!("activated-{}.dat", hex::encode(t))).exists(), "the Activated record didn't move with the world");
+        // The next start: nothing left to move, still one world.
+        assert_eq!(promote_activated_imports(&imports, &root), Default::default());
+        // A twin of the import beside the moved world (e.g. a copy put back
+        // by hand, or a move a crash repeated): never moved in a second time.
+        crate::save::copy_dir_recursive(&root.join("harbour_town"), &working, None).unwrap();
+        assert!(promote_activated_imports(&imports, &root).moved.is_empty(), "a world was moved in twice");
+        assert_eq!(crate::save::list_world_entries().len(), 1, "the handed-over world is listed twice");
+        let fork = crate::save::fork_world("harbour_town", "Harbour Town").expect("the moved world forks");
+        assert!(!crate::save::world_dir(&fork).join("handover").exists(), "the fork carried handover/");
+        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
+    }
+
+    /// CP18: a worlds folder on another drive (the rename fails with
+    /// `CrossesDevices`) leaves the import where it is, with the lobby line;
+    /// another process holding the import's lock, and a quarantine record,
+    /// each keep it there with no line; with neither, it moves.
+    #[test]
+    fn handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine() {
+        use crate::handover::live::{copy, promote::{promote_activated_imports, promote_with}, world_lock};
+        let _root = crate::save::WorldsRootGuard::new("promote-refused");
+        let relay = crate::handover::relay_fixture::Relay::start();
+        let (imports, working, t) = prepared_world_import("refused", "Far Field", &relay);
+        activate_import(&imports, &working, t);
+        let root = crate::save::worlds_root();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let other_drive = loop {
+            let p = promote_with(&imports, &root, |_, _| Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices)));
+            if !p.lines.is_empty() || std::time::Instant::now() > deadline {
+                break p;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(other_drive, crate::handover::live::promote::Promoted { moved: vec![], lines: vec![copy::import_on_other_drive("Far Field")] });
+        assert!(working.exists() && crate::save::list_world_entries().is_empty(), "something moved across drives");
+        let child = world_lock::tests::ChildHolder::hold(&working);
+        assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "an import another process holds was moved");
+        child.kill();
+        let quarantined = crate::handover::live::authority::dir(&working).join(format!("quarantined-{}.dat", hex::encode(t)));
+        std::fs::write(&quarantined, b"q").unwrap();
+        assert_eq!(promote_activated_imports(&imports, &root), Default::default(), "a quarantined import was moved");
+        assert!(crate::save::list_world_entries().is_empty(), "a quarantined import is listed");
+        std::fs::remove_file(&quarantined).unwrap();
+        assert_eq!(promote_until_moved(&imports).moved, vec!["far_field".to_owned()]);
+        let _ = std::fs::remove_dir_all(imports.parent().unwrap());
+    }
 }

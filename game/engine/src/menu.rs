@@ -417,6 +417,10 @@ pub struct MenuState {
 
 impl MenuState {
     pub fn new() -> Self {
+        // CP18: a handed-over world that has finished arriving moves into
+        // the worlds folder first, so it lists below.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::handover_game::promote_activated_imports();
         #[cfg(not(target_arch = "wasm32"))]
         let worlds = save::list_world_entries();
         #[cfg(target_arch = "wasm32")]
@@ -499,6 +503,7 @@ impl MenuState {
     pub fn refresh(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            crate::handover_game::promote_activated_imports();
             self.worlds = save::list_world_entries();
             self.awaiting_imports = crate::handover_game::awaiting_import_statuses();
         }

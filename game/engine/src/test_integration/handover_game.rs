@@ -968,8 +968,15 @@ impl crate::handover::live::recipient::HeldLease for FlagLease {
 #[test]
 #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
 fn game_harness_handover_recipient_leaving_while_prepared_ends_the_session_and_still_activates() {
+    leave_while_prepared_then_activate("dst-prepared-leave");
+}
+
+/// The body of the test above: the recipient leaves at Prepared and its
+/// import activates in the background. Returns the joined game (now in the
+/// lobby), the source session and the import's working world.
+fn leave_while_prepared_then_activate(tag: &str) -> (Joined, SourceSession, PathBuf) {
     use crate::handover::live::resumer::{Backoff, Resumer};
-    let mut j = joined("dst-prepared-leave");
+    let mut j = joined(tag);
     let mut src = consented(&mut j);
     let t = src.transfer();
     let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1015,6 +1022,66 @@ fn game_harness_handover_recipient_leaving_while_prepared_ends_the_session_and_s
         assert!(std::time::Instant::now() < deadline, "the recipient never activated after leaving while Prepared");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    (j, src, working)
+}
+
+/// CP18: once Activated, the lobby's refresh moves the handed-over world
+/// into the world list; Play opens it through the lobby's own load path
+/// (the open guard passes the Activated record it carries), it hosts, and
+/// a joiner joins it.
+#[test]
+#[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+fn game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_lobby() {
+    let (mut j, _src, working) = leave_while_prepared_then_activate("dst-opens-activated");
+    assert!(matches!(j.hg.state.mode, crate::GameMode::Menu(_)), "the recipient isn't in the lobby");
+    // The lobby's refresh, until the resumer's wait has let go of the import.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let folder = loop {
+        // The harness's import lives in its own folder, not the data dir
+        // the lobby's refresh promotes from; the refresh then lists it.
+        let p = crate::handover::live::promote::promote_activated_imports(&j._dir.0.join("imports"), &crate::save::worlds_root());
+        let crate::GameMode::Menu(ms) = &mut j.hg.state.mode else { unreachable!() };
+        ms.refresh();
+        if let Some(f) = p.moved.first() {
+            break f.clone();
+        }
+        assert!(std::time::Instant::now() < deadline, "the activated import never moved into the world list");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(!working.exists(), "the import's working world is still there");
+    let crate::GameMode::Menu(ms) = &j.hg.state.mode else { unreachable!() };
+    assert!(ms.worlds.iter().any(|e| e.folder_name == folder), "the lobby doesn't list the handed-over world");
+    assert_eq!(crate::save::world_open_refusal(&folder), None, "the handed-over world is refused");
+    // Play, from the lobby.
+    j.hg.state.pending_menu_action =
+        Some((crate::menu::MenuAction::LoadWorld(folder.clone(), crate::spawn_pref::SpawnPref::Default), web_time::Instant::now()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !matches!(j.hg.state.mode, crate::GameMode::Playing) {
+        j.hg.frames(1);
+        if let crate::GameMode::Menu(ms) = &j.hg.state.mode {
+            assert!(ms.notice.is_none(), "the lobby refused the world: {:?}", ms.notice);
+        }
+        assert!(std::time::Instant::now() < deadline, "the handed-over world never opened");
+    }
+    assert_eq!(j.hg.state.world_name, folder);
+    // Host it (a lent host on the in-process transport), and a joiner joins.
+    let hs = HostedServer::start_host(
+        1,
+        folder.clone(),
+        j.hg.state.biome_gen.seed,
+        1,
+        crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        crate::hosted_server::HostWorld::Lent,
+    )
+    .expect("the handed-over world hosts");
+    j.hg.state.hosted_server = Some(hs);
+    let client = j.hg.state.hosted_server.as_mut().unwrap().attach_test_remote();
+    client.send_to_server(&protocol::serialize_packet(
+        PacketType::JoinRequest,
+        &crate::remote_client::build_join_request_guest("Visitor", 0),
+    ));
+    j.hg.hosted_ticks(2);
+    assert!(accepted(&client).is_some(), "the joiner wasn't accepted into the handed-over world");
 }
 
 

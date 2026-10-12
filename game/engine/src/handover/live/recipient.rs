@@ -411,7 +411,10 @@ impl RecipientSession {
             self.checkpoint = None;
             self.receiver = None;
             // An unmarked import is never touched; a failed discard is left
-            // for the next sweep (the marker still names it).
+            // for the next sweep (the marker still names it). CP17 review
+            // LOW-8: the session's own lock handle inside the import goes
+            // first (Windows can't delete a folder with a handle open).
+            self.live_lock = None;
             let _ = super::inert::discard(&self.imports, self.transfer());
         }
         // CP12 (CP10 review LOW-2): past the durable receipt the wait for
@@ -820,8 +823,11 @@ impl RecipientSession {
         if self.live_lock.is_none() {
             let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
             self.live_lock = Some(
-                super::world_lock::acquire(&working)
-                    .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?,
+                super::world_lock::acquire(&working).map_err(|e| match e {
+                    // CP17 review MEDIUM-1: no file locking here, no handover.
+                    super::world_lock::LockError::Unsupported => Refusal(super::copy::NO_FILE_LOCKING),
+                    _ => Refusal("The handover record couldn't be stored safely on this device."),
+                })?,
             );
         }
         let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;

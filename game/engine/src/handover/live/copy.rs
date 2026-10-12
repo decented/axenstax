@@ -1,8 +1,9 @@
 //! Every player-facing line of the live world handover, in one place so the
 //! wording can be reviewed as a whole. PROPOSED copy: not yet reviewed by the
 //! owner. Plain UK English, npub only (never hex), and nothing beyond what is
-//! built: this version stops once the recipient has stored its copy, so no
-//! line says the recipient becomes the host or that the world opens there.
+//! built. CP18: once the import is Activated the world moves into the
+//! recipient's world list (`promote`), where it opens and hosts like any
+//! other world.
 
 /// The host action, one per signed-in player who is here now.
 pub fn hand_to(label: &str) -> String {
@@ -22,8 +23,9 @@ pub fn consent_lines(world: &str, source_npub: &str) -> [String; 5] {
          arrows and other things in flight, and wild animals and monsters may not."
             .to_string(),
         "Nobody's sign-in, contacts, wallet or private Plans are copied.".to_string(),
-        // Temporary until activation ships: say what this version does.
-        "This version stores the copy but can't open it as your world yet.".to_string(),
+        // CP18: once the handover finishes, the world is moved into the
+        // world list (`promote::promote_activated_imports`).
+        "Once the handover finishes, the world appears in your world list and you can play or host it.".to_string(),
     ]
 }
 
@@ -161,6 +163,11 @@ pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be re
 pub const HANDOVER_ELSEWHERE: &str =
     "Another copy of the game on this computer is handing this world over right now. Try again once that has finished.";
 
+/// CP17 review MEDIUM-1: the world's folder gives no file lock (e.g. some
+/// network drives), so a handover can't start; play and saving go on.
+pub const NO_FILE_LOCKING: &str =
+    "This world's folder doesn't support the file locking a handover needs, so it can't be handed over from here. You can still play it.";
+
 // Slice A (CP7): bearer, Prepared, retirement.
 pub const NO_LIVE_INVITE: &str =
     "This world has no live online invitation, so it can't be handed over. Host it online again for a fresh invitation.";
@@ -186,6 +193,15 @@ pub fn recipient_finishing(world: &str) -> String {
 }
 
 /// CP10: the recipient's world is activated here: the handover finished.
+/// CP18: an Activated import that can't be moved into the worlds folder
+/// because that folder is on a different drive (no copy path).
+pub fn import_on_other_drive(world: &str) -> String {
+    format!(
+        "\u{201c}{world}\u{201d} was handed over to you, but it can't be moved into your world list because your worlds folder \
+         is on a different drive from the game's data folder. Put the worlds folder (AXENSTAX_WORLDS_DIR) on the same drive \
+         and start the game again."
+    )
+}
 pub fn recipient_activated(world: &str) -> String {
     format!("\"{world}\" is yours now: the handover finished and the world is stored on this device.")
 }

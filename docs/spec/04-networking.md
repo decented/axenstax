@@ -5380,7 +5380,8 @@ verifies none, so a proposal there is declined). Its game loop drains the
 screen (copy in `handover::live::copy`, proposed and awaiting owner review:
 world name, source npub, what comes across and what may not — loose drops,
 things in flight, wild animals and monsters — that the copy is stored on this
-machine, and that this version can't open it as their world yet); a refused
+machine, and that once the handover finishes the world appears in their world
+list to play or host); a refused
 or unverifiable proposal is answered with a Decline. Every Decline is typed
 (`wire::DeclineReason`: `Player`, `Busy`, `UnverifiedHost`, `NotReady`,
 `Invalid`) and the source shows the reason (`copy::host_declined`), never a
@@ -6177,9 +6178,27 @@ now. Try again once that has finished." (`copy::HANDOVER_ELSEWHERE`), and so
 does a handover of it (`source::check`). The OS releases the lock when the
 handle closes or the process dies, so a crash leaves no stale lock; `.live`
 itself is never deleted (deleting a lock file under a holder lets two
-processes lock two files) and is one of the folder's 256 entries. A lock
-file that can't be checked counts as held (fail closed); one that can't be
-made at start-up, with no other holder seen, is worked without (logged).
+processes lock two files) and is one of the folder's 256 entries. CP18
+(CP17 review MEDIUM-1, DECIDED): only "would block" means held. Any other
+lock error (a file system without file locking, e.g. NFS with no lock
+daemon), or an existing regular `.live` that can't be opened, means "no
+lock here": open, save, host and the start-up work go on as before the lock
+(logged once per world), but a new handover refuses, on the source at
+disclosure and on the recipient before its receipt, with
+`copy::NO_FILE_LOCKING` ("This world's folder doesn't support the file
+locking a handover needs…"); a world never becomes unopenable or
+unsaveable because of the lock. A `.live` that exists and isn't a regular
+file still counts as held. CP18 (CP17 review LOW-3): the probe takes a
+shared lock (`try_lock_shared`) and lets go at once, so two probes never
+collide while a live session's exclusive lock still blocks it. CP18 (CP17
+review LOW-4): the registry is keyed by the canonical `handover/` path; no
+thread sleeps while holding it; a releasing guard lets go of its file
+before its entry, and a present entry with no live guard counts as this
+process (`acquire` retries, the probe answers "not elsewhere"); promotion
+moves an import only when no holder in this process remains, so the
+rename never meets this process's handle (Windows). CP18 (CP17 review
+LOW-8): a recipient aborting while inert drops its own lock handle before
+it deletes its import.
 Native only. Tested with a real second process (the test binary
 re-executed holding the lock): its promotion, publication, open and import
 wait are skipped while it lives, and all go ahead once it is killed.
@@ -6257,7 +6276,38 @@ above the cards, "Waiting for <npub> to finish handing this world over"
 (the source persona's npub; `resumer::awaiting_statuses`, the same
 bounded, read-only scan as the start-up step). It is not a world card:
 the import isn't under the worlds folder and can't be opened. There is
-no "take over anyway" (it risks two live copies; an owner question). The
+no "take over anyway" (it risks two live copies; an owner question).
+
+**The recipient opens the handed-over world (CP18, DECIDED).** Once the
+import is Activated, `handover::live::promote::promote_activated_imports`
+moves its `working` folder into the worlds folder with one `rename`, so it
+lists as an ordinary world card, and Play, Host and Fork work on it as on a
+world made here. It runs on the main thread only, at start-up (after the
+resumer's boot step) and on every lobby refresh, before the list is read;
+never on the resumer's thread. An import is moved only when it holds an
+Activated record, has no `quarantined-*` record, passes the open guard, and
+no holder in this process (`world_lock::held_here`: the live session or the
+resumer's wait, which read it at its old path) nor another process holds
+its handover lock; otherwise it is left for the next refresh. The folder
+name is the lobby's new-world naming (`save::slugify_folder_name` of the
+world's display name) with the `_2`, `_3`, … collision rule, applied to the
+"world" fallback too. After the rename both parent folders are fsynced
+(`crate::fsync::sync_dir`). Idempotent: the rename is atomic, every import
+scan reads `working/handover/`, so a moved import vanishes from them all,
+and an import whose Activated transfer already has a world in the worlds
+folder is never moved again (tested with a twin copy). The moved world
+keeps `handover/` with its Activated record (the guard passes it); a fork
+carries no `handover/` (tested). The import's `received/` copy and archive
+stay where they were (owner question: discard them after the move). A
+worlds folder on another drive (`AXENSTAX_WORLDS_DIR` elsewhere, the rename
+fails with `CrossesDevices`) has no copy path: the import stays, and the
+world list shows `copy::import_on_other_drive` (what to change). Before
+activation, and on quarantine, there is no card, as above. Tests:
+`handover_promote_moves_an_activated_import_into_the_world_list_once`,
+`handover_promote_refuses_another_drive_a_held_lock_and_a_quarantine`, and
+the GPU harness `game_harness_handover_recipient_opens_and_hosts_the_activated_world_from_the_lobby`
+(Activated → listed → opened by the lobby's own load path → hosted → a
+joiner joins). The
 open guard refuses the import until it is Activated,
 whatever the inert marker says: any `ready-*`, `prepared-*` or
 `quarantined-*` record of a transfer with no `activated-<same>.dat`

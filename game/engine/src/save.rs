@@ -4554,7 +4554,7 @@ fn dir_size(path: &std::path::Path) -> u64 {
 
 /// Recursively copy a directory.
 #[cfg(not(target_arch = "wasm32"))]
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path, skip_top: Option<&str>) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path, skip_top: Option<&str>) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;

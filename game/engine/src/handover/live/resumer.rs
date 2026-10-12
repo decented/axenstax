@@ -397,7 +397,7 @@ fn import_receipts(imports: &Path) -> Vec<(PathBuf, Id)> {
 }
 
 /// CP13: the same scan for any record kind's file prefix.
-fn import_records(imports: &Path, prefix: &str) -> Vec<(PathBuf, Id)> {
+pub(crate) fn import_records(imports: &Path, prefix: &str) -> Vec<(PathBuf, Id)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(imports) else { return out };
     for (seen, entry) in entries.enumerate() {

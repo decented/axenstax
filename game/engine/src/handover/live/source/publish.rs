@@ -47,6 +47,11 @@ impl SourceSession {
                 Err(crate::handover::live::world_lock::LockError::HeldElsewhere) => {
                     return Err(Refusal(crate::handover::live::copy::HANDOVER_ELSEWHERE));
                 }
+                // CP17 review MEDIUM-1: a folder with no file locking can't
+                // hold a handover; the world itself still opens and saves.
+                Err(crate::handover::live::world_lock::LockError::Unsupported) => {
+                    return Err(Refusal(crate::handover::live::copy::NO_FILE_LOCKING));
+                }
                 Err(crate::handover::live::world_lock::LockError::Io) => {
                     log::warn!("handover: this world's handover lock couldn't be taken; nothing was disclosed");
                     return Err(Refusal(crate::handover::live::copy::PENDING_ABORT_UNWRITTEN));

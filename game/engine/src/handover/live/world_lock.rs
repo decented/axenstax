@@ -32,7 +32,9 @@ use std::sync::{Arc, Mutex, Weak};
 /// The lock file's name inside `handover/`.
 pub const LOCK_FILE: &str = ".live";
 
-/// This process's holders, by the lock file's absolute path.
+/// This process's holders, by the lock file's path (`lock_path`). A
+/// present entry whose guard is gone is a holder still releasing (CP17
+/// review LOW-4): it counts as this process, never as another.
 static HELD: Mutex<BTreeMap<PathBuf, Weak<Held>>> = Mutex::new(BTreeMap::new());
 
 struct Held {
@@ -41,10 +43,11 @@ struct Held {
 }
 impl Drop for Held {
     fn drop(&mut self) {
-        // Released under the registry's lock, so an `acquire` in this
-        // process never meets this handle's OS lock half-released.
-        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        // CP17 review LOW-4: the file (and its OS lock) goes first, then
+        // the entry; until then an `acquire` here sees a releasing holder
+        // and retries, never another process.
         self.file.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
         if held.get(&self.key).is_some_and(|w| w.upgrade().is_none()) {
             held.remove(&self.key);
         }
@@ -63,55 +66,101 @@ pub enum LockError {
     HeldElsewhere,
     /// The lock file couldn't be made or opened (or is not a regular file).
     Io,
+    /// CP17 review MEDIUM-1: this folder's file system gives no file lock
+    /// (any lock error other than "held"). Opening, saving and hosting go
+    /// on as before the lock; a new handover refuses.
+    Unsupported,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: every lock call on this thread fails as on a file system
+    /// without file locking.
+    pub(crate) static NO_LOCKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `try_lock` / `try_lock_shared`, with the test hook.
+fn try_lock(file: &File, shared: bool) -> Result<(), TryLockError> {
+    #[cfg(test)]
+    if NO_LOCKING.with(|c| c.get()) {
+        return Err(TryLockError::Error(std::io::Error::from(std::io::ErrorKind::Unsupported)));
+    }
+    if shared { file.try_lock_shared() } else { file.try_lock() }
+}
+
+/// Log once per lock file that its folder gives no file lock.
+fn log_unsupported(key: &Path, e: &std::io::Error) {
+    static LOGGED: Mutex<std::collections::BTreeSet<PathBuf>> = Mutex::new(std::collections::BTreeSet::new());
+    if LOGGED.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_path_buf()) {
+        log::warn!("handover: {} can't be locked ({e}); this folder has no file locking, so no handover can start here", key.display());
+    }
+}
+
+/// CP17 review LOW-4 (c): the canonical `handover/` (symlinks, `..` and
+/// other spellings resolved) when it exists, else the absolute path.
 fn lock_path(world_dir: &Path) -> PathBuf {
-    let p = super::authority::dir(world_dir).join(LOCK_FILE);
-    std::path::absolute(&p).unwrap_or(p)
+    let d = super::authority::dir(world_dir);
+    let d = std::fs::canonicalize(&d).or_else(|_| std::path::absolute(&d)).unwrap_or(d);
+    d.join(LOCK_FILE)
 }
 
 /// Take the world's handover lock (creating `handover/` and `.live` when
 /// needed). Already held in this process: the same guard. A brief retry
 /// covers another process's momentary probe (`held_elsewhere`).
 pub fn acquire(world_dir: &Path) -> Result<LiveLock, LockError> {
-    let key = lock_path(world_dir);
-    let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(h) = held.get(&key).and_then(Weak::upgrade) {
-        return Ok(LiveLock(h));
-    }
     super::authority::store(world_dir).map_err(|_| LockError::Io)?;
-    match std::fs::symlink_metadata(&key) {
-        Ok(m) if !m.is_file() => return Err(LockError::Io),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(LockError::Io),
-    }
-    let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = opts.open(&key).map_err(|_| LockError::Io)?;
-    let mut tries = 0;
-    loop {
-        match file.try_lock() {
-            Ok(()) => break,
-            Err(TryLockError::WouldBlock) if tries < 40 => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(TryLockError::WouldBlock) => return Err(LockError::HeldElsewhere),
-            Err(TryLockError::Error(e)) => {
-                log::warn!("handover: the world's handover lock couldn't be taken ({e})");
-                return Err(LockError::Io);
+    let key = lock_path(world_dir);
+    // CP17 review LOW-4 (b): never sleep while holding the registry.
+    for _ in 0..80 {
+        {
+            let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+            match held.get(&key) {
+                Some(w) => match w.upgrade() {
+                    Some(h) => return Ok(LiveLock(h)),
+                    // This process's holder, still releasing: retry.
+                    None => {}
+                },
+                None => {
+                    match std::fs::symlink_metadata(&key) {
+                        Ok(m) if !m.is_file() => return Err(LockError::Io),
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(LockError::Io),
+                    }
+                    let mut opts = OpenOptions::new();
+                    opts.read(true).write(true).create(true).truncate(false);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+                    }
+                    let file = opts.open(&key).map_err(|_| LockError::Io)?;
+                    match try_lock(&file, false) {
+                        Ok(()) => {
+                            let h = Arc::new(Held { key: key.clone(), file: Mutex::new(Some(file)) });
+                            held.insert(key, Arc::downgrade(&h));
+                            return Ok(LiveLock(h));
+                        }
+                        // Another process's holder or momentary probe.
+                        Err(TryLockError::WouldBlock) => {}
+                        Err(TryLockError::Error(e)) => {
+                            log_unsupported(&key, &e);
+                            return Err(LockError::Unsupported);
+                        }
+                    }
+                }
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let h = Arc::new(Held { key: key.clone(), file: Mutex::new(Some(file)) });
-    held.insert(key, Arc::downgrade(&h));
-    Ok(LiveLock(h))
+    Err(LockError::HeldElsewhere)
+}
+
+/// CP18: whether a holder in THIS process (a live session, the resumer's
+/// wait) still holds the world's handover lock. Read-only.
+pub fn held_here(world_dir: &Path) -> bool {
+    let key = lock_path(world_dir);
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).get(&key).is_some_and(|w| w.upgrade().is_some())
 }
 
 /// Whether another process on this computer holds the world's handover
@@ -122,7 +171,8 @@ pub fn acquire(world_dir: &Path) -> Result<LiveLock, LockError> {
 pub fn held_elsewhere(world_dir: &Path) -> bool {
     let key = lock_path(world_dir);
     let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-    if held.get(&key).is_some_and(|w| w.upgrade().is_some()) {
+    // This process's holder, live or still releasing (LOW-4 (a)).
+    if held.contains_key(&key) {
         return false;
     }
     match std::fs::symlink_metadata(&key) {
@@ -137,15 +187,25 @@ pub fn held_elsewhere(world_dir: &Path) -> bool {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW);
     }
-    let Ok(file) = opts.open(&key) else { return true };
+    let file = match opts.open(&key) {
+        Ok(f) => f,
+        Err(e) => {
+            // CP17 review MEDIUM-1: an existing regular `.live` that can't be
+            // opened is no proof of a holder; the world stays usable.
+            log_unsupported(&key, &e);
+            return false;
+        }
+    };
     // Probed under the registry's lock, so this process's own `acquire`
-    // never meets the probe.
-    match file.try_lock() {
+    // never meets the probe. CP17 review LOW-3: a shared lock, so two
+    // probes never collide; another process's exclusive holder still
+    // blocks it. CP17 review MEDIUM-1: only "would block" is held.
+    match try_lock(&file, true) {
         Ok(()) => false,
         Err(TryLockError::WouldBlock) => true,
         Err(TryLockError::Error(e)) => {
-            log::warn!("handover: the world's handover lock can't be checked ({e}); the world is treated as in use");
-            true
+            log_unsupported(&key, &e);
+            false
         }
     }
 }
@@ -166,7 +226,7 @@ pub(crate) fn unless_elsewhere(world_dir: &Path, what: &str) -> Option<Option<Li
             log_skipped(world_dir, what);
             None
         }
-        Err(LockError::Io) => {
+        Err(LockError::Io | LockError::Unsupported) => {
             log::warn!("handover: {}'s handover lock couldn't be taken; {what} goes on without it", world_dir.display());
             Some(None)
         }
@@ -260,5 +320,25 @@ pub(crate) mod tests {
         assert!(f.try_lock().is_ok(), "dropping the last guard didn't release the lock");
         drop(f);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+    /// CP18 (CP17 review MEDIUM-1): on a file system with no file locking
+    /// (any lock error but "would block") a world that has a `.live` still
+    /// opens, and the start-up work goes on without the lock; only a new
+    /// handover is refused (`acquire` says `Unsupported`).
+    #[test]
+    fn handover_lock_no_file_locking_never_makes_a_world_unopenable() {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let world = std::env::temp_dir().join(format!("axenstax-nolock-{}", hex::encode(r)));
+        std::fs::create_dir_all(&world).unwrap();
+        drop(acquire(&world).expect("an ordinary lock"));
+        assert!(world.join("handover").join(LOCK_FILE).exists());
+        NO_LOCKING.with(|c| c.set(true));
+        assert!(!held_elsewhere(&world), "a lock error read as another process's handover");
+        assert_eq!(super::super::authority::open_guard(&world).map_err(|r| r.0), Ok(()), "a world with no file locking was refused");
+        assert_eq!(acquire(&world).err(), Some(LockError::Unsupported), "a handover could start with no file lock");
+        assert!(matches!(unless_elsewhere(&world, "test"), Some(None)), "the start-up work was skipped");
+        NO_LOCKING.with(|c| c.set(false));
+        let _ = std::fs::remove_dir_all(&world);
     }
 }

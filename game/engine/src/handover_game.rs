@@ -136,7 +136,22 @@ pub(crate) fn awaiting_import_statuses() -> Vec<String> {
     );
     // CP13b (D2): e.g. "This world may now exist in two places."
     lines.extend(crate::handover::live::resumer::Resumer::global().notices());
+    // CP18: an Activated import the last promotion couldn't move in.
+    lines.extend(PROMOTE_LINES.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
     lines
+}
+
+/// CP18: the last promotion's lines (`promote_activated_imports`).
+static PROMOTE_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// CP18: move every Activated import into the worlds folder, so it lists
+/// as an ordinary world (`handover::live::promote`). Main thread only: at
+/// start-up and on every lobby refresh, before the world list is read.
+/// Never creates `<data>/handover/imports`.
+pub(crate) fn promote_activated_imports() {
+    let imports = crate::data_dir::data_root().join("handover").join("imports");
+    let promoted = crate::handover::live::promote::promote_activated_imports(&imports, &crate::save::worlds_root());
+    *PROMOTE_LINES.lock().unwrap_or_else(|e| e.into_inner()) = promoted.lines;
 }
 
 /// P3: discard every marked inert import under `<data>/handover/imports`

@@ -3046,6 +3046,10 @@ fn native_boot_services() {
         &crate::data_dir::data_root().join("handover").join("imports"),
         &handover::ledger::Ledger::install(),
     );
+    // CP18: an import Activated before this start (or whose move a crash
+    // interrupted) moves into the worlds folder now (main thread).
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_game::promote_activated_imports();
     let identity = signet::native_signer::init_identity();
     match identity.npub() {
         Some(npub) => log::info!("Signed in as {npub} (cached identity, offline)"),

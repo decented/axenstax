@@ -87,6 +87,17 @@ pub fn clear(imports: &Path, transfer: Id) -> Result<()> {
     }
 }
 
+/// A file or folder inside an import being discarded (a symlink is
+/// unlinked, never followed).
+fn remove_entry(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(path).map_err(|_| Error::Io),
+        Ok(_) => fs::remove_file(path).map_err(|_| Error::Io),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Error::Io),
+    }
+}
+
 fn remove_dir(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() || !m.is_dir() => Err(Error::Invalid("inert import type")),
@@ -122,9 +133,32 @@ pub fn sweep_pack_scratch(scratch: &Path) -> Result<usize> {
 pub fn discard(imports: &Path, transfer: Id) -> Result<()> {
     let Some(world) = marked(imports, transfer)? else { return Ok(()) };
     let import = imports.join(format!("handover-{}-{}", hex::encode(world), hex::encode(transfer)));
-    let records = super::authority::dir(&import.join("working"));
+    let working = import.join("working");
+    let records = super::authority::dir(&working);
     if fs::symlink_metadata(&records).is_ok() {
+        // CP18 (CP17 review MEDIUM-2): the import's handover lock is taken
+        // and the state re-checked under it, so another copy of the game
+        // whose receipt is landing (it holds the lock from before the
+        // receipt) is never deleted from under; held there: skipped. The
+        // lock is held while everything but `working/handover/` goes, then
+        // let go (Windows can't remove a folder with the handle open).
+        let Some(lock) = super::world_lock::unless_elsewhere(&working, "the inert discard") else {
+            return Err(Error::State("the import is in use by another copy of the game"));
+        };
         MarkerStore::new(records)?.discard_inert_ready(transfer)?;
+        let entries = fs::read_dir(&import).map_err(|_| Error::Io)?;
+        for entry in entries.take(SCAN_LIMIT).flatten() {
+            if entry.file_name() == "working" {
+                for child in fs::read_dir(&working).map_err(|_| Error::Io)?.take(SCAN_LIMIT).flatten() {
+                    if child.file_name() != "handover" {
+                        remove_entry(&child.path())?;
+                    }
+                }
+            } else {
+                remove_entry(&entry.path())?;
+            }
+        }
+        drop(lock);
     }
     remove_dir(&import)?;
     let scratch = format!(".handover-receive-{}-", hex::encode(transfer));
@@ -174,5 +208,35 @@ pub fn sweep(imports: &Path, live: Option<Id>) -> Result<usize> {
     match first_err {
         Some(e) if removed == 0 => Err(e),
         _ => Ok(removed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CP18 (CP17 review MEDIUM-2): an inert import whose handover lock
+    /// another copy of the game holds (its receipt may be landing) is never
+    /// discarded by this one's sweep; once that copy has gone, it is.
+    #[test]
+    fn handover_inert_sweep_leaves_an_import_another_process_holds() {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let imports = std::env::temp_dir().join(format!("axenstax-inert-held-{}", hex::encode(r)));
+        let (t, w) = ([0x61; 16], [0x62; 16]);
+        let import = imports.join(format!("handover-{}-{}", hex::encode(w), hex::encode(t)));
+        let working = import.join("working");
+        std::fs::create_dir_all(working.join("chunks")).unwrap();
+        std::fs::write(working.join("world.dat"), b"w").unwrap();
+        std::fs::write(import.join("archive.tar.gz"), b"a").unwrap();
+        mark(&imports, t, w).unwrap();
+        super::super::authority::store(&working).unwrap();
+        let child = super::super::world_lock::tests::ChildHolder::hold(&working);
+        assert!(sweep(&imports, None).is_err(), "the held import's discard reported success");
+        assert!(working.join("world.dat").exists() && import.join("archive.tar.gz").exists(), "an import another process holds was discarded");
+        child.kill();
+        assert_eq!(sweep(&imports, None).unwrap(), 1);
+        assert!(!import.exists(), "the import outlived its discard");
+        let _ = std::fs::remove_dir_all(&imports);
     }
 }

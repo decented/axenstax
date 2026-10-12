@@ -7,6 +7,7 @@ pub mod capture;
 pub mod eligibility;
 pub mod inert;
 pub mod listener;
+pub mod promote;
 pub mod recipient;
 pub mod resumer;
 pub mod source;
