@@ -209,8 +209,8 @@ pub struct WindowEvents {
 }
 
 impl WindowEvents {
-    /// Events sent and not applied yet.
-    #[cfg(test)]
+    /// Events sent and not applied yet (C3d run 15: also names the cap a
+    /// whole event reservation hit, `actions::reservation_detail`).
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }

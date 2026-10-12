@@ -2131,7 +2131,7 @@ impl HostedServer {
 
     /// MP-D2b, split in C3d run 15 — land a swing [`Self::check_joiner_swing`]
     /// passed: the schedule moves a full cooldown on, then `combat::strike`
-    /// + `combat::after_swing`, the single-player rule: `base_damage`, a
+    /// and `combat::after_swing`, the single-player rule: `base_damage`, a
     /// critical hit if the server's body is airborne, knockback, the sweep,
     /// `LastAttacker` naming this joiner, a Nostrich's kick-back.
     pub(super) fn strike_joiner_swing(&mut self, i: usize, target: hecs::Entity, sprint: bool, sneak: bool, base_damage: f32) {
