@@ -29,17 +29,16 @@ pub fn sync_file(path: &Path) -> std::io::Result<()> {
 /// Only this module makes one (`open_written` forces `write(true)` onto
 /// the caller's options), so `sync_written` can't be handed a read-only
 /// handle: `sync_written(&File::open(p)?)` doesn't compile. It reads,
-/// writes and seeks as the `File` it wraps.
+/// writes and seeks as the `File` it wraps. CP19 (CP17 review LOW-2): no
+/// `DerefMut`, so the inner handle can't be swapped for a read-only one
+/// (`*w = File::open(p)?`); `&File` (metadata, `set_len`) is all `Deref`
+/// gives. Windows: a caller's `access_mode` could still narrow the access
+/// `open_written` asks for; no caller sets one.
 pub struct Written(std::fs::File);
 impl std::ops::Deref for Written {
     type Target = std::fs::File;
     fn deref(&self) -> &std::fs::File {
         &self.0
-    }
-}
-impl std::ops::DerefMut for Written {
-    fn deref_mut(&mut self) -> &mut std::fs::File {
-        &mut self.0
     }
 }
 impl std::io::Write for Written {
@@ -62,10 +61,11 @@ impl std::io::Seek for Written {
 }
 
 /// Open `path` with `options` AND write access (forced here, whatever the
-/// caller set; with `append` set too, writes still go to the end). CP17
-/// (CP16 review LOW-4): so an append-only handle (Windows: FILE_APPEND_DATA
-/// without GENERIC_WRITE, which `FlushFileBuffers` documents as required)
-/// is never what gets flushed.
+/// caller set). CP19 (CP17 review LOW-1): a caller must NOT set `append`:
+/// std's Windows mapping drops the write access whenever `append` is set
+/// (FILE_APPEND_DATA without FILE_WRITE_DATA), so the handle would be the
+/// append-only one `FlushFileBuffers` documents against. The ledger opens
+/// read + write with no `append` and seeks to the end before each write.
 pub fn open_written(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<Written> {
     options.write(true).open(path).map(Written)
 }
@@ -81,12 +81,21 @@ pub fn sync_written(f: &Written) -> std::io::Result<()> {
 /// and only if the file opened is the one checked: never through a symlink
 /// (`O_NOFOLLOW` on Unix), and on Unix the opened handle's device and inode
 /// must be the checked path's. Write access on Windows, as `sync_file`.
+/// CP19 (CP17 review LOW-9): on Unix the open is also `O_NONBLOCK` (a FIFO
+/// swapped in between the check and the open can't hang the caller; the
+/// flag is harmless on a regular file) and the handle is refused by fstat
+/// unless it is a regular file. Only the last path component is protected
+/// from a symlink. Windows: no identity check (std has no stable file-index
+/// API), so a link planted between the check and the open is followed; the
+/// check-then-open race is closed on Unix only.
 pub fn sync_regular(path: &Path) -> std::io::Result<()> {
     let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not the regular file checked");
     let before = std::fs::symlink_metadata(path)?;
     if !before.is_file() {
         return Err(bad());
     }
+    #[cfg(test)]
+    tests::between_check_and_open(path);
     let mut options = std::fs::OpenOptions::new();
     #[cfg(windows)]
     options.write(true);
@@ -95,7 +104,7 @@ pub fn sync_regular(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let f = options.open(path)?;
     let after = f.metadata()?;
@@ -126,6 +135,49 @@ pub fn sync_dir(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        static SWAP: std::cell::Cell<Option<fn(&std::path::Path)>> = const { std::cell::Cell::new(None) };
+    }
+    /// Test hook: runs between `sync_regular`'s check and its open.
+    pub(super) fn between_check_and_open(path: &std::path::Path) {
+        if let Some(f) = SWAP.with(|s| s.take()) {
+            f(path);
+        }
+    }
+
+    /// CP19 (CP17 review LOW-9): a file swapped between the check and the
+    /// open is refused: another regular file (a different inode) by the
+    /// identity compare, a FIFO promptly (never a hang) by `O_NONBLOCK` and
+    /// the fstat.
+    #[cfg(unix)]
+    #[test]
+    fn sync_regular_refuses_a_file_swapped_after_the_check() {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let d = std::env::temp_dir().join(format!("axenstax-fsync-swap-{}", hex::encode(r)));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("member");
+        std::fs::write(&p, b"x").unwrap();
+        SWAP.with(|s| s.set(Some(|p| {
+            let side = p.with_extension("new");
+            std::fs::write(&side, b"y").unwrap();
+            std::fs::rename(&side, p).unwrap();
+        })));
+        assert!(super::sync_regular(&p).is_err(), "a regular file swapped in after the check was synced");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = d.join("member");
+        std::thread::spawn(move || {
+            SWAP.with(|s| s.set(Some(|p| {
+                std::fs::remove_file(p).unwrap();
+                let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            })));
+            let _ = tx.send(super::sync_regular(&q).is_err());
+        });
+        let refused = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a FIFO swapped in after the check hung the sync");
+        assert!(refused, "a FIFO swapped in after the check was synced");
+        std::fs::remove_dir_all(d).unwrap();
+    }
     /// No `File::open(..)` followed (within the statement's next lines) by
     /// `sync_all`/`sync_data` anywhere in the engine's source but here.
     #[test]

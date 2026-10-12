@@ -5643,14 +5643,25 @@ second guard could be dodged through its own escape hatch
 and a basename-only exemption), so `sync_written` now takes
 `crate::fsync::Written`, a handle only `crate::fsync::open_written` makes
 (it forces write access onto the caller's options): a read-only handle no
-longer compiles there. The guard bans `sync_all` / `sync_data` as an
+longer compiles there (CP19, CP17 review LOW-2: `Written` has no
+`DerefMut`, so its inner handle can't be swapped; a Windows caller's
+`access_mode` could still narrow it, and none sets one). The guard bans `sync_all` / `sync_data` as an
 identifier (any spacing, split lines, a path reference) everywhere but the
-exact file `src/fsync.rs`. The ledger's append handle is opened through
-`open_written` too, so it is never append-only (Windows' `FlushFileBuffers`
-documents a write-access requirement; unconfirmed on Windows itself). An
-import's re-sync by path goes through `crate::fsync::sync_regular`, which
-opens without following a symlink and, on Unix, syncs only when the handle's
-device and inode are the checked path's.
+exact file `src/fsync.rs`. The ledger is opened through `open_written`
+with read + write and NO `append` (CP19, CP17 review LOW-1: std's Windows
+mapping drops the write access whenever `append` is set, so CP17's
+`append` + `write` handle was still append-only there), and each write
+seeks to the end first; the ledger's process-wide lock serialises writers
+(Windows' `FlushFileBuffers` documents a write-access requirement;
+unconfirmed on Windows itself). An import's re-sync by path goes through
+`crate::fsync::sync_regular`, which opens without following a symlink
+(the last path component only) and, on Unix, with `O_NONBLOCK`, refusing
+the handle unless fstat says it is a regular file whose device and inode
+are the checked path's (CP19, CP17 review LOW-9: a FIFO or another file
+swapped in after the check is refused, never waited on; tested through a
+test-only hook between the check and the open). On Windows there is no
+identity check (std has no stable file-index API): the check-then-open race
+is closed on Unix only.
 
 Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
 bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the

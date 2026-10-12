@@ -141,12 +141,14 @@ impl Ledger {
             Err(_) => return Err(Error::Io),
         };
         let mut options = std::fs::OpenOptions::new();
-        options.read(true).append(true).create(true);
+        options.read(true).create(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        // CP17 (CP16 review LOW-4): opened with write access too (writes
-        // still go to the end), so the flush below never meets an
-        // append-only handle on Windows. Unconfirmed on Windows itself.
+        // CP19 (CP17 review LOW-1): read + write, NO `append` (std's Windows
+        // mapping drops the write access when `append` is set, leaving the
+        // append-only handle `FlushFileBuffers` documents against); the
+        // write below seeks to the end first, and `LOCK` serialises the
+        // writers in this process. Unconfirmed on Windows itself.
         let mut file = crate::fsync::open_written(&mut options, &self.path).map_err(|_| Error::Io)?;
         let len = file.metadata().map_err(|_| Error::Io)?.len();
         // CP13b (CP13 review MEDIUM-1): the read bound, at append time. The
@@ -165,6 +167,7 @@ impl Ledger {
             }
         }
         out.extend_from_slice(entry.line().as_bytes());
+        file.seek(SeekFrom::End(0)).map_err(|_| Error::Io)?;
         file.write_all(&out).map_err(|_| Error::Io)?;
         crate::fsync::sync_written(&file).map_err(|_| Error::Io)?;
         if created {
@@ -215,10 +218,10 @@ impl Ledger {
 }
 
 /// The whole entries in the first `len` bytes of `file` (under the lock).
-fn whole_entries(file: &mut std::fs::File, len: u64) -> Result<usize> {
+fn whole_entries<F: Read + Seek>(file: &mut F, len: u64) -> Result<usize> {
     let mut bytes = Vec::new();
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
-    (&mut *file).take(len).read_to_end(&mut bytes).map_err(|_| Error::Io)?;
+    file.by_ref().take(len).read_to_end(&mut bytes).map_err(|_| Error::Io)?;
     Ok(bytes.split(|b| *b == b'\n').filter_map(Entry::parse).count())
 }
 
