@@ -105,9 +105,16 @@ impl HostedServer {
             // made before the `Replace` is served on the server's current
             // copy without applying through its base, and without the
             // contents digest (`serve_strict_config`).
-            let stale_base = sp.window_events.predates_replace(base);
-            let boundary_ok = sp.window_events.accepts_boundary(base);
-            if !boundary_ok && !stale_base {
+            // C3d run 20 (run-19 review HIGH-1) — a Mirror seat's toggle
+            // reads and changes no window, so it neither depends on nor moves
+            // the window boundary: a toggle that waited a tick while a later
+            // packet applied newer events is served, never torn down, and
+            // the Mirror window order stays exactly as before run 19 (only
+            // the paths that applied events then apply them now).
+            let window_free = sp.server_simulated && sp.inventory_mode == InventoryMode::Mirror && matches!(packet.intent, ActionIntent::ToggleBlock { .. });
+            let stale_base = !window_free && sp.window_events.predates_replace(base);
+            let boundary_ok = !window_free && sp.window_events.accepts_boundary(base);
+            if !boundary_ok && !stale_base && !window_free {
                 return self.pause_typed_action(i, StrictTeardown::FellBehind, "Action names an unavailable window boundary");
             }
             if boundary_ok && !(config && stale_base) { crate::window_events::apply_through(sp, base, now); }

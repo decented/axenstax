@@ -57,6 +57,8 @@ mod c3d_client_attack_tests;
 mod c3d_wear_target_tests;
 #[cfg(test)]
 mod c3d_door_tests;
+#[cfg(test)]
+mod c3d_mirror_toggle_tests;
 
 use std::collections::VecDeque;
 
@@ -120,6 +122,11 @@ pub const MAX_WINDOW_OPS_PER_TICK: usize = 8;
 /// C3a-2a — is `packet` a `WindowOp` (budgeted by deferral)?
 fn is_window_op(packet: &[u8]) -> bool {
     matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::WindowOp, _)))
+}
+
+/// C3d run 20 (run-19 review MEDIUM-1) — is `packet` a typed `Action`?
+fn is_typed_action(packet: &[u8]) -> bool {
+    matches!(protocol::deserialize_header(packet), Some((protocol::PacketType::Action, _)))
 }
 
 /// Max device interactions per tick per client. A right-click is gated
@@ -4200,6 +4207,11 @@ impl HostedServer {
                             edits_waiting,
                         )
                     })
+                    // C3d run 20 (run-19 review MEDIUM-1) — a Mirror seat's
+                    // typed action (its door toggle) waits behind this
+                    // client's waiting edits, as a request does (FU4a): it
+                    // was made after them (a door placed, then opened).
+                    || (edits_waiting && self.mirror_slot(i) && self.inbound[i].front().is_some_and(|p| is_typed_action(p)))
                 {
                     break;
                 }

@@ -759,3 +759,10 @@ A Strict `SetAutoRefill` the server's copy can't reproduce (its digest) is a typ
   `remote_may_touch`, whose other callers are unchanged), economy owner.
 - Owner question: should Spectator toggle at all? Kept as single-player has
   it.
+- Run-19 review HIGH-1 + MEDIUM-1: a Mirror seat's `ToggleBlock` is
+  window-free (`actions.rs` `window_free`): no boundary check, no
+  `apply_through`, never stale on a `Replace` (served; superseded only on a
+  dead body); a Mirror seat's `Action` packet waits in inbound behind that
+  joiner's waiting edits (`hosted_server.rs` read loop,
+  `is_typed_action`). Residue: a toggle already deferred on the item budget
+  can run after later edits (world only, refused + sent back if stale).
