@@ -5205,7 +5205,9 @@ cleanup never deletes it. Native no-replace uses Linux renameat2 and Android SYS
 existing syscall symbol (no API30 Bionic dependency on the API24 app),
 macOS exclusive rename and Windows directory rename. CP21 (CP19 review MEDIUM-2): a
 filesystem or kernel that rejects the no-replace flag (EINVAL/ENOSYS: NFS, FUSE without
-rename2, ecryptfs-encrypted home folders, an old Android kernel) falls back to checking the
+rename2, ecryptfs-encrypted home folders, an old Android kernel; CP22, CP21 review
+MEDIUM-2: ENOTSUP/EOPNOTSUPP too, which macOS `renamex_np(RENAME_EXCL)` answers on SMB/NFS
+network homes and exFAT/FAT drives, per its man page, unverified on a Mac) falls back to checking the
 target absent just before a plain rename (a residual race: `rename(2)` may replace an EMPTY
 folder made in between, never a non-empty one or a file); any other error fails closed. One
 helper serves the import and the world-list move (`handover::rename::no_replace`; test
@@ -6357,7 +6359,8 @@ Tests: `handover_promote_never_names_a_reserved_folder` ("Exp-Hash-Dash"),
 The move never replaces a folder at the target, even an empty one
 (`promote::rename_no_replace` → `handover::rename::no_replace`:
 `renameat2(RENAME_NOREPLACE)` on Linux; Windows' `MoveFileExW` never replaces a directory;
-other Unix, and a Linux filesystem that rejects the flag with EINVAL/ENOSYS, re-check the
+other Unix, and a filesystem that rejects the flag (EINVAL/ENOSYS on Linux and Android,
+ENOTSUP on macOS), re-check the
 target just before `rename`, a residual race). Tests:
 `handover_promote_never_names_a_reserved_folder`,
 `handover_promote_rename_never_replaces_a_folder`,

@@ -13,8 +13,19 @@
 //! check-then-rename path every other platform has: the target is checked
 //! absent just before a plain `rename`. A residual race remains there:
 //! `rename(2)` would replace an EMPTY folder someone made in between (never
-//! a non-empty one, never a file). Only EINVAL and ENOSYS fall back; every
-//! other error is returned as it is.
+//! a non-empty one, never a file). Only the "flag not supported" errors
+//! fall back (`flag_unsupported`); every other error is returned as it is.
+//!
+//! CP22 (CP21 review MEDIUM-2, DECIDED): which errno each platform uses for
+//! "this filesystem has no no-replace rename":
+//! - Linux `renameat2`: EINVAL (the filesystem rejects the flag: NFS,
+//!   FUSE without rename2, ecryptfs; probed on the dev machine), ENOSYS (a
+//!   kernel without the syscall).
+//! - Android raw `SYS_renameat2`: the same, ENOSYS on an old kernel.
+//! - macOS `renamex_np(RENAME_EXCL)`: ENOTSUP (SMB/NFS network homes,
+//!   exFAT/FAT drives, some FUSE), per the man page; UNVERIFIED on a Mac.
+//!   EOPNOTSUPP is accepted too (the same value on Linux, a different one
+//!   on macOS).
 
 use std::io;
 use std::path::Path;
@@ -32,9 +43,13 @@ pub fn no_replace(from: &Path, to: &Path) -> io::Result<()> {
 pub fn no_replace_with(from: &Path, to: &Path, attempt: Atomic) -> io::Result<()> {
     match attempt(from, to) {
         Err(e) if flag_unsupported(&e) => {
-            log::warn!(
-                "handover: this filesystem can't move a folder without replacing ({e}); checking the target first instead"
-            );
+            // CP22 (CP21 review MEDIUM-1): once per process, not per move.
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                log::warn!(
+                    "handover: this filesystem can't move a folder without replacing ({e}); checking the target first instead"
+                )
+            });
             check_then_rename(from, to)
         }
         r => r,
@@ -45,7 +60,7 @@ pub fn no_replace_with(from: &Path, to: &Path, attempt: Atomic) -> io::Result<()
 fn flag_unsupported(e: &io::Error) -> bool {
     #[cfg(unix)]
     {
-        matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS))
+        matches!(e.raw_os_error(), Some(c) if c == libc::EINVAL || c == libc::ENOSYS || c == libc::ENOTSUP || c == libc::EOPNOTSUPP)
     }
     #[cfg(not(unix))]
     {
@@ -112,6 +127,31 @@ mod tests {
         std::fs::create_dir_all(d.join("from")).unwrap();
         std::fs::write(d.join("from/world.dat"), b"w").unwrap();
         d
+    }
+
+    /// CP22 (CP21 review MEDIUM-2): every platform's "flag not supported"
+    /// errno falls back (macOS answers ENOTSUP); nothing else does.
+    #[test]
+    fn handover_rename_every_flag_unsupported_errno_falls_back() {
+        fn enotsup(_: &Path, _: &Path) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+        }
+        fn eopnotsupp(_: &Path, _: &Path) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
+        }
+        fn enosys(_: &Path, _: &Path) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        }
+        let d = dir("errnos");
+        let mut at = d.join("from");
+        for (i, (name, attempt)) in [("EINVAL", einval as Atomic), ("ENOSYS", enosys), ("ENOTSUP", enotsup), ("EOPNOTSUPP", eopnotsupp)].into_iter().enumerate() {
+            let to = d.join(format!("to{i}"));
+            no_replace_with(&at, &to, attempt).unwrap_or_else(|e| panic!("an {name} filesystem never moved the folder: {e:?}"));
+            assert_eq!(std::fs::read(to.join("world.dat")).unwrap(), b"w", "{name}");
+            at = to;
+        }
+        assert!(no_replace_with(&at, &d.join("free"), eacces).is_err() && !d.join("free").exists(), "EACCES fell back");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
