@@ -54,6 +54,8 @@ mod c3d_client_shot_tests;
 mod c3d_client_attack_tests;
 #[cfg(test)]
 mod c3d_wear_target_tests;
+#[cfg(test)]
+mod c3d_door_tests;
 
 use std::collections::VecDeque;
 
