@@ -10,17 +10,20 @@
 //! effect, corrected by the S1 `Replace`, never torn down. The swing's own
 //! rules (target alive and in reach ahead of the body, no friendly fire
 //! unless sneaking, the swing schedule) are the Mirror swing's, shared
-//! (`HostedServer::check_joiner_swing`); a swing they refuse is the same
-//! corrected refusal with zero effect (no damage, knockback, wear, schedule
-//! move or event). A dead attacker never reaches here: `process_typed_actions`
-//! supersedes a dead body's action (with its correction) first.
+//! (`HostedServer::check_joiner_swing`); a swing they refuse is refused for
+//! a WORLD FACT (run 16): zero effect (no damage, knockback, wear, schedule
+//! move or event), its `Refused` receipt alone, no correction `Replace` and
+//! no tick of the correction bound, since the client predicted nothing
+//! (`HostedServer::refuse_world_fact`). A dead attacker never reaches here:
+//! `process_typed_actions` supersedes a dead body's action first.
 //!
 //! A tool's wear is ONE numbered `WearWeapon` event, staged and reserved
 //! (with the result row) BEFORE the damage lands; the server copy wears when
 //! the client says it applied that event, as Mirror's does. A bare hand or
 //! a non-tool item wears nothing (no event). The damage is the effective
-//! surviving item's (Decision 8: a pending wear that broke it is a
-//! `FellBehind` teardown, Shoot parity). Event/byte/result caps leave zero
+//! surviving item's; a pending wear that broke or changed it (a last-point
+//! sword swung twice inside one round trip) is a corrected refusal (run 16:
+//! one `Replace`, never a teardown; the shot's rule too). Event/byte/result caps leave zero
 //! external effect (a `FellBehind` teardown, exactly as a shot's). After the
 //! commit, the one debt-zero predicate (`strict_fold_holds`).
 //!
@@ -46,9 +49,12 @@ impl HostedServer {
             self.refuse_typed_action(i, action);
             return false;
         }
+        // C3d run 16 — the shared rule refuses only on world facts the
+        // client could not know (reach and facing on the server's body, the
+        // swing schedule, a target gone or dead, its own pet): a receipt
+        // alone, no correction, since the client predicted nothing.
         let Some(target) = self.check_joiner_swing(i, req) else {
-            self.refuse_typed_action(i, action);
-            return false;
+            return self.refuse_world_fact(i, action, &crate::action_wire::ActionIntent::Attack(req.clone()));
         };
         let sp = &self.server.players[i];
         let mut effective = match crate::window_events::strict_effective_marker(sp, &self.server.registry) {
@@ -61,11 +67,16 @@ impl HostedServer {
         let (base_damage, events) = match &historical {
             Some(Item::Tool(tool)) => {
                 let view = effective.view();
+                // C3d run 16 — a pending Wear the client hasn't applied yet
+                // broke (or changed) the weapon it claims: a last-point sword
+                // swung twice inside one round trip. The window disagrees,
+                // deterministically on the server's own pending prefix, so it
+                // is a corrected refusal (one `Replace`), never a teardown.
                 let Some(ItemStack { item: Item::Tool(surviving), count: 1 }) = view.inv.slot(slot) else {
-                    self.pause_typed_action(i, StrictTeardown::FellBehind, "The historical attack weapon no longer survives"); return false;
+                    self.refuse_typed_action(i, action); return false;
                 };
                 if surviving.tool_type != tool.tool_type || surviving.material != tool.material {
-                    self.pause_typed_action(i, StrictTeardown::FellBehind, "The historical attack weapon has changed"); return false;
+                    self.refuse_typed_action(i, action); return false;
                 }
                 let damage = Item::Tool(*surviving).attack_damage();
                 (damage, vec![crate::window_events::WindowEvent::WearWeapon { slot, tool: *tool }])

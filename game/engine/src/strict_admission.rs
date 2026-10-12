@@ -150,6 +150,12 @@ mod teardown_copy_tests {
 pub struct RefusalTally {
     pub stale_world: u32,
     pub other: u32,
+    /// C3d run 16 — a world fact the client could not know (a swing out of
+    /// reach on the server, early on the swing schedule, at a target gone
+    /// or dead, at its own pet): refused with a receipt only, never
+    /// corrected (the client predicted nothing). Kept apart so honest
+    /// misses never count as a window mismatch.
+    pub world_fact: u32,
 }
 
 /// C3d run 13 (run-12 review LOW-3) — at most this many live correction
@@ -186,18 +192,20 @@ impl CorrectionRate {
 pub enum RefusalKind {
     StaleWorld,
     Rule,
+    /// C3d run 16 — see [`RefusalTally::world_fact`].
+    WorldFact,
 }
 
 impl RefusalTally {
     pub fn note(&mut self, kind: RefusalKind) {
-        let n = match kind { RefusalKind::StaleWorld => &mut self.stale_world, RefusalKind::Rule => &mut self.other };
+        let n = match kind { RefusalKind::StaleWorld => &mut self.stale_world, RefusalKind::Rule => &mut self.other, RefusalKind::WorldFact => &mut self.world_fact };
         *n = n.saturating_add(1);
     }
     /// The departure line's addition, or `None` if nothing was refused.
     pub fn summary(&self) -> Option<String> {
         (*self != Self::default()).then(|| format!(
-            "Strict refusals: {} stale-world (Drift), {} other (rule or mismatch); not counted as cheating",
-            self.stale_world, self.other
+            "Strict refusals: {} stale-world (Drift), {} other (rule or mismatch), {} world fact (uncorrected); not counted as cheating",
+            self.stale_world, self.other, self.world_fact
         ))
     }
 }

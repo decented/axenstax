@@ -158,6 +158,14 @@ impl RemoteClient {
         }
     }
 
+    /// C3d run 16 — does the journal hold an unretired `SetAutoRefill`
+    /// (after `seq`, when given)?
+    pub(super) fn set_auto_refill_journaled_after(&self, seq: Option<u64>) -> bool {
+        self.action_journal.as_ref().is_some_and(|journal| {
+            journal.actions().any(|a| seq.is_none_or(|s| a.header.seq > s) && is_set_auto_refill(&a.intent))
+        })
+    }
+
     pub(super) fn retire_applied_receipts(&mut self) {
         while let Some(receipt) = self.action_receipts.front().copied() {
             if receipt.included_events > self.events_applied { break; }
@@ -170,9 +178,11 @@ impl RemoteClient {
                 self.queued_action_receipts -= 1;
                 continue;
             }
+            // Run 16 — unless a later setting is already journaled (the
+            // `Replace` that came with this refusal sent it again).
             if receipt.fate == crate::action_identity::ActionFate::Refused
-                && journal.actions().find(|a| a.header == receipt.action).and_then(|a| crate::action_wire::ActionPacket::decode(&a.intent).ok())
-                    .is_some_and(|p| matches!(p.intent, crate::action_wire::ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })))
+                && journal.actions().find(|a| a.header == receipt.action).is_some_and(|a| is_set_auto_refill(&a.intent))
+                && !journal.actions().any(|a| a.header.seq > receipt.action.seq && is_set_auto_refill(&a.intent))
             {
                 self.refill_refused = true;
             }
@@ -190,4 +200,10 @@ impl RemoteClient {
         self.flush_applied_action_ack();
     }
 
+}
+
+/// Is a journaled intent (its encoded packet) a `SetAutoRefill`?
+fn is_set_auto_refill(intent: &[u8]) -> bool {
+    crate::action_wire::ActionPacket::decode(intent)
+        .is_ok_and(|p| matches!(p.intent, crate::action_wire::ActionIntent::Window(op) if matches!(op.op, protocol::WireWindowOp::SetAutoRefill { .. })))
 }

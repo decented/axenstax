@@ -130,7 +130,11 @@ pub fn route_attack(
     packet.seq = actions.record(pending, remote.next_input_seq());
     packet.events_applied = remote.applied_window_boundary();
     let seq = packet.seq;
-    let header = match remote.reserve_action(crate::action_wire::ActionIntent::Attack(packet), recipe, Box::new([])) {
+    let intent = crate::action_wire::ActionIntent::Attack(packet);
+    // C3d run 16 — nothing is predicted for a swing, and the server relies on
+    // it: a world-fact refusal is a receipt alone (`refuse_world_fact`).
+    debug_assert!(intent.predicts_nothing(), "an attack predicts nothing");
+    let header = match remote.reserve_action(intent, recipe, Box::new([])) {
         Ok(header) => header,
         Err(error) => {
             actions.release(seq);

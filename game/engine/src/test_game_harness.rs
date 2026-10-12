@@ -2891,6 +2891,76 @@ mod tests {
         assert_eq!((sp.strict_refusals.stale_world, sp.strict_refusals.other), (0, 0), "no Strict refusal");
     }
 
+    /// C3d run 16 — a STRICT joiner's swing through its REAL client
+    /// (`GameState::send_entity_attack` → `strict_requests::route_attack`):
+    /// ONE typed action, served from the server copy's sword; the hit lands
+    /// (the chicken dies and the client's kill attribution counts it), the
+    /// sword wears once on both copies from the server's numbered Wear, every
+    /// reservation retired, no Strict refusal, never torn down.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas (llvmpipe caps 256) — run: cargo test -- --ignored game_harness"]
+    fn game_harness_strict_joiners_swing_is_served_typed() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-strict-swing");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-strict-swing-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.select_inventory_mode(crate::action_identity::InventoryMode::Strict).expect("Strict");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Swinger", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let slot = server.server.players.len() - 1;
+        assert_eq!(hg.state.remote_client.as_ref().unwrap().inventory_mode, crate::action_identity::InventoryMode::Strict);
+        let applied = hg.state.remote_client.as_ref().unwrap().applied_window_boundary();
+        crate::window_events::apply_through(&mut server.server.players[slot], applied, 0);
+        let refill = hg.state.players[0].inventory.auto_refill;
+        let hot = hg.state.players[0].hotbar_slot;
+        let iron = crate::crafting::Tool::new(crate::crafting::ToolType::Sword, crate::crafting::ToolMaterial::Iron);
+        for inv in [&mut hg.state.players[0].inventory, &mut server.server.players[slot].inventory] {
+            *inv = crate::inventory::Inventory::new();
+            inv.auto_refill = refill;
+            inv.set_slot(hot, Some(crate::item::ItemStack { item: crate::item::Item::Tool(iron), count: 1 }));
+        }
+        clear_pad(&mut hg, Some(&mut server));
+        harness_step(&mut server, &mut hg);
+        let wear = |inv: &crate::inventory::Inventory| match inv.slot(hot).map(|s| &s.item) {
+            Some(crate::item::Item::Tool(t)) => t.durability,
+            other => panic!("the sword is gone: {other:?}"),
+        };
+        // A chicken one hit from death, right in front of the joiner's body.
+        let sp = &server.server.players[slot];
+        let at = sp.player.pos + crate::camera::forward_from(sp.yaw, 0.0) * 1.5;
+        let chicken = crate::entity::spawn_mob(&mut server.server.ecs, crate::mob::MobType::Chicken, at);
+        server.server.ecs.get::<&mut crate::combat::Health>(chicken).unwrap().current = 1.0;
+        harness_step(&mut server, &mut hg);
+        let id = server.server.ecs.get::<&crate::entity::ProtocolId>(chicken).expect("broadcast").0;
+        server.server.ecs.get::<&mut crate::entity::Position>(chicken).unwrap().0 = at;
+        hg.state.send_entity_attack(
+            0,
+            crate::remote_mobs::MirrorTarget { id, kind: crate::mob::MobType::Chicken, tamed: false, baby: false, tethered: false, product_not_ready: false },
+            false,
+            false,
+        );
+        settle(&mut server, &mut hg);
+        let client = hg.state.remote_client.as_ref().unwrap();
+        assert!(client.is_connected(), "an honest Strict swing is never torn down");
+        assert_eq!(client.action_journal.as_ref().map(|j| j.len()), Some(0), "the typed swing retired");
+        assert_eq!(wear(&hg.state.players[0].inventory), iron.durability - 1, "the server's Wear applied on the client");
+        let sp = &server.server.players[slot];
+        assert_eq!(wear(&sp.inventory), iron.durability - 1, "and on the server copy");
+        assert_eq!(
+            hg.state.players[0].kill_counter.get(&crate::mob::MobType::Chicken).copied(),
+            Some(1),
+            "the hit landed: the server's KillEvent ran the joiner's kill attribution"
+        );
+        let t = sp.strict_refusals;
+        assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "no Strict refusal");
+    }
+
     // ─── C3c-1-fix ─────────────────────────────────────────────────────────
 
     /// Units of `item` in `inv`'s 36 slots.

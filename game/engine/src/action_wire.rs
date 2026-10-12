@@ -39,6 +39,20 @@ pub enum ActionIntent {
     CancelledNoop,
 }
 
+impl ActionIntent {
+    /// C3d run 16 — does the client predict NOTHING for this intent (no
+    /// window, world or wear change before the server's answer)? The ONE
+    /// table both sides read: the client asserts it where it reserves
+    /// (`strict_requests::route_attack`), and only such an intent may be
+    /// refused for a world fact with a receipt alone, no correction
+    /// (`HostedServer::refuse_world_fact`). A class that starts predicting
+    /// must leave this table, which puts its refusals back on the corrected
+    /// path (the server falls back to it for any other intent).
+    pub fn predicts_nothing(&self) -> bool {
+        matches!(self, ActionIntent::Attack(_))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionPacket {
     pub action: ActionHeader,

@@ -227,6 +227,28 @@ impl HostedServer {
         // BRIDGE: the refused action's suffix is superseded, not replayed (Decision 16) — replace in S3 (recovery bundle + replay)
         self.queue_live_correction_replace(i);
     }
+    /// C3d run 16 — a refusal for a WORLD FACT the client could not know
+    /// (its swing out of reach on the server, early on the swing schedule,
+    /// at a target gone, dead or its own pet): the `Refused` row alone, no
+    /// correction `Replace` and no tick of the correction bound
+    /// (`strict_admission::CorrectionRate`), because the client predicted
+    /// nothing for `intent` (`ActionIntent::predicts_nothing`). Any other
+    /// intent takes the corrected path instead (and a debug build stops).
+    /// Counted apart (`RefusalKind::WorldFact`), never as a window mismatch.
+    /// Such refusals still count against the per-tick budget that limits
+    /// the class (an attack: `MAX_ITEM_ACTIONS_PER_TICK`).
+    ///
+    /// `true` when the queue may go on this tick (nothing was corrected, so
+    /// the next action's base is still current).
+    pub(super) fn refuse_world_fact(&mut self, i: usize, action: ActionHeader, intent: &crate::action_wire::ActionIntent) -> bool {
+        debug_assert!(intent.predicts_nothing(), "a world-fact refusal of an intent the client predicts");
+        if !intent.predicts_nothing() || !self.strict_slot(i) {
+            self.refuse_typed_action(i, action);
+            return false;
+        }
+        self.server.players[i].strict_refusals.note(RefusalKind::WorldFact);
+        self.complete_typed_noop(i, action, ActionFate::Refused)
+    }
     /// A refusal a `Replace` can't undo — a container open or click (the
     /// `Replace` carries no container view): still the bridge teardown.
     pub(super) fn refuse_typed_action_then_teardown(&mut self, i: usize, action: ActionHeader) {
@@ -369,11 +391,14 @@ impl HostedServer {
             Err(_) => { self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot source lineage is uncertain"); return false; }
         };
         let effective_view = effective.view();
+        // C3d run 16 — a pending Wear the client hasn't applied yet broke (or
+        // changed) the claimed weapon: a last-point bow shot twice inside one
+        // round trip. A corrected refusal (one `Replace`), never a teardown.
         let Some(ItemStack { item: Item::Tool(surviving), count: 1 }) = effective_view.inv.slot(slot as usize) else {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "The historical shot weapon no longer survives"); return false;
+            self.refuse_typed_action(i, action); return false;
         };
         if surviving.tool_type != historical.tool_type || surviving.material != historical.material {
-            self.pause_typed_action(i, StrictTeardown::FellBehind, "The historical shot weapon has changed"); return false;
+            self.refuse_typed_action(i, action); return false;
         }
         let events = vec![
             crate::window_events::WindowEvent::Take { slot: slot as usize, item: Item::Material(crate::shot::ammo_for(weapon)), n: 1, how: "on a shot" },

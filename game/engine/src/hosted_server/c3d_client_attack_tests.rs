@@ -19,14 +19,14 @@ use crate::strict_requests::{route_attack, AttackRecipe};
 use crate::transport::ClientTransport as _;
 use glam::Vec3;
 
-fn sword(material: ToolMaterial) -> Tool { Tool::new(ToolType::Sword, material) }
-fn held(tool: Tool) -> ItemStack { ItemStack { item: Item::Tool(tool), count: 1 } }
+pub(super) fn sword(material: ToolMaterial) -> Tool { Tool::new(ToolType::Sword, material) }
+pub(super) fn held(tool: Tool) -> ItemStack { ItemStack { item: Item::Tool(tool), count: 1 } }
 
 /// Two blocks ahead of a body at `pos` facing yaw 0 (−z), on its floor.
-fn ahead(pos: Vec3, blocks: f32) -> Vec3 { pos + Vec3::new(0.0, 0.0, -blocks) }
+pub(super) fn ahead(pos: Vec3, blocks: f32) -> Vec3 { pos + Vec3::new(0.0, 0.0, -blocks) }
 
 /// A cow in the server's world at `at`, broadcast once (so it has an id).
-fn spawn_cow(hs: &mut super::HostedServer, at: Vec3) -> (hecs::Entity, u32) {
+pub(super) fn spawn_cow(hs: &mut super::HostedServer, at: Vec3) -> (hecs::Entity, u32) {
     let e = crate::entity::spawn_mob(&mut hs.server.ecs, MobType::Cow, at);
     hs.tick();
     let id = hs.server.ecs.get::<&crate::entity::ProtocolId>(e).expect("broadcast").0;
@@ -34,7 +34,7 @@ fn spawn_cow(hs: &mut super::HostedServer, at: Vec3) -> (hecs::Entity, u32) {
 }
 
 /// Put the cow back at `at`, at rest; the joiner's body faces it (yaw 0).
-fn place(hs: &mut super::HostedServer, i: usize, e: hecs::Entity, at: Vec3) {
+pub(super) fn place(hs: &mut super::HostedServer, i: usize, e: hecs::Entity, at: Vec3) {
     hs.server.ecs.get::<&mut crate::entity::Position>(e).unwrap().0 = at;
     hs.server.ecs.get::<&mut crate::entity::Velocity>(e).unwrap().0 = Vec3::ZERO;
     let sp = &mut hs.server.players[i];
@@ -44,7 +44,7 @@ fn place(hs: &mut super::HostedServer, i: usize, e: hecs::Entity, at: Vec3) {
 
 /// What a hit leaves on the cow: health, whether it is stamped as hit, its
 /// height (a knockback pops it off the floor).
-fn cow_state(hs: &super::HostedServer, e: hecs::Entity) -> (f32, bool, f32) {
+pub(super) fn cow_state(hs: &super::HostedServer, e: hecs::Entity) -> (f32, bool, f32) {
     let ecs = &hs.server.ecs;
     let health = ecs.get::<&crate::combat::Health>(e).unwrap().current;
     let stamped = ecs.get::<&crate::combat::LastAttacker>(e).is_ok();
@@ -63,22 +63,22 @@ fn swing_of(inv: &crate::inventory::Inventory, hot: usize, entity: u32) -> (Pend
 
 /// Swing from hotbar `hot` at `entity` on the Strict rig, routed as the
 /// game loop does.
-fn attack(j: &mut Joined, hot: usize, entity: u32) -> ActionHeader {
+pub(super) fn attack(j: &mut Joined, hot: usize, entity: u32) -> ActionHeader {
     let (pending, packet) = swing_of(&j.inv, hot, entity);
     route_attack(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending, packet).expect("routed").expect("a Strict seat sends the attack typed")
 }
 
-fn fate(j: &Joined, action: ActionHeader) -> Option<ActionFate> {
+pub(super) fn fate(j: &Joined, action: ActionHeader) -> Option<ActionFate> {
     j.sp().action_results.as_ref().expect("a joined result history").peek(action).map(|r| r.fate)
 }
 
-fn durability(inv: &crate::inventory::Inventory, slot: usize) -> Option<u16> {
+pub(super) fn durability(inv: &crate::inventory::Inventory, slot: usize) -> Option<u16> {
     match inv.slot(slot).map(|s| &s.item) { Some(Item::Tool(t)) => Some(t.durability), _ => None }
 }
 
 /// A Strict rig with the refill setting already agreed and a cow two
 /// blocks ahead of the joiner.
-fn rig(tag: &str, items: &[(usize, ItemStack)], cow_blocks: f32) -> (Joined, hecs::Entity, u32, Vec3) {
+pub(super) fn rig(tag: &str, items: &[(usize, ItemStack)], cow_blocks: f32) -> (Joined, hecs::Entity, u32, Vec3) {
     let mut j = joined(tag, items, true);
     j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
     j.pump();
@@ -161,9 +161,12 @@ fn c3d_client_strict_claimed_better_sword_is_refused_and_corrected() {
 }
 
 /// Out of reach (ten blocks ahead): refused by the shared Mirror swing
-/// rule, zero effect, corrected, never torn down.
+/// rule for a WORLD FACT (run 16): zero effect, its `Refused` receipt
+/// alone, no correction `Replace` (the client predicted nothing), never
+/// torn down. (Run 15's `..._is_refused_and_corrected` asserted a `Replace`
+/// here.)
 #[test]
-fn c3d_client_strict_out_of_reach_hit_is_refused_and_corrected() {
+fn c3d_client_strict_out_of_reach_hit_is_refused_uncorrected() {
     let iron = sword(ToolMaterial::Iron);
     let (mut j, cow, id, at) = rig("attack-reach", &[(0, held(iron))], 10.0);
     let (max, _, y0) = cow_state(&j.hs, cow);
@@ -178,10 +181,119 @@ fn c3d_client_strict_out_of_reach_hit_is_refused_and_corrected() {
     assert!(!stamped, "nothing names the joiner");
     assert!(y <= y0 + 1e-3, "no knockback ({y} vs {y0})");
     assert_eq!(j.sp().next_swing_tick, schedule, "the swing schedule didn't move");
-    assert_eq!(j.sp().window_events.last_number(), before + 1, "exactly one correction Replace, no Wear");
+    assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace, no Wear");
+    assert!(!j.sp().window_events.replace_waiting(), "no correction waits");
     j.assert_honest("the out-of-reach hit");
     assert_eq!(durability(&j.inv, 0), Some(iron.durability), "no wear");
     assert_eq!(durability(&j.sp().inventory, 0), Some(iron.durability), "no wear on the server copy");
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 1), "a world fact, never a window mismatch");
+}
+
+/// Run 16 — nine out-of-reach swings inside 100 ticks, one every swing
+/// cooldown (one past the correction bound's eight): each is a receipt alone, so no `Replace`, no
+/// tick of the bound and no teardown; zero effect on the cow and the
+/// sword; the client's window is untouched by every routed swing.
+#[test]
+fn c3d_client_strict_nine_misses_in_100_ticks_never_tear_down() {
+    let iron = sword(ToolMaterial::Iron);
+    let (mut j, cow, id, at) = rig("attack-misses", &[(0, held(iron))], 10.0);
+    let (max, _, _) = cow_state(&j.hs, cow);
+    let before = j.sp().window_events.last_number();
+    let start = j.hs.server.tick_counter;
+    for n in 1..=9 {
+        let window = j.ui.digest(&j.inv, &j.armour);
+        let action = attack(&mut j, 0, id);
+        assert_eq!(j.ui.digest(&j.inv, &j.armour), window, "swing {n}: routing predicted nothing");
+        // Attack held: a swing every `ATTACK_COOLDOWN` ticks, each answer
+        // applied before the next (the run-15 review's own-pet / reach-edge
+        // case: nine refusals in about 81 ticks).
+        place(&mut j.hs, j.i, cow, at);
+        j.pump();
+        assert_eq!(fate(&j, action), Some(ActionFate::Refused), "swing {n}: refused");
+        for _ in 1..crate::combat::ATTACK_COOLDOWN { place(&mut j.hs, j.i, cow, at); j.pump(); }
+        assert!(matches!(j.rc.state, ConnectionState::Connected { .. }) && !j.hs.slot_is_free(j.i), "swing {n}: never torn down");
+    }
+    assert!(j.hs.server.tick_counter - start < crate::strict_admission::CORRECTION_WINDOW_TICKS, "inside one correction window");
+    assert_eq!(j.sp().window_events.last_number(), before, "no Replace, no Wear");
+    assert_eq!(cow_state(&j.hs, cow).0, max, "zero effect on the cow");
+    j.assert_honest("nine misses");
+    assert_eq!(durability(&j.sp().inventory, 0), Some(iron.durability), "zero effect on the sword");
+    assert_eq!(j.sp().strict_refusals.world_fact, 9);
+}
+
+/// Run 16 — two swings in one tick: the second is early on the server's
+/// swing schedule, a world fact (receipt alone, no `Replace`); the first
+/// lands and wears once.
+#[test]
+fn c3d_client_strict_swing_early_on_the_schedule_is_refused_uncorrected() {
+    let iron = sword(ToolMaterial::Iron);
+    let (mut j, cow, id, at) = rig("attack-early", &[(0, held(iron))], 2.0);
+    let (max, _, _) = cow_state(&j.hs, cow);
+    let before = j.sp().window_events.last_number();
+    let first = attack(&mut j, 0, id);
+    let second = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, cow, at);
+    j.pump();
+    assert_eq!((fate(&j, first), fate(&j, second)), (Some(ActionFate::Accepted), Some(ActionFate::Refused)));
+    assert_eq!(cow_state(&j.hs, cow).0, max - Item::Tool(iron).attack_damage(), "one hit landed");
+    assert_eq!(j.sp().window_events.last_number(), before + 1, "the first swing's Wear, no Replace");
+    j.assert_honest("the early swing");
+    assert_eq!(durability(&j.inv, 0), Some(iron.durability - 1), "worn once");
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.other, t.world_fact), (0, 1));
+}
+
+/// Run 16 — the joiner's body dies with a swing in flight: the swing is
+/// `Superseded` (before the attack arm runs), zero effect, never torn
+/// down; not a world-fact refusal.
+#[test]
+fn c3d_client_strict_swing_from_a_dead_body_is_superseded() {
+    let iron = sword(ToolMaterial::Iron);
+    let (mut j, cow, id, at) = rig("attack-dead", &[(0, held(iron))], 2.0);
+    let (max, _, _) = cow_state(&j.hs, cow);
+    let action = attack(&mut j, 0, id);
+    let sp = &mut j.hs.server.players[j.i];
+    sp.combat.health = 0.0;
+    sp.combat.dead = true;
+    place(&mut j.hs, j.i, cow, at);
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Superseded), "superseded");
+    assert_eq!(cow_state(&j.hs, cow), (max, false, cow_state(&j.hs, cow).2), "zero effect on the cow");
+    assert_eq!(durability(&j.sp().inventory, 0), Some(iron.durability), "no wear");
+    assert!(matches!(j.rc.state, ConnectionState::Connected { .. }) && !j.hs.slot_is_free(j.i), "never torn down");
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 0), "superseded, not refused");
+}
+
+/// Run 16 — a sword on its last point swung twice inside one round trip:
+/// the first hit lands and its Wear (which breaks the sword) waits for the
+/// client; the second swing, made before the client applied it and past
+/// the swing schedule, names a sword the server's effective window no
+/// longer holds. A corrected refusal (one `Replace`), never a teardown;
+/// the sword is gone on both copies.
+#[test]
+fn c3d_client_strict_last_point_sword_swung_twice_in_one_round_trip_is_corrected() {
+    let mut worn = sword(ToolMaterial::Wood);
+    worn.durability = 1;
+    let (mut j, cow, id, at) = rig("attack-break-twice", &[(0, held(worn))], 2.0);
+    let (max, _, _) = cow_state(&j.hs, cow);
+    let before = j.sp().window_events.last_number();
+    let first = attack(&mut j, 0, id);
+    // Past the swing schedule, with the client reading nothing.
+    for _ in 0..8 { place(&mut j.hs, j.i, cow, at); j.hs.tick(); }
+    assert_eq!(fate(&j, first), Some(ActionFate::Accepted));
+    assert!(j.inv.slot(0).is_some(), "the client still shows the sword (its Wear unread)");
+    let second = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, cow, at);
+    j.pump();
+    assert_eq!(fate(&j, second), Some(ActionFate::Refused), "refused");
+    assert!(matches!(j.rc.state, ConnectionState::Connected { .. }) && !j.hs.slot_is_free(j.i), "never torn down");
+    assert_eq!(cow_state(&j.hs, cow).0, max - Item::Tool(worn).attack_damage(), "only the first hit landed");
+    assert_eq!(j.sp().window_events.last_number(), before + 2, "the Wear, then ONE correction Replace");
+    j.assert_honest("the last point swung twice");
+    assert!(j.inv.slot(0).is_none() && j.sp().inventory.slot(0).is_none(), "broken on both copies");
+    assert_eq!((j.sp().strict_refusals.other, j.sp().strict_refusals.world_fact), (1, 0), "a window disagreement");
 }
 
 /// A sword on its last point breaks as in single-player: the hit lands,

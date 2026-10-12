@@ -365,7 +365,13 @@ pub struct RemoteClient {
     pub action_receipts: std::collections::VecDeque<crate::action_wire::ActionReceipt>,
     /// C3d run 14 — a retired `Refused` receipt named this client's
     /// `SetAutoRefill`: its next window action sends the setting again
-    /// (`CraftingUi::sync_auto_refill_joined`).
+    /// (`CraftingUi::sync_auto_refill_joined`). Run 16 (run-14 review
+    /// LOW-1) — set too when a Strict whole-window `InventorySync` (a
+    /// correction `Replace`) arrives while a `SetAutoRefill` is still
+    /// unretired: the `Replace` keeps each copy's refill setting, so the
+    /// setting goes again BEFORE the next digest-covered action, not only
+    /// when the receipt (held behind the chunk intake) retires. An
+    /// unchanged setting resent is served harmlessly.
     pub refill_refused: bool,
     last_recovery_id: u64,
     queued_action_receipts: usize,
@@ -1269,6 +1275,11 @@ impl RemoteClient {
                         match protocol::safe_deserialize::<protocol::InventorySyncPacket>(payload) {
                             Ok(sync) if sync.window_event != 0 => {
                                 self.pending_outcomes.push(RequestOutcome::Sync(sync));
+                                if self.inventory_mode == crate::action_identity::InventoryMode::Strict
+                                    && self.set_auto_refill_journaled_after(None)
+                                {
+                                    self.refill_refused = true;
+                                }
                                 changed = true;
                             }
                             Ok(_) => {}

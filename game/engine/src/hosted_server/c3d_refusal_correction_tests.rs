@@ -255,6 +255,11 @@ fn c3d_s1_a_refusal_every_tick_is_torn_down_at_the_ninth_correction() {
     assert!(j.open(None), "E opens");
     j.pumps(3);
     j.assert_agree("open");
+    // Run 16 — the session-start setting's receipt retires (this rig reads
+    // no receipts on its own), as it does long before play in the game: a
+    // setting still unretired at a correction is sent again (run-14 review
+    // LOW-1), which is not what this test measures.
+    j.retire_receipts();
     let start = j.hs.server.tick_counter;
     for round in 1..=9u8 {
         j.hs.server.players[j.i].inventory.set_slot(7, Some(stone(round)));
@@ -313,6 +318,43 @@ fn c3d_s1_refused_auto_refill_setting_is_corrected_then_resent() {
     assert_eq!(j.sp().inventory.auto_refill, j.inv.auto_refill, "the copies' refill settings agree");
     j.assert_honest("the corrected setting");
     assert_eq!(j.held(&Item::Block(COBBLESTONE)), 7, "the client's window was corrected to the server's");
+}
+
+/// Run 16 (run-14 review LOW-1) — the click that lands between the
+/// correction `Replace` and its `Refused` receipt. The setting is refused
+/// and corrected; the client applies the `Replace` but its receipt waits
+/// behind the world intake (a chunk stall: the split pump). The player
+/// clicks in that gap. The `Replace` itself sends the setting again before
+/// the click, so the click is served: ONE correction in all, one refusal.
+#[test]
+fn c3d_s1_a_click_between_the_replace_and_its_receipt_is_served() {
+    let mut j = joined("s1-refill-gap", &[(0, ItemStack::new_block(COBBLESTONE, 4))], true);
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.pump();
+    assert!(j.ui.open_joined(&mut j.rc, None, &mut j.inv, &mut j.armour, &j.reg).expect("reserved and sent"), "E opens");
+    j.assert_honest("the session's setting and the open screen");
+    j.hs.server.players[j.i].inventory.set_slot(7, Some(ItemStack::new_block(COBBLESTONE, 3)));
+    j.inv.auto_refill = !j.inv.auto_refill;
+    let before = j.sp().window_events.last_number();
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    let refused = j.newest_header();
+    j.pump_outcomes_only();
+    assert_eq!(fate(&j, refused), Some(ActionFate::Refused), "the setting is refused");
+    assert_eq!(j.sp().window_events.last_number(), before + 1, "its one correction Replace");
+    assert_eq!(j.held(&Item::Block(COBBLESTONE)), 7, "the Replace is applied on the client");
+    assert!(j.rc.action_journal.as_ref().unwrap().actions().any(|a| a.header == refused), "its receipt still waits in the intake");
+    // The gap: a click on the corrected window.
+    let eye = j.sp().player.eye_pos();
+    let ctx = crate::window::ClickCtx::new(false, j.ui.station(), eye, |_| crate::block::CRAFTING_TABLE);
+    j.ui.apply_joined_click(&mut j.rc, &mut j.inv, &mut j.armour, &WindowClick::Slot { slot: 0, right: false }, &ctx, &j.reg).expect("reserved and sent");
+    let click = j.newest_header();
+    j.pump_intake();
+    j.pump();
+    assert_eq!(fate(&j, click), Some(ActionFate::Accepted), "the click in the gap is served");
+    assert_eq!(counters(&j), (0, 1), "one refusal: the setting's");
+    assert_eq!(j.sp().window_events.last_number(), before + 1, "no second correction Replace");
+    assert_eq!(j.sp().inventory.auto_refill, j.inv.auto_refill, "the copies' refill settings agree");
+    j.assert_honest("the click in the gap");
 }
 
 /// Run 15 item 1 — the resend can't loop. A server copy that diverges again

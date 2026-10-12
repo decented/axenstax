@@ -157,6 +157,15 @@ impl Joined {
 
     pub(super) fn pumps(&mut self, n: usize) { for _ in 0..n { self.pump(); } }
 
+    /// C3d run 16 — retire the action receipts read so far (this rig's pump
+    /// leaves the world intake, receipts included, unread).
+    pub(super) fn retire_receipts(&mut self) {
+        self.rc.pending_block_changes.clear();
+        for (_, item) in std::mem::take(&mut self.rc.chunk_queue) {
+            if let crate::chunk_intake::StreamItem::ActionReceipt(receipt) = item { self.rc.apply_action_receipt(receipt); }
+        }
+    }
+
     /// Both copies hold `stack` in their bags from the same grant.
     pub(super) fn give(&mut self, slot: usize, stack: ItemStack) { self.set_both(slot, Some(stack)); }
 

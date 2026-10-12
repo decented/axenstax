@@ -103,6 +103,15 @@ impl Joined {
     /// One server tick, then the client: its packets read, its window events
     /// applied in event order, its world intake (block changes, receipts).
     pub(super) fn pump(&mut self) {
+        self.pump_outcomes_only();
+        self.pump_intake();
+    }
+
+    /// C3d run 16 — the first half of [`Self::pump`]: one server tick, the
+    /// client's packets read and its window events applied, but its world
+    /// intake (block changes, action receipts) left waiting, as the game
+    /// loop leaves it behind a chunk stall.
+    pub(super) fn pump_outcomes_only(&mut self) {
         self.hs.tick();
         self.rc.poll();
         let outcomes = std::mem::take(&mut self.rc.pending_outcomes);
@@ -138,6 +147,11 @@ impl Joined {
             }
             self.rc.note_window_event(event);
         }
+    }
+
+    /// The second half of [`Self::pump`]: the world intake (block changes
+    /// and action receipts, in their order).
+    pub(super) fn pump_intake(&mut self) {
         let changes = std::mem::take(&mut self.rc.pending_block_changes);
         let chunks = std::mem::take(&mut self.rc.chunk_queue);
         for step in self.intake.plan_deltas(chunks, &changes, 64) {

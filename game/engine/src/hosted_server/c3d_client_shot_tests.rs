@@ -14,10 +14,10 @@ use crate::protocol::{self, ShotWeapon};
 use crate::remote_client::{ConnectionState, RemoteClient, RequestOutcome};
 use crate::strict_requests::{route_shot, ShotRecipe, ShotRoute};
 
-fn bow() -> Tool { Tool::new(ToolType::Bow, ToolMaterial::Wood) }
-fn arrows(n: u8) -> ItemStack { ItemStack { item: Item::Material(crate::shot::ammo_for(ShotWeapon::Bow)), count: n } }
+pub(super) fn bow() -> Tool { Tool::new(ToolType::Bow, ToolMaterial::Wood) }
+pub(super) fn arrows(n: u8) -> ItemStack { ItemStack { item: Item::Material(crate::shot::ammo_for(ShotWeapon::Bow)), count: n } }
 
-fn projectiles(j: &Joined) -> usize {
+pub(super) fn projectiles(j: &Joined) -> usize {
     j.hs.server.ecs.query::<&crate::entity::ProjectileEntity>().iter().count()
 }
 
@@ -42,7 +42,7 @@ fn send_legacy(rc: &mut RemoteClient, actions: &mut JoinerActions, pending: Pend
 }
 
 /// Shoot from hotbar `hot` on the Strict rig, routed as the game loop does.
-fn shoot(j: &mut Joined, hot: usize) -> Option<ActionHeader> {
+pub(super) fn shoot(j: &mut Joined, hot: usize) -> Option<ActionHeader> {
     let (pending, action) = shot_of(&j.inv, hot);
     match route_shot(Some(&mut j.rc), &mut j.ui, &j.inv, &j.armour, &mut j.actions, pending.clone(), &action).expect("routed") {
         ShotRoute::Typed(header) => Some(header),
@@ -51,7 +51,7 @@ fn shoot(j: &mut Joined, hot: usize) -> Option<ActionHeader> {
     }
 }
 
-fn fate(j: &Joined, action: ActionHeader) -> Option<ActionFate> {
+pub(super) fn fate(j: &Joined, action: ActionHeader) -> Option<ActionFate> {
     j.sp().action_results.as_ref().expect("a joined result history").peek(action).map(|r| r.fate)
 }
 
@@ -81,6 +81,41 @@ fn c3d_client_strict_shot_is_served_typed() {
     assert_eq!(j.held(&ammo), 7, "the server's Take applied on the client");
     assert!(matches!(j.inv.slot(0).map(|s| &s.item), Some(Item::Tool(t)) if t.durability + 1 == bow().durability), "the server's Wear applied on the client");
     assert_eq!((j.sp().strict_refusals.stale_world, j.sp().strict_refusals.other), (0, 0));
+}
+
+/// Run 16 — a bow on its last point shot twice inside one round trip: the
+/// first shot's Wear (which breaks the bow) waits for the client; the
+/// second, past the shot schedule and made before the client applied it,
+/// names a bow the server's effective window no longer holds. A corrected
+/// refusal (one `Replace`), never a teardown: one projectile, one arrow
+/// spent, the bow gone on both copies.
+#[test]
+fn c3d_client_strict_last_point_bow_shot_twice_in_one_round_trip_is_corrected() {
+    let mut worn = bow();
+    worn.durability = 1;
+    let mut j = joined("shot-break-twice", &[(0, ItemStack { item: Item::Tool(worn), count: 1 }), (1, arrows(2))], true);
+    let ammo = arrows(1).item;
+    let before = j.sp().window_events.last_number();
+    let first = shoot(&mut j, 0).expect("typed");
+    for _ in 0..6 { j.hs.tick(); }
+    assert_eq!(fate(&j, first), Some(ActionFate::Accepted));
+    assert!(j.inv.slot(0).is_some(), "the client still shows the bow (its Wear unread)");
+    // The first shot's wear claim ends with the server's acknowledgement of
+    // the input it went ahead of (`JoinerActions::acknowledged`), which can
+    // be applied before the numbered Wear (held behind a carry-over): the
+    // client may then shoot its last-point bow again.
+    j.actions.acknowledged(u64::MAX);
+    let second = shoot(&mut j, 0).expect("typed");
+    j.pump();
+    assert_eq!(fate(&j, second), Some(ActionFate::Refused), "refused");
+    let reason = match &j.rc.state { ConnectionState::Failed(m) => m.clone(), _ => String::new() };
+    assert!(!j.hs.slot_is_free(j.i) && reason.is_empty(), "never torn down: {reason}");
+    assert_eq!(projectiles(&j), 1, "one projectile");
+    assert_eq!(j.sp().window_events.last_number(), before + 3, "the Take and the Wear, then ONE correction Replace");
+    j.assert_honest("the last point shot twice");
+    assert!(j.inv.slot(0).is_none() && j.sp().inventory.slot(0).is_none(), "broken on both copies");
+    assert_eq!(j.held(&ammo), 1, "one arrow spent");
+    assert_eq!(j.sp().strict_refusals.other, 1, "a window disagreement");
 }
 
 /// A shot the server's copy can't pay (no arrows there, though the client
