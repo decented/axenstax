@@ -42,3 +42,17 @@ fn c3d_strict_shot_with_a_spare_identical_bow_is_served() {
     assert_eq!((wear(&j.inv, 0), wear(&j.inv, 20)), (b.durability - 1, b.durability), "the held bow wore on the client");
     assert_eq!((wear(&j.sp().inventory, 0), wear(&j.sp().inventory, 20)), (b.durability - 1, b.durability), "and on the server copy");
 }
+
+/// C3d run 17 (run-16 review LOW-5) — `strict_wear_target`'s fallback,
+/// pinned: the named slot lacks the kind and exactly one piece elsewhere
+/// holds it → that piece; two elsewhere → `None` (ambiguous).
+#[test]
+fn c3d_wear_target_falls_back_to_the_unique_piece_elsewhere() {
+    let iron = Item::Tool(sword(ToolMaterial::Iron));
+    let mut inv = crate::inventory::Inventory::new();
+    inv.set_slot(0, Some(ItemStack::new_block(crate::block::STONE, 1)));
+    inv.set_slot(20, Some(held(sword(ToolMaterial::Iron))));
+    assert_eq!(crate::joiner_actions::strict_wear_target(&inv, 0, &iron), Some(20), "the unique piece elsewhere");
+    inv.set_slot(25, Some(held(sword(ToolMaterial::Iron))));
+    assert_eq!(crate::joiner_actions::strict_wear_target(&inv, 0, &iron), None, "two elsewhere: ambiguous");
+}

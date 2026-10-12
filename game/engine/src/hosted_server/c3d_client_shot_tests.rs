@@ -194,3 +194,42 @@ fn c3d_client_strict_shot_on_a_raw_unrepresentable_window_is_refused_then_torn_d
     assert_eq!(projectiles(&j), 0, "no projectile");
     assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace");
 }
+
+/// C3d run 17 (run-16 review LOW-1, decided) — a shot early on the
+/// server's shot schedule (two in one tick) is a WORLD FACT: its `Refused`
+/// receipt alone, no correction `Replace`, no Take or Wear, nothing
+/// superseded; the first is served. Its request record is released.
+#[test]
+fn c3d_client_strict_early_shot_is_refused_uncorrected() {
+    let mut j = joined("shot-early", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
+    j.ui.sync_auto_refill_joined(&mut j.rc, &j.inv, &j.armour).expect("reserved and sent");
+    j.assert_honest("the refill setting");
+    let before = j.sp().window_events.last_number();
+    let first = shoot(&mut j, 0).expect("typed");
+    let early = shoot(&mut j, 0).expect("typed");
+    j.hs.tick();
+    assert_eq!(fate(&j, first), Some(ActionFate::Accepted), "the first is served");
+    assert_eq!(fate(&j, early), Some(ActionFate::Refused), "the early one is refused");
+    assert_eq!(projectiles(&j), 1, "one projectile");
+    assert_eq!(j.sp().window_events.last_number(), before + 2, "the first's Take and Wear, no correction Replace");
+    assert!(!j.sp().window_events.replace_waiting(), "no correction waits");
+    j.assert_honest("an early shot");
+    assert_eq!(j.held(&arrows(1).item), 7, "one arrow spent");
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.stale_world, t.other, t.world_fact), (0, 0, 1), "a world fact, never a window mismatch");
+    assert_eq!(j.actions.len(), 0, "both records settled");
+}
+
+/// C3d run 17 (run-16 review LOW-1) — the observed guard on a shot: an
+/// honest Strict shot predicts nothing; ammo taken locally trips it.
+#[test]
+fn c3d_strict_no_prediction_guard_trips_on_a_predicted_shot() {
+    use crate::strict_requests::NoPrediction;
+    let mut j = joined("shot-guard", &[(0, ItemStack { item: Item::Tool(bow()), count: 1 }), (1, arrows(8))], true);
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "shot").expect("a Strict seat is guarded");
+    shoot(&mut j, 0).expect("typed");
+    assert_eq!(guard.end(&j.ui, &j.inv, &j.armour), Ok(()), "an honest shot predicts nothing");
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "shot").expect("guarded");
+    j.inv.set_slot(1, Some(arrows(7)));
+    assert!(guard.end(&j.ui, &j.inv, &j.armour).is_err(), "a predicted ammo take trips the guard");
+}

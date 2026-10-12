@@ -130,10 +130,10 @@ pub fn route_attack(
     packet.seq = actions.record(pending, remote.next_input_seq());
     packet.events_applied = remote.applied_window_boundary();
     let seq = packet.seq;
-    let intent = crate::action_wire::ActionIntent::Attack(packet);
     // C3d run 16 — nothing is predicted for a swing, and the server relies on
-    // it: a world-fact refusal is a receipt alone (`refuse_world_fact`).
-    debug_assert!(intent.predicts_nothing(), "an attack predicts nothing");
+    // it: a world-fact refusal is a receipt alone (`refuse_world_fact`). Run
+    // 17: the game loop's `NoPrediction` guard checks it on the window.
+    let intent = crate::action_wire::ActionIntent::Attack(packet);
     let header = match remote.reserve_action(intent, recipe, Box::new([])) {
         Ok(header) => header,
         Err(error) => {
@@ -145,4 +145,44 @@ pub fn route_attack(
         log::warn!("Reserved attack {} could not be sent: {error}", header.seq);
     }
     Ok(Some(header))
+}
+
+/// C3d run 17 (run-16 review LOW-1) — the observed half of
+/// `ActionIntent::predicts_nothing`: a Strict swing or shot changes nothing
+/// in the joined window before its answer, and the server relies on it (a
+/// world-fact refusal is a receipt alone, no correction). The game loop
+/// takes the window's digest before the swing or shot branch
+/// ([`Self::begin`]) and checks it after the branch ([`Self::end`]), so a
+/// prediction added anywhere in that branch (a weapon worn, ammo taken)
+/// is an error, never a silent divergence. No window event is applied
+/// inside the branch, so only the action itself can change the digest.
+pub struct NoPrediction {
+    digest: u32,
+    what: &'static str,
+}
+
+impl NoPrediction {
+    /// On a Strict seat, the window's digest before `what`; else `None`.
+    pub fn begin(remote: Option<&RemoteClient>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4], what: &'static str) -> Option<Self> {
+        shot_goes_typed(remote).then(|| NoPrediction { digest: ui.digest(inv, armour), what })
+    }
+
+    /// `Err` when the window changed since [`Self::begin`].
+    pub fn end(self, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) -> Result<(), String> {
+        let now = ui.digest(inv, armour);
+        if now == self.digest {
+            Ok(())
+        } else {
+            Err(format!("a Strict {} changed the joined window before its answer ({:08x} -> {now:08x}); a world-fact refusal would leave it uncorrected", self.what, self.digest))
+        }
+    }
+
+    /// [`Self::end`] where the game loop runs it: an error is logged, and a
+    /// debug build stops.
+    pub fn check(guard: Option<Self>, ui: &CraftingUi, inv: &Inventory, armour: &[Option<ArmourItem>; 4]) {
+        if let Some(guard) = guard && let Err(error) = guard.end(ui, inv, armour) {
+            log::error!("{error}");
+            debug_assert!(false, "{error}");
+        }
+    }
 }

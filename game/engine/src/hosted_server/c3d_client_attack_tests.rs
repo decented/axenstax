@@ -298,7 +298,7 @@ fn c3d_client_strict_swing_early_on_the_schedule_is_refused_uncorrected() {
 fn c3d_client_strict_swing_from_a_dead_body_is_superseded() {
     let iron = sword(ToolMaterial::Iron);
     let (mut j, cow, id, at) = rig("attack-dead", &[(0, held(iron))], 2.0);
-    let (max, _, _) = cow_state(&j.hs, cow);
+    let (max, _, y0) = cow_state(&j.hs, cow);
     let action = attack(&mut j, 0, id);
     let sp = &mut j.hs.server.players[j.i];
     sp.combat.health = 0.0;
@@ -306,7 +306,9 @@ fn c3d_client_strict_swing_from_a_dead_body_is_superseded() {
     place(&mut j.hs, j.i, cow, at);
     j.pump();
     assert_eq!(fate(&j, action), Some(ActionFate::Superseded), "superseded");
-    assert_eq!(cow_state(&j.hs, cow), (max, false, cow_state(&j.hs, cow).2), "zero effect on the cow");
+    let (health, stamped, y) = cow_state(&j.hs, cow);
+    assert_eq!((health, stamped), (max, false), "zero effect on the cow");
+    assert!(y <= y0 + 1e-3, "no knockback ({y} vs {y0}; run-16 review LOW-5: was compared with itself)");
     assert_eq!(durability(&j.sp().inventory, 0), Some(iron.durability), "no wear");
     assert!(matches!(j.rc.state, ConnectionState::Connected { .. }) && !j.hs.slot_is_free(j.i), "never torn down");
     let t = j.sp().strict_refusals;
@@ -508,4 +510,97 @@ fn c3d_strict_attack_at_the_result_cap_has_zero_external_effect() {
     r.fill_results();
     r.hs.server.players[r.i].window_events.shrink_waiting_to_fit();
     assert_zero_effect_attack(r, cow, id, at, "result cap", "Attack result history is full");
+}
+
+/// C3d run 17 (run-16 review LOW-1, decided) — the observed guard behind
+/// `ActionIntent::predicts_nothing`: an honest Strict swing leaves the
+/// joined window's digest as it was until its answer, and a predicting path
+/// (the weapon worn locally, as a single-player hit does) trips it.
+#[test]
+fn c3d_strict_no_prediction_guard_trips_on_a_predicted_swing_wear() {
+    use crate::strict_requests::NoPrediction;
+    let iron = sword(ToolMaterial::Iron);
+    let (mut j, _cow, id, _at) = rig("attack-guard", &[(0, held(iron))], 2.0);
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "swing").expect("a Strict seat is guarded");
+    attack(&mut j, 0, id);
+    assert_eq!(guard.end(&j.ui, &j.inv, &j.armour), Ok(()), "an honest swing predicts nothing");
+    let guard = NoPrediction::begin(Some(&j.rc), &j.ui, &j.inv, &j.armour, "swing").expect("guarded");
+    attack(&mut j, 0, id);
+    j.inv.use_hotbar_tool(0);
+    let error = guard.end(&j.ui, &j.inv, &j.armour).expect_err("a predicted wear trips the guard");
+    assert!(error.contains("Strict swing changed the joined window"), "{error}");
+}
+
+/// C3d run 17 (run-16 review LOW-5) — the action right behind a world-fact
+/// refusal, sent in the same round trip, is SERVED (not `Superseded`): no
+/// correction `Replace` came between them, so its base is still current.
+#[test]
+fn c3d_client_strict_action_behind_a_world_fact_refusal_is_served() {
+    let iron = sword(ToolMaterial::Iron);
+    let stone = ItemStack::new_block(crate::block::STONE, 4);
+    let (mut j, _cow, id, _at) = rig("attack-behind", &[(0, held(iron)), (1, stone)], 10.0);
+    let miss = attack(&mut j, 0, id);
+    j.place(super::c3d_client_edit_tests::CELLS[0], 1);
+    let placed = j.rc.action_journal.as_ref().unwrap().actions().last().unwrap().header;
+    j.pump();
+    assert_eq!(fate(&j, miss), Some(ActionFate::Refused), "the miss is refused");
+    assert_eq!(fate(&j, placed), Some(ActionFate::Accepted), "the placement behind it is served, not superseded");
+    j.assert_honest("a placement behind a miss");
+    assert_eq!(j.sp().strict_refusals.world_fact, 1);
+}
+
+/// C3d run 17 (run-16 review LOW-5) — a signed-in seat's swing (not
+/// sneaking) at its OWN tamed wolf: refused for a world fact (1C
+/// no-friendly-fire), its receipt alone, no `Replace`, zero effect.
+#[test]
+fn c3d_client_strict_swing_at_own_pet_is_refused_uncorrected() {
+    let iron = sword(ToolMaterial::Iron);
+    let (mut j, _cow, _id, _at) = rig("attack-own-pet", &[(0, held(iron))], 10.0);
+    j.hs.server.players[j.i].verified_pubkey = Some([7; 32]);
+    let key = j.sp().pet_owner_key().expect("a signed-in seat");
+    let at = ahead(j.sp().player.pos, 2.0);
+    let wolf = crate::entity::spawn_mob(&mut j.hs.server.ecs, MobType::Wolf, at);
+    j.hs.server.ecs.get::<&mut crate::wolf::WolfData>(wolf).expect("a wolf").ownership.owner_pubkey = key;
+    j.hs.tick();
+    let id = j.hs.server.ecs.get::<&crate::entity::ProtocolId>(wolf).expect("broadcast").0;
+    let (max, _, _) = cow_state(&j.hs, wolf);
+    let before = j.sp().window_events.last_number();
+    let action = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, wolf, at);
+    j.pump();
+    assert_eq!(fate(&j, action), Some(ActionFate::Refused), "refused");
+    assert_eq!(cow_state(&j.hs, wolf).0, max, "the pet is untouched");
+    assert_eq!(j.sp().window_events.last_number(), before, "no correction Replace, no Wear");
+    j.assert_honest("a swing at the own pet");
+    let t = j.sp().strict_refusals;
+    assert_eq!((t.other, t.world_fact), (0, 1));
+}
+
+/// C3d run 17 (run-16 review LOW-2, DECIDED: fail-closed for now) — PINS a
+/// known honest-client teardown until S3 replay: a last-point sword breaks
+/// on swing 1, and before the client applies that Wear an identical-kind
+/// sword is granted into the freed slot; swing 2 (claiming the old sword,
+/// which the server's raw copy still holds) passes the survivor check on
+/// the kind, but staging its Wear on raw and folding the pending Wear finds
+/// no unique piece (`AmbiguousWear`): torn down (`FellBehind`) with zero
+/// effect. A change that serves or corrects this case must revise this test.
+#[test]
+fn c3d_strict_last_point_sword_replaced_in_flight_by_an_identical_kind_is_a_known_teardown() {
+    let mut last = sword(ToolMaterial::Iron);
+    last.durability = 1;
+    let (mut j, cow, id, at) = rig("attack-ambiguous", &[(0, held(last))], 2.0);
+    let first = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, cow, at);
+    j.hs.tick();
+    assert_eq!(fate(&j, first), Some(ActionFate::Accepted), "swing 1 is served");
+    j.hs.grant_to_joiner(j.i, [held(sword(ToolMaterial::Iron))]);
+    j.hs.server.players[j.i].next_swing_tick = 0;
+    let (health, _, _) = cow_state(&j.hs, cow);
+    let second = attack(&mut j, 0, id);
+    place(&mut j.hs, j.i, cow, at);
+    j.hs.tick();
+    assert!(j.hs.slot_is_free(j.i), "torn down today (fail-closed)");
+    assert_eq!(super::actions::teardown_detail::last(), "Attack wear or pending fit is uncertain", "the internal reason");
+    assert_eq!(cow_state(&j.hs, cow).0, health, "zero effect: no second hit");
+    let _ = second;
 }

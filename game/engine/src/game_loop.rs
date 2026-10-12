@@ -11182,6 +11182,13 @@ impl super::GameState {
                     }
                 };
 
+                // C3d run 17 — a Strict swing predicts nothing (checked below).
+                let no_prediction = if joined_target.is_some() {
+                    let p = &self.players[pidx];
+                    crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "swing")
+                } else {
+                    None
+                };
                 let attacked = if joined_target.is_some() && !self.players[pidx].combat.can_attack() {
                     false
                 } else if villager_grace {
@@ -11264,6 +11271,10 @@ impl super::GameState {
                 if attacked && joined_target.is_none() {
                     let info = self.players[pidx].inventory.use_hotbar_tool(hotbar);
                     self.handle_tool_use(info);
+                }
+                {
+                    let p = &self.players[pidx];
+                    crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
                 }
 
                 // If no entity was hit, try breaking a block
@@ -13625,11 +13636,18 @@ impl super::GameState {
                         if !self.players[pidx].shot_ready(now) {
                             fired_arrow = true;
                         } else if self.joined() {
+                            // C3d run 17 — a Strict shot predicts nothing.
+                            let no_prediction = {
+                                let p = &self.players[pidx];
+                                crate::strict_requests::NoPrediction::begin(self.remote_client.as_ref(), &p.crafting_ui, &p.inventory, &p.armour_slots, "shot")
+                            };
                             if self.send_shot(pidx, weapon) {
                                 self.players[pidx].arm_shot(now);
                                 self.players[pidx].place_cooldown = 8;
                                 fired_arrow = true;
                             }
+                            let p = &self.players[pidx];
+                            crate::strict_requests::NoPrediction::check(no_prediction, &p.crafting_ui, &p.inventory, &p.armour_slots);
                         } else if let Some(slot_idx) = crate::shot::find_ammo(&self.players[pidx].inventory, weapon)
                             && let Some(mut stack) = self.players[pidx].inventory.slot(slot_idx).cloned()
                         {

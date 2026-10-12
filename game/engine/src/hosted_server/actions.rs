@@ -143,8 +143,8 @@ impl HostedServer {
                     if !self.serve_strict_edit(i, packet.action, &change, hand, mined.as_ref(), old, budget) { return; }
                 }
                 ActionIntent::Item(req) if self.strict_slot(i) => {
-                    if let protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } = req.action {
-                        if !self.serve_strict_shot(i, packet.action, req.seq, weapon, hotbar_slot, (held_kind, held_id, held_full), Aim { yaw, pitch, charge }) { return; }
+                    if let protocol::ItemAction::Shoot { weapon, hotbar_slot, held_kind, held_id, held_full, yaw, pitch, charge } = req.action.clone() {
+                        if !self.serve_strict_shot(i, packet.action, &req, weapon, hotbar_slot, (held_kind, held_id, held_full), Aim { yaw, pitch, charge }) { return; }
                     } else { return self.pause_typed_action(i, StrictTeardown::Untyped, "Typed item handler is awaiting authoritative integration"); }
                 }
                 // C3d run 15 — a swing at the server's mob (`strict_attack.rs`).
@@ -229,7 +229,8 @@ impl HostedServer {
     }
     /// C3d run 16 — a refusal for a WORLD FACT the client could not know
     /// (its swing out of reach on the server, early on the swing schedule,
-    /// at a target gone, dead or its own pet): the `Refused` row alone, no
+    /// at a target gone, dead or its own pet; run 17: a shot early on the
+    /// server's shot schedule): the `Refused` row alone, no
     /// correction `Replace` and no tick of the correction bound
     /// (`strict_admission::CorrectionRate`), because the client predicted
     /// nothing for `intent` (`ActionIntent::predicts_nothing`). Any other
@@ -365,7 +366,7 @@ impl HostedServer {
         self.complete_typed_result(i, action, ActionFate::Accepted, result);
         self.strict_fold_holds(i, "window click")
     }
-    fn serve_strict_shot(&mut self, i: usize, action: ActionHeader, request_seq: u32, weapon: protocol::ShotWeapon, slot: u8, claim: (u8, u16, protocol::WireItem), aim: Aim) -> bool {
+    fn serve_strict_shot(&mut self, i: usize, action: ActionHeader, req: &protocol::ItemActionPacket, weapon: protocol::ShotWeapon, slot: u8, claim: (u8, u16, protocol::WireItem), aim: Aim) -> bool {
         use crate::item::{Item, ItemStack};
         let now = self.server.tick_counter;
         let sp = &self.server.players[i];
@@ -380,8 +381,13 @@ impl HostedServer {
         if crate::shot::weapon_of(Some(&item)) != Some(weapon) || crate::inventory::item_to_ref(&item).to_wire() != (claim.0, claim.1) || crate::inventory::item_to_wire_full(&item) != claim.2 {
             self.refuse_typed_action(i, action); return false;
         }
+        // C3d run 17 (run-16 review LOW-1, decided) — early on the server's
+        // shot schedule is a WORLD FACT the client could not know, and a
+        // shot predicts nothing: its `Refused` receipt alone, no correction
+        // (as a swing's). Ammo or a bow missing from the server's copy stays
+        // a corrected window disagreement.
         if now.saturating_add(crate::shot::SHOT_JITTER_TICKS) < sp.next_shot_tick {
-            self.refuse_typed_action(i, action); return false;
+            return self.refuse_world_fact(i, action, &ActionIntent::Item(req.clone()));
         }
         let mut effective = match crate::window_events::strict_effective_marker(sp, &self.server.registry) {
             Ok(effective) => effective,
@@ -421,7 +427,7 @@ impl HostedServer {
         let Some(included) = included else {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot window event numbers are exhausted"); return false;
         };
-        let outcome = protocol::ItemActionOutcomePacket { seq: request_seq, accepted: true, consume_held: 1, note: 0, window_event: included, wear_held: true, bite_after: 0 };
+        let outcome = protocol::ItemActionOutcomePacket { seq: req.seq, accepted: true, consume_held: 1, note: 0, window_event: included, wear_held: true, bite_after: 0 };
         let packet = protocol::serialize_packet(protocol::PacketType::ItemActionOutcome, &outcome);
         if packet.len() > crate::action_journal::MAX_PAGE_BYTES {
             self.pause_typed_action(i, StrictTeardown::FellBehind, "Shot outcome exceeds its reservation"); return false;

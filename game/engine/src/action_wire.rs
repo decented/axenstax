@@ -48,8 +48,14 @@ impl ActionIntent {
     /// (`HostedServer::refuse_world_fact`). A class that starts predicting
     /// must leave this table, which puts its refusals back on the corrected
     /// path (the server falls back to it for any other intent).
+    ///
+    /// C3d run 17 (run-16 review LOW-1) — a shot too (run 13: nothing is
+    /// predicted until its outcome). The table is a promise; the observed
+    /// guard is `strict_requests::NoPrediction`, which the game loop runs
+    /// around the swing and the shot (a window change there is an error).
     pub fn predicts_nothing(&self) -> bool {
         matches!(self, ActionIntent::Attack(_))
+            || matches!(self, ActionIntent::Item(p) if matches!(p.action, protocol::ItemAction::Shoot { .. }))
     }
 }
 
