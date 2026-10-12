@@ -247,8 +247,12 @@ impl HostedServer {
         // Run 20 (run-19 review LOW-4) — a cell only the client's footprint
         // could hold (a door half or neighbour its stale world has and the
         // server's lacks) was flipped by its prediction and nothing else
-        // corrects it: send those back as the server holds them (at most
-        // 15 cells, the refusal's union less the footprint just broadcast).
+        // corrects it: send those back as the server holds them (the
+        // refusal's union, at most 15 cells, less the footprint just
+        // broadcast: at most 14 ghosts — 13 beside a whole door, 14 when the
+        // server lacks its other half). Run 21 (run-20 review LOW-1): they
+        // ride the shared broadcast, so every joiner hears them, and they
+        // share the clicker's 64 send-backs a tick (Spec 04).
         let ghosts: Vec<[i32; 3]> = back.into_iter().filter(|c| !cells.contains(c)).collect();
         self.send_back_cells(&ghosts, budget);
         self.complete_typed_result(i, action, ActionFate::Accepted, result);

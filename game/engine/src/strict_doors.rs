@@ -30,6 +30,11 @@ fn other_half(cell: [i32; 3], m: u8) -> [i32; 3] {
     [cell[0], cell[1] + dy, cell[2]]
 }
 
+/// C3d run 21 (run-20 review LOW-2) — the toast a Mirror joiner sees when
+/// it clicks a door while its own earlier edits are still waiting to be
+/// sent: the toggle would overtake them, so it is not sent.
+pub const TOGGLE_WAITS_TOAST: &str = "Still sending your last changes — try the door again.";
+
 /// C3d run 21 (run-18 review L3) — [`other_half`] with checked arithmetic,
 /// for a cell the client names: where the matching half of a door half at
 /// `cell` with meta `m` stands, `None` past `i32`'s range.

@@ -3990,7 +3990,7 @@ normal lobby), clicks exhibits to **collect** them into a personal **basket**, a
   globals on `index.dedicated.html` (default OFF), read via
   `ws_transport_web::showcase_config`. Every kiosk branch is flag-guarded, so a
   normal server and the normal PWA are byte-identical.
-- **Safe default = Adventure** (read-only) so an anonymous guest can't grief
+- **Safe default = Adventure** (read-only; doors, gates and trapdoors still open for everyone, and since C3d run 20 a guest's toggle is shared with every player) so an anonymous guest can't grief
   (spec §13 #4); building locked; operator moderation via the console.
 - **Containment.** When `should_dead_end_exit`, the three exit transitions
   (ESC-quit + both pause-menu quit arms) set `showcase_exited` instead of going to

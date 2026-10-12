@@ -84,7 +84,8 @@ fn c3d_mirror_toggle_waits_behind_the_joiners_waiting_edits() {
 
 /// Run 20 (with HIGH-1): a live Mirror toggle whose base predates a
 /// whole-window `Replace` the client hadn't applied (here a correction
-/// `Replace` queued after the click) is SERVED, not superseded: it read
+/// `Replace` queued after the click — a Strict-only path driven on a Mirror
+/// seat; run 21 adds the Mirror case that happens, the join sync, below) is SERVED, not superseded: it read
 /// nothing from the window and the client predicted nothing in it, so
 /// there is nothing for the `Replace` to make stale. The door opens on both
 /// copies; the seat is never torn down.
@@ -104,4 +105,28 @@ fn c3d_mirror_toggle_made_before_a_replace_is_served() {
         assert!(open(&m.hs.server.world, [41, y, 40]), "the server's half at y={y} is open");
         assert!(open(&m.world, [41, y, 40]), "and the joiner's");
     }
+}
+
+/// C3d run 21 (run-20 review LOW-4) — the Mirror case that happens: a
+/// toggle clicked in the first round trip after the join, before the client
+/// has applied the join sync's whole-window `Replace` (sent by the join's
+/// own `send_inventory_sync` to a returning joiner or one with a kit,
+/// `hosted_server.rs` join path; a fresh guest gets none, so the test sends
+/// it as the join does). This harness never applies window events, so the
+/// click's base predates it. It reads no window, so it is served, never
+/// superseded or torn down.
+#[test]
+fn c3d_mirror_toggle_before_the_join_replace_is_applied_is_served() {
+    let mut m = mirror_joined("mirror-toggle-pre-join-replace");
+    for w in [&mut m.hs.server.world, &mut m.world] { stand_door(w, [41, 80, 40], Facing::North); }
+    let i = m.rc.player_index().expect("joined") as usize;
+    let fold = crate::window_events::effective_window_and_debt(&m.hs.server.players[i]);
+    m.hs.send_inventory_sync(i, fold.window, fold.debt);
+    let base = m.rc.applied_window_boundary();
+    assert!(m.hs.server.players[i].window_events.predates_replace(base), "the click's base predates the join sync's Replace");
+    click(&mut m, [41, 80, 40]);
+    for _ in 0..6 { m.pump(); }
+    assert!(!m.hs.disconnected[i], "never torn down");
+    assert_eq!(m.fates, vec![ActionFate::Accepted], "served, not superseded");
+    for y in [80, 81] { assert!(open(&m.hs.server.world, [41, y, 40]) && open(&m.world, [41, y, 40]), "open on both at y={y}"); }
 }

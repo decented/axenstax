@@ -3391,6 +3391,56 @@ mod tests {
         assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
     }
 
+    /// C3d run 21 (run-20 review LOW-2) — a Mirror joiner's door click while
+    /// its own edits still wait to be sent is NOT sent (it would overtake
+    /// them): nothing reserved, the door stays shut, a toast. Once they have
+    /// gone, the next click is a typed `ToggleBlock` as usual.
+    #[test]
+    #[ignore = "needs a GPU adapter holding the 506-layer atlas"]
+    fn game_harness_mirror_door_click_waits_for_unsent_edits() {
+        isolate_saves();
+        let mut hg = HeadlessGame::boot_into_world("harness-mirror-toggle-wait");
+        hg.state.set_play_mode(crate::play_mode::PlayMode::Survival);
+        let mut server = crate::hosted_server::HostedServer::start(
+            0, format!("harness-mirror-toggle-wait-server-{}", std::process::id()), 42, 0,
+            crate::hosted_server::RemoteTransport::WebSocket { port: 0 },
+        ).expect("dedicated server starts");
+        server.server.difficulty = crate::survival::Difficulty::Peaceful;
+        let transport = server.attach_test_remote();
+        hg.state.remote_client = Some(crate::remote_client::RemoteClient::from_transport(
+            Box::new(transport), crate::remote_client::build_join_request_guest("Doorman", 0), None));
+        for _ in 0..5 { harness_step(&mut server, &mut hg); }
+        let feet = clear_pad(&mut hg, Some(&mut server));
+        let bottom = [feet[0], feet[1], feet[2] - 2];
+        let top = [bottom[0], bottom[1] + 1, bottom[2]];
+        for w in [&mut hg.state.world, &mut server.server.world] {
+            w.set_block(bottom[0], bottom[1], bottom[2], crate::block::OAK_DOOR);
+            w.set_meta((bottom[0], bottom[1], bottom[2]), 0);
+            w.set_block(top[0], top[1], top[2], crate::block::OAK_DOOR);
+            w.set_meta((top[0], top[1], top[2]), crate::use_edits::door_top_meta(0));
+        }
+        for _ in 0..2 { harness_step(&mut server, &mut hg); }
+        aim_at(&mut hg, glam::Vec3::new(bottom[0] as f32 + 0.5, bottom[1] as f32 + 0.5, bottom[2] as f32 + 0.5));
+        let toggles = |hg: &HeadlessGame| hg.state.remote_client.as_ref().unwrap().action_journal.as_ref().unwrap().actions()
+            .filter(|a| matches!(crate::action_wire::ActionPacket::decode(&a.intent).map(|p| p.intent), Ok(crate::action_wire::ActionIntent::ToggleBlock { cell, .. }) if cell == bottom))
+            .count();
+        // An edit of this client's still waiting to go (the floor it stands
+        // on, as it is): the click must not overtake it.
+        let floor = [feet[0], feet[1] - 1, feet[2]];
+        let standing = hg.state.world.get_block(floor[0], floor[1], floor[2]);
+        hg.state.pending_block_changes.push(crate::protocol::BlockChange { x: floor[0], y: floor[1], z: floor[2], new_block: standing, meta: 0 });
+        right_click(&mut hg);
+        assert_eq!(toggles(&hg), 0, "nothing reserved while an edit waits");
+        assert!(!crate::block_shape::is_open(hg.state.world.meta_at(bottom[0], bottom[1], bottom[2])), "nothing predicted");
+        assert_eq!(toast_text(&hg).as_deref(), Some(crate::strict_doors::TOGGLE_WAITS_TOAST), "the toast asks again");
+        for _ in 0..4 { harness_step(&mut server, &mut hg); }
+        right_click(&mut hg);
+        assert_eq!(toggles(&hg), 1, "once the edits have gone, one ToggleBlock reserved");
+        for _ in 0..6 { harness_step(&mut server, &mut hg); }
+        assert!(crate::block_shape::is_open(server.server.world.meta_at(bottom[0], bottom[1], bottom[2])), "the server's door is open");
+        assert!(hg.state.remote_client.as_ref().unwrap().is_connected(), "never torn down");
+    }
+
     // ─── C3c-3r ────────────────────────────────────────────────────────────
 
     /// C3c-3r — the toast text on a client now, if any.
