@@ -48,7 +48,7 @@ pub fn mark(imports: &Path, transfer: Id, world: Id) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(&temp).map_err(|_| Error::Io)?;
+    let mut f = crate::fsync::open_written(&mut opts, &temp).map_err(|_| Error::Io)?;
     f.write_all(&record(transfer, world)).and_then(|()| crate::fsync::sync_written(&f)).map_err(|_| Error::Io)?;
     fs::rename(&temp, &path).map_err(|_| Error::Io)?;
     sync(imports)

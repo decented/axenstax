@@ -5636,7 +5636,20 @@ after the regular-file check), a handle the code itself opened for writing
 is synced through `crate::fsync::sync_written`, and a second guard pins
 that no `sync_all(` / `sync_data(` call exists anywhere in the engine's
 source outside `crate::fsync`. Those lines are not compiled or tested on
-this Linux-only build.
+this Linux-only build. CP17 (CP16 review MEDIUM-1, LOW-4, LOW-6): that
+second guard could be dodged through its own escape hatch
+(`sync_written(&File::open(p)?)` was green, as were a spaced `.sync_all (`
+and a basename-only exemption), so `sync_written` now takes
+`crate::fsync::Written`, a handle only `crate::fsync::open_written` makes
+(it forces write access onto the caller's options): a read-only handle no
+longer compiles there. The guard bans `sync_all` / `sync_data` as an
+identifier (any spacing, split lines, a path reference) everywhere but the
+exact file `src/fsync.rs`. The ledger's append handle is opened through
+`open_written` too, so it is never append-only (Windows' `FlushFileBuffers`
+documents a write-access requirement; unconfirmed on Windows itself). An
+import's re-sync by path goes through `crate::fsync::sync_regular`, which
+opens without following a symlink and, on Unix, syncs only when the handle's
+device and inode are the checked path's.
 
 Bearer, Prepared and retirement (CP7 slice A). `SourceConfig` carries the
 bearer of the online host's LIVE invitation (`OnlineHost::live_bearer`, the

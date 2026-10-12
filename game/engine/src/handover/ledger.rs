@@ -144,7 +144,10 @@ impl Ledger {
         options.read(true).append(true).create(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&self.path).map_err(|_| Error::Io)?;
+        // CP17 (CP16 review LOW-4): opened with write access too (writes
+        // still go to the end), so the flush below never meets an
+        // append-only handle on Windows. Unconfirmed on Windows itself.
+        let mut file = crate::fsync::open_written(&mut options, &self.path).map_err(|_| Error::Io)?;
         let len = file.metadata().map_err(|_| Error::Io)?.len();
         // CP13b (CP13 review MEDIUM-1): the read bound, at append time. The
         // file after this append (a torn tail's newline included) must still

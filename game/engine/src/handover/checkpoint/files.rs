@@ -7,14 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 pub(super) const BUFFER: usize = 16 * 1024;
-/// CP16: the regular-file check `open` makes, without opening.
-pub(super) fn regular(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.is_file() => Ok(()),
-        Ok(_) => Err(Error::Invalid("unsafe source file")),
-        Err(_) => Err(Error::Io),
-    }
-}
 pub(super) fn open(path: &Path) -> Result<File> {
     let before = fs::symlink_metadata(path).map_err(|_| Error::Io)?;
     if !before.is_file() {
@@ -43,6 +35,18 @@ pub(super) fn new_file(path: &Path) -> Result<File> {
         options.mode(0o600);
     }
     options.open(path).map_err(|_| Error::Io)
+}
+/// CP17 (CP16 review MEDIUM-1): `new_file` for a file the import syncs:
+/// the handle `crate::fsync::sync_written` accepts.
+pub(super) fn new_written(path: &Path) -> Result<crate::fsync::Written> {
+    let mut options = OpenOptions::new();
+    options.read(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    crate::fsync::open_written(&mut options, path).map_err(|_| Error::Io)
 }
 pub(super) fn owned_dir(parent: &Path, prefix: &str) -> Result<PathBuf> {
     if !fs::symlink_metadata(parent)

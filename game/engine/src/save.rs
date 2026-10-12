@@ -1279,7 +1279,8 @@ pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), S
         PathBuf::from(t)
     };
     {
-        let mut f = fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        let mut f = crate::fsync::open_written(fs::OpenOptions::new().create(true).truncate(true), &tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
         f.write_all(bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
         crate::fsync::sync_written(&f).map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
     }

@@ -75,7 +75,7 @@ pub struct Import {
     parent: PathBuf,
     directory: PathBuf,
     final_path: PathBuf,
-    receiver: Option<Receiver<File>>,
+    receiver: Option<Receiver<crate::fsync::Written>>,
     verified: bool,
     renamed: bool,
     limits: super::Limits,
@@ -119,7 +119,7 @@ impl Import {
             parent,
             &format!("handover-receive-{}", hex::encode(admitted.manifest().transfer)),
         )?;
-        let file = match files::new_file(&directory.join("archive.tar.gz")) {
+        let file = match files::new_written(&directory.join("archive.tar.gz")) {
             Ok(f) => f,
             Err(e) => {
                 let _ = fs::remove_dir_all(&directory);
@@ -223,7 +223,7 @@ pub(super) fn observe(o: &mut impl ImportObserver, b: ImportBoundary, p: &Path) 
 }
 /// A handle this import opened for writing (the archive it received, a
 /// member it extracted).
-pub(super) fn sync_written(file: &File, path: &Path, o: &mut impl ImportObserver) -> Result<()> {
+pub(super) fn sync_written(file: &crate::fsync::Written, path: &Path, o: &mut impl ImportObserver) -> Result<()> {
     observe(o, ImportBoundary::FileSync, path)?;
     crate::fsync::sync_written(file).map_err(|_| Error::Io)
 }
@@ -233,8 +233,9 @@ pub(super) fn sync_written(file: &File, path: &Path, o: &mut impl ImportObserver
 /// `files::open` makes.
 pub(super) fn sync_existing(path: &Path, o: &mut impl ImportObserver) -> Result<()> {
     observe(o, ImportBoundary::FileSync, path)?;
-    files::regular(path)?;
-    crate::fsync::sync_file(path).map_err(|_| Error::Io)
+    // CP17 (CP16 review LOW-6): the file synced is the regular file
+    // checked (no symlink followed; same device and inode on Unix).
+    crate::fsync::sync_regular(path).map_err(|_| Error::Io)
 }
 fn write_file(
     path: &Path,
@@ -243,7 +244,7 @@ fn write_file(
     o: &mut impl ImportObserver,
 ) -> Result<Hash> {
     observe(o, ImportBoundary::Write, path)?;
-    let mut file = files::new_file(path)?;
+    let mut file = files::new_written(path)?;
     let mut hash = Sha256::new();
     let mut left = length;
     let mut buf = [0u8; files::BUFFER];
