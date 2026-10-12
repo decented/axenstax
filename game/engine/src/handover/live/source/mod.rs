@@ -200,6 +200,10 @@ pub struct SourceSession {
     /// and its abort record (durable as the pending abort record). Every
     /// abort after disclosure writes exactly this record.
     pending_abort: Option<(Event, AbortRecord)>,
+    /// CP17 (CP15 review LOW-3): the world's handover lock, taken before the
+    /// pending abort record is written and dropped once a terminal record
+    /// is durable (or with the session; the OS drops it if the process dies).
+    live_lock: Option<super::world_lock::LiveLock>,
     /// CP13b test hook: the abort record's write fails.
     #[cfg(test)]
     pub test_fail_abort_record: bool,
@@ -278,6 +282,7 @@ impl SourceSession {
             abort_unrecorded: false,
             abort_sent: false,
             pending_abort: None,
+            live_lock: None,
             #[cfg(test)]
             test_fail_abort_record: false,
             #[cfg(test)]
@@ -483,15 +488,30 @@ impl SourceSession {
         match phase.abort_disclosed(&store, &crate::handover::ledger::Ledger::install(), record) {
             Ok(()) => {
                 self.abort_recorded = true;
+                self.live_lock = None;
                 AbortRecorded::Recorded(ev)
             }
-            Err(crate::handover::Error::State(crate::handover::phase::RETIREMENT_RECORD_EXISTS)) => AbortRecorded::Retired,
+            Err(crate::handover::Error::State(crate::handover::phase::RETIREMENT_RECORD_EXISTS)) => {
+                self.live_lock = None;
+                AbortRecorded::Retired
+            }
             Err(e) => {
                 log::error!("handover: the abort record couldn't be written ({e}); play resumes anyway");
                 self.abort_unrecorded = true;
                 AbortRecorded::Unrecorded(Some(ev))
             }
         }
+    }
+    /// CP17 test hook: whether this session holds the world's handover
+    /// lock, and dropping it (a "kill" that `mem::forget`s the session
+    /// would otherwise leak this process's guard).
+    #[cfg(test)]
+    pub fn test_holds_live_lock(&self) -> bool {
+        self.live_lock.is_some()
+    }
+    #[cfg(test)]
+    pub fn test_drop_live_lock(&mut self) {
+        self.live_lock = None;
     }
     /// Retired or quarantined: the original world never resumes.
     pub fn past_retirement(&self) -> bool {
@@ -782,6 +802,10 @@ fn check(hs: &HostedServer, action: &HostAction, cfg: &SourceConfig, live: Live)
         return Err(Refusal("This world's invitation belongs to a different identity than the one signed in."));
     }
     eligibility::seats(&hs.server, action.seat)?;
+    // CP17 (CP15 review LOW-3): another process is handing this world over.
+    if cfg.world_dir.as_deref().is_some_and(super::world_lock::held_elsewhere) {
+        return Err(Refusal(super::copy::HANDOVER_ELSEWHERE));
+    }
     let saved = match &cfg.world_dir {
         Some(dir) => eligibility::saved_record_keys(dir)?,
         None => Vec::new(),

@@ -187,6 +187,10 @@ pub struct RecipientSession {
     /// for Committed to (the game: the process's one). `None` hands nothing
     /// (a session a test drives by hand).
     resumer: Option<super::resumer::Resumer>,
+    /// CP17 (CP15 review LOW-3): the import's handover lock, taken before
+    /// the Prepared receipt is written and held (with the resumer job that
+    /// takes over the wait, which shares it) until Activated or quarantine.
+    live_lock: Option<super::world_lock::LiveLock>,
 }
 
 /// L5: a router mapping the joined session asked for (native: the UPnP
@@ -303,6 +307,7 @@ impl RecipientSession {
             #[cfg(test)]
             test_fail_inert_clear: false,
             resumer: None,
+            live_lock: None,
             activation_checked: 0,
             hand_tried: 0,
         })
@@ -522,6 +527,9 @@ impl RecipientSession {
             self.stage,
             RecipientStage::Aborted(_) | RecipientStage::Quarantined(_) | RecipientStage::AwaitingConsent | RecipientStage::Activated
         ) {
+            // CP17: Activated or ended here: this session's share of the
+            // lock goes (a resumer job still waiting keeps its own).
+            self.live_lock = None;
             return Ok(());
         }
         if let Some(lease) = self.lease.as_mut() {
@@ -806,6 +814,15 @@ impl RecipientSession {
         // CP13b (CP13 review MEDIUM-1): room in the ledger before the receipt.
         if !crate::handover::ledger::Ledger::install().has_room(2) {
             return Err(Refusal(super::copy::LEDGER_FULL));
+        }
+        // CP17 (CP15 review LOW-3): the import's handover lock before the
+        // receipt; not taken, nothing is written and this aborts while inert.
+        if self.live_lock.is_none() {
+            let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
+            self.live_lock = Some(
+                super::world_lock::acquire(&working)
+                    .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?,
+            );
         }
         let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;
         let markers = self.markers.as_ref().ok_or(Refusal("No Ready."))?;

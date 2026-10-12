@@ -5859,7 +5859,10 @@ boundary, the rename) removes the temp (best effort, then a directory
 fsync), so a retirement's signed Commit never lingers beside a world that
 aborted, and the start-up step (`Resumer::boot`) first sweeps every
 regular `*.tmp-*` from every world's and every import's `handover/`
-(nothing renamed them, and no session runs yet); a world whose `handover/` has been deleted
+(nothing renamed them, and no session of this process runs yet; CP17,
+CP16 review LOW-3: a world or import whose handover lock another game
+process holds is skipped, since its temps may be that live session's
+records, and the lock is held here while sweeping); a world whose `handover/` has been deleted
 meanwhile has nowhere to record it and is dropped after the proof. The open
 guard still refuses the world after publication: retired is forever. The
 resumer is a detached thread, which does not outlive `main`: a publication
@@ -6105,7 +6108,9 @@ logged and ignored); one whose abort record exists is removed; otherwise it
 is written as the abort record through the choke point (`write_terminal`), so
 retire/abort exclusivity holds. **A pending abort record and a retirement
 record: the retirement wins**, the pending record is discarded, and that is
-logged. The scan then publishes the promoted record through
+logged. (CP17: "no retire can race a process that died" holds only for
+one process; a second live process is fenced by the per-world handover
+lock below.) The scan then publishes the promoted record through
 `Resumer::adopt` (which re-persists it first), and the recipient past its
 ack quarantines on it. The invitation needs no rotation step at start-up:
 invitations live only in memory (`OnlineHost::start` mints a fresh bearer
@@ -6119,6 +6124,41 @@ recipient quarantines; (b) a pending abort record beside a retirement
 record publishes only the Committed and leaves no abort record; (c) a
 pending abort record that can't be written stops the handover with nothing
 disclosed.
+
+**The per-world handover lock (CP17, CP15 review LOW-3).** The process-wide
+lock above orders one process's writers only, and nothing stopped a second
+game process on the same computer (no single-instance lock exists): its
+start-up would promote a LIVE handover's pending record, so the first
+process's retire met an abort record (a live handover cancelled by a second
+launch), or, if the two interleaved, both records and both events existed
+and a recipient reading the Aborted first quarantined while the source
+retired (the world usable nowhere). So a live handover holds an exclusive
+advisory lock on `handover/.live` in the world's folder
+(`live::world_lock`, the standard library's `File::try_lock`: `flock` on
+Unix, `LockFileEx` on Windows): the source from just before its pending
+abort record is written (taken before the room check, so `.live` is
+counted; not taken: nothing is disclosed) until its retirement or abort
+record is durable; the recipient from just before its Prepared receipt is
+written (not taken: nothing is written and it aborts while inert) until the
+import is Activated or quarantined. The resumer job that takes over the
+recipient's wait shares the lock (within one process the guard is shared,
+and the OS lock goes with the last holder). Another process: its start-up
+promotion, publication scan, unfinished-record sweep and import waits skip
+a world whose lock is held (logged once; the promotion and the sweep hold
+the lock themselves while they work, so no handover starts under them); its
+open guard (`authority::open_guard`, after the retired and still-arriving
+refusals, read-only) refuses to open, host, fork or write the world with
+"Another copy of the game on this computer is handing this world over right
+now. Try again once that has finished." (`copy::HANDOVER_ELSEWHERE`), and so
+does a handover of it (`source::check`). The OS releases the lock when the
+handle closes or the process dies, so a crash leaves no stale lock; `.live`
+itself is never deleted (deleting a lock file under a holder lets two
+processes lock two files) and is one of the folder's 256 entries. A lock
+file that can't be checked counts as held (fail closed); one that can't be
+made at start-up, with no other holder seen, is worked without (logged).
+Native only. Tested with a real second process (the test binary
+re-executed holding the lock): its promotion, publication, open and import
+wait are skipped while it lives, and all go ahead once it is killed.
 
 CP13b (CP13 review MEDIUM-1): the ledger's append
 bound is its read bound (entry 8,193 is refused at append time, before its

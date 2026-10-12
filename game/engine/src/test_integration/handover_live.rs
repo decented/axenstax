@@ -2634,6 +2634,60 @@ mod session {
         drop((dst, relay));
     }
 
+    /// CP17 (CP15 review LOW-3): a second game process starting while this
+    /// one is between disclosure and a terminal record (it holds the world's
+    /// handover lock) skips the world: its pending abort record is NOT
+    /// promoted, nothing is published, the world doesn't open there, and
+    /// the import's wait isn't taken over while the recipient holds its
+    /// lock. Once the holder dies (the OS drops its lock; nothing is
+    /// released by hand) the start-up promotes and publishes as before.
+    /// The "other process" is a real child process holding the lock.
+    #[test]
+    fn handover_lock_a_live_handover_in_another_process_is_skipped_until_it_ends() {
+        use crate::handover::live::{authority, copy, resumer::Resumer, world_lock};
+        let mut p = past_the_ack("lock-held");
+        let t = p.src.transfer();
+        assert!(p.src.test_holds_live_lock(), "the source didn't hold the world's lock past disclosure");
+        let world = dir_world(&p.dir);
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        // The source process "is" the child from here: this one lets go.
+        p.src.test_drop_live_lock();
+        let Pair { hs, host, src, rc, dst, relay, dir, .. } = p;
+        std::mem::forget(src);
+        drop((rc, hs, host));
+        let other = world_lock::tests::ChildHolder::hold(&world);
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 0, "a world held by another process was published");
+        assert!(!source_record(&dir, "aborted", t).exists(), "a second process promoted a live handover's pending abort record");
+        assert!(source_record(&dir, "pending-abort", t).is_file(), "the live handover's pending record went");
+        assert_eq!(authority::open_guard(&world).err().map(|r| r.0), Some(copy::HANDOVER_ELSEWHERE));
+        assert_eq!(
+            crate::save::with_worlds_root(&dir.0, || crate::save::world_open_refusal("world")).as_deref(),
+            Some(copy::HANDOVER_ELSEWHERE),
+            "a second process could open a world mid-handover"
+        );
+        other.kill();
+        assert!(authority::open_guard(&world).is_ok(), "a dead process's lock still refused the world");
+        assert_eq!(Resumer::new(FAST).resume_all(&dir.0, src_install()), 1, "the pending record wasn't promoted once the holder died");
+        assert!(source_record(&dir, "aborted", t).is_file(), "no abort record after the promotion");
+        // The recipient side: its session's lock goes with it; another
+        // process holding the import's lock keeps the wait there.
+        drop(dst);
+        let other = world_lock::tests::ChildHolder::hold(&working);
+        assert_eq!(Resumer::new(FAST).resume_imports(&dir.0.join("imports"), dst_install()), 0, "a wait another process holds was taken over");
+        other.kill();
+        let recipient = Resumer::new(FAST);
+        assert_eq!(recipient.resume_imports(&dir.0.join("imports"), dst_install()), 1, "the wait wasn't taken over once the holder died");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !has_record(&dir, "quarantined", t) {
+            assert!(std::time::Instant::now() < deadline, "the recipient never quarantined on the published Aborted");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(relay);
+    }
+    fn dir_world(dir: &Dir) -> std::path::PathBuf {
+        dir.0.join("world")
+    }
+
     /// CP15 (b): a pending abort record beside the transfer's retirement
     /// record: the retirement wins. The start-up publishes the Committed
     /// only, writes no abort record, and discards the pending record.

@@ -404,7 +404,9 @@ pub struct Promotion {
 /// CP15 (coordinator 2026-10-11): at start-up, before any world opens, a
 /// pending abort record with no terminal record is promoted to the abort
 /// record through the one choke point (`write_terminal`: retire/abort
-/// exclusivity holds; no retire can race a process that died). The scan
+/// exclusivity holds; no retire can race a process that died; CP17: a
+/// second live process is fenced by `live::world_lock`, which the caller
+/// holds while promoting, skipping a world another process holds). The scan
 /// that follows publishes it (`Resumer::adopt`, which re-persists it
 /// first), and the recipient past its ack quarantines on it instead of
 /// waiting forever. The restarted process holds no bearer: invitations are

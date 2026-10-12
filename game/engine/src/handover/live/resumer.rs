@@ -282,6 +282,11 @@ impl Resumer {
     /// CP13: only a receipt whose exact digest `ledger` lists.
     pub fn adopt_import(&self, world_dir: &Path, transfer: Id, ledger: &Ledger) -> bool {
         let Ok(store) = existing_store(world_dir) else { return false };
+        // CP17 (CP15 review LOW-3): another process holding the import's
+        // handover lock is waiting for it there. Otherwise the lock is taken
+        // now (shared with this process's session, if it holds it) and moves
+        // into the job, so it is held until Activated or quarantine.
+        let Some(lock) = super::world_lock::unless_elsewhere(world_dir, "the wait for Committed") else { return false };
         match AwaitingCommit::read(&store, transfer) {
             Ok(Some(a)) if !ledger.lists(&a.ledger_entry()) => {
                 log::warn!("handover: an import's receipt under {} isn't in this install's ledger; it is not resumed", world_dir.display());
@@ -301,7 +306,10 @@ impl Resumer {
         let dir = world_dir.to_path_buf();
         let spawned = std::thread::Builder::new()
             .name("handover-activate".into())
-            .spawn(move || run_import(shared, dir, transfer));
+            .spawn(move || {
+                let _lock = lock;
+                run_import(shared, dir, transfer)
+            });
         if spawned.is_err() {
             self.0.jobs.lock().unwrap_or_else(|e| e.into_inner()).remove(&(Flavour::Import, transfer));
             log::error!("handover: couldn't start waiting for Committed; it resumes at the next start");
@@ -327,12 +335,20 @@ impl Resumer {
     /// below publishes their Aborted; this runs before any world opens.
     pub fn resume_all(&self, worlds_root: &Path, ledger: &Ledger) -> usize {
         for world in handover_worlds(worlds_root) {
-            if let Ok(store) = existing_store(&world) {
-                crate::handover::phase::promote_pending_aborts(&store, ledger);
-            }
+            // CP17 (CP15 review LOW-3): a world whose handover lock another
+            // process holds is mid-handover there: its pending record is
+            // live, not a crash's leftover. Skipped (logged once); the lock
+            // is held here while promoting, so no handover can start under it.
+            let Ok(store) = existing_store(&world) else { continue };
+            let Some(_lock) = super::world_lock::unless_elsewhere(&world, "the start-up promotion") else { continue };
+            crate::handover::phase::promote_pending_aborts(&store, ledger);
         }
         let mut adopted = 0;
         for (world, retired) in retired_worlds(worlds_root) {
+            if super::world_lock::held_elsewhere(&world) {
+                super::world_lock::log_skipped(&world, "the publication");
+                continue;
+            }
             if self.adopt(&world, retired, ledger) {
                 adopted += 1;
             }
@@ -502,7 +518,19 @@ pub(crate) fn sweep_temps(worlds_root: &Path, imports: &Path) -> usize {
             }
         }
     }
-    dirs.iter().filter_map(|d| existing_store(d).ok()).map(|s| s.sweep_temps()).sum()
+    // CP17 (CP16 review LOW-3): a world or import whose handover lock
+    // another process holds is mid-handover there, and its temps may be
+    // that session's records being written: left alone (logged once). The
+    // lock is held here while sweeping, so no handover starts under it.
+    dirs.iter()
+        .filter_map(|d| {
+            let store = existing_store(d).ok()?;
+            let lock = super::world_lock::unless_elsewhere(d, "the unfinished-record sweep")?;
+            let n = store.sweep_temps();
+            drop(lock);
+            Some(n)
+        })
+        .sum()
 }
 
 fn handover_worlds(worlds_root: &Path) -> Vec<PathBuf> {
@@ -832,6 +860,27 @@ mod tests {
         assert_eq!(sweep_temps(&worlds, &imports), 2);
         assert!(temps.iter().all(|t| !t.exists()), "a stale temp survived the start-up sweep");
         assert!(!super::super::authority::dir(&bare).exists(), "the sweep created a handover folder");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// CP17 (CP16 review LOW-3): a world whose handover lock another
+    /// process holds keeps its temps (they may be that live session's
+    /// records being written); the sweep reaches it once the holder dies.
+    #[test]
+    fn handover_lock_boot_sweep_leaves_a_held_worlds_temps_alone() {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).unwrap();
+        let root = std::env::temp_dir().join(format!("axenstax-sweep-held-{}", hex::encode(random)));
+        let (worlds, imports) = (root.join("worlds"), root.join("imports"));
+        let world = worlds.join("w");
+        let store = super::super::authority::store(&world).unwrap();
+        let temp = store.directory().join("pending-abort.tmp-0101");
+        std::fs::write(&temp, b"a live record").unwrap();
+        let other = super::super::world_lock::tests::ChildHolder::hold(&world);
+        assert_eq!(sweep_temps(&worlds, &imports), 0, "the sweep removed a temp from a world another process holds");
+        assert!(temp.exists(), "a held world's temp was swept");
+        other.kill();
+        assert_eq!(sweep_temps(&worlds, &imports), 1, "the sweep skipped a world once its holder died");
         std::fs::remove_dir_all(root).unwrap();
     }
 

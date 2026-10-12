@@ -33,6 +33,22 @@ impl SourceSession {
         {
             use crate::handover::durable::MarkerKind::{Aborted, PendingAbort, Published, Retired};
             let dir = self.cfg.world_dir.as_ref().ok_or(Refusal(crate::handover::live::copy::NEVER_SAVED))?;
+            // CP17 (CP15 review LOW-3): the world's handover lock, from
+            // before the pending abort record until a terminal record is
+            // durable: no other game process on this computer promotes,
+            // opens or hands over this world meanwhile. Taken before the
+            // room check, so `.live` is counted. Not taken: nothing is
+            // disclosed.
+            match crate::handover::live::world_lock::acquire(dir) {
+                Ok(lock) => self.live_lock = Some(lock),
+                Err(crate::handover::live::world_lock::LockError::HeldElsewhere) => {
+                    return Err(Refusal(crate::handover::live::copy::HANDOVER_ELSEWHERE));
+                }
+                Err(crate::handover::live::world_lock::LockError::Io) => {
+                    log::warn!("handover: this world's handover lock couldn't be taken; nothing was disclosed");
+                    return Err(Refusal(crate::handover::live::copy::PENDING_ABORT_UNWRITTEN));
+                }
+            }
             let room = crate::handover::live::authority::store(dir).and_then(|s| s.has_room(&[PendingAbort, Retired, Aborted, Published], 3));
             if !matches!(room, Ok(true)) {
                 log::warn!("handover: this world's handover records have no room for another handover ({room:?}); nothing was disclosed");

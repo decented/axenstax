@@ -11,4 +11,5 @@ pub mod recipient;
 pub mod resumer;
 pub mod source;
 pub mod wire;
+pub mod world_lock;
 pub mod copy;

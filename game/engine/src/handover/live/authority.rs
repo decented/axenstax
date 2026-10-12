@@ -79,7 +79,16 @@ pub fn open_guard(world_dir: &Path) -> Result<(), Refusal> {
             activated.insert(t.ok_or(unreadable.clone())?);
         }
     }
-    let Some((path, id)) = retired else { return recipient_guard(&d, &pending, &activated) };
+    let Some((path, id)) = retired else {
+        recipient_guard(&d, &pending, &activated)?;
+        // CP17 (CP15 review LOW-3): last, so a retired or still-arriving
+        // world says so first. Read-only: the probe opens an existing
+        // `.live` and never creates one.
+        if super::world_lock::held_elsewhere(world_dir) {
+            return Err(Refusal(super::copy::HANDOVER_ELSEWHERE));
+        }
+        return Ok(());
+    };
     let record = id.zip(read_bounded(&path)).and_then(|(id, b)| crate::handover::durable::retirement_payload(&b, id).ok());
     match record.and_then(|b| crate::handover::phase::Retirement::decode(&b).ok()) {
         Some(_) => Err(Refusal(super::copy::RETIRED)),

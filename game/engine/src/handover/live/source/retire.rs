@@ -76,6 +76,8 @@ impl SourceSession {
         let phase = self.phase.as_mut().ok_or(Refusal("No Prepared."))?;
         match phase.retire(&store, &crate::handover::ledger::Ledger::install(), record) {
             Ok(permit) => {
+                // CP17: the terminal record is durable; the lock goes.
+                self.live_lock = None;
                 self.permit = Some(permit);
                 self.commit = Some(commit);
                 self.stage = SourceStage::Retired;

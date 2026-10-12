@@ -155,6 +155,11 @@ pub fn waiting_after_ack(npub: &str) -> String {
 pub const HANDOVER_UNFINISHED: &str = "This handover didn't finish. The world stays with the sender.";
 pub const NOT_ACTIVATED: &str = "This world is still arriving from a handover, so it can't be opened or saved yet.";
 pub const AUTHORITY_UNREADABLE: &str = "This world's handover record can't be read, so it won't be opened or saved.";
+/// CP17 (CP15 review LOW-3): another copy of the game on this computer is
+/// in the middle of a handover of this world (it holds the world's
+/// handover lock), so this one won't open, host or hand it over.
+pub const HANDOVER_ELSEWHERE: &str =
+    "Another copy of the game on this computer is handing this world over right now. Try again once that has finished.";
 
 // Slice A (CP7): bearer, Prepared, retirement.
 pub const NO_LIVE_INVITE: &str =
