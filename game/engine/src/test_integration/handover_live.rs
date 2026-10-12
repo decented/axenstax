@@ -1553,6 +1553,40 @@ mod session {
         assert!(has_record(&p.dir, "ready", t));
     }
 
+    /// CP19 (CP18 review MEDIUM-2): the recipient holds its import's lock
+    /// from the moment the import appears, so another copy of the game's
+    /// inert sweep at Ready skips it (nothing lost). An import removed all
+    /// the same (a discard that won the gap) is never recreated and never
+    /// acknowledged into: no receipt, no ack, and the source doesn't retire.
+    #[test]
+    fn handover_recipient_never_acks_into_an_import_removed_at_ready() {
+        let mut p = ready_pair("vanish");
+        let t = p.src.transfer();
+        let working = p.dst.as_ref().unwrap().checkpoint().unwrap().working_world();
+        let imports = p.dir.0.join("imports");
+        assert_eq!(
+            crate::handover::live::world_lock::tests::child_sweep(&imports),
+            "SWEEP Err",
+            "another process's inert sweep took an import held at Ready"
+        );
+        assert!(working.exists() && std::fs::read_dir(&working).unwrap().count() > 1, "another process's sweep removed an import held at Ready");
+        // What a discard that won the gap leaves: Ready's record first, then
+        // everything but `working/handover/` (which it keeps while it holds
+        // the lock).
+        let records = crate::handover::live::authority::dir(&working);
+        std::fs::remove_file(records.join(format!("ready-{}.dat", hex::encode(t)))).unwrap();
+        for e in std::fs::read_dir(&working).unwrap().flatten() {
+            if e.file_name() != "handover" {
+                let path = e.path();
+                if path.is_dir() { std::fs::remove_dir_all(path).unwrap() } else { std::fs::remove_file(path).unwrap() }
+            }
+        }
+        drive(&mut p, SourceStage::Retired);
+        assert!(!p.src.past_retirement(), "the source retired on an ack into a removed import");
+        assert!(matches!(p.dst.as_ref().unwrap().stage(), RecipientStage::Aborted(_)), "{:?}", p.dst.as_ref().unwrap().stage());
+        assert!(!has_record(&p.dir, "prepared", t), "a receipt was written into a removed import");
+    }
+
     /// P2: a bearer that doesn't derive the key Prepared is sealed to stops
     /// the recipient with a typed reason while the import is still inert
     /// (discarded, no Prepared); the source, which disclosed its bearer,

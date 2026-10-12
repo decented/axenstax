@@ -6174,9 +6174,24 @@ advisory lock on `handover/.live` in the world's folder
 Unix, `LockFileEx` on Windows): the source from just before its pending
 abort record is written (taken before the room check, so `.live` is
 counted; not taken: nothing is disclosed) until its retirement or abort
-record is durable; the recipient from just before its Prepared receipt is
-written (not taken: nothing is written and it aborts while inert) until the
-import is Activated or quarantined. The resumer job that takes over the
+record is durable; the recipient from the moment its import folder
+appears (CP19, CP18 review MEDIUM-2, DECIDED: the import worker takes it
+right after the import's rename, and `finish` again before the Ready
+record if the worker couldn't; it was taken only at the Prepared receipt
+before, so another copy's inert sweep could discard an import at Ready)
+until the import is Activated or quarantined. Not taken: nothing is
+written and it aborts while inert. The recipient's lock is
+`world_lock::acquire_existing`, which never creates a missing world folder
+(only `handover/` inside an existing one, one `create_dir`): a folder
+another process removed stays removed and the recipient refuses with
+`copy::IMPORT_VANISHED`. Before its receipt, under the lock, it also checks
+the import is still the one Ready was recorded in (`LiveLock::still_at`:
+the lock file at the path is the held one, same device and inode on Unix;
+and the Ready record is still on disk, which an inert discard removes
+first); otherwise it refuses while inert: no receipt, no ack, and the
+source aborts as for any failure before the ack (test
+`handover_recipient_never_acks_into_an_import_removed_at_ready`: another
+process's sweep at Ready is skipped; a discard's leftovers get no ack). The resumer job that takes over the
 recipient's wait shares the lock (within one process the guard is shared,
 and the OS lock goes with the last holder). Another process: its start-up
 promotion, publication scan, unfinished-record sweep and import waits skip

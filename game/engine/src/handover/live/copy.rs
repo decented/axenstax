@@ -168,6 +168,12 @@ pub const HANDOVER_ELSEWHERE: &str =
 pub const NO_FILE_LOCKING: &str =
     "This world's folder doesn't support the file locking a handover needs, so it can't be handed over from here. You can still play it.";
 
+/// CP19 (CP18 review MEDIUM-2): the recipient's import was removed (for
+/// example by another copy of the game) before the handover finished; it
+/// refuses before acknowledging, so the host keeps its world.
+pub const IMPORT_VANISHED: &str =
+    "The handed-over world's files went missing on this device before the handover finished, so it was cancelled. The host keeps the world.";
+
 // Slice A (CP7): bearer, Prepared, retirement.
 pub const NO_LIVE_INVITE: &str =
     "This world has no live online invitation, so it can't be handed over. Host it online again for a fresh invitation.";

@@ -59,6 +59,24 @@ impl Drop for Held {
 #[derive(Clone)]
 pub struct LiveLock(#[allow(dead_code)] Arc<Held>);
 
+impl LiveLock {
+    /// CP19 (CP18 review MEDIUM-2): the held lock file is still the one at
+    /// `world_dir`'s lock path (Unix: same device and inode; elsewhere: it
+    /// still exists there), i.e. nobody removed the folder under the lock.
+    pub fn still_at(&self, world_dir: &Path) -> bool {
+        let Ok(on_disk) = std::fs::symlink_metadata(super::authority::dir(world_dir).join(LOCK_FILE)) else { return false };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let g = self.0.file.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(held) = g.as_ref().and_then(|f| f.metadata().ok()) else { return false };
+            held.dev() == on_disk.dev() && held.ino() == on_disk.ino()
+        }
+        #[cfg(not(unix))]
+        on_disk.is_file()
+    }
+}
+
 /// Why the lock couldn't be taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockError {
@@ -66,6 +84,9 @@ pub enum LockError {
     HeldElsewhere,
     /// The lock file couldn't be made or opened (or is not a regular file).
     Io,
+    /// CP19 (CP18 review MEDIUM-2): the world folder is gone (never
+    /// recreated by `acquire_existing`).
+    Missing,
     /// CP17 review MEDIUM-1: this folder's file system gives no file lock
     /// (any lock error other than "held"). Opening, saving and hosting go
     /// on as before the lock; a new handover refuses.
@@ -109,6 +130,38 @@ fn lock_path(world_dir: &Path) -> PathBuf {
 /// covers another process's momentary probe (`held_elsewhere`).
 pub fn acquire(world_dir: &Path) -> Result<LiveLock, LockError> {
     super::authority::store(world_dir).map_err(|_| LockError::Io)?;
+    take(world_dir)
+}
+
+/// CP19 (CP18 review MEDIUM-2, DECIDED): the recipient's lock on its import.
+/// Never creates a missing world folder: `world_dir` must already be a real
+/// directory, and only `handover/` inside it is made (one `create_dir`,
+/// never `create_dir_all`), so a folder another process removed stays
+/// removed and the caller refuses (`Missing`).
+pub fn acquire_existing(world_dir: &Path) -> Result<LiveLock, LockError> {
+    match std::fs::symlink_metadata(world_dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(LockError::Io),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LockError::Missing),
+        Err(_) => return Err(LockError::Io),
+    }
+    let d = super::authority::dir(world_dir);
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    match b.create(&d) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LockError::Missing),
+        Err(_) => return Err(LockError::Io),
+    }
+    if !std::fs::symlink_metadata(&d).is_ok_and(|m| m.is_dir()) {
+        return Err(LockError::Io);
+    }
+    take(world_dir)
+}
+
+fn take(world_dir: &Path) -> Result<LiveLock, LockError> {
     let key = lock_path(world_dir);
     // CP17 review LOW-4 (b): never sleep while holding the registry.
     for _ in 0..80 {
@@ -227,7 +280,7 @@ pub(crate) fn unless_elsewhere(world_dir: &Path, what: &str) -> Option<Option<Li
             log_skipped(world_dir, what);
             None
         }
-        Err(LockError::Io | LockError::Unsupported) => {
+        Err(LockError::Io | LockError::Unsupported | LockError::Missing) => {
             log::warn!("handover: {}'s handover lock couldn't be taken; {what} goes on without it", world_dir.display());
             Some(None)
         }
@@ -252,6 +305,47 @@ pub(crate) mod tests {
 
     /// Not a test on its own: the second process. Run by `ChildHolder`
     /// (re-executing this test binary); without the env var it does nothing.
+    /// CP19 (CP18 review MEDIUM-2): the recipient's lock never recreates a
+    /// world folder another process removed; on one that exists it makes
+    /// only `handover/`, and notices the folder removed under it.
+    #[test]
+    fn handover_lock_on_an_import_never_recreates_a_vanished_folder() {
+        let mut r = [0u8; 8];
+        getrandom::fill(&mut r).unwrap();
+        let base = std::env::temp_dir().join(format!("axenstax-lock-vanish-{}", hex::encode(r)));
+        let gone = base.join("import").join("working");
+        assert!(matches!(acquire_existing(&gone), Err(LockError::Missing)));
+        assert!(!base.join("import").exists(), "taking the lock recreated a vanished import folder");
+        std::fs::create_dir_all(&gone).unwrap();
+        let lock = acquire_existing(&gone).expect("the lock on an existing import");
+        assert!(lock.still_at(&gone));
+        std::fs::remove_dir_all(base.join("import")).unwrap();
+        assert!(!lock.still_at(&gone), "a folder removed under the lock still reads as there");
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    const SWEEP_ENV: &str = "AXENSTAX_HANDOVER_SWEEP_CHILD";
+    #[test]
+    fn handover_sweep_child_process() {
+        let Some(dir) = std::env::var_os(SWEEP_ENV) else { return };
+        let r = super::super::inert::sweep(Path::new(&dir), None);
+        println!("SWEEP {}", if r.is_ok() { "Ok" } else { "Err" });
+    }
+
+    /// Another game process running the inert sweep over `imports` once;
+    /// its "SWEEP Ok" / "SWEEP Err" line.
+    pub(crate) fn child_sweep(imports: &Path) -> String {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "handover::live::world_lock::tests::handover_sweep_child_process", "--nocapture", "--test-threads=1"])
+            .env(SWEEP_ENV, imports)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .expect("run the second process");
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["SWEEP Ok", "SWEEP Err"].into_iter().find(|w| text.contains(w)).unwrap_or("no sweep line").to_owned()
+    }
+
     #[test]
     fn handover_lock_child_process() {
         let Some(dir) = std::env::var_os(CHILD_ENV) else { return };

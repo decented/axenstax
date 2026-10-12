@@ -32,7 +32,19 @@ use std::sync::{Arc, Mutex, mpsc};
 
 /// M1: what the import worker hands back: its generation, the transfer it
 /// imported, and the durable checkpoint (or why not).
-type ImportResult = (u64, Id, crate::handover::Result<DurableCheckpoint>);
+/// The import's lock refused as a plain line.
+fn lock_refusal(e: super::world_lock::LockError) -> Refusal {
+    match e {
+        // CP17 review MEDIUM-1: no file locking here, no handover.
+        super::world_lock::LockError::Unsupported => Refusal(super::copy::NO_FILE_LOCKING),
+        super::world_lock::LockError::Missing => Refusal(super::copy::IMPORT_VANISHED),
+        _ => Refusal("The handover record couldn't be stored safely on this device."),
+    }
+}
+
+/// CP19 (CP18 review MEDIUM-2): with the import's handover lock, taken by
+/// the worker right after the import folder appears (its rename).
+type ImportResult = (u64, Id, crate::handover::Result<DurableCheckpoint>, Option<super::world_lock::LiveLock>);
 
 /// M1: who cleans up a cancelled import. The worker decides under this lock:
 /// a worker that sees `cancelled` discards its own inert import; once it has
@@ -820,18 +832,25 @@ impl RecipientSession {
         }
         // CP17 (CP15 review LOW-3): the import's handover lock before the
         // receipt; not taken, nothing is written and this aborts while inert.
+        // CP19 (CP18 review MEDIUM-2): held since the import appeared, and
+        // never recreating a vanished folder.
+        let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
         if self.live_lock.is_none() {
-            let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
-            self.live_lock = Some(
-                super::world_lock::acquire(&working).map_err(|e| match e {
-                    // CP17 review MEDIUM-1: no file locking here, no handover.
-                    super::world_lock::LockError::Unsupported => Refusal(super::copy::NO_FILE_LOCKING),
-                    _ => Refusal("The handover record couldn't be stored safely on this device."),
-                })?,
-            );
+            self.live_lock = Some(super::world_lock::acquire_existing(&working).map_err(lock_refusal)?);
         }
         let receiver = self.receiver.as_mut().ok_or(Refusal("No Ready."))?;
         let markers = self.markers.as_ref().ok_or(Refusal("No Ready."))?;
+        // CP19 (CP18 review MEDIUM-2): no ack into an empty folder. Under the
+        // lock, the import must still be the one Ready was recorded in: the
+        // lock file still the held one (nobody removed the folder under it)
+        // and the Ready record still on disk (an inert discard removes it
+        // first). Otherwise this refuses while inert: no receipt, no ack,
+        // and the source aborts as for any failure before the ack.
+        let intact = self.live_lock.as_ref().is_some_and(|l| l.still_at(&working))
+            && markers.read(crate::handover::durable::MarkerKind::Ready, transfer).is_ok_and(|r| r.is_some());
+        if !intact {
+            return Err(Refusal(super::copy::IMPORT_VANISHED));
+        }
         receiver
             .prepared(markers, &crate::handover::ledger::Ledger::install(), &vp, crate::handover::phase::PreparedReceipt { event: &ev, root: &p.root, bearer })
             .map_err(|_| Refusal("The handover record couldn't be stored safely on this device."))?;
@@ -925,6 +944,12 @@ impl RecipientSession {
             .name("handover-import".into())
             .spawn(move || {
                 let r = import.complete(now, &mut CancelImport(worker_fence.clone()));
+                // CP19 (CP18 review MEDIUM-2, DECIDED): the import's lock the
+                // moment its folder exists, held through Ready to the ack, so
+                // another copy of the game's inert sweep skips it. Never
+                // recreates a folder (`acquire_existing`); not taken here,
+                // `finish` tries again and refuses.
+                let lock = r.as_ref().ok().and_then(|c| super::world_lock::acquire_existing(&c.working_world()).ok());
                 // A failed pre-rename import removes its own scratch here.
                 drop(import);
                 #[cfg(test)]
@@ -940,7 +965,7 @@ impl RecipientSession {
                 }
                 g.finished = true;
                 drop(g);
-                let _ = tx.send((generation, transfer, r));
+                let _ = tx.send((generation, transfer, r, lock));
             })
             .map_err(|_| Refusal("The world couldn't be stored on this device."))?;
         self.import_fence = Some(fence);
@@ -972,9 +997,12 @@ impl RecipientSession {
             }
         };
         self.import_rx = None;
-        let (generation, transfer, result) = msg;
+        let (generation, transfer, result, lock) = msg;
         if generation != self.import_generation || transfer != self.transfer() || self.stage != RecipientStage::Importing {
             return Ok(None);
+        }
+        if lock.is_some() {
+            self.live_lock = lock;
         }
         Ok(Some(result))
     }
@@ -1015,6 +1043,10 @@ impl RecipientSession {
         // CP10: the recipient's records live in the import's own working
         // world `handover/` (the open guard refuses it until Activated).
         let working = self.checkpoint.as_ref().map(|c| c.working_world()).ok_or(Refusal("No checkpoint."))?;
+        // CP19 (CP18 review MEDIUM-2): the import's lock before any record.
+        if self.live_lock.is_none() {
+            self.live_lock = Some(super::world_lock::acquire_existing(&working).map_err(lock_refusal)?);
+        }
         let markers = super::authority::store(&working).map_err(|_| Refusal("Ready couldn't be recorded safely."))?;
         let receiver = Receiver::checkpoint_ready(&markers, core, &ready, p.challenge, &p.root, now)
             .map_err(|_| Refusal("Ready couldn't be recorded safely."))?;

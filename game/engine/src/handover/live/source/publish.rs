@@ -52,7 +52,7 @@ impl SourceSession {
                 Err(crate::handover::live::world_lock::LockError::Unsupported) => {
                     return Err(Refusal(crate::handover::live::copy::NO_FILE_LOCKING));
                 }
-                Err(crate::handover::live::world_lock::LockError::Io) => {
+                Err(crate::handover::live::world_lock::LockError::Io | crate::handover::live::world_lock::LockError::Missing) => {
                     log::warn!("handover: this world's handover lock couldn't be taken; nothing was disclosed");
                     return Err(Refusal(crate::handover::live::copy::PENDING_ABORT_UNWRITTEN));
                 }
